@@ -40,4 +40,19 @@ against one runtime is not guaranteed to load against another.
     and the compile time and binary size probes that make the monomorphization
     cost per dtype a number rather than a worry.
 
+- The compute kernel layer, the first part of M1:
+  - `firepanda.kernel`: sum, count, min, max and mean reductions; add, subtract,
+    multiply and divide; the six comparisons; casts between any two numeric
+    dtypes; validity masking; and take and filter.
+  - A null holds a zero in the values buffer, which is what lets `sum` and `mean`
+    run without reading the validity bitmap at all. The invariant, and the one
+    way to break it, are written down in `firepanda/kernel/__init__.mojo`.
+  - `firepanda/kernel/scalar.mojo`: a one element at a time twin of every kernel,
+    never called in production, which is what the kernels are checked against.
+  - Tests: 26 unit tests and a second fuzz harness that runs every kernel against
+    its twin over six dtypes and four null shapes.
+  - `Bitmap.slice` on an unaligned start now shifts a byte at a time instead of a
+    bit at a time, and `Array.slice` copies its values with one memcpy. Unaligned
+    bitmap slicing went from 1.326 to 0.051 ns per bit.
+
 There is no dataframe yet. See the status notice in the README.

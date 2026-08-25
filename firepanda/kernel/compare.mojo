@@ -1,0 +1,186 @@
+"""Elementwise comparison of two columns, producing a boolean column.
+
+Six operations, one loop, an operation code picked at compile time. Same shape as
+`arith.mojo` and for the same reason.
+
+The output is a `bool` column, one byte per value, not a bitmap. A bitmap would be
+eight times smaller and would then have to be unpacked by every kernel that
+consumes a mask, which is all of them. Arrow stores boolean arrays as bits and
+pays that cost; firepanda stores bytes and pays the memory instead. The filter
+kernel reads a byte per row with no shifting as a result.
+
+Comparison against a null is null, not false. That is three-valued logic and it
+is what both pandas and SQL do, and it is why `filter_rows` has to decide
+separately what a null in a mask means; see `select.mojo`.
+"""
+
+from std.sys.info import simd_width_of
+
+from firepanda.array.array import Array
+
+from .mask import apply_validity, combined_validity
+
+comptime CMP_EQ = 0
+"""Operation code for equality."""
+
+comptime CMP_NE = 1
+"""Operation code for inequality."""
+
+comptime CMP_LT = 2
+"""Operation code for less-than."""
+
+comptime CMP_LE = 3
+"""Operation code for less-than-or-equal."""
+
+comptime CMP_GT = 4
+"""Operation code for greater-than."""
+
+comptime CMP_GE = 5
+"""Operation code for greater-than-or-equal."""
+
+
+def equal[dt: DType](a: Array[dt], b: Array[dt]) -> Array[DType.bool]:
+    """Compares two columns for equality.
+
+    Args:
+        a: The left column.
+        b: The right column. Must be the same length as `a`.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A bool column, null wherever either input is null.
+    """
+    return _compare[dt, CMP_EQ](a, b)
+
+
+def not_equal[dt: DType](a: Array[dt], b: Array[dt]) -> Array[DType.bool]:
+    """Compares two columns for inequality.
+
+    Args:
+        a: The left column.
+        b: The right column. Must be the same length as `a`.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A bool column, null wherever either input is null.
+    """
+    return _compare[dt, CMP_NE](a, b)
+
+
+def less[dt: DType](a: Array[dt], b: Array[dt]) -> Array[DType.bool]:
+    """Reports elementwise whether the left column is smaller.
+
+    Args:
+        a: The left column.
+        b: The right column. Must be the same length as `a`.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A bool column, null wherever either input is null.
+    """
+    return _compare[dt, CMP_LT](a, b)
+
+
+def less_equal[dt: DType](a: Array[dt], b: Array[dt]) -> Array[DType.bool]:
+    """Reports elementwise whether the left column is smaller or equal.
+
+    Args:
+        a: The left column.
+        b: The right column. Must be the same length as `a`.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A bool column, null wherever either input is null.
+    """
+    return _compare[dt, CMP_LE](a, b)
+
+
+def greater[dt: DType](a: Array[dt], b: Array[dt]) -> Array[DType.bool]:
+    """Reports elementwise whether the left column is larger.
+
+    Args:
+        a: The left column.
+        b: The right column. Must be the same length as `a`.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A bool column, null wherever either input is null.
+    """
+    return _compare[dt, CMP_GT](a, b)
+
+
+def greater_equal[dt: DType](a: Array[dt], b: Array[dt]) -> Array[DType.bool]:
+    """Reports elementwise whether the left column is larger or equal.
+
+    Args:
+        a: The left column.
+        b: The right column. Must be the same length as `a`.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A bool column, null wherever either input is null.
+    """
+    return _compare[dt, CMP_GE](a, b)
+
+
+def _compare[
+    dt: DType, op: Int
+](a: Array[dt], b: Array[dt]) -> Array[DType.bool]:
+    """Applies a comparison elementwise.
+
+    Args:
+        a: The left column.
+        b: The right column. Must be the same length as `a`.
+
+    Parameters:
+        dt: The dtype.
+        op: One of the `CMP_` codes.
+
+    Returns:
+        A bool column, null wherever either input is null.
+    """
+    comptime width = simd_width_of[dt]()
+
+    var n = len(a)
+    var out = Array[DType.bool](n)
+    var lhs = a.unsafe_ptr()
+    var rhs = b.unsafe_ptr()
+    var dst = out.unsafe_ptr()
+
+    var i = 0
+    while i < n:
+        var x = lhs.unsafe_offset(i).unsafe_load[width=width]()
+        var y = rhs.unsafe_offset(i).unsafe_load[width=width]()
+
+        # `x < y` on a register does not mean what it looks like it means. The
+        # operators on `SIMD` are constrained to width one, because a whole-vector
+        # `<` would have to answer with a single Bool and there is no honest
+        # answer. The lanewise forms are the named methods.
+        comptime if op == CMP_EQ:
+            dst.unsafe_offset(i).unsafe_store(x.eq(y))
+        elif op == CMP_NE:
+            dst.unsafe_offset(i).unsafe_store(x.ne(y))
+        elif op == CMP_LT:
+            dst.unsafe_offset(i).unsafe_store(x.lt(y))
+        elif op == CMP_LE:
+            dst.unsafe_offset(i).unsafe_store(x.le(y))
+        elif op == CMP_GT:
+            dst.unsafe_offset(i).unsafe_store(x.gt(y))
+        else:
+            dst.unsafe_offset(i).unsafe_store(x.ge(y))
+        i += width
+
+    apply_validity(out, combined_validity(a.data.validity, b.data.validity))
+    return out^

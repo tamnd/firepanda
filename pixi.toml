@@ -76,10 +76,12 @@ format = "mojo format firepanda tests benchmarks tools"
 format-check = "bash tools/format_check.sh"
 
 # The bitmap is checked against a `List[Bool]` reference written with no bit
-# twiddling at all. From M1 the same harness covers each kernel against its
-# scalar twin in firepanda/kernel/scalar; the twins are never called in
-# production and exist to be the specification.
-fuzz = "mojo run -I . tests/fuzz/main.mojo"
+# twiddling at all, and every kernel is checked against its scalar twin in
+# firepanda/kernel/scalar.mojo. The twins are never called in production and
+# exist to be the specification.
+fuzz = { depends-on = ["fuzz-bitmap", "fuzz-kernel"] }
+fuzz-bitmap = "mojo run -I . tests/fuzz/main.mojo"
+fuzz-kernel = "mojo run -I . tests/fuzz/kernel.mojo"
 
 # The substitute for a race detector: every parallel operator, thousands of
 # iterations, randomized worker counts and cancellation points, compared against

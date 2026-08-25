@@ -4,16 +4,17 @@
   <a href="https://github.com/tamnd/firepanda/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/tamnd/firepanda/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
   <a href="docs/specs"><img alt="Specification" src="https://img.shields.io/badge/spec-12%20documents-informational"></a>
-  <img alt="Status" src="https://img.shields.io/badge/status-M0%20foundations-orange">
+  <img alt="Status" src="https://img.shields.io/badge/status-M1%20kernels-orange">
 </p>
 
 A dataframe library for [Mojo](https://mojolang.org) with the pandas API.
 
-> **Status: M0 landed. There is no dataframe yet and nothing to install.** What exists
-> is the layer underneath one: validity bitmaps, aligned buffers with a size class pool,
-> typed and type erased columns, the StringView layout, the logical type lattice with
-> its promotion rules, and the `comptime` dtype dispatch bridge. It is tested, fuzzed
-> against a reference model, and checked against numpy and pyarrow in the same process.
+> **Status: M0 landed and M1 is under way. There is no dataframe yet and nothing to
+> install.** What exists is the layer underneath one: validity bitmaps, aligned buffers
+> with a size class pool, typed and type erased columns, the StringView layout, the
+> logical type lattice with its promotion rules, the `comptime` dtype dispatch bridge,
+> and the compute kernels that run over a column. It is tested, fuzzed against a
+> reference model, and checked against numpy and pyarrow in the same process.
 > The specification is twelve documents in [`docs/specs/`](docs/specs), written against
 > Mojo 1.0, pandas 3.0, Polars 1.43 and Arrow 25.0 as of August 2026, and the milestone
 > issues track the rest of the way to a frame you can actually use.

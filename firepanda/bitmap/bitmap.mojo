@@ -137,16 +137,63 @@ struct Bitmap(Copyable, Movable, Sized):
         var mask = UInt8((1 << used) - 1)
         slot.unsafe_write(slot.unsafe_load() & mask)
 
+    def word_count(self) -> Int:
+        """Returns how many 64-bit words cover the bitmap.
+
+        Returns:
+            The word count, rounded up. Reading every one of them is safe: the
+            buffer is padded to a 64-byte multiple and the padding is zero.
+        """
+        return (self._length + 63) // 64
+
+    def unsafe_word(self, w: Int) -> UInt64:
+        """Returns the validity bits for values `w * 64` through `w * 64 + 63`.
+
+        Bit 0 of the result is the lowest-numbered value, matching the Arrow
+        packing. Words past the end read as zero, which is to say as null, so a
+        caller that bounds its loop by length rather than by word count gets the
+        right answer either way.
+
+        Args:
+            w: The word index. Must be less than `word_count()`.
+
+        Returns:
+            The word.
+        """
+        return (
+            self._buffer.bitcast[DType.uint64]().unsafe_offset(w).unsafe_load()
+        )
+
+    def unsafe_set_word(mut self, w: Int, value: UInt64):
+        """Writes the validity bits for values `w * 64` through `w * 64 + 63`.
+
+        The whole word goes down, including the bits past `length` in the last
+        one. That is in bounds because the buffer is padded, and it is correct
+        because a caller building a bitmap forward never sets a bit it has not
+        reached. A caller that does set one has broken the tail-is-zero rule that
+        `count_ones` depends on.
+
+        Args:
+            w: The word index. Must be less than `word_count()`.
+            value: The word.
+        """
+        self._buffer.bitcast[DType.uint64]().unsafe_offset(w).unsafe_write(
+            value
+        )
+
     def count_ones(self) -> Int:
         """Returns the number of present values.
+
+        A word at a time rather than a byte at a time. The tail bits past
+        `length` are cleared by every mutating path and the buffer padding is
+        zero, so the last word needs no masking and the loop needs no remainder.
 
         Returns:
             The number of set bits.
         """
         var total = 0
-        var ptr = self._buffer.unsafe_ptr()
-        for i in range(self.byte_length()):
-            total += Int(pop_count(ptr.unsafe_offset(i).unsafe_load()))
+        for w in range(self.word_count()):
+            total += Int(pop_count(self.unsafe_word(w)))
         return total
 
     def null_count(self) -> Int:
@@ -264,6 +311,9 @@ struct Bitmap(Copyable, Movable, Sized):
             A bitmap of length `end - start`.
         """
         var out = Self(end - start, all_valid=False)
+        if end <= start:
+            return out^
+
         if start & 7 == 0:
             # Byte aligned, so the copy is a memcpy plus a tail fixup.
             var nbytes = bytes_for(end - start)
@@ -274,8 +324,31 @@ struct Bitmap(Copyable, Movable, Sized):
             )
             out._clear_tail()
             return out^
-        for i in range(start, end):
-            out.set(i - start, self.get(i))
+
+        # Unaligned, so every output byte straddles two input bytes. Shifting a
+        # byte at a time is eight times less work than walking bits and is the
+        # only reason this branch is not the one that shows up in a profile. A
+        # word at a time would be another eight, and needs unaligned 64-bit loads
+        # that have to be assembled by hand near the end of the buffer, which is
+        # a trade worth making the day a profile asks for it and not before.
+        var shift = UInt8(start & 7)
+        var carry = UInt8(8) - shift
+        var source = self._buffer.unsafe_ptr()
+        var target = out._buffer.unsafe_ptr()
+        var first = start >> 3
+        var available = self.byte_length()
+        var nbytes = bytes_for(end - start)
+
+        for j in range(nbytes):
+            var low = source.unsafe_offset(first + j).unsafe_load() >> shift
+            var high = UInt8(0)
+            if first + j + 1 < available:
+                high = (
+                    source.unsafe_offset(first + j + 1).unsafe_load() << carry
+                )
+            target.unsafe_offset(j).unsafe_write(low | high)
+
+        out._clear_tail()
         return out^
 
     def to_list(self) -> List[Bool]:
