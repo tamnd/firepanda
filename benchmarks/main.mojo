@@ -17,12 +17,13 @@ not a measurement. Each repetition is itself a `std.benchmark` run, so the numbe
 being taken ten medians of is already an average over however many iterations fit
 in the minimum runtime.
 
-At M0 there are no kernels yet, so what is measured is the layer everything else
-will sit on: the validity bitmap, the buffer allocator and its pool, the typed
-array, and the dispatch call that turns a runtime dtype into a compile-time one.
-Several of these are deliberately naive today, `Array.slice` copies element by
-element, and having the number recorded now is the point. When M1 replaces it with
-a memcpy the graph should show a step.
+What is measured is the storage layer, the validity bitmap, the buffer allocator
+and its pool, the typed array and the dtype dispatch, and then the kernels that
+sit on top of it. Several of the kernel rows are paired with the scalar twin that
+`tests/fuzz/kernel.mojo` checks them against, so the table says what the
+vectorized version is worth as well as what it costs. The twins are not a
+strawman, they are the implementation the library would have if nobody had
+bothered, which is the comparison worth printing.
 
 Usage:
     mojo run -I . benchmarks/main.mojo [--rows=N] [--repetitions=N]
@@ -50,6 +51,24 @@ from firepanda.buffer.buffer import Buffer
 from firepanda.buffer.pool import BufferPool
 from firepanda.dtype.dispatch import dispatch
 from firepanda.dtype.lists import NUMERIC
+from firepanda.kernel import (
+    add,
+    cast_to,
+    divide,
+    filter_rows,
+    less,
+    mean_of,
+    min_of,
+    multiply,
+    sum_of,
+    take_rows,
+)
+from firepanda.kernel.scalar import (
+    add_scalar,
+    filter_scalar,
+    min_scalar,
+    sum_scalar,
+)
 from firepanda.version import version
 
 comptime DEFAULT_ROWS = 1 << 20
@@ -427,12 +446,14 @@ struct Harness(Movable):
         self.results.append(measurement^)
 
 
-def sum_of[dt: DType](col: AnyArray) raises -> Float64:
+def sum_erased[dt: DType](col: AnyArray) raises -> Float64:
     """Adds up an erased column at its own dtype.
 
-    This is the operation the dispatch benchmark dispatches. It is deliberately
-    the same shape as the kernels M1 will add, so the dispatch overhead measured
-    here is the overhead they will pay.
+    This is the operation the dispatch benchmark dispatches. It is the same shape
+    as `kernel.sum_of` on purpose, so the overhead measured here is the overhead
+    the real kernel pays when it is reached through an erased column. It is not
+    the real kernel and it is not named like it, because a benchmark that
+    measures the thing it is standing in for is a benchmark nobody can read.
 
     Args:
         col: The column, whose dtype dispatch has already proved is `dt`.
@@ -675,6 +696,186 @@ def bench_array(mut harness: Harness) raises:
     harness.record("array/copy", "rows", rows, deep_copy)
 
 
+def bench_kernel(mut harness: Harness) raises:
+    """Measures the kernel layer.
+
+    Three of these rows are there to be read together. `kernel/sum_dense` and
+    `kernel/sum_sparse` should be the same number, because `sum_of` never looks at
+    the validity bitmap and a null is a zero, and `kernel/sum_twin` is what the
+    same work costs written the obvious way with a validity check per row. If the
+    first two ever drift apart, the fast path has grown a branch.
+
+    Every other row includes the cost of allocating the output column, because
+    every one of these kernels returns a new column and pretending otherwise would
+    flatter the numbers. The allocator rows in `bench_buffer` are how to subtract
+    it back out.
+
+    Args:
+        harness: The harness.
+
+    Raises:
+        If a benchmark raises.
+    """
+    var rows = harness.options.rows
+
+    var dense = Array[BENCH_DTYPE](rows)
+    var other = Array[BENCH_DTYPE](rows)
+    for i in range(rows):
+        dense[i] = Scalar[BENCH_DTYPE](i % 1000)
+        other[i] = Scalar[BENCH_DTYPE](i % 97 + 1)
+
+    var sparse = Array[BENCH_DTYPE](copy=dense)
+    for i in range(0, rows, 7):
+        sparse.set_null(i)
+
+    def sum_dense() raises {imm dense}:
+        keep(dense)
+        var total = sum_of(dense)
+        keep(total.value)
+
+    harness.record("kernel/sum_dense", "rows", rows, sum_dense)
+
+    def sum_sparse() raises {imm sparse}:
+        keep(sparse)
+        var total = sum_of(sparse)
+        keep(total.value)
+
+    harness.record("kernel/sum_sparse", "rows", rows, sum_sparse)
+
+    def sum_twin() raises {imm sparse}:
+        keep(sparse)
+        var total = sum_scalar(sparse)
+        keep(total)
+
+    harness.record("kernel/sum_twin", "rows", rows, sum_twin)
+
+    def min_dense() raises {imm dense}:
+        keep(dense)
+        var low = min_of(dense)
+        keep(low.value)
+
+    harness.record("kernel/min_dense", "rows", rows, min_dense)
+
+    # min cannot skip the bitmap the way sum can, so unlike the pair above these
+    # two are expected to differ. The gap is what the three-way word split buys.
+    def min_sparse() raises {imm sparse}:
+        keep(sparse)
+        var low = min_of(sparse)
+        keep(low.value)
+
+    harness.record("kernel/min_sparse", "rows", rows, min_sparse)
+
+    def min_twin() raises {imm sparse}:
+        keep(sparse)
+        var low = min_scalar(sparse)
+        keep(low[0])
+
+    harness.record("kernel/min_twin", "rows", rows, min_twin)
+
+    def mean_sparse() raises {imm sparse}:
+        keep(sparse)
+        var avg = mean_of(sparse)
+        keep(avg.value)
+
+    harness.record("kernel/mean_sparse", "rows", rows, mean_sparse)
+
+    def add_dense() raises {imm dense, imm other}:
+        keep(dense)
+        var out = add(dense, other)
+        keep(out)
+
+    harness.record("kernel/add_dense", "rows", rows, add_dense)
+
+    def add_sparse() raises {imm sparse, imm other}:
+        keep(sparse)
+        var out = add(sparse, other)
+        keep(out)
+
+    harness.record("kernel/add_sparse", "rows", rows, add_sparse)
+
+    def add_twin() raises {imm sparse, imm other}:
+        keep(sparse)
+        var out = add_scalar(sparse, other)
+        keep(out)
+
+    harness.record("kernel/add_twin", "rows", rows, add_twin)
+
+    def multiply_dense() raises {imm dense, imm other}:
+        keep(dense)
+        var out = multiply(dense, other)
+        keep(out)
+
+    harness.record("kernel/multiply_dense", "rows", rows, multiply_dense)
+
+    def divide_dense() raises {imm dense, imm other}:
+        keep(dense)
+        var out = divide(dense, other)
+        keep(out)
+
+    harness.record("kernel/divide_dense", "rows", rows, divide_dense)
+
+    def compare_dense() raises {imm dense, imm other}:
+        keep(dense)
+        var out = less(dense, other)
+        keep(out)
+
+    harness.record("kernel/less_dense", "rows", rows, compare_dense)
+
+    def cast_widen() raises {imm dense}:
+        keep(dense)
+        var out = cast_to[BENCH_DTYPE, DType.float64](dense)
+        keep(out)
+
+    harness.record("kernel/cast_i64_f64", "rows", rows, cast_widen)
+
+    def cast_narrow() raises {imm dense}:
+        keep(dense)
+        var out = cast_to[BENCH_DTYPE, DType.int16](dense)
+        keep(out)
+
+    harness.record("kernel/cast_i64_i16", "rows", rows, cast_narrow)
+
+    # A stride that is coprime with the row count, so the gather walks the whole
+    # column and misses cache the way a real join's take does. A sequential index
+    # list would measure the prefetcher instead.
+    var scattered = List[Int](capacity=rows)
+    for i in range(rows):
+        scattered.append((i * 7919) % rows)
+
+    def take_scattered() raises {imm dense, imm scattered}:
+        keep(dense)
+        var out = take_rows(dense, scattered)
+        keep(out)
+
+    harness.record("kernel/take_scattered", "rows", rows, take_scattered)
+
+    var mask = less(other, dense)
+
+    def filter_half() raises {imm dense, imm mask}:
+        keep(dense)
+        var out = filter_rows(dense, mask)
+        keep(out)
+
+    harness.record("kernel/filter", "rows", rows, filter_half)
+
+    # The branchless copy only applies when the filtered column has no nulls, so
+    # the version that does have them is measured too. Reporting only the fast
+    # path would be reporting the best case and calling it the number.
+    def filter_sparse() raises {imm sparse, imm mask}:
+        keep(sparse)
+        var out = filter_rows(sparse, mask)
+        keep(out)
+
+    harness.record("kernel/filter_sparse", "rows", rows, filter_sparse)
+
+    def filter_twin() raises {imm dense, imm mask}:
+        keep(dense)
+        var out = filter_scalar(dense, mask)
+        keep(out)
+
+    harness.record("kernel/filter_twin", "rows", rows, filter_twin)
+
+
 def bench_dispatch(mut harness: Harness) raises:
     """Measures what the runtime to compile-time bridge costs per call.
 
@@ -698,7 +899,7 @@ def bench_dispatch(mut harness: Harness) raises:
 
     def dispatch_tiny() raises {imm tiny_erased}:
         keep(tiny_erased)
-        var total = dispatch[NUMERIC](tiny_erased, sum_of)
+        var total = dispatch[NUMERIC](tiny_erased, sum_erased)
         keep(total)
 
     harness.record("dispatch/call_1_row", "calls", 1, dispatch_tiny)
@@ -710,14 +911,14 @@ def bench_dispatch(mut harness: Harness) raises:
 
     def dispatch_wide() raises {imm wide_erased}:
         keep(wide_erased)
-        var total = dispatch[NUMERIC](wide_erased, sum_of)
+        var total = dispatch[NUMERIC](wide_erased, sum_erased)
         keep(total)
 
     harness.record("dispatch/sum_full", "rows", rows, dispatch_wide)
 
     def direct_sum() raises {imm wide_erased}:
         keep(wide_erased)
-        var total = sum_of[BENCH_DTYPE](wide_erased)
+        var total = sum_erased[BENCH_DTYPE](wide_erased)
         keep(total)
 
     harness.record("dispatch/sum_full_direct", "rows", rows, direct_sum)
@@ -852,6 +1053,7 @@ def main() raises:
     bench_bitmap(harness)
     bench_buffer(harness)
     bench_array(harness)
+    bench_kernel(harness)
     bench_dispatch(harness)
     var elapsed = Float64(perf_counter_ns() - started) / 1e9
 
