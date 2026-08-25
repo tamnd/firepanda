@@ -77,9 +77,13 @@ from firepanda.kernel import (
     filter_rows,
     group_first,
     group_mean,
+    group_median,
     group_min,
+    group_nunique,
     group_size,
+    group_std,
     group_sum,
+    group_var,
     less,
     mean_of,
     min_of,
@@ -1495,6 +1499,58 @@ def bench_group(mut harness: Harness) raises:
 
     harness.record("group/size", "rows", rows, size_grouped)
 
+    # The five that landed after the first eight. `var` is two passes over the
+    # column where `mean` is one, and the three below it build a slab of the
+    # values and sort it per group, so the gap between these and `group/sum` is
+    # the price of a reduction that cannot be done in one accumulator.
+    def var_grouped() raises {imm sparse, imm codes}:
+        keep(sparse)
+        var out = group_var(sparse, codes, GROUPS)
+        keep(out[0])
+
+    harness.record("group/var_sparse", "rows", rows, var_grouped)
+
+    def std_grouped() raises {imm sparse, imm codes}:
+        keep(sparse)
+        var out = group_std(sparse, codes, GROUPS)
+        keep(out[0])
+
+    harness.record("group/std_sparse", "rows", rows, std_grouped)
+
+    def median_grouped() raises {imm values, imm codes}:
+        keep(values)
+        var out = group_median(values, codes, GROUPS)
+        keep(out[0])
+
+    harness.record("group/median", "rows", rows, median_grouped)
+
+    def median_sparse_grouped() raises {imm sparse, imm codes}:
+        keep(sparse)
+        var out = group_median(sparse, codes, GROUPS)
+        keep(out[0])
+
+    harness.record("group/median_sparse", "rows", rows, median_sparse_grouped)
+
+    # A thousand groups over a million rows is a thousand values per slab. The
+    # cardinality row below it is ten groups, so the slabs are a hundred times
+    # longer and the sort inside each one costs more per row, which is the whole
+    # difference between the two.
+    def median_low_cardinality() raises {imm values, imm few}:
+        keep(values)
+        var out = group_median(values, few, 10)
+        keep(out[0])
+
+    harness.record(
+        "group/median_cardinality_10", "rows", rows, median_low_cardinality
+    )
+
+    def nunique_grouped() raises {imm values, imm codes}:
+        keep(values)
+        var out = group_nunique(values, codes, GROUPS)
+        keep(out[0])
+
+    harness.record("group/nunique", "rows", rows, nunique_grouped)
+
     var erased = AnyArray(Array(copy=values))
 
     def sum_erased_group() raises {imm erased, imm codes}:
@@ -1503,6 +1559,15 @@ def bench_group(mut harness: Harness) raises:
         keep(len(out))
 
     harness.record("group/sum_dispatched", "rows", rows, sum_erased_group)
+
+    def quantile_erased() raises {imm erased, imm codes}:
+        keep(erased)
+        var out = aggregate_group_any(
+            erased, AggKind.quantile_at(0.9), codes, GROUPS
+        )
+        keep(len(out))
+
+    harness.record("group/quantile_dispatched", "rows", rows, quantile_erased)
 
     var columns = List[Series]()
     columns.append(Series("key", key^))

@@ -41,9 +41,14 @@ from .group import (
     group_last,
     group_max,
     group_mean,
+    group_median,
     group_min,
+    group_nunique,
+    group_quantile,
     group_size,
+    group_std,
     group_sum,
+    group_var,
 )
 from .mask import apply_validity, combined_validity
 from .select import filter_any, filter_rows, take_any, take_rows

@@ -418,7 +418,16 @@ def run_one[dt: DType](mut rng: Rng, step: Int, seed: UInt64) raises:
     var codes = Array[DType.uint32](length)
     for i in range(length):
         codes[i] = UInt32(rng.next_below(groups))
-    var kind = AggKind(UInt8((step // 4) % 8))
+    # Thirteen reductions, one per case, so every one of them sees every column
+    # shape the generator makes rather than a thirteenth of them. `QUANTILE` gets
+    # a different position each time it comes round, because a quantile that only
+    # ever runs at the median is a median with extra arithmetic and the
+    # interpolation between two values is the part worth checking.
+    var kind = AggKind(UInt8((step // 4) % 13))
+    if kind == AggKind.QUANTILE:
+        kind = AggKind.quantile_at(Float64(rng.next_below(101)) / 100.0)
+    elif kind == AggKind.VAR or kind == AggKind.STD:
+        kind = AggKind(kind.code, Float64(rng.next_below(3)))
     var reduced = cast_any(
         aggregate_group(a, kind, codes, groups), DType.float64
     ).as_typed[DType.float64]()
@@ -435,7 +444,16 @@ def run_one[dt: DType](mut rng: Rng, step: Int, seed: UInt64) raises:
             var delta = reduced[g] - twin[0][g]
             if delta < 0.0:
                 delta = -delta
-            if delta > 1.0e-9:
+            # Relative once the numbers get big. The two sides add the same terms
+            # in different orders, which is exact for a sum of integers and is
+            # not for a variance, where the result is a square and a column of
+            # values near a million lands near 1e12. An absolute tolerance there
+            # is asking floating point addition to be associative.
+            var scale = reduced[g] if reduced[g] >= 0.0 else -reduced[g]
+            var tolerance = 1.0e-9
+            if scale > 1.0:
+                tolerance = 1.0e-9 * scale
+            if delta > tolerance:
                 fail(
                     step,
                     seed,
