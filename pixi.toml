@@ -7,8 +7,15 @@ version = "0.0.0"
 description = "A dataframe library for Mojo with the pandas API"
 authors = ["tamnd <tamnd87@gmail.com>"]
 license = "Apache-2.0"
-channels = ["https://conda.modular.com/max", "https://repo.prefix.dev/modular-community", "conda-forge"]
-platforms = ["linux-64", "linux-aarch64", "osx-arm64", "osx-64"]
+# The community channel is deliberately absent. Pixi resolves with strict channel
+# priority, so a channel listed here outranks conda-forge for every package it
+# happens to carry, and adding modular-community made the differential environment
+# unsolvable with an error that pointed at pyarrow rather than at the channel list.
+# Add it back the day we actually depend on something in it, not before.
+channels = ["https://conda.modular.com/max", "conda-forge"]
+# No osx-64. Modular stopped shipping a Mojo for Intel macOS, and the solver says
+# so plainly: every `modular` release wants a `mojo` that has no candidate there.
+platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 preview = ["pixi-build"]
 
 [dependencies]
@@ -20,41 +27,65 @@ modular = "*"
 [feature.dev.dependencies]
 python = ">=3.12"
 
+# The nightly channel is scoped to this feature rather than added to the workspace,
+# so a default `pixi run` cannot quietly resolve the toolchain to a nightly build.
+[feature.nightly]
+channels = ["https://conda.modular.com/max-nightly", "conda-forge"]
+
 [feature.nightly.dependencies]
-modular = { version = "*", channel = "https://conda.modular.com/max-nightly" }
+modular = "*"
 
 # Mojo imports pandas in the same process, so the conformance suite needs no
 # bindings and works from M1. docs/specs/09-quality-bar.md section 4.
+#
+# The pyarrow floor is not a wish, it is what the toolchain already ships. The
+# Modular stack pulls in pyarrow 24 and pins libprotobuf to 6, while libarrow 25
+# wants libprotobuf 7, so asking for pyarrow 25 makes the environment unsolvable
+# with an error that reads like conda-forge is missing builds. Match the toolchain
+# and raise this when the toolchain raises it.
+#
+# Each of these names conda-forge explicitly. None of them lives in the Modular
+# channel, so today the qualification changes nothing, but the Modular channel is
+# listed first and strict priority means anything it starts shipping silently wins.
+# Saying conda-forge out loud is how the day that happens stays uneventful.
 [feature.differential.dependencies]
-python = ">=3.12"
-pandas = ">=3.0"
-pyarrow = ">=25.0"
-duckdb = "*"
-polars = ">=1.43"
+python = { version = ">=3.12", channel = "conda-forge" }
+pandas = { version = ">=3.0", channel = "conda-forge" }
+pyarrow = { version = ">=24", channel = "conda-forge" }
+duckdb = { version = "*", channel = "conda-forge" }
+polars = { version = ">=1.43", channel = "conda-forge" }
 
 [environments]
 default = { features = ["dev"], solve-group = "main" }
 nightly = { features = ["nightly", "dev"] }
-differential = { features = ["dev", "differential"], solve-group = "main" }
+differential = { features = ["dev", "differential"] }
 
 [tasks]
-build = "mojo package firepanda -o build/firepanda.mojopkg"
-test = "mojo test tests firepanda"
-format = "mojo format firepanda tests"
-format-check = "mojo format --check firepanda tests"
+# `mojo package` and `mojo test` do not exist in Mojo 1.0. Packaging is
+# `precompile` and the output extension is `.mojoc`; tests are ordinary programs
+# that call `TestSuite.discover_tests`, so the runner is a loop.
+build = "mojo precompile firepanda -o build/firepanda.mojoc"
+test = { cmd = "bash tools/run_tests.sh", depends-on = ["build"] }
+format = "mojo format firepanda tests benchmarks tools"
 
-# Every kernel is checked against its scalar twin in firepanda/kernel/scalar.
-# The twins are never called in production; they exist to be the specification.
-fuzz = "mojo run tests/fuzz/main.mojo"
+# Not `mojo format --check`. That flag does not exist in Mojo 1.0; the formatter
+# only rewrites in place. tools/format_check.sh does the copy-format-diff dance.
+format-check = "bash tools/format_check.sh"
+
+# The bitmap is checked against a `List[Bool]` reference written with no bit
+# twiddling at all. From M1 the same harness covers each kernel against its
+# scalar twin in firepanda/kernel/scalar; the twins are never called in
+# production and exist to be the specification.
+fuzz = "mojo run -I . tests/fuzz/main.mojo"
 
 # The substitute for a race detector: every parallel operator, thousands of
 # iterations, randomized worker counts and cancellation points, compared against
 # the single-threaded result. docs/specs/09-quality-bar.md section 3.
-stress = "mojo run tests/stress/main.mojo"
+stress = "mojo run -I . tests/stress/main.mojo"
 
-differential = { cmd = "mojo run tests/differential/main.mojo", environment = "differential" }
+differential = { cmd = "mojo run -I . tests/differential/main.mojo", default-environment = "differential" }
 
-bench = "mojo run benchmarks/main.mojo"
+bench = "mojo run -I . benchmarks/main.mojo"
 bench-compare = "python tools/bench_compare.py"
 
 # Under monomorphization these are the numbers most likely to blow up, so they are

@@ -127,6 +127,7 @@ jobs:
       - uses: ./.github/actions/setup-pixi
         with:
           environment: ${{ matrix.mojo == 'nightly' && 'nightly' || 'default' }}
+          locked: ${{ matrix.mojo == 'nightly' && 'false' || 'true' }}
 
       - name: Toolchain versions
         run: pixi run mojo --version
@@ -154,6 +155,59 @@ jobs:
           path: compile-budget.json
           if-no-files-found: warn
 
+  # One machine, always the same one, because comparing a run on an arm runner
+  # against a run on an x86 one measures the runner. docs/specs/10-benchmarks.md.
+  bench:
+    name: Microbenchmarks
+    needs: guard
+    if: needs.guard.outputs.has_mojo == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-pixi
+
+      # Fewer repetitions and a shorter minimum than a developer would use. The
+      # full settings take a couple of minutes and this runs on every push.
+      - name: Run
+        run: pixi run bench -- --json=bench.json --label=gha-ubuntu-latest --repetitions=5 --min-time=50
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bench-ubuntu-latest
+          path: bench.json
+          if-no-files-found: error
+
+      - name: Fetch the baseline from main
+        id: baseline
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id=$(gh run list --workflow=ci.yml --branch=main --status=success --limit=1 \
+            --json databaseId --jq '.[0].databaseId // empty')
+          if [ -z "$run_id" ]; then
+            echo "::notice title=No baseline::no successful CI run on main to compare against yet"
+            exit 0
+          fi
+          if gh run download "$run_id" --name bench-ubuntu-latest --dir baseline; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice title=No baseline::run $run_id has no microbenchmark artifact"
+          fi
+
+      # The threshold is looser here than the tool's own default because a shared
+      # runner is a noisy machine and a gate that cries wolf gets switched off.
+      # The tool also refuses to call anything a regression unless it clears the
+      # spread it measured, so this is two conditions rather than one.
+      - name: Compare against main
+        if: steps.baseline.outputs.found == 'true'
+        run: |
+          pixi run bench-compare -- --baseline baseline/bench.json --candidate bench.json \
+            --threshold 0.25 --markdown "$GITHUB_STEP_SUMMARY"
+
   differential:
     name: Differential vs pandas & DuckDB
     needs: guard
@@ -170,7 +224,7 @@ jobs:
   required:
     name: CI
     if: always()
-    needs: [spec, format, build, differential]
+    needs: [spec, format, build, bench, differential]
     runs-on: ubuntu-latest
     steps:
       - name: Collect results

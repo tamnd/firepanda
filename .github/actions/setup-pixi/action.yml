@@ -13,6 +13,13 @@ inputs:
     description: pixi version to install, or "latest"
     required: false
     default: latest
+  locked:
+    description: >
+      Install exactly what pixi.lock says. Set this to false for the nightly job,
+      which exists to find out what today's toolchain does and would learn nothing
+      from a toolchain pinned in a lockfile that was solved weeks ago.
+    required: false
+    default: "true"
 
 runs:
   using: composite
@@ -36,7 +43,13 @@ runs:
 
     - name: Install environment
       shell: bash
-      run: pixi install --locked --environment "${{ inputs.environment }}"
+      run: |
+        if [ "${{ inputs.locked }}" = "true" ]; then
+          pixi install --locked --environment "${{ inputs.environment }}"
+        else
+          pixi update --environment "${{ inputs.environment }}"
+          pixi install --environment "${{ inputs.environment }}"
+        fi
 
     # The Mojo ABI is not stable, so which toolchain compiled a result is part of
     # the result. Record it where every job's log can be read for it.
