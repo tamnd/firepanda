@@ -4,12 +4,12 @@
   <a href="https://github.com/tamnd/firepanda/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/tamnd/firepanda/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
   <a href="docs/specs"><img alt="Specification" src="https://img.shields.io/badge/spec-12%20documents-informational"></a>
-  <img alt="Status" src="https://img.shields.io/badge/status-M1%20frame-orange">
+  <img alt="Status" src="https://img.shields.io/badge/status-M1%20display-orange">
 </p>
 
 A dataframe library for [Mojo](https://mojolang.org) with the pandas API.
 
-> **Status: M0 landed and M1 is under way. There is a `DataFrame` now, and still nothing to install.** What exists is the layer underneath one, plus the first thing built on it: validity bitmaps, aligned buffers with a size class pool, typed and type erased columns, the StringView layout, the logical type lattice with its promotion rules, the `comptime` dtype dispatch bridge, the compute kernels that run over a column, a stable radix sort with multi-key and null placement, the hash table and `factorize` that group by and join will be built on, and an eager `Series` and `DataFrame` over all of it that can select, cast, filter, take, slice and sort. It cannot print its own values yet, group by anything, join anything or read a file. It is tested, fuzzed against a reference model, and checked against numpy and pyarrow in the same process. The specification is twelve documents in [`docs/specs/`](docs/specs), written against Mojo 1.0, pandas 3.0, Polars 1.43 and Arrow 25.0 as of August 2026, and the milestone issues track the rest of the way to a frame you can actually use. If you are looking for a working Mojo dataframe today, you want [MojoFrame](https://arxiv.org/abs/2505.04080), which is a research prototype, or [Polars](https://pola.rs), which is not in Mojo but is excellent.
+> **Status: M0 landed and M1 is under way. There is a `DataFrame` now, it prints itself, and there is still nothing to install.** What exists is the layer underneath one, plus the first thing built on it: validity bitmaps, aligned buffers with a size class pool, typed and type erased columns, the StringView layout, the logical type lattice with its promotion rules, the `comptime` dtype dispatch bridge, the compute kernels that run over a column, a stable radix sort with multi-key and null placement, the hash table and `factorize` that group by and join will be built on, an eager `Series` and `DataFrame` over all of it that can select, cast, filter, take, slice and sort, and a display layer that renders either of them as a table. It cannot group by anything, join anything or read a file. It is tested, fuzzed against a reference model, and checked against numpy and pyarrow in the same process. The specification is twelve documents in [`docs/specs/`](docs/specs), written against Mojo 1.0, pandas 3.0, Polars 1.43 and Arrow 25.0 as of August 2026, and the milestone issues track the rest of the way to a frame you can actually use. If you are looking for a working Mojo dataframe today, you want [MojoFrame](https://arxiv.org/abs/2505.04080), which is a research prototype, or [Polars](https://pola.rs), which is not in Mojo but is excellent.
 
 ## What it is meant to be
 
@@ -36,6 +36,52 @@ var df = read_parquet("trades.parquet")
         .group_by("symbol").agg(col("net").sum())
         .collect()
 ```
+
+## What actually runs today
+
+The block above is the target. This is the part that works now, and the output is copied from a real run rather than written by hand.
+
+```mojo
+var df = DataFrame.from_series(columns^)
+print(df)
+
+var big = df.filter(greater(qty, threshold)).sort_by("price", descending=True)
+print(big)
+
+var widened = big.cast("qty", DType.float64)
+print(Series("notional", multiply(
+    widened.column("qty").as_typed[DType.float64](),
+    widened.column("price").as_typed[DType.float64](),
+)))
+```
+
+```
+    qty    price
+0   400   101.25
+1  1200     99.5
+2  2500    100.0
+3    80    98.75
+4  1750     <NA>
+5  3000  100.125
+
+[6 rows x 2 columns]
+
+    qty    price
+0  3000  100.125
+1  2500    100.0
+2  1200     99.5
+3  1750     <NA>
+
+[4 rows x 2 columns]
+
+0    300375.0
+1    250000.0
+2    119400.0
+3        <NA>
+Name: notional, dtype: float64
+```
+
+No Parquet, no group by, no expression API and no strings. Columns are built by hand, the mask comes from a kernel rather than from `df["qty"] > 1000`, and a null and a `NaN` print differently because in an Arrow layout they are different things.
 
 ## The argument
 

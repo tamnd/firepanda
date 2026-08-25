@@ -24,6 +24,7 @@ next to `column`.
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.dtype.logical import LogicalType
+from firepanda.frame.display import DisplayOptions, render_column
 from firepanda.kernel.cast import cast_any
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.sort import argsort_any
@@ -289,26 +290,16 @@ struct Series(Copyable, Movable, Sized, Writable):
         return self.take(_to_positions(order))
 
     def write_to(self, mut writer: Some[Writer]):
-        """Writes a one line summary.
+        """Writes the values, one per line, with a dtype footer.
 
-        This is not the display layer. Rendering the values with the alignment,
-        truncation and null spelling that a notebook needs is its own change;
-        what this gives is enough to identify a column in a test failure.
+        The default limits apply. `render_column` in `firepanda.frame.display`
+        takes a `DisplayOptions` if a caller wants more or fewer rows than the
+        ten this prints.
 
         Args:
             writer: The sink.
         """
-        writer.write(
-            "Series[",
-            self.name,
-            ": ",
-            self.values.type,
-            "] ",
-            len(self),
-            " rows, ",
-            self.null_count(),
-            " null",
-        )
+        writer.write(render_column(self.name, self.values, DisplayOptions()))
 
 
 def _clamp(n: Int, length: Int) -> Int:
