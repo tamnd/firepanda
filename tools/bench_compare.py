@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from fnmatch import fnmatch
 from pathlib import Path
 
 # Anything slower than this fraction of the baseline is a regression, provided it
@@ -203,6 +204,16 @@ def main() -> int:
         help="compare runs from different machines anyway",
     )
     parser.add_argument(
+        "--reference",
+        action="append",
+        default=[],
+        help=(
+            "glob for benchmarks that exist to be compared against rather than "
+            "to be defended, such as a standard library implementation. They are "
+            "reported and never gate. Repeatable."
+        ),
+    )
+    parser.add_argument(
         "--markdown",
         default=None,
         help="also write a markdown table here, for a pull request comment",
@@ -240,6 +251,14 @@ def main() -> int:
             continue
         change = (after - before) / before
         noise = max(MIN_NOISE, spread(old[name]), spread(entry))
+        # A reference row measures somebody else's code. It moving tells us
+        # nothing about this change and everything about the machine, so it is
+        # printed and then left alone.
+        if any(fnmatch(name, pattern) for pattern in args.reference):
+            rows.append(
+                (name, format_seconds(before), format_seconds(after), change, "ref")
+            )
+            continue
         if change > args.threshold and change > noise:
             verdict = "REGRESSED"
             regressions.append(
@@ -294,9 +313,13 @@ def main() -> int:
         ]
         for name, before_text, after_text, change, verdict in rows:
             change_text = "-" if verdict == "new" else f"{change * 100:+.1f}%"
-            mark = {"REGRESSED": "slower", "faster": "faster", "ok": "", "new": "new"}[
-                verdict
-            ]
+            mark = {
+                "REGRESSED": "slower",
+                "faster": "faster",
+                "ok": "",
+                "new": "new",
+                "ref": "reference",
+            }[verdict]
             lines.append(
                 f"| `{name}` | {before_text} | {after_text} | {change_text} | {mark} |"
             )
