@@ -60,7 +60,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: ossf/scorecard-action@v2
+      # No moving major tag is published for this one; it has to be a full version.
+      - uses: ossf/scorecard-action@v2.4.4
         with:
           results_file: scorecard.sarif
           results_format: sarif
