@@ -122,4 +122,4 @@ jobs:
           gh issue create --repo "${GITHUB_REPOSITORY}" \
             --title "Publish ${GITHUB_REF_NAME} to modular-community" \
             --label "packaging,release" \
-            --body "\`${GITHUB_REF_NAME}\` is on PyPI. Open the recipe pull request against \`modular/modular-community\` and link it here. Close when the package is resolvable via \`pixi add -c https://prefix.dev/modular-community firepanda\`."
+            --body "\`${GITHUB_REF_NAME}\` is on PyPI. Open the recipe pull request against \`modular/modular-community\` and link it here. Close when the package is resolvable via \`pixi add -c https://repo.prefix.dev/modular-community firepanda\`."
