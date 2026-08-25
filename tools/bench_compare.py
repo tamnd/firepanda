@@ -313,9 +313,13 @@ def main() -> int:
         ]
         for name, before_text, after_text, change, verdict in rows:
             change_text = "-" if verdict == "new" else f"{change * 100:+.1f}%"
-            mark = {"REGRESSED": "slower", "faster": "faster", "ok": "", "new": "new"}[
-                verdict
-            ]
+            mark = {
+                "REGRESSED": "slower",
+                "faster": "faster",
+                "ok": "",
+                "new": "new",
+                "ref": "reference",
+            }[verdict]
             lines.append(
                 f"| `{name}` | {before_text} | {after_text} | {change_text} | {mark} |"
             )
