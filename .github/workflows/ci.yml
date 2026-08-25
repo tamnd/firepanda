@@ -28,7 +28,7 @@ jobs:
       has_mojo: ${{ steps.detect.outputs.has_mojo }}
       has_python: ${{ steps.detect.outputs.has_python }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: detect
         run: |
           if compgen -G "firepanda/**/*.mojo" > /dev/null || compgen -G "firepanda/*.mojo" > /dev/null; then
@@ -48,9 +48,9 @@ jobs:
     name: Spec checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
 
@@ -94,12 +94,12 @@ jobs:
     if: needs.guard.outputs.has_mojo == 'true' || needs.guard.outputs.has_python == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-pixi
       - name: mojo format
         if: needs.guard.outputs.has_mojo == 'true'
         run: pixi run format-check
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v7
         if: needs.guard.outputs.has_python == 'true'
       - name: ruff
         if: needs.guard.outputs.has_python == 'true'
@@ -122,7 +122,7 @@ jobs:
             mojo: nightly
     continue-on-error: ${{ matrix.mojo == 'nightly' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: ./.github/actions/setup-pixi
         with:
@@ -148,7 +148,7 @@ jobs:
       - name: Compile budget
         run: pixi run compile-budget --output compile-budget.json
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: compile-budget-${{ matrix.os }}-${{ matrix.mojo }}
           path: compile-budget.json
@@ -160,7 +160,7 @@ jobs:
     if: needs.guard.outputs.has_mojo == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-pixi
         with:
           environment: differential

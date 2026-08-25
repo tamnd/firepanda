@@ -22,7 +22,7 @@ jobs:
     outputs:
       ready: ${{ steps.d.outputs.ready }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: d
         run: |
           if [ -d benchmarks ]; then echo "ready=true" >> "$GITHUB_OUTPUT"; else echo "ready=false" >> "$GITHUB_OUTPUT"; fi
@@ -36,7 +36,7 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -49,7 +49,7 @@ jobs:
       # file somebody edited, so a regression is attributable to a commit.
       - name: Restore baseline
         if: github.event_name == 'pull_request'
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: baseline.json
           key: bench-baseline-${{ runner.os }}-${{ github.event.pull_request.base.sha }}
@@ -67,12 +67,12 @@ jobs:
 
       - name: Save baseline
         if: github.ref == 'refs/heads/main'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: current.json
           key: bench-baseline-${{ runner.os }}-${{ github.sha }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bench-${{ github.sha }}
           path: current.json
