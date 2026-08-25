@@ -34,4 +34,5 @@ from .dtype import (
     logical_for,
     promote,
 )
+from .frame import DataFrame, Series
 from .version import VERSION, version

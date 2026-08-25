@@ -51,6 +51,8 @@ from firepanda.buffer.buffer import Buffer
 from firepanda.buffer.pool import BufferPool
 from firepanda.dtype.dispatch import dispatch
 from firepanda.dtype.lists import NUMERIC
+from firepanda.frame.frame import DataFrame
+from firepanda.frame.series import Series
 from firepanda.hash import (
     DEFAULT_SEED,
     DIRECT_LIMIT,
@@ -1017,6 +1019,123 @@ def bench_sort(mut harness: Harness) raises:
     harness.record("sort/std_sort_int64", "rows", rows, sort_reference)
 
 
+def bench_frame(mut harness: Harness) raises:
+    """Measures what the frame layer adds on top of the kernels it calls.
+
+    Every row here has a kernel row it should be compared against, because the
+    frame is supposed to be a thin thing and the way to check that is to see
+    whether it costs what the kernel underneath it costs. `frame/filter` runs
+    the same mask over three columns that `kernel/filter_rows` runs over one, so
+    it should land near three times it plus the erased dispatch, which is a
+    comparison chain over a value in a register and should not be visible at all.
+
+    The pair worth reading first is `frame/column_by_name` against
+    `frame/column_by_position`. They fetch the same column. The first returns a
+    `Series`, which copies, and the second returns a borrowed reference, which
+    does not, and the ratio between them is the price of the eager no-views rule
+    stated in `firepanda/frame/frame.mojo`. It is a large ratio and it is meant
+    to be visible, because when the plan layer arrives at M4 and column
+    references stop being resolved by string lookup, this is the row that should
+    move.
+
+    `frame/sort_one_key` against `sort/int64_small` is the other pair. The
+    difference between them is the three gathers that apply the permutation,
+    which is what a frame sort costs over a column sort and is why `argsort` and
+    `take` are separate functions in the first place.
+
+    Args:
+        harness: The harness.
+
+    Raises:
+        If a benchmark raises.
+    """
+    var rows = harness.options.rows
+    var rng = Rng(0xF2A3E)
+
+    var key = Array[DType.int64](rows)
+    var score = Array[DType.float64](rows)
+    var flag = Array[DType.bool](rows)
+    var mask = Array[DType.bool](rows)
+    var scatter = List[Int](capacity=rows)
+    for i in range(rows):
+        var draw = rng.next_u64()
+        key[i] = Int64(draw % 1000)
+        score[i] = Float64(Int64(draw % 1000000)) / Float64(64.0)
+        flag[i] = draw & 1 == 1
+        mask[i] = draw & 2 == 2
+        scatter.append(Int(draw % UInt64(rows)))
+
+    var columns = List[Series]()
+    columns.append(Series("key", key^))
+    columns.append(Series("score", score^))
+    columns.append(Series("flag", flag^))
+    var df = DataFrame.from_series(columns^)
+
+    def frame_filter() raises {imm df, imm mask}:
+        keep(df.rows)
+        var out = df.filter(mask)
+        keep(out.rows)
+
+    harness.record("frame/filter", "rows", rows, frame_filter)
+
+    def frame_take() raises {imm df, imm scatter}:
+        keep(df.rows)
+        var out = df.take(scatter)
+        keep(out.rows)
+
+    harness.record("frame/take", "rows", rows, frame_take)
+
+    def frame_slice() raises {imm df, imm rows}:
+        keep(df.rows)
+        var out = df.slice(1, rows // 2)
+        keep(out.rows)
+
+    harness.record("frame/slice_half", "rows", rows, frame_slice)
+
+    def frame_select() raises {imm df}:
+        keep(df.rows)
+        var out = df.select(["score", "key"])
+        keep(out.rows)
+
+    harness.record("frame/select_two", "rows", rows, frame_select)
+
+    def frame_cast() raises {imm df}:
+        keep(df.rows)
+        var out = df.cast("key", DType.float64)
+        keep(out.rows)
+
+    harness.record("frame/cast_one", "rows", rows, frame_cast)
+
+    def frame_sort_one() raises {imm df}:
+        keep(df.rows)
+        var out = df.sort_by("key")
+        keep(out.rows)
+
+    harness.record("frame/sort_one_key", "rows", rows, frame_sort_one)
+
+    def frame_sort_two() raises {imm df}:
+        keep(df.rows)
+        var out = df.sort_values(
+            ["key", "score"], [False, True], [False, False]
+        )
+        keep(out.rows)
+
+    harness.record("frame/sort_two_keys", "rows", rows, frame_sort_two)
+
+    def frame_by_name() raises {imm df}:
+        keep(df.rows)
+        var got = df.column("score")
+        keep(len(got))
+
+    harness.record("frame/column_by_name", "rows", rows, frame_by_name)
+
+    def frame_by_position() raises {imm df}:
+        keep(df.rows)
+        keep(len(df[1]))
+
+    harness.record("frame/column_by_position", "rows", rows, frame_by_position)
+
+
 def bench_hash(mut harness: Harness) raises:
     """Measures the hash table, and measures whether it was worth writing.
 
@@ -1364,6 +1483,7 @@ def main() raises:
     bench_array(harness)
     bench_kernel(harness)
     bench_sort(harness)
+    bench_frame(harness)
     bench_hash(harness)
     bench_dispatch(harness)
     var elapsed = Float64(perf_counter_ns() - started) / 1e9
