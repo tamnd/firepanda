@@ -47,6 +47,9 @@ there is one loop per reduction rather than two, and the twin in `scalar.mojo`
 covers both.
 """
 
+from std.collections.span import Span
+from std.math import sqrt
+
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.bitmap.bitmap import Bitmap
@@ -55,18 +58,111 @@ from firepanda.kernel.accum import accumulator, highest, lowest
 from firepanda.kernel.agg import max_of
 
 
-@fieldwise_init
 struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
     """Which reduction a grouped aggregation should run.
 
-    This is a runtime tag rather than eight separate erased entry points because
-    the erased path instantiates its body once per dtype. Eight entry points over
-    twelve dtypes would be ninety six instantiations of one loop; one entry point
-    carrying a tag is twelve instantiations of eight loops, which is the same
-    code with one dispatch chain instead of eight.
+    This is a runtime tag rather than a parameter because the erased path
+    instantiates its body once per dtype. Thirteen entry points over twelve
+    dtypes would be a hundred and fifty six instantiations of one loop; one entry
+    point carrying a tag is twelve instantiations of thirteen loops, which is the
+    same code with one dispatch chain instead of thirteen.
+
+    Three of the reductions take a number as well as a name. `VAR` and `STD` take
+    a delta degrees of freedom and `QUANTILE` takes the quantile itself, so the
+    tag carries a `Float64` beside the code. Anything that does not use it leaves
+    it at zero.
+
+    Two kinds are equal when their codes are, and `param` is deliberately not
+    part of that. `kind == AggKind.QUANTILE` has to be true for the ninetieth
+    percentile as well as for the median, because that comparison is how the
+    dispatch chain picks a branch and it is asking which reduction this is, not
+    which arguments it was given.
     """
 
     var code: UInt8
+    """Which reduction."""
+
+    var param: Float64
+    """The delta degrees of freedom for `VAR` and `STD`, the quantile for
+    `QUANTILE` and `MEDIAN`, and zero for everything else."""
+
+    def __init__(out self, code: UInt8):
+        """Constructs a kind with the reduction's own default parameter.
+
+        Args:
+            code: Which reduction.
+        """
+        self.code = code
+        self.param = Self._default_param(code)
+
+    def __init__(out self, code: UInt8, param: Float64):
+        """Constructs a kind with an explicit parameter.
+
+        Args:
+            code: Which reduction.
+            param: The degrees of freedom or the quantile.
+        """
+        self.code = code
+        self.param = param
+
+    @staticmethod
+    def _default_param(code: UInt8) -> Float64:
+        """Returns the parameter a bare code should carry.
+
+        Constructing from a code alone has to give the reduction its documented
+        default rather than zero, because zero is a legal delta degrees of freedom
+        and a legal quantile. A caller that writes `AggKind(UInt8(11))` and gets
+        the minimum instead of the median has been handed a bug rather than an
+        argument, so the default lives here rather than in a signature.
+
+        Args:
+            code: Which reduction.
+
+        Returns:
+            One for the two dispersions, a half for the two order statistics, and
+            zero for the rest.
+        """
+        if code == 8 or code == 9:
+            return 1.0
+        if code == 10 or code == 11:
+            return 0.5
+        return 0.0
+
+    @staticmethod
+    def var_with(ddof: Int) -> Self:
+        """Returns a variance with an explicit delta degrees of freedom.
+
+        Args:
+            ddof: Subtracted from the count to give the divisor.
+
+        Returns:
+            The kind.
+        """
+        return Self(8, Float64(ddof))
+
+    @staticmethod
+    def std_with(ddof: Int) -> Self:
+        """Returns a standard deviation with an explicit delta degrees of freedom.
+
+        Args:
+            ddof: Subtracted from the count to give the divisor.
+
+        Returns:
+            The kind.
+        """
+        return Self(9, Float64(ddof))
+
+    @staticmethod
+    def quantile_at(q: Float64) -> Self:
+        """Returns a quantile at a given position.
+
+        Args:
+            q: Where in the sorted values to land, from zero to one.
+
+        Returns:
+            The kind.
+        """
+        return Self(11, q)
 
     comptime SUM = Self(0)
     """Adds the non-null values. Zero for a group with none."""
@@ -92,14 +188,29 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
     comptime SIZE = Self(7)
     """How many rows the group has, nulls included."""
 
+    comptime VAR = Self(8)
+    """The variance of the non-null values, dividing by count minus `param`."""
+
+    comptime STD = Self(9)
+    """The square root of `VAR`, with the same divisor."""
+
+    comptime MEDIAN = Self(10)
+    """The middle of the non-null values, interpolating between two."""
+
+    comptime QUANTILE = Self(11)
+    """The value at position `param` of the sorted non-null values."""
+
+    comptime NUNIQUE = Self(12)
+    """How many distinct non-null values the group has."""
+
     def __eq__(self, other: Self) -> Bool:
-        """Compares two kinds.
+        """Compares two kinds, by reduction and not by parameter.
 
         Args:
             other: The kind to compare against.
 
         Returns:
-            True if they are the same reduction.
+            True if they are the same reduction, whatever each was asked for.
         """
         return self.code == other.code
 
@@ -133,9 +244,15 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             counts, float64 for a mean, the accumulator dtype for a sum, and
             `dt` itself for the four that report a value the column held.
         """
-        if self == Self.COUNT or self == Self.SIZE:
+        if self == Self.COUNT or self == Self.SIZE or self == Self.NUNIQUE:
             return DType.int64
-        if self == Self.MEAN:
+        if (
+            self == Self.MEAN
+            or self == Self.VAR
+            or self == Self.STD
+            or self == Self.MEDIAN
+            or self == Self.QUANTILE
+        ):
             return DType.float64
         if self == Self.SUM:
             return accumulator(dt)
@@ -161,8 +278,18 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("first")
         elif self == Self.LAST:
             writer.write("last")
-        else:
+        elif self == Self.SIZE:
             writer.write("size")
+        elif self == Self.VAR:
+            writer.write("var")
+        elif self == Self.STD:
+            writer.write("std")
+        elif self == Self.MEDIAN:
+            writer.write("median")
+        elif self == Self.QUANTILE:
+            writer.write("quantile")
+        else:
+            writer.write("nunique")
 
 
 def group_size(codes: Array[DType.uint32], groups: Int) -> Array[DType.int64]:
@@ -542,6 +669,378 @@ def _edge_core[
     return out^
 
 
+def group_var[
+    dt: DType
+](
+    values: Array[dt],
+    codes: Array[DType.uint32],
+    groups: Int,
+    ddof: Int = 1,
+) -> Array[DType.float64]:
+    """Returns the variance of the non-null values in each group.
+
+    Args:
+        values: The column being aggregated.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals.
+        ddof: Subtracted from the count to give the divisor. One is the sample
+            variance and is what pandas defaults to; zero is the population one.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        A column of `groups` variances. A group with `ddof` or fewer non-null
+        values is null, which is the case pandas reports as NaN.
+    """
+    return _var_core[want_std=False](
+        values.unsafe_ptr(),
+        values.data.validity,
+        values.null_count() > 0,
+        codes,
+        groups,
+        ddof,
+    )
+
+
+def group_std[
+    dt: DType
+](
+    values: Array[dt],
+    codes: Array[DType.uint32],
+    groups: Int,
+    ddof: Int = 1,
+) -> Array[DType.float64]:
+    """Returns the standard deviation of the non-null values in each group.
+
+    Args:
+        values: The column being aggregated.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals.
+        ddof: Subtracted from the count to give the divisor.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        A column of `groups` standard deviations, null on the same groups
+        `group_var` reports null on.
+    """
+    return _var_core[want_std=True](
+        values.unsafe_ptr(),
+        values.data.validity,
+        values.null_count() > 0,
+        codes,
+        groups,
+        ddof,
+    )
+
+
+def _var_core[
+    dt: DType, //, want_std: Bool, origin: ImmOrigin
+](
+    source: Pointer[Scalar[dt], origin],
+    validity: Bitmap,
+    has_null: Bool,
+    codes: Array[DType.uint32],
+    groups: Int,
+    ddof: Int,
+) -> Array[DType.float64]:
+    """Sums the squared deviations from each group's own mean.
+
+    Two passes rather than one. The single pass version accumulates the sum and
+    the sum of squares together and subtracts at the end, which is one loop
+    instead of two and is the arrangement most libraries start with. It also
+    loses every significant digit when the values are large and the spread is
+    small, because it computes a small number as the difference of two large
+    ones: a column of timestamps around 1.7e9 with a spread of a few seconds has
+    a sum of squares near 3e18, and the subtraction that is supposed to leave the
+    variance is cancelling seventeen digits away. Timestamps in a group by are
+    not a corner case, so this takes the second pass.
+    """
+    var means = _mean_core(source, validity, has_null, codes, groups)
+    var counts = _count_core(validity, has_null, codes, groups)
+
+    var out = Array[DType.float64](groups)
+    var target = out.unsafe_ptr()
+    var centre = means.unsafe_ptr()
+    var at = codes.unsafe_ptr()
+
+    for i in range(len(codes)):
+        if has_null and not validity.get(i):
+            continue
+        var g = Int(at.unsafe_offset(i).unsafe_load())
+        var delta = (
+            source.unsafe_offset(i).unsafe_load().cast[DType.float64]()
+            - centre.unsafe_offset(g).unsafe_load()
+        )
+        target.unsafe_offset(g).unsafe_store(
+            target.unsafe_offset(g).unsafe_load() + delta * delta
+        )
+
+    var n = counts.unsafe_ptr()
+    for g in range(groups):
+        var divisor = Int(n.unsafe_offset(g).unsafe_load()) - ddof
+        if divisor <= 0:
+            out.data.validity.set(g, False)
+            target.unsafe_offset(g).unsafe_store(0.0)
+            continue
+        var value = target.unsafe_offset(g).unsafe_load() / Float64(divisor)
+        comptime if want_std:
+            value = sqrt(value)
+        target.unsafe_offset(g).unsafe_store(value)
+    return out^
+
+
+def group_median[
+    dt: DType
+](values: Array[dt], codes: Array[DType.uint32], groups: Int) -> Array[
+    DType.float64
+]:
+    """Returns the median of the non-null values in each group.
+
+    Args:
+        values: The column being aggregated.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        A column of `groups` medians, null where a group has no non-null values.
+        An even count interpolates between the two middle values, so the median
+        of a column of integers is a float and can be a half.
+    """
+    return _quantile_core(
+        values.unsafe_ptr(),
+        values.data.validity,
+        values.null_count() > 0,
+        codes,
+        groups,
+        0.5,
+    )
+
+
+def group_quantile[
+    dt: DType
+](
+    values: Array[dt], codes: Array[DType.uint32], groups: Int, q: Float64
+) raises -> Array[DType.float64]:
+    """Returns one quantile of the non-null values in each group.
+
+    Args:
+        values: The column being aggregated.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals.
+        q: Where in the sorted values to land, from zero for the minimum to one
+            for the maximum.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        A column of `groups` quantiles, interpolated linearly between the two
+        values the position falls between, which is what pandas does by default.
+
+    Raises:
+        If `q` is outside zero to one.
+    """
+    if not (q >= 0.0 and q <= 1.0):
+        raise Error(
+            "group by: a quantile must be between 0 and 1, got " + String(q)
+        )
+    return _quantile_core(
+        values.unsafe_ptr(),
+        values.data.validity,
+        values.null_count() > 0,
+        codes,
+        groups,
+        q,
+    )
+
+
+def group_nunique[
+    dt: DType
+](values: Array[dt], codes: Array[DType.uint32], groups: Int) -> Array[
+    DType.int64
+]:
+    """Counts the distinct non-null values in each group.
+
+    Args:
+        values: The column being aggregated.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        A column of `groups` counts, every one of them present. A group with no
+        non-null values counts zero rather than reporting null, which is what
+        pandas does and is the same choice `group_count` makes.
+    """
+    return _nunique_core(
+        values.unsafe_ptr(),
+        values.data.validity,
+        values.null_count() > 0,
+        codes,
+        groups,
+    )
+
+
+def _slab_bounds(counts: Array[DType.int64], groups: Int) -> List[Int]:
+    """Turns per group counts into `groups + 1` slab offsets."""
+    var bounds = List[Int](capacity=groups + 1)
+    var n = counts.unsafe_ptr()
+    var running = 0
+    bounds.append(0)
+    for g in range(groups):
+        running += Int(n.unsafe_offset(g).unsafe_load())
+        bounds.append(running)
+    return bounds^
+
+
+def _fill_slab[
+    dt: DType, //, origin: ImmOrigin
+](
+    source: Pointer[Scalar[dt], origin],
+    validity: Bitmap,
+    has_null: Bool,
+    codes: Array[DType.uint32],
+    groups: Int,
+    bounds: List[Int],
+    mut slab: Array[dt],
+):
+    """Gathers each group's non-null values into its own run of the slab.
+
+    The three reductions below all need a group's values next to each other, and
+    two of them need them sorted. Sorting the whole column by group and then by
+    value would do it in one radix pass, but the sort kernel here argsorts into a
+    permutation and applying that is another pass over the column plus an
+    indirection per row. Scattering into per group runs is the same single pass
+    and leaves each run short enough that sorting it is cheap: the runs sum to
+    the row count, so sorting all of them is n log(n over groups) rather than
+    n log n, and on the thousand group shape that is a third of the comparisons.
+    """
+    var cursor = List[Int](capacity=groups)
+    for g in range(groups):
+        cursor.append(bounds[g])
+
+    var into = slab.unsafe_ptr()
+    var at = codes.unsafe_ptr()
+    for i in range(len(codes)):
+        if has_null and not validity.get(i):
+            continue
+        var g = Int(at.unsafe_offset(i).unsafe_load())
+        into.unsafe_offset(cursor[g]).unsafe_store(
+            source.unsafe_offset(i).unsafe_load()
+        )
+        cursor[g] = cursor[g] + 1
+
+
+def _quantile_core[
+    dt: DType, //, origin: ImmOrigin
+](
+    source: Pointer[Scalar[dt], origin],
+    validity: Bitmap,
+    has_null: Bool,
+    codes: Array[DType.uint32],
+    groups: Int,
+    q: Float64,
+) -> Array[DType.float64]:
+    """Sorts each group's values and reads the position `q` falls at."""
+    var counts = _count_core(validity, has_null, codes, groups)
+    var bounds = _slab_bounds(counts, groups)
+    var slab = Array[dt](bounds[groups])
+    _fill_slab(source, validity, has_null, codes, groups, bounds, slab)
+
+    var values = slab.unsafe_ptr()
+    var out = Array[DType.float64](groups)
+    var target = out.unsafe_ptr()
+
+    for g in range(groups):
+        var start = bounds[g]
+        var count = bounds[g + 1] - start
+        if count == 0:
+            out.data.validity.set(g, False)
+            continue
+        sort(
+            Span[Scalar[dt], origin_of(slab)](
+                unsafe_ptr=values.unsafe_offset(start), length=count
+            )
+        )
+        # pandas' default interpolation. The position is on the sorted values
+        # rather than between them, so q of zero is the minimum and q of one is
+        # the maximum exactly, and everything in between is a weighted pair.
+        var position = q * Float64(count - 1)
+        var lower = Int(position)
+        var upper = lower + 1 if lower + 1 < count else lower
+        var low = (
+            values.unsafe_offset(start + lower)
+            .unsafe_load()
+            .cast[DType.float64]()
+        )
+        var high = (
+            values.unsafe_offset(start + upper)
+            .unsafe_load()
+            .cast[DType.float64]()
+        )
+        target.unsafe_offset(g).unsafe_store(
+            low + (high - low) * (position - Float64(lower))
+        )
+    return out^
+
+
+def _nunique_core[
+    dt: DType, //, origin: ImmOrigin
+](
+    source: Pointer[Scalar[dt], origin],
+    validity: Bitmap,
+    has_null: Bool,
+    codes: Array[DType.uint32],
+    groups: Int,
+) -> Array[DType.int64]:
+    """Sorts each group's values and counts the runs.
+
+    Sorting to count distinct values rather than putting them in a hash set. The
+    set is asymptotically better and loses here for two reasons: the slab is
+    already being built and sorted for the quantiles, so this is reusing a pass
+    rather than adding one, and a set of every distinct value in the column is
+    unbounded where the slab is exactly the size of the data. A group by that
+    counts distinct values on a high cardinality column is the case where the
+    set would be biggest and it is also the case where it would collide most.
+    """
+    var counts = _count_core(validity, has_null, codes, groups)
+    var bounds = _slab_bounds(counts, groups)
+    var slab = Array[dt](bounds[groups])
+    _fill_slab(source, validity, has_null, codes, groups, bounds, slab)
+
+    var values = slab.unsafe_ptr()
+    var out = Array[DType.int64](groups)
+    var target = out.unsafe_ptr()
+
+    for g in range(groups):
+        var start = bounds[g]
+        var count = bounds[g + 1] - start
+        if count == 0:
+            continue
+        sort(
+            Span[Scalar[dt], origin_of(slab)](
+                unsafe_ptr=values.unsafe_offset(start), length=count
+            )
+        )
+        var distinct = 1
+        for i in range(start + 1, start + count):
+            if (
+                values.unsafe_offset(i).unsafe_load()
+                != values.unsafe_offset(i - 1).unsafe_load()
+            ):
+                distinct += 1
+        target.unsafe_offset(g).unsafe_store(Int64(distinct))
+    return out^
+
+
 def aggregate_group[
     dt: DType
 ](
@@ -616,6 +1115,33 @@ def _dispatch_core[
             _edge_core[want_first=False](
                 source, validity, has_null, codes, groups
             )
+        )
+    if kind == AggKind.VAR:
+        return AnyArray(
+            _var_core[want_std=False](
+                source, validity, has_null, codes, groups, Int(kind.param)
+            )
+        )
+    if kind == AggKind.STD:
+        return AnyArray(
+            _var_core[want_std=True](
+                source, validity, has_null, codes, groups, Int(kind.param)
+            )
+        )
+    if kind == AggKind.MEDIAN or kind == AggKind.QUANTILE:
+        if not (kind.param >= 0.0 and kind.param <= 1.0):
+            raise Error(
+                "group by: a quantile must be between 0 and 1, got "
+                + String(kind.param)
+            )
+        return AnyArray(
+            _quantile_core(
+                source, validity, has_null, codes, groups, kind.param
+            )
+        )
+    if kind == AggKind.NUNIQUE:
+        return AnyArray(
+            _nunique_core(source, validity, has_null, codes, groups)
         )
     raise Error("group by: unsupported aggregation")
 

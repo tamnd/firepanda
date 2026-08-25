@@ -47,9 +47,14 @@ from firepanda.kernel.group import (
     group_last,
     group_max,
     group_mean,
+    group_median,
     group_min,
+    group_nunique,
+    group_quantile,
     group_size,
+    group_std,
     group_sum,
+    group_var,
 )
 
 
@@ -527,6 +532,205 @@ def test_grouping_an_empty_frame() raises:
 def test_a_spec_renders_as_it_reads() raises:
     assert_equal(String(AggSpec("v", AggKind.SUM)), "sum(v) as v_sum")
     assert_equal(String(AggSpec("v", AggKind.MAX, "top")), "max(v) as top")
+
+
+def test_variance_uses_a_sample_divisor_by_default() raises:
+    var out = group_var(sample_values(), sample_codes(), 3)
+    assert_almost_equal(out[0], 200.0, atol=1e-9)
+    assert_almost_equal(out[1], 800.0, atol=1e-9)
+
+
+def test_variance_of_a_single_value_is_null_at_the_default_ddof() raises:
+    var out = group_var(sample_values(), sample_codes(), 3)
+    assert_false(
+        out.is_valid(2),
+        "one value and ddof of 1 divides by zero; pandas reports NaN here",
+    )
+
+
+def test_variance_of_a_single_value_is_zero_at_ddof_zero() raises:
+    var out = group_var(sample_values(), sample_codes(), 3, ddof=0)
+    assert_true(out.is_valid(2))
+    assert_almost_equal(out[2], 0.0, atol=1e-9)
+    assert_almost_equal(out[0], 100.0, atol=1e-9)
+
+
+def test_variance_skips_nulls_rather_than_counting_them_as_zero() raises:
+    # Group 1 holds 20, null and 60. Counting the null as a zero would give a
+    # mean of 26.67 and a variance of 933.33 instead of 800.
+    var out = group_var(sample_values(), sample_codes(), 3)
+    assert_almost_equal(out[1], 800.0, atol=1e-9)
+
+
+def test_variance_of_an_all_null_group_is_null() raises:
+    var out = group_var(all_null_group(), codes_of([0, 1, 0, 1]), 2)
+    assert_false(out.is_valid(1))
+
+
+def test_standard_deviation_is_the_root_of_the_variance() raises:
+    var out = group_std(sample_values(), sample_codes(), 3)
+    assert_almost_equal(out[0], 14.142135623730951, atol=1e-9)
+    assert_almost_equal(out[1], 28.284271247461902, atol=1e-9)
+    assert_false(out.is_valid(2))
+
+
+def test_variance_keeps_its_digits_on_large_values() raises:
+    # Five timestamps a second apart. The one pass formula computes this as the
+    # difference of two numbers near 1.4e19 and comes back with garbage, or with
+    # a negative variance. The right answer is 2.5.
+    var base = Int64(1_700_000_000)
+    var col = ints([base, base + 1, base + 2, base + 3, base + 4])
+    var out = group_var(col, codes_of([0, 0, 0, 0, 0]), 1)
+    assert_almost_equal(out[0], 2.5, atol=1e-9)
+
+
+def test_median_interpolates_between_two_middle_values() raises:
+    var out = group_median(sample_values(), sample_codes(), 3)
+    assert_almost_equal(out[0], 20.0, atol=1e-9)
+    assert_almost_equal(out[1], 40.0, atol=1e-9)
+    assert_almost_equal(out[2], 50.0, atol=1e-9)
+
+
+def test_median_of_an_even_count_of_integers_can_be_a_half() raises:
+    var out = group_median(ints([1, 2, 3, 4]), codes_of([0, 0, 0, 0]), 1)
+    assert_almost_equal(out[0], 2.5, atol=1e-9)
+
+
+def test_median_of_an_all_null_group_is_null() raises:
+    var out = group_median(all_null_group(), codes_of([0, 1, 0, 1]), 2)
+    assert_false(out.is_valid(1))
+    assert_almost_equal(out[0], 8.0, atol=1e-9)
+
+
+def test_median_does_not_need_the_input_sorted() raises:
+    var out = group_median(
+        ints([50, 10, 40, 20, 30]), codes_of([0, 0, 0, 0, 0]), 1
+    )
+    assert_almost_equal(out[0], 30.0, atol=1e-9)
+
+
+def test_quantile_at_zero_and_one_are_the_extremes() raises:
+    var low = group_quantile(sample_values(), sample_codes(), 3, 0.0)
+    var high = group_quantile(sample_values(), sample_codes(), 3, 1.0)
+    assert_almost_equal(low[1], 20.0, atol=1e-9)
+    assert_almost_equal(high[1], 60.0, atol=1e-9)
+
+
+def test_quantile_interpolates_linearly() raises:
+    # Group 0 holds 10 and 30, so the quarter point is a quarter of the way from
+    # one to the other rather than either of them.
+    var out = group_quantile(sample_values(), sample_codes(), 3, 0.25)
+    assert_almost_equal(out[0], 15.0, atol=1e-9)
+    assert_almost_equal(out[1], 30.0, atol=1e-9)
+
+
+def test_quantile_outside_zero_to_one_is_refused() raises:
+    with assert_raises(contains="between 0 and 1"):
+        _ = group_quantile(sample_values(), sample_codes(), 3, 1.5)
+
+
+def test_distinct_count_ignores_repeats_and_nulls() raises:
+    var col = ints([5, 5, 7, 0, 5])
+    col.set_null(3)
+    var out = group_nunique(col, codes_of([0, 0, 0, 0, 0]), 1)
+    assert_equal(out[0], 2)
+
+
+def test_distinct_count_of_an_all_null_group_is_zero_and_present() raises:
+    var out = group_nunique(all_null_group(), codes_of([0, 1, 0, 1]), 2)
+    assert_equal(out[1], 0)
+    assert_true(out.is_valid(1), "pandas gives 0 here, not NA")
+
+
+def test_distinct_count_is_per_group_rather_than_overall() raises:
+    # Both groups hold the same two values. Counting distinct values across the
+    # column would give 2 once; per group it is 2 twice.
+    var out = group_nunique(ints([1, 2, 1, 2]), codes_of([0, 0, 1, 1]), 2)
+    assert_equal(out[0], 2)
+    assert_equal(out[1], 2)
+
+
+def test_the_new_reductions_agree_with_their_erased_spelling() raises:
+    var kinds = List[AggKind]()
+    kinds.append(AggKind.VAR)
+    kinds.append(AggKind.STD)
+    kinds.append(AggKind.MEDIAN)
+    kinds.append(AggKind.QUANTILE)
+    kinds.append(AggKind.NUNIQUE)
+    for k in range(len(kinds)):
+        var erased = AnyArray(sample_values())
+        var through = aggregate_group_any(erased, kinds[k], sample_codes(), 3)
+        var direct = aggregate_group(
+            sample_values(), kinds[k], sample_codes(), 3
+        )
+        assert_equal(len(through), len(direct))
+        assert_equal(
+            String(through.dtype()),
+            String(direct.dtype()),
+            String("dtype under ", kinds[k]),
+        )
+
+
+def test_a_bare_code_carries_the_reduction_default() raises:
+    # Constructing from a code alone has to give ddof 1 and quantile 0.5 rather
+    # than zero, because zero is a legal value for both.
+    assert_almost_equal(AggKind(UInt8(8)).param, 1.0, atol=1e-12)
+    assert_almost_equal(AggKind(UInt8(9)).param, 1.0, atol=1e-12)
+    assert_almost_equal(AggKind(UInt8(10)).param, 0.5, atol=1e-12)
+    assert_almost_equal(AggKind(UInt8(11)).param, 0.5, atol=1e-12)
+    assert_almost_equal(AggKind(UInt8(0)).param, 0.0, atol=1e-12)
+
+
+def test_two_kinds_are_equal_by_reduction_and_not_by_parameter() raises:
+    assert_true(
+        AggKind.quantile_at(0.9) == AggKind.QUANTILE,
+        "the dispatch chain compares against the bare kind",
+    )
+    assert_true(AggKind.var_with(0) == AggKind.VAR)
+    assert_true(AggKind.std_with(0) == AggKind.STD)
+    assert_true(AggKind.VAR != AggKind.STD)
+
+
+def test_the_new_reductions_name_themselves() raises:
+    assert_equal(String(AggKind.VAR), "var")
+    assert_equal(String(AggKind.STD), "std")
+    assert_equal(String(AggKind.MEDIAN), "median")
+    assert_equal(String(AggKind.QUANTILE), "quantile")
+    assert_equal(String(AggKind.NUNIQUE), "nunique")
+
+
+def test_a_frame_groups_by_the_new_reductions() raises:
+    var specs = List[AggSpec]()
+    specs.append(AggSpec("v", AggKind.MEDIAN))
+    specs.append(AggSpec("v", AggKind.NUNIQUE))
+    specs.append(AggSpec("v", AggKind.quantile_at(0.0), "smallest"))
+    var out = sample_frame().group_by(["k"], specs)
+
+    # Keys 5, 10 and 20 survive; the null key is dropped. Key 10 holds 20, null
+    # and 60, so its median is 40 and it has two distinct values.
+    assert_equal(len(out), 3)
+    var median = out.column("v_median").as_typed[DType.float64]()
+    var distinct = out.column("v_nunique").as_typed[DType.int64]()
+    var smallest = out.column("smallest").as_typed[DType.float64]()
+    assert_almost_equal(median[1], 40.0, atol=1e-9)
+    assert_equal(distinct[1], 2)
+    assert_almost_equal(smallest[1], 20.0, atol=1e-9)
+
+
+def test_a_frame_wide_variance_keeps_its_degrees_of_freedom() raises:
+    var out = sample_frame().group_agg(["k"], AggKind.std_with(0))
+    var spread = out.column("v").as_typed[DType.float64]()
+    # Key 10 holds 20 and 60. With ddof 0 that is a population standard
+    # deviation of 20, where the default would give 28.28.
+    assert_almost_equal(spread[1], 20.0, atol=1e-9)
+
+
+def test_two_quantiles_of_one_column_need_explicit_names() raises:
+    var specs = List[AggSpec]()
+    specs.append(AggSpec("v", AggKind.quantile_at(0.25)))
+    specs.append(AggSpec("v", AggKind.quantile_at(0.75)))
+    with assert_raises(contains="would both be called"):
+        _ = sample_frame().group_by(["k"], specs)
 
 
 def main() raises:

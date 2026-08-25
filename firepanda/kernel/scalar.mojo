@@ -15,6 +15,8 @@ Read the twins to find out what a kernel is supposed to do. They are the
 specification in the only form that runs.
 """
 
+from std.math import sqrt
+
 from firepanda.array.array import Array
 
 from .accum import accumulator
@@ -523,6 +525,61 @@ def group_scalar[
                 var at = 0 if kind == AggKind.FIRST else len(present) - 1
                 values.append(present[at])
                 valid.append(True)
+        elif kind == AggKind.VAR or kind == AggKind.STD:
+            var divisor = len(present) - Int(kind.param)
+            if divisor <= 0:
+                values.append(Float64(0))
+                valid.append(False)
+            else:
+                var total = Float64(0)
+                for k in range(len(present)):
+                    total += present[k]
+                var centre = total / Float64(len(present))
+                var squares = Float64(0)
+                for k in range(len(present)):
+                    squares += (present[k] - centre) * (present[k] - centre)
+                var spread = squares / Float64(divisor)
+                if kind == AggKind.STD:
+                    spread = sqrt(spread)
+                values.append(spread)
+                valid.append(True)
+        elif kind == AggKind.MEDIAN or kind == AggKind.QUANTILE:
+            if len(present) == 0:
+                values.append(Float64(0))
+                valid.append(False)
+            else:
+                # An insertion sort, because the point of the twin is that the
+                # reader can see it is a sort rather than take one on trust.
+                var ordered = List[Float64]()
+                for k in range(len(present)):
+                    var at = len(ordered)
+                    ordered.append(present[k])
+                    while at > 0 and ordered[at - 1] > ordered[at]:
+                        var swap = ordered[at - 1]
+                        ordered[at - 1] = ordered[at]
+                        ordered[at] = swap
+                        at -= 1
+                var position = kind.param * Float64(len(ordered) - 1)
+                var lower = Int(position)
+                var upper = lower + 1 if lower + 1 < len(ordered) else lower
+                values.append(
+                    ordered[lower]
+                    + (ordered[upper] - ordered[lower])
+                    * (position - Float64(lower))
+                )
+                valid.append(True)
+        elif kind == AggKind.NUNIQUE:
+            var seen = List[Float64]()
+            for k in range(len(present)):
+                var known = False
+                for s in range(len(seen)):
+                    if seen[s] == present[k]:
+                        known = True
+                        break
+                if not known:
+                    seen.append(present[k])
+            values.append(Float64(len(seen)))
+            valid.append(True)
         else:
             raise Error("group by: unsupported aggregation")
 
