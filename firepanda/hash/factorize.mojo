@@ -107,6 +107,20 @@ struct Factorized[dt: DType](Movable):
         """
         return len(self.keys)
 
+    def into_codes(deinit self) -> Array[DType.uint32]:
+        """Gives up the ordinals without copying them, dropping the keys.
+
+        A caller that groups on several columns wants the ordinals and has no use
+        for the keys, and Mojo will not let it reach in and move `codes` out from
+        under a struct that still owns `keys`. `deinit` says the rest is being
+        torn down, which is what makes the move legal. Same arrangement as
+        `Series.into_values`.
+
+        Returns:
+            The per-row ordinals.
+        """
+        return self.codes^
+
 
 def factorize[
     dt: DType

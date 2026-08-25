@@ -53,6 +53,7 @@ from firepanda.dtype.dispatch import dispatch
 from firepanda.dtype.lists import NUMERIC
 from firepanda.frame.display import DisplayOptions, render_column
 from firepanda.frame.frame import DataFrame
+from firepanda.frame.groupby import AggSpec
 from firepanda.frame.series import Series
 from firepanda.hash import (
     DEFAULT_SEED,
@@ -60,17 +61,25 @@ from firepanda.hash import (
     HashTable,
     factorize,
     factorize_dict,
+    group_ordinals,
     hash_into,
     mix,
     radix_partition,
 )
 from firepanda.kernel import (
+    AggKind,
     add,
+    aggregate_group_any,
     argsort,
     argsort_multi,
     cast_to,
     divide,
     filter_rows,
+    group_first,
+    group_mean,
+    group_min,
+    group_size,
+    group_sum,
     less,
     mean_of,
     min_of,
@@ -1370,6 +1379,195 @@ def bench_dispatch(mut harness: Harness) raises:
     harness.record("dispatch/sum_full_direct", "rows", rows, direct_sum)
 
 
+def bench_group(mut harness: Harness) raises:
+    """Times grouped reductions from the scatter loop up to `DataFrame.group_by`.
+
+    Three questions, and the row names are arranged so each one is a subtraction.
+
+    How much does grouping cost over the same reduction ungrouped. `group/sum` is
+    a scatter into an accumulator per group where `kernel/sum_dense` is a straight
+    SIMD accumulate, and the gap between them is what a group by costs before any
+    hashing happens at all.
+
+    How much does cardinality cost. `group/sum_cardinality_10` and its 100k twin
+    run the identical loop over the identical rows and differ only in how many
+    accumulators the scatter is writing into. Ten fits in a cache line and a
+    hundred thousand does not, so the pair measures the random write directly.
+
+    How much of a real group by is the grouping rather than the reduction.
+    `group/ordinals_one_key` is the factorize and renumber pass on its own, and
+    `group/frame_one_key` is the whole operation, so the reduction is what is left
+    over. The two key rows say what the second factorize and the repacking add.
+
+    Args:
+        harness: The harness.
+
+    Raises:
+        If a benchmark raises.
+    """
+    var rows = harness.options.rows
+    var rng = Rng(0x6C0DE5)
+
+    comptime GROUPS = 1000
+
+    var values = Array[DType.int64](rows)
+    var sparse = Array[DType.int64](rows)
+    var codes = Array[DType.uint32](rows)
+    var few = Array[DType.uint32](rows)
+    var many = Array[DType.uint32](rows)
+    var key = Array[DType.int64](rows)
+    var other = Array[DType.int64](rows)
+    var wide = 100_000 if rows >= 100_000 else rows
+    if wide < 1:
+        wide = 1
+    for i in range(rows):
+        var draw = rng.next_u64()
+        values[i] = Int64(draw % 1000)
+        sparse[i] = Int64(draw % 1000)
+        codes[i] = UInt32(draw % UInt64(GROUPS))
+        few[i] = UInt32(draw % 10)
+        many[i] = UInt32(draw % UInt64(wide))
+        key[i] = Int64(draw % UInt64(GROUPS))
+        other[i] = Int64((draw >> 20) % 8)
+        if draw & 7 == 0:
+            sparse.set_null(i)
+
+    def sum_dense() raises {imm values, imm codes}:
+        keep(values)
+        var out = group_sum(values, codes, GROUPS)
+        keep(out[0])
+
+    harness.record("group/sum", "rows", rows, sum_dense)
+
+    def sum_sparse() raises {imm sparse, imm codes}:
+        keep(sparse)
+        var out = group_sum(sparse, codes, GROUPS)
+        keep(out[0])
+
+    harness.record("group/sum_sparse", "rows", rows, sum_sparse)
+
+    def sum_few() raises {imm values, imm few}:
+        keep(values)
+        var out = group_sum(values, few, 10)
+        keep(out[0])
+
+    harness.record("group/sum_cardinality_10", "rows", rows, sum_few)
+
+    def sum_many() raises {imm values, imm many, imm wide}:
+        keep(values)
+        var out = group_sum(values, many, wide)
+        keep(out[0])
+
+    harness.record("group/sum_cardinality_100k", "rows", rows, sum_many)
+
+    def mean_grouped() raises {imm sparse, imm codes}:
+        keep(sparse)
+        var out = group_mean(sparse, codes, GROUPS)
+        keep(out[0])
+
+    harness.record("group/mean_sparse", "rows", rows, mean_grouped)
+
+    def min_dense() raises {imm values, imm codes}:
+        keep(values)
+        var out = group_min(values, codes, GROUPS)
+        keep(out[0])
+
+    harness.record("group/min", "rows", rows, min_dense)
+
+    def min_grouped() raises {imm sparse, imm codes}:
+        keep(sparse)
+        var out = group_min(sparse, codes, GROUPS)
+        keep(out[0])
+
+    harness.record("group/min_sparse", "rows", rows, min_grouped)
+
+    def first_grouped() raises {imm sparse, imm codes}:
+        keep(sparse)
+        var out = group_first(sparse, codes, GROUPS)
+        keep(out[0])
+
+    harness.record("group/first_sparse", "rows", rows, first_grouped)
+
+    def size_grouped() raises {imm codes}:
+        keep(codes)
+        var out = group_size(codes, GROUPS)
+        keep(out[0])
+
+    harness.record("group/size", "rows", rows, size_grouped)
+
+    var erased = AnyArray(Array(copy=values))
+
+    def sum_erased_group() raises {imm erased, imm codes}:
+        keep(erased)
+        var out = aggregate_group_any(erased, AggKind.SUM, codes, GROUPS)
+        keep(len(out))
+
+    harness.record("group/sum_dispatched", "rows", rows, sum_erased_group)
+
+    var columns = List[Series]()
+    columns.append(Series("key", key^))
+    columns.append(Series("other", other^))
+    columns.append(Series("value", values^))
+    var df = DataFrame.from_series(columns^)
+
+    var one_key = List[Int]()
+    one_key.append(0)
+    var two_keys = List[Int]()
+    two_keys.append(0)
+    two_keys.append(1)
+
+    def ordinals_one() raises {imm df, imm one_key}:
+        keep(df.rows)
+        var out = group_ordinals(df.columns, one_key, df.rows)
+        keep(out.groups)
+
+    harness.record("group/ordinals_one_key", "rows", rows, ordinals_one)
+
+    def ordinals_two() raises {imm df, imm two_keys}:
+        keep(df.rows)
+        var out = group_ordinals(df.columns, two_keys, df.rows)
+        keep(out.groups)
+
+    harness.record("group/ordinals_two_keys", "rows", rows, ordinals_two)
+
+    def frame_one() raises {imm df}:
+        keep(df.rows)
+        var out = df.group_by(["key"], [AggSpec("value", AggKind.SUM)])
+        keep(out.rows)
+
+    harness.record("group/frame_one_key", "rows", rows, frame_one)
+
+    def frame_two() raises {imm df}:
+        keep(df.rows)
+        var out = df.group_by(["key", "other"], [AggSpec("value", AggKind.SUM)])
+        keep(out.rows)
+
+    harness.record("group/frame_two_keys", "rows", rows, frame_two)
+
+    def frame_unsorted() raises {imm df}:
+        keep(df.rows)
+        var out = df.group_by(
+            ["key"], [AggSpec("value", AggKind.SUM)], dropna=False, sort=False
+        )
+        keep(out.rows)
+
+    harness.record("group/frame_unsorted", "rows", rows, frame_unsorted)
+
+    def frame_three_aggs() raises {imm df}:
+        keep(df.rows)
+        var out = df.group_by(
+            ["key"],
+            [
+                AggSpec("value", AggKind.SUM),
+                AggSpec("value", AggKind.MIN),
+                AggSpec("value", AggKind.MAX),
+            ],
+        )
+        keep(out.rows)
+
+    harness.record("group/frame_three_aggs", "rows", rows, frame_three_aggs)
+
+
 def machine_json(options: Options) -> String:
     """Describes the machine the numbers came from.
 
@@ -1503,6 +1701,7 @@ def main() raises:
     bench_sort(harness)
     bench_frame(harness)
     bench_hash(harness)
+    bench_group(harness)
     bench_dispatch(harness)
     var elapsed = Float64(perf_counter_ns() - started) / 1e9
 

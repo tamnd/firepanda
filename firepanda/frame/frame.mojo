@@ -35,10 +35,13 @@ from firepanda.array.array import Array
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.frame.display import DisplayOptions, render_table
+from firepanda.hash.grouping import group_ordinals
 from firepanda.kernel.cast import cast_any
+from firepanda.kernel.group import AggKind, aggregate_group_any
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.sort import argsort_any_into, identity_permutation
 
+from .groupby import AggSpec
 from .series import Series, _check_range, _clamp, _to_positions
 
 
@@ -560,6 +563,164 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         var front = List[Bool]()
         front.append(nulls_first)
         return self.sort_values(keys, down, front)
+
+    def group_by(
+        self,
+        by: List[String],
+        specs: List[AggSpec],
+        dropna: Bool = True,
+        sort: Bool = True,
+    ) raises -> Self:
+        """Groups rows by one or more key columns and reduces each group.
+
+        The result has one row per distinct key tuple, the key columns first in
+        the order they were given, then one column per spec. Nothing about the
+        input is mutated and the input's row order is never disturbed: the
+        grouping is a scatter over the rows, and the only sort that happens is on
+        the result, which is one row per group.
+
+        Args:
+            by: The key columns. At least one, no repeats.
+            specs: What to compute. May be empty, which gives the distinct key
+                tuples and nothing else, the way `drop_duplicates` would.
+            dropna: Drop the groups whose key contains a null, as pandas does.
+            sort: Order the result by the key columns ascending, as pandas does.
+                False leaves the groups in first-seen order and costs nothing.
+
+        Returns:
+            The aggregated frame.
+
+        Raises:
+            If a name is missing or repeated, if two outputs would collide, or if
+            a dtype involved has no physical layout.
+        """
+        var at = List[Int](capacity=len(by))
+        for i in range(len(by)):
+            var idx = self.schema.index_of(by[i])
+            for j in range(len(at)):
+                if at[j] == idx:
+                    raise Error(
+                        "group by: key column " + by[i] + " was given twice"
+                    )
+            at.append(idx)
+
+        var grouping = group_ordinals(self.columns, at, self.rows)
+
+        var fields = List[Field]()
+        var columns = List[AnyArray]()
+        for k in range(len(at)):
+            fields.append(Field(by[k], self.columns[at[k]].type))
+            columns.append(take_any(self.columns[at[k]], grouping.rows_at))
+
+        for s in range(len(specs)):
+            var name = specs[s].output_name()
+            for f in range(len(fields)):
+                if fields[f].name == name:
+                    raise Error(
+                        "group by: two output columns would both be called "
+                        + name
+                    )
+            var produced = aggregate_group_any(
+                self.columns[self.schema.index_of(specs[s].column)],
+                specs[s].kind,
+                grouping.codes,
+                grouping.groups,
+            )
+            fields.append(Field(name, produced.type))
+            columns.append(produced^)
+
+        var out = Self(Schema(fields^), columns^)
+
+        if dropna:
+            # A group's key values are whatever its representative row holds, so
+            # asking whether the key is null is asking about that one row rather
+            # than about the gathered column.
+            var keep = Array[DType.bool](grouping.groups)
+            var dropping = False
+            for g in range(grouping.groups):
+                var ok = True
+                for k in range(len(at)):
+                    if not self.columns[at[k]].is_valid(grouping.rows_at[g]):
+                        ok = False
+                        break
+                keep.set_valid(g, ok)
+                if not ok:
+                    dropping = True
+            if dropping:
+                out = out.filter(keep)
+
+        if sort and len(out) > 1:
+            var down = List[Bool]()
+            var front = List[Bool]()
+            for _ in range(len(by)):
+                down.append(False)
+                front.append(False)
+            out = out.sort_values(by, down, front)
+
+        return out^
+
+    def group_agg(
+        self,
+        by: List[String],
+        kind: AggKind,
+        dropna: Bool = True,
+        sort: Bool = True,
+    ) raises -> Self:
+        """Applies one reduction to every column that is not a key.
+
+        This is `df.groupby(keys).sum()` and its siblings. The output columns keep
+        their original names, because there is only one reduction and no
+        collision to disambiguate.
+
+        Args:
+            by: The key columns.
+            kind: The reduction to apply to everything else.
+            dropna: As `group_by`.
+            sort: As `group_by`.
+
+        Returns:
+            The aggregated frame.
+
+        Raises:
+            As `group_by` does.
+        """
+        var specs = List[AggSpec]()
+        for i in range(len(self.schema)):
+            var name = self.schema[i].name
+            var is_key = False
+            for k in range(len(by)):
+                if by[k] == name:
+                    is_key = True
+                    break
+            if not is_key:
+                specs.append(AggSpec(name, kind, name))
+        return self.group_by(by, specs, dropna, sort)
+
+    def group_count(
+        self, by: List[String], dropna: Bool = True, sort: Bool = True
+    ) raises -> Self:
+        """Counts the rows in each group.
+
+        `size` rather than `count`: the number is per group, not per column, so a
+        null in some other column does not change it. pandas spells this
+        `df.groupby(keys).size()`.
+
+        Args:
+            by: The key columns.
+            dropna: As `group_by`.
+            sort: As `group_by`.
+
+        Returns:
+            The key columns plus an int64 column called `size`.
+
+        Raises:
+            As `group_by` does.
+        """
+        if len(by) == 0:
+            raise Error("group by: at least one key column is required")
+        var specs = List[AggSpec]()
+        specs.append(AggSpec(by[0], AggKind.SIZE, "size"))
+        return self.group_by(by, specs, dropna, sort)
 
     def write_to(self, mut writer: Some[Writer]):
         """Writes the frame as a table.

@@ -47,6 +47,7 @@ from .function import (
     key_bits,
     mix,
 )
+from .grouping import Grouping, group_ordinals
 from .partition import Partitioning, radix_partition
 from .scalar import factorize_dict, factorize_linear
 from .table import HashTable

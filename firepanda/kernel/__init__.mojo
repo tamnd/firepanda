@@ -32,6 +32,19 @@ from .agg import AggResult, count_of, max_of, mean_of, min_of, sum_of
 from .arith import add, divide, multiply, subtract
 from .cast import cast_any, cast_to
 from .compare import equal, greater, greater_equal, less, less_equal, not_equal
+from .group import (
+    AggKind,
+    aggregate_group,
+    aggregate_group_any,
+    group_count,
+    group_first,
+    group_last,
+    group_max,
+    group_mean,
+    group_min,
+    group_size,
+    group_sum,
+)
 from .mask import apply_validity, combined_validity
 from .select import filter_any, filter_rows, take_any, take_rows
 from .sort import (
