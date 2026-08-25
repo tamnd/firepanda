@@ -25,6 +25,12 @@ does. That split is not elegant and it is honest: a borrowing accessor needs the
 index in the return type, which a name lookup cannot provide until the plan layer
 at M4 turns column references into something resolved ahead of time.
 
+`join` is the one method here that does real work of its own rather than calling
+a kernel with the columns unpacked. Which rows pair with which is
+`firepanda/join`; what the output columns are called and where a shared key
+column's values come from is this file, because both of those are questions about
+schemas and nothing below the frame layer has one.
+
 None of this is lazy. `docs/specs/04-python-dx.md` describes the eager surface as
 a facade over a plan, which is true from M4 onwards. At M1 the facade is the
 implementation and every method runs when it is called.
@@ -36,6 +42,7 @@ from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.frame.display import DisplayOptions, render_table
 from firepanda.hash.grouping import group_ordinals
+from firepanda.join.pairs import JoinKind, join_indices, take_pair
 from firepanda.kernel.cast import cast_any
 from firepanda.kernel.group import AggKind, aggregate_group_any
 from firepanda.kernel.select import filter_any, take_any
@@ -722,6 +729,185 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         specs.append(AggSpec(by[0], AggKind.SIZE, "size"))
         return self.group_by(by, specs, dropna, sort)
 
+    def join(
+        self,
+        other: Self,
+        on: List[String],
+        kind: JoinKind = JoinKind.INNER,
+        suffix: String = "_right",
+    ) raises -> Self:
+        """Joins two frames on columns that have the same name in both.
+
+        The result has the left frame's columns in their original order, then the
+        right frame's columns except the keys, which the two frames shared and of
+        which the output keeps one. A right column whose name is already taken
+        gets `suffix` appended.
+
+        Args:
+            other: The right frame.
+            on: The key columns. Must exist in both frames with the same dtype.
+            kind: Which rows to keep.
+            suffix: Appended to a right column whose name collides.
+
+        Returns:
+            The joined frame.
+
+        Raises:
+            As `join_on` does.
+        """
+        return self.join_on(other, on, on, kind, suffix)
+
+    def join_on(
+        self,
+        other: Self,
+        left_on: List[String],
+        right_on: List[String],
+        kind: JoinKind = JoinKind.INNER,
+        suffix: String = "_right",
+    ) raises -> Self:
+        """Joins two frames on keys that are named differently on each side.
+
+        Where a key pair shares a name the output keeps one column, and where it
+        does not it keeps both, which is what pandas does and is the only thing it
+        can do: the two columns have different names and dropping one would lose a
+        name the caller asked for.
+
+        The kept column of a shared pair is filled from whichever side had the
+        row. That only matters for a right or outer join, where an output row can
+        have no left row at all, and getting it wrong would put a null in the
+        column the row was matched on.
+
+        Args:
+            other: The right frame.
+            left_on: The left key columns, most significant first.
+            right_on: The right key columns, matched positionally.
+            kind: Which rows to keep.
+            suffix: Appended to a right column whose name collides.
+
+        Returns:
+            The joined frame.
+
+        Raises:
+            If the key lists disagree in length, if a name is missing or
+            repeated, if a key pair has different dtypes, if a right column name
+            still collides after the suffix, or if a dtype involved has no
+            physical layout.
+        """
+        if len(left_on) != len(right_on):
+            raise Error(
+                "join: needs the same number of keys on each side; got "
+                + String(len(left_on))
+                + " on the left and "
+                + String(len(right_on))
+                + " on the right"
+            )
+
+        var left_at = List[Int](capacity=len(left_on))
+        var right_at = List[Int](capacity=len(right_on))
+        for k in range(len(left_on)):
+            var here = self.schema.index_of(left_on[k])
+            var there = other.schema.index_of(right_on[k])
+            for j in range(len(left_at)):
+                if left_at[j] == here:
+                    raise Error(
+                        "join: key column " + left_on[k] + " was given twice"
+                    )
+                if right_at[j] == there:
+                    raise Error(
+                        "join: key column " + right_on[k] + " was given twice"
+                    )
+            left_at.append(here)
+            right_at.append(there)
+
+        var pairs = join_indices(
+            self.columns,
+            left_at,
+            self.rows,
+            other.columns,
+            right_at,
+            other.rows,
+            kind,
+        )
+
+        # Only these two can produce an output row that no left row backs, so
+        # only these two need the shared key columns filled from both sides. The
+        # others gather the left column straight through, which is one pass
+        # instead of one pass with a branch per row.
+        var coalescing = kind == JoinKind.RIGHT or kind == JoinKind.OUTER
+
+        var fields = List[Field](capacity=len(self.columns))
+        var columns = List[AnyArray](capacity=len(self.columns))
+
+        for i in range(len(self.columns)):
+            var shared = -1
+            for k in range(len(left_at)):
+                if left_at[k] == i and left_on[k] == right_on[k]:
+                    shared = k
+                    break
+            if shared >= 0 and coalescing:
+                columns.append(
+                    take_pair(
+                        self.columns[i],
+                        other.columns[right_at[shared]],
+                        pairs.left_at,
+                        pairs.right_at,
+                    )
+                )
+            else:
+                columns.append(take_any(self.columns[i], pairs.left_at))
+            fields.append(Field(self.schema[i].name, self.schema[i].dtype))
+
+        if kind.keeps_right_columns():
+            for j in range(len(other.columns)):
+                var folded = False
+                for k in range(len(right_at)):
+                    if right_at[k] == j and left_on[k] == right_on[k]:
+                        folded = True
+                        break
+                if folded:
+                    continue
+
+                var name = other.schema[j].name
+                if _has_name(fields, name):
+                    name = name + suffix
+                    if _has_name(fields, name):
+                        raise Error(
+                            "join: the right frame's column '"
+                            + other.schema[j].name
+                            + "' collides and so does '"
+                            + name
+                            + "'; pass a different suffix"
+                        )
+                columns.append(take_any(other.columns[j], pairs.right_at))
+                fields.append(Field(name, other.schema[j].dtype))
+
+        var out = Self(Schema(fields^), columns^)
+        out.rows = len(pairs)
+        return out^
+
+    def cross_join(self, other: Self, suffix: String = "_right") raises -> Self:
+        """Pairs every row of this frame with every row of another.
+
+        The result is as tall as the product of the two heights, so this is for a
+        small frame on at least one side. Nothing here refuses a large one,
+        because any threshold would be arbitrary and would be in the way of the
+        case the operation exists for.
+
+        Args:
+            other: The right frame.
+            suffix: Appended to a right column whose name collides.
+
+        Returns:
+            A frame of `len(self) * len(other)` rows.
+
+        Raises:
+            If a right column name still collides after the suffix, or if a dtype
+            has no physical layout.
+        """
+        return self.join_on(
+            other, List[String](), List[String](), JoinKind.CROSS, suffix
+        )
+
     def write_to(self, mut writer: Some[Writer]):
         """Writes the frame as a table.
 
@@ -760,3 +946,19 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                 " null",
             )
         return out^
+
+
+def _has_name(fields: List[Field], name: String) -> Bool:
+    """Reports whether a field list already uses a name.
+
+    Args:
+        fields: The fields built so far.
+        name: The name to look for.
+
+    Returns:
+        True if some field has it.
+    """
+    for i in range(len(fields)):
+        if fields[i].name == name:
+            return True
+    return False

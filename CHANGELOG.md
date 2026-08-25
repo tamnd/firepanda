@@ -8,6 +8,49 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-26
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Joins. All seven kinds, on one or more key columns, from `DataFrame.join` down to the row pairing underneath it.
+
+The minor bump is for a new top level package, `firepanda.join`, and for three new methods on `DataFrame`. Nothing that existed changed shape.
+
+### Added
+
+- `firepanda.join`: `JoinKind` with `INNER`, `LEFT`, `RIGHT`, `OUTER`, `SEMI`, `ANTI` and `CROSS`, `JoinIndices` holding the paired row numbers, and `join_indices` producing them from two column lists and a set of keys.
+- `DataFrame.join` for keys named the same on both sides, `DataFrame.join_on` for keys named differently, and `DataFrame.cross_join`.
+- `firepanda.join.scalar.join_nested`, the nested loop twin, on the same terms as the twins in `firepanda/kernel` and `firepanda/hash`: it is never called in production and it is what the fast path is checked against.
+- `tests/fuzz/join.mojo` and the `fuzz-join` pixi task, wired into `pixi run fuzz`. Two million cases pass in forty seconds.
+- Tests: 34 in `tests/test_join.mojo`, covering each kind's row set, the null rule, the column naming rules and the row order.
+- Benchmarks: nine `join/*` rows covering the pairing on its own, four of the kinds, dimension size, two keys, and the many to many case.
+
+### How it works, and what follows from it
+
+- The two frames are aligned by concatenating each key column with its opposite number and handing the result to `group_ordinals`. Two rows share a code exactly when they share a key tuple, whichever side they came from, and the multi-key packing and the small integer fast path come along unchanged. The cost is one extra pass over each key column plus the memory to hold the copy.
+- A row whose key contains a null matches nothing, including another null. That is SQL's rule and Polars' default. pandas `merge` joins NaN keys together and this deliberately does not, because firepanda has a validity bitmap and does not need to overload a float value to mean missing. The rows are not dropped: an unmatched left row still survives a left join or an anti join.
+- The result is in left row order, and within a left row, in right row order. A right join is the same operation with the sides exchanged, so it comes out in right row order. This is fixed rather than incidental, because a join whose row order moves between runs cannot be compared against another engine.
+- A key column that both frames call by the same name appears once in the output and is filled from whichever side had the row. That only matters for a right or outer join, where an output row can have no left row at all, and taking the key from the left would put a null in the column the row was matched on.
+- Key columns must have the same dtype on both sides. Promoting them here would mean a join silently finding fewer matches than either side expected, with nothing on screen to say why, so the cast is the caller's to write.
+
+### Notes on the numbers
+
+Measured on the reference machine, a 16 core x86_64 with 32 byte SIMD, at 1,048,576 fact rows against a 1,000 row dimension unless stated.
+
+- `join/indices_1000` is 11.773 ms and `join/inner_1000` is 19.562 ms. The first is the pairing alone and the second is the whole operation, so building the output columns is the larger half at roughly 2 ms per gathered column.
+- `join/inner_100k` is 30.528 ms against 19.562 ms for the same fact rows using the same thousand keys. The result is identical and only the dimension's unused rows differ. The extra 11 ms is the key alignment: a dimension spanning a hundred thousand values puts `factorize` on a 400 KB direct table where the thousand row dimension fits in 4 KB, and every one of the 1.1 million concatenated rows pays the difference.
+- `join/semi` is 19.185 ms and `join/anti` is 18.723 ms, both against `join/inner_1000` at 19.562 ms. The filtering joins gather nothing from the right and stop at the first match, and they are barely cheaper, because the key alignment dominates and they pay all of it.
+- `join/outer` is 30.241 ms. The extra over inner is the bitmap write per matched row and the coalesced key column, which is a two source gather rather than a straight one.
+- `join/two_keys` is 28.652 ms. The second key adds a factorize, a pack and a refactorize, which is the same 9 ms it adds to a two key group by.
+- `join/many_to_many` is 1.870 ms for 262,144 output rows out of two 4,096 row frames, or 7.13 ns per output row, the cheapest per row in the set because both sources are cache resident.
+
+### Known limitations
+
+- The right side is bucketed with a counting sort over the group ordinals, which is one array as wide as the number of distinct keys in both frames together. For a join between two large frames with high cardinality that array is the working set, and radix partitioning the probe is what `firepanda/hash/partition.mojo` exists for.
+- The key alignment copies each key column. Rewriting `factorize` to take a pointer rather than an `Array` removes that copy and is the same open item `group_ordinals` already has.
+- A cross join materializes the full product and nothing refuses a large one. Any threshold would be arbitrary and would be in the way of the case the operation exists for.
+- Joining on a float column keys NaN to NaN and negative zero to zero, which is `key_bits` and is the same rule group by uses.
+
 ## [0.5.0] - 2026-08-26
 
 Built against Mojo 1.0.0 (ed45d567).
@@ -185,7 +228,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/tamnd/firepanda/releases/tag/v0.6.0
 [0.5.0]: https://github.com/tamnd/firepanda/releases/tag/v0.5.0
 [0.4.0]: https://github.com/tamnd/firepanda/releases/tag/v0.4.0
 [0.3.0]: https://github.com/tamnd/firepanda/releases/tag/v0.3.0
