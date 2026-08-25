@@ -51,6 +51,16 @@ from firepanda.buffer.buffer import Buffer
 from firepanda.buffer.pool import BufferPool
 from firepanda.dtype.dispatch import dispatch
 from firepanda.dtype.lists import NUMERIC
+from firepanda.hash import (
+    DEFAULT_SEED,
+    DIRECT_LIMIT,
+    HashTable,
+    factorize,
+    factorize_dict,
+    hash_into,
+    mix,
+    radix_partition,
+)
 from firepanda.kernel import (
     add,
     cast_to,
@@ -876,6 +886,174 @@ def bench_kernel(mut harness: Harness) raises:
     harness.record("kernel/filter_twin", "rows", rows, filter_twin)
 
 
+def bench_hash(mut harness: Harness) raises:
+    """Measures the hash table, and measures whether it was worth writing.
+
+    The rows to read together are the three `factorize_*` numbers and the three
+    `dict_*` numbers beside them. They run over the same columns and differ only
+    in which map is underneath. M1's exit criteria ask for that comparison rather
+    than for a target, because if our table is not meaningfully faster than the
+    language's `Dict` then the premise this package rests on is wrong and the
+    cheap time to find that out is now.
+
+    Cardinality is varied across three orders of magnitude because that is the
+    axis the answer moves along. At a hundred groups the table fits in L1 and
+    almost any implementation looks fine; at one group per row every probe is a
+    cache miss and the layout is the whole story.
+
+    `factorize_direct` is not part of that comparison. It is the route that does
+    not hash at all, and it is here to show what the branch in `factorize` is
+    buying on the shape of column that a real group by usually gets.
+
+    Args:
+        harness: The harness.
+
+    Raises:
+        If a benchmark raises.
+    """
+    var rows = harness.options.rows
+
+    # Small dense integers, which is what a year, a category code or a previous
+    # factorize looks like. Takes the direct route.
+    var narrow = Array[DType.int64](rows)
+    for i in range(rows):
+        narrow[i] = Int64(i % 1000)
+
+    def factorize_direct() raises {imm narrow}:
+        keep(narrow)
+        var out = factorize(narrow)
+        keep(out.codes)
+
+    harness.record("hash/factorize_direct", "rows", rows, factorize_direct)
+
+    # The same shape of data spread far enough apart that the direct table would
+    # be larger than the column, so these go through the hash table. The stride
+    # is what makes the comparison against `Dict` a comparison of two hash maps
+    # rather than of a hash map against an array index.
+    comptime stride = Int64(DIRECT_LIMIT + 1)
+
+    var low = Array[DType.int64](rows)
+    var mid = Array[DType.int64](rows)
+    var high = Array[DType.int64](rows)
+    for i in range(rows):
+        low[i] = Int64(i % 100) * stride
+        mid[i] = Int64(i % 10000) * stride
+        high[i] = Int64(i) * stride
+
+    def factorize_low() raises {imm low}:
+        keep(low)
+        var out = factorize(low)
+        keep(out.codes)
+
+    harness.record("hash/factorize_100", "rows", rows, factorize_low)
+
+    def factorize_mid() raises {imm mid}:
+        keep(mid)
+        var out = factorize(mid)
+        keep(out.codes)
+
+    harness.record("hash/factorize_10k", "rows", rows, factorize_mid)
+
+    def factorize_high() raises {imm high}:
+        keep(high)
+        var out = factorize(high)
+        keep(out.codes)
+
+    harness.record("hash/factorize_all_distinct", "rows", rows, factorize_high)
+
+    def dict_low() raises {imm low}:
+        keep(low)
+        var out = factorize_dict(low)
+        keep(out)
+
+    harness.record("hash/dict_100", "rows", rows, dict_low)
+
+    def dict_mid() raises {imm mid}:
+        keep(mid)
+        var out = factorize_dict(mid)
+        keep(out)
+
+    harness.record("hash/dict_10k", "rows", rows, dict_mid)
+
+    def dict_high() raises {imm high}:
+        keep(high)
+        var out = factorize_dict(high)
+        keep(out)
+
+    harness.record("hash/dict_all_distinct", "rows", rows, dict_high)
+
+    # A fifth of the rows null, which is the shape that decides whether the null
+    # group cost a branch per row or a branch per column.
+    var sparse = Array[DType.int64](copy=mid)
+    for i in range(0, rows, 5):
+        sparse.set_null(i)
+
+    def factorize_nulls() raises {imm sparse}:
+        keep(sparse)
+        var out = factorize(sparse)
+        keep(out.codes)
+
+    harness.record("hash/factorize_nulls", "rows", rows, factorize_nulls)
+
+    # The pieces on their own, so that a regression in the whole can be attributed
+    # to one of them rather than guessed at.
+    def hash_column() raises {imm high, imm rows}:
+        keep(high)
+        var hashes = Buffer(rows * 8)
+        hash_into(high, DEFAULT_SEED, hashes)
+        keep(hashes)
+
+    harness.record("hash/hash_into", "rows", rows, hash_column)
+
+    var keys = Buffer(rows * 8)
+    var key_ptr = keys.bitcast[DType.uint64]()
+    for i in range(rows):
+        key_ptr.unsafe_offset(i).unsafe_write(mix(UInt64(i), DEFAULT_SEED))
+
+    # Deliberately the row-at-a-time API and deliberately not presized, so that
+    # this row and `hash/factorize_all_distinct` above it bracket what the batch
+    # build and the sizing hint are together worth. Nothing in the library builds
+    # a table this way.
+    def table_build() raises {imm keys, imm rows}:
+        var bits = keys.bitcast[DType.uint64]()
+        var table = HashTable()
+        for i in range(rows):
+            var k = bits.unsafe_offset(i).unsafe_load()
+            _ = table.insert(mix(k, table.seed()))
+        keep(len(table))
+
+    harness.record("hash/table_insert_loop", "keys", rows, table_build)
+
+    # Built once outside the timer so this row is probes and nothing else. Every
+    # probe hits, which is the group by case; a join has misses too and will get
+    # its own row at M8.
+    var built = HashTable(rows)
+    for i in range(rows):
+        var k = key_ptr.unsafe_offset(i).unsafe_load()
+        _ = built.insert(mix(k, built.seed()))
+
+    def table_probe() raises {imm keys, imm built, imm rows}:
+        var bits = keys.bitcast[DType.uint64]()
+        var found = 0
+        for i in range(rows):
+            var k = bits.unsafe_offset(i).unsafe_load()
+            found += built.find(mix(k, built.seed()))
+        keep(found)
+
+    harness.record("hash/table_probe", "keys", rows, table_probe)
+
+    var hashes = Buffer(rows * 8)
+    var hash_ptr = hashes.bitcast[DType.uint64]()
+    for i in range(rows):
+        hash_ptr.unsafe_offset(i).unsafe_write(mix(UInt64(i), DEFAULT_SEED))
+
+    def partition() raises {imm hashes, imm rows}:
+        var parts = radix_partition(hashes, rows, 8)
+        keep(parts.order)
+
+    harness.record("hash/radix_partition_256", "rows", rows, partition)
+
+
 def bench_dispatch(mut harness: Harness) raises:
     """Measures what the runtime to compile-time bridge costs per call.
 
@@ -1054,6 +1232,7 @@ def main() raises:
     bench_buffer(harness)
     bench_array(harness)
     bench_kernel(harness)
+    bench_hash(harness)
     bench_dispatch(harness)
     var elapsed = Float64(perf_counter_ns() - started) / 1e9
 
