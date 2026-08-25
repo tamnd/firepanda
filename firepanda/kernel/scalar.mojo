@@ -18,6 +18,7 @@ specification in the only form that runs.
 from firepanda.array.array import Array
 
 from .accum import accumulator
+from .group import AggKind
 
 
 def sum_scalar[dt: DType](col: Array[dt]) -> Scalar[accumulator(dt)]:
@@ -420,3 +421,109 @@ def argsort_scalar[
         for i in range(len(nulls)):
             out.append(nulls[i])
     return out^
+
+
+def group_scalar[
+    dt: DType
+](
+    col: Array[dt],
+    kind: AggKind,
+    codes: Array[DType.uint32],
+    groups: Int,
+) raises -> Tuple[List[Float64], List[Bool]]:
+    """Aggregates each group by collecting its rows into a list and reducing it.
+
+    This is the twin's whole idea made literal. The kernel never materializes a
+    group; it scatters into an accumulator and the groups only exist as indices.
+    This one builds the actual list of values belonging to each group and then
+    reduces that list with a loop anyone can read, which is slow enough to be
+    useless and simple enough to be right.
+
+    Everything comes back as `Float64` regardless of the input dtype, with a
+    parallel list saying which entries are present. That loses precision above
+    2^53 and the fuzz generator keeps the columns it builds inside that range,
+    which is the same trade the twin makes everywhere else: it is checking that
+    the grouping and the reduction are right, not that int64 arithmetic is.
+
+    Args:
+        col: The column being aggregated.
+        kind: Which reduction.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        One value per group and one validity flag per group.
+
+    Raises:
+        If the reduction is not one of the eight.
+    """
+    var values = List[Float64](capacity=groups)
+    var valid = List[Bool](capacity=groups)
+
+    for g in range(groups):
+        # Collect this group's rows the naive way: walk every row and keep the
+        # ones that name this group. That is O(groups * rows) and it is meant to
+        # be, because the alternative is a bucketing pass and a bucketing pass is
+        # the thing being checked.
+        var present = List[Float64]()
+        var rows = 0
+        for i in range(len(codes)):
+            if Int(codes[i]) != g:
+                continue
+            rows += 1
+            if kind.counts_rows():
+                continue
+            if col.is_valid(i):
+                present.append(Float64(col[i]))
+
+        if kind == AggKind.SIZE:
+            values.append(Float64(rows))
+            valid.append(True)
+        elif kind == AggKind.COUNT:
+            values.append(Float64(len(present)))
+            valid.append(True)
+        elif kind == AggKind.SUM:
+            var total = Float64(0)
+            for k in range(len(present)):
+                total += present[k]
+            values.append(total)
+            valid.append(True)
+        elif kind == AggKind.MEAN:
+            if len(present) == 0:
+                values.append(Float64(0))
+                valid.append(False)
+            else:
+                var total = Float64(0)
+                for k in range(len(present)):
+                    total += present[k]
+                values.append(total / Float64(len(present)))
+                valid.append(True)
+        elif kind == AggKind.MIN or kind == AggKind.MAX:
+            if len(present) == 0:
+                values.append(Float64(0))
+                valid.append(False)
+            else:
+                var best = present[0]
+                for k in range(1, len(present)):
+                    if kind == AggKind.MIN:
+                        if present[k] < best:
+                            best = present[k]
+                    elif present[k] > best:
+                        best = present[k]
+                values.append(best)
+                valid.append(True)
+        elif kind == AggKind.FIRST or kind == AggKind.LAST:
+            if len(present) == 0:
+                values.append(Float64(0))
+                valid.append(False)
+            else:
+                var at = 0 if kind == AggKind.FIRST else len(present) - 1
+                values.append(present[at])
+                valid.append(True)
+        else:
+            raise Error("group by: unsupported aggregation")
+
+    return (values^, valid^)

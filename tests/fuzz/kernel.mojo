@@ -33,8 +33,11 @@ from std.time import perf_counter_ns
 
 from firepanda.array.array import Array
 from firepanda.kernel import (
+    AggKind,
     add,
+    aggregate_group,
     argsort,
+    cast_any,
     cast_to,
     count_of,
     divide,
@@ -59,6 +62,7 @@ from firepanda.kernel.scalar import (
     divide_scalar,
     equal_scalar,
     filter_scalar,
+    group_scalar,
     less_scalar,
     max_scalar,
     mean_scalar,
@@ -403,6 +407,50 @@ def run_one[dt: DType](mut rng: Rng, step: Int, seed: UInt64) raises:
     same_column(
         filter_rows(a, mask), filter_scalar(a, mask), step, seed, "filter_rows"
     )
+
+    # Grouped reductions, one kind per case so that a run covers all eight. The
+    # codes are drawn rather than factorized: what is under test here is the
+    # scatter and the null policy, and running the real grouping first would
+    # produce a code distribution shaped by the column rather than by chance.
+    # Few groups on purpose, because a group with one row in it exercises none of
+    # the accumulate path and the interesting cases are the crowded ones.
+    var groups = 1 + rng.next_below(6)
+    var codes = Array[DType.uint32](length)
+    for i in range(length):
+        codes[i] = UInt32(rng.next_below(groups))
+    var kind = AggKind(UInt8((step // 4) % 8))
+    var reduced = cast_any(
+        aggregate_group(a, kind, codes, groups), DType.float64
+    ).as_typed[DType.float64]()
+    var twin = group_scalar(a, kind, codes, groups)
+    for g in range(groups):
+        if reduced.is_valid(g) != twin[1][g]:
+            fail(
+                step,
+                seed,
+                "aggregate_group",
+                String("group ", g, " validity under ", kind),
+            )
+        if reduced.is_valid(g):
+            var delta = reduced[g] - twin[0][g]
+            if delta < 0.0:
+                delta = -delta
+            if delta > 1.0e-9:
+                fail(
+                    step,
+                    seed,
+                    "aggregate_group",
+                    String(
+                        "group ",
+                        g,
+                        " is ",
+                        reduced[g],
+                        " but twin has ",
+                        twin[0][g],
+                        " under ",
+                        kind,
+                    ),
+                )
 
     if length > 1:
         var start = rng.next_below(length)

@@ -21,4 +21,5 @@ without a cycle.
 
 from .display import DisplayOptions, render_column, render_table
 from .frame import DataFrame
+from .groupby import AggSpec
 from .series import Series

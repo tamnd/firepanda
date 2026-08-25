@@ -213,11 +213,20 @@ jobs:
       # runner is a noisy machine and a gate that cries wolf gets switched off.
       # The tool also refuses to call anything a regression unless it clears the
       # spread it measured, so this is two conditions rather than one.
+      #
+      # `--advisory` prints the table and the verdicts and then exits zero. The
+      # reason is in the tool's module docstring and it is worth reading before
+      # taking it out: benchmarks/main.mojo is one compilation unit, so a pull
+      # request that appends benchmarks changes which of the loops above them get
+      # vectorized, and the comparison then reports large reproducible movements
+      # in files the pull request never opened. The performance gate with teeth is
+      # the reference machine run recorded in each pull request.
       - name: Compare against the merge base
         if: steps.baseline.outputs.found == 'true'
         run: |
           pixi run bench-compare -- --baseline baseline/bench.json --candidate bench.json \
-            --threshold 0.25 --reference 'hash/dict_*' --markdown "$GITHUB_STEP_SUMMARY"
+            --threshold 0.25 --reference 'hash/dict_*' --advisory \
+            --markdown "$GITHUB_STEP_SUMMARY"
 
   differential:
     name: Differential vs pandas & DuckDB
