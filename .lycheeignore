@@ -1,0 +1,14 @@
+# Requires authentication; returns 404 to anonymous requests.
+https://github.com/tamnd/firepanda/security/advisories/new
+
+# Not created until the first release.
+https://pypi.org/p/firepanda
+https://test.pypi.org/p/firepanda
+https://pypi.org/project/firepanda
+
+# Badge endpoints and workflow status URLs are generated, not authored.
+^https://img\.shields\.io/
+^https://github\.com/tamnd/firepanda/actions/
+
+# Discussions are enabled per-repository and 404 when they are not.
+https://github.com/tamnd/firepanda/discussions

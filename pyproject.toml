@@ -1,0 +1,70 @@
+[project]
+name = "firepanda"
+version = "0.0.0.dev0"
+description = "A dataframe library for Mojo with the pandas API"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+authors = [{ name = "tamnd", email = "tamnd87@gmail.com" }]
+keywords = ["dataframe", "pandas", "polars", "mojo", "arrow", "columnar", "analytics"]
+classifiers = [
+  "Development Status :: 1 - Planning",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Other",
+  "Topic :: Scientific/Engineering",
+  "Topic :: Software Development :: Libraries",
+  "Typing :: Typed",
+]
+
+# Deliberately empty. Data crosses the boundary as an Arrow C stream through the
+# PyCapsule protocol, which needs no runtime dependency on pyarrow: implementing
+# __arrow_c_array__ and __arrow_c_stream__ is enough for pandas, Polars, DuckDB and
+# pyarrow to accept a frame with no copy. docs/specs/07-python-bindings.md section 4.
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pyarrow>=25.0", "pandas>=3.0", "polars>=1.43", "duckdb"]
+
+[project.urls]
+Homepage = "https://github.com/tamnd/firepanda"
+Specification = "https://github.com/tamnd/firepanda/tree/main/docs/specs"
+Benchmarks = "https://github.com/tamnd/firepanda-bench"
+Issues = "https://github.com/tamnd/firepanda/issues"
+Changelog = "https://github.com/tamnd/firepanda/blob/main/CHANGELOG.md"
+
+# Placeholder. The real build backend compiles firepanda/py/module.mojo into an
+# extension exporting PyInit_firepanda and vendors the Mojo runtime beside it.
+# That lands at M3, and the first task of M3 is confirming the runtime may be
+# redistributed at all. docs/specs/07-python-bindings.md section 2.
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["python/firepanda"]
+
+[tool.cibuildwheel]
+build-frontend = "build"
+# No Windows: Mojo has no native Windows support. WSL users install the Linux wheel.
+skip = ["*-win*", "*-musllinux_*", "pp*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
+addopts = "-q --strict-markers"
+
+[tool.mypy]
+strict = true
+files = ["python/firepanda"]

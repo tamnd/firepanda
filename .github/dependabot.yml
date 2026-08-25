@@ -1,0 +1,22 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    labels: ["ci", "dependencies"]
+    commit-message:
+      prefix: "ci"
+
+  # Covers the thin Python shim and the test/build requirements only. The engine
+  # deliberately depends on almost nothing: docs/specs/01-research-2026.md.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    labels: ["dependencies"]
+    commit-message:
+      prefix: "deps"

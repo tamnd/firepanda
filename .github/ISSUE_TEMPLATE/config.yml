@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Read the specification first
+    url: https://github.com/tamnd/firepanda/tree/main/docs/specs
+    about: firepanda is at specification stage. Most "is X supported" questions are answered by the parity checklist in 06-pandas-parity.md.
+  - name: Discussions
+    url: https://github.com/tamnd/firepanda/discussions
+    about: Design questions, ideas, and anything that is not yet a concrete issue.
+  - name: Report a security issue
+    url: https://github.com/tamnd/firepanda/security/advisories/new
+    about: Please do not open a public issue for a vulnerability.

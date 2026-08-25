@@ -1,0 +1,45 @@
+# pixi
+.pixi/
+*.pixi
+
+# Mojo
+*.mojopkg
+*.o
+.mojo_cache/
+
+# Build output
+build/
+dist/
+wheelhouse/
+*.so
+*.dylib
+*.whl
+*.tar.gz
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Benchmarks and profiling
+current.json
+baseline.json
+compile-budget.json
+*.prof
+perf.data*
+
+# Fuzzing corpus artifacts (the committed corpus lives under tests/corpus)
+crash-*
+timeout-*
+leak-*
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+!.vscode/extensions.json

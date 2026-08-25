@@ -1,0 +1,76 @@
+# Mojo reached 1.0 recently and is still moving. A break against nightly is expected
+# occasionally and must never be discovered on release day. This workflow's whole job
+# is to convert "nightly broke us" from a surprise into a tracked issue.
+name: Nightly canary
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    name: Build against Mojo nightly
+    runs-on: ubuntu-latest
+    outputs:
+      failed: ${{ steps.run.outcome == 'failure' }}
+      version: ${{ steps.version.outputs.mojo }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-pixi
+        with:
+          environment: nightly
+
+      - id: version
+        run: echo "mojo=$(pixi run --environment nightly mojo --version)" >> "$GITHUB_OUTPUT"
+
+      - id: run
+        continue-on-error: true
+        run: |
+          pixi run --environment nightly build
+          pixi run --environment nightly test
+
+  report:
+    name: Open or update tracking issue
+    needs: canary
+    if: needs.canary.outputs.failed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          MOJO: ${{ needs.canary.outputs.version }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Nightly canary failing"
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --label "toolchain" --search "$title in:title" --json number --jq '.[0].number // empty')
+          body=$(printf '%s\n\n- toolchain: `%s`\n- run: %s\n' \
+            "The build or test suite fails against the Mojo nightly toolchain." "$MOJO" "$RUN")
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
+              --label "toolchain,upstream" --body "$body"
+          fi
+
+  close:
+    name: Close tracking issue when green
+    needs: canary
+    if: needs.canary.outputs.failed == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label "toolchain" \
+            --search "Nightly canary failing in:title" --json number --jq '.[0].number // empty')
+          [ -z "$n" ] || gh issue close "$n" --repo "$GITHUB_REPOSITORY" \
+            --comment "Nightly is green again as of $GITHUB_RUN_ID."

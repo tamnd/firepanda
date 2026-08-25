@@ -1,0 +1,47 @@
+name: pandas parity gap
+description: A pandas API that firepanda should have and does not
+labels: ["parity", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check `docs/specs/06-pandas-parity.md` first. If the API is listed with a
+        milestone tag it is already planned, and the useful thing to say is that you
+        want it sooner, and why. If it is in the "genuine omissions" section it is
+        deliberately not planned, and the useful thing to say is why that is wrong.
+
+  - type: input
+    id: api
+    attributes:
+      label: The pandas API
+      placeholder: DataFrame.pivot_table
+    validations:
+      required: true
+
+  - type: dropdown
+    id: status
+    attributes:
+      label: Where it stands in the checklist
+      options:
+        - Listed with a milestone tag, I want it sooner
+        - Listed as a genuine omission, I think that is wrong
+        - Not in the checklist at all
+    validations:
+      required: true
+
+  - type: textarea
+    id: usage
+    attributes:
+      label: What you use it for
+      description: A real snippet from real code is worth more than a description.
+      render: python
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Current workaround
+      description: >
+        After M2 anything missing can be handed to DuckDB or pyarrow without a copy.
+        If that does not work for your case, say why — it is useful signal.

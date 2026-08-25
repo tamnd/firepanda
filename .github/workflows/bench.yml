@@ -1,0 +1,78 @@
+# Microbenchmarks live here rather than in firepanda-bench because they run on every
+# pull request and must not require Python or any competing engine to be installed.
+# The cross-engine comparison is tamnd/firepanda-bench.
+name: Benchmarks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.d.outputs.ready }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: d
+        run: |
+          if [ -d benchmarks ]; then echo "ready=true" >> "$GITHUB_OUTPUT"; else echo "ready=false" >> "$GITHUB_OUTPUT"; fi
+
+  micro:
+    name: Microbenchmarks
+    needs: guard
+    if: needs.guard.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: ./.github/actions/setup-pixi
+
+      - name: Run
+        run: pixi run bench --output current.json
+
+      # Compare against main's recorded results rather than against a number in a
+      # file somebody edited, so a regression is attributable to a commit.
+      - name: Restore baseline
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@v4
+        with:
+          path: baseline.json
+          key: bench-baseline-${{ runner.os }}-${{ github.event.pull_request.base.sha }}
+          restore-keys: bench-baseline-${{ runner.os }}-
+
+      - name: Regression gate
+        if: github.event_name == 'pull_request'
+        run: |
+          if [ -f baseline.json ]; then
+            pixi run bench-compare baseline.json current.json \
+              --threshold 1.05 --summary "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::notice::no baseline available; recording this run as the first one"
+          fi
+
+      - name: Save baseline
+        if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: current.json
+          key: bench-baseline-${{ runner.os }}-${{ github.sha }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ github.sha }}
+          path: current.json

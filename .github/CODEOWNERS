@@ -1,0 +1,13 @@
+# Default owner for everything.
+*                       @tamnd
+
+# The specification is the design of record. Changes to it are design changes.
+/docs/specs/            @tamnd
+
+# Shared mutable state is the substitute for a race detector in a language that
+# does not have one. Every change to this file is a concurrency design change.
+/firepanda/exec/shared.mojo  @tamnd
+
+# Supply chain surface.
+/.github/workflows/     @tamnd
+/.github/actions/       @tamnd

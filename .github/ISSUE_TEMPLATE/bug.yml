@@ -1,0 +1,65 @@
+name: Bug report
+description: Something behaves differently from what the specification or pandas says it should
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If the difference is from pandas, please check the divergence table in
+        `docs/specs/04-python-dx.md` section 6 first. Some differences are deliberate
+        and documented, and knowing which is which saves everyone time.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: If pandas does something different, paste what pandas does.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: The smallest program that shows it, including how the frame was built.
+      render: python
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: firepanda version
+    validations:
+      required: true
+
+  - type: input
+    id: mojo
+    attributes:
+      label: Mojo toolchain version
+      description: Output of `mojo --version`, or "none, installed the wheel". The ABI is not stable, so this matters.
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: OS and architecture
+      placeholder: macOS 15 arm64 / Ubuntu 24.04 x86-64
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which front door
+      options: [Python, Mojo, Both, Not sure]
+    validations:
+      required: true

@@ -1,0 +1,68 @@
+# Channel names and package names for the Mojo toolchain have moved more than once
+# during Mojo's pre-1.0 period. Verify these against the toolchain you actually
+# install rather than against this file; see docs/specs/01-research-2026.md.
+[workspace]
+name = "firepanda"
+version = "0.0.0"
+description = "A dataframe library for Mojo with the pandas API"
+authors = ["tamnd <tamnd87@gmail.com>"]
+license = "Apache-2.0"
+channels = ["https://conda.modular.com/max", "https://prefix.dev/modular-community", "conda-forge"]
+platforms = ["linux-64", "linux-aarch64", "osx-arm64", "osx-64"]
+preview = ["pixi-build"]
+
+[dependencies]
+modular = "*"
+
+# The engine depends on almost nothing on purpose. The ecosystem is young and its
+# most prominent HTTP library was archived in May 2026; anything we take on here is
+# something we may end up maintaining.
+[feature.dev.dependencies]
+python = ">=3.12"
+
+[feature.nightly.dependencies]
+modular = { version = "*", channel = "https://conda.modular.com/max-nightly" }
+
+# Mojo imports pandas in the same process, so the conformance suite needs no
+# bindings and works from M1. docs/specs/09-quality-bar.md section 4.
+[feature.differential.dependencies]
+python = ">=3.12"
+pandas = ">=3.0"
+pyarrow = ">=25.0"
+duckdb = "*"
+polars = ">=1.43"
+
+[environments]
+default = { features = ["dev"], solve-group = "main" }
+nightly = { features = ["nightly", "dev"] }
+differential = { features = ["dev", "differential"], solve-group = "main" }
+
+[tasks]
+build = "mojo package firepanda -o build/firepanda.mojopkg"
+test = "mojo test tests firepanda"
+format = "mojo format firepanda tests"
+format-check = "mojo format --check firepanda tests"
+
+# Every kernel is checked against its scalar twin in firepanda/kernel/scalar.
+# The twins are never called in production; they exist to be the specification.
+fuzz = "mojo run tests/fuzz/main.mojo"
+
+# The substitute for a race detector: every parallel operator, thousands of
+# iterations, randomized worker counts and cancellation points, compared against
+# the single-threaded result. docs/specs/09-quality-bar.md section 3.
+stress = "mojo run tests/stress/main.mojo"
+
+differential = { cmd = "mojo run tests/differential/main.mojo", environment = "differential" }
+
+bench = "mojo run benchmarks/main.mojo"
+bench-compare = "python tools/bench_compare.py"
+
+# Under monomorphization these are the numbers most likely to blow up, so they are
+# graphed from M0 rather than thresholded from M8. docs/specs/03-dtype-dispatch.md.
+compile-budget = "python tools/compile_budget.py"
+
+# A grep is not a sanitizer. It is what exists.
+check-shared-state = """
+! grep -rn --include=*.mojo -E '\\bAtomic\\b|^var [a-z_]+ *=' firepanda \
+  --exclude-dir=exec || (echo 'shared state outside exec/shared.mojo' && exit 1)
+"""

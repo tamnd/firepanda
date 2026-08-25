@@ -1,0 +1,148 @@
+name: Wheels
+
+on:
+  pull_request:
+    paths:
+      - "pyproject.toml"
+      - "pixi.toml"
+      - "python/**"
+      - "firepanda/py/**"
+      - ".github/workflows/wheels.yml"
+  workflow_dispatch:
+  workflow_call:
+    outputs:
+      artifact:
+        description: Name of the artifact holding the built distributions
+        value: dist
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    name: Detect bindings
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.detect.outputs.ready }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: detect
+        run: |
+          if [ -f firepanda/py/module.mojo ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=No bindings yet::The Python front door lands at M3; wheel builds are skipped until then."
+          fi
+
+  wheels:
+    name: ${{ matrix.name }}
+    needs: guard
+    if: needs.guard.outputs.ready == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: manylinux x86-64
+            os: ubuntu-latest
+            archs: x86_64
+          - name: manylinux aarch64
+            os: ubuntu-24.04-arm
+            archs: aarch64
+          # macOS x86-64 is cross-compiled from the arm64 runner rather than built on
+          # an Intel one, because the Intel macOS runner images are on their way out.
+          # Cross-built wheels cannot be imported here, so their tests are skipped.
+          - name: macOS arm64 + x86-64
+            os: macos-latest
+            archs: arm64 x86_64
+    env:
+      CIBW_ARCHS: ${{ matrix.archs }}
+      # Free-threaded 3.14 is in the matrix to prove the extension does not depend
+      # on the GIL, per docs/specs/07-python-bindings.md section 6.
+      CIBW_ENABLE: cpython-freethreading
+      CIBW_BUILD: "cp312-* cp313-* cp314-*"
+      CIBW_SKIP: "*-musllinux_*"
+      CIBW_TEST_SKIP: "*-macosx_x86_64"
+      CIBW_TEST_COMMAND: >-
+        python -c "import firepanda; print(firepanda.__version__)" &&
+        python -m pytest {package}/python/tests -q
+      CIBW_TEST_REQUIRES: pytest pyarrow pandas polars
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # The Mojo toolchain lives in the pixi environment; cibuildwheel's build step
+      # shells out to it. On Linux this happens inside the manylinux container, which
+      # is why the container needs pixi rather than the runner.
+      - uses: ./.github/actions/setup-pixi
+
+      - name: Build wheels
+        run: pipx run cibuildwheel --output-dir dist
+
+      - name: Build sdist
+        if: matrix.os == 'ubuntu-latest'
+        run: pipx run build --sdist --outdir dist
+
+      # Vendoring the Mojo runtime makes wheel size easy to lose track of.
+      - name: Record wheel size
+        run: |
+          {
+            echo "### ${{ matrix.name }}"
+            echo
+            echo '| artifact | size |'
+            echo '|---|---|'
+            for f in dist/*; do
+              printf '| %s | %s |\n' "$(basename "$f")" "$(du -h "$f" | cut -f1)"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+          limit_mb=250
+          for f in dist/*.whl; do
+            mb=$(( $(wc -c < "$f") / 1000000 ))
+            [ "$mb" -le "$limit_mb" ] || { echo "::error::$f is ${mb}MB, over the ${limit_mb}MB budget"; exit 1; }
+          done
+        shell: bash
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.os }}-${{ strategy.job-index }}
+          path: dist/*
+
+  # A wheel that builds is not the same as a wheel that installs. Prove the second
+  # one from a clean virtualenv with no Mojo toolchain anywhere on the machine.
+  install-test:
+    name: Clean install (${{ matrix.os }})
+    needs: wheels
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - name: Install from wheel only
+        run: |
+          python -m venv /tmp/clean
+          /tmp/clean/bin/python -m pip install --no-index --find-links dist firepanda
+          /tmp/clean/bin/python - <<'PY'
+          import firepanda as fp
+          print(fp.__version__)
+          PY
+      - name: Assert no toolchain was required
+        run: |
+          command -v mojo && { echo "::error::a Mojo toolchain is on PATH; this test proves nothing"; exit 1; } || true
