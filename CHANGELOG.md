@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.0] - 2026-08-26
+
+Built against Mojo 1.0.0 (ed45d567).
+
+The first tagged release. There is no dataframe in it. What it contains is the layer a dataframe is built out of, plus the parts of the compute layer that sit directly on top: bitmaps, buffers, columns, the type lattice, the kernels, and the hash table that group by and join will use. It is tagged because the pieces underneath are now stable enough that changing them would be a break worth writing down, not because any of it is usable as a dataframe yet.
+
+Install it and you get a library with no public API to speak of. The point of the tag is the version identity: the Mojo ABI is not stable within 1.x, so a build is identified by its own version and by the toolchain that produced it, and that pairing needs somewhere to start.
+
 ### Added
 
 - The specification: twelve documents in `docs/specs/`, written against Mojo 1.0, pandas 3.0.5, Polars 1.43 and Arrow 25.0.0 as of August 2026.
@@ -37,4 +47,11 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
   - `firepanda/hash/scalar.mojo`: a quadratic twin to check against, and a `Dict` based factorize kept in the library so the comparison stays runnable.
   - Tests: 41 unit tests and a fuzz harness that checks the table, the partitioning and both factorize routes against the twin.
 
-There is no dataframe yet. See the status notice in the README.
+### Known limitations
+
+- No `DataFrame`, no `Series`, no IO. See the status notice in the README.
+- `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
+- The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
+
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/tamnd/firepanda/releases/tag/v0.1.0
