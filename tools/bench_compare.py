@@ -45,6 +45,20 @@ DEFAULT_THRESHOLD = 0.10
 # drops below this no matter what the measurement claims.
 MIN_NOISE = 0.03
 
+# A benchmark that measures one fixed operation rather than a per-row throughput
+# reports a per item time of a few nanoseconds, and a shared runner cannot resolve
+# a few nanoseconds repeatably. `dispatch/call_1_row` measured 4.0 ns and 7.2 ns on
+# two CI runs, +82%, while the same two binaries measured 2.817 ns and 2.796 ns
+# against each other on a dedicated machine. A percentage is the wrong instrument
+# at that scale, so a benchmark with few enough items also has to move by an
+# absolute margin before anybody is woken up.
+#
+# The item count is what separates the two kinds. A throughput row reports a
+# million items and a per item time well under a nanosecond, where an absolute
+# margin would mask a genuine doubling. A fixed cost row reports one.
+FIXED_COST_ITEMS = 1000
+MIN_ABSOLUTE_NS = 10.0
+
 
 def load(path: Path) -> dict:
     """Reads a result file.
@@ -79,6 +93,23 @@ def by_name(document: dict) -> dict[str, dict]:
         A mapping from benchmark name to its record.
     """
     return {entry["name"]: entry for entry in document.get("benchmarks", [])}
+
+
+def too_fast_to_compare(before: dict, after: dict) -> bool:
+    """Reports whether two records differ by less than the runner can resolve.
+
+    Args:
+        before: The baseline record.
+        after: The candidate record.
+
+    Returns:
+        True if this is a fixed cost benchmark and the two per item times are
+        within the absolute margin of each other.
+    """
+    if after.get("items", 1) > FIXED_COST_ITEMS:
+        return False
+    moved = abs(after.get("per_item_ns", 0.0) - before.get("per_item_ns", 0.0))
+    return moved < MIN_ABSOLUTE_NS
 
 
 def spread(entry: dict) -> float:
@@ -259,13 +290,16 @@ def main() -> int:
                 (name, format_seconds(before), format_seconds(after), change, "ref")
             )
             continue
-        if change > args.threshold and change > noise:
+        # Printed as `ok` rather than skipped, so the row and its percentage are
+        # still in the table for anybody who wants to look at it.
+        unresolvable = too_fast_to_compare(old[name], entry)
+        if change > args.threshold and change > noise and not unresolvable:
             verdict = "REGRESSED"
             regressions.append(
                 f"{name}: {format_seconds(before)} to {format_seconds(after)}, "
                 f"{change * 100:+.1f}% against a noise floor of {noise * 100:.1f}%"
             )
-        elif change < -args.threshold and -change > noise:
+        elif change < -args.threshold and -change > noise and not unresolvable:
             verdict = "faster"
             improvements.append(f"{name}: {change * 100:+.1f}%")
         else:
