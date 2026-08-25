@@ -4,23 +4,12 @@
   <a href="https://github.com/tamnd/firepanda/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/tamnd/firepanda/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
   <a href="docs/specs"><img alt="Specification" src="https://img.shields.io/badge/spec-12%20documents-informational"></a>
-  <img alt="Status" src="https://img.shields.io/badge/status-M1%20kernels-orange">
+  <img alt="Status" src="https://img.shields.io/badge/status-M1%20hash-orange">
 </p>
 
 A dataframe library for [Mojo](https://mojolang.org) with the pandas API.
 
-> **Status: M0 landed and M1 is under way. There is no dataframe yet and nothing to
-> install.** What exists is the layer underneath one: validity bitmaps, aligned buffers
-> with a size class pool, typed and type erased columns, the StringView layout, the
-> logical type lattice with its promotion rules, the `comptime` dtype dispatch bridge,
-> and the compute kernels that run over a column. It is tested, fuzzed against a
-> reference model, and checked against numpy and pyarrow in the same process.
-> The specification is twelve documents in [`docs/specs/`](docs/specs), written against
-> Mojo 1.0, pandas 3.0, Polars 1.43 and Arrow 25.0 as of August 2026, and the milestone
-> issues track the rest of the way to a frame you can actually use.
-> If you are looking for a working Mojo dataframe today, you want
-> [MojoFrame](https://arxiv.org/abs/2505.04080), which is a research prototype, or
-> [Polars](https://pola.rs), which is not in Mojo but is excellent.
+> **Status: M0 landed and M1 is under way. There is no dataframe yet and nothing to install.** What exists is the layer underneath one: validity bitmaps, aligned buffers with a size class pool, typed and type erased columns, the StringView layout, the logical type lattice with its promotion rules, the `comptime` dtype dispatch bridge, the compute kernels that run over a column, and the hash table and `factorize` that group by and join will be built on. It is tested, fuzzed against a reference model, and checked against numpy and pyarrow in the same process. The specification is twelve documents in [`docs/specs/`](docs/specs), written against Mojo 1.0, pandas 3.0, Polars 1.43 and Arrow 25.0 as of August 2026, and the milestone issues track the rest of the way to a frame you can actually use. If you are looking for a working Mojo dataframe today, you want [MojoFrame](https://arxiv.org/abs/2505.04080), which is a research prototype, or [Polars](https://pola.rs), which is not in Mojo but is excellent.
 
 ## What it is meant to be
 
@@ -31,12 +20,9 @@ df = pd.read_parquet("trades.parquet")
 big = df[df["qty"] > 1000].groupby("symbol")["notional"].sum()
 ```
 
-That is pandas. It is also, underneath, a lazy columnar query engine that pushed the
-projection and the predicate down into the Parquet reader, never decoded the columns
-you did not ask for, and ran the aggregation across every core in your machine.
+That is pandas. It is also, underneath, a lazy columnar query engine that pushed the projection and the predicate down into the Parquet reader, never decoded the columns you did not ask for, and ran the aggregation across every core in your machine.
 
-And this is the same library, from Mojo, with the user's own function compiled into
-the pipeline rather than called through an interpreter:
+And this is the same library, from Mojo, with the user's own function compiled into the pipeline rather than called through an interpreter:
 
 ```mojo
 from firepanda import read_parquet, col
@@ -53,21 +39,11 @@ var df = read_parquet("trades.parquet")
 
 ## The argument
 
-Every fast dataframe library today is a fast engine in one language with a Python
-veneer on top. pandas is C and Cython. Polars is Rust. DuckDB is C++. The veneer is
-where user code lives, and it is why `df.apply(lambda ...)` falls off a cliff: the
-moment you write a function the library did not anticipate, you leave the fast
-language and enter the slow one.
+Every fast dataframe library today is a fast engine in one language with a Python veneer on top. pandas is C and Cython. Polars is Rust. DuckDB is C++. The veneer is where user code lives, and it is why `df.apply(lambda ...)` falls off a cliff: the moment you write a function the library did not anticipate, you leave the fast language and enter the slow one.
 
-Mojo removes the boundary. The library, the kernels and the user's own hot loop are
-all the same language, and they all compile. That is the one thing firepanda can offer
-that a mature library in another language structurally cannot, and it is the reason to
-build this rather than use Polars.
+Mojo removes the boundary. The library, the kernels and the user's own hot loop are all the same language, and they all compile. That is the one thing firepanda can offer that a mature library in another language structurally cannot, and it is the reason to build this rather than use Polars.
 
-The honest counterweight is in [`docs/specs/00-README.md`](docs/specs/00-README.md):
-the argument only pays off for Mojo users. For Python users arriving through
-`pip install firepanda`, a Python callable is still a Python callable, and the
-benchmark tables say so in their own column.
+The honest counterweight is in [`docs/specs/00-README.md`](docs/specs/00-README.md): the argument only pays off for Mojo users. For Python users arriving through `pip install firepanda`, a Python callable is still a Python callable, and the benchmark tables say so in their own column.
 
 ## Design in one screen
 
@@ -82,8 +58,7 @@ benchmark tables say so in their own column.
 
 ## The specification
 
-Read [`docs/specs/00-README.md`](docs/specs/00-README.md) first; it is the index and it
-says what was already decided and why.
+Read [`docs/specs/00-README.md`](docs/specs/00-README.md) first; it is the index and it says what was already decided and why.
 
 | | |
 |---|---|
@@ -100,42 +75,24 @@ says what was already decided and why.
 | [10](docs/specs/10-benchmarks.md) | What gets measured and against whom |
 | [11](docs/specs/11-package-layout.md) | The tree, and why Mojo 1.0's import rules decide it |
 
-There are no time estimates in these documents, deliberately. Milestones are ordered
-by dependency and by risk; a week count invites a reader to add them up and treat the
-total as a delivery date.
+There are no time estimates in these documents, deliberately. Milestones are ordered by dependency and by risk; a week count invites a reader to add them up and treat the total as a delivery date.
 
 ## The two risks worth naming up front
 
-**Distribution.** Mojo 1.0 guarantees source compatibility within 1.x and explicitly
-does not guarantee ABI stability, and a wheel is a binary artifact. The plan is to
-vendor the runtime and pin hard — which first requires confirming the runtime may be
-redistributed at all. That question is the first task of M3, before any binding code
-gets written, because a negative answer changes the entire distribution strategy.
+**Distribution.** Mojo 1.0 guarantees source compatibility within 1.x and explicitly does not guarantee ABI stability, and a wheel is a binary artifact. The plan is to vendor the runtime and pin hard — which first requires confirming the runtime may be redistributed at all. That question is the first task of M3, before any binding code gets written, because a negative answer changes the entire distribution strategy.
 
-**Code size.** Monomorphizing every kernel over every dtype produces on the order of
-a few thousand instantiated function bodies. Compile time and stripped binary size are
-graphed in CI from the first commit, with named thresholds and three graduated
-responses, because finding this out late is how the strategy fails.
+**Code size.** Monomorphizing every kernel over every dtype produces on the order of a few thousand instantiated function bodies. Compile time and stripped binary size are graphed in CI from the first commit, with named thresholds and three graduated responses, because finding this out late is how the strategy fails.
 
 ## Related
 
-- [tamnd/firepanda-bench](https://github.com/tamnd/firepanda-bench) — the performance
-  comparison against pandas, Polars, DuckDB, cuDF and MojoFrame. Losses get published
-  next to the wins; for a project whose pitch is performance, the credibility of the
-  numbers is the asset.
-- [tamnd/kuma](https://github.com/tamnd/kuma) — the sibling specification for the same
-  problem in Go. Several documents here are written against it as a contrast.
+- [tamnd/firepanda-bench](https://github.com/tamnd/firepanda-bench) — the performance comparison against pandas, Polars, DuckDB, cuDF and MojoFrame. Losses get published next to the wins; for a project whose pitch is performance, the credibility of the numbers is the asset.
+- [tamnd/kuma](https://github.com/tamnd/kuma) — the sibling specification for the same problem in Go. Several documents here are written against it as a contrast.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). At specification stage the most useful
-contribution is disagreement: if something in `docs/specs/` is wrong about Mojo 1.0,
-about pandas 3.0, or about what an engine of this shape costs to build, an issue
-saying so is worth more than any amount of code written against a bad premise.
+See [CONTRIBUTING.md](CONTRIBUTING.md). At specification stage the most useful contribution is disagreement: if something in `docs/specs/` is wrong about Mojo 1.0, about pandas 3.0, or about what an engine of this shape costs to build, an issue saying so is worth more than any amount of code written against a bad premise.
 
-Claims in the specification that could not be confirmed against Modular's own
-documentation are marked **[verify]**. Confirming or refuting one of those is a
-genuinely valuable pull request.
+Claims in the specification that could not be confirmed against Modular's own documentation are marked **[verify]**. Confirming or refuting one of those is a genuinely valuable pull request.
 
 ## License
 
