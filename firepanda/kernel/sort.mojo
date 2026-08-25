@@ -250,17 +250,58 @@ def argsort_multi(
                 + String(len(cols[k]))
             )
 
+    var order = identity_permutation(n)
+    for at in range(len(cols) - 1, -1, -1):
+        argsort_any_into(cols[at], order, descending[at], nulls_first[at])
+    return order^
+
+
+def argsort_any(
+    col: AnyArray, descending: Bool = False, nulls_first: Bool = False
+) raises -> Array[DType.uint32]:
+    """Returns the row order that sorts one type-erased column.
+
+    `argsort_multi` with a single key does the same thing, but its argument is a
+    `List[AnyArray]` and building one costs a deep copy of the column. A `Series`
+    sorts itself often enough for that to be worth its own entry point.
+
+    Args:
+        col: The column to sort on.
+        descending: Largest first.
+        nulls_first: Put the nulls at the front rather than the back.
+
+    Returns:
+        A permutation of `[0, len(col))`.
+
+    Raises:
+        If the column's dtype is not one firepanda can sort.
+    """
+    var order = identity_permutation(len(col))
+    argsort_any_into(col, order, descending, nulls_first)
+    return order^
+
+
+def identity_permutation(n: Int) -> Array[DType.uint32]:
+    """Returns `[0, 1, ..., n - 1]` as a permutation column.
+
+    Every erased sort starts here, because `argsort_into` refines a permutation
+    rather than building one and the unsorted frame's own row order is what it
+    starts from.
+
+    Args:
+        n: The number of rows.
+
+    Returns:
+        A column of `n` uint32 values counting up from zero.
+    """
     var order = Array[DType.uint32](n)
     var out = order.unsafe_ptr()
     for i in range(n):
         out.unsafe_offset(i).unsafe_write(UInt32(i))
-
-    for at in range(len(cols) - 1, -1, -1):
-        _argsort_any_into(cols[at], order, descending[at], nulls_first[at])
     return order^
 
 
-def _argsort_any_into(
+def argsort_any_into(
     col: AnyArray,
     mut order: Array[DType.uint32],
     descending: Bool,

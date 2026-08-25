@@ -8,7 +8,21 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- `firepanda.frame`: `Series` and `DataFrame`, eager, positional and immutable. Column access, `select`, `drop`, `rename`, `with_column`, `cast`, `filter`, `take`, `slice`, `head`, `tail`, `argsort`, `sort_by` and `sort_values`.
+- `firepanda.kernel`: `take_any`, `filter_any`, `cast_any` and `argsort_any`, the type erased entry points a frame needs because its columns have different dtypes from each other. They share a body with the typed kernels rather than duplicating one, so the scalar twin still covers both.
+- `AnyArray.slice`, which needs no dtype dispatch at all because a slice moves bytes without looking at them.
+- `tools/probes/cast_matrix.mojo`, a compile budget probe for the first two sided dispatch in the package. `cast_any` instantiates 144 copies of its loop and they cost 72 KB and 1.3 seconds of compile time over a probe that dispatches over nothing.
+- Tests: 39 unit tests covering the frame invariants, the error paths and the erased dispatch over all twelve dtypes.
+- Benchmarks: nine `frame/*` rows, each paired with the kernel row underneath it so the frame layer's overhead is a number rather than an assertion.
+
+### Known limitations
+
+- An operation that changes one column still copies the ones it did not touch, because a frame owns its columns outright. `frame/cast_one` measures 5.0 ms against 0.5 ms for the same cast at the kernel layer, and the difference is copying the other two columns. Sharing immutable columns by reference count is the fix.
+- Fetching a column by name copies it, at 439 us on a million rows, where fetching by position borrows it at 1 ns. A borrowing accessor needs the column index in its return type, which a name lookup cannot supply until the plan layer resolves column references ahead of time.
+- No display layer. A `Series` and a `DataFrame` print their shape and schema, not their values.
+- No group by, no joins, no IO.
 
 ## [0.2.0] - 2026-08-26
 

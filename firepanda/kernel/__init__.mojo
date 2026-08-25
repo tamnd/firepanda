@@ -30,12 +30,13 @@ import is where that shows up in review.
 from .accum import accumulator, highest, lowest
 from .agg import AggResult, count_of, max_of, mean_of, min_of, sum_of
 from .arith import add, divide, multiply, subtract
-from .cast import cast_to
+from .cast import cast_any, cast_to
 from .compare import equal, greater, greater_equal, less, less_equal, not_equal
 from .mask import apply_validity, combined_validity
-from .select import filter_rows, take_rows
+from .select import filter_any, filter_rows, take_any, take_rows
 from .sort import (
     argsort,
+    argsort_any,
     argsort_into,
     argsort_multi,
     is_sorted,

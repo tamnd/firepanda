@@ -14,10 +14,22 @@ the index list is signed.
 `filter_rows` drops the rows where the mask is null. The alternative, keeping
 them, would mean `filter(m)` and `filter(not m)` both contain the same row, which
 no query engine does and pandas does not either.
+
+Both kernels come in two spellings. The typed one takes an `Array[dt]` and is
+what other kernels call. The erased one takes an `AnyArray` and is what a
+`DataFrame` calls, because a frame holds a list of columns whose dtypes are only
+known at runtime and differ from each other. They share a body: the typed entry
+point hands its pointer and bitmap to the core, and the erased one walks `ALL`
+and hands over the same two things. Routing the erased case through
+`AnyArray.as_typed` instead would have been three lines shorter and would have
+deep copied every column on the way in, which on a filter is the entire cost of
+the operation paid twice.
 """
 
+from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.bitmap.bitmap import Bitmap
+from firepanda.dtype.lists import ALL
 
 
 def take_rows[dt: DType](col: Array[dt], indices: List[Int]) -> Array[dt]:
@@ -34,11 +46,43 @@ def take_rows[dt: DType](col: Array[dt], indices: List[Int]) -> Array[dt]:
     Returns:
         A column of length `len(indices)`.
     """
+    return _take_core(col.unsafe_ptr(), col.data.validity, indices)
+
+
+def take_any(col: AnyArray, indices: List[Int]) raises -> AnyArray:
+    """Gathers rows by position from a column whose dtype is a runtime value.
+
+    Args:
+        col: The column to gather from.
+        indices: The positions to gather, negative meaning null, as in
+            `take_rows`.
+
+    Returns:
+        A column of length `len(indices)` with the same dtype as the input.
+
+    Raises:
+        If the column's dtype is not one firepanda has a physical layout for.
+    """
+    comptime for candidate in ALL:
+        if col.dtype() == candidate:
+            return AnyArray(
+                _take_core(
+                    col.unsafe_ptr[candidate](), col.data.validity, indices
+                )
+            )
+    raise Error("take: unsupported dtype")
+
+
+def _take_core[
+    dt: DType, //, origin: ImmOrigin
+](
+    source: Pointer[Scalar[dt], origin], validity: Bitmap, indices: List[Int]
+) -> Array[dt]:
+    """The gather loop, over a pointer and a bitmap rather than a column."""
     var n = len(indices)
     var out = Array[dt](n)
-    var source = col.unsafe_ptr()
     var target = out.unsafe_ptr()
-    var validity = Bitmap(n, all_valid=False)
+    var built = Bitmap(n, all_valid=False)
 
     # The output positions are consecutive, so the validity bits can be built in
     # a register and stored once every sixty four rows instead of read-modify-
@@ -47,19 +91,19 @@ def take_rows[dt: DType](col: Array[dt], indices: List[Int]) -> Array[dt]:
     var word = UInt64(0)
     for i in range(n):
         var at = indices[i]
-        if at >= 0 and col.data.validity.get(at):
+        if at >= 0 and validity.get(at):
             target.unsafe_offset(i).unsafe_write(
                 source.unsafe_offset(at).unsafe_load()
             )
             word |= UInt64(1) << UInt64(i & 63)
         if i & 63 == 63:
-            validity.unsafe_set_word(i >> 6, word)
+            built.unsafe_set_word(i >> 6, word)
             word = 0
 
     if n & 63 != 0:
-        validity.unsafe_set_word(n >> 6, word)
+        built.unsafe_set_word(n >> 6, word)
 
-    out.data.validity = validity^
+    out.data.validity = built^
     return out^
 
 
@@ -87,6 +131,46 @@ def filter_rows[
     Returns:
         A column holding the kept rows, in their original order.
     """
+    return _filter_core(
+        col.unsafe_ptr(), col.data.validity, col.null_count() > 0, mask
+    )
+
+
+def filter_any(col: AnyArray, mask: Array[DType.bool]) raises -> AnyArray:
+    """Keeps the rows where the mask is true, for a runtime dtype.
+
+    Args:
+        col: The column to filter.
+        mask: The mask. Must be the same length as `col`.
+
+    Returns:
+        A column holding the kept rows, with the same dtype as the input.
+
+    Raises:
+        If the column's dtype is not one firepanda has a physical layout for.
+    """
+    comptime for candidate in ALL:
+        if col.dtype() == candidate:
+            return AnyArray(
+                _filter_core(
+                    col.unsafe_ptr[candidate](),
+                    col.data.validity,
+                    col.null_count() > 0,
+                    mask,
+                )
+            )
+    raise Error("filter: unsupported dtype")
+
+
+def _filter_core[
+    dt: DType, //, origin: ImmOrigin
+](
+    source: Pointer[Scalar[dt], origin],
+    validity: Bitmap,
+    has_null: Bool,
+    mask: Array[DType.bool],
+) -> Array[dt]:
+    """The compaction loop, over a pointer and a bitmap rather than a column."""
     var n = len(mask)
     var mask_values = mask.unsafe_ptr()
 
@@ -98,10 +182,9 @@ def filter_rows[
             kept += 1
 
     var out = Array[dt](kept)
-    var source = col.unsafe_ptr()
     var target = out.unsafe_ptr()
 
-    if col.null_count() == 0:
+    if not has_null:
         # Nothing to record, because a filter of a column with no nulls has no
         # nulls, and `Array` starts out all present. That leaves a loop with no
         # branch in it at all: every row is written at the output cursor and the
@@ -121,7 +204,7 @@ def filter_rows[
             i += 1
         return out^
 
-    var validity = Bitmap(kept, all_valid=False)
+    var built = Bitmap(kept, all_valid=False)
 
     # As in `take_rows`, the output positions are consecutive and the validity
     # goes down a word at a time. Here it matters more, because the row being
@@ -137,15 +220,15 @@ def filter_rows[
         target.unsafe_offset(at).unsafe_write(
             source.unsafe_offset(i).unsafe_load()
         )
-        if col.data.validity.get(i):
+        if validity.get(i):
             word |= UInt64(1) << UInt64(at & 63)
         at += 1
         if at & 63 == 0:
-            validity.unsafe_set_word((at >> 6) - 1, word)
+            built.unsafe_set_word((at >> 6) - 1, word)
             word = 0
 
     if at & 63 != 0:
-        validity.unsafe_set_word(at >> 6, word)
+        built.unsafe_set_word(at >> 6, word)
 
-    out.data.validity = validity^
+    out.data.validity = built^
     return out^

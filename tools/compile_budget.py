@@ -15,13 +15,19 @@ land at M8 it lands on evidence.
 What is measured:
 
 - how long `mojo precompile` takes on the package, and how big the artifact is;
-- three probe programs under tools/probes, each linking the package and doing a
+- four probe programs under tools/probes, each linking the package and doing a
   different amount of dispatch, built to real executables and stripped.
 
 The probes are the interesting part. `baseline` dispatches over nothing,
 `dispatch_signed` over four dtypes and `dispatch_numeric` over eleven, with the
 same kernel in both dispatching probes, so the difference between the last two is
 seven instantiations of one kernel and nothing else.
+
+`cast_matrix` is a different measurement. It dispatches on a source and a target
+dtype at once, so it instantiates twelve squared rather than twelve, and its
+`bytes_over_baseline` is what a two-sided dispatch costs to have in the binary.
+It is not part of the per-dtype figure, which is about the marginal cost of
+adding a dtype to a list rather than the cost of squaring one.
 
 Usage:
     python tools/compile_budget.py [--output compile-budget.json] [--repeat N]
@@ -41,7 +47,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PROBES = ["baseline", "dispatch_signed", "dispatch_numeric"]
+PROBES = ["baseline", "dispatch_signed", "dispatch_numeric", "cast_matrix"]
 
 # The two dispatching probes differ only in the length of the dtype list.
 SPREAD_PROBES = ("dispatch_signed", "dispatch_numeric")

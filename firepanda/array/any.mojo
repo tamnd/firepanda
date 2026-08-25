@@ -12,8 +12,11 @@ never elided, not even in release; the cost is one comparison against a value th
 is in cache and predicted.
 """
 
+from std.memory import unsafe_memcpy
+
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer
+from firepanda.dtype.lists import dtype_size
 from firepanda.dtype.logical import LogicalType, logical_for
 
 from .array import Array
@@ -145,6 +148,35 @@ struct AnyArray(Copyable, Movable, Sized):
         """
         self.check_dtype[dt]()
         return Array[dt](self.data^)
+
+    def slice(self, start: Int, end: Int) -> Self:
+        """Returns a copy of a half-open range of the column.
+
+        This is the one column operation that needs no dispatch at all. A slice
+        moves bytes and does not look at them, so the element width coming from
+        `dtype_size` as a runtime value is all it needs, and the whole thing
+        compiles to a single copy of the loop instead of one per dtype.
+
+        Args:
+            start: The first position, inclusive.
+            end: The last position, exclusive.
+
+        Returns:
+            A new column of length `end - start` and the same dtype.
+        """
+        var width = dtype_size(self.type.physical)
+        var n = end - start
+        var values = Buffer(n * width)
+        if n > 0:
+            unsafe_memcpy(
+                dest=values.unsafe_ptr(),
+                src=self.data.values.unsafe_ptr().unsafe_offset(start * width),
+                count=n * width,
+            )
+        return Self(
+            ColumnData(values^, self.data.validity.slice(start, end), n),
+            self.type,
+        )
 
     def unsafe_ptr[dt: DType](ref self) -> Pointer[Scalar[dt], origin_of(self)]:
         """Returns a typed pointer to the values without checking the dtype.
