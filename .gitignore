@@ -29,6 +29,8 @@ venv/
 # Benchmarks and profiling
 current.json
 baseline.json
+bench.json
+bench-*.json
 compile-budget.json
 *.prof
 perf.data*

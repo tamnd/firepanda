@@ -1,0 +1,19 @@
+# zizmor audits the workflows and uploads its findings to code scanning, where a
+# new alert fails the pull request. That is only useful if every alert is one
+# somebody intends to act on, so the one standing exception is written down here
+# rather than left to fail on every pull request that adds a step.
+rules:
+  # Actions are referenced by release tag, not by commit hash. A hash pin defends
+  # against a tag being moved under you, which is a real attack and one this repo
+  # will eventually need to defend against. It also makes every action upgrade an
+  # unreadable diff, and with a single maintainer and no external contributors the
+  # thing that actually breaks first is nobody reading those diffs at all.
+  #
+  # ref-pin keeps the rule switched on at the weaker policy: a tag or a branch is
+  # accepted, a bare `uses` with no ref is still an error. Raise this to hash-pin
+  # and let Dependabot manage the comments on the day this repo starts taking
+  # outside contributions.
+  unpinned-uses:
+    config:
+      policies:
+        "*": ref-pin
