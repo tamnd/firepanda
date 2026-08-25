@@ -23,5 +23,21 @@ against one runtime is not guaranteed to load against another.
   a benchmark regression gate, and workflow, dependency and Scorecard auditing.
 - Release: PyPI publishing through Trusted Publishing with build provenance
   attestations. No PyPI token exists in this repository.
+- M0, the foundation layer, built against Mojo 1.0.0 (ed45d567):
+  - `firepanda.bitmap`: an Arrow validity bitmap with word at a time popcount,
+    boolean operators, ranged set, and both aligned and unaligned slicing.
+  - `firepanda.buffer`: 64 byte aligned allocation and a size class pool.
+  - `firepanda.array`: `Array[dt]`, the type erased `AnyArray`, `ChunkedArray`,
+    and the StringView layout with its 16 byte inline prefix representation.
+  - `firepanda.dtype`: the logical type lattice, `Schema` and `Field`, promotion
+    that agrees with numpy on all 144 pairs, the `comptime` dtype lists, and the
+    `dispatch` bridge from a runtime dtype tag to a compiled instantiation.
+  - Tests: 90 unit tests, a ten million case bitmap fuzz against a `List[Bool]`
+    reference, a concurrency stress harness, and a differential suite that runs
+    against numpy and pyarrow in process.
+  - Tools: a microbenchmark suite with a median and IQR report, a comparison tool
+    that will not call anything a regression unless it clears the measured spread,
+    and the compile time and binary size probes that make the monomorphization
+    cost per dtype a number rather than a worry.
 
-Nothing is implemented. See the status notice in the README.
+There is no dataframe yet. See the status notice in the README.
