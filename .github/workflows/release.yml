@@ -21,9 +21,14 @@ jobs:
     permissions:
       contents: read
 
+  # Everything below this point has nothing to do until there are wheels, and
+  # wheels wait for the Python front door at M3. Attesting the provenance of an
+  # empty directory failed the release for 0.1.0 rather than being skipped, which
+  # is a worse way to find out that a tag produced no artifacts than a skip is.
   provenance:
     name: Attest build provenance
     needs: build
+    if: needs.build.outputs.ready == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -42,7 +47,7 @@ jobs:
   testpypi:
     name: Publish to TestPyPI
     needs: [build, provenance]
-    if: github.event_name == 'push' || inputs.target == 'testpypi'
+    if: needs.build.outputs.ready == 'true' && (github.event_name == 'push' || inputs.target == 'testpypi')
     runs-on: ubuntu-latest
     environment:
       name: testpypi
@@ -63,8 +68,8 @@ jobs:
 
   pypi:
     name: Publish to PyPI
-    needs: testpypi
-    if: github.event_name == 'push' || inputs.target == 'pypi'
+    needs: [build, testpypi]
+    if: needs.build.outputs.ready == 'true' && (github.event_name == 'push' || inputs.target == 'pypi')
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -79,10 +84,12 @@ jobs:
           path: dist
       - uses: pypa/gh-action-pypi-publish@release/v1
 
+  # Runs for every version tag, whether or not there were wheels, because the
+  # release notes are the point of it and they exist either way.
   github-release:
     name: GitHub release
-    needs: pypi
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, pypi]
+    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.build.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -91,27 +98,43 @@ jobs:
         with:
           fetch-depth: 0
       - uses: actions/download-artifact@v8
+        if: needs.build.outputs.ready == 'true'
         with:
           pattern: dist-*
           merge-multiple: true
           path: dist
-      - name: Create release
+      - name: Create or update the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           # The toolchain version is part of the release identity: the Mojo ABI is
           # not stable, so a binary built against one runtime is not guaranteed to
           # load against another. docs/specs/09-quality-bar.md section 8.
-          gh release create "${GITHUB_REF_NAME}" dist/* \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes \
-            --verify-tag
+          #
+          # The release usually exists already, written by hand, because generated
+          # notes are a list of commit subjects and a reader wants to know what
+          # changed and what it cost rather than what the branches were called. So
+          # this attaches the artifacts to it and only writes notes itself if
+          # nobody got there first.
+          shopt -s nullglob
+          files=(dist/*)
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            if [ ${#files[@]} -gt 0 ]; then
+              gh release upload "${GITHUB_REF_NAME}" "${files[@]}" --clobber
+            fi
+          else
+            gh release create "${GITHUB_REF_NAME}" "${files[@]}" \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes \
+              --verify-tag
+          fi
 
   # modular-community is a pull request against someone else's repository, so it is
   # slower than PyPI and is not gated on. The git install path stays documented.
   modular-community:
     name: Remind to publish to modular-community
-    needs: pypi
+    needs: [build, pypi]
+    if: always() && needs.build.outputs.ready == 'true' && needs.pypi.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       issues: write
