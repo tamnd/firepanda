@@ -7,7 +7,7 @@
   <img alt="Status" src="https://img.shields.io/badge/status-specification-orange">
 </p>
 
-A dataframe library for [Mojo](https://www.modular.com/mojo) with the pandas API.
+A dataframe library for [Mojo](https://mojolang.org) with the pandas API.
 
 > **Status: specification, no implementation.** There is no code in this repository yet
 > and nothing to install. What is here is a complete technical specification — twelve

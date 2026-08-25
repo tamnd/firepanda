@@ -300,42 +300,52 @@ Full treatment is document 10.
 
 - Modular 26.5: Mojo 1.0 is here, https://www.modular.com/blog/modular-26-5-mojo-1-0-is-here
 - Mojo v1.0.0 release notes, https://mojolang.org/releases/v1.0.0/
-- Mojo changelog, https://docs.modular.com/mojo/changelog
-- Mojo standard library index, https://docs.modular.com/mojo/lib/
+- Mojo release notes and changelog, https://mojolang.org/releases/
+- Mojo standard library index, https://mojolang.org/docs/std/
 - Mojo (programming language), Wikipedia, https://en.wikipedia.org/wiki/Mojo_(programming_language)
 - Mojo Hits 1.0: A Technical Look, https://dev.to/shresthapandey/mojo-hits-10-a-technical-look-50ga
 - Mojo 1.0 Officially Arrives with Stability Guarantees, XenoSpectrum, https://xenospectrum.com/en/mojo-1-0-stability-open-source/
 
 **Language features**
 
-- Parameterization, https://docs.modular.com/mojo/manual/parameters/
-- Compile-time evaluation, https://docs.modular.com/mojo/manual/metaprogramming/comptime-evaluation/
+- Parameterization, https://mojolang.org/docs/manual/parameters/
+- Compile-time evaluation, https://mojolang.org/docs/manual/metaprogramming/comptime-evaluation/
 - Proposal: replace `@parameter` with a `comptime` statement modifier, https://forum.modular.com/t/proposal-replace-parameter-with-comptime-statement-modifier/2713
 - RFC: rename the `alias` keyword, https://github.com/modular/modular/issues/171
-- `simd` builtin module, https://docs.modular.com/mojo/stdlib/builtin/simd/
-- Unsafe pointers, https://docs.modular.com/mojo/manual/pointers/unsafe-pointers/
+- `simd` builtin module, https://mojolang.org/docs/std/builtin/simd/
+- Using pointers, https://mojolang.org/docs/manual/pointers/using-pointers/
 - UnsafePointer v2 proposal, https://github.com/modular/modular/blob/main/mojo/proposals/unsafe-pointer-v2.md
 - Trait objects and dynamic dispatch discussion, https://github.com/modular/modular/discussions/3169
 - liuzhishan/mojo-dynamic-dispatch, https://github.com/liuzhishan/mojo-dynamic-dispatch
 
 **GPU**
 
-- GPU programming fundamentals, https://docs.modular.com/mojo/manual/gpu/fundamentals/
-- Get started with GPU programming, https://docs.modular.com/mojo/manual/gpu/intro-tutorial/
-- `DeviceContext` API, https://docs.modular.com/mojo/stdlib/gpu/host/device_context/DeviceContext/
-- Build custom ops for GPUs, https://docs.modular.com/max/develop/build-custom-ops/
+Note on where these live. When Mojo was open sourced the documentation split in
+two: the language, manual and standard library moved to `mojolang.org`, and the
+GPU host API moved to `max.modular.com`. That is not only a URL change. The
+kernel-side primitives (`std.gpu`, `thread_idx`, `sys.info.has_accelerator`) are
+Mojo standard library and covered by the 1.x source compatibility promise; the
+host side that firepanda would need to launch anything (`max.gpu.host`,
+`DeviceContext`) ships with MAX and carries no such promise. M9 therefore takes a
+dependency on MAX, not just on the Mojo toolchain, and the GPU backend has to be
+an optional build.
+
+- GPU programming fundamentals, https://max.modular.com/gpu/fundamentals/
+- Get started with GPU programming, https://max.modular.com/gpu/intro-tutorial/
+- `DeviceContext` API, https://max.modular.com/api/mojo/max/gpu/host/device_context/DeviceContext/
+- Build custom ops for GPUs, https://max.modular.com/develop/build-custom-ops/
 
 **Python interop**
 
-- Calling Mojo from Python, https://docs.modular.com/mojo/manual/python/mojo-from-python/
-- Calling Python from Mojo, https://docs.modular.com/mojo/manual/python/python-from-mojo/
+- Calling Mojo from Python, https://mojolang.org/docs/manual/python/mojo-from-python/
+- Calling Python from Mojo, https://mojolang.org/docs/manual/python/python-from-mojo/
 - Python Can Now Call Mojo, Towards Data Science, https://towardsdatascience.com/python-can-now-call-mojo/
 - Giving Mojo a spin, koaning.io, https://koaning.io/posts/giving-mojo-a-spin/
 - Free threading in Python, https://docs.python.org/3/howto/free-threading-python.html
 
 **Packaging**
 
-- Pixi basics for Mojo, https://docs.modular.com/pixi/
+- Pixi basics for Mojo, https://mojolang.org/docs/pixi/
 - pixi-build-mojo, https://pixi.prefix.dev/latest/build/backends/pixi-build-mojo/
 - modular/modular-community, https://github.com/modular/modular-community
 - prefix-dev/pixi PR 3942, legacy `mojoproject.toml` support, https://github.com/prefix-dev/pixi/pull/3942
