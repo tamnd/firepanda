@@ -217,7 +217,7 @@ jobs:
         if: steps.baseline.outputs.found == 'true'
         run: |
           pixi run bench-compare -- --baseline baseline/bench.json --candidate bench.json \
-            --threshold 0.25 --markdown "$GITHUB_STEP_SUMMARY"
+            --threshold 0.25 --reference 'hash/dict_*' --markdown "$GITHUB_STEP_SUMMARY"
 
   differential:
     name: Differential vs pandas & DuckDB
