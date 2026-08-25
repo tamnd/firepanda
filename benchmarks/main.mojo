@@ -63,6 +63,8 @@ from firepanda.hash import (
 )
 from firepanda.kernel import (
     add,
+    argsort,
+    argsort_multi,
     cast_to,
     divide,
     filter_rows,
@@ -73,6 +75,7 @@ from firepanda.kernel import (
     sum_of,
     take_rows,
 )
+from firepanda.testing.rng import Rng
 from firepanda.kernel.scalar import (
     add_scalar,
     filter_scalar,
@@ -886,6 +889,134 @@ def bench_kernel(mut harness: Harness) raises:
     harness.record("kernel/filter_twin", "rows", rows, filter_twin)
 
 
+def bench_sort(mut harness: Harness) raises:
+    """Measures the radix sort, on the shapes that change how many passes it does.
+
+    The rows to read together are `int64_random` and `int64_small`. They are the
+    same dtype and the same row count and differ only in the range of the values,
+    which is what decides how many of the eight digits have more than one bucket
+    occupied. If the skip is working, the second is several times faster than the
+    first, and if it is not then the two are the same number and the check in
+    `_radix_sort` is dead code.
+
+    `uint32_random` is there for the other half of the pass count question. An
+    unsigned dtype narrower than eight bytes leaves the high bytes of the key
+    zero by construction rather than by luck, so it should cost four passes on
+    any data at all.
+
+    `int64_presorted` measures a column that arrives already in order, which a
+    query plan hits constantly. It is the slowest row in the group and that is
+    not a typo. It runs three passes, the same three that a random column of the
+    same value range runs, and it takes 2.6 times as long: 22.8 ms against 8.7 ms
+    on the reference machine, verified by counting the passes both ways. The
+    cause is the scatter. Sequential input sends consecutive rows to consecutive
+    buckets, so the 256 write cursors are visited in strict round robin and every
+    one of them has been evicted by the time it comes round again, where random
+    input revisits a cursor early often enough to keep some of them live. Fixing
+    it means staging the writes, and that is a change to make with the number in
+    front of us rather than on the way past.
+
+    `std_sort_int64` sorts a plain `List` with the standard library. It is not a
+    like for like comparison, because it moves values rather than producing a
+    permutation and it has no nulls to carry, so it is reported as a reference
+    row rather than gated on. What it is good for is answering whether writing a
+    sort was worth it at all.
+
+    Args:
+        harness: The harness.
+
+    Raises:
+        If a benchmark raises.
+    """
+    var rows = harness.options.rows
+    var rng = Rng(0x51AB1E)
+
+    var wide = Array[DType.int64](rows)
+    var small = Array[DType.int64](rows)
+    var narrow = Array[DType.uint32](rows)
+    var real = Array[DType.float64](rows)
+    var presorted = Array[DType.int64](rows)
+    var sparse = Array[DType.int64](rows)
+    for i in range(rows):
+        var draw = rng.next_u64()
+        wide[i] = Int64(draw)
+        small[i] = Int64(draw % 1000)
+        narrow[i] = UInt32(draw & 0xFFFFFFFF)
+        real[i] = Float64(Int64(draw % 1000000)) / Float64(64.0)
+        presorted[i] = Int64(i)
+        sparse[i] = Int64(draw % 1000)
+
+    for i in range(rows):
+        if i % 8 == 0:
+            sparse.set_null(i)
+
+    def sort_wide() raises {imm wide}:
+        keep(wide)
+        var order = argsort(wide)
+        keep(order)
+
+    harness.record("sort/int64_random", "rows", rows, sort_wide)
+
+    def sort_small() raises {imm small}:
+        keep(small)
+        var order = argsort(small)
+        keep(order)
+
+    harness.record("sort/int64_small", "rows", rows, sort_small)
+
+    def sort_narrow() raises {imm narrow}:
+        keep(narrow)
+        var order = argsort(narrow)
+        keep(order)
+
+    harness.record("sort/uint32_random", "rows", rows, sort_narrow)
+
+    def sort_real() raises {imm real}:
+        keep(real)
+        var order = argsort(real)
+        keep(order)
+
+    harness.record("sort/float64_random", "rows", rows, sort_real)
+
+    def sort_presorted() raises {imm presorted}:
+        keep(presorted)
+        var order = argsort(presorted)
+        keep(order)
+
+    harness.record("sort/int64_presorted", "rows", rows, sort_presorted)
+
+    def sort_sparse() raises {imm sparse}:
+        keep(sparse)
+        var order = argsort(sparse, descending=True, nulls_first=True)
+        keep(order)
+
+    harness.record("sort/int64_nulls_descending", "rows", rows, sort_sparse)
+
+    def sort_two_keys() raises {imm small, imm narrow}:
+        keep(small)
+        keep(narrow)
+        var cols = List[AnyArray]()
+        cols.append(AnyArray(Array[DType.int64](copy=small)))
+        cols.append(AnyArray(Array[DType.uint32](copy=narrow)))
+        var order = argsort_multi(cols, [False, False], [False, False])
+        keep(order)
+
+    harness.record("sort/multi_two_keys", "rows", rows, sort_two_keys)
+
+    var reference = List[Int64]()
+    for i in range(rows):
+        reference.append(wide[i])
+
+    def sort_reference() raises {imm reference, imm rows}:
+        var copy = List[Int64]()
+        for i in range(rows):
+            copy.append(reference[i])
+        sort(copy)
+        keep(copy[0])
+
+    harness.record("sort/std_sort_int64", "rows", rows, sort_reference)
+
+
 def bench_hash(mut harness: Harness) raises:
     """Measures the hash table, and measures whether it was worth writing.
 
@@ -1232,6 +1363,7 @@ def main() raises:
     bench_buffer(harness)
     bench_array(harness)
     bench_kernel(harness)
+    bench_sort(harness)
     bench_hash(harness)
     bench_dispatch(harness)
     var elapsed = Float64(perf_counter_ns() - started) / 1e9
