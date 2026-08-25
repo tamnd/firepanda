@@ -34,6 +34,7 @@ from std.time import perf_counter_ns
 from firepanda.array.array import Array
 from firepanda.kernel import (
     add,
+    argsort,
     cast_to,
     count_of,
     divide,
@@ -52,6 +53,7 @@ from firepanda.kernel import (
 )
 from firepanda.kernel.scalar import (
     add_scalar,
+    argsort_scalar,
     cast_scalar,
     count_scalar,
     divide_scalar,
@@ -69,9 +71,9 @@ from firepanda.kernel.scalar import (
 from firepanda.testing.rng import Rng
 
 comptime DEFAULT_CASES = 1_000_000
-"""A case is two columns of up to four hundred rows through fifteen kernels, so
-the default is a few hundred million row operations rather than a few hundred
-million cases. It runs in under half a minute."""
+"""A case is two columns of up to four hundred rows through every kernel, so the
+default is a few hundred million row operations rather than a few hundred million
+cases. It runs in about a minute."""
 
 comptime MAX_LENGTH = 401
 """A prime, for the reason given in the module docstring."""
@@ -270,6 +272,41 @@ def run_one[dt: DType](mut rng: Rng, step: Int, seed: UInt64) raises:
     var length = rng.next_below(MAX_LENGTH)
     var a = random_column[dt](rng, length, rng.next_below(4))
     var b = random_column[dt](rng, length, rng.next_below(4))
+
+    # Sorting is checked against an insertion sort over `<`, so the permutation
+    # and its stability are both under test rather than only the sorted values.
+    # The direction and the null placement rotate with the case number instead
+    # of being drawn, so even a short run covers all four combinations.
+    # Short columns, and one case in four. The twin is quadratic and the sort
+    # allocates four buffers per call, so running it on every case costs more
+    # time than the other fourteen kernels put together, which buys coverage of
+    # one kernel by taking it away from all of them. Everything the sort has a
+    # separate code path for, the partial validity word and the digit skip,
+    # happens under a hundred rows too. The four combinations of direction and
+    # null placement rotate on the cases that do run, not on all of them.
+    if length <= 96 and step % 4 == 0:
+        var mode = (step // 4) % 4
+        var descending = mode % 2 == 1
+        var nulls_first = mode >= 2
+        var order = argsort(a, descending, nulls_first)
+        var order_twin = argsort_scalar(a, descending, nulls_first)
+        if len(order) != len(order_twin):
+            fail(step, seed, "argsort", "length disagrees with the twin")
+        for i in range(len(order_twin)):
+            if Int(order[i]) != order_twin[i]:
+                fail(
+                    step,
+                    seed,
+                    "argsort",
+                    String(
+                        "row ",
+                        i,
+                        " is ",
+                        Int(order[i]),
+                        " but twin has ",
+                        order_twin[i],
+                    ),
+                )
 
     var total = sum_of(a)
     if total.value != sum_scalar(a):

@@ -34,3 +34,11 @@ from .cast import cast_to
 from .compare import equal, greater, greater_equal, less, less_equal, not_equal
 from .mask import apply_validity, combined_validity
 from .select import filter_rows, take_rows
+from .sort import (
+    argsort,
+    argsort_into,
+    argsort_multi,
+    is_sorted,
+    sort_key,
+    sort_rows,
+)

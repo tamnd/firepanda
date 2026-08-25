@@ -356,3 +356,67 @@ def filter_scalar[
             out.set_null(at)
         at += 1
     return out^
+
+
+def argsort_scalar[
+    dt: DType
+](col: Array[dt], descending: Bool = False, nulls_first: Bool = False) -> List[
+    Int
+]:
+    """Sorts row indices by insertion, comparing values with `<`.
+
+    An insertion sort is stable by construction as long as it stops shifting on
+    the first element that does not strictly belong after the one being placed,
+    which is what the loop below does, so this twin checks the real kernel's
+    stability and not only its ordering.
+
+    It deliberately does not go through `sort_key`. Comparing the values means
+    the transform is checked rather than assumed, which is the whole point of
+    having a twin. The two places that costs something are NaN, which no
+    comparison orders, and negative zero, which compares equal to positive zero
+    while the kernel sorts it below. Both are pinned down by name in
+    `tests/test_sort.mojo` instead, and the fuzz generator keeps them out of the
+    float columns it builds.
+
+    Args:
+        col: The column.
+        descending: Largest first.
+        nulls_first: Put the nulls at the front rather than the back.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A permutation of `[0, len(col))`.
+    """
+    var live = List[Int]()
+    var nulls = List[Int]()
+    for i in range(len(col)):
+        if col.is_valid(i):
+            live.append(i)
+        else:
+            nulls.append(i)
+
+    for i in range(1, len(live)):
+        var at = live[i]
+        var value = col[at]
+        var j = i - 1
+        while j >= 0:
+            var other = col[live[j]]
+            var shift = other < value if descending else value < other
+            if not shift:
+                break
+            live[j + 1] = live[j]
+            j -= 1
+        live[j + 1] = at
+
+    var out = List[Int]()
+    if nulls_first:
+        for i in range(len(nulls)):
+            out.append(nulls[i])
+    for i in range(len(live)):
+        out.append(live[i])
+    if not nulls_first:
+        for i in range(len(nulls)):
+            out.append(nulls[i])
+    return out^
