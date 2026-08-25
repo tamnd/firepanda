@@ -155,8 +155,9 @@ jobs:
           path: compile-budget.json
           if-no-files-found: warn
 
-  # One machine, always the same one, because comparing a run on an arm runner
-  # against a run on an x86 one measures the runner. docs/specs/10-benchmarks.md.
+  # One machine, always the same one, and both sides of the comparison measured
+  # on it back to back, because comparing two runs on two runners measures the
+  # runners. docs/specs/10-benchmarks.md.
   bench:
     name: Microbenchmarks
     needs: guard
@@ -164,12 +165,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      actions: read
     steps:
-      # This job reads another run's artifacts with `gh` and its own token. It has
-      # no use for the checkout's credentials, so it does not keep them.
+      # Full history, because the baseline below is the merge base rather than an
+      # artifact from another run. The checkout's credentials are not kept; this
+      # job only ever reads.
       - uses: actions/checkout@v7
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/setup-pixi
 
@@ -184,29 +186,34 @@ jobs:
           path: bench.json
           if-no-files-found: error
 
-      - name: Fetch the baseline from main
+      # The baseline is measured here, in this job, on this runner, rather than
+      # downloaded from the last green run on main. Those runs land on whatever
+      # hardware the pool had that day, and the spread between runner generations
+      # is larger than any regression this gate is looking for. Comparing across
+      # them reported a 91% regression in a file the pull request had not touched,
+      # twice, with identical numbers both times, which is what a stale baseline
+      # looks like rather than what noise looks like. Measuring both sides back to
+      # back costs another two minutes and is the only version of this that means
+      # anything.
+      - name: Measure the merge base
         id: baseline
         if: github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          run_id=$(gh run list --workflow=ci.yml --branch=main --status=success --limit=1 \
-            --json databaseId --jq '.[0].databaseId // empty')
-          if [ -z "$run_id" ]; then
-            echo "::notice title=No baseline::no successful CI run on main to compare against yet"
-            exit 0
-          fi
-          if gh run download "$run_id" --name bench-ubuntu-latest --dir baseline; then
-            echo "found=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice title=No baseline::run $run_id has no microbenchmark artifact"
-          fi
+          base=$(git rev-parse HEAD)
+          git fetch --no-tags origin "$GITHUB_BASE_REF"
+          merge_base=$(git merge-base HEAD "origin/$GITHUB_BASE_REF") || exit 0
+          git checkout --detach "$merge_base"
+          mkdir -p baseline
+          pixi run bench -- --json=baseline/bench.json --label=gha-merge-base \
+            --repetitions=5 --min-time=50
+          git checkout --detach "$base"
+          echo "found=true" >> "$GITHUB_OUTPUT"
 
       # The threshold is looser here than the tool's own default because a shared
       # runner is a noisy machine and a gate that cries wolf gets switched off.
       # The tool also refuses to call anything a regression unless it clears the
       # spread it measured, so this is two conditions rather than one.
-      - name: Compare against main
+      - name: Compare against the merge base
         if: steps.baseline.outputs.found == 'true'
         run: |
           pixi run bench-compare -- --baseline baseline/bench.json --candidate bench.json \
