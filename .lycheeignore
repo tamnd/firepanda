@@ -12,3 +12,8 @@ https://pypi.org/project/firepanda
 
 # Discussions are enabled per-repository and 404 when they are not.
 https://github.com/tamnd/firepanda/discussions
+
+# The changelog links a version to its tag, and the tag is pushed after the
+# release pull request merges. On that pull request the link is correctly a 404.
+^https://github\.com/tamnd/firepanda/releases/tag/
+^https://github\.com/tamnd/firepanda/compare/
