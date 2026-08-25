@@ -22,6 +22,35 @@ Both files must come from the same machine. Comparing a run on a laptop against 
 run on a CI runner is meaningless, so a mismatch is refused rather than warned
 about, unless `--allow-machine-mismatch` says the operator knows better.
 
+## Why CI passes `--advisory`
+
+Same machine is necessary and it is not sufficient. The two runs also have to be
+two builds of the same benchmark file, and on a pull request that adds benchmarks
+they are not. `benchmarks/main.mojo` is one compilation unit and the benchmark
+bodies are closures with the thing being measured inlined into them, so adding a
+benchmark at the bottom of the file changes which of the loops above it get
+vectorized.
+
+That is not a theory. Adding the group by benchmarks, 199 lines to the end of the
+file and nothing at all to `firepanda/array` or `firepanda/bitmap`, moved
+`array/sum_scalar` from 386 us to 740 us, `bitmap/or_with` from 58 us to 92 us and
+`kernel/sum_sparse` from 118 us to 186 us, while making `kernel/mean_sparse` 35%
+faster. Two runs on two different runners reproduced all four to within half a
+percent, so it is deterministic rather than noise. Every row that measures through
+a boundary the compiler will not inline across held still, `dispatch/sum_full` at
+1.108 ms on both sides among them, and on the reference machine the invariants
+these rows exist to protect held exactly: `kernel/sum_dense` 110.776 us against
+`kernel/sum_sparse` 110.855 us, `bitmap/and_with` 24.676 us against
+`bitmap/or_with` 24.917 us.
+
+So the numbers are real and the attribution is wrong. The loops did get slower, in
+a binary nobody ships, for a reason that has nothing to do with the change. A gate
+cannot tell that case apart from a genuine regression, which leaves two options:
+fail builds for reasons the author cannot act on, or report and let a human look.
+CI reports. The gate that has teeth is the run on the reference machine recorded
+in each pull request, where the same tool runs without `--advisory` and where the
+build is controlled.
+
 Usage:
     python tools/bench_compare.py --baseline old.json --candidate new.json
     python tools/bench_compare.py --candidate new.json          # just print it
@@ -249,6 +278,14 @@ def main() -> int:
         default=None,
         help="also write a markdown table here, for a pull request comment",
     )
+    parser.add_argument(
+        "--advisory",
+        action="store_true",
+        help=(
+            "report regressions but exit zero, for callers that cannot attribute "
+            "a difference to the library. See the note in the module docstring."
+        ),
+    )
     args = parser.parse_args()
 
     candidate = load(Path(args.candidate))
@@ -361,6 +398,10 @@ def main() -> int:
             lines += ["", "Gone from the candidate: " + ", ".join(sorted(missing))]
         Path(args.markdown).write_text("\n".join(lines) + "\n")
 
+    if regressions and args.advisory:
+        print()
+        print("advisory mode: reporting the above without failing")
+        return 0
     return 1 if regressions else 0
 
 
