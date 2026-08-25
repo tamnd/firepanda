@@ -34,6 +34,7 @@ from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
+from firepanda.frame.display import DisplayOptions, render_table
 from firepanda.kernel.cast import cast_any
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.sort import argsort_any_into, identity_permutation
@@ -561,24 +562,34 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         return self.sort_values(keys, down, front)
 
     def write_to(self, mut writer: Some[Writer]):
-        """Writes the shape and the schema, one column per line.
+        """Writes the frame as a table.
 
-        This is not the display layer either. A frame that cannot be printed at
-        all is not debuggable, and a frame that prints its values needs column
-        widths, truncation and a null spelling, which is a change of its own.
+        The default limits apply, which is ten rows and twenty columns with the
+        middle elided. `render_table` in `firepanda.frame.display` takes a
+        `DisplayOptions` for anything else.
 
         Args:
             writer: The sink.
         """
         writer.write(
-            "DataFrame ",
-            self.rows,
-            " rows x ",
-            len(self.columns),
-            " columns",
+            render_table(self.schema, self.columns, self.rows, DisplayOptions())
+        )
+
+    def describe(self) -> String:
+        """Returns the shape and the schema without rendering any values.
+
+        `write_to` prints the data, which is what you want at a prompt and not
+        what you want when a column is a million rows long and the question is
+        what dtype it ended up as. This is the answer to that question.
+
+        Returns:
+            One line for the shape and one per column.
+        """
+        var out = String(
+            "DataFrame ", self.rows, " rows x ", len(self.columns), " columns"
         )
         for i in range(len(self.schema)):
-            writer.write(
+            out += String(
                 "\n  ",
                 self.schema[i].name,
                 ": ",
@@ -587,3 +598,4 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                 self.columns[i].null_count(),
                 " null",
             )
+        return out^

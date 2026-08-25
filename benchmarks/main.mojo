@@ -51,6 +51,7 @@ from firepanda.buffer.buffer import Buffer
 from firepanda.buffer.pool import BufferPool
 from firepanda.dtype.dispatch import dispatch
 from firepanda.dtype.lists import NUMERIC
+from firepanda.frame.display import DisplayOptions, render_column
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.series import Series
 from firepanda.hash import (
@@ -1134,6 +1135,23 @@ def bench_frame(mut harness: Harness) raises:
         keep(len(df[1]))
 
     harness.record("frame/column_by_position", "rows", rows, frame_by_position)
+
+    # These two are per render rather than per row on purpose. Rendering builds
+    # only the cells it prints, so the cost should not move when the frame gets
+    # taller, and a per-row figure would hide that by dividing a constant by the
+    # row count. Read them against each other instead: a frame at three columns
+    # against a single column, both over a million rows.
+    def frame_render() raises {imm df}:
+        keep(df.rows)
+        keep(String(df).byte_length())
+
+    harness.record("frame/render", "renders", 1, frame_render)
+
+    def series_render() raises {imm df}:
+        keep(df.rows)
+        keep(render_column("score", df[1], DisplayOptions()).byte_length())
+
+    harness.record("frame/render_column", "renders", 1, series_render)
 
 
 def bench_hash(mut harness: Harness) raises:
