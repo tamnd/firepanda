@@ -26,8 +26,10 @@ runs:
   steps:
     - name: Install pixi
       shell: bash
+      env:
+        PIXI_VERSION: ${{ inputs.pixi-version }}
       run: |
-        curl -fsSL https://pixi.sh/install.sh | PIXI_VERSION="${{ inputs.pixi-version }}" bash
+        curl -fsSL https://pixi.sh/install.sh | bash
         echo "$HOME/.pixi/bin" >> "$GITHUB_PATH"
 
     # Keyed on the lockfile: a dependency change busts the cache, nothing else does.
@@ -41,19 +43,28 @@ runs:
         restore-keys: |
           pixi-${{ runner.os }}-${{ runner.arch }}-${{ inputs.environment }}-
 
+    # Inputs come in through env rather than through ${{ }} inside the script.
+    # An expression is expanded into the shell text before bash ever sees it, so
+    # an input carrying a quote or a semicolon becomes shell syntax; an env var is
+    # just data. zizmor flags the difference as template-injection and is right to.
     - name: Install environment
       shell: bash
+      env:
+        LOCKED: ${{ inputs.locked }}
+        ENVIRONMENT: ${{ inputs.environment }}
       run: |
-        if [ "${{ inputs.locked }}" = "true" ]; then
-          pixi install --locked --environment "${{ inputs.environment }}"
+        if [ "$LOCKED" = "true" ]; then
+          pixi install --locked --environment "$ENVIRONMENT"
         else
-          pixi update --environment "${{ inputs.environment }}"
-          pixi install --environment "${{ inputs.environment }}"
+          pixi update --environment "$ENVIRONMENT"
+          pixi install --environment "$ENVIRONMENT"
         fi
 
     # The Mojo ABI is not stable, so which toolchain compiled a result is part of
     # the result. Record it where every job's log can be read for it.
     - name: Record toolchain
       shell: bash
+      env:
+        ENVIRONMENT: ${{ inputs.environment }}
       run: |
-        pixi run --environment "${{ inputs.environment }}" mojo --version | tee -a "$GITHUB_STEP_SUMMARY"
+        pixi run --environment "$ENVIRONMENT" mojo --version | tee -a "$GITHUB_STEP_SUMMARY"

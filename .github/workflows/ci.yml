@@ -1,7 +1,7 @@
 # Actions are pinned to release tags rather than commit SHAs while this repo has a
-# single maintainer. `security.yml` runs zizmor, which flags unpinned actions; when
-# the project starts taking outside contributions, act on those findings and pin to
-# SHAs with a Dependabot-managed comment.
+# single maintainer. That decision is recorded as a zizmor policy in
+# `.github/zizmor.yml`, so it is one line to reverse when the project starts taking
+# outside contributions.
 name: CI
 
 on:
@@ -166,7 +166,11 @@ jobs:
       contents: read
       actions: read
     steps:
+      # This job reads another run's artifacts with `gh` and its own token. It has
+      # no use for the checkout's credentials, so it does not keep them.
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/setup-pixi
 
       # Fewer repetitions and a shorter minimum than a developer would use. The

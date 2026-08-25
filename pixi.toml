@@ -64,7 +64,10 @@ differential = { features = ["dev", "differential"] }
 # `mojo package` and `mojo test` do not exist in Mojo 1.0. Packaging is
 # `precompile` and the output extension is `.mojoc`; tests are ordinary programs
 # that call `TestSuite.discover_tests`, so the runner is a loop.
-build = "mojo precompile firepanda -o build/firepanda.mojoc"
+# The mkdir is not decoration. `mojo precompile` will not create the directory
+# its output path names, it fails with "No such file or directory", and a fresh
+# checkout has no build/ because build/ is ignored.
+build = "mkdir -p build && mojo precompile firepanda -o build/firepanda.mojoc"
 test = { cmd = "bash tools/run_tests.sh", depends-on = ["build"] }
 format = "mojo format firepanda tests benchmarks tools"
 
