@@ -14,6 +14,9 @@ on:
       artifact:
         description: Name of the artifact holding the built distributions
         value: dist
+      ready:
+        description: Whether there were any distributions to build
+        value: ${{ jobs.guard.outputs.ready }}
 
 permissions:
   contents: read
