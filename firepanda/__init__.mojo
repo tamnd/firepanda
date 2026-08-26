@@ -35,4 +35,5 @@ from .dtype import (
     promote,
 )
 from .frame import DataFrame, Series
+from .join import JoinIndices, JoinKind, join_indices
 from .version import VERSION, version

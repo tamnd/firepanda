@@ -3,7 +3,7 @@
 # install rather than against this file; see docs/specs/01-research-2026.md.
 [workspace]
 name = "firepanda"
-version = "0.5.0"
+version = "0.6.0"
 description = "A dataframe library for Mojo with the pandas API"
 authors = ["tamnd <tamnd87@gmail.com>"]
 license = "Apache-2.0"
@@ -77,13 +77,15 @@ format-check = "bash tools/format_check.sh"
 
 # The bitmap is checked against a `List[Bool]` reference written with no bit
 # twiddling at all, every kernel is checked against its scalar twin in
-# firepanda/kernel/scalar.mojo, and factorize is checked against the quadratic
-# one in firepanda/hash/scalar.mojo. The twins are never called in production and
-# exist to be the specification.
-fuzz = { depends-on = ["fuzz-bitmap", "fuzz-kernel", "fuzz-hash"] }
+# firepanda/kernel/scalar.mojo, factorize is checked against the quadratic one in
+# firepanda/hash/scalar.mojo, and the join is checked against the nested loop in
+# firepanda/join/scalar.mojo. The twins are never called in production and exist
+# to be the specification.
+fuzz = { depends-on = ["fuzz-bitmap", "fuzz-kernel", "fuzz-hash", "fuzz-join"] }
 fuzz-bitmap = "mojo run -I . tests/fuzz/main.mojo"
 fuzz-kernel = "mojo run -I . tests/fuzz/kernel.mojo"
 fuzz-hash = "mojo run -I . tests/fuzz/hash.mojo"
+fuzz-join = "mojo run -I . tests/fuzz/join.mojo"
 
 # The substitute for a race detector: every parallel operator, thousands of
 # iterations, randomized worker counts and cancellation points, compared against

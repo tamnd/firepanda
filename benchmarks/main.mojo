@@ -66,6 +66,7 @@ from firepanda.hash import (
     mix,
     radix_partition,
 )
+from firepanda.join import JoinKind, join_indices
 from firepanda.kernel import (
     AggKind,
     add,
@@ -1633,6 +1634,232 @@ def bench_group(mut harness: Harness) raises:
     harness.record("group/frame_three_aggs", "rows", rows, frame_three_aggs)
 
 
+def bench_join(mut harness: Harness) raises:
+    """Times joins, from the row pairing up to `DataFrame.join`.
+
+    The shape every row here uses except the last is the one a join actually has
+    in a query: a large fact table against a small dimension table, each fact row
+    matching exactly one dimension row. That is the case worth being fast at and
+    it is also the case where a bad implementation looks fine, because the output
+    is the same height as the input and nothing is being duplicated.
+
+    Four questions.
+
+    What does the pairing cost on its own. `join/indices_1000` is
+    `join_indices` with no columns gathered afterwards, and `join/inner_1000` is
+    the whole operation, so the difference is what building the output costs. On a
+    two column frame that difference is two gathers and it should dominate.
+
+    What does dimension size cost. `join/inner_1000` and `join/inner_100k` join
+    the same fact rows, using the same thousand keys, against dimensions a
+    hundred times apart in size. The result is identical and only the dimension's
+    unused rows differ, so the gap is exactly what carrying them costs: the
+    counting, prefix and scatter passes are over the whole dimension and the
+    bucket array is as wide as it is.
+
+    What do the other kinds cost relative to inner. Semi and anti stop at the
+    first match and gather nothing from the right, so they should be cheaper than
+    inner on the same inputs. Outer has to track which right rows were hit, which
+    is a bitmap write per matched row.
+
+    What does multiplicity cost. `join/many_to_many` is two small frames with
+    sixty four keys each, so every key produces a block of output rows and the
+    result is far taller than either input. That is the case where a join stops
+    being a gather and starts being a product, and it is deliberately small
+    because the cost is the output size.
+
+    Args:
+        harness: The harness.
+
+    Raises:
+        If a benchmark raises.
+    """
+    var rows = harness.options.rows
+    var rng = Rng(0x105E5)
+
+    var dim_rows = 1000 if rows >= 1000 else rows
+    if dim_rows < 1:
+        dim_rows = 1
+    var wide_rows = 100_000 if rows >= 100_000 else dim_rows
+
+    var fact_key = Array[DType.int64](rows)
+    var fact_other = Array[DType.int64](rows)
+    var fact_value = Array[DType.int64](rows)
+    for i in range(rows):
+        var draw = rng.next_u64()
+        fact_key[i] = Int64(draw % UInt64(dim_rows))
+        fact_other[i] = Int64((draw >> 20) % 8)
+        fact_value[i] = Int64(draw % 1000)
+
+    var fact_series = List[Series]()
+    fact_series.append(Series("key", fact_key^))
+    fact_series.append(Series("other", fact_other^))
+    fact_series.append(Series("value", fact_value^))
+    var fact = DataFrame.from_series(fact_series^)
+
+    var dim = _dimension(dim_rows, 0, "label")
+    var wide_dim = _dimension(wide_rows, 0, "label")
+    # Half the keys, so that the kinds which report a non-match have something to
+    # report. Joining a dimension that covers every key would make anti empty and
+    # outer identical to inner, and neither would be measuring anything.
+    var partial = _dimension(dim_rows // 2 if dim_rows > 1 else 1, 0, "label")
+
+    var one = List[String]()
+    one.append("key")
+    var two = List[String]()
+    two.append("key")
+    two.append("other")
+
+    var fact_keys = List[Int]()
+    fact_keys.append(0)
+    var dim_keys = List[Int]()
+    dim_keys.append(0)
+
+    def indices_only() raises {imm fact, imm dim, imm fact_keys, imm dim_keys}:
+        keep(fact.rows)
+        var pairs = join_indices(
+            fact.columns,
+            fact_keys,
+            fact.rows,
+            dim.columns,
+            dim_keys,
+            dim.rows,
+            JoinKind.INNER,
+        )
+        keep(len(pairs))
+
+    harness.record("join/indices_1000", "rows", rows, indices_only)
+
+    def inner_small() raises {imm fact, imm dim, imm one}:
+        keep(fact.rows)
+        var out = fact.join(dim, one)
+        keep(out.rows)
+
+    harness.record("join/inner_1000", "rows", rows, inner_small)
+
+    def left_small() raises {imm fact, imm dim, imm one}:
+        keep(fact.rows)
+        var out = fact.join(dim, one, JoinKind.LEFT)
+        keep(out.rows)
+
+    harness.record("join/left_1000", "rows", rows, left_small)
+
+    def inner_wide() raises {imm fact, imm wide_dim, imm one}:
+        keep(fact.rows)
+        var out = fact.join(wide_dim, one)
+        keep(out.rows)
+
+    harness.record("join/inner_100k", "rows", rows, inner_wide)
+
+    def semi_partial() raises {imm fact, imm partial, imm one}:
+        keep(fact.rows)
+        var out = fact.join(partial, one, JoinKind.SEMI)
+        keep(out.rows)
+
+    harness.record("join/semi", "rows", rows, semi_partial)
+
+    def anti_partial() raises {imm fact, imm partial, imm one}:
+        keep(fact.rows)
+        var out = fact.join(partial, one, JoinKind.ANTI)
+        keep(out.rows)
+
+    harness.record("join/anti", "rows", rows, anti_partial)
+
+    def outer_partial() raises {imm fact, imm partial, imm one}:
+        keep(fact.rows)
+        var out = fact.join(partial, one, JoinKind.OUTER)
+        keep(out.rows)
+
+    harness.record("join/outer", "rows", rows, outer_partial)
+
+    # Every distinct pair of the two fact key columns, so the two key join finds
+    # a match for every row and the extra cost is the packing rather than a
+    # different result.
+    var pair_rows = dim_rows * 8
+    var pair_key = Array[DType.int64](pair_rows)
+    var pair_other = Array[DType.int64](pair_rows)
+    var pair_label = Array[DType.int64](pair_rows)
+    for i in range(pair_rows):
+        pair_key[i] = Int64(i // 8)
+        pair_other[i] = Int64(i % 8)
+        pair_label[i] = Int64(i)
+    var pair_series = List[Series]()
+    pair_series.append(Series("key", pair_key^))
+    pair_series.append(Series("other", pair_other^))
+    pair_series.append(Series("label", pair_label^))
+    var pair_dim = DataFrame.from_series(pair_series^)
+
+    def two_key() raises {imm fact, imm pair_dim, imm two}:
+        keep(fact.rows)
+        var out = fact.join(pair_dim, two)
+        keep(out.rows)
+
+    harness.record("join/two_keys", "rows", rows, two_key)
+
+    # Deliberately small. Sixty four keys over four thousand rows a side is
+    # sixty four rows per key per side, which is four thousand output rows per
+    # key and a quarter of a million altogether.
+    var block = 4096 if rows >= 4096 else rows
+    if block < 1:
+        block = 1
+    var left_key = Array[DType.int64](block)
+    var left_value = Array[DType.int64](block)
+    var right_key = Array[DType.int64](block)
+    var right_value = Array[DType.int64](block)
+    for i in range(block):
+        left_key[i] = Int64(i % 64)
+        left_value[i] = Int64(i)
+        right_key[i] = Int64(i % 64)
+        right_value[i] = Int64(i)
+    var left_series = List[Series]()
+    left_series.append(Series("key", left_key^))
+    left_series.append(Series("a", left_value^))
+    var right_series = List[Series]()
+    right_series.append(Series("key", right_key^))
+    right_series.append(Series("b", right_value^))
+    var dense_left = DataFrame.from_series(left_series^)
+    var dense_right = DataFrame.from_series(right_series^)
+
+    # The item count is the output height rather than the input height, because
+    # that is what the work is proportional to and a per-row number against four
+    # thousand inputs would be off by the fan-out.
+    var product = block * (block // 64 if block >= 64 else 1)
+
+    def many_to_many() raises {
+        imm dense_left, imm dense_right, imm one, imm block
+    }:
+        keep(block)
+        var out = dense_left.join(dense_right, one)
+        keep(out.rows)
+
+    harness.record("join/many_to_many", "rows", product, many_to_many)
+
+
+def _dimension(rows: Int, base: Int, label: String) raises -> DataFrame:
+    """Builds a dimension table with one row per key.
+
+    Args:
+        rows: The height, which is also the number of distinct keys.
+        base: The first key.
+        label: The name of the payload column.
+
+    Returns:
+        A two column frame keyed by `key`.
+
+    Raises:
+        If the frame cannot be built.
+    """
+    var key = Array[DType.int64](rows)
+    var payload = Array[DType.int64](rows)
+    for i in range(rows):
+        key[i] = Int64(base + i)
+        payload[i] = Int64(i * 7)
+    var series = List[Series]()
+    series.append(Series("key", key^))
+    series.append(Series(label, payload^))
+    return DataFrame.from_series(series^)
+
+
 def machine_json(options: Options) -> String:
     """Describes the machine the numbers came from.
 
@@ -1767,6 +1994,7 @@ def main() raises:
     bench_frame(harness)
     bench_hash(harness)
     bench_group(harness)
+    bench_join(harness)
     bench_dispatch(harness)
     var elapsed = Float64(perf_counter_ns() - started) / 1e9
 
