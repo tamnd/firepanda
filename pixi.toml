@@ -81,7 +81,11 @@ format-check = "bash tools/format_check.sh"
 # firepanda/hash/scalar.mojo, and the join is checked against the nested loop in
 # firepanda/join/scalar.mojo. The twins are never called in production and exist
 # to be the specification.
-fuzz = { depends-on = ["fuzz-bitmap", "fuzz-kernel", "fuzz-hash", "fuzz-join"] }
+# All four at once rather than one after another. They share nothing, and each
+# spends its first seconds in the compiler, so in sequence this step waited for
+# the sum of four compiles for no reason. `--max-total-time=N` still means N
+# seconds per fuzzer.
+fuzz = "bash tools/run_fuzz.sh"
 fuzz-bitmap = "mojo run -I . tests/fuzz/main.mojo"
 fuzz-kernel = "mojo run -I . tests/fuzz/kernel.mojo"
 fuzz-hash = "mojo run -I . tests/fuzz/hash.mojo"

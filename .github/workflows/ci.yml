@@ -110,17 +110,17 @@ jobs:
     needs: guard
     if: needs.guard.outputs.has_mojo == 'true'
     runs-on: ${{ matrix.os }}
+    # A stabilizing language will break us, and finding out on the day it lands
+    # rather than on release day is what `.github/workflows/nightly.yml` is for.
+    # It builds and tests against nightly every morning and opens a tracking issue
+    # when it breaks. Running the same build again on every pull request was the
+    # slowest job in this workflow and told us nothing the canary had not already
+    # told us that morning.
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
         mojo: [pinned]
-        include:
-          # A stabilizing language will break us. Find out on the day it lands,
-          # not on the day a user reports it. Nightly may fail without blocking.
-          - os: ubuntu-latest
-            mojo: nightly
-    continue-on-error: ${{ matrix.mojo == 'nightly' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -138,6 +138,8 @@ jobs:
       - name: Unit and docstring tests
         run: pixi run test
 
+      # All four fuzzers at once. The bound is per fuzzer, as it was when they
+      # ran in sequence, so this shortens the step without shortening the fuzz.
       - name: Differential fuzz (bounded)
         run: pixi run fuzz -- --max-total-time=300
 
@@ -166,19 +168,23 @@ jobs:
     permissions:
       contents: read
     steps:
-      # Full history, because the baseline below is the merge base rather than an
-      # artifact from another run. The checkout's credentials are not kept; this
-      # job only ever reads.
+      # Two commits, because the baseline below is the previous commit rather than
+      # an artifact from another run. The checkout's credentials are not kept;
+      # this job only ever reads.
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: 2
           persist-credentials: false
       - uses: ./.github/actions/setup-pixi
 
-      # Fewer repetitions and a shorter minimum than a developer would use. The
-      # full settings take a couple of minutes and this runs on every push.
+      # Fewer repetitions and a shorter minimum than a developer would use, and
+      # both numbers are measured rather than picked. The suite costs roughly a
+      # fixed amount per repetition whatever else is set, so the repetition count
+      # is the lever: five repetitions at a fifty millisecond minimum took 309 s
+      # and three at twenty five took 154 s for the same 123 rows. Three is the
+      # fewest that still has a median.
       - name: Run
-        run: pixi run bench -- --json=bench.json --label=gha-ubuntu-latest --repetitions=5 --min-time=50
+        run: pixi run bench -- --json=bench.json --label=gha-ubuntu-latest --repetitions=3 --min-time=25
 
       - uses: actions/upload-artifact@v7
         with:
@@ -193,20 +199,26 @@ jobs:
       # them reported a 91% regression in a file the pull request had not touched,
       # twice, with identical numbers both times, which is what a stale baseline
       # looks like rather than what noise looks like. Measuring both sides back to
-      # back costs another two minutes and is the only version of this that means
-      # anything.
-      - name: Measure the merge base
+      # back is the only version of this that means anything.
+      #
+      # It runs on pushes to main rather than on pull requests. Measuring both
+      # sides doubles the job, and doubling it was buying a comparison that the
+      # `--advisory` flag below already says nobody should gate on, in front of an
+      # author who is waiting to merge. The performance gate with teeth is the
+      # reference machine run recorded in each pull request. This one now lands a
+      # few minutes after the merge, where nothing is waiting for it, and it is
+      # one line to move back.
+      - name: Measure the previous commit
         id: baseline
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'push'
         run: |
-          base=$(git rev-parse HEAD)
-          git fetch --no-tags origin "$GITHUB_BASE_REF"
-          merge_base=$(git merge-base HEAD "origin/$GITHUB_BASE_REF") || exit 0
-          git checkout --detach "$merge_base"
+          head=$(git rev-parse HEAD)
+          parent=$(git rev-parse 'HEAD^') || exit 0
+          git checkout --detach "$parent"
           mkdir -p baseline
-          pixi run bench -- --json=baseline/bench.json --label=gha-merge-base \
-            --repetitions=5 --min-time=50
-          git checkout --detach "$base"
+          pixi run bench -- --json=baseline/bench.json --label=gha-previous \
+            --repetitions=3 --min-time=25
+          git checkout --detach "$head"
           echo "found=true" >> "$GITHUB_OUTPUT"
 
       # The threshold is looser here than the tool's own default because a shared
@@ -221,7 +233,7 @@ jobs:
       # vectorized, and the comparison then reports large reproducible movements
       # in files the pull request never opened. The performance gate with teeth is
       # the reference machine run recorded in each pull request.
-      - name: Compare against the merge base
+      - name: Compare against the previous commit
         if: steps.baseline.outputs.found == 'true'
         run: |
           pixi run bench-compare -- --baseline baseline/bench.json --candidate bench.json \

@@ -8,6 +8,13 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed
+
+- The test runner runs several files at once rather than one after another. Each test file is a separate `mojo run` that compiles the library again, so the step was spending most of its wall clock in the compiler with one core busy. Output is still collected per file and printed in filename order, so the log reads the same. `FIREPANDA_TEST_JOBS=1` restores the serial run. On an eight core machine the suite went from 70.7 s to 26.9 s.
+- The four fuzzers run at once for the same reason, through `tools/run_fuzz.sh`. `--max-total-time=N` still means N seconds per fuzzer rather than N in total.
+- Continuous integration no longer builds against the Mojo nightly toolchain on every pull request. `.github/workflows/nightly.yml` already does that every morning and opens a tracking issue when it breaks, and the duplicate was the slowest job in the pull request pipeline.
+- The microbenchmark job measures the previous commit on pushes to main rather than the merge base on every pull request. The suite costs roughly a fixed amount per repetition whatever else is set, so measuring both sides doubled the job, and what it bought was a comparison the job already prints as advisory. The performance gate with teeth is the reference machine run recorded in each pull request. The job also drops from five repetitions at a fifty millisecond minimum to three at twenty five, which is 154 s instead of 309 s for the same 123 rows.
+
 ## [0.6.2] - 2026-08-28
 
 Built against Mojo 1.0.0 (ed45d567).
