@@ -32,6 +32,24 @@ def bytes_for(length: Int) -> Int:
     return (length + 7) // 8
 
 
+def _low_mask(bits: Int) -> UInt64:
+    """Returns a word with its lowest `bits` bits set.
+
+    The full-word case is spelled out rather than shifted into, because shifting
+    a 64-bit word by 64 is undefined and on x86 quietly shifts by zero, which
+    would produce a mask of one bit where the caller asked for all of them.
+
+    Args:
+        bits: How many low bits to set, from 0 to 64.
+
+    Returns:
+        The mask.
+    """
+    if bits >= 64:
+        return UInt64.MAX
+    return (UInt64(1) << UInt64(bits)) - 1
+
+
 struct Bitmap(Copyable, Movable, Sized):
     """A packed run of validity bits, one per element."""
 
@@ -253,6 +271,59 @@ struct Bitmap(Copyable, Movable, Sized):
         for i in range(last_full * 8, end):
             self.set(i, value)
         self._clear_tail()
+
+    def paste(mut self, at: Int, other: Self, count: Int):
+        """Copies the first `count` bits of another bitmap in at a bit offset.
+
+        `slice` reads a run out of a bitmap and this writes one in, and the
+        asymmetry between them is that the destination here is shared: the bits
+        on either side of the run belong to somebody else and have to come
+        through untouched. So every word is a read, a mask and a write rather
+        than a store, and a run that does not start on a word boundary is
+        written as two halves of the word it straddles.
+
+        This is what a concat of columns with nulls needs. Without it the only
+        way to place a part's validity at an arbitrary row is a loop over bits,
+        which is sixty four times the work and was the shape of the loop at the
+        bottom of this package's concat kernel.
+
+        Args:
+            at: The destination bit position the run starts at. The run must fit
+                inside this bitmap.
+            other: The bitmap to read from.
+            count: How many bits to copy, starting from the first bit of
+                `other`. Must not exceed either bitmap.
+        """
+        if count <= 0:
+            return
+        for w in range((count + 63) // 64):
+            var bits = count - w * 64
+            if bits > 64:
+                bits = 64
+            var value = other.unsafe_word(w) & _low_mask(bits)
+
+            var target = at + w * 64
+            var word = target >> 6
+            var offset = target & 63
+            var low = 64 - offset
+            if low > bits:
+                low = bits
+
+            var mask = _low_mask(low) << UInt64(offset)
+            self.unsafe_set_word(
+                word,
+                (self.unsafe_word(word) & ~mask)
+                | ((value << UInt64(offset)) & mask),
+            )
+            if bits > low:
+                # Only reachable when the run is unaligned, so `low` is under 64
+                # and the shift below is defined.
+                var rest = _low_mask(bits - low)
+                self.unsafe_set_word(
+                    word + 1,
+                    (self.unsafe_word(word + 1) & ~rest)
+                    | ((value >> UInt64(low)) & rest),
+                )
 
     def and_with(mut self, other: Self):
         """Intersects this bitmap with another in place.
