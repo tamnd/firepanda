@@ -15,9 +15,23 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ### Changed
 
+- A fixed width column is parsed straight into the finished column. The column is allocated at its full height before any block runs and each block writes its own contiguous range of it, so the per block pieces are gone and so is the copy that joined them. Validity is still per block, because two blocks meeting inside a byte would both have to read, modify and write the same word, and the bitmaps are pasted in afterwards, which is a pass over a bit per row rather than over a value per row. A block with no nulls in it is not pasted at all. String columns are unchanged and still build a piece per block, because a block's payload size is not known until the block has been read and there is nothing to write into.
 - `read_csv` maps the file rather than copying it. The kernel already has the bytes and a mapping points at them where they are, so nothing is copied, and because the parser touches its blocks on every core at once the page faults are taken in parallel rather than serialised behind one `read` call. A file that cannot be mapped, and an empty one counts, is read the old way.
 
 ### Notes on the numbers
+
+Ten million rows on an i9-13900K, five repetitions, warm page cache, reading off a mapping. The direct write is measured against the mapping alone, so the two columns below are the two changes in this release in the order they were made.
+
+| file | mapped | mapped and written direct |
+| --- | --- | --- |
+| narrow | 348 ms | 281 ms |
+| quoted | 431 ms | 402 ms |
+| nulls | 791 ms | 631 ms |
+| wide | 701 ms | 701 ms |
+
+The narrow file is four columns of nothing but numbers over ten million rows, so all of the copy that went away was on its critical path, and it gains a fifth. The nulls file gains the most in absolute terms: nine values in ten are missing there, and the join was copying a validity bitmap along with the values on every one of eight columns. The wide file does not move, which is the expected answer rather than a disappointing one. It is fifty columns of a million rows, so a column is eight megabytes against the narrow file's eighty, and what a wide read spends its time on is fifty million fields rather than the bytes that come out of them.
+
+Peak resident memory on the quoted file goes from 2.80 GB to 2.77 GB. That it barely moves is the honest result and it is worth saying why. The peak is not the columns, it is the scan index, which is a twenty four byte span per field plus eight bytes per row and comes to 960 MB on the narrow file for a 357 MB input. That is the next thing to go.
 
 Ten million rows on an i9-13900K, five repetitions, warm page cache, both paths in the same process back to back so they share a cache and a heap.
 
