@@ -29,6 +29,7 @@ from .parse import (
 from .read import (
     INFER_ALL,
     MIN_BLOCK,
+    SPECULATE_ROWS,
     ReadOptions,
     TypeGuess,
     block_count,
@@ -39,6 +40,8 @@ from .read import (
     read_csv_as,
     read_csv_bytes,
     read_csv_bytes_as,
+    rung_of,
+    sample_columns,
     scan_blocks,
 )
 from .scalar import scan_csv_scalar

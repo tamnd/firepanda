@@ -10,13 +10,23 @@ string, and it never moves back down. That ordering is the whole design. A colum
 read as an integer because the first thousand rows happened to be integers is a
 read that fails on row one thousand and one, and the alternatives to failing are
 both bad: raise, and a file that pandas reads becomes a file firepanda refuses,
-or silently null the value, and the frame quietly loses data. So the climb
-happens during inference, over a sample the caller chooses the size of, and the
-default sample is the whole file. Reading twice is the price of never being
-wrong about a type, and the second pass is over offsets rather than over text.
+or silently null the value, and the frame quietly loses data.
 
-A caller who knows the types can say so and skip inference entirely, which is
-both faster and the only way to force a column wider than its values need.
+What the ladder also buys is a way not to read the file twice. Deciding a type
+by looking at every value means parsing every value in the file before parsing
+every value in the file, and on a wide file that second pass was a third of the
+read. So the type is guessed from the first `SPECULATE_ROWS` rows of each block
+and the column is filled straight away, and a value that does not fit moves the
+column one rung up and fills it again. A rung read off a sample is never higher
+than the rung the whole column needs, and the ladder only climbs, so the type
+that comes out is the type looking at everything first would have given. It is
+the same answer, arrived at without the pass that proved it.
+
+Refilling is the uncommon case and it costs one more pass over one column, not
+over the file. A caller who would rather not risk it can bound `infer_rows`,
+which goes back to deciding first and filling second, or declare the schema and
+skip the question, which is also the only way to force a column wider than its
+values need.
 
 Missing fields never constrain the type. A column of a hundred integers and one
 `NA` is an integer column with one null in it, which is a thing this frame can
@@ -25,16 +35,18 @@ validity bitmap exists.
 
 A file large enough to be worth it is read on every core. `split.mojo` cuts the
 buffer into blocks that each start on a row boundary, and from there the scan,
-the inference and the conversion all run one task per block. Each block scans
-into its own `Scan` and guesses its own types.
+the sampling and the conversion all run one task per block. Each block scans into
+its own `Scan` and samples its own rows.
 
 Four things are worth knowing about that.
 
 **The types are decided globally, not per block.** Each block climbs the ladder
-over its own rows and reports how far it got, and the column takes the highest
-rung any block reached. A block of all nulls reports that it saw no value at all,
-which is not the same as reporting string, because otherwise one empty block
-would force a numeric column to text.
+over the rows it looked at and reports how far it got, and the column starts at
+the highest rung any block reached. A block of all nulls reports that it saw no
+value at all, which is not the same as reporting string, because otherwise one
+empty block would force a numeric column to text. Sampling every block rather
+than the head of the file costs nothing extra and starts the file whose first
+megabyte is integers and whose last is not off at the right rung.
 
 **A fixed width column is written once, in place.** The column is allocated at
 its full height before any block runs and each block parses its rows straight
@@ -142,6 +154,52 @@ comptime _FLOAT = 2
 
 comptime _STRING = 3
 """The top rung, which everything fits and nothing climbs out of."""
+
+
+comptime SPECULATE_ROWS = 128
+"""Rows of each block a read looks at before it picks a type and commits.
+
+Small on purpose. The point of the sample is not to be right, it is to be right
+almost always and cheap always: a wrong guess costs one extra pass over one
+column, and a sample large enough to never be wrong costs a pass over the whole
+file every time.
+"""
+
+
+@fieldwise_init
+struct BlockFill(Movable):
+    """What one block made of one column."""
+
+    var valid: Bitmap
+    """Which of the block's rows held a value."""
+
+    var ok: Bool
+    """Whether every value parsed as the type asked for."""
+
+    var row: Int
+    """The file row of the first value that did not, when `ok` is false."""
+
+    var saw_value: Bool
+    """Whether any row of the block held a value at all."""
+
+
+@fieldwise_init
+struct FillReport(ImplicitlyCopyable, Movable):
+    """What every block together made of one column, apart from the values.
+
+    It is filled in through a `mut` argument rather than returned beside the
+    column, because a caller that has to decide whether to keep the column
+    cannot decide it while holding the two in one value.
+    """
+
+    var ok: Bool
+    """Whether every value in the file parsed as the type asked for."""
+
+    var row: Int
+    """The lowest file row that did not, when `ok` is false."""
+
+    var saw_value: Bool
+    """Whether any row of the column held a value at all."""
 
 
 @fieldwise_init
@@ -519,27 +577,124 @@ def infer_schema_blocks(
     return Schema(fields^)
 
 
+def sample_columns(
+    data: Span[UInt8, _],
+    scans: List[Scan],
+    layout: List[BlockRows],
+    width: Int,
+    options: ReadOptions,
+) raises -> List[TypeGuess]:
+    """Guesses every column's type from the first few rows of every block.
+
+    The same climb as full inference over a hundredth of a percent of the rows.
+    A rung read off a sample is always at or below the rung the whole column
+    needs, because a rung only ever goes up, which is what makes the guess safe
+    to build on: too low is a column read twice and too high cannot happen.
+
+    Sampling every block rather than the head of the file costs nothing extra
+    and catches the file whose first megabyte is integers and whose last is not.
+
+    Args:
+        data: The buffer the scans point into.
+        scans: One scan per block.
+        layout: Each block's share of the rows.
+        width: How many columns the file has.
+        options: The read options.
+
+    Returns:
+        One guess per column.
+
+    Raises:
+        Error: Never directly. The signature is inherited from `parallel_for`.
+    """
+    var blocks = len(scans)
+    var parts = List[TypeGuess](
+        length=width * blocks, fill=TypeGuess(_BOOL, False)
+    )
+
+    def one(task: Int) raises {mut parts, imm}:
+        var column = task // blocks
+        var b = task % blocks
+        var last = len(scans[b])
+        var bound = layout[b].first + SPECULATE_ROWS
+        if bound < last:
+            last = bound
+        parts[task] = guess_column(
+            data, scans[b], column, layout[b].first, last
+        )
+
+    parallel_for(one, width * blocks)
+
+    var merged = List[TypeGuess](capacity=width)
+    for column in range(width):
+        var guess = TypeGuess(_BOOL, False)
+        for b in range(blocks):
+            guess = combine(guess, parts[column * blocks + b])
+        merged.append(guess)
+    return merged^
+
+
+def rung_of(dtype: LogicalType) -> Int:
+    """Returns which rung of the ladder a declared type sits on.
+
+    Anything that is not one of the three types inference can produce is
+    `_STRING`, which here means "not a fixed width column this file fills in
+    place" rather than "text". A declared `INT32` goes down the piece and stack
+    path with everything else, which is what it did before any of this existed.
+
+    Args:
+        dtype: The column's type.
+
+    Returns:
+        One of `_BOOL`, `_INT`, `_FLOAT` and `_STRING`.
+    """
+    if dtype == LogicalType.BOOL:
+        return _BOOL
+    if dtype == LogicalType.INT64:
+        return _INT
+    if dtype == LogicalType.FLOAT64:
+        return _FLOAT
+    return _STRING
+
+
 def build_blocks(
     data: Span[UInt8, _],
     scans: List[Scan],
     layout: List[BlockRows],
     var schema: Schema,
     options: ReadOptions,
+    guesses: List[TypeGuess],
 ) raises -> DataFrame:
     """Fills one column at a time, every block of it at once.
+
+    A fixed width column is allocated once at its full height and every block
+    parses its rows straight into its own range of it. A string column cannot
+    do that, because a block's payload size is not known until it has been read,
+    so it builds a piece per block and stacks them.
+
+    When `guesses` is not empty the schema is a guess from a sample rather than
+    a fact, and a value that does not fit its column promotes the column and
+    reads it again instead of failing. The ladder only goes up, so a column is
+    read at most four times and in every file anyone has it is read once. What
+    that buys is the whole of inference: deciding the type properly means
+    parsing every field in the file before parsing every field in the file.
+
+    When `guesses` is empty the schema came from the caller and a value that
+    does not fit is an error, which is the only thing a declared type can mean.
 
     Args:
         data: The buffer the scans point into.
         scans: One scan per block.
         layout: Each block's share of the rows.
-        schema: The types to read as.
+        schema: The types to read as, which speculation may raise.
         options: The read options.
+        guesses: One sampled guess per column, or empty for a declared schema.
 
     Returns:
         The frame.
 
     Raises:
-        Error: If a value does not fit its column's declared type.
+        Error: If a value does not fit a declared column's type.
     """
     var blocks = len(scans)
     var header = 1 if options.has_header else 0
@@ -547,35 +702,100 @@ def build_blocks(
     for b in range(blocks):
         rows += layout[b].count
     var columns = List[AnyArray](capacity=len(schema))
+    var speculating = len(guesses) > 0
 
     for column in range(len(schema)):
-        var dtype = schema[column].dtype
-        # A fixed width column is allocated once at its full height and every
-        # block writes its own rows into it, so there is no per block column to
-        # allocate and nothing to stack afterwards. A string column cannot do
-        # that, because a block's payload size is not known until it has been
-        # read, so it still builds pieces and concatenates them.
-        if dtype == LogicalType.BOOL:
-            var bools = fill_column[DType.bool, _BOOL](
-                data, scans, layout, column, header, schema[column], rows
-            )
-            columns.append(AnyArray(bools^))
-        elif dtype == LogicalType.INT64:
-            var ints = fill_column[DType.int64, _INT](
-                data, scans, layout, column, header, schema[column], rows
-            )
-            columns.append(AnyArray(ints^))
-        elif dtype == LogicalType.FLOAT64:
-            var floats = fill_column[DType.float64, _FLOAT](
-                data, scans, layout, column, header, schema[column], rows
-            )
-            columns.append(AnyArray(floats^))
-        else:
-            columns.append(
-                stack_column(
-                    data, scans, layout, column, header, schema[column], options
+        var rung = rung_of(schema[column].dtype)
+        if speculating and not guesses[column].saw_value:
+            # The sample saw no value at all, so it said string, and that is
+            # the right answer only if the whole column turns out to be null.
+            # Start at the bottom and let the first value that turns up decide.
+            rung = _BOOL
+
+        var done = False
+        var report = FillReport(True, 0, False)
+        while not done:
+            if speculating:
+                # The schema follows the rung rather than the other way round,
+                # and it has to be right before the attempt rather than after
+                # it, because the string path reads the type out of it.
+                var settled = logical_of(TypeGuess(rung, True))
+                if settled != schema[column].dtype:
+                    schema.fields[column] = Field(schema[column].name, settled)
+            if rung == _BOOL:
+                var bools = fill_column[DType.bool, _BOOL](
+                    data,
+                    scans,
+                    layout,
+                    column,
+                    header,
+                    schema[column],
+                    rows,
+                    report,
                 )
-            )
+                if report.ok and (report.saw_value or not speculating):
+                    columns.append(AnyArray(bools^))
+                    done = True
+                elif not report.ok and not speculating:
+                    raise Error(
+                        bad_value(schema[column].name, report.row, "a boolean")
+                    )
+                else:
+                    rung = _STRING if report.ok else _INT
+            elif rung == _INT:
+                var ints = fill_column[DType.int64, _INT](
+                    data,
+                    scans,
+                    layout,
+                    column,
+                    header,
+                    schema[column],
+                    rows,
+                    report,
+                )
+                if report.ok and (report.saw_value or not speculating):
+                    columns.append(AnyArray(ints^))
+                    done = True
+                elif not report.ok and not speculating:
+                    raise Error(
+                        bad_value(schema[column].name, report.row, "an integer")
+                    )
+                else:
+                    rung = _STRING if report.ok else _FLOAT
+            elif rung == _FLOAT:
+                var floats = fill_column[DType.float64, _FLOAT](
+                    data,
+                    scans,
+                    layout,
+                    column,
+                    header,
+                    schema[column],
+                    rows,
+                    report,
+                )
+                if report.ok and (report.saw_value or not speculating):
+                    columns.append(AnyArray(floats^))
+                    done = True
+                elif not report.ok and not speculating:
+                    raise Error(
+                        bad_value(schema[column].name, report.row, "a number")
+                    )
+                else:
+                    rung = _STRING
+            else:
+                columns.append(
+                    stack_column(
+                        data,
+                        scans,
+                        layout,
+                        column,
+                        header,
+                        schema[column],
+                        options,
+                    )
+                )
+                done = True
+
     return DataFrame(schema^, columns^)
 
 
@@ -639,6 +859,7 @@ def fill_column[
     header: Int,
     field: Field,
     rows: Int,
+    mut report: FillReport,
 ) raises -> Array[dt]:
     """Reads one fixed width column, every block writing straight into it.
 
@@ -661,12 +882,14 @@ def fill_column[
         header: One if the file has a header row, zero if not.
         field: The column's name and type.
         rows: The height of the finished column.
+        report: Set to whether every value fitted, the first row that did not,
+            and whether any value was seen at all.
 
     Returns:
-        The column.
+        The column, which is complete only if the report says so.
 
     Raises:
-        Error: If a value does not fit the column's declared type.
+        Error: Never directly. The signature is inherited from `parallel_for`.
 
     Parameters:
         dt: The dtype to read as.
@@ -678,27 +901,37 @@ def fill_column[
     # and the ranges partition the column, which is the fact that makes this
     # safe, and it is not a fact the origin system can be told.
     var values = out.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
-    var masks = List[Bitmap](capacity=blocks)
+    var parts = List[BlockFill](capacity=blocks)
     for b in range(blocks):
-        masks.append(Bitmap(layout[b].count))
+        parts.append(BlockFill(Bitmap(layout[b].count), True, 0, False))
 
-    def one(b: Int) raises {mut masks, imm}:
-        masks[b] = fill_block[dt, rung](
+    def one(b: Int) raises {mut parts, imm}:
+        parts[b] = fill_block[dt, rung](
             data,
             scans[b],
             column,
             layout[b].first,
             layout[b].count,
             layout[b].before + header,
-            field.name,
             values.unsafe_offset(layout[b].before),
         )
 
     parallel_for(one, blocks)
 
+    report = FillReport(True, 0, False)
     for b in range(blocks):
-        if not masks[b].all_valid():
-            out.data.validity.paste(layout[b].before, masks[b], layout[b].count)
+        report.saw_value = report.saw_value or parts[b].saw_value
+        if not parts[b].ok:
+            # The lowest failing row rather than whichever block happened to
+            # finish first, so a malformed file always names the same line.
+            if report.ok or parts[b].row < report.row:
+                report.ok = False
+                report.row = parts[b].row
+            continue
+        if not parts[b].valid.all_valid():
+            out.data.validity.paste(
+                layout[b].before, parts[b].valid, layout[b].count
+            )
     return out^
 
 
@@ -711,9 +944,8 @@ def fill_block[
     first_row: Int,
     rows: Int,
     file_row: Int,
-    name: String,
     values: Pointer[Scalar[dt], MutUntrackedOrigin],
-) raises -> Bitmap:
+) raises -> BlockFill:
     """Parses one block's rows of one column into somebody else's buffer.
 
     Args:
@@ -724,21 +956,25 @@ def fill_block[
         rows: How many value rows to read.
         file_row: The row number in the whole file of `first_row`, which is what
             an error message quotes.
-        name: The column name, for the error message.
         values: Where this block's first value goes. The caller guarantees room
             for `rows` of them.
 
     Returns:
-        This block's validity, which the caller pastes into the column's.
+        This block's validity, whether every value fitted, and the file row of
+        the first that did not.
 
     Raises:
-        Error: If a value does not fit the type.
+        Error: Never. A value that does not fit is reported rather than raised,
+            because whether it is an error at all is the caller's question: a
+            declared type says it is and a guessed one says the guess was too
+            narrow. The signature is inherited from `parallel_for`.
 
     Parameters:
         dt: The dtype to read as.
         rung: Which of `_BOOL`, `_INT` and `_FLOAT` the values are parsed as.
     """
     var valid = Bitmap(rows)
+    var saw_value = False
     for i in range(rows):
         var bytes = field_bytes(data, scan.at(first_row + i, column))
         if is_missing(bytes):
@@ -746,23 +982,24 @@ def fill_block[
             # zeroed, so marking the bit is the whole of it.
             valid.set(i, False)
             continue
+        saw_value = True
 
         comptime if rung == _BOOL:
             var parsed = parse_bool(bytes)
             if not parsed.ok:
-                raise Error(bad_value(name, file_row + i, "a boolean"))
+                return BlockFill(valid^, False, file_row + i, saw_value)
             values.unsafe_offset(i)[] = rebind[Scalar[dt]](parsed.value)
         elif rung == _INT:
             var parsed = parse_int[dt](bytes)
             if not parsed.ok:
-                raise Error(bad_value(name, file_row + i, "an integer"))
+                return BlockFill(valid^, False, file_row + i, saw_value)
             values.unsafe_offset(i)[] = parsed.value
         else:
             var parsed = parse_float[dt](bytes)
             if not parsed.ok:
-                raise Error(bad_value(name, file_row + i, "a number"))
+                return BlockFill(valid^, False, file_row + i, saw_value)
             values.unsafe_offset(i)[] = parsed.value
-    return valid^
+    return BlockFill(valid^, True, 0, saw_value)
 
 
 def read_csv_bytes(
@@ -785,8 +1022,28 @@ def read_csv_bytes(
     if split_scan(data, options.dialect, scans):
         var width = block_width(scans)
         var layout = block_rows(scans, options)
-        var schema = infer_schema_blocks(data, scans, layout, width, options)
-        return build_blocks(data, scans, layout, schema^, options)
+        if options.infer_rows != INFER_ALL:
+            # A bound on the sample is a promise about what gets looked at, so
+            # it keeps the two pass read: speculating would quietly look past it
+            # and give a type the caller asked not to be given.
+            var bounded = infer_schema_blocks(
+                data, scans, layout, width, options
+            )
+            return build_blocks(
+                data, scans, layout, bounded^, options, List[TypeGuess]()
+            )
+        var guesses = sample_columns(data, scans, layout, width, options)
+        var fields = List[Field](capacity=width)
+        for column in range(width):
+            fields.append(
+                Field(
+                    column_name(data, scans[0], column, options),
+                    logical_of(guesses[column]),
+                )
+            )
+        return build_blocks(
+            data, scans, layout, Schema(fields^), options, guesses
+        )
 
     var scan = scan_csv(data, options.dialect)
     var schema = infer_schema(data, scan, options)
@@ -818,7 +1075,9 @@ def read_csv_bytes_as(
     if split_scan(data, options.dialect, scans):
         check_width(len(schema), block_width(scans))
         var layout = block_rows(scans, options)
-        return build_blocks(data, scans, layout, schema^, options)
+        return build_blocks(
+            data, scans, layout, schema^, options, List[TypeGuess]()
+        )
 
     var scan = scan_csv(data, options.dialect)
     if scan.is_ragged():

@@ -51,9 +51,7 @@ def bytes_of(var text: String) -> List[UInt8]:
         The bytes, without a terminator.
     """
     var out = List[UInt8](capacity=text.byte_length())
-    var ptr = text.unsafe_ptr()
-    for i in range(text.byte_length()):
-        out.append(ptr.unsafe_offset(i).unsafe_load())
+    out.extend(text.as_bytes())
     return out^
 
 
@@ -139,6 +137,71 @@ def test_a_bounded_sample_can_be_told_to_stop_looking() raises:
     var data = bytes_of(text^)
     with assert_raises(contains="is not an integer"):
         _ = read_csv_bytes(Span(data), ReadOptions(default_dialect(), True, 10))
+
+
+def split_csv(header: String, var row: String, last: String) -> String:
+    """Builds a file big enough that the reader cuts it into blocks.
+
+    Speculation only happens on the parallel path, and the parallel path only
+    happens above `MIN_BLOCK` twice over, so a test of it is half a megabyte at
+    the smallest. The body is doubled rather than appended to because a dozen
+    doublings are a dozen allocations and a hundred thousand appends are not.
+
+    Args:
+        header: The header row, terminator included.
+        row: The row to repeat, terminator included.
+        last: The one row at the end that the sample never sees.
+
+    Returns:
+        The file.
+    """
+    var body = row^
+    while body.byte_length() < 1 << 19:
+        var doubled = String(body, body)
+        body = doubled^
+    return String(header, body, last)
+
+
+def test_a_split_file_settles_on_the_types_full_inference_would_give() raises:
+    """The sample is a guess, and every column here is a way of being wrong.
+
+    A file above the block threshold picks its types from the first hundred and
+    odd rows of each block and starts reading. What comes out has to be what
+    looking at every row first would have given, so the last row of this one is
+    a value none of the columns can hold: `b` climbs a rung to float, `c` climbs
+    two to text, and `d` never sees a value anywhere and lands on text with its
+    nulls intact, which is where the single threaded path leaves it too.
+
+    Three columns in one file rather than three files because the file has to be
+    half a megabyte and the test suite has to finish.
+    """
+    var frame = frame_of(split_csv("a,b,c,d\n", "1,2,2,\n", "1,3.5,x,\n"))
+    var last = len(frame) - 1
+    assert_true(frame.schema[0].dtype == LogicalType.INT64)
+    assert_true(frame.schema[1].dtype == LogicalType.FLOAT64)
+    assert_true(frame.schema[2].dtype == LogicalType.STRING)
+    assert_true(frame.schema[3].dtype == LogicalType.STRING)
+    var floats = frame[1].as_typed[DType.float64]()
+    assert_equal(floats[0], Float64(2.0))
+    assert_equal(floats[last], Float64(3.5))
+    assert_equal(frame[2].strings()[0], "2")
+    assert_equal(frame[2].strings()[last], "x")
+    assert_false(frame[3].is_valid(0))
+    assert_false(frame[3].is_valid(last))
+
+
+def test_a_declared_schema_still_refuses_a_bad_value_in_a_split_file() raises:
+    """Promotion is for a guess. A declared type is the caller's answer.
+
+    The row the message names is the lowest failing row rather than whichever
+    block reached one first, so the same file always produces the same message.
+    """
+    var fields = List[Field]()
+    fields.append(Field("a", LogicalType.INT64))
+    fields.append(Field("b", LogicalType.INT64))
+    var data = bytes_of(split_csv("a,b\n", "1,2\n", "1,3.5\n"))
+    with assert_raises(contains="is not an integer"):
+        _ = read_csv_bytes_as(Span(data), Schema(fields^), ReadOptions())
 
 
 def test_text_stops_the_ladder_at_the_top() raises:

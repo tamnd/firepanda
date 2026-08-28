@@ -13,24 +13,30 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 - `read_csv_as(path, schema)` and `read_csv_as(path, schema, options)`, which read a file with types the caller already knows. `read_csv_bytes_as` has always existed, so the only way to declare a schema was to open and copy the file yourself, which gave up the mapping and read the file twice as slowly for the trouble.
 - `Scan.push` and `Scan.field`, the two functions that know how a scanned field is packed, and `Scan.long`, where the length of a field too long to pack is kept.
 - `LongField`, the position and length of a field of four megabytes or more.
+- `SPECULATE_ROWS`, how many rows of each block a read looks at before it picks a type, and `sample_columns`, which does the looking. `rung_of` maps a declared type back to its rung on the ladder.
 
 ### Changed
 
 - A scanned field is one 64-bit word rather than a struct of two offsets and two flags. Forty bits address the buffer, twenty two hold the length and two are the flags. The index a scan produces is the largest thing a read allocates and it is written once and read once, so its size is very nearly all of its cost: for a four column file of ten million rows it was 960 MB over a 357 MB input and it is now 320 MB. `Scan.at` still returns a `FieldSpan`, so nothing above the scanner changed.
 - A buffer larger than a terabyte is refused by the scanner with a message that says so, rather than recording offsets that do not fit. A field of four megabytes or more keeps its length in `Scan.long` and is not refused, because a file with one in it is a real file.
+- Types are guessed from a sample and the guess is corrected if it turns out wrong, rather than decided by a pass over every value in the file. Each block looks at its first `SPECULATE_ROWS` rows, the column is filled at the rung that sample reached, and a value that does not fit moves the column one rung up and fills it again. A rung read off a sample is never higher than the rung the whole column needs and the ladder only climbs, so the type that comes out is the type the old full pass gave, on every file, and the schemas and null counts of the four ingestion files were compared build against build to check it. Refilling costs one more pass over one column, not over the file.
+- `fill_block` and `fill_column` report a value that does not fit rather than raising on it, because whether it is an error at all is now the caller's question: a declared type says it is and a guessed one says the guess was too narrow. When it is an error, the row named is the lowest failing row in the file rather than whichever block reached one first, so the same malformed file always produces the same message.
+- A bounded `infer_rows` still decides types first and fills second. A bound is a promise about what gets looked at, and speculating would quietly look past it.
 
 ### Notes on the numbers
 
-Ten million rows on an i9-13900K, five repetitions, warm cache, reading off a mapping, the two builds run alternately in one session because the machine was not in the same state as it was for 0.6.11.
+Ten million rows on an i9-13900K, five repetitions per round, four rounds, warm cache, reading off a mapping. The two changes were measured separately and each against a build of the commit before it, run alternately in one session, because the machine drifts by tens of percent over an afternoon and numbers taken hours apart are not comparable.
 
-| file | before | after | peak RSS before | peak RSS after |
-| --- | --- | --- | --- | --- |
-| narrow | 460 ms | 372 ms | 2.10 GB | 1.41 GB |
-| quoted | 655 ms | 570 ms | 2.80 GB | 2.23 GB |
-| nulls | 940 ms | 660 ms | 3.10 GB | 1.83 GB |
-| wide | 830 ms | 780 ms | 2.03 GB | 1.27 GB |
+| file | 0.6.11 | packed index | speculative types | peak RSS before | peak RSS after |
+| --- | --- | --- | --- | --- | --- |
+| narrow | 460 ms | 372 ms | 192 ms | 2.10 GB | 1.72 GB |
+| quoted | 655 ms | 570 ms | 333 ms | 2.80 GB | 2.57 GB |
+| nulls | 940 ms | 660 ms | 381 ms | 3.10 GB | 2.32 GB |
+| wide | 830 ms | 780 ms | 473 ms | 2.03 GB | 1.43 GB |
 
-The nulls file gains the most of the four on both counts, which is what a file of nine columns and very short fields should do: it has the highest ratio of index to content, so shrinking the index is worth the most there.
+The two middle columns are from different sessions and the machine was slower for the first, so read down a column rather than across the whole row. Against its own baseline the packed index took nulls from 940 to 660 and speculation took it from 499 to 381, and the wide file, which has fifty columns and the most inference to skip, went from 720 to 473.
+
+Peak RSS is unchanged by speculation, within two percent either way, which is the expected answer: the same buffers are allocated, one pass earlier.
 
 ## [0.6.11] - 2026-08-29
 
