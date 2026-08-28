@@ -25,11 +25,10 @@ validity bitmap exists.
 
 A file large enough to be worth it is read on every core. `split.mojo` cuts the
 buffer into blocks that each start on a row boundary, and from there the scan,
-the inference and the conversion all run one task per block. Nothing is shared:
-each block scans into its own `Scan`, guesses its own types, fills its own piece
-of each column, and the pieces are stacked at the end.
+the inference and the conversion all run one task per block. Each block scans
+into its own `Scan` and guesses its own types.
 
-Three things are worth knowing about that.
+Four things are worth knowing about that.
 
 **The types are decided globally, not per block.** Each block climbs the ladder
 over its own rows and reports how far it got, and the column takes the highest
@@ -37,12 +36,23 @@ rung any block reached. A block of all nulls reports that it saw no value at all
 which is not the same as reporting string, because otherwise one empty block
 would force a numeric column to text.
 
-**Columns are stacked one at a time.** Doing every column's blocks at once and
-then stacking would hold two copies of the whole file's worth of columns at the
-peak. Finishing one column before starting the next holds two copies of one
-column instead, which for a four column file is a third less memory and for a
-wide one is very much less. Each column still fills every core, because the
-parallelism is over blocks rather than over columns.
+**A fixed width column is written once, in place.** The column is allocated at
+its full height before any block runs and each block parses its rows straight
+into its own range of it, so there are no per block columns to allocate and
+nothing to stack afterwards. Validity is the exception: two blocks meeting
+inside a byte would each have to read, modify and write the same word, so each
+block fills a bitmap of its own and those are pasted in afterwards, which is a
+pass over a bit per row rather than over a value per row. A block with no nulls
+is not pasted at all.
+
+**A string column still builds pieces and stacks them.** A block's payload size
+is not known until the block has been read, so there is nothing to write into.
+The stacking is two memcpys per block since 0.6.10, which is most of the way to
+the same place.
+
+**Columns are done one at a time.** Doing every column's blocks at once would
+hold the whole file's worth of pieces at the peak. Each column still fills every
+core, because the parallelism is over blocks rather than over columns.
 
 **A wrong split cannot pass silently.** `split.mojo` documents the check; if it
 fires, or if any block fails to scan, the whole read is done again on one thread
@@ -52,6 +62,7 @@ and that is the answer the caller gets.
 from std.collections.span import Span
 
 from firepanda.array import Array, AnyArray, StringArray, StringBuilder
+from firepanda.bitmap import Bitmap
 from firepanda.dtype import Field, LogicalType, Schema
 from firepanda.exec import parallel_for, worker_count
 from firepanda.frame import DataFrame
@@ -532,31 +543,226 @@ def build_blocks(
     """
     var blocks = len(scans)
     var header = 1 if options.has_header else 0
+    var rows = 0
+    for b in range(blocks):
+        rows += layout[b].count
     var columns = List[AnyArray](capacity=len(schema))
 
     for column in range(len(schema)):
-        var pieces = List[AnyArray](capacity=blocks)
-        for _ in range(blocks):
-            # A placeholder rather than an `Optional`, because every slot is
-            # written before any of them is read and the empty column costs an
-            # allocation of nothing.
-            pieces.append(AnyArray(Array[DType.int8](0)))
-
-        def one(b: Int) raises {mut pieces, imm}:
-            pieces[b] = read_column(
-                data,
-                scans[b],
-                column,
-                layout[b].first,
-                layout[b].count,
-                layout[b].before + header,
-                schema[column],
-                options,
+        var dtype = schema[column].dtype
+        # A fixed width column is allocated once at its full height and every
+        # block writes its own rows into it, so there is no per block column to
+        # allocate and nothing to stack afterwards. A string column cannot do
+        # that, because a block's payload size is not known until it has been
+        # read, so it still builds pieces and concatenates them.
+        if dtype == LogicalType.BOOL:
+            var bools = fill_column[DType.bool, _BOOL](
+                data, scans, layout, column, header, schema[column], rows
             )
-
-        parallel_for(one, blocks)
-        columns.append(concat_any(pieces))
+            columns.append(AnyArray(bools^))
+        elif dtype == LogicalType.INT64:
+            var ints = fill_column[DType.int64, _INT](
+                data, scans, layout, column, header, schema[column], rows
+            )
+            columns.append(AnyArray(ints^))
+        elif dtype == LogicalType.FLOAT64:
+            var floats = fill_column[DType.float64, _FLOAT](
+                data, scans, layout, column, header, schema[column], rows
+            )
+            columns.append(AnyArray(floats^))
+        else:
+            columns.append(
+                stack_column(
+                    data, scans, layout, column, header, schema[column], options
+                )
+            )
     return DataFrame(schema^, columns^)
+
+
+def stack_column(
+    data: Span[UInt8, _],
+    scans: List[Scan],
+    layout: List[BlockRows],
+    column: Int,
+    header: Int,
+    field: Field,
+    options: ReadOptions,
+) raises -> AnyArray:
+    """Reads one column as a piece per block and stacks the pieces.
+
+    Args:
+        data: The buffer the scans point into.
+        scans: One scan per block.
+        layout: Each block's share of the rows.
+        column: Which column to read.
+        header: One if the file has a header row, zero if not.
+        field: The column's name and type.
+        options: The read options.
+
+    Returns:
+        The column.
+
+    Raises:
+        Error: If a value does not fit the column's declared type.
+    """
+    var blocks = len(scans)
+    var pieces = List[AnyArray](capacity=blocks)
+    for _ in range(blocks):
+        # A placeholder rather than an `Optional`, because every slot is written
+        # before any of them is read and the empty column costs an allocation of
+        # nothing.
+        pieces.append(AnyArray(Array[DType.int8](0)))
+
+    def one(b: Int) raises {mut pieces, imm}:
+        pieces[b] = read_column(
+            data,
+            scans[b],
+            column,
+            layout[b].first,
+            layout[b].count,
+            layout[b].before + header,
+            field,
+            options,
+        )
+
+    parallel_for(one, blocks)
+    return concat_any(pieces)
+
+
+def fill_column[
+    dt: DType, rung: Int
+](
+    data: Span[UInt8, _],
+    scans: List[Scan],
+    layout: List[BlockRows],
+    column: Int,
+    header: Int,
+    field: Field,
+    rows: Int,
+) raises -> Array[dt]:
+    """Reads one fixed width column, every block writing straight into it.
+
+    The values go into the finished column's own buffer, because a block's rows
+    are a contiguous range of it and no two blocks share an element. Validity
+    cannot go the same way: two blocks meeting inside a byte would each have to
+    read, modify and write the same word, and that is a race whichever order
+    they run in. So each block fills a bitmap of its own and the bitmaps are
+    pasted afterwards, which is one pass over a bit per row against a pass over
+    a value per row and does not show up next to the parse.
+
+    A block whose rows are all present does not get pasted at all, and a column
+    with no nulls anywhere therefore costs nothing.
+
+    Args:
+        data: The buffer the scans point into.
+        scans: One scan per block.
+        layout: Each block's share of the rows.
+        column: Which column to read.
+        header: One if the file has a header row, zero if not.
+        field: The column's name and type.
+        rows: The height of the finished column.
+
+    Returns:
+        The column.
+
+    Raises:
+        Error: If a value does not fit the column's declared type.
+
+    Parameters:
+        dt: The dtype to read as.
+        rung: Which of `_BOOL`, `_INT` and `_FLOAT` the values are parsed as.
+    """
+    var blocks = len(scans)
+    var out = Array[dt](rows)
+    # The origin is dropped deliberately. Every block writes a range of its own
+    # and the ranges partition the column, which is the fact that makes this
+    # safe, and it is not a fact the origin system can be told.
+    var values = out.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+    var masks = List[Bitmap](capacity=blocks)
+    for b in range(blocks):
+        masks.append(Bitmap(layout[b].count))
+
+    def one(b: Int) raises {mut masks, imm}:
+        masks[b] = fill_block[dt, rung](
+            data,
+            scans[b],
+            column,
+            layout[b].first,
+            layout[b].count,
+            layout[b].before + header,
+            field.name,
+            values.unsafe_offset(layout[b].before),
+        )
+
+    parallel_for(one, blocks)
+
+    for b in range(blocks):
+        if not masks[b].all_valid():
+            out.data.validity.paste(layout[b].before, masks[b], layout[b].count)
+    return out^
+
+
+def fill_block[
+    dt: DType, rung: Int
+](
+    data: Span[UInt8, _],
+    scan: Scan,
+    column: Int,
+    first_row: Int,
+    rows: Int,
+    file_row: Int,
+    name: String,
+    values: Pointer[Scalar[dt], MutUntrackedOrigin],
+) raises -> Bitmap:
+    """Parses one block's rows of one column into somebody else's buffer.
+
+    Args:
+        data: The buffer the scan points into.
+        scan: The scanned fields.
+        column: Which column to read.
+        first_row: The first value row within `scan`.
+        rows: How many value rows to read.
+        file_row: The row number in the whole file of `first_row`, which is what
+            an error message quotes.
+        name: The column name, for the error message.
+        values: Where this block's first value goes. The caller guarantees room
+            for `rows` of them.
+
+    Returns:
+        This block's validity, which the caller pastes into the column's.
+
+    Raises:
+        Error: If a value does not fit the type.
+
+    Parameters:
+        dt: The dtype to read as.
+        rung: Which of `_BOOL`, `_INT` and `_FLOAT` the values are parsed as.
+    """
+    var valid = Bitmap(rows)
+    for i in range(rows):
+        var bytes = field_bytes(data, scan.at(first_row + i, column))
+        if is_missing(bytes):
+            # A null is a zero in the values buffer, and the buffer arrived
+            # zeroed, so marking the bit is the whole of it.
+            valid.set(i, False)
+            continue
+
+        comptime if rung == _BOOL:
+            var parsed = parse_bool(bytes)
+            if not parsed.ok:
+                raise Error(bad_value(name, file_row + i, "a boolean"))
+            values.unsafe_offset(i)[] = rebind[Scalar[dt]](parsed.value)
+        elif rung == _INT:
+            var parsed = parse_int[dt](bytes)
+            if not parsed.ok:
+                raise Error(bad_value(name, file_row + i, "an integer"))
+            values.unsafe_offset(i)[] = parsed.value
+        else:
+            var parsed = parse_float[dt](bytes)
+            if not parsed.ok:
+                raise Error(bad_value(name, file_row + i, "a number"))
+            values.unsafe_offset(i)[] = parsed.value
+    return valid^
 
 
 def read_csv_bytes(
