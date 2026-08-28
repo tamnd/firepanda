@@ -98,6 +98,7 @@ from firepanda.kernel import (
     argsort_multi,
     cast_to,
     coalesce,
+    concat_any,
     concat_arrays,
     concat_two_any,
     divide,
@@ -1928,6 +1929,31 @@ def bench_strings(mut harness: Harness) raises:
         keep(len(out))
 
     harness.record("strings/filter", "rows", rows, filter_half)
+
+    # Eight parts of a thirty second of the rows each, which is the shape
+    # `read_csv` hands the kernel: one piece per block, stacked once per column.
+    # The short row and the long row are the two halves of the kernel, because a
+    # short element is a straight copy of its view and a long one also has to
+    # have its payload offset moved along.
+    var short_parts = List[AnyArray]()
+    var long_parts = List[AnyArray]()
+    for p in range(8):
+        var first = p * rows // 8
+        var last = (p + 1) * rows // 8
+        short_parts.append(AnyArray(short.slice(first, last)))
+        long_parts.append(AnyArray(long.slice(first, last)))
+
+    def concat_short() raises {imm short_parts}:
+        var out = concat_any(short_parts)
+        keep(len(out))
+
+    harness.record("strings/concat_short", "rows", rows, concat_short)
+
+    def concat_long() raises {imm long_parts}:
+        var out = concat_any(long_parts)
+        keep(len(out))
+
+    harness.record("strings/concat_long", "rows", rows, concat_long)
 
 
 def bench_text(mut harness: Harness) raises:

@@ -32,7 +32,12 @@ from .agg import AggResult, count_of, max_of, mean_of, min_of, sum_of
 from .arith import add, divide, multiply, subtract
 from .cast import cast_any, cast_strings_to, cast_to, cast_to_strings
 from .compare import equal, greater, greater_equal, less, less_equal, not_equal
-from .concat import concat_any, concat_arrays, concat_two_any
+from .concat import (
+    concat_any,
+    concat_arrays,
+    concat_strings,
+    concat_two_any,
+)
 from .group import (
     AggKind,
     aggregate_group,
