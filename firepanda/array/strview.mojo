@@ -109,6 +109,20 @@ struct StringView(ImplicitlyCopyable, Movable, Sized):
         """
         return self._w1
 
+    def shift_offset(mut self, by: UInt32):
+        """Moves a long string's payload offset along by a fixed amount.
+
+        Stacking two columns' payloads end to end leaves the second column's
+        views pointing at where its bytes used to be, and this is how they are
+        moved onto where the bytes are now. It is only meaningful on a long
+        view; on a short one `_w3` holds data bytes and adding to it corrupts
+        the string.
+
+        Args:
+            by: The number of bytes the payload moved.
+        """
+        self._w3 += by
+
     def inline_bytes(ref self) -> Pointer[UInt8, origin_of(self)]:
         """Returns a pointer to the twelve inline data bytes.
 

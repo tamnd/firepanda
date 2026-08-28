@@ -161,6 +161,45 @@ def test_slice_leaves_the_source_alone() raises:
     assert_equal(bitmap.count_ones(), 32)
 
 
+def test_paste_matches_a_loop_over_bits() raises:
+    # Every destination offset from 0 to 70 covers both halves of the word the
+    # run starts in, the aligned case, and a run that spans three words.
+    var source = Bitmap(100, all_valid=False)
+    for i in range(100):
+        if i % 7 < 3:
+            source.set(i, True)
+
+    var counts: List[Int] = [1, 63, 64, 65, 100]
+    for at in range(71):
+        for c in range(len(counts)):
+            var count = counts[c]
+            var fast = Bitmap(200, all_valid=False)
+            for i in range(200):
+                fast.set(i, i % 2 == 0)
+            var slow = Bitmap(copy=fast)
+
+            fast.paste(at, source, count)
+            for i in range(count):
+                slow.set(at + i, source.get(i))
+
+            # Spelled as a raise rather than an assert per bit, because the
+            # message an assert takes is built whether it fires or not and
+            # seventy thousand of them is three seconds of the test run.
+            for i in range(200):
+                if fast.get(i) != slow.get(i):
+                    raise Error(
+                        String("bit ", i, " pasting ", count, " at ", at)
+                    )
+
+
+def test_paste_leaves_the_tail_zero() raises:
+    var source = Bitmap(5)
+    var target = Bitmap(13, all_valid=False)
+    target.paste(8, source, 5)
+    assert_equal(target.count_ones(), 5)
+    assert_equal(len(target.to_list()), 13)
+
+
 def test_copy_is_deep() raises:
     var original = Bitmap(32)
     var duplicate = Bitmap(copy=original)

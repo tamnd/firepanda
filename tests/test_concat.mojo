@@ -21,11 +21,17 @@ from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array, from_list
+from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.dtype.lists import ALL
 from firepanda.frame.concat import concat, concat_series
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.series import Series
-from firepanda.kernel.concat import concat_any, concat_arrays, concat_two_any
+from firepanda.kernel.concat import (
+    concat_any,
+    concat_arrays,
+    concat_strings,
+    concat_two_any,
+)
 from firepanda.kernel.scalar import concat_scalar
 from firepanda.testing.rng import Rng
 
@@ -361,6 +367,117 @@ def test_concat_agrees_with_its_twin() raises:
             fast.is_valid(i), slow.is_valid(i), "validity row " + String(i)
         )
         assert_equal(fast[i], slow[i], "row " + String(i))
+
+
+def strings_of(values: List[String], missing: List[Int]) raises -> StringArray:
+    """Builds a string column with nulls at the given positions.
+
+    Args:
+        values: The values, one per row. The value at a null row is ignored.
+        missing: Which rows are null.
+
+    Returns:
+        The column.
+    """
+    var builder = StringBuilder(capacity=len(values))
+    for i in range(len(values)):
+        var is_null = False
+        for m in range(len(missing)):
+            if missing[m] == i:
+                is_null = True
+        if is_null:
+            builder.append_null()
+        else:
+            builder.append(values[i].as_bytes())
+    return builder^.finish()
+
+
+def test_concat_strings_stacks_payloads() raises:
+    # Every part has at least one element too long to live inside its view, so
+    # every part after the first has offsets that have to be moved along, which
+    # is the one thing the block copy has to get right and the element by
+    # element version got for free.
+    var left = strings_of(
+        ["short", "a string well over twelve bytes", "x"], [2]
+    )
+    var right = strings_of(
+        ["another string over twelve bytes", "", "third one over twelve bytes"],
+        [],
+    )
+    var parts = List[StringArray]()
+    parts.append(left^)
+    parts.append(right^)
+
+    var out = concat_strings(parts)
+    assert_equal(len(out), 6, "height")
+    assert_equal(out[0], "short", "row 0")
+    assert_equal(out[1], "a string well over twelve bytes", "row 1")
+    assert_false(out.is_valid(2), "row 2 is null")
+    assert_equal(out[3], "another string over twelve bytes", "row 3")
+    assert_equal(out[4], "", "row 4")
+    assert_equal(out[5], "third one over twelve bytes", "row 5")
+
+
+def test_concat_strings_agrees_with_element_by_element() raises:
+    # The reference is what the kernel used to do: append every element to a
+    # builder in order. Lengths straddle the twelve byte inline boundary and the
+    # part heights are odd on purpose, so the validity of a part lands at a bit
+    # offset that is not a multiple of eight, let alone of sixty four.
+    var rng = Rng(0x5EED1234)
+    var parts = List[StringArray]()
+    for _ in range(6):
+        var rows = rng.next_below(40)
+        var builder = StringBuilder(capacity=rows)
+        for _ in range(rows):
+            if rng.next_below(5) == 0:
+                builder.append_null()
+            else:
+                var text = String("")
+                for _ in range(rng.next_below(30)):
+                    text += String(chr(97 + rng.next_below(26)))
+                builder.append(text.as_bytes())
+        parts.append(builder^.finish())
+
+    var reference = StringBuilder()
+    for p in range(len(parts)):
+        for i in range(len(parts[p])):
+            if parts[p].is_valid(i):
+                reference.append(parts[p].unsafe_bytes(i))
+            else:
+                reference.append_null()
+    var slow = reference^.finish()
+
+    var fast = concat_strings(parts)
+    assert_equal(len(fast), len(slow), "same height")
+    for i in range(len(fast)):
+        assert_equal(
+            fast.is_valid(i), slow.is_valid(i), "validity row " + String(i)
+        )
+        assert_equal(fast[i], slow[i], "row " + String(i))
+
+
+def test_concat_strings_through_any_and_pairs() raises:
+    var first = strings_of(["one over twelve bytes long", "b"], [])
+    var second = strings_of(["c", "two over twelve bytes long"], [1])
+
+    var listed = List[AnyArray]()
+    listed.append(AnyArray(StringArray(copy=first)))
+    listed.append(AnyArray(StringArray(copy=second)))
+    var from_list_form = concat_any(listed)
+    var from_pair = concat_two_any(AnyArray(first^), AnyArray(second^))
+
+    assert_equal(len(from_list_form), 4, "height")
+    ref listed_out = from_list_form.strings()
+    ref paired_out = from_pair.strings()
+    for i in range(4):
+        assert_equal(
+            listed_out.is_valid(i),
+            paired_out.is_valid(i),
+            "validity row " + String(i),
+        )
+        assert_equal(listed_out[i], paired_out[i], "row " + String(i))
+    assert_equal(listed_out[0], "one over twelve bytes long", "row 0")
+    assert_equal(listed_out[3], "", "row 3 is the null")
 
 
 def main() raises:

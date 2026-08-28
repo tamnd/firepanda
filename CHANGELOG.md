@@ -8,6 +8,26 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added
+
+- `concat_strings`, the typed spelling of a concat of string columns, beside the `concat_arrays` that has always been there for the fixed width ones.
+- `Bitmap.paste`, which writes a run of bits into a bitmap at a bit offset. It is the mirror of `slice` and it is harder, because the destination is shared: the bits either side of the run belong to a different part and have to survive, so every word is a read, a mask and a write, and a run that does not start on a word boundary is written as two halves. Tested against a loop over bits at every offset from 0 to 70 for five run lengths.
+- `StringView.shift_offset`, which moves a long element's payload offset along by a fixed amount. That is the whole of what stacking two payloads costs a view.
+- Two benchmark rows, `strings/concat_short` and `strings/concat_long`, stacking eight parts of a quarter million elements each, which is the shape `read_csv` hands the kernel.
+
+### Changed
+
+- A concat of string columns copies blocks rather than elements. It walked every element into a `StringBuilder`, which copied the bytes into a growing payload, appended a view to one `List` and a flag to another, and then copied both `List`s again in `finish`. Four copies per element on a path `read_csv` runs once per column. The views of a part are now one memcpy and its payload is another, and the only per element work left is adding the part's payload base to the offset field of the views long enough to have one. Short elements are not touched at all.
+- The validity of a part with nulls goes across through `Bitmap.paste` rather than one bit at a time.
+
+### Notes on the numbers
+
+Measured on an i9-13900K, eight parts of 262,144 elements, five repetitions: 2.339 ms to 0.265 ms on a column of eight byte elements, and 4.897 ms to 1.218 ms on a column of thirty two byte ones, which is 8.8 and 4.0 times. The gap between the two is the payload, which still has to be copied and is now the whole cost of the long case.
+
+Inside `read_csv` at ten million rows, the phase that stacks the per block pieces: 833 ms to 83 ms on a file of two text columns, 268 ms to 43 ms on a four column one, 176 ms to 55 ms on a fifty column one. A file with no text column does not move, which is expected, since its stack was already a memcpy.
+
+The end to end read does not move by as much as that, and it is worth saying why rather than quoting the phase number and stopping. Reading the file into memory is 400 ms of a narrow read and 760 ms of a quoted one, which is now the largest single part of it, and at these sizes the wall clock of a whole read on this machine varies by twenty to thirty per cent between runs. The file read is the next piece of work.
+
 ## [0.6.9] - 2026-08-29
 
 Built against Mojo 1.0.0 (ed45d567).
