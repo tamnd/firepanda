@@ -55,7 +55,7 @@ from firepanda.dtype.lists import ALL
 
 from firepanda.kernel.agg import max_of
 
-from .factorize import factorize
+from .factorize import factorize, factorize_strings
 
 
 struct Grouping(Movable):
@@ -162,6 +162,12 @@ def _factorize_any(col: AnyArray) raises -> Array[DType.uint32]:
     Raises:
         If the dtype has no physical layout.
     """
+    # Before the dispatch, because uint8 is in ALL and a string column would
+    # match it and group on the first byte of each view, which puts every name
+    # starting with the same letter in one group.
+    if col.is_string():
+        return factorize_strings(col.strings()).into_codes()
+
     comptime for candidate in ALL:
         if col.dtype() == candidate:
             return factorize(col.as_typed[candidate]()).into_codes()

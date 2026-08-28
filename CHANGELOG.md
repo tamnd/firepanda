@@ -8,6 +8,27 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added
+
+- A text column can be a group by key and a join key. `group_by` accepts one on its own or alongside number keys, with or without `dropna`, sorted or in first seen order, and the joins take one on either side.
+- `factorize_strings`, which assigns a group ordinal to every element of a `StringArray`, and `FactorizedStrings`, which carries the codes, the row that first showed each group and the null group.
+- `hash_bytes` and `hash_strings_chunk`, a length seeded hash over a run of bytes and the chunked form the table build consumes.
+- `HashTable.build_strings`, the probe loop for keys that do not fit in the hash.
+- `factorize_strings_linear`, the scalar twin, which compares bytes against every group it has seen and never hashes.
+- `tests/test_text_group.mojo`, twenty one tests, and a factorize round in the string fuzzer against a reference that shares no code with the kernel.
+
+### Fixed
+
+- A string column reaching the group by and join dispatch matched `uint8` and was grouped on the first byte of each view, which put every value starting with the same letter in one group. Both dispatches now ask whether the column is text before the type walk. The same hazard was fixed in the sort in 0.6.5 and this is the rest of it.
+
+### Why text needs its own table build
+
+The existing table stores a 64 bit hash and treats hash equality as key equality. That is exact for a fixed width key, because the mix is a bijection on 64 bits, so two keys that hash alike are the same key. Text does not fit in 64 bits and the hash is a real hash, so `build_strings` compares the bytes against the row that first showed the group and keeps probing when they differ. The two builds are kept apart rather than merged behind a flag, so the fixed width one stays a loop with nothing extra in it.
+
+### Notes on the numbers
+
+Measured on an i9-13900K, one million rows, fifteen repetitions, interquartile range under 4 percent on every row. Distinct text keys group at 14.9 ns a row against 14.3 for an int64 column of the same height that also goes through the hash. A column where every element shares a nine byte prefix costs 16.8 ns a row, which is the case that costs the sort 307.6, because a group only has to find its bucket and does not have to order anything. A hundred repeated values cost 10.6 ns a row against 3.6 for the int64 column, which takes a direct route that text has no equivalent of.
+
 ## [0.6.5] - 2026-08-28
 
 Built against Mojo 1.0.0 (ed45d567).

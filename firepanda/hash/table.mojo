@@ -12,6 +12,14 @@ exact. What it buys is that the caller hands over one number per row instead of
 two, the probe does one load per step instead of two, and a growth reinserts
 without hashing anything again.
 
+That argument covers every fixed width dtype and does not cover text, because
+sixteen bytes of name do not fit in eight bytes of hash and no function can make
+them. `build_strings` is the same probe with the comparison put back: on a hash
+match it compares the row against the row that first produced that ordinal, and
+keeps probing if they differ. The two builds are otherwise the same loop, kept
+apart rather than merged behind a flag so that the fixed width one stays a loop
+with nothing in it.
+
 Layout is one flat buffer of 16-byte slots, the hash in the first eight bytes and
 the ordinal in the second eight. Two parallel buffers would be the obvious
 alternative and would touch two cache lines on every probe instead of one, which
@@ -38,6 +46,7 @@ extrapolation lives.
 from std.sys.intrinsics import PrefetchOptions, prefetch
 
 from firepanda.array.array import Array
+from firepanda.array.strings import StringArray
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer
 
@@ -393,6 +402,151 @@ struct HashTable(Movable, Sized):
                         UInt32(Int(ordinal) - 1 + offset)
                     )
                     break
+                at = (at + 1) & mask
+
+        self._count = found
+        self._stage = stage
+        self._half = half
+        self._mark = mark
+
+    def build_strings(
+        mut self,
+        hashes: Buffer,
+        col: StringArray,
+        has_null: Bool,
+        base: Int,
+        count: Int,
+        rows: Int,
+        offset: Int,
+        mut codes: Array[DType.uint32],
+        mut firsts: List[Int],
+    ):
+        """Inserts a chunk of a string column's keys in one call.
+
+        `build` with the key comparison put back. A hash match is a candidate
+        rather than an answer, so the row is compared against the row that first
+        produced that ordinal, and a mismatch keeps probing exactly as an
+        occupied slot with a different hash does.
+
+        The comparison is nearly free in the usual case. `element_equals` settles
+        two elements on their length and their first four bytes without reading
+        either payload, and the row it compares against was written when the
+        group was created and so tends to already be in cache on a low
+        cardinality column. What it costs is a load of the other row's view,
+        which on a column where every row is its own group is a cache miss per
+        row and is the price of being right.
+
+        It is worth saying how rarely the comparison changes the answer. Two
+        different strings landing on the same 64 bits happens about once in every
+        two hundred thousand columns of ten million distinct keys, so a version
+        of this that skipped the check would pass every test anybody wrote and
+        would merge two groups in production some months later. That is the
+        reason it is here rather than a measurement.
+
+        The sizing schedule is shared with `build`, so a column built by one and
+        then the other would size itself correctly, though nothing does that.
+
+        Args:
+            hashes: Hashes for this chunk, indexed from zero, from
+                `hash_strings_chunk`.
+            col: The column, needed for the comparison. Indexed by absolute row.
+            has_null: Whether the column has any nulls at all.
+            base: The absolute row index this chunk starts at.
+            count: How many rows are in this chunk.
+            rows: The length of the whole column.
+            offset: Added to every ordinal written to `codes`.
+            codes: Where the per-row ordinals go, indexed by absolute row.
+            firsts: Appended with the absolute row index of every key that was
+                new, in ordinal order. This build reads it as well as writing it,
+                because it is where the key to compare against lives.
+        """
+        var hash = hashes.bitcast[DType.uint64]()
+        var out = codes.unsafe_ptr()
+        var slots = self._slots.bitcast[DType.uint64]()
+        var mask = self._mask
+        var capacity = self._capacity
+        var found = self._count
+
+        var stage = self._stage
+        var half = self._half
+        var mark = self._mark
+        if stage == 0 and rows <= SIZING_EARLY * 2:
+            mark = -1
+
+        for j in range(count):
+            var i = base + j
+
+            if i == mark:
+                if stage == 0:
+                    half = found
+                    mark = SIZING_EARLY
+                    stage = 1
+                elif stage == 1:
+                    self._count = found
+                    self._reserve(
+                        min(
+                            project_groups(found, half, i, rows),
+                            found * EARLY_JUMP,
+                        )
+                    )
+                    slots = self._slots.bitcast[DType.uint64]()
+                    mask = self._mask
+                    capacity = self._capacity
+                    mark = SIZING_LATE // 2
+                    stage = 2
+                    if rows <= SIZING_LATE:
+                        mark = -1
+                elif stage == 2:
+                    half = found
+                    mark = SIZING_LATE
+                    stage = 3
+                else:
+                    self._count = found
+                    self._reserve(project_groups(found, half, i, rows))
+                    slots = self._slots.bitcast[DType.uint64]()
+                    mask = self._mask
+                    capacity = self._capacity
+                    mark = -1
+
+            if has_null and not col.is_valid(i):
+                out.unsafe_offset(i).unsafe_write(UInt32(0))
+                continue
+
+            if (found + 1) * 2 > capacity:
+                self._count = found
+                self._grow()
+                slots = self._slots.bitcast[DType.uint64]()
+                mask = self._mask
+                capacity = self._capacity
+
+            if j + PROBE_LOOKAHEAD < count:
+                var ahead = (
+                    hash.unsafe_offset(j + PROBE_LOOKAHEAD).unsafe_load() & mask
+                )
+                prefetch[PrefetchOptions().for_read().high_locality()](
+                    slots.unsafe_offset(Int(ahead) * SLOT_WORDS)
+                )
+
+            var wanted = hash.unsafe_offset(j).unsafe_load()
+            var at = wanted & mask
+            while True:
+                var slot = Int(at) * SLOT_WORDS
+                var ordinal = slots.unsafe_offset(slot + 1).unsafe_load()
+                if ordinal == 0:
+                    slots.unsafe_offset(slot).unsafe_write(wanted)
+                    slots.unsafe_offset(slot + 1).unsafe_write(
+                        UInt64(found + 1)
+                    )
+                    out.unsafe_offset(i).unsafe_write(UInt32(found + offset))
+                    firsts.append(i)
+                    found += 1
+                    break
+                if slots.unsafe_offset(slot).unsafe_load() == wanted:
+                    if col.element_equals(i, firsts[Int(ordinal) - 1]):
+                        out.unsafe_offset(i).unsafe_write(
+                            UInt32(Int(ordinal) - 1 + offset)
+                        )
+                        break
                 at = (at + 1) & mask
 
         self._count = found

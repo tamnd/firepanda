@@ -69,6 +69,7 @@ from firepanda.hash import (
     HashTable,
     factorize,
     factorize_dict,
+    factorize_strings,
     group_ordinals,
     hash_into,
     mix,
@@ -1907,6 +1908,12 @@ def bench_text(mut harness: Harness) raises:
     a million int64 rows sit in a cache the full million does not, so the two
     tables disagree by a factor that is about the machine and not about the code.
 
+    The sort rows and the group rows read the same three text columns and reward
+    opposite shapes, which is the most useful thing in the table. A column of
+    short repeated labels is the sort's best case and the group's best case for
+    different reasons, and a column that shares a nine byte prefix is the sort's
+    worst case and costs the group almost nothing.
+
     Args:
         harness: The harness.
 
@@ -2062,6 +2069,62 @@ def bench_text(mut harness: Harness) raises:
         keep(len(order))
 
     harness.record("text/sort_number", "rows", rows, sort_number)
+
+    # Grouping reads the same three columns and rewards the opposite shapes to
+    # the sort. `group_repeated` is the cheap one here because a hundred keys fit
+    # in cache and every probe after the first hits. `group_prefixed` is not the
+    # pathological case it is for the sort, because the hash reads every byte
+    # rather than the first eight, so a shared prefix costs the bytes it adds and
+    # nothing more.
+    var distinct_keys = StringArray(copy=distinct_col.strings())
+    var prefixed_keys = StringArray(copy=prefixed_col.strings())
+    var repeated_keys = StringArray(copy=repeated_col.strings())
+
+    def group_distinct() raises {imm distinct_keys}:
+        var found = factorize_strings(distinct_keys)
+        keep(found.codes)
+
+    harness.record("text/group_distinct", "rows", rows, group_distinct)
+
+    def group_prefixed() raises {imm prefixed_keys}:
+        var found = factorize_strings(prefixed_keys)
+        keep(found.codes)
+
+    harness.record("text/group_prefixed", "rows", rows, group_prefixed)
+
+    def group_repeated() raises {imm repeated_keys}:
+        var found = factorize_strings(repeated_keys)
+        keep(found.codes)
+
+    harness.record("text/group_repeated", "rows", rows, group_repeated)
+
+    # The numeric pair, spread far enough apart to be denied the direct route, so
+    # both sides of the comparison are the same hash table doing the same job on
+    # the same number of groups.
+    comptime spread = Int64(DIRECT_LIMIT + 1)
+    var all_distinct = Array[DType.int64](rows)
+    var hundred = Array[DType.int64](rows)
+    for i in range(rows):
+        all_distinct[i] = Int64(i) * spread
+        hundred[i] = Int64(i % 100) * spread
+
+    def group_number_distinct() raises {imm all_distinct}:
+        keep(all_distinct)
+        var found = factorize(all_distinct)
+        keep(found.codes)
+
+    harness.record(
+        "text/group_number_distinct", "rows", rows, group_number_distinct
+    )
+
+    def group_number_repeated() raises {imm hundred}:
+        keep(hundred)
+        var found = factorize(hundred)
+        keep(found.codes)
+
+    harness.record(
+        "text/group_number_repeated", "rows", rows, group_number_repeated
+    )
 
 
 def bench_dispatch(mut harness: Harness) raises:
