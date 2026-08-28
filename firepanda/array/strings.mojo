@@ -32,6 +32,7 @@ same reason recorded on `Bitmap.slice`. A view into another column's payload
 would make every column's lifetime depend on every column it was ever cut from.
 """
 
+from std.bit import byte_swap
 from std.collections.span import Span
 from std.memory import unsafe_memcpy
 
@@ -214,17 +215,20 @@ struct StringArray(Copyable, Movable, Sized):
         This copies. `unsafe_bytes` is the one that does not, and is what a
         kernel should use.
 
+        The bytes are handed over whole rather than one at a time. Appending
+        `chr(byte)` per byte, which is what this did first, treats every byte as a
+        code point and so re-encodes anything above 127: a column holding "ábove"
+        read back as "Ã¡bove", because the two bytes of the UTF-8 `á` each became a
+        character of their own. The column stores bytes and does not interpret
+        them, and this is the one place that has to say what they mean.
+
         Args:
             i: The element index.
 
         Returns:
             The element's bytes as a string. Empty for a null.
         """
-        var out = String()
-        var bytes = self.unsafe_bytes(i)
-        for j in range(len(bytes)):
-            out += chr(Int(bytes[j]))
-        return out^
+        return String(StringSlice(unsafe_from_utf8=self.unsafe_bytes(i)))
 
     def equals(self, i: Int, other: Span[UInt8, _]) -> Bool:
         """Compares one element against a run of bytes.
@@ -270,6 +274,86 @@ struct StringArray(Copyable, Movable, Sized):
         if left.is_inline():
             return views_equal_short(left, right)
         return _bytes_equal(self.unsafe_bytes(i), self.unsafe_bytes(j))
+
+    def sort_prefix(self, i: Int) -> UInt64:
+        """Returns the first eight bytes of an element as a comparable integer.
+
+        The bytes go in most significant first and anything the element does not
+        have is a zero, so comparing two of these as unsigned integers gives the
+        same answer as comparing the first eight bytes of the two elements, and a
+        shorter element sorts before a longer one that starts with it. That makes
+        a string sortable by the radix machinery the numeric dtypes already use.
+
+        Eight bytes settles almost everything a dataframe sorts on. A city, a
+        currency, a status label and a surname are all decided inside it, and what
+        is left is a run of rows the caller has to break some other way. Four would
+        have been free, since the prefix is already in the view, and it would leave
+        far more ties: "Amsterdam" and "Amersfoort" agree on four bytes and not on
+        eight.
+
+        Args:
+            i: The element index.
+
+        Returns:
+            The packed prefix. A null gives zero, which the caller is expected to
+            have partitioned out before asking.
+        """
+        var element = self.view(i)
+        var count = len(element)
+        if count > WORD:
+            count = WORD
+        var bytes = self.unsafe_bytes(i)
+        var packed = UInt64(0)
+        for k in range(count):
+            packed |= UInt64(bytes[k]) << UInt64(56 - 8 * k)
+        return packed
+
+    def compare_elements(self, i: Int, j: Int) -> Int:
+        """Orders two elements of the same column lexicographically.
+
+        Bytes are compared as unsigned, which is what every database and what
+        `memcmp` do, and it means a column of ASCII sorts the way a reader expects
+        while a column of UTF-8 sorts by code point. It is not a locale aware
+        collation and does not claim to be. Sorting "Zurich" before "ambridge" is
+        what `ORDER BY` does in SQL without a collation named on it.
+
+        A prefix that differs settles it without either payload being touched,
+        which is the same property `element_equals` relies on, except that here
+        the prefix has to be byte reversed before it is compared. It is packed
+        little endian for the equality check to be a single word compare, and
+        ordering wants the first byte to be the most significant one.
+
+        Args:
+            i: The left element index.
+            j: The right element index.
+
+        Returns:
+            Negative if `i` sorts first, zero if they are identical, positive if
+            `j` sorts first. Nulls are not considered here; the caller partitions
+            them out, because where a null belongs is the caller's choice and not
+            a property of the values.
+        """
+        var left = self.view(i)
+        var right = self.view(j)
+        if not left.is_inline() and not right.is_inline():
+            var a = byte_swap(left.prefix())
+            var b = byte_swap(right.prefix())
+            if a != b:
+                return -1 if a < b else 1
+        return _bytes_compare(self.unsafe_bytes(i), self.unsafe_bytes(j))
+
+    def compare(self, i: Int, other: Span[UInt8, _]) -> Int:
+        """Orders one element against a run of bytes.
+
+        Args:
+            i: The element index.
+            other: The bytes to compare against.
+
+        Returns:
+            Negative if the element sorts first, zero if identical, positive if
+            `other` sorts first.
+        """
+        return _bytes_compare(self.unsafe_bytes(i), other)
 
     def slice(self, start: Int, end: Int) raises -> Self:
         """Returns a copy of a contiguous run of elements.
@@ -500,6 +584,48 @@ def strings_from_list(values: List[String]) -> StringArray:
     for i in range(len(values)):
         builder.append(values[i].as_bytes())
     return builder^.finish()
+
+
+def _bytes_compare(a: Span[UInt8, _], b: Span[UInt8, _]) -> Int:
+    """Orders two runs of bytes lexicographically, shorter first on a tie.
+
+    A word at a time over the part both sides have, which is worth it here for the
+    same reason it is in `_bytes_equal`: the common answer is that the two agree
+    for a while and then do not, and finding the word that differs eight bytes at
+    a time is eight times fewer branches to get there. The scan for the byte inside
+    that word runs at most once per comparison, because the word it runs on is the
+    one the function returns from.
+
+    Args:
+        a: The left bytes.
+        b: The right bytes.
+
+    Returns:
+        Negative if `a` sorts first, zero if identical, positive if `b` does.
+    """
+    var count = len(a)
+    if len(b) < count:
+        count = len(b)
+    var left = a.unsafe_ptr()
+    var right = b.unsafe_ptr()
+
+    var i = 0
+    while i + WORD <= count:
+        var chunk = left.unsafe_offset(i).unsafe_load[width=WORD]()
+        var other = right.unsafe_offset(i).unsafe_load[width=WORD]()
+        if chunk.ne(other).reduce_or():
+            for k in range(WORD):
+                if chunk[k] != other[k]:
+                    return -1 if chunk[k] < other[k] else 1
+        i += WORD
+    while i < count:
+        if a[i] != b[i]:
+            return -1 if a[i] < b[i] else 1
+        i += 1
+
+    if len(a) == len(b):
+        return 0
+    return -1 if len(a) < len(b) else 1
 
 
 def _bytes_equal(a: Span[UInt8, _], b: Span[UInt8, _]) -> Bool:

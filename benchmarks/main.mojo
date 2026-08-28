@@ -48,7 +48,11 @@ from std.time import perf_counter_ns
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
-from firepanda.array.strings import StringArray, StringBuilder
+from firepanda.array.strings import (
+    StringArray,
+    StringBuilder,
+    strings_from_list,
+)
 from firepanda.array.strview import PREFIX_LENGTH
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer
@@ -80,6 +84,7 @@ from firepanda.kernel import (
     add,
     aggregate_group_any,
     argsort,
+    argsort_any,
     argsort_multi,
     cast_to,
     coalesce,
@@ -2008,6 +2013,55 @@ def bench_text(mut harness: Harness) raises:
         keep(found)
 
     harness.record("text/is_string", "calls", 2, guard)
+
+    # The three rows to read together are the sort rows, and what separates them
+    # is how much of the answer the eight byte key can give. `sort_distinct` is
+    # the column a dataframe usually sorts, where the key settles almost every
+    # pair and the comparison sort is barely entered. `sort_prefixed` shares nine
+    # bytes across every element, so the radix passes leave one run as tall as the
+    # column and the whole answer comes out of the merge sort. `sort_repeated`
+    # has a hundred distinct values, so the runs are large and every comparison
+    # inside them returns equal, which is the case where a tie break does the most
+    # work for the least benefit.
+    var distinct = List[String](capacity=rows)
+    var prefixed = List[String](capacity=rows)
+    var repeated = List[String](capacity=rows)
+    var sort_rng = Rng(0x7E5713)
+    for _ in range(rows):
+        var n = sort_rng.next_below(1 << 30)
+        distinct.append(String("k", n))
+        prefixed.append(String("sharedpre", n))
+        repeated.append(String("v", sort_rng.next_below(100)))
+
+    var distinct_col = AnyArray(strings_from_list(distinct))
+    var prefixed_col = AnyArray(strings_from_list(prefixed))
+    var repeated_col = AnyArray(strings_from_list(repeated))
+
+    def sort_distinct() raises {imm distinct_col}:
+        var order = argsort_any(distinct_col)
+        keep(len(order))
+
+    harness.record("text/sort_distinct", "rows", rows, sort_distinct)
+
+    def sort_prefixed() raises {imm prefixed_col}:
+        var order = argsort_any(prefixed_col)
+        keep(len(order))
+
+    harness.record("text/sort_prefixed", "rows", rows, sort_prefixed)
+
+    def sort_repeated() raises {imm repeated_col}:
+        var order = argsort_any(repeated_col)
+        keep(len(order))
+
+    harness.record("text/sort_repeated", "rows", rows, sort_repeated)
+
+    # The numeric column of the same height through the same entry point, so the
+    # text sort has something to be a multiple of.
+    def sort_number() raises {imm number}:
+        var order = argsort_any(number)
+        keep(len(order))
+
+    harness.record("text/sort_number", "rows", rows, sort_number)
 
 
 def bench_dispatch(mut harness: Harness) raises:

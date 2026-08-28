@@ -35,19 +35,49 @@ of the same value range costs 8.7 ms on the same three. Sequential input walks t
 round again. Staging the scatter through a small per bucket buffer is the known
 fix and it is not in here yet.
 
-There is no comparison sort in this file. The spec calls for pattern defeating
-quicksort for the dtypes radix cannot take, and at this milestone there are none:
-every numeric dtype and `bool` go through `sort_key`. It arrives with the string
-kernels, which is the first time a key is not a fixed width number.
+A string is sorted by the same radix passes, which is the whole reason the eight
+byte prefix exists. `StringArray.sort_prefix` packs the first eight bytes of an
+element into a `UInt64` most significant byte first, so comparing two of those as
+integers gives the same answer as comparing the elements, right up to the point
+where the first eight bytes agree. The radix sort then does what it does for an
+int64 column and what comes out is correct except within runs of rows whose first
+eight bytes are identical.
+
+Those runs are what the comparison sort in here is for, and it only ever runs on
+them. On the columns a dataframe actually sorts, a city, a currency code, a status
+label, a surname, almost every run is a single row and the comparison sort is
+never entered at all. When it is, it is a stable merge sort with an insertion sort
+underneath, because a run is usually small and occasionally is the whole column,
+which is what a column of URLs sharing a scheme and host looks like.
+
+Eight bytes rather than the four already sitting in the view, because four leaves
+far more ties than eight: "Amsterdam" and "Amersfoort" agree on four and not on
+eight. The cost is that a long element's key needs its payload read once while the
+keys are built, and that read is in row order rather than scattered.
 """
 
 from std.sys.info import size_of
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
+from firepanda.array.strings import StringArray
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer
 from firepanda.dtype.lists import ORDERED
+
+comptime SMALL_RUN = 16
+"""Rows below which a tied run is insertion sorted rather than merged.
+
+A merge sort of eight rows spends more of its time on bookkeeping than on
+comparisons, and the runs this sees are mostly two or three rows long.
+"""
+
+comptime KEY_BYTES = 8
+"""Bytes of an element that fit in its radix key, which is `StringArray.sort_prefix`.
+
+An element no longer than this is entirely inside its own key, which is what lets
+a run of them be recognised as already settled without a single comparison.
+"""
 
 comptime RADIX_BITS = 8
 """Bits per digit. Eight means a 256 entry histogram, 2 KB of counters, which
@@ -326,10 +356,15 @@ def argsort_any_into(
     # match it and sort on the first byte of each view, which is a plausible
     # looking wrong answer rather than an error.
     if col.is_string():
-        raise Error(
-            "sort: a string column cannot be ordered yet; equality and grouping"
-            " work, ordering comparison does not"
+        _argsort_strings(
+            col.strings(),
+            col.data.validity,
+            col.null_count() > 0,
+            order,
+            descending,
+            nulls_first,
         )
+        return
     comptime for candidate in ORDERED:
         if col.dtype() == candidate:
             _argsort_core(
@@ -441,6 +476,332 @@ def _argsort_core[
     var tail = 0 if nulls_first else live
     for i in range(len(nulls)):
         target.unsafe_offset(tail + i).unsafe_write(nulls[i])
+
+
+def _argsort_strings(
+    col: StringArray,
+    validity: Bitmap,
+    has_null: Bool,
+    mut order: Array[DType.uint32],
+    descending: Bool,
+    nulls_first: Bool,
+):
+    """Sorts a permutation by the text it points at.
+
+    The same shape as `_argsort_core`: partition the nulls out, build a key per
+    live row, radix sort the keys with the rows riding along, put the nulls back
+    at whichever end was asked for. The two differences are that the key is the
+    first eight bytes of the element rather than the whole value, and that because
+    the key is not the whole value the radix pass leaves runs of rows it could not
+    tell apart, which `_resolve_ties` then finishes.
+
+    The eight digits are all counted even though a column of ASCII text uses about
+    ninety values in each byte, because unlike a numeric column there is no high
+    byte here that is constant across the data. The all-one-bucket skip in
+    `_radix_sort` still catches the case where it is, which is a column of fixed
+    prefixes.
+
+    Args:
+        col: The text.
+        validity: The column's validity bitmap.
+        has_null: Whether the validity bitmap has anything to say.
+        order: The permutation to refine, in place.
+        descending: Largest first.
+        nulls_first: Put the nulls at the front rather than the back.
+    """
+    var n = len(order)
+    if n < 2:
+        return
+
+    var keys = Buffer(n * 8)
+    var alt_keys = Buffer(n * 8)
+    var rows = Buffer(n * 4)
+    var alt_rows = Buffer(n * 4)
+
+    var nulls = List[UInt32]()
+    var live = 0
+
+    var order_ptr = order.unsafe_ptr()
+    var key = keys.bitcast[DType.uint64]()
+    var row = rows.bitcast[DType.uint32]()
+
+    if has_null:
+        for i in range(n):
+            var at = order_ptr.unsafe_offset(i).unsafe_load()
+            if validity.get(Int(at)):
+                row.unsafe_offset(live).unsafe_write(at)
+                key.unsafe_offset(live).unsafe_write(col.sort_prefix(Int(at)))
+                live += 1
+            else:
+                nulls.append(at)
+    else:
+        live = n
+        for i in range(n):
+            var at = order_ptr.unsafe_offset(i).unsafe_load()
+            row.unsafe_offset(i).unsafe_write(at)
+            key.unsafe_offset(i).unsafe_write(col.sort_prefix(Int(at)))
+
+    if descending:
+        for i in range(live):
+            key.unsafe_offset(i).unsafe_write(
+                ~key.unsafe_offset(i).unsafe_load()
+            )
+
+    var flipped = _radix_sort(keys, alt_keys, rows, alt_rows, live, 8)
+
+    var lead = len(nulls) if nulls_first else 0
+    var target = order.unsafe_ptr()
+    var sorted_keys = alt_keys.bitcast[
+        DType.uint64
+    ]() if flipped else keys.bitcast[DType.uint64]()
+    var sorted_rows = alt_rows.bitcast[
+        DType.uint32
+    ]() if flipped else rows.bitcast[DType.uint32]()
+    for i in range(live):
+        target.unsafe_offset(lead + i).unsafe_write(
+            sorted_rows.unsafe_offset(i).unsafe_load()
+        )
+
+    _resolve_ties(col, sorted_keys, target, lead, live, descending)
+
+    var tail = 0 if nulls_first else live
+    for i in range(len(nulls)):
+        target.unsafe_offset(tail + i).unsafe_write(nulls[i])
+
+
+def _resolve_ties[
+    origin: MutOrigin, key_origin: MutOrigin
+](
+    col: StringArray,
+    keys: Pointer[UInt64, key_origin],
+    target: Pointer[UInt32, origin],
+    lead: Int,
+    live: Int,
+    descending: Bool,
+):
+    """Orders the rows the eight byte key could not separate.
+
+    A run here is a maximal stretch of rows whose keys are equal, which after the
+    radix passes is a contiguous stretch. Every run of one row is already right,
+    and skipping those is the whole reason this is affordable: on a column of
+    cities or currency codes the loop below finds nothing to do and costs one pass
+    over the keys.
+
+    Args:
+        col: The text.
+        keys: The sorted keys, `live` of them starting at zero.
+        target: The permutation, whose live rows start at `lead`.
+        lead: Where the live rows start.
+        live: How many live rows there are.
+        descending: Whether the comparison is reversed. The keys were complemented
+            before the radix passes, which is what put the runs in descending
+            order, but a complemented key says nothing about the bytes past the
+            eighth, so the tie break has to know.
+
+    Parameters:
+        origin: The permutation's origin, inferred.
+        key_origin: The keys' origin, inferred.
+    """
+    var scratch = List[UInt32]()
+    var start = 0
+    while start < live:
+        var stop = start + 1
+        var here = keys.unsafe_offset(start).unsafe_load()
+        while stop < live and keys.unsafe_offset(stop).unsafe_load() == here:
+            stop += 1
+
+        var count = stop - start
+        if count > 1:
+            var run = target.unsafe_offset(lead + start)
+            if not _run_is_settled(col, run, count):
+                if count <= SMALL_RUN:
+                    _insertion_sort_run(col, run, count, descending)
+                else:
+                    _merge_sort_run(col, run, count, descending, scratch)
+        start = stop
+
+
+def _run_is_settled[
+    origin: MutOrigin
+](col: StringArray, run: Pointer[UInt32, origin], count: Int) -> Bool:
+    """Reports whether a tied run is already in its final order.
+
+    The rows in a run agree on the packed first eight bytes. If every one of them
+    is also at most eight bytes long and they are all the same length, then that
+    packed key was the whole element and the rows are byte identical, so there is
+    nothing left to order and the comparison sort would spend its whole time
+    proving it.
+
+    That is not a corner case, it is the shape of the columns most often sorted.
+    A status, a currency, a country, a category or a ticker is a handful of short
+    values repeated across every row, which puts almost the entire column into a
+    few enormous runs. Without this check a sort of a hundred distinct two byte
+    labels costs 403 ns a row on the reference machine against 27 for an int64
+    column, and nearly all of that is a merge sort discovering that everything it
+    compares is equal.
+
+    The check is one length load per row and it stops at the first row that fails,
+    so a column of long elements pays for one load in total.
+
+    Args:
+        col: The text.
+        run: The rows in the run.
+        count: How many.
+
+    Returns:
+        True when every row in the run holds the same bytes.
+    """
+    var first = col.byte_length(Int(run.unsafe_offset(0).unsafe_load()))
+    if first > KEY_BYTES:
+        return False
+    for i in range(1, count):
+        if col.byte_length(Int(run.unsafe_offset(i).unsafe_load())) != first:
+            return False
+    return True
+
+
+def _compare_rows(
+    col: StringArray, a: UInt32, b: UInt32, descending: Bool
+) -> Int:
+    """Orders two rows of a text column, honouring the direction.
+
+    Args:
+        col: The text.
+        a: The left row.
+        b: The right row.
+        descending: Reverse the answer.
+
+    Returns:
+        Negative if `a` sorts first, zero if the two are identical, positive if
+        `b` sorts first.
+    """
+    var order = col.compare_elements(Int(a), Int(b))
+    return -order if descending else order
+
+
+def _insertion_sort_run[
+    origin: MutOrigin
+](
+    col: StringArray,
+    run: Pointer[UInt32, origin],
+    count: Int,
+    descending: Bool,
+):
+    """Stably sorts a short run of rows by their text.
+
+    Stable because the inner loop stops on the first element that does not sort
+    strictly after the one being placed, so equal elements are never crossed. That
+    matters as much here as it does in the radix passes: a multi-key sort is built
+    out of stable single-key sorts and nothing else.
+
+    Args:
+        col: The text.
+        run: The rows to sort, in place.
+        count: How many.
+        descending: Reverse the comparison.
+
+    Parameters:
+        origin: The run's origin, inferred.
+    """
+    for i in range(1, count):
+        var value = run.unsafe_offset(i).unsafe_load()
+        var j = i - 1
+        while (
+            j >= 0
+            and _compare_rows(
+                col, run.unsafe_offset(j).unsafe_load(), value, descending
+            )
+            > 0
+        ):
+            run.unsafe_offset(j + 1).unsafe_write(
+                run.unsafe_offset(j).unsafe_load()
+            )
+            j -= 1
+        run.unsafe_offset(j + 1).unsafe_write(value)
+
+
+def _merge_sort_run[
+    origin: MutOrigin
+](
+    col: StringArray,
+    run: Pointer[UInt32, origin],
+    count: Int,
+    descending: Bool,
+    mut scratch: List[UInt32],
+):
+    """Stably sorts a long run of rows by their text.
+
+    Bottom up rather than recursive, with runs of `SMALL_RUN` insertion sorted
+    first so the merging starts from something already ordered. This is the path a
+    column of long shared prefixes takes, a URL column being the obvious one, and
+    on such a column it is the whole sort rather than a correction to it, so the
+    n log n matters.
+
+    The scratch list is passed in and reused across runs rather than allocated per
+    run, because a column that ties once tends to tie many times.
+
+    Args:
+        col: The text.
+        run: The rows to sort, in place.
+        count: How many.
+        descending: Reverse the comparison.
+        scratch: Working space. Resized as needed and left holding whatever the
+            last merge put in it.
+
+    Parameters:
+        origin: The run's origin, inferred.
+    """
+    while len(scratch) < count:
+        scratch.append(UInt32(0))
+
+    var width = SMALL_RUN
+    var at = 0
+    while at < count:
+        var here = count - at
+        if here > width:
+            here = width
+        _insertion_sort_run(col, run.unsafe_offset(at), here, descending)
+        at += here
+
+    while width < count:
+        var left = 0
+        while left < count:
+            var middle = left + width
+            if middle >= count:
+                break
+            var right = middle + width
+            if right > count:
+                right = count
+
+            # The two halves are each sorted and the left one comes first in the
+            # original order, so taking from the left whenever the comparison is
+            # not strictly greater is what keeps this stable.
+            var a = left
+            var b = middle
+            var out = left
+            while a < middle and b < right:
+                var lhs = run.unsafe_offset(a).unsafe_load()
+                var rhs = run.unsafe_offset(b).unsafe_load()
+                if _compare_rows(col, lhs, rhs, descending) <= 0:
+                    scratch[out] = lhs
+                    a += 1
+                else:
+                    scratch[out] = rhs
+                    b += 1
+                out += 1
+            while a < middle:
+                scratch[out] = run.unsafe_offset(a).unsafe_load()
+                a += 1
+                out += 1
+            while b < right:
+                scratch[out] = run.unsafe_offset(b).unsafe_load()
+                b += 1
+                out += 1
+
+            for k in range(left, right):
+                run.unsafe_offset(k).unsafe_write(scratch[k])
+            left = right
+        width *= 2
 
 
 def _radix_sort(

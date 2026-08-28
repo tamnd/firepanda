@@ -84,7 +84,7 @@ Deliberately not easiest first. This is the order in which kernels pay for thems
 | 5 | Aggregations | sum, min, max, count, mean, var, std, and the two pass numerically stable variants. |
 | 6 | Bitmap operations | and, or, not, popcount, and the append and slice paths. |
 | 7 | String compare, search, and the prefix fast path | The hottest real dtype. |
-| 8 | Sort | Radix for integers, pattern defeating quicksort for the rest, with a dedicated 16 byte record path for StringView. |
+| 8 | Sort | Radix for integers and, as it turned out, for text as well: the first eight bytes of an element pack into a `UInt64` whose integer order is the element's order, so the same passes run, and a stable comparison sort finishes only the runs whose first eight bytes were identical. Pattern defeating quicksort is not in the implementation and no dtype has needed it. |
 | 9 | Elementwise arithmetic | Last, deliberately. It is the easiest to vectorize, the most satisfying to benchmark, and almost never the bottleneck in a real query. |
 
 Number 9 being last is the point of the list. Arithmetic is where a naive optimization effort starts, and it is where the least time is spent in any query that reads data from disk.
