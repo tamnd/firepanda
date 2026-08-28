@@ -22,8 +22,10 @@ Usage:
 from std.sys import argv
 from std.time import perf_counter_ns
 
+from firepanda.array.any import AnyArray
 from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
+from firepanda.kernel.sort import argsort_any
 from firepanda.testing.rng import Rng
 
 comptime DEFAULT_CASES = 1_000_000
@@ -35,6 +37,32 @@ comptime MAX_ROWS = 137
 
 comptime MAX_BYTES = 29
 """Long enough to reach past the twelve byte inline limit twice over."""
+
+comptime PREFIX_COUNT = 4
+"""How many shared prefixes `shared_prefix` can return."""
+
+
+def shared_prefix(k: Int) -> String:
+    """Returns one of the prefixes handed to a quarter of the elements.
+
+    They exist so that collisions happen at all. Eight bytes because that is the
+    width of the sort key, and one of nine and one of sixteen so that a collision
+    also happens on the far side of the inline limit, where a comparison has to
+    leave the view and read the payload.
+
+    Args:
+        k: Which prefix, below `PREFIX_COUNT`.
+
+    Returns:
+        The prefix.
+    """
+    if k == 0:
+        return "qqqqqqqq"
+    if k == 1:
+        return "qqqqqqqqq"
+    if k == 2:
+        return "zzzzzzzz"
+    return "zzzzzzzzzzzzzzzz"
 
 
 struct Options(Copyable, Movable):
@@ -87,6 +115,13 @@ def random_text(mut rng: Rng) -> String:
     of the inline limit, since that is where the layout decides which of its two
     storage paths an element takes.
 
+    One element in four is given one of four shared eight byte prefixes. Twenty
+    six letters over twenty nine positions collide almost never, and the paths
+    that only run on a collision are the interesting ones: the prefix comparison
+    in `element_equals` returns early on a difference it can see and the run
+    breaking in the sort is entered only when the first eight bytes are identical.
+    Without the shared prefixes a random column exercises neither.
+
     Args:
         rng: The generator.
 
@@ -98,10 +133,69 @@ def random_text(mut rng: Rng) -> String:
         length = rng.next_range(10, 15)
     else:
         length = rng.next_below(MAX_BYTES + 1)
+
     var text = String()
+    if rng.next_below(4) == 0:
+        text += shared_prefix(Int(rng.next_below(PREFIX_COUNT)))
     for _ in range(length):
         text += chr(97 + Int(rng.next_below(26)))
     return text^
+
+
+def reference_argsort(
+    values: List[String],
+    present: List[Bool],
+    descending: Bool,
+    nulls_first: Bool,
+) -> List[Int]:
+    """Sorts row indices the slow obvious way, sharing no code with the kernel.
+
+    An insertion sort over `String` comparison, which is stable because the inner
+    loop stops on the first element that does not sort strictly after the one
+    being placed. Stability is the property being checked as much as the order is:
+    the kernel's radix passes and its tie break each have their own way of losing
+    it, and a multi-key sort is built out of nothing but stable single-key sorts.
+
+    Args:
+        values: The reference elements.
+        present: The reference validity.
+        descending: Largest first.
+        nulls_first: Put the missing rows at the front rather than the back.
+
+    Returns:
+        The row order.
+    """
+    var live = List[Int]()
+    var nulls = List[Int]()
+    for i in range(len(values)):
+        if present[i]:
+            live.append(i)
+        else:
+            nulls.append(i)
+
+    for i in range(1, len(live)):
+        var row = live[i]
+        var j = i - 1
+        while j >= 0:
+            var after = values[live[j]] > values[row]
+            if descending:
+                after = values[live[j]] < values[row]
+            if not after:
+                break
+            live[j + 1] = live[j]
+            j -= 1
+        live[j + 1] = row
+
+    var out = List[Int](capacity=len(values))
+    if nulls_first:
+        for i in range(len(nulls)):
+            out.append(nulls[i])
+    for i in range(len(live)):
+        out.append(live[i])
+    if not nulls_first:
+        for i in range(len(nulls)):
+            out.append(nulls[i])
+    return out^
 
 
 def check(
@@ -380,6 +474,59 @@ def main() raises:
                                 column.element_equals(i, j),
                             )
                         )
+
+        elif op < 95 and len(values) > 0:
+            # The permutation is compared position by position rather than the
+            # sorted elements being compared, because two different permutations
+            # can produce the same sorted elements and only one of them is stable.
+            var descending = rng.next_bool()
+            var nulls_first = rng.next_bool()
+            var want = reference_argsort(
+                values, present, descending, nulls_first
+            )
+            var got = argsort_any(
+                AnyArray(StringArray(copy=column)), descending, nulls_first
+            )
+            if len(got) != len(want):
+                raise Error(
+                    String(
+                        "step ",
+                        step,
+                        " seed ",
+                        options.seed,
+                        ": argsort returned ",
+                        len(got),
+                        " rows for ",
+                        len(want),
+                    )
+                )
+            var order = got.unsafe_ptr()
+            for i in range(len(want)):
+                var at = Int(order.unsafe_offset(i).unsafe_load())
+                if at == want[i]:
+                    continue
+                # Nothing is forgiven here. Two rows holding the same bytes are
+                # interchangeable in the sorted elements but not in a stable
+                # permutation, so there is exactly one right answer and any
+                # difference from the reference is a bug.
+                raise Error(
+                    String(
+                        "step ",
+                        step,
+                        " seed ",
+                        options.seed,
+                        ": argsort descending ",
+                        descending,
+                        " nulls_first ",
+                        nulls_first,
+                        " put row ",
+                        at,
+                        " at ",
+                        i,
+                        " where the reference put ",
+                        want[i],
+                    )
+                )
 
         else:
             column = build(rng, values, present)

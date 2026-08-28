@@ -245,10 +245,12 @@ def test_casting_text_is_refused_rather_than_reading_a_view() raises:
         _ = s.cast(DType.int64)
 
 
-def test_sorting_text_says_what_is_missing() raises:
-    var s = Series("s", strings_from_list(["b", "a"]))
-    with assert_raises(contains="cannot be ordered yet"):
-        _ = s.sort_values()
+def test_sorting_text_orders_it() raises:
+    var s = Series("s", strings_from_list(["b", "a", "c"]))
+    var sorted = s.sort_values()
+    assert_equal(sorted.text(0), "a")
+    assert_equal(sorted.text(1), "b")
+    assert_equal(sorted.text(2), "c")
 
 
 def test_aggregating_text_says_what_is_missing() raises:

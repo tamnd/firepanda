@@ -8,6 +8,27 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added
+
+- A text column can be ordered. `sort_values`, `argsort` and a frame sort all accept one, ascending or descending, nulls first or last, and the order is stable.
+- `StringArray.sort_prefix`, `compare_elements` and `compare`, which are the three pieces the sort needs: a radix key, an ordering between two elements of a column, and an ordering between an element and a run of bytes for a future search.
+- `tests/test_text_sort.mojo`, fourteen tests that separate the radix half from the tie break half so that neither can pass on the other's behalf.
+- A differential sort round in the string fuzzer, against a reference insertion sort that shares no code with the kernel. It compares the permutation position by position rather than the sorted elements, because two permutations can produce the same elements and only one of them is stable.
+
+### Fixed
+
+- `StringArray.__getitem__` returned mojibake for any element with a byte above 127. It appended `chr(byte)` per byte, which treats every byte as a code point, so a column holding "ábove" read back as "Ã¡bove". It now hands the bytes over whole. The column stores bytes and does not interpret them, and this is the one place that has to say what they mean.
+
+### How the sort works
+
+The first eight bytes of an element pack into a `UInt64` most significant byte first, so comparing two of those integers gives the same answer as comparing the first eight bytes of the elements, and a shorter element sorts before one that extends it. That means the existing radix sort runs over text unchanged, at eight digits. Only the runs whose keys came out identical need a comparison, and those are finished by a stable insertion sort below sixteen rows and a stable bottom-up merge above it.
+
+A run whose elements are all at most eight bytes and all the same length is already in its final order, because the key held the whole element, and it is skipped without a single comparison. That is not a corner case, it is the shape of the columns a dataframe most often sorts. Without it a column of a hundred distinct two byte labels cost 403 ns a row against 27 for an int64 column of the same height.
+
+### Notes on the numbers
+
+Measured on an i9-13900K, 262144 rows. Distinct keys 23.2 ns a row against 17.2 for an int64 column of the same height through the same entry point. A hundred repeated short values 14.8 ns a row, which is faster than the int64 column because the settled check skips every comparison and the low entropy keys let the radix passes skip digits. The pathological case is a column where every element shares a nine byte prefix, at 424 ns a row, where the radix does no work at all and the merge does all of it. A wider key would move that case rather than fix it.
+
 ## [0.6.4] - 2026-08-28
 
 Built against Mojo 1.0.0 (ed45d567).
