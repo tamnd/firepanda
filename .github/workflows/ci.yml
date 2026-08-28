@@ -82,10 +82,16 @@ jobs:
           done < <(grep -ohE 'document [0-9]{2}' docs/specs/*.md | awk '{print $2}' | sort -u)
           exit $rc
 
+      # A link check that talks to the internet is a flaky check, and this one
+      # failed a pull request because contributor-covenant.org reset a single
+      # connection. Retries make a transient reset cost two seconds instead of a
+      # rerun, and 429 is a host rate limiting us rather than a broken link.
       - name: Link check
         uses: lycheeverse/lychee-action@v2
         with:
-          args: --no-progress --max-concurrency 4 './**/*.md'
+          args: >-
+            --no-progress --max-concurrency 4 --max-retries 3 --retry-wait-time 2
+            --accept 200,206,429 './**/*.md'
           fail: true
 
   format:
