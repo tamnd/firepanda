@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.6] - 2026-08-28
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A text column can be a group by key and a join key. 0.6.5 made one sortable and this makes one groupable, which together are what db-benchmark's group by queries need from a string column.
+
+A patch bump. One fix, and the rest is addition.
+
 ### Added
 
 - A text column can be a group by key and a join key. `group_by` accepts one on its own or alongside number keys, with or without `dropna`, sorted or in first seen order, and the joins take one on either side.
@@ -492,7 +500,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.5...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.6...HEAD
+[0.6.6]: https://github.com/tamnd/firepanda/releases/tag/v0.6.6
 [0.6.5]: https://github.com/tamnd/firepanda/releases/tag/v0.6.5
 [0.6.4]: https://github.com/tamnd/firepanda/releases/tag/v0.6.4
 [0.6.3]: https://github.com/tamnd/firepanda/releases/tag/v0.6.3
