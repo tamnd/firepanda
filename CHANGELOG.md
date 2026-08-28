@@ -8,6 +8,32 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added
+
+- `firepanda/io/mapped.mojo`, which maps a file into memory instead of copying it. `MappedFile` owns the mapping and hands out a `Span` that borrows from it, so the span cannot outlive the mapping and the origin system is what enforces that rather than a comment. `map_file` is the same thing with the failure returned as a value, which is the shape a caller with a fallback wants.
+- `tests/test_mapped.mojo`, the first tests in the repository that write a real file and read it back. Everything else in the reader is tested against a byte span built in memory, which is the right way to test a parser and no way at all to find out whether the file ever arrives.
+
+### Changed
+
+- `read_csv` maps the file rather than copying it. The kernel already has the bytes and a mapping points at them where they are, so nothing is copied, and because the parser touches its blocks on every core at once the page faults are taken in parallel rather than serialised behind one `read` call. A file that cannot be mapped, and an empty one counts, is read the old way.
+
+### Notes on the numbers
+
+Ten million rows on an i9-13900K, five repetitions, warm page cache, both paths in the same process back to back so they share a cache and a heap.
+
+| file | size | copy | map |
+| --- | --- | --- | --- |
+| narrow | 357 MB | 613 ms | 348 ms |
+| quoted | 577 MB | 948 ms | 431 ms |
+| wide | 383 MB | 852 ms | 701 ms |
+| nulls | 207 MB | 822 ms | 791 ms |
+
+The getting the bytes step itself goes from 199 ms to 0.026 ms on the narrow file and from 523 ms to 0.036 ms on the quoted one, because a map is three system calls and no work. The whole read saves more than that, which is the destination pages of the copy no longer being faulted in and zeroed.
+
+Cold cache, with the page cache dropped before every single run, is the case the ingestion suite measures and it is better rather than worse: 1045 ms to 625 ms on the narrow file and 1977 ms to 822 ms on the quoted one. Thirty two workers faulting in parallel pull from the device harder than one sequential `read` does.
+
+Peak resident memory on the quoted file falls from 3.48 GB to 2.80 GB, which is the copy that no longer exists.
+
 ## [0.6.10] - 2026-08-29
 
 Built against Mojo 1.0.0 (ed45d567).
