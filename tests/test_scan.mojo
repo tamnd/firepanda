@@ -83,6 +83,7 @@ def check_twins(data: List[UInt8]) raises:
             assert_equal(fast.at(r, c).start, slow.at(r, c).start, at_field)
             assert_equal(fast.at(r, c).end, slow.at(r, c).end, at_field)
             assert_equal(fast.at(r, c).escaped, slow.at(r, c).escaped, at_field)
+            assert_equal(fast.at(r, c).quoted, slow.at(r, c).quoted, at_field)
 
 
 def test_a_plain_file_splits_into_rows_and_fields() raises:
@@ -193,6 +194,18 @@ def test_an_empty_quoted_field_is_empty() raises:
     var scan = scan_csv(data, default_dialect())
     assert_equal(scan.width(0), 2)
     assert_equal(text_at(data, scan, 0, 0), "")
+    # Empty either way, and only this flag tells the reader which of the two
+    # values the file meant.
+    assert_true(scan.at(0, 0).quoted)
+    check_twins(data)
+
+
+def test_an_empty_unquoted_field_says_it_was_not_quoted() raises:
+    var data = bytes_of(",\n")
+    var scan = scan_csv(data, default_dialect())
+    assert_equal(scan.width(0), 2)
+    assert_false(scan.at(0, 0).quoted)
+    assert_false(scan.at(0, 1).quoted)
     check_twins(data)
 
 

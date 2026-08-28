@@ -32,7 +32,9 @@ a doubled quote inside a quoted field is one literal quote, and a newline inside
 a quoted field is data. The span this returns excludes the outer quotes and
 carries a flag saying whether a doubled quote is in it, so the reader only pays
 for unescaping on the fields that need it, which in practice is close to none of
-them.
+them. It also records whether the field was quoted at all, which the reader needs
+for exactly one thing: an empty field is a missing value and a quoted empty field
+is the empty string, and those are different values.
 
 Two things are refused rather than guessed. A quote that never closes before the
 end of the buffer is an error with the row number in it, and so are bytes
@@ -107,6 +109,16 @@ struct FieldSpan(ImplicitlyCopyable, Movable):
 
     var escaped: Bool
     """Whether the content contains a doubled quote needing an unescape."""
+
+    var quoted: Bool
+    """Whether the field was written inside quotes.
+
+    Only one thing depends on this and it is worth stating, because otherwise
+    this looks like a flag kept for its own sake. An empty field and a quoted
+    empty field are the two ways a CSV file has of writing a missing value and
+    the empty string, and they are different values. Without this the reader has
+    to guess, and whichever way it guesses, one of the two is unrepresentable.
+    """
 
 
 struct Scan(Movable, Sized):
@@ -222,7 +234,7 @@ def scan_csv(data: Span[UInt8, _], dialect: Dialect) raises -> Scan:
                 # A delimiter at the end of the buffer or the line still opens
                 # one more field, and that field is empty.
                 if at >= n or _at_row_end(data, at):
-                    out.fields.append(FieldSpan(at, at, False))
+                    out.fields.append(FieldSpan(at, at, False, False))
                     break
                 continue
             if here == RETURN:
@@ -270,7 +282,7 @@ def _plain_field(
         end of the buffer.
     """
     var stop = _next_special(data, start, dialect.delimiter)
-    out.fields.append(FieldSpan(start, stop, False))
+    out.fields.append(FieldSpan(start, stop, False, False))
     return stop
 
 
@@ -314,7 +326,7 @@ def _quoted_field(
             escaped = True
             at += 2
             continue
-        out.fields.append(FieldSpan(start + 1, at, escaped))
+        out.fields.append(FieldSpan(start + 1, at, escaped, True))
         var after = at + 1
         if after >= n or _at_row_end(data, after):
             return after
