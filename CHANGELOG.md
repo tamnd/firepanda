@@ -8,6 +8,43 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-08-28
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A `DataFrame` can hold a text column. 0.6.3 shipped `StringArray` as a standalone module with nothing above it able to hold one, and this connects it to `AnyArray`, which is the type-erased column a `Series` and a frame are made of.
+
+A patch bump. Everything here is addition, and the four operations that now refuse a text column previously could not be handed one at all.
+
+### Added
+
+- `AnyArray` carries a string column. New `AnyArray(StringArray)` constructor, plus `is_string()`, `strings()` for a borrow and `into_strings()` for a move.
+- `Series` takes a `StringArray`, and reports `is_string()`, `as_strings()` and `text(i)`.
+- Take, filter, slice, concat, coalesce, fill forward and fill backward all carry text through the erased path, which means a `DataFrame` can select, reorder, cut and stack frames with text columns in them.
+- The display layer prints a text value rather than its type, and `<NA>` for a null. Values are not quoted and not escaped, which is what pandas does too, because a table is read by a person and `to_csv` is where escaping belongs.
+- `tests/test_text.mojo`, twenty one tests, one per operation that reads values.
+- A `text/` benchmark group measuring the erased path, with every text row paired against an int64 column of the same height through the same entry point.
+
+### Fixed
+
+- Every kernel that dispatches by matching on `col.dtype()` now asks `is_string()` first. `LogicalType.STRING` has physical dtype uint8 and uint8 is a member of both `ALL` and `ORDERED`, so a string column reaching one of those dispatches would have matched the uint8 arm and read the first byte of a sixteen byte view as the value. That is not a crash and not an obviously wrong answer, it is a plausible number, and a sum over a column of country codes would have returned a total. This was unreachable before 0.6.3 because no frame could hold a text column, and it is closed in the same release that makes it reachable.
+- `AnyArray.check_dtype` refuses a string column for every dtype, so `as_typed[DType.uint8]()` on a column of names raises instead of handing back a column over the views buffer.
+- `concat` compares `is_string()` as well as `dtype()`. Both a text column and a column of bytes are uint8 physically, so the dtype check on its own let the pair through.
+
+### Not yet
+
+Cast, ordering comparison and group by aggregation refuse a text column, each with a message naming what is missing rather than a dtype the caller did not choose. Ordering is next and is what db-benchmark q1, q2, q3, q7 and q10 need.
+
+### The validity duplication
+
+`AnyArray` keeps the validity bitmap in `data` as well as inside the `StringArray`. `is_null`, `is_not_null` and the all-present mask that a join and a group by both build read `data.validity` and never look at a value, so keeping the bitmap where they already look means those three need no text case. A column is immutable once constructed, so both copies are written from the same source in the same call and cannot drift. The cost is one bit per row per text column and it goes away when columns are refcounted rather than deep copied.
+
+### Notes on the numbers
+
+Measured on an i9-13900K at 262144 rows, ten repetitions, median. Per row: take 78.5 ns for text against 2.0 ns for int64, filter 8.8 against 1.4, concat 25.1 against 0.4, slice 15.5 against 0.2. The `is_string` guard that is now on the front of every erased kernel costs 0.14 ns.
+
+The 40x on the gather is mostly not inherent. A standalone probe separates it: at 32 byte elements a sequential take is 48 ns/row and a scattered one is 247, which is two dependent cache misses per row, the view and then the payload it points at. Every one of those addresses is derivable before the loop starts because the index list is the input, and none of them are prefetched today. That is worth fixing before string keys reach a join.
+
 ## [0.6.3] - 2026-08-28
 
 Built against Mojo 1.0.0 (ed45d567).
@@ -405,7 +442,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.3...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.4...HEAD
+[0.6.4]: https://github.com/tamnd/firepanda/releases/tag/v0.6.4
 [0.6.3]: https://github.com/tamnd/firepanda/releases/tag/v0.6.3
 [0.6.2]: https://github.com/tamnd/firepanda/releases/tag/v0.6.2
 [0.6.1]: https://github.com/tamnd/firepanda/releases/tag/v0.6.1
