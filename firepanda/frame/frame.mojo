@@ -45,6 +45,7 @@ from firepanda.hash.grouping import group_ordinals
 from firepanda.join.pairs import JoinKind, join_indices, take_pair
 from firepanda.kernel.cast import cast_any
 from firepanda.kernel.group import AggKind, aggregate_group_any
+from firepanda.kernel.nulls import all_valid_mask, coalesce_any
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.sort import argsort_any_into, identity_permutation
 
@@ -907,6 +908,61 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         return self.join_on(
             other, List[String](), List[String](), JoinKind.CROSS, suffix
         )
+
+    def drop_nulls(self, subset: List[String] = List[String]()) raises -> Self:
+        """Returns the rows where every column in the subset is present.
+
+        pandas spells the choice between "drop a row if any column is missing"
+        and "drop it only if all of them are" as `how=`. This has only the first
+        one, because `how="all"` on a subset of one column means the same thing
+        as `how="any"` and on a subset of several it answers a question nobody
+        has asked in the wild. Narrowing `subset` is the useful control and it is
+        here.
+
+        Args:
+            subset: Which columns must be present. An empty list means all of
+                them, which is the pandas default.
+
+        Returns:
+            A frame with the same columns and the offending rows removed.
+
+        Raises:
+            If a named column does not exist, or if a dtype has no physical
+            layout.
+        """
+        var looked_at = List[AnyArray]()
+        if len(subset) == 0:
+            for c in range(self.width()):
+                looked_at.append(AnyArray(copy=self.columns[c]))
+        else:
+            for c in range(len(subset)):
+                looked_at.append(
+                    AnyArray(copy=self.columns[self.index_of(subset[c])])
+                )
+        return self.filter(all_valid_mask(looked_at, self.rows))
+
+    def fill_null(self, name: String, var value: Series) raises -> Self:
+        """Returns the frame with one column's missing rows taken from another column.
+
+        The fallback may be one row, which is used for every missing row and is
+        how filling with a scalar is spelled.
+
+        Args:
+            name: Which column to fill.
+            value: The fallback, of the same dtype and either as tall as the
+                frame or one row. Its name is ignored.
+
+        Returns:
+            A frame of the same shape, with the named column filled.
+
+        Raises:
+            If the column does not exist, if the dtypes differ, if the fallback
+            is neither one row nor as tall as the frame, or if the dtype has no
+            physical layout.
+        """
+        var at = self.index_of(name)
+        var filled = Series(name, coalesce_any(self.columns[at], value.values))
+        return self.with_column(filled^)
 
     def write_to(self, mut writer: Some[Writer]):
         """Writes the frame as a table.

@@ -26,6 +26,13 @@ from firepanda.array.array import Array
 from firepanda.dtype.logical import LogicalType
 from firepanda.frame.display import DisplayOptions, render_column
 from firepanda.kernel.cast import cast_any
+from firepanda.kernel.nulls import (
+    coalesce_any,
+    fill_backward_any,
+    fill_forward_any,
+    is_not_null_any,
+    is_null_any,
+)
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.sort import argsort_any
 
@@ -288,6 +295,93 @@ struct Series(Copyable, Movable, Sized, Writable):
         """
         var order = self.argsort(descending, nulls_first)
         return self.take(_to_positions(order))
+
+    def is_null(self) -> Array[DType.bool]:
+        """Returns a mask that is true where a row is missing.
+
+        The mask is a bare `Array` rather than a `Series`, because that is what
+        `filter` takes and the round trip through a named column would be in the
+        way of the thing this is almost always used for.
+
+        Returns:
+            A bool column, with no nulls of its own, as tall as the series.
+        """
+        return is_null_any(self.values)
+
+    def is_not_null(self) -> Array[DType.bool]:
+        """Returns a mask that is true where a row is present.
+
+        Returns:
+            A bool column, with no nulls of its own, as tall as the series.
+        """
+        return is_not_null_any(self.values)
+
+    def drop_nulls(self) raises -> Self:
+        """Returns the series with the missing rows removed.
+
+        Returns:
+            A series of `len(self) - null_count()` rows, in their original order.
+
+        Raises:
+            If the dtype has no physical layout.
+        """
+        return self.filter(self.is_not_null())
+
+    def fill_null(self, other: Self) raises -> Self:
+        """Returns the series with the missing rows taken from another.
+
+        The fallback may be one row, which is used for every missing row. That
+        is how filling with a scalar is spelled, and it is the same operation as
+        filling from a column rather than a second one.
+
+        Args:
+            other: The fallback, of the same dtype and either as tall as the
+                series or one row. Its name is ignored; the result keeps this
+                series' name.
+
+        Returns:
+            A series null only where both were.
+
+        Raises:
+            If the dtypes differ, if the fallback is neither one row nor as tall
+            as the series, or if the dtype has no physical layout.
+        """
+        return Self(self.name, coalesce_any(self.values, other.values))
+
+    def fill_forward(self, limit: Int = 0) raises -> Self:
+        """Returns the series with each null taking the last present value before it.
+
+        This is one of two methods on `Series` whose answer depends on the row
+        order, the other being `fill_backward`. On a series that came out of a
+        group by or a join, the order is the one this library promises for that
+        operation, and on a series the caller built it is theirs.
+
+        Args:
+            limit: The longest run of nulls to fill, or zero for no limit.
+
+        Returns:
+            A series of the same height. Nulls before the first present value
+            stay null.
+
+        Raises:
+            If the dtype has no physical layout.
+        """
+        return Self(self.name, fill_forward_any(self.values, limit))
+
+    def fill_backward(self, limit: Int = 0) raises -> Self:
+        """Returns the series with each null taking the next present value after it.
+
+        Args:
+            limit: The longest run of nulls to fill, or zero for no limit.
+
+        Returns:
+            A series of the same height. Nulls after the last present value stay
+            null.
+
+        Raises:
+            If the dtype has no physical layout.
+        """
+        return Self(self.name, fill_backward_any(self.values, limit))
 
     def write_to(self, mut writer: Some[Writer]):
         """Writes the values, one per line, with a dtype footer.

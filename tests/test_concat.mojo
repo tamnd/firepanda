@@ -1,0 +1,367 @@
+"""Tests for stacking columns, series and frames.
+
+`concat` has no arithmetic in it, so what these tests are actually checking is
+bookkeeping: that the parts land at the right offsets, that the validity comes
+across with them, and that the two spellings in the kernel agree.
+
+Two of those need care. The offset a part lands on is the running total of every
+part before it, which is almost never a multiple of sixty four, so the validity
+bits go across at an offset the bitmap has no fast path for. There is a test with
+parts of awkward lengths and nulls in each of them for exactly that. And the
+kernel has a two argument spelling next to the list one, added so a join can
+concatenate two borrowed columns without deep copying them first, so there is a
+test that the two produce the same answer.
+
+The frame level adds the rule that names decide and positions do not, which is
+worth a test that stacks two frames whose columns are in different orders and
+asserts the values did not get shuffled.
+"""
+
+from std.testing import TestSuite, assert_equal, assert_false, assert_true
+
+from firepanda.array.any import AnyArray
+from firepanda.array.array import Array, from_list
+from firepanda.dtype.lists import ALL
+from firepanda.frame.concat import concat, concat_series
+from firepanda.frame.frame import DataFrame
+from firepanda.frame.series import Series
+from firepanda.kernel.concat import concat_any, concat_arrays, concat_two_any
+from firepanda.kernel.scalar import concat_scalar
+from firepanda.testing.rng import Rng
+
+
+def gapped(
+    values: List[Int64], missing: List[Int]
+) raises -> Array[DType.int64]:
+    """Builds an int64 column with nulls at the given positions.
+
+    Args:
+        values: The values, one per row.
+        missing: Which rows are null.
+
+    Returns:
+        The column.
+    """
+    var col = Array[DType.int64](len(values))
+    for i in range(len(values)):
+        col.set_valid(i, values[i])
+    for m in range(len(missing)):
+        col.set_null(missing[m])
+    return col^
+
+
+def frame_of(name: String, values: List[Int64]) raises -> DataFrame:
+    """Builds a one column frame.
+
+    Args:
+        name: The column name.
+        values: The values, none of them null.
+
+    Returns:
+        The frame.
+    """
+    var columns = List[Series]()
+    columns.append(Series(name, gapped(values, List[Int]())))
+    return DataFrame.from_series(columns^)
+
+
+def test_concat_stacks_in_order() raises:
+    var parts = List[Array[DType.int64]]()
+    parts.append(gapped([Int64(1), 2], List[Int]()))
+    parts.append(gapped([Int64(3)], List[Int]()))
+    parts.append(gapped([Int64(4), 5, 6], List[Int]()))
+
+    var out = concat_arrays(parts)
+    assert_equal(len(out), 6, "height is the sum")
+    for i in range(6):
+        assert_equal(out[i], Int64(i + 1), "row " + String(i))
+
+
+def test_concat_carries_the_nulls() raises:
+    var parts = List[Array[DType.int64]]()
+    parts.append(gapped([Int64(1), 2], [0]))
+    parts.append(gapped([Int64(3), 4], [1]))
+
+    var out = concat_arrays(parts)
+    assert_false(out.is_valid(0), "the first part's null")
+    assert_true(out.is_valid(1), "the first part's value")
+    assert_true(out.is_valid(2), "the second part's value")
+    assert_false(out.is_valid(3), "the second part's null")
+    assert_equal(out[0], 0, "a null holds a zero")
+
+
+def test_concat_of_nothing_is_empty() raises:
+    var out = concat_arrays(List[Array[DType.int64]]())
+    assert_equal(len(out), 0, "an empty list gives an empty column")
+
+
+def test_concat_of_one_part_is_a_copy() raises:
+    var parts = List[Array[DType.int64]]()
+    parts.append(gapped([Int64(1), 2, 3], [1]))
+    var out = concat_arrays(parts)
+    assert_equal(len(out), 3, "height")
+    assert_false(out.is_valid(1), "the null came across")
+
+
+def test_concat_of_empty_parts() raises:
+    var parts = List[Array[DType.int64]]()
+    parts.append(Array[DType.int64](0))
+    parts.append(gapped([Int64(7)], List[Int]()))
+    parts.append(Array[DType.int64](0))
+
+    var out = concat_arrays(parts)
+    assert_equal(len(out), 1, "only the middle part had rows")
+    assert_equal(out[0], 7, "and it landed at row 0")
+
+
+def test_concat_at_an_unaligned_offset() raises:
+    # A part starts on the running total of everything before it, which here is
+    # 37 and then 37 plus 90, neither of which is a multiple of sixty four. The
+    # validity bits go across at those offsets, which is where an implementation
+    # that copied words instead of bits would be off by a shift.
+    var first = List[Int64]()
+    for i in range(37):
+        first.append(Int64(i))
+    var second = List[Int64]()
+    for i in range(90):
+        second.append(Int64(100 + i))
+    var third = List[Int64]()
+    for i in range(45):
+        third.append(Int64(1000 + i))
+
+    var parts = List[Array[DType.int64]]()
+    parts.append(gapped(first, [0, 36]))
+    parts.append(gapped(second, [0, 27, 89]))
+    parts.append(gapped(third, [44]))
+
+    var out = concat_arrays(parts)
+    assert_equal(len(out), 172, "height is the sum")
+
+    var expected_missing = [0, 36, 37, 37 + 27, 37 + 89, 171]
+    var at = 0
+    for i in range(172):
+        var want_null = at < len(expected_missing) and expected_missing[at] == i
+        assert_equal(out.is_valid(i), not want_null, "row " + String(i))
+        if want_null:
+            at += 1
+
+    assert_equal(out[1], 1, "a value from the first part")
+    assert_equal(out[38], 101, "a value from the second part")
+    assert_equal(out[130], 1000 + 130 - 127, "a value from the third part")
+
+
+def test_concat_any_matches_the_typed_one() raises:
+    comptime for candidate in ALL:
+        var a = Array[candidate](3)
+        var b = Array[candidate](2)
+        for i in range(3):
+            a.set_valid(i, Scalar[candidate](1))
+        for i in range(2):
+            b.set_valid(i, Scalar[candidate](1))
+        a.set_null(1)
+
+        var parts = List[AnyArray]()
+        parts.append(AnyArray(Array[candidate](copy=a)))
+        parts.append(AnyArray(Array[candidate](copy=b)))
+
+        var out = concat_any(parts)
+        assert_equal(len(out), 5, "height for " + String(candidate))
+        assert_false(out.is_valid(1), "null for " + String(candidate))
+        assert_equal(out.dtype(), candidate, "dtype for " + String(candidate))
+
+
+def test_the_two_argument_spelling_agrees_with_the_list_one() raises:
+    var a = AnyArray(gapped([Int64(1), 2, 3], [1]))
+    var b = AnyArray(gapped([Int64(4), 5], [0]))
+
+    var parts = List[AnyArray]()
+    parts.append(AnyArray(copy=a))
+    parts.append(AnyArray(copy=b))
+
+    var listed = concat_any(parts)
+    var paired = concat_two_any(a, b)
+    assert_equal(len(listed), len(paired), "same height")
+    for i in range(len(listed)):
+        assert_equal(listed.is_valid(i), paired.is_valid(i), "row " + String(i))
+
+
+def test_concat_any_refuses_a_different_dtype() raises:
+    var parts = List[AnyArray]()
+    parts.append(AnyArray(gapped([Int64(1)], List[Int]())))
+    parts.append(AnyArray(Array[DType.float64](1)))
+
+    var raised = False
+    try:
+        _ = concat_any(parts)
+    except:
+        raised = True
+    assert_true(raised, "int64 stacked onto float64")
+
+
+def test_concat_any_refuses_an_empty_list() raises:
+    # The typed spelling can return an empty column of a known dtype and this
+    # one cannot, because there is nothing to read the dtype off.
+    var raised = False
+    try:
+        _ = concat_any(List[AnyArray]())
+    except:
+        raised = True
+    assert_true(raised, "no columns and no dtype")
+
+
+def test_concat_series_keeps_the_first_name() raises:
+    var parts = List[Series]()
+    parts.append(Series("a", gapped([Int64(1), 2], List[Int]())))
+    parts.append(Series("b", gapped([Int64(3)], List[Int]())))
+
+    var out = concat_series(parts)
+    assert_equal(out.name, "a", "the first name wins")
+    assert_equal(len(out), 3, "height is the sum")
+
+
+def test_concat_frames_stacks_the_rows() raises:
+    var frames = List[DataFrame]()
+    frames.append(frame_of("a", [Int64(1), 2]))
+    frames.append(frame_of("a", [Int64(3), 4, 5]))
+
+    var out = concat(frames)
+    assert_equal(len(out), 5, "height is the sum")
+    assert_equal(out.width(), 1, "width is unchanged")
+    var values = out.column("a").as_typed[DType.int64]()
+    for i in range(5):
+        assert_equal(values[i], Int64(i + 1), "row " + String(i))
+
+
+def test_concat_frames_matches_on_names_not_positions() raises:
+    var first = List[Series]()
+    first.append(Series("a", gapped([Int64(1)], List[Int]())))
+    first.append(Series("b", gapped([Int64(10)], List[Int]())))
+
+    var second = List[Series]()
+    second.append(Series("b", gapped([Int64(20)], List[Int]())))
+    second.append(Series("a", gapped([Int64(2)], List[Int]())))
+
+    var frames = List[DataFrame]()
+    frames.append(DataFrame.from_series(first^))
+    frames.append(DataFrame.from_series(second^))
+
+    var out = concat(frames)
+    assert_equal(out.names()[0], "a", "the first frame's order is kept")
+    assert_equal(out.column("a").as_typed[DType.int64]()[1], 2, "a stayed a")
+    assert_equal(out.column("b").as_typed[DType.int64]()[1], 20, "b stayed b")
+
+
+def test_concat_frames_takes_more_than_two() raises:
+    # Two frames go through the borrowing path and three or more go through the
+    # list one, so both need a test.
+    var frames = List[DataFrame]()
+    frames.append(frame_of("a", [Int64(1)]))
+    frames.append(frame_of("a", [Int64(2)]))
+    frames.append(frame_of("a", [Int64(3)]))
+    frames.append(frame_of("a", [Int64(4)]))
+
+    var out = concat(frames)
+    assert_equal(len(out), 4, "height is the sum")
+    var values = out.column("a").as_typed[DType.int64]()
+    for i in range(4):
+        assert_equal(values[i], Int64(i + 1), "row " + String(i))
+
+
+def test_concat_frames_refuses_a_different_width() raises:
+    var wide = List[Series]()
+    wide.append(Series("a", gapped([Int64(1)], List[Int]())))
+    wide.append(Series("b", gapped([Int64(2)], List[Int]())))
+
+    var frames = List[DataFrame]()
+    frames.append(DataFrame.from_series(wide^))
+    frames.append(frame_of("a", [Int64(3)]))
+
+    var raised = False
+    try:
+        _ = concat(frames)
+    except:
+        raised = True
+    assert_true(raised, "two columns stacked onto one")
+
+
+def test_concat_frames_refuses_a_missing_column() raises:
+    var frames = List[DataFrame]()
+    frames.append(frame_of("a", [Int64(1)]))
+    frames.append(frame_of("c", [Int64(2)]))
+
+    var raised = False
+    try:
+        _ = concat(frames)
+    except:
+        raised = True
+    assert_true(raised, "no column named a in the second frame")
+
+
+def test_concat_frames_refuses_a_different_dtype() raises:
+    var floats = List[Series]()
+    var col = Array[DType.float64](1)
+    col.set_valid(0, 1.0)
+    floats.append(Series("a", col^))
+
+    var frames = List[DataFrame]()
+    frames.append(frame_of("a", [Int64(1)]))
+    frames.append(DataFrame.from_series(floats^))
+
+    var raised = False
+    try:
+        _ = concat(frames)
+    except:
+        raised = True
+    assert_true(raised, "an int64 column and a float64 one named the same")
+
+
+def test_concat_of_no_frames_is_empty() raises:
+    var out = concat(List[DataFrame]())
+    assert_equal(len(out), 0, "no rows")
+    assert_equal(out.width(), 0, "no columns")
+
+
+def test_concat_of_one_frame_is_a_copy() raises:
+    var frames = List[DataFrame]()
+    frames.append(frame_of("a", [Int64(1), 2]))
+    var out = concat(frames)
+    assert_equal(len(out), 2, "height")
+    assert_equal(out.column("a").as_typed[DType.int64]()[1], 2, "values")
+
+
+def test_concat_leaves_its_inputs_alone() raises:
+    var frames = List[DataFrame]()
+    frames.append(frame_of("a", [Int64(1), 2]))
+    frames.append(frame_of("a", [Int64(3)]))
+
+    var out = concat(frames)
+    assert_equal(len(out), 3, "the result")
+    assert_equal(len(frames[0]), 2, "the first input is untouched")
+    assert_equal(len(frames[1]), 1, "the second input is untouched")
+
+
+def test_concat_agrees_with_its_twin() raises:
+    var rng = Rng(0xDEADBEEF)
+    var parts = List[Array[DType.int64]]()
+    for _ in range(5):
+        var rows = rng.next_below(70)
+        var col = Array[DType.int64](rows)
+        for i in range(rows):
+            if rng.next_below(4) == 0:
+                col.set_null(i)
+            else:
+                col.set_valid(i, Int64(rng.next_below(1000)))
+        parts.append(col^)
+
+    var fast = concat_arrays(parts)
+    var slow = concat_scalar(parts)
+    assert_equal(len(fast), len(slow), "same height")
+    for i in range(len(fast)):
+        assert_equal(
+            fast.is_valid(i), slow.is_valid(i), "validity row " + String(i)
+        )
+        assert_equal(fast[i], slow[i], "row " + String(i))
+
+
+def main() raises:
+    TestSuite.discover_tests[__functions_in_module()]().run()
