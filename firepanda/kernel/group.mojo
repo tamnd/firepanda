@@ -1186,6 +1186,15 @@ def aggregate_group_any(
     if kind == AggKind.SIZE:
         return AnyArray(group_size(codes, groups))
 
+    # As in `cast_any` and `argsort_any_into`: uint8 is in ALL and a string
+    # column would match it, so a sum over a column of names would return a
+    # number rather than raising.
+    if col.is_string():
+        raise Error(
+            "group by: a string column can be a key but cannot be aggregated"
+            " yet"
+        )
+
     comptime for candidate in ALL:
         if col.dtype() == candidate:
             return _dispatch_core(

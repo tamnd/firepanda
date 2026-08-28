@@ -322,6 +322,14 @@ def argsort_any_into(
     Raises:
         If the column's dtype is not one firepanda can sort.
     """
+    # Before the dispatch, because uint8 is in ORDERED and a string column would
+    # match it and sort on the first byte of each view, which is a plausible
+    # looking wrong answer rather than an error.
+    if col.is_string():
+        raise Error(
+            "sort: a string column cannot be ordered yet; equality and grouping"
+            " work, ordering comparison does not"
+        )
     comptime for candidate in ORDERED:
         if col.dtype() == candidate:
             _argsort_core(

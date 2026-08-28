@@ -84,6 +84,15 @@ def cast_any(col: AnyArray, to: DType) raises -> AnyArray:
     Raises:
         If either dtype is not one firepanda has a physical layout for.
     """
+    # A string column has no numeric cast yet, and it must not fall through: its
+    # physical dtype is uint8, so `_cast_erased` would find the uint8 source arm
+    # and convert the first byte of every 16 byte view.
+    if col.is_string():
+        raise Error(
+            "cast: a string column cannot be converted to "
+            + String(to)
+            + " yet"
+        )
     comptime for target in ALL:
         if to == target:
             return AnyArray(_cast_erased[target](col))

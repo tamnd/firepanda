@@ -25,6 +25,7 @@ from std.sys.info import simd_width_of
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
+from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
 
@@ -73,14 +74,26 @@ def concat_any(parts: List[AnyArray]) raises -> AnyArray:
     var dt = parts[0].dtype()
     var total = 0
     for p in range(len(parts)):
-        if parts[p].dtype() != dt:
+        # The `is_string` half is not redundant. A string column's physical
+        # dtype is uint8, so a string column and a column of bytes agree on
+        # `dtype()` and are not the same column at all.
+        if (
+            parts[p].dtype() != dt
+            or parts[p].is_string() != parts[0].is_string()
+        ):
             raise Error(
                 "concat: every column must have the same dtype; got "
-                + String(dt)
+                + String(parts[0].type)
                 + " and "
-                + String(parts[p].dtype())
+                + String(parts[p].type)
             )
         total += len(parts[p])
+
+    if parts[0].is_string():
+        var builder = StringBuilder(capacity=total)
+        for p in range(len(parts)):
+            _append_all(builder, parts[p].strings())
+        return AnyArray(builder^.finish())
 
     comptime for candidate in ALL:
         if dt == candidate:
@@ -123,6 +136,19 @@ def concat_two_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
             + " and "
             + String(b.dtype())
         )
+    if a.is_string() != b.is_string():
+        raise Error(
+            "concat: every column must have the same dtype; got "
+            + String(a.type)
+            + " and "
+            + String(b.type)
+        )
+    if a.is_string():
+        var builder = StringBuilder(capacity=len(a) + len(b))
+        _append_all(builder, a.strings())
+        _append_all(builder, b.strings())
+        return AnyArray(builder^.finish())
+
     comptime for candidate in ALL:
         if a.dtype() == candidate:
             var out = Array[candidate](len(a) + len(b))
@@ -130,6 +156,27 @@ def concat_two_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
             _copy_into(out, len(a), b.unsafe_ptr[candidate](), b.data.validity)
             return AnyArray(out^)
     raise Error("concat: unsupported dtype " + String(a.dtype()))
+
+
+def _append_all(mut builder: StringBuilder, col: StringArray) raises:
+    """Appends every element of a string column to a builder.
+
+    The fixed width path memcpys a whole part into place at a known offset. This
+    one cannot, because the payload offsets in a part's views are relative to
+    that part's payload block, and stacking the blocks would leave every view
+    after the first pointing into the wrong one. Rewriting the offsets instead of
+    the elements would be faster and is worth doing the day a concat of string
+    columns is on a hot path; today it is a `read_csv` of several files.
+
+    Args:
+        builder: The builder to append to.
+        col: The column whose elements are appended, in order.
+    """
+    for i in range(len(col)):
+        if col.is_valid(i):
+            builder.append(col.unsafe_bytes(i))
+        else:
+            builder.append_null()
 
 
 def _copy_into[

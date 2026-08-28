@@ -28,6 +28,7 @@ the operation paid twice.
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
+from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
 
@@ -63,6 +64,8 @@ def take_any(col: AnyArray, indices: List[Int]) raises -> AnyArray:
     Raises:
         If the column's dtype is not one firepanda has a physical layout for.
     """
+    if col.is_string():
+        return AnyArray(_take_strings(col.strings(), indices))
     comptime for candidate in ALL:
         if col.dtype() == candidate:
             return AnyArray(
@@ -71,6 +74,42 @@ def take_any(col: AnyArray, indices: List[Int]) raises -> AnyArray:
                 )
             )
     raise Error("take: unsupported dtype")
+
+
+def _take_strings(col: StringArray, indices: List[Int]) raises -> StringArray:
+    """Gathers variable width rows by position.
+
+    None of what `_take_core` does applies here. The output element is not a
+    fixed number of bytes, so it cannot be written unconditionally at a computed
+    offset, and the validity cannot be built a word at a time ahead of the
+    values. What is left is the straightforward loop, and it is still the right
+    shape: a short element is copied into its own view with no payload touched at
+    all, which is the case that a gather of a key column actually hits.
+
+    Args:
+        col: The column to gather from.
+        indices: The positions to gather. A negative index produces a null, as
+            in `take_rows`, because that is how a left join reports a row that
+            was not there.
+
+    Returns:
+        A column of length `len(indices)`.
+
+    Raises:
+        If an index is neither negative nor a position in the column.
+    """
+    var builder = StringBuilder(capacity=len(indices))
+    for k in range(len(indices)):
+        var at = indices[k]
+        if at >= len(col):
+            raise Error(
+                String("take index ", at, " is outside a column of ", len(col))
+            )
+        if at < 0 or not col.is_valid(at):
+            builder.append_null()
+        else:
+            builder.append(col.unsafe_bytes(at))
+    return builder^.finish()
 
 
 def _take_core[
@@ -149,6 +188,8 @@ def filter_any(col: AnyArray, mask: Array[DType.bool]) raises -> AnyArray:
     Raises:
         If the column's dtype is not one firepanda has a physical layout for.
     """
+    if col.is_string():
+        return AnyArray(_filter_strings(col.strings(), mask))
     comptime for candidate in ALL:
         if col.dtype() == candidate:
             return AnyArray(
@@ -160,6 +201,50 @@ def filter_any(col: AnyArray, mask: Array[DType.bool]) raises -> AnyArray:
                 )
             )
     raise Error("filter: unsupported dtype")
+
+
+def _filter_strings(
+    col: StringArray, mask: Array[DType.bool]
+) raises -> StringArray:
+    """Keeps the variable width rows where the mask is true.
+
+    A null in the mask drops the row, the same rule `_filter_core` follows and
+    for the same reason. There is no branch free version of this one: the
+    trick in `_filter_core` is to write every row and advance the cursor by the
+    mask bit, which only works when a row that nobody keeps costs a fixed number
+    of bytes that the next row overwrites.
+
+    Args:
+        col: The column to filter.
+        mask: The mask. Must be as tall as the column.
+
+    Returns:
+        A column holding the kept rows in their original order.
+
+    Raises:
+        If the mask is not as tall as the column.
+    """
+    if len(mask) != len(col):
+        raise Error(
+            String(
+                "filter mask has ",
+                len(mask),
+                " rows and the column has ",
+                len(col),
+            )
+        )
+    var values = mask.unsafe_ptr()
+    var builder = StringBuilder(capacity=len(col))
+    for i in range(len(col)):
+        if not mask.data.validity.get(i):
+            continue
+        if not Bool(values.unsafe_offset(i).unsafe_load()):
+            continue
+        if col.is_valid(i):
+            builder.append(col.unsafe_bytes(i))
+        else:
+            builder.append_null()
+    return builder^.finish()
 
 
 def _filter_core[

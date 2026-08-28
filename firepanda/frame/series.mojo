@@ -23,6 +23,7 @@ next to `column`.
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
+from firepanda.array.strings import StringArray
 from firepanda.dtype.logical import LogicalType
 from firepanda.frame.display import DisplayOptions, render_column
 from firepanda.kernel.cast import cast_any
@@ -65,6 +66,16 @@ struct Series(Copyable, Movable, Sized, Writable):
 
         Parameters:
             dt: The dtype being erased.
+        """
+        self.name = name
+        self.values = AnyArray(values^)
+
+    def __init__(out self, name: String, var values: StringArray):
+        """Constructs a series from a string column.
+
+        Args:
+            name: The column name.
+            values: The data. Consumed, with no copy of the buffers.
         """
         self.name = name
         self.values = AnyArray(values^)
@@ -148,6 +159,44 @@ struct Series(Copyable, Movable, Sized, Writable):
             If `dt` is not the series' dtype.
         """
         return self.values.as_typed[dt]()
+
+    def is_string(self) -> Bool:
+        """Reports whether the series holds text.
+
+        Returns:
+            True for a string column.
+        """
+        return self.values.is_string()
+
+    def as_strings(self) raises -> StringArray:
+        """Returns the data as a string column.
+
+        Returns:
+            A copy of the string column.
+
+        Raises:
+            If the series is not a string column.
+        """
+        return StringArray(copy=self.values.strings())
+
+    def text(self, i: Int) raises -> String:
+        """Returns one element as a string.
+
+        This copies the element, and a null reads as the empty string, which is
+        why it is here for tests and for printing rather than for anything that
+        runs per row. `as_strings().unsafe_bytes(i)` is the one that does not
+        copy.
+
+        Args:
+            i: The row.
+
+        Returns:
+            The element's bytes as a string.
+
+        Raises:
+            If the series is not a string column.
+        """
+        return self.values.strings()[i]
 
     def rename(self, name: String) raises -> Self:
         """Returns the same data under a different name.
