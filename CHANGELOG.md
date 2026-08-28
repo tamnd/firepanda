@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.11] - 2026-08-29
+
+Built against Mojo 1.0.0 (ed45d567).
+
+The reader stops copying. A file is mapped rather than read into a buffer, and a fixed width column is parsed straight into the column rather than into a per block piece that is joined afterwards. Two copies of the whole file's worth of data, both of them removed. A patch bump: nothing in the API changes shape, and the one new module is additive.
+
+Reading the four ingestion files on an i9-13900K, ten million rows, warm cache, against 0.6.10: narrow 613 ms to 281 ms, quoted 948 ms to 402 ms, nulls 822 ms to 631 ms, wide 852 ms to 701 ms. Cold cache, which is what the ingestion suite measures, narrow 1045 ms to 625 ms and quoted 1977 ms to 822 ms.
+
 ### Added
 
 - `firepanda/io/mapped.mojo`, which maps a file into memory instead of copying it. `MappedFile` owns the mapping and hands out a `Span` that borrows from it, so the span cannot outlive the mapping and the origin system is what enforces that rather than a comment. `map_file` is the same thing with the failure returned as a value, which is the shape a caller with a fallback wants.
@@ -45,6 +53,8 @@ Ten million rows on an i9-13900K, five repetitions, warm page cache, both paths 
 The getting the bytes step itself goes from 199 ms to 0.026 ms on the narrow file and from 523 ms to 0.036 ms on the quoted one, because a map is three system calls and no work. The whole read saves more than that, which is the destination pages of the copy no longer being faulted in and zeroed.
 
 Cold cache, with the page cache dropped before every single run, is the case the ingestion suite measures and it is better rather than worse: 1045 ms to 625 ms on the narrow file and 1977 ms to 822 ms on the quoted one. Thirty two workers faulting in parallel pull from the device harder than one sequential `read` does.
+
+The same measurement on an eight core AMD EPYC, where the copy is a larger share of everything, warm: narrow 17311 ms to 8804 ms, quoted 12500 ms to 5687 ms, wide 21551 ms to 13096 ms, nulls 14639 ms to 12145 ms. Cold there, narrow 8753 ms to 4049 ms and quoted 14931 ms to 11230 ms.
 
 Peak resident memory on the quoted file falls from 3.48 GB to 2.80 GB, which is the copy that no longer exists.
 
