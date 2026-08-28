@@ -37,6 +37,7 @@ from .group import (
     AggKind,
     aggregate_group,
     aggregate_group_any,
+    aggregate_group_strings,
     group_count,
     group_first,
     group_last,

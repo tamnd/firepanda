@@ -52,8 +52,10 @@ from std.math import sqrt
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
+from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
+from firepanda.hash.factorize import factorize_strings
 from firepanda.kernel.accum import accumulator, highest, lowest
 from firepanda.kernel.agg import max_of
 
@@ -1188,12 +1190,9 @@ def aggregate_group_any(
 
     # As in `cast_any` and `argsort_any_into`: uint8 is in ALL and a string
     # column would match it, so a sum over a column of names would return a
-    # number rather than raising.
+    # number taken from the first byte of every view rather than an error.
     if col.is_string():
-        raise Error(
-            "group by: a string column can be a key but cannot be aggregated"
-            " yet"
-        )
+        return aggregate_group_strings(col.strings(), kind, codes, groups)
 
     comptime for candidate in ALL:
         if col.dtype() == candidate:
@@ -1227,3 +1226,104 @@ def _check_codes(codes: Array[DType.uint32], groups: Int) raises:
             + String(groups)
             + " that exist"
         )
+
+
+def aggregate_group_strings(
+    col: StringArray, kind: AggKind, codes: Array[DType.uint32], groups: Int
+) raises -> AnyArray:
+    """Runs one grouped reduction over a column of text.
+
+    Six of the thirteen reductions mean something over bytes and the rest do not.
+    `SIZE` and `COUNT` never look at a value, `FIRST`, `LAST`, `MIN` and `MAX`
+    report a value the column held, and `NUNIQUE` counts values without ordering
+    them. A sum of names is not a slow operation, it is not an operation, and the
+    other six raise saying so rather than returning something defensible.
+
+    The four that report a value do it by keeping a row number per group and
+    gathering at the end. Nothing is copied while the scan runs, which matters
+    because the alternative is holding a `String` per group and rewriting it
+    every time a smaller one turns up.
+
+    `NUNIQUE` is the one that reuses the number path outright. Factorizing the
+    column gives every distinct value an ordinal, two rows hold the same bytes
+    exactly when they got the same ordinal, so counting distinct values in a
+    group is counting distinct ordinals and the existing uint32 core does that.
+
+    Args:
+        col: The text column being aggregated.
+        kind: Which reduction.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals.
+
+    Returns:
+        A column of `groups` values, text for the four that report a value and
+        int64 for the three that count.
+
+    Raises:
+        If the reduction is one that text has no meaning for.
+    """
+    if kind == AggKind.SIZE:
+        return AnyArray(group_size(codes, groups))
+    if kind == AggKind.COUNT:
+        return AnyArray(
+            _count_core(col.validity, col.null_count() > 0, codes, groups)
+        )
+    if kind == AggKind.NUNIQUE:
+        var ordinals = factorize_strings(StringArray(copy=col)).into_codes()
+        # The ordinals carry no nulls of their own, because a null row is a group
+        # like any other to the factorize. The count has to skip those rows, so
+        # the column's own validity is what the core is handed.
+        ordinals.data.validity = Bitmap(copy=col.validity)
+        return _dispatch_core(
+            ordinals.unsafe_ptr(),
+            ordinals.data.validity,
+            col.null_count() > 0,
+            AggKind.NUNIQUE,
+            codes,
+            groups,
+        )
+
+    var wants_edge = kind == AggKind.FIRST or kind == AggKind.LAST
+    var wants_extreme = kind == AggKind.MIN or kind == AggKind.MAX
+    if not (wants_edge or wants_extreme):
+        raise Error(
+            "group by: " + String(kind) + " is not defined for a string column"
+        )
+
+    var at = List[Int](capacity=groups)
+    for _ in range(groups):
+        at.append(-1)
+
+    var at_ptr = at.unsafe_ptr()
+    var group_of = codes.unsafe_ptr()
+    if wants_edge:
+        var first = kind == AggKind.FIRST
+        for i in range(len(codes)):
+            if not col.is_valid(i):
+                continue
+            var g = Int(group_of.unsafe_offset(i).unsafe_load())
+            if first and at_ptr.unsafe_offset(g).unsafe_load() >= 0:
+                continue
+            at_ptr.unsafe_offset(g).unsafe_store(i)
+    else:
+        var want_min = kind == AggKind.MIN
+        for i in range(len(codes)):
+            if not col.is_valid(i):
+                continue
+            var g = Int(group_of.unsafe_offset(i).unsafe_load())
+            var held = at_ptr.unsafe_offset(g).unsafe_load()
+            if held < 0:
+                at_ptr.unsafe_offset(g).unsafe_store(i)
+                continue
+            var order = col.compare_elements(i, held)
+            if order < 0 if want_min else order > 0:
+                at_ptr.unsafe_offset(g).unsafe_store(i)
+
+    var builder = StringBuilder(capacity=groups)
+    for g in range(groups):
+        var row = at_ptr.unsafe_offset(g).unsafe_load()
+        if row < 0:
+            builder.append_null()
+        else:
+            builder.append(col.unsafe_bytes(row))
+    return AnyArray(builder^.finish())

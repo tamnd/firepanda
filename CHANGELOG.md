@@ -8,6 +8,24 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added
+
+- A text column can be aggregated. `count`, `size`, `nunique`, `first`, `last`, `min` and `max` all work on a string column, per group, through the same `group_by` call the number columns go through.
+- `aggregate_group_strings`, the kernel behind it, and `group_text_scalar`, the obvious twin the tests compare it against.
+- `tests/test_text_agg.mojo`, eighteen tests, and a round in the string fuzzer that checks the four value reductions against an inline reference.
+
+### Fixed
+
+- A string column reaching the aggregation dispatch matched `uint8` and was summed as bytes, so `sum` over a column of names returned a number rather than an error. The dispatch now asks whether the column is text first, the same way the sort, group by and join dispatches do. That is the last of the three places the hazard lived.
+
+### Why nunique and min take different routes
+
+`nunique` factorizes the column and then runs the number kernel over the ordinals, because two rows hold the same bytes exactly when they share an ordinal, and the number kernel already knows how to count distinct values per group. `first`, `last`, `min` and `max` never copy a value during the scan. They keep one row number per group and gather once at the end through a `StringBuilder`, so a column of long values costs the same to reduce as a column of short ones and only the surviving values are ever written.
+
+### Notes on the numbers
+
+Measured on an i9-13900K, two hundred thousand rows over a hundred groups, fifteen repetitions, interquartile range around 1 percent. `min` over a text column runs at 6.0 ns a row and `nunique` at 16.9, the gap being the factorize pass the second one pays for. On the AMD EPYC VPS the same rows are 31.3 and 64.5 ns.
+
 ## [0.6.6] - 2026-08-28
 
 Built against Mojo 1.0.0 (ed45d567).
