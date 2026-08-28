@@ -8,6 +8,25 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.12] - 2026-08-29
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Two changes to the reader, both about not doing work twice. The scanned index is packed into one word per field instead of four, and the pass that decided every column's type before a single value was parsed is gone, replaced by a guess from a sample that corrects itself when it is wrong. A patch bump: nothing in the API changes shape and the reader gives the same answer on every file it gave before.
+
+Each change was measured against a build of the commit before it, the two builds run alternately in one session, because this machine drifts by tens of percent over an afternoon and two numbers taken hours apart are not a comparison. That means the two are not on one scale and cannot be subtracted from each other, so what follows is each one's ratio against its own baseline, ten million rows on an i9-13900K, warm cache, reading off a mapping.
+
+| file | packed index | speculative types | the two together |
+| --- | --- | --- | --- |
+| narrow | 0.81 | 0.83 | 0.67 |
+| quoted | 0.87 | 0.95 | 0.83 |
+| nulls | 0.70 | 0.76 | 0.54 |
+| wide | 0.94 | 0.66 | 0.62 |
+
+So a third off narrow, a sixth off quoted, not quite half off nulls and just under two fifths off wide. The last column is the product of the two before it, which assumes they do not interact, and they should not: one shrinks the index and the other removes a pass over it.
+
+Peak RSS fell by about a third with the packed index and is unchanged by speculation, which is the expected answer, since speculation allocates the same buffers one pass earlier.
+
 ### Added
 
 - `read_csv_as(path, schema)` and `read_csv_as(path, schema, options)`, which read a file with types the caller already knows. `read_csv_bytes_as` has always existed, so the only way to declare a schema was to open and copy the file yourself, which gave up the mapping and read the file twice as slowly for the trouble.
