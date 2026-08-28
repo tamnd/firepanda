@@ -22,13 +22,40 @@ Missing fields never constrain the type. A column of a hundred integers and one
 `NA` is an integer column with one null in it, which is a thing this frame can
 represent and a pandas frame cannot, and the difference is the reason the
 validity bitmap exists.
+
+A file large enough to be worth it is read on every core. `split.mojo` cuts the
+buffer into blocks that each start on a row boundary, and from there the scan,
+the inference and the conversion all run one task per block. Nothing is shared:
+each block scans into its own `Scan`, guesses its own types, fills its own piece
+of each column, and the pieces are stacked at the end.
+
+Three things are worth knowing about that.
+
+**The types are decided globally, not per block.** Each block climbs the ladder
+over its own rows and reports how far it got, and the column takes the highest
+rung any block reached. A block of all nulls reports that it saw no value at all,
+which is not the same as reporting string, because otherwise one empty block
+would force a numeric column to text.
+
+**Columns are stacked one at a time.** Doing every column's blocks at once and
+then stacking would hold two copies of the whole file's worth of columns at the
+peak. Finishing one column before starting the next holds two copies of one
+column instead, which for a four column file is a third less memory and for a
+wide one is very much less. Each column still fills every core, because the
+parallelism is over blocks rather than over columns.
+
+**A wrong split cannot pass silently.** `split.mojo` documents the check; if it
+fires, or if any block fails to scan, the whole read is done again on one thread
+and that is the answer the caller gets.
 """
 
 from std.collections.span import Span
 
 from firepanda.array import Array, AnyArray, StringArray, StringBuilder
 from firepanda.dtype import Field, LogicalType, Schema
+from firepanda.exec import parallel_for, worker_count
 from firepanda.frame import DataFrame
+from firepanda.kernel.concat import concat_any
 
 from .parse import is_missing, parse_bool, parse_float, parse_int
 from .scan import (
@@ -37,13 +64,22 @@ from .scan import (
     Scan,
     default_dialect,
     field_bytes,
+    scan_block,
     scan_csv,
     unescape,
 )
+from .split import Split, split_buffer
 
 
 comptime INFER_ALL = 0
 """Passed as `infer_rows` to look at every row before deciding a type."""
+
+comptime MIN_BLOCK = 1 << 18
+"""Bytes a block must be worth before the buffer is cut into more of them.
+
+A quarter of a megabyte. Below this the split, the task and the stacking cost
+more than the block saves, and a small file is fast either way.
+"""
 
 
 struct ReadOptions(ImplicitlyCopyable, Movable):
@@ -83,6 +119,124 @@ struct ReadOptions(ImplicitlyCopyable, Movable):
         self.infer_rows = infer_rows
 
 
+comptime _BOOL = 0
+"""The bottom rung of the inference ladder."""
+
+comptime _INT = 1
+"""One rung up from boolean."""
+
+comptime _FLOAT = 2
+"""One rung up from integer."""
+
+comptime _STRING = 3
+"""The top rung, which everything fits and nothing climbs out of."""
+
+
+@fieldwise_init
+struct TypeGuess(ImplicitlyCopyable, Movable):
+    """How far up the ladder one part of a column got.
+
+    Two parts of the same column are combined by taking the higher rung, which is
+    what makes inferring a block at a time give the same answer as inferring the
+    whole column at once.
+    """
+
+    var rung: Int
+    """The highest rung any value needed."""
+
+    var saw_value: Bool
+    """Whether any value was looked at at all.
+
+    A part with no values does not vote. It is not evidence for string, which is
+    what a bare rung would make it, and one block of nulls in a numeric column is
+    common enough that getting this wrong would be noticed immediately.
+    """
+
+
+def combine(a: TypeGuess, b: TypeGuess) -> TypeGuess:
+    """Merges two parts of the same column.
+
+    Args:
+        a: One part's guess.
+        b: The other's.
+
+    Returns:
+        The guess for the two together.
+    """
+    return TypeGuess(
+        a.rung if a.rung > b.rung else b.rung, a.saw_value or b.saw_value
+    )
+
+
+def logical_of(guess: TypeGuess) -> LogicalType:
+    """Turns a finished guess into the type a column gets.
+
+    Args:
+        guess: The guess.
+
+    Returns:
+        The type.
+    """
+    if not guess.saw_value:
+        # No value was observed, so nothing argues for a number. A string column
+        # of all nulls can be cast to anything later; a float column of all
+        # nulls has already thrown the text away.
+        return LogicalType.STRING
+    if guess.rung == _BOOL:
+        return LogicalType.BOOL
+    if guess.rung == _INT:
+        return LogicalType.INT64
+    if guess.rung == _FLOAT:
+        return LogicalType.FLOAT64
+    return LogicalType.STRING
+
+
+def guess_column(
+    data: Span[UInt8, _],
+    scan: Scan,
+    column: Int,
+    first_row: Int,
+    last_row: Int,
+) -> TypeGuess:
+    """Climbs the ladder over one column of one row range.
+
+    Args:
+        data: The buffer the scan points into.
+        scan: The scanned fields.
+        column: Which column to look at.
+        first_row: The first row to sample, past any header.
+        last_row: One past the last row to sample.
+
+    Returns:
+        The highest rung needed, and whether any value was seen.
+    """
+    var rung = _BOOL
+    var saw_value = False
+    for row in range(first_row, last_row):
+        if column >= scan.width(row):
+            continue
+        var span = scan.at(row, column)
+        var bytes = field_bytes(data, span)
+        if is_missing(bytes):
+            continue
+        saw_value = True
+        # An escaped field has a quote in it, so it is text whatever its
+        # remaining bytes look like, and unescaping it here to find that out
+        # would allocate on a path that runs once per value in the file.
+        if span.escaped:
+            return TypeGuess(_STRING, True)
+        if rung == _BOOL and parse_bool(bytes).ok:
+            continue
+        if rung <= _INT and parse_int[DType.int64](bytes).ok:
+            rung = _INT
+            continue
+        if rung <= _FLOAT and parse_float[DType.float64](bytes).ok:
+            rung = _FLOAT
+            continue
+        return TypeGuess(_STRING, True)
+    return TypeGuess(rung, saw_value)
+
+
 def infer_column(
     data: Span[UInt8, _],
     scan: Scan,
@@ -102,40 +256,7 @@ def infer_column(
     Returns:
         The narrowest type every sampled value fits in, or string if none does.
     """
-    var kind = 0
-    var saw_value = False
-    for row in range(first_row, last_row):
-        if column >= scan.width(row):
-            continue
-        var span = scan.at(row, column)
-        var bytes = field_bytes(data, span)
-        if is_missing(bytes):
-            continue
-        saw_value = True
-        # An escaped field has a quote in it, so it is text whatever its
-        # remaining bytes look like, and unescaping it here to find that out
-        # would allocate on a path that runs once per value in the file.
-        if span.escaped:
-            return LogicalType.STRING
-        if kind == 0 and parse_bool(bytes).ok:
-            continue
-        if kind <= 1 and parse_int[DType.int64](bytes).ok:
-            kind = 1
-            continue
-        if kind <= 2 and parse_float[DType.float64](bytes).ok:
-            kind = 2
-            continue
-        return LogicalType.STRING
-    if not saw_value:
-        # No value was observed, so nothing argues for a number. A string column
-        # of all nulls can be cast to anything later; a float column of all
-        # nulls has already thrown the text away.
-        return LogicalType.STRING
-    if kind == 0:
-        return LogicalType.BOOL
-    if kind == 1:
-        return LogicalType.INT64
-    return LogicalType.FLOAT64
+    return logical_of(guess_column(data, scan, column, first_row, last_row))
 
 
 def infer_schema(
@@ -171,19 +292,270 @@ def infer_schema(
 
     var fields = List[Field](capacity=width)
     for column in range(width):
-        var name = String("column_", column)
-        if options.has_header:
-            var span = scan.at(0, column)
-            if span.escaped:
-                var literal = unescape(data, span, options.dialect.quote)
-                name = String(StringSlice(unsafe_from_utf8=Span(literal)))
-            else:
-                name = String(
-                    StringSlice(unsafe_from_utf8=field_bytes(data, span))
-                )
+        var name = column_name(data, scan, column, options)
         var dtype = infer_column(data, scan, column, first_row, last_row)
         fields.append(Field(name, dtype))
     return Schema(fields^)
+
+
+def column_name(
+    data: Span[UInt8, _], scan: Scan, column: Int, options: ReadOptions
+) -> String:
+    """Returns what one column is called.
+
+    Args:
+        data: The buffer the scan points into.
+        scan: A scan whose row zero is the file's first row.
+        column: Which column to name.
+        options: The read options.
+
+    Returns:
+        The header cell, or a positional name for a file with no header.
+    """
+    if not options.has_header:
+        return String("column_", column)
+    var span = scan.at(0, column)
+    if span.escaped:
+        var literal = unescape(data, span, options.dialect.quote)
+        return String(StringSlice(unsafe_from_utf8=Span(literal)))
+    return String(StringSlice(unsafe_from_utf8=field_bytes(data, span)))
+
+
+def block_count(size: Int) -> Int:
+    """Returns how many blocks a buffer of this size should be cut into.
+
+    Args:
+        size: The buffer's length in bytes.
+
+    Returns:
+        One for a file not worth splitting, otherwise one block per worker at
+        most and never a block smaller than `MIN_BLOCK`.
+    """
+    var affordable = size // MIN_BLOCK
+    var workers = worker_count()
+    var count = workers if affordable > workers else affordable
+    return count if count > 1 else 1
+
+
+def scan_blocks(
+    data: Span[UInt8, _], dialect: Dialect, blocks: Int
+) raises -> List[Scan]:
+    """Scans a buffer in parallel, or raises if the split cannot be trusted.
+
+    Args:
+        data: The whole file.
+        dialect: The delimiter and quote character.
+        blocks: How many blocks to cut the buffer into.
+
+    Returns:
+        One scan per block, with offsets into `data`.
+
+    Raises:
+        Error: If any block fails to scan, or if the blocks did not account for
+            every quote byte in the file. Either means the caller should read
+            the file on one thread instead. `split.mojo` has the argument.
+    """
+    var split = split_buffer(data, dialect, blocks)
+    var scans = List[Scan](capacity=blocks)
+    for _ in range(blocks):
+        scans.append(Scan())
+
+    def one(b: Int) raises {mut scans, imm}:
+        scans[b] = scan_block(
+            data, dialect, split.bounds[b], split.bounds[b + 1]
+        )
+
+    parallel_for(one, blocks)
+
+    var accounted = 0
+    for b in range(blocks):
+        accounted += scans[b].quotes
+    if accounted != split.quotes:
+        raise Error(
+            "csv: a quote byte was read as data, so the block split is not"
+            " trustworthy"
+        )
+    return scans^
+
+
+@fieldwise_init
+struct BlockRows(ImplicitlyCopyable, Movable):
+    """Where one block's rows sit, in its own scan and in the file."""
+
+    var first: Int
+    """The block's first value row, which is one for a block zero with a header.
+    """
+
+    var count: Int
+    """How many value rows the block has."""
+
+    var before: Int
+    """How many value rows the whole file has before this block."""
+
+
+def block_rows(scans: List[Scan], options: ReadOptions) -> List[BlockRows]:
+    """Works out each block's share of the file's rows.
+
+    Args:
+        scans: One scan per block.
+        options: The read options.
+
+    Returns:
+        One entry per block.
+    """
+    var out = List[BlockRows](capacity=len(scans))
+    var before = 0
+    for b in range(len(scans)):
+        var first = 1 if b == 0 and options.has_header else 0
+        var count = len(scans[b]) - first
+        if count < 0:
+            count = 0
+        out.append(BlockRows(first, count, before))
+        before += count
+    return out^
+
+
+def block_width(scans: List[Scan]) raises -> Int:
+    """Returns how many columns the file has, checking that every block agrees.
+
+    Args:
+        scans: One scan per block.
+
+    Returns:
+        The column count, or zero for a file with no rows.
+
+    Raises:
+        Error: If any block is ragged, or if two blocks disagree on the width.
+    """
+    var width = -1
+    for b in range(len(scans)):
+        if len(scans[b]) == 0:
+            continue
+        if scans[b].is_ragged():
+            raise Error(
+                "rows have different numbers of fields; a ragged file has no"
+                " schema"
+            )
+        if width < 0:
+            width = scans[b].width(0)
+        elif scans[b].width(0) != width:
+            raise Error(
+                "rows have different numbers of fields; a ragged file has no"
+                " schema"
+            )
+    return width if width > 0 else 0
+
+
+def infer_schema_blocks(
+    data: Span[UInt8, _],
+    scans: List[Scan],
+    layout: List[BlockRows],
+    width: Int,
+    options: ReadOptions,
+) raises -> Schema:
+    """Names and types every column of a buffer that was scanned in blocks.
+
+    Every column of every block is guessed at once and the guesses are combined
+    afterwards, rather than one task per column, because a file with four columns
+    would otherwise use four cores.
+
+    Args:
+        data: The buffer the scans point into.
+        scans: One scan per block.
+        layout: Each block's share of the rows.
+        width: How many columns the file has.
+        options: The read options.
+
+    Returns:
+        The schema.
+
+    Raises:
+        Error: Never directly. The signature is inherited from `parallel_for`.
+    """
+    var blocks = len(scans)
+    var guesses = List[TypeGuess](
+        length=width * blocks, fill=TypeGuess(_BOOL, False)
+    )
+
+    def one(task: Int) raises {mut guesses, imm}:
+        var column = task // blocks
+        var b = task % blocks
+        var last = len(scans[b])
+        if options.infer_rows != INFER_ALL:
+            # The sample is the file's first `infer_rows` value rows, so a block
+            # that starts past the end of it looks at nothing at all.
+            var left = options.infer_rows - layout[b].before
+            var bound = layout[b].first + (left if left > 0 else 0)
+            if bound < last:
+                last = bound
+        guesses[task] = guess_column(
+            data, scans[b], column, layout[b].first, last
+        )
+
+    parallel_for(one, width * blocks)
+
+    var fields = List[Field](capacity=width)
+    for column in range(width):
+        var merged = TypeGuess(_BOOL, False)
+        for b in range(blocks):
+            merged = combine(merged, guesses[column * blocks + b])
+        fields.append(
+            Field(
+                column_name(data, scans[0], column, options), logical_of(merged)
+            )
+        )
+    return Schema(fields^)
+
+
+def build_blocks(
+    data: Span[UInt8, _],
+    scans: List[Scan],
+    layout: List[BlockRows],
+    var schema: Schema,
+    options: ReadOptions,
+) raises -> DataFrame:
+    """Fills one column at a time, every block of it at once.
+
+    Args:
+        data: The buffer the scans point into.
+        scans: One scan per block.
+        layout: Each block's share of the rows.
+        schema: The types to read as.
+        options: The read options.
+
+    Returns:
+        The frame.
+
+    Raises:
+        Error: If a value does not fit its column's declared type.
+    """
+    var blocks = len(scans)
+    var header = 1 if options.has_header else 0
+    var columns = List[AnyArray](capacity=len(schema))
+
+    for column in range(len(schema)):
+        var pieces = List[AnyArray](capacity=blocks)
+        for _ in range(blocks):
+            # A placeholder rather than an `Optional`, because every slot is
+            # written before any of them is read and the empty column costs an
+            # allocation of nothing.
+            pieces.append(AnyArray(Array[DType.int8](0)))
+
+        def one(b: Int) raises {mut pieces, imm}:
+            pieces[b] = read_column(
+                data,
+                scans[b],
+                column,
+                layout[b].first,
+                layout[b].count,
+                layout[b].before + header,
+                schema[column],
+                options,
+            )
+
+        parallel_for(one, blocks)
+        columns.append(concat_any(pieces))
+    return DataFrame(schema^, columns^)
 
 
 def read_csv_bytes(
@@ -202,6 +574,13 @@ def read_csv_bytes(
         Error: If the file is ragged, or if a value does not fit the type the
             schema declares for its column.
     """
+    var scans = List[Scan]()
+    if split_scan(data, options.dialect, scans):
+        var width = block_width(scans)
+        var layout = block_rows(scans, options)
+        var schema = infer_schema_blocks(data, scans, layout, width, options)
+        return build_blocks(data, scans, layout, schema^, options)
+
     var scan = scan_csv(data, options.dialect)
     var schema = infer_schema(data, scan, options)
     return build(data, scan, schema^, options)
@@ -228,22 +607,72 @@ def read_csv_bytes_as(
         Error: If the file is ragged, if the schema does not have one field per
             column, or if a value does not fit its declared type.
     """
+    var scans = List[Scan]()
+    if split_scan(data, options.dialect, scans):
+        check_width(len(schema), block_width(scans))
+        var layout = block_rows(scans, options)
+        return build_blocks(data, scans, layout, schema^, options)
+
     var scan = scan_csv(data, options.dialect)
     if scan.is_ragged():
         raise Error(
             "rows have different numbers of fields; a ragged file has no schema"
         )
-    if len(scan) > 0 and len(schema) != scan.width(0):
+    if len(scan) > 0:
+        check_width(len(schema), scan.width(0))
+    return build(data, scan, schema^, options)
+
+
+def check_width(declared: Int, found: Int) raises:
+    """Checks that a declared schema has one field per column of the file.
+
+    Args:
+        declared: How many fields the schema has.
+        found: How many columns the file has, or zero for an empty file.
+
+    Raises:
+        Error: If they disagree.
+    """
+    if found > 0 and declared != found:
         raise Error(
             String(
                 "schema has ",
-                len(schema),
+                declared,
                 " fields but the file has ",
-                scan.width(0),
+                found,
                 " columns",
             )
         )
-    return build(data, scan, schema^, options)
+
+
+def split_scan(
+    data: Span[UInt8, _], dialect: Dialect, mut scans: List[Scan]
+) -> Bool:
+    """Tries to scan a buffer in blocks and says whether it worked.
+
+    The failure is swallowed rather than reported, and that is deliberate. There
+    are two reasons a block scan fails: the split was not trustworthy, or the
+    file is malformed. Only the sequential scan can tell them apart, and it has
+    to run either way, so the answer the caller gets comes from the one pass that
+    knows which row the problem is on.
+
+    Args:
+        data: The whole file.
+        dialect: The delimiter and quote character.
+        scans: Filled with one scan per block if this returns true, and left
+            alone if it does not.
+
+    Returns:
+        True if the blocks can be used.
+    """
+    var blocks = block_count(len(data))
+    if blocks <= 1:
+        return False
+    try:
+        scans = scan_blocks(data, dialect, blocks)
+        return True
+    except:
+        return False
 
 
 def build(
@@ -270,45 +699,79 @@ def build(
 
     var columns = List[AnyArray](capacity=len(schema))
     for column in range(len(schema)):
-        var dtype = schema[column].dtype
-        var name = schema[column].name
-        if dtype == LogicalType.BOOL:
-            columns.append(
-                AnyArray(read_bool(data, scan, column, first_row, rows, name))
+        columns.append(
+            read_column(
+                data,
+                scan,
+                column,
+                first_row,
+                rows,
+                first_row,
+                schema[column],
+                options,
             )
-        elif dtype == LogicalType.INT64:
-            columns.append(
-                AnyArray(
-                    read_number[DType.int64, True](
-                        data, scan, column, first_row, rows, name
-                    )
-                )
-            )
-        elif dtype == LogicalType.FLOAT64:
-            columns.append(
-                AnyArray(
-                    read_number[DType.float64, False](
-                        data, scan, column, first_row, rows, name
-                    )
-                )
-            )
-        elif dtype == LogicalType.STRING:
-            columns.append(
-                AnyArray(
-                    read_text(data, scan, column, first_row, rows, options)
-                )
-            )
-        else:
-            raise Error(
-                String(
-                    "column '",
-                    name,
-                    "' asks for ",
-                    dtype,
-                    ", which the CSV reader does not produce yet",
-                )
-            )
+        )
     return DataFrame(schema^, columns^)
+
+
+def read_column(
+    data: Span[UInt8, _],
+    scan: Scan,
+    column: Int,
+    first_row: Int,
+    rows: Int,
+    file_row: Int,
+    field: Field,
+    options: ReadOptions,
+) raises -> AnyArray:
+    """Fills one column, or one block's piece of one.
+
+    Args:
+        data: The buffer the scan points into.
+        scan: The scanned fields.
+        column: Which column to read.
+        first_row: The first value row within `scan`.
+        rows: How many value rows to read.
+        file_row: The row number in the whole file of `first_row`, which is what
+            an error message quotes. It differs from `first_row` only when the
+            scan is one block of a file.
+        field: The column's name and type.
+        options: The read options.
+
+    Returns:
+        The column.
+
+    Raises:
+        Error: If a value does not fit the type, or if the type is one the CSV
+            reader cannot produce.
+    """
+    if field.dtype == LogicalType.BOOL:
+        return AnyArray(
+            read_bool(data, scan, column, first_row, rows, file_row, field.name)
+        )
+    if field.dtype == LogicalType.INT64:
+        return AnyArray(
+            read_number[DType.int64, True](
+                data, scan, column, first_row, rows, file_row, field.name
+            )
+        )
+    if field.dtype == LogicalType.FLOAT64:
+        return AnyArray(
+            read_number[DType.float64, False](
+                data, scan, column, first_row, rows, file_row, field.name
+            )
+        )
+    if field.dtype == LogicalType.STRING:
+        return AnyArray(read_text(data, scan, column, first_row, rows, options))
+    raise Error(
+        String(
+            "column '",
+            field.name,
+            "' asks for ",
+            field.dtype,
+            ", which the CSV reader does not produce yet",
+        )
+    )
 
 
 def read_bool(
@@ -317,6 +780,7 @@ def read_bool(
     column: Int,
     first_row: Int,
     rows: Int,
+    file_row: Int,
     name: String,
 ) raises -> Array[DType.bool]:
     """Fills one boolean column.
@@ -327,6 +791,7 @@ def read_bool(
         column: Which column to read.
         first_row: The first value row.
         rows: How many value rows there are.
+        file_row: The row number in the file of `first_row`.
         name: The column name, for the error message.
 
     Returns:
@@ -343,7 +808,7 @@ def read_bool(
             continue
         var parsed = parse_bool(bytes)
         if not parsed.ok:
-            raise Error(bad_value(name, first_row + i, "a boolean"))
+            raise Error(bad_value(name, file_row + i, "a boolean"))
         out.set_valid(i, parsed.value)
     return out^
 
@@ -356,6 +821,7 @@ def read_number[
     column: Int,
     first_row: Int,
     rows: Int,
+    file_row: Int,
     name: String,
 ) raises -> Array[dt]:
     """Fills one numeric column.
@@ -366,6 +832,7 @@ def read_number[
         column: Which column to read.
         first_row: The first value row.
         rows: How many value rows there are.
+        file_row: The row number in the file of `first_row`.
         name: The column name, for the error message.
 
     Returns:
@@ -388,12 +855,12 @@ def read_number[
         comptime if is_int:
             var parsed = parse_int[dt](bytes)
             if not parsed.ok:
-                raise Error(bad_value(name, first_row + i, "an integer"))
+                raise Error(bad_value(name, file_row + i, "an integer"))
             out.set_valid(i, parsed.value)
         else:
             var parsed = parse_float[dt](bytes)
             if not parsed.ok:
-                raise Error(bad_value(name, first_row + i, "a number"))
+                raise Error(bad_value(name, file_row + i, "a number"))
             out.set_valid(i, parsed.value)
     return out^
 

@@ -8,6 +8,36 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added
+
+- `firepanda/exec`, which is the whole of the library's threading. One function, `parallel_for`, which runs a body once per index and returns when all of them have finished. It is built on `TaskGroup` from `std.runtime.asyncrt` rather than on `parallelize`, which is no longer in the standard library and now lives behind a GPU dependency in `max.algorithm`.
+- `firepanda/io/split.mojo`, which cuts a CSV buffer into blocks that each begin on a row boundary. A newline inside a quoted field is data rather than a separator, so the quote state at an offset is what decides, and that state is the parity of the quote bytes before it. Counting bytes is parallel and a prefix sum over one number per block is free, so every block learns its starting state without reading what came before it.
+- `scan_block`, which scans a byte range of a buffer while keeping the offsets absolute, and `scan_blocks`, which runs one per block and checks the result.
+- A CSV round in `tests/stress/main.mojo`. It builds a file whose every value is a function of its row index, cuts it into a randomized number of blocks between one and thirty three, checks the blocks against a single pass field span by field span, then reads it the way a caller would and checks the values against the generator rather than against another run of the reader.
+- `tests/test_split.mojo`, twenty two tests, and `tests/test_parallel.mojo`, eight.
+
+### Changed
+
+- `read_csv` runs on every core for a file large enough to be worth it, which is a quarter of a megabyte per core. The scan, the inference and the conversion all run one task per block. Nothing is shared between blocks: each scans into its own `Scan`, guesses its own types, and fills its own piece of each column.
+- `Scan` records how many quote bytes it read as structure. That number is what makes the split checkable rather than merely plausible; see below.
+- Columns are stacked one at a time rather than all at once. The parallelism is over blocks within a column, so every core is still busy, and the peak holds two copies of one column instead of two copies of the whole frame.
+
+### Why a wrong split cannot pass silently
+
+The parity argument holds under RFC 4180 and this reader is deliberately looser than RFC 4180: it accepts a bare quote in the middle of an unquoted field, because pandas does. Such a quote is data, it does not come in a pair, and it flips the parity of every offset after it.
+
+So the split is checked. A block's structural quote count can never exceed the quote bytes in its own byte range, and the blocks partition the buffer, so if the totals agree over the whole file they agree over every block, which means no quote byte was read as data. Block zero starts at offset zero, which is a row boundary outside quotes by definition, so block zero's parse is correct, so the next block's start is a row boundary too, and the induction runs to the end.
+
+The other half is that a boundary with the wrong parity cuts the block before it inside a quoted field, and a quoted field with no closing quote is an error the scanner already raises. When either fires the whole read is done again on one thread, which is also what produces the right file row number in the message for a file that really is malformed.
+
+### Notes on the numbers
+
+Measured on an i9-13900K, sixteen physical cores and thirty two logical, against one million rows of four columns, 28.2 MB, the same file for every reader and seven runs each.
+
+firepanda reads it in 50.3 ms median, against 145.9 ms for the same code before this change. That is 2.9 times, on a machine with thirty two logical cores, and the reason it is not more is that only part of the work moved. The scan went from 45.2 ms to 7.5 ms, which is six times and close to what the hardware allows. The rest of the read, inference and conversion and stacking, is 32 ms of the remaining 39 ms and did not improve nearly as much. That is where the next piece of work is.
+
+On the same file `pandas.read_csv` takes 237.5 ms with the C engine and 11.1 ms with the pyarrow engine, and `polars.read_csv` takes 6.2 ms. So firepanda is now four and a half times faster than the C engine and still four and a half times behind the pyarrow one. The M1 exit criterion asks for a reader that beats the pyarrow engine and this is not yet that reader.
+
 ## [0.6.8] - 2026-08-29
 
 Built against Mojo 1.0.0 (ed45d567).
