@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.9] - 2026-08-29
+
+Built against Mojo 1.0.0 (ed45d567).
+
+`read_csv` runs on every core. A patch bump: nothing changes shape, one thing gets faster, and the library gains its first piece of threading.
+
 ### Added
 
 - `firepanda/exec`, which is the whole of the library's threading. One function, `parallel_for`, which runs a body once per index and returns when all of them have finished. It is built on `TaskGroup` from `std.runtime.asyncrt` rather than on `parallelize`, which is no longer in the standard library and now lives behind a GPU dependency in `max.algorithm`.
@@ -598,7 +604,9 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.7...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.9...HEAD
+[0.6.9]: https://github.com/tamnd/firepanda/releases/tag/v0.6.9
+[0.6.8]: https://github.com/tamnd/firepanda/releases/tag/v0.6.8
 [0.6.7]: https://github.com/tamnd/firepanda/releases/tag/v0.6.7
 [0.6.6]: https://github.com/tamnd/firepanda/releases/tag/v0.6.6
 [0.6.5]: https://github.com/tamnd/firepanda/releases/tag/v0.6.5
