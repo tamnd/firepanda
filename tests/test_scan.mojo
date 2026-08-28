@@ -15,6 +15,10 @@ from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from firepanda.io.scalar import scan_csv_scalar
 from firepanda.io.scan import (
+    COMMA,
+    DOUBLE_QUOTE,
+    LONG_FIELD,
+    NEWLINE,
     Dialect,
     Scan,
     default_dialect,
@@ -286,6 +290,50 @@ def test_a_delimiter_at_every_offset_in_a_register() raises:
             scan.at(0, 0).end - scan.at(0, 0).start, pad, "pad " + String(pad)
         )
         check_twins(data)
+
+
+def test_the_packed_length_boundary_is_exact() raises:
+    # A packed field gives twenty two bits to its length, so a field of
+    # `LONG_FIELD` bytes or more has its length kept beside the index rather
+    # than in it. One field either side of that length and one exactly on it,
+    # in a single row, because a lookup keyed on the wrong field would swap two
+    # of them rather than quietly agree with itself. The middle one is quoted
+    # and holds a doubled quote, since the two flags share the word with the
+    # length and a length that spilled must not take them with it.
+    #
+    # The row is one fill and nine stores rather than a loop, because it is
+    # twelve megabytes and this is a test suite.
+    var n = LONG_FIELD
+    var data = List[UInt8](length=3 * n + 5, fill=UInt8(98))
+    data[0] = UInt8(97)
+    data[n - 1] = COMMA
+    data[n] = DOUBLE_QUOTE
+    data[2 * n - 1] = DOUBLE_QUOTE
+    data[2 * n] = DOUBLE_QUOTE
+    data[2 * n + 1] = DOUBLE_QUOTE
+    data[2 * n + 2] = COMMA
+    data[2 * n + 3] = UInt8(99)
+    data[3 * n + 4] = NEWLINE
+
+    var scan = scan_csv(data, default_dialect())
+    assert_equal(scan.width(0), 3)
+
+    var short = scan.at(0, 0)
+    assert_equal(short.end - short.start, n - 1)
+    assert_equal(data[short.start], UInt8(97))
+    assert_false(short.quoted)
+    assert_false(short.escaped)
+
+    var exact = scan.at(0, 1)
+    assert_equal(exact.start, n + 1)
+    assert_equal(exact.end - exact.start, n)
+    assert_true(exact.quoted)
+    assert_true(exact.escaped)
+
+    var over = scan.at(0, 2)
+    assert_equal(over.end - over.start, n + 1)
+    assert_equal(data[over.start], UInt8(99))
+    assert_false(over.quoted)
 
 
 def test_a_custom_dialect() raises:

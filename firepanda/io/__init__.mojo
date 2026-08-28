@@ -44,6 +44,7 @@ from .scalar import scan_csv_scalar
 from .scan import (
     Dialect,
     FieldSpan,
+    LongField,
     Scan,
     default_dialect,
     field_bytes,

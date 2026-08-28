@@ -1695,7 +1695,7 @@ def bench_csv(mut harness: Harness) raises:
     def parse_integers() raises {imm narrow, imm found, imm integers}:
         var total = Int64(0)
         for i in range(len(integers)):
-            var span = found.fields[integers[i]]
+            var span = found.field(integers[i])
             total += parse_int[DType.int64](field_bytes(narrow, span)).value
         keep(Int(total))
 
@@ -1704,7 +1704,7 @@ def bench_csv(mut harness: Harness) raises:
     def parse_floats() raises {imm narrow, imm found, imm floats}:
         var total = Float64(0.0)
         for i in range(len(floats)):
-            var span = found.fields[floats[i]]
+            var span = found.field(floats[i])
             total += parse_float[DType.float64](field_bytes(narrow, span)).value
         keep(Int(total))
 

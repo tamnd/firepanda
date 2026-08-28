@@ -45,3 +45,6 @@ leak-*
 .idea/
 .vscode/
 !.vscode/extensions.json
+
+# Throwaway timing programs. They are written for one measurement and deleted.
+tools/probes/

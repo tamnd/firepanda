@@ -44,6 +44,12 @@ in a data file is worse than a failed read.
 
 Blank lines are skipped, which is pandas' default and is what a file ending in a
 newline needs in order not to produce a phantom last row.
+
+What comes out is one 64-bit word per field, not a struct of two offsets and two
+flags. The index is the largest thing a read allocates and it is written once
+and read once, so its size is nearly all of its cost, and three times smaller is
+three times less memory traffic in both directions. `Scan.push` and `Scan.field`
+are the only two functions that know the layout.
 """
 
 from std.collections.span import Span
@@ -70,6 +76,48 @@ and for those the vector path is pure overhead. A whole register would be the
 tidier number, but it costs the long fields a register's worth of skipping for
 nothing, since the walk after a hit is bounded by the register width either way.
 """
+
+
+comptime START_BITS = 40
+"""Bits a packed field gives to its start offset, so a buffer up to a terabyte.
+
+A field is packed into one 64-bit word because the index is the largest thing a
+read allocates and it is read exactly once after it is written, so its size is
+its cost almost entirely. The old layout was two `Int` offsets and two flags,
+which padded to twenty four bytes: for a four column file of ten million rows
+that is 960 MB of index over a 357 MB file.
+
+Forty bits for the start and twenty two for the length is the split that makes
+the common case exact. The start has to address the whole buffer, and a buffer
+larger than a terabyte is refused with a message that says so rather than
+truncated. The length only has to cover one field, and a field longer than four
+megabytes is kept in `Scan.long` instead, so nothing is refused for being wide.
+"""
+
+comptime LENGTH_BITS = 22
+"""Bits a packed field gives to its length, so four megabytes less one."""
+
+comptime MAX_START = 1 << START_BITS
+"""One past the largest byte offset a scan can record."""
+
+comptime LONG_FIELD = (1 << LENGTH_BITS) - 1
+"""The length that means the real length is in `Scan.long`.
+
+A field of exactly this length is stored there too, which costs one entry and
+saves a special case.
+"""
+
+comptime START_MASK = UInt64(MAX_START - 1)
+"""Where the start sits in a packed field."""
+
+comptime LENGTH_MASK = UInt64(LONG_FIELD)
+"""Where the length sits, once shifted down."""
+
+comptime ESCAPED_BIT = UInt64(1) << 62
+"""Set when the field's content contains a doubled quote."""
+
+comptime QUOTED_BIT = UInt64(1) << 63
+"""Set when the field was written inside quotes."""
 
 
 @fieldwise_init
@@ -121,16 +169,33 @@ struct FieldSpan(ImplicitlyCopyable, Movable):
     """
 
 
+@fieldwise_init
+struct LongField(ImplicitlyCopyable, Movable):
+    """The real length of a field too long to fit in a packed one."""
+
+    var at: Int
+    """The field's position in `Scan.fields`."""
+
+    var length: Int
+    """How many bytes of content it has."""
+
+
 struct Scan(Movable, Sized):
     """Every field in a buffer, grouped into rows.
 
     The fields are one flat list and the rows are offsets into it, which is the
     same shape as an Arrow offsets buffer and for the same reason: one
     allocation for the whole file rather than one per row.
+
+    A field is one 64-bit word rather than a `FieldSpan`, which is three times
+    smaller and is the difference between an index that fits in cache and one
+    that does not. `push` and `field` are the only two places that know the
+    layout, and `at` still hands back an ordinary `FieldSpan`, so nothing above
+    this struct has to think about it.
     """
 
-    var fields: List[FieldSpan]
-    """Every field, in file order."""
+    var fields: List[UInt64]
+    """Every field, in file order, packed."""
 
     var starts: List[Int]
     """Where each row begins in `fields`, with a final entry for the end."""
@@ -146,12 +211,88 @@ struct Scan(Movable, Sized):
     bytes in the file. `firepanda/io/split.mojo` has the argument in full.
     """
 
+    var long: List[LongField]
+    """Fields longer than `LONG_FIELD`, in increasing position order.
+
+    Almost always empty. A file of four megabyte fields is a real file, though,
+    and refusing it to save two bytes of packing would be the wrong trade.
+    """
+
     def __init__(out self):
         """Constructs an empty scan."""
-        self.fields = List[FieldSpan]()
+        self.fields = List[UInt64]()
         self.starts = List[Int]()
         self.starts.append(0)
+        self.long = List[LongField]()
         self.quotes = 0
+
+    def push(mut self, start: Int, end: Int, escaped: Bool, quoted: Bool):
+        """Records one field.
+
+        Args:
+            start: First byte of the content.
+            end: One past the last byte of the content.
+            escaped: Whether the content has a doubled quote in it.
+            quoted: Whether the field was written inside quotes.
+        """
+        var length = end - start
+        var stored = length
+        if length >= LONG_FIELD:
+            self.long.append(LongField(len(self.fields), length))
+            stored = LONG_FIELD
+        var bits = UInt64(start) | (UInt64(stored) << START_BITS)
+        if escaped:
+            bits |= ESCAPED_BIT
+        if quoted:
+            bits |= QUOTED_BIT
+        self.fields.append(bits)
+
+    def field(self, i: Int) -> FieldSpan:
+        """Returns one field's span by its position in `fields`.
+
+        Args:
+            i: The field's position.
+
+        Returns:
+            The span.
+        """
+        var bits = self.fields[i]
+        var start = Int(bits & START_MASK)
+        var length = Int((bits >> START_BITS) & LENGTH_MASK)
+        if length == LONG_FIELD:
+            length = self._long_length(i)
+        return FieldSpan(
+            start,
+            start + length,
+            (bits & ESCAPED_BIT) != 0,
+            (bits & QUOTED_BIT) != 0,
+        )
+
+    def _long_length(self, i: Int) -> Int:
+        """Returns the recorded length of a field that did not fit.
+
+        `long` is appended to in field order, so this is a binary search rather
+        than a walk, which matters only for the pathological file where most
+        fields are long.
+
+        Args:
+            i: The field's position in `fields`.
+
+        Returns:
+            The length, or `LONG_FIELD` if the entry is somehow missing, which
+            cannot happen and is not worth raising over.
+        """
+        var lo = 0
+        var hi = len(self.long)
+        while lo < hi:
+            var mid = (lo + hi) // 2
+            if self.long[mid].at < i:
+                lo = mid + 1
+            else:
+                hi = mid
+        if lo < len(self.long) and self.long[lo].at == i:
+            return self.long[lo].length
+        return LONG_FIELD
 
     def __len__(self) -> Int:
         """Returns the number of rows.
@@ -182,7 +323,7 @@ struct Scan(Movable, Sized):
         Returns:
             The span.
         """
-        return self.fields[self.starts[row] + column]
+        return self.field(self.starts[row] + column)
 
     def is_ragged(self) -> Bool:
         """Returns whether the rows disagree on how many fields they have.
@@ -218,8 +359,13 @@ def scan_csv(
         If a quoted field is never closed, or if a closing quote is followed by
         anything other than a delimiter or the end of the row.
     """
-    var out = Scan()
     var n = len(data)
+    if n > MAX_START:
+        raise Error(
+            "csv: a buffer larger than a terabyte cannot be scanned in one"
+            " piece"
+        )
+    var out = Scan()
     var ptr = data.unsafe_ptr()
     var at = first
 
@@ -251,7 +397,7 @@ def scan_csv(
                 # A delimiter at the end of the buffer or the line still opens
                 # one more field, and that field is empty.
                 if at >= n or _at_row_end(data, at):
-                    out.fields.append(FieldSpan(at, at, False, False))
+                    out.push(at, at, False, False)
                     break
                 continue
             if here == RETURN:
@@ -333,7 +479,7 @@ def _plain_field(
         end of the buffer.
     """
     var stop = _next_special(data, start, dialect.delimiter)
-    out.fields.append(FieldSpan(start, stop, False, False))
+    out.push(start, stop, False, False)
     return stop
 
 
@@ -381,7 +527,7 @@ def _quoted_field(
         # The opening quote and this closing one, counted together now that the
         # field is known to have both.
         out.quotes += 2
-        out.fields.append(FieldSpan(start + 1, at, escaped, True))
+        out.push(start + 1, at, escaped, True)
         var after = at + 1
         if after >= n or _at_row_end(data, after):
             return after
