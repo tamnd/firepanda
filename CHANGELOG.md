@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.10] - 2026-08-29
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Stacking string columns stops touching elements. A patch bump: no API changes shape, one kernel gets between four and nine times faster, and two functions are added that exist because that kernel needed them.
+
 ### Added
 
 - `concat_strings`, the typed spelling of a concat of string columns, beside the `concat_arrays` that has always been there for the fixed width ones.
