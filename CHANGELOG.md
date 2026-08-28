@@ -8,6 +8,27 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added
+
+- `read_csv`, which turns a file or a buffer of bytes into a `DataFrame`, inferring the schema from the first rows or taking one you hand it. Names come from the header when there is one and are `column_0` upward when there is not.
+- `write_csv`, which turns a `DataFrame` back into a file or a buffer of bytes, quoting a field only when leaving it bare would move a boundary.
+- `ReadOptions` and `WriteOptions`, carrying the dialect, whether there is a header, and how many rows the inference is allowed to look at. `INFER_ALL` reads the whole file before deciding.
+- `benchmarks/read_file.mojo`, a standalone timed read of a file that already exists, so the comparison against `pandas.read_csv` can be run on byte identical input rather than on two files of the same description.
+- Three benchmark rows, `csv/read_inferred`, `csv/read_declared` and `csv/write`.
+- `tests/test_csv.mojo`, twenty eight tests.
+
+### Changed
+
+- `FieldSpan` records whether the field was written inside quotes. An empty field and a quoted empty field are the two ways a CSV file has of writing a missing value and the empty string, and without the flag the reader has to guess, and whichever way it guesses one of the two becomes unrepresentable.
+
+### How the type of a column is decided
+
+Inference climbs a ladder, bool to int64 to float64 to string, and never descends. A value that does not fit the current rung moves the column up one rung and the column keeps the widest rung any value forced. A missing value decides nothing, so a column of numbers with a gap in it is still a column of numbers, and a column with nothing in it at all is text, because text is the only rung that can hold whatever eventually turns up. A quoted field is not promoted to text for being quoted, since quoting says where a field ends and not what is in it, but a quoted empty string is the empty string and not a null, which is the one place quoting does change a value.
+
+### Notes on the numbers
+
+Measured on an i9-13900K against one million rows of four columns, 20.7 MB, the same file for every reader. firepanda reads it in 139.7 ms median. `pandas.read_csv` with the C engine takes 137.1 ms and with the pyarrow engine 28.8 ms from the file and 12.4 ms from memory. So this is at parity with the engine pandas has had for fifteen years and roughly eleven times behind the threaded Arrow reader. The gap is threads. The scan and the conversion both run on one core here, and Arrow runs both across all of them. The M1 exit criterion asks for a reader that beats the pyarrow engine and this is not that reader yet.
+
 ## [0.6.7] - 2026-08-28
 
 Built against Mojo 1.0.0 (ed45d567).

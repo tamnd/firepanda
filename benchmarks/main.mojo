@@ -58,6 +58,8 @@ from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer
 from firepanda.buffer.pool import BufferPool
 from firepanda.dtype.dispatch import dispatch
+from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.schema import Field, Schema
 from firepanda.dtype.lists import NUMERIC
 from firepanda.frame.display import DisplayOptions, render_column
 from firepanda.frame.frame import DataFrame
@@ -76,8 +78,14 @@ from firepanda.hash import (
     radix_partition,
 )
 from firepanda.io.parse import parse_float, parse_int
+from firepanda.io.read import (
+    ReadOptions,
+    read_csv_bytes,
+    read_csv_bytes_as,
+)
 from firepanda.io.scalar import scan_csv_scalar
 from firepanda.io.scan import default_dialect, field_bytes, scan_csv
+from firepanda.io.write import WriteOptions, write_csv_bytes
 from firepanda.join import JoinKind, join_indices
 from firepanda.frame.concat import concat
 from firepanda.kernel import (
@@ -1700,6 +1708,45 @@ def bench_csv(mut harness: Harness) raises:
         keep(Int(total))
 
     harness.record("csv/parse_float", "fields", len(floats), parse_floats)
+
+    # The whole reader, which is scan plus inference plus the column fill, and
+    # is the only row here comparable to `pandas.read_csv`. The typed row beside
+    # it is the same read with inference skipped, so the difference between them
+    # is what a second pass over the file costs.
+    var headless = ReadOptions(default_dialect(), False, 0)
+
+    def read_inferred() raises {imm narrow, imm rows, imm headless}:
+        keep(rows)
+        var frame = read_csv_bytes(narrow, headless)
+        keep(len(frame))
+
+    harness.record("csv/read_inferred", "rows", rows, read_inferred)
+
+    var declared_fields = List[Field]()
+    declared_fields.append(Field("id", LogicalType.INT64))
+    declared_fields.append(Field("value", LogicalType.FLOAT64))
+    declared_fields.append(Field("count", LogicalType.INT64))
+    declared_fields.append(Field("label", LogicalType.STRING))
+    var declared = Schema(declared_fields^)
+
+    def read_declared() raises {
+        imm narrow, imm rows, imm declared, imm headless
+    }:
+        keep(rows)
+        var frame = read_csv_bytes_as(narrow, Schema(copy=declared), headless)
+        keep(len(frame))
+
+    harness.record("csv/read_declared", "rows", rows, read_declared)
+
+    var loaded = read_csv_bytes(narrow, headless)
+    var write_options = WriteOptions(default_dialect(), False)
+
+    def write_back() raises {imm loaded, imm rows, imm write_options}:
+        keep(rows)
+        var bytes = write_csv_bytes(loaded, write_options)
+        keep(len(bytes))
+
+    harness.record("csv/write", "rows", rows, write_back)
 
 
 def _string_column(

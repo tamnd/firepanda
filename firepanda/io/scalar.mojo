@@ -104,7 +104,7 @@ def scan_csv_scalar(data: Span[UInt8, _], dialect: Dialect) raises -> Scan:
                     at += 1
                 stop = at
 
-            out.fields.append(FieldSpan(start, stop, escaped))
+            out.fields.append(FieldSpan(start, stop, escaped, quoted))
 
             if at >= n:
                 done = True
@@ -113,12 +113,12 @@ def scan_csv_scalar(data: Span[UInt8, _], dialect: Dialect) raises -> Scan:
             if here == dialect.delimiter:
                 at += 1
                 if at >= n:
-                    out.fields.append(FieldSpan(at, at, False))
+                    out.fields.append(FieldSpan(at, at, False, False))
                     done = True
                     continue
                 var next = ptr.unsafe_offset(at).unsafe_load()
                 if next == NEWLINE or next == RETURN:
-                    out.fields.append(FieldSpan(at, at, False))
+                    out.fields.append(FieldSpan(at, at, False, False))
                     if next == RETURN:
                         at += 1
                     if (
