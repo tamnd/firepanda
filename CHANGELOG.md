@@ -8,15 +8,76 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-08-28
+
+Built against Mojo 1.0.0 (ed45d567).
+
+The variable width string column, which is the last thing a CSV reader was missing and the reason 0.6.2 shipped a scanner with nowhere to put a text field. Plus the continuous integration work that took the pull request pipeline from about twelve minutes to about three.
+
+A patch bump. The column is a new module and the pipeline changes are not API.
+
+### Added
+
+- `firepanda/array/strings.mojo`, holding `StringArray` and `StringBuilder`. A column is a views buffer of sixteen bytes per element, a payload buffer holding the bytes of the long elements, and a validity bitmap. An element of twelve bytes or fewer lives entirely inside its own view, so a column of country codes, status labels or short names is one flat array with no second buffer touched at all. A longer element keeps its length and its first four bytes in the view and its bytes in the payload.
+- `StringBuilder`, which is the only way to make a column. Append a field, append a null, ask for the result. `finish` consumes the builder and hands its payload buffer to the column rather than copying it again.
+- `StringArray.unsafe_bytes`, which returns a `Span` into whichever buffer the element lives in, so a kernel can read an element without allocating a `String` for it. The span is tied to the column's origin, so nothing it produces can outlive the column.
+- `equals` for comparing an element against a run of bytes, and `element_equals` for comparing two elements of the same column. Both are the operations a join key or a group by needs.
+- `slice`, `take`, `filter`, `to_list` and a deep copy, all of which produce an independent column.
+- Twenty four tests in `tests/test_strings.mojo`, including every length from zero to thirty, the inline limit approached from both sides, a null after a long element, and two thousand random elements with nulls mixed in.
+- `tests/fuzz/strings.mojo`, a fifth fuzzer, which checks the column against a `List[String]` reference through random rounds of slice, take, filter, copy and rebuild. A third of the lengths it draws land within two bytes of the inline limit.
+- Ten benchmark rows under `strings/`, every one of them measured at eight bytes and at thirty two so the two storage paths are always side by side.
+
+### How it works, and what follows from it
+
+The classic Arrow string layout gives every element an offset into one data buffer, so reading any string is two dependent loads and knowing its length is two more. This layout puts the length and a four byte prefix in the element itself. A length costs one load whatever the element is, and two long elements that differ in their first four bytes are settled without either payload being read.
+
+The cost is sixteen bytes per element against Arrow's four or eight. On a column of paragraphs that is a loss. On the short repeated text that dataframes are actually full of it is a large win, and short is the case worth optimizing for.
+
+A finished column has exactly one payload block, so every long view carries block index zero. That field is not wasted. It is what will let a chunked string column share payload across chunks later without rewriting a single view.
+
+Slicing, taking and filtering copy rather than pointing into the source column's payload. This is the same decision `Array` and `Bitmap.slice` already made, for the same reason: a view into another column's payload would make every column's lifetime depend on every column it was ever cut from.
+
+### Notes on the numbers
+
+Measured on gamingpc, sixteen physical cores, thirty two byte registers, at 262144 elements, ten repetitions, median reported.
+
+```
+strings/build_short          566.130 us     4.2%     8.638 ns   115.76 Mrows/s
+strings/build_long           959.114 us     2.9%    14.635 ns    68.33 Mrows/s
+strings/length_short          12.987 us     1.8%     0.198 ns     5.05 Grows/s
+strings/length_long           12.385 us     3.0%     0.189 ns     5.29 Grows/s
+strings/bytes_short           53.789 us     0.8%     0.821 ns     1.22 Grows/s
+strings/bytes_long            63.092 us     1.7%     0.963 ns     1.04 Grows/s
+strings/equals_prefix        148.520 us     0.9%     2.266 ns  441.25 Mpairs/s
+strings/equals_payload       240.393 us     0.6%     3.668 ns  272.62 Mpairs/s
+strings/take                   1.250 ms     6.3%    19.075 ns    52.42 Mrows/s
+strings/filter               455.942 us     0.6%     6.957 ns  143.74 Mrows/s
+```
+
+`length_short` and `length_long` land on top of each other at a fifth of a nanosecond, which is the layout's first claim and the one the offsets layout cannot make. Asking a thirty two byte element how long it is costs exactly what asking an eight byte element costs.
+
+`bytes_short` against `bytes_long` does not show the gap it looks like it should. Both walks are in order and a prefetcher handles two sequential streams as easily as one, so reading the payload is nearly free here. The inline layout is worth nothing to a scan. It is worth something to everything that jumps.
+
+`equals_prefix` against `equals_payload` is where it pays. Both compare adjacent long elements that are not equal and both answer false, and the only difference is whether the difference is in the four bytes the view already holds. It is 1.6x on this machine and 1.9x on the eight core server, on elements of thirty two bytes with the payload in cache. Neither of those is the interesting case. The interesting case is a join key column that does not fit in cache, where settling a comparison in the view is a cache miss that does not happen.
+
+Two things were slower before they were measured. The payload started as a `List[UInt8]` appended one byte at a time, which cost 143 ns per row on a long build, and `take` of a quarter of a million rows took 42 ms. Replacing the loop with one copy per field and a `resize` made it worse, not better, because `resize` allocates exactly what it was asked for and turns a growing payload into a quadratic copy: the same `take` went to 3.2 seconds. The payload is now a buffer that doubles, and the build is 14.6 ns per row.
+
 ### Changed
 
 - The test runner runs several files at once rather than one after another. Each test file is a separate `mojo run` that compiles the library again, so the step was spending most of its wall clock in the compiler with one core busy. Output is still collected per file and printed in filename order, so the log reads the same. `FIREPANDA_TEST_JOBS=1` restores the serial run. On an eight core machine the suite went from 70.7 s to 26.9 s.
-- The four fuzzers run at once for the same reason, through `tools/run_fuzz.sh`. `--max-total-time=N` still means N seconds per fuzzer rather than N in total.
+- The fuzzers run at once for the same reason, through `tools/run_fuzz.sh`. `--max-total-time=N` still means N seconds per fuzzer rather than N in total.
 - Continuous integration no longer builds against the Mojo nightly toolchain on every pull request. `.github/workflows/nightly.yml` already does that every morning and opens a tracking issue when it breaks, and the duplicate was the slowest job in the pull request pipeline.
 - The microbenchmark job measures the previous commit on pushes to main rather than the merge base on every pull request. Measuring both sides doubled the job, and what it bought was a comparison the job already prints as advisory. The performance gate with teeth is the reference machine run recorded in each pull request.
 - The benchmark harness takes a `--max-time` flag, in milliseconds, for the wall clock ceiling on one repetition. It defaults to what the harness has always used, three times the minimum plus a quarter of a second, so nothing changes for a developer who does not pass it. It exists because that ceiling is what the suite's runtime is actually made of: `run` keeps sampling until the ceiling rather than stopping at the minimum, so the total is roughly the ceiling times the benchmark count times the repetitions, and the row count barely enters into it. Halving the rows moved a full run from 310 s to 276 s. Halving the ceiling halves it.
 - The link check retries and accepts a rate limit response rather than failing the build on it. It failed a pull request because one host reset one connection, which is a flaky check rather than a broken link.
 - Continuous integration runs the suite at five repetitions with a twenty millisecond minimum and a forty millisecond ceiling, which is 80 s against 316 s for the settings it used before. The measured spread hardly moves: median interquartile range 13.7% against 12.1%, ninetieth percentile identical at 50%. On a shared runner the noise floor is the machine rather than the sampling budget.
+
+### Known limitations
+
+- The column is not wired into `AnyArray`, `Series`, `DataFrame` or the display layer, so nothing that takes a frame can hold one yet. That is the next change and it is what actually unblocks `read_csv`.
+- There is no comparison other than equality. Ordering strings needs a lexicographic compare that uses the prefix, and sorting or grouping by a string column needs that first.
+- `element_equals` on two long elements with the same prefix walks the payload a word at a time. A column of URLs, where thousands of elements share their first four bytes, gets nothing from the prefix and pays the full walk.
+- The bytes are not validated as UTF-8, deliberately. A CSV field is bytes and a column that refuses to hold what the file contains cannot read the file.
 
 ## [0.6.2] - 2026-08-28
 
@@ -344,7 +405,10 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.3...HEAD
+[0.6.3]: https://github.com/tamnd/firepanda/releases/tag/v0.6.3
+[0.6.2]: https://github.com/tamnd/firepanda/releases/tag/v0.6.2
+[0.6.1]: https://github.com/tamnd/firepanda/releases/tag/v0.6.1
 [0.6.0]: https://github.com/tamnd/firepanda/releases/tag/v0.6.0
 [0.5.0]: https://github.com/tamnd/firepanda/releases/tag/v0.5.0
 [0.4.0]: https://github.com/tamnd/firepanda/releases/tag/v0.4.0

@@ -1,9 +1,10 @@
-"""Columns: typed, erased, chunked, and the string view layout."""
+"""Columns: typed, erased, chunked, and the variable width string column."""
 
 from .any import AnyArray
 from .array import Array, from_list
 from .chunked import ChunkedArray
 from .data import ColumnData
+from .strings import StringArray, StringBuilder, strings_from_list
 from .strview import (
     INLINE_CAPACITY,
     PREFIX_LENGTH,

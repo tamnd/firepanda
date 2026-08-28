@@ -144,8 +144,8 @@ jobs:
       - name: Unit and docstring tests
         run: pixi run test
 
-      # All four fuzzers at once. The bound is per fuzzer, as it was when they
-      # ran in sequence, so this shortens the step without shortening the fuzz.
+      # Every fuzzer at once. The bound is per fuzzer, as it was when they ran
+      # in sequence, so this shortens the step without shortening the fuzz.
       - name: Differential fuzz (bounded)
         run: pixi run fuzz -- --max-total-time=300
 
