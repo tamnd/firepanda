@@ -12,8 +12,13 @@ know what a `DataFrame` is.
 `split.mojo` sits beside the scanner and cuts a buffer into blocks that each
 begin on a row boundary, which is what lets the whole read run on every core. It
 knows about quoting and nothing else.
+
+`mapped.mojo` is how a file on disk becomes bytes in the first place. It maps
+the file instead of copying it, which is worth a paragraph of libc and four
+constants because the copy was the largest single part of a read.
 """
 
+from .mapped import MappedFile, map_file
 from .parse import (
     Parsed,
     is_missing,

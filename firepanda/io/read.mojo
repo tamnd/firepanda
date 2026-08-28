@@ -57,6 +57,7 @@ from firepanda.exec import parallel_for, worker_count
 from firepanda.frame import DataFrame
 from firepanda.kernel.concat import concat_any
 
+from .mapped import map_file
 from .parse import is_missing, parse_bool, parse_float, parse_int
 from .scan import (
     Dialect,
@@ -929,6 +930,15 @@ def read_csv(path: String, options: ReadOptions) raises -> DataFrame:
     before it allocates, and neither is worth it until there is a file here that
     does not fit.
 
+    In one piece does not mean in one copy. The file is mapped, so the parser
+    reads the page cache where it lies and the pages arrive on demand, on the
+    same cores that are already parsing. Copying the file first cost 394 ms on
+    a 375 MB file and a second whole file of resident memory.
+
+    A file that cannot be mapped, and an empty one counts, is read the old way.
+    That path is also where the error for a file that does not exist comes
+    from, which is why the mapping failure itself is swallowed.
+
     Args:
         path: The file to read.
         options: The read options.
@@ -939,6 +949,10 @@ def read_csv(path: String, options: ReadOptions) raises -> DataFrame:
     Raises:
         Error: If the file cannot be read, or is not readable as CSV.
     """
+    var mapped = map_file(path)
+    if mapped:
+        ref file = mapped.value()
+        return read_csv_bytes(file.bytes(), options)
     var handle = open(path, "r")
     var data = handle.read_bytes()
     handle.close()
