@@ -135,11 +135,23 @@ struct Scan(Movable, Sized):
     var starts: List[Int]
     """Where each row begins in `fields`, with a final entry for the end."""
 
+    var quotes: Int
+    """How many quote bytes this scan read as structure rather than as data.
+
+    An opening quote, a closing quote and both halves of a doubled quote are
+    structure. A bare quote in the middle of an unquoted field is data, and this
+    reader accepts one because pandas does. The parallel reader needs to know
+    whether the file has any, because a data quote flips the parity that the
+    block split is found by, so it compares this against the number of quote
+    bytes in the file. `firepanda/io/split.mojo` has the argument in full.
+    """
+
     def __init__(out self):
         """Constructs an empty scan."""
         self.fields = List[FieldSpan]()
         self.starts = List[Int]()
         self.starts.append(0)
+        self.quotes = 0
 
     def __len__(self) -> Int:
         """Returns the number of rows.
@@ -187,12 +199,17 @@ struct Scan(Movable, Sized):
         return False
 
 
-def scan_csv(data: Span[UInt8, _], dialect: Dialect) raises -> Scan:
+def scan_csv(
+    data: Span[UInt8, _], dialect: Dialect, first: Int = 0
+) raises -> Scan:
     """Cuts a buffer into rows of fields.
 
     Args:
-        data: The whole file, or a block of it split on a row boundary.
+        data: The whole file, or a prefix of it ending on a row boundary.
         dialect: The delimiter and quote character.
+        first: Where to start, which must be the first byte of a row. Field
+            offsets are into `data` either way, so a block scanned this way can
+            be read against the whole buffer without rebasing anything.
 
     Returns:
         The fields and the row offsets.
@@ -204,7 +221,7 @@ def scan_csv(data: Span[UInt8, _], dialect: Dialect) raises -> Scan:
     var out = Scan()
     var n = len(data)
     var ptr = data.unsafe_ptr()
-    var at = 0
+    var at = first
 
     while at < n:
         # A row of nothing is not a row. This is what makes a trailing newline
@@ -248,6 +265,40 @@ def scan_csv(data: Span[UInt8, _], dialect: Dialect) raises -> Scan:
         out.starts.append(len(out.fields))
 
     return out^
+
+
+def scan_block[
+    origin: ImmOrigin
+](
+    data: Span[UInt8, origin], dialect: Dialect, start: Int, end: Int
+) raises -> Scan:
+    """Cuts one block of a buffer into rows of fields.
+
+    Narrowing the span rather than passing a length around is what keeps the
+    field offsets absolute: the block's span has the buffer's own pointer, so
+    every offset the scan records is an offset into the whole file and the
+    reader never rebases anything.
+
+    Args:
+        data: The whole file.
+        dialect: The delimiter and quote character.
+        start: The block's first byte, which must begin a row.
+        end: One past the block's last byte, which must end a row.
+
+    Returns:
+        The fields and the row offsets, with offsets into `data`.
+
+    Raises:
+        If the block is not cut on row boundaries, or if the file is malformed.
+
+    Parameters:
+        origin: Where the buffer lives.
+    """
+    return scan_csv(
+        Span[UInt8, origin](unsafe_ptr=data.unsafe_ptr(), length=end),
+        dialect,
+        start,
+    )
 
 
 def _at_row_end(data: Span[UInt8, _], at: Int) -> Bool:
@@ -324,8 +375,12 @@ def _quoted_field(
             and ptr.unsafe_offset(at + 1).unsafe_load() == dialect.quote
         ):
             escaped = True
+            out.quotes += 2
             at += 2
             continue
+        # The opening quote and this closing one, counted together now that the
+        # field is known to have both.
+        out.quotes += 2
         out.fields.append(FieldSpan(start + 1, at, escaped, True))
         var after = at + 1
         if after >= n or _at_row_end(data, after):

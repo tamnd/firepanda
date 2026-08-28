@@ -1,11 +1,11 @@
 """Concurrency and allocation stress.
 
-At M0 there are no parallel operators to stress, so this harness stresses the
-thing that has to be right before there can be any: building and tearing down
-columns from several threads at once. Every worker owns its own buffers and
-touches nothing another worker touches, which is the discipline the whole engine
-is going to run on, and the point of the harness is to notice the day something
-in the allocation path stops honouring it.
+The first thing this stresses is the thing that has to be right before there can
+be any parallel operator at all: building and tearing down columns from several
+threads at once. Every worker owns its own buffers and touches nothing another
+worker touches, which is the discipline the whole engine runs on, and the point
+of the harness is to notice the day something in the allocation path stops
+honouring it.
 
 Each round picks a random number of chunks, a random length per chunk, and a
 random worker count, builds every chunk in parallel, and compares the per-chunk
@@ -14,23 +14,38 @@ contents come from a generator seeded by the chunk index, so the answer does not
 depend on the order the workers ran in, and a mismatch is a real disagreement
 rather than a scheduling artifact.
 
-The second half of each round churns the buffer pool: take and give buffers at
-random sizes and confirm that every buffer handed out is aligned and zeroed. The
-pool is deliberately not shared between threads and not guarded by a lock, so it
-is exercised on one thread only; making it global and atomic is the design this
-project is trying not to have.
+The second thing is the CSV reader, which is the first operator in the library
+that splits real work across cores. A round builds a file whose every value is a
+function of its row index, cuts it into a random number of blocks, and checks the
+blocks against a single pass field span by field span. Then it reads the file the
+way a caller would and checks the values against the generator rather than against
+another run of the reader, so a bug that both paths share is still caught.
+
+The block count is randomized rather than left to the machine, because the number
+of blocks a race needs is not the number of cores this happens to have. One block
+and thirty three blocks over a file of two hundred rows are both reachable here
+and neither is reachable from a normal read.
+
+The third is the buffer pool: take and give buffers at random sizes and confirm
+that every buffer handed out is aligned and zeroed. The pool is deliberately not
+shared between threads and not guarded by a lock, so it is exercised on one
+thread only; making it global and atomic is the design this project is trying not
+to have.
 
 Usage:
     mojo run -I . tests/stress/main.mojo [--rounds=N] [--seed=N] [--max-total-time=SECONDS]
 """
 
 from max.algorithm import parallelize
+from std.collections.span import Span
 from std.sys import argv
 from std.time import perf_counter_ns
 
 from firepanda.array.array import Array
 from firepanda.buffer.buffer import Buffer
 from firepanda.buffer.pool import BufferPool
+from firepanda.io import ReadOptions, default_dialect, scan_blocks, scan_csv
+from firepanda.io.read import read_csv_bytes
 from firepanda.testing.rng import Rng
 
 comptime DEFAULT_ROUNDS = 200
@@ -38,6 +53,16 @@ comptime DEFAULT_ROUNDS = 200
 
 comptime MAX_CHUNKS = 64
 comptime MAX_CHUNK_LENGTH = 20_000
+
+comptime MAX_CSV_ROWS = 4_000
+"""Enough rows for a file to hold thirty three blocks with rows to spare."""
+
+comptime MAX_CSV_BLOCKS = 33
+"""One more than the logical core count of the largest machine this runs on.
+
+The interesting counts are the ones a real read would never choose: one block, a
+block per few rows, and more blocks than the file has row boundaries to give.
+"""
 
 
 def checksum_of_chunk(index: Int, length: Int) -> Int64:
@@ -66,6 +91,177 @@ def checksum_of_chunk(index: Int, length: Int) -> Int64:
         if column.is_valid(i):
             total += column[i]
     return total
+
+
+def csv_row(index: Int) -> String:
+    """Builds one CSV row from its index alone.
+
+    Every fifth row is quoted and holds both a delimiter and a line feed, which
+    is the case a splitter that looks for newlines without tracking quotes gets
+    wrong. The values are still a function of the index, so a reader's answer can
+    be checked against arithmetic rather than against another reader.
+
+    Args:
+        index: The row index, counting from zero.
+
+    Returns:
+        The row, line feed included.
+    """
+    if index % 5 == 0:
+        return String(index, ',"a,', index, '\nb",', index * 3, "\n")
+    return String(index, ",plain", index, ",", index * 3, "\n")
+
+
+def csv_bytes(rows: Int) -> List[UInt8]:
+    """Builds a whole file from `csv_row`.
+
+    Args:
+        rows: How many value rows to write.
+
+    Returns:
+        The file, header included.
+    """
+    var dst = List[UInt8]()
+    var header = String("a,b,c\n")
+    for i in range(header.byte_length()):
+        dst.append(header.unsafe_ptr().unsafe_offset(i).unsafe_load())
+    for row in range(rows):
+        var text = csv_row(row)
+        var ptr = text.unsafe_ptr()
+        for i in range(text.byte_length()):
+            dst.append(ptr.unsafe_offset(i).unsafe_load())
+    return dst^
+
+
+def stress_the_csv_reader(mut rng: Rng, round: Int, seed: UInt64) raises:
+    """Reads one random file in blocks and checks it two ways.
+
+    Args:
+        rng: The generator, for the shape.
+        round: The round number, for the failure message.
+        seed: The seed, for the failure message.
+
+    Raises:
+        Error: If the blocks disagree with a single pass, or if a value in the
+            frame is not the one the generator wrote.
+    """
+    var rows = rng.next_range(1, MAX_CSV_ROWS)
+    var blocks = rng.next_range(1, MAX_CSV_BLOCKS + 1)
+    var data = csv_bytes(rows)
+    var shape = String(
+        " (round ",
+        round,
+        " seed ",
+        seed,
+        ", ",
+        rows,
+        " rows, ",
+        blocks,
+        " blocks)",
+    )
+
+    var whole = scan_csv(Span(data), default_dialect())
+    var parts = scan_blocks(Span(data), default_dialect(), blocks)
+
+    var at = 0
+    for b in range(len(parts)):
+        for r in range(len(parts[b])):
+            if at >= len(whole):
+                raise Error(
+                    String("the blocks found more rows than one pass", shape)
+                )
+            if parts[b].width(r) != whole.width(at):
+                raise Error(
+                    String(
+                        "row ",
+                        at,
+                        " is ",
+                        parts[b].width(r),
+                        " fields in blocks and ",
+                        whole.width(at),
+                        " in one pass",
+                        shape,
+                    )
+                )
+            for c in range(parts[b].width(r)):
+                var mine = parts[b].at(r, c)
+                var theirs = whole.at(at, c)
+                if mine.start != theirs.start or mine.end != theirs.end:
+                    raise Error(
+                        String(
+                            "row ",
+                            at,
+                            " field ",
+                            c,
+                            " is bytes ",
+                            mine.start,
+                            "..",
+                            mine.end,
+                            " in blocks and ",
+                            theirs.start,
+                            "..",
+                            theirs.end,
+                            " in one pass",
+                            shape,
+                        )
+                    )
+            at += 1
+    if at != len(whole):
+        raise Error(
+            String(
+                "the blocks found ",
+                at,
+                " rows and one pass found ",
+                len(whole),
+                shape,
+            )
+        )
+
+    # The blocks agreeing with one pass is not the same as either being right, so
+    # the values go back to the generator rather than to the other path.
+    var frame = read_csv_bytes(Span(data), ReadOptions())
+    if len(frame) != rows:
+        raise Error(
+            String("read ", len(frame), " rows and wrote ", rows, shape)
+        )
+    var first = frame.column("a").as_typed[DType.int64]().unsafe_ptr()
+    var last = frame.column("c").as_typed[DType.int64]().unsafe_ptr()
+    for row in range(rows):
+        if first.unsafe_offset(row).unsafe_load() != Int64(row):
+            raise Error(
+                String(
+                    "row ",
+                    row,
+                    " column a came back ",
+                    first.unsafe_offset(row).unsafe_load(),
+                    shape,
+                )
+            )
+        if last.unsafe_offset(row).unsafe_load() != Int64(row * 3):
+            raise Error(
+                String(
+                    "row ",
+                    row,
+                    " column c came back ",
+                    last.unsafe_offset(row).unsafe_load(),
+                    shape,
+                )
+            )
+    for row in range(0, rows, 5):
+        var wanted = String("a,", row, "\nb")
+        if frame.column("b").text(row) != wanted:
+            raise Error(
+                String(
+                    "row ",
+                    row,
+                    " column b came back '",
+                    frame.column("b").text(row),
+                    "' rather than '",
+                    wanted,
+                    "'",
+                    shape,
+                )
+            )
 
 
 struct Options(Copyable, Movable):
@@ -170,7 +366,7 @@ def churn_the_pool(mut rng: Rng, mut pool: BufferPool, operations: Int) raises:
 def main() raises:
     var options = parse_options()
     print(
-        "stressing parallel column construction:",
+        "stressing parallel column construction and the block CSV reader:",
         options.rounds,
         "rounds, seed",
         options.seed,
@@ -235,6 +431,7 @@ def main() raises:
                 )
             rows += lengths[i]
 
+        stress_the_csv_reader(rng, round, options.seed)
         churn_the_pool(rng, pool, 200)
         completed += 1
 

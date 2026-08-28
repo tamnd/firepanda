@@ -8,6 +8,10 @@ tested and fuzzed on their own and reused by the NDJSON reader when it arrives.
 On top of those, `read.mojo` infers the schema and fills the columns, and
 `write.mojo` renders a frame back out. Those two are the only files here that
 know what a `DataFrame` is.
+
+`split.mojo` sits beside the scanner and cuts a buffer into blocks that each
+begin on a row boundary, which is what lets the whole read run on every core. It
+knows about quoting and nothing else.
 """
 
 from .parse import (
@@ -19,12 +23,17 @@ from .parse import (
 )
 from .read import (
     INFER_ALL,
+    MIN_BLOCK,
     ReadOptions,
+    TypeGuess,
+    block_count,
+    guess_column,
     infer_column,
     infer_schema,
     read_csv,
     read_csv_bytes,
     read_csv_bytes_as,
+    scan_blocks,
 )
 from .scalar import scan_csv_scalar
 from .scan import (
@@ -33,8 +42,15 @@ from .scan import (
     Scan,
     default_dialect,
     field_bytes,
+    scan_block,
     scan_csv,
     unescape,
+)
+from .split import (
+    Split,
+    count_bytes,
+    row_start_at_or_after,
+    split_buffer,
 )
 from .write import (
     WriteOptions,
