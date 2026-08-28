@@ -181,19 +181,47 @@ def test_a_float_is_exact_where_it_promises_to_be() raises:
     )
 
 
-def test_a_float_outside_the_exact_range_is_close() raises:
-    # Past the table the scaling compounds a rounding per step, which is the
-    # documented divergence from a correctly rounded strtod.
-    assert_almost_equal(
+def test_a_float_outside_the_exact_range_is_exact_too() raises:
+    # Past the table the stepped scaling would compound a rounding per step and
+    # land an ulp away, so these go to strtod instead. Equalities, because an
+    # ulp is exactly what a round trip cannot afford to lose.
+    assert_equal(
         parse_float[DType.float64](bytes_of("1.7976931348623157e308")).value,
         Float64(1.7976931348623157e308),
-        rtol=1e-12,
     )
-    assert_almost_equal(
+    assert_equal(
         parse_float[DType.float64](bytes_of("2.2250738585072014e-308")).value,
         Float64(2.2250738585072014e-308),
-        rtol=1e-12,
     )
+    assert_equal(
+        parse_float[DType.float64](bytes_of("1.2345678901234567e100")).value,
+        Float64(1.2345678901234567e100),
+    )
+    assert_equal(
+        parse_float[DType.float64](bytes_of("-9.87654321e-99")).value,
+        Float64(-9.87654321e-99),
+    )
+
+
+def test_a_float_with_more_digits_than_fit_is_still_correctly_rounded() raises:
+    # Twenty five significant digits, so the accumulator truncates and the fast
+    # path is refused on those grounds rather than on the exponent's.
+    assert_equal(
+        parse_float[DType.float64](
+            bytes_of("1.234567890123456789012345")
+        ).value,
+        Float64(1.234567890123456789012345),
+    )
+
+
+def test_the_fallback_does_not_widen_what_is_accepted() raises:
+    # strtod would take all four of these and the reader takes none of them. The
+    # grammar is checked before the value is asked for, so the fallback answers
+    # the question and does not get to change it.
+    assert_false(parse_float[DType.float64](bytes_of(" 1e100")).ok)
+    assert_false(parse_float[DType.float64](bytes_of("1e100 ")).ok)
+    assert_false(parse_float[DType.float64](bytes_of("0x1p3")).ok)
+    assert_false(parse_float[DType.float64](bytes_of("1e100abc")).ok)
 
 
 def test_an_absurd_exponent_saturates() raises:

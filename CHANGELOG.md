@@ -10,6 +10,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ### Added
 
+- A text column casts to a number and a number column casts to text. `cast_strings_to` reads bytes through the same parser the CSV reader uses, and `cast_to_strings` writes them the way the CSV writer writes them, so a value that survives a file round trip survives this one.
+- `cast_any` and `Series.cast` and `DataFrame.cast` take a `LogicalType` as well as a `DType`. The dtype form cannot name text, text having no dtype of its own, so `series.cast(LogicalType.STRING)` is the way to ask for it.
+- All three take a `strict` flag, defaulting to true. Strict raises on a text value that is not a number and names the row and the value. Not strict writes a null, which is what `to_numeric(errors="coerce")` does.
+- `tests/test_text_cast.mojo`, twenty three tests.
 - `read_csv`, which turns a file or a buffer of bytes into a `DataFrame`, inferring the schema from the first rows or taking one you hand it. Names come from the header when there is one and are `column_0` upward when there is not.
 - `write_csv`, which turns a `DataFrame` back into a file or a buffer of bytes, quoting a field only when leaving it bare would move a boundary.
 - `ReadOptions` and `WriteOptions`, carrying the dialect, whether there is a header, and how many rows the inference is allowed to look at. `INFER_ALL` reads the whole file before deciding.
@@ -20,6 +24,15 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Changed
 
 - `FieldSpan` records whether the field was written inside quotes. An empty field and a quoted empty field are the two ways a CSV file has of writing a missing value and the empty string, and without the flag the reader has to guess, and whichever way it guesses one of the two becomes unrepresentable.
+
+### Fixed
+
+- `parse_float` was an ulp or two off from a correctly rounded `strtod` outside the exponent range where a single multiply is exact, because it scaled in steps of 1e22 and rounded once per step. Five steps of that put `1.2345678901234567e100` one ulp away, so a float written at seventeen digits did not read back as itself. The fast path is unchanged and still one multiply. Everything outside it now goes to the platform's `strtod`, which is correctly rounded at every exponent, and the grammar is still checked here first, so the fallback answers the question and does not get to widen it.
+- Casting a text column raised rather than converting, because the numeric path would have found its uint8 physical dtype and converted the first byte of every sixteen byte view. It converts now.
+
+### Why the empty string is not a number
+
+Coercing it to a null quietly would throw away the distinction the string column went to some trouble to keep. An empty field and a quoted empty field are different values in a CSV file, the reader keeps them apart, and a cast that collapses them undoes that two lines later.
 
 ### How the type of a column is decided
 

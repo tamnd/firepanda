@@ -209,24 +209,50 @@ struct Series(Copyable, Movable, Sized, Writable):
         """
         return Self(name, AnyArray(copy=self.values))
 
-    def cast(self, to: DType) raises -> Self:
+    def cast(self, to: DType, strict: Bool = True) raises -> Self:
         """Returns the series converted to another dtype.
 
-        No range check. Casting 300 to int8 gives 44, which is what the hardware
-        gives and what `firepanda.kernel.cast` documents. pandas raises here and
-        the decision to follow it or not belongs to the milestone that settles
-        the error model, not to this one.
+        No range check between numbers. Casting 300 to int8 gives 44, which is
+        what the hardware gives and what `firepanda.kernel.cast` documents.
+        pandas raises here and the decision to follow it or not belongs to the
+        milestone that settles the error model, not to this one.
+
+        Text is the exception, because a string is not a number until it is read
+        as one and the reading can fail. Strict, which is the default, raises and
+        names the row. Not strict writes a null.
 
         Args:
             to: The target dtype.
+            strict: Whether a text value that is not a number raises.
 
         Returns:
             A series of dtype `to`, null in the same places.
 
         Raises:
-            If either dtype has no physical layout.
+            If either dtype has no physical layout, or the series is text and
+            strict and some value is not a number.
         """
-        return Self(self.name, cast_any(self.values, to))
+        return Self(self.name, cast_any(self.values, to, strict))
+
+    def cast(self, to: LogicalType, strict: Bool = True) raises -> Self:
+        """Returns the series converted to another logical type.
+
+        This is the overload that can name text, text having no dtype of its own.
+        `series.cast(LogicalType.STRING)` renders a number column as text and
+        `series.cast(LogicalType.INT64)` reads a text one back.
+
+        Args:
+            to: The target type.
+            strict: Whether a text value that is not a number raises.
+
+        Returns:
+            A series of type `to`, null in the same places.
+
+        Raises:
+            If the type has no conversion from this one, or the series is text
+            and strict and some value is not a number.
+        """
+        return Self(self.name, cast_any(self.values, to, strict))
 
     def take(self, indices: List[Int]) raises -> Self:
         """Returns rows gathered by position.
