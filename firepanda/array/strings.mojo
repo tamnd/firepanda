@@ -59,7 +59,7 @@ from .strview import (
 )
 
 
-struct StringArray(Movable, Sized):
+struct StringArray(Copyable, Movable, Sized):
     """A nullable column of variable width byte strings.
 
     The bytes are not validated as UTF-8. A CSV field is bytes, a Parquet byte

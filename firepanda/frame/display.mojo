@@ -189,9 +189,17 @@ def render_value(col: AnyArray, i: Int, options: DisplayOptions) -> String:
     if not col.is_valid(i):
         return options.null_text
     # A string's physical dtype is uint8, so falling through to the dispatch
-    # below would print the first byte of the value as a number. There are no
-    # string kernels yet and so no way to build such a column, but the day there
-    # is, this should say so rather than print a plausible looking 104.
+    # below would print the first byte of the value as a number.
+    #
+    # The text is not quoted and not escaped. pandas does not quote either, and a
+    # table is read by a person rather than parsed, so a value containing a
+    # newline is a display problem that quoting would not fix anyway. `to_csv` is
+    # where escaping belongs and is where it happens.
+    if col.is_string():
+        try:
+            return col.strings()[i]
+        except:
+            return String("<", col.type, ">")
     if col.type.is_variable_width():
         return String("<", col.type, ">")
     comptime for candidate in ALL:

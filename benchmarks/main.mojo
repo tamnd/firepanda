@@ -84,8 +84,10 @@ from firepanda.kernel import (
     cast_to,
     coalesce,
     concat_arrays,
+    concat_two_any,
     divide,
     fill_forward,
+    filter_any,
     filter_rows,
     group_first,
     group_mean,
@@ -102,6 +104,7 @@ from firepanda.kernel import (
     min_of,
     multiply,
     sum_of,
+    take_any,
     take_rows,
 )
 from firepanda.testing.rng import Rng
@@ -1873,6 +1876,140 @@ def bench_strings(mut harness: Harness) raises:
     harness.record("strings/filter", "rows", rows, filter_half)
 
 
+def bench_text(mut harness: Harness) raises:
+    """Times a string column moving through the erased column the frame holds.
+
+    `bench_strings` above measures `StringArray` on its own. This measures the
+    same work reached the way a `DataFrame` reaches it, through `AnyArray`, and
+    every row is paired with the int64 column of the same height going through
+    the same entry point. The pair is the point. A row of text and a row of number
+    are not the same amount of work and the table should say by how much rather
+    than leave it to be guessed at.
+
+    The gap is expected and is not a defect. A gather of int64 writes eight bytes
+    at a computed offset; a gather of text writes a sixteen byte view and, for
+    anything past twelve bytes, copies the element into a payload block that grows
+    as it goes. What the pair is watching for is the gap changing.
+
+    `text/is_string` is the guard on its own. `AnyArray` grew an
+    `Optional[StringArray]` field and every erased kernel now asks `is_string()`
+    before it dispatches, so the question of what that costs is worth a row rather
+    than an assurance. It is a load and a predictable branch on a field that is
+    already in the line the dtype was read from.
+
+    The numeric rows here are not comparable with the `kernel/` rows above. These
+    run at a quarter of the row count for the reason given below, and a quarter of
+    a million int64 rows sit in a cache the full million does not, so the two
+    tables disagree by a factor that is about the machine and not about the code.
+
+    Args:
+        harness: The harness.
+
+    Raises:
+        If a benchmark raises.
+    """
+    # A quarter of the usual rows, matching `bench_strings`, because the same
+    # sixteen bytes of view per element apply and several of these hold two
+    # columns and an output at once.
+    var rows = harness.options.rows // 4
+    if rows < 1:
+        rows = 1
+
+    var text = AnyArray(_string_column(rows, 32, True))
+    var text_other = AnyArray(_string_column(rows, 32, True))
+
+    var numbers = Array[BENCH_DTYPE](rows)
+    for i in range(rows):
+        numbers[i] = Scalar[BENCH_DTYPE](i)
+    var number = AnyArray(numbers^)
+
+    var more = Array[BENCH_DTYPE](rows)
+    for i in range(rows):
+        more[i] = Scalar[BENCH_DTYPE](i)
+    var number_other = AnyArray(more^)
+
+    # The same coprime stride `bench_strings` uses, so a gather here and a gather
+    # there are walking the column the same way and the two tables can be read
+    # against each other.
+    var picks = List[Int](capacity=rows)
+    var step = 0
+    for _ in range(rows):
+        step = (step + 7919) % rows
+        picks.append(step)
+
+    def take_text() raises {imm text, imm picks}:
+        var out = take_any(text, picks)
+        keep(len(out))
+
+    harness.record("text/take_text", "rows", rows, take_text)
+
+    def take_number() raises {imm number, imm picks}:
+        var out = take_any(number, picks)
+        keep(len(out))
+
+    harness.record("text/take_number", "rows", rows, take_number)
+
+    var mask = Array[DType.bool](rows)
+    var bits = mask.unsafe_ptr()
+    for i in range(rows):
+        bits.unsafe_offset(i).unsafe_write(i % 2 == 0)
+
+    def filter_text() raises {imm text, imm mask}:
+        var out = filter_any(text, mask)
+        keep(len(out))
+
+    harness.record("text/filter_text", "rows", rows, filter_text)
+
+    def filter_number() raises {imm number, imm mask}:
+        var out = filter_any(number, mask)
+        keep(len(out))
+
+    harness.record("text/filter_number", "rows", rows, filter_number)
+
+    # Concat is where the two paths differ most and for a reason worth seeing in
+    # the table. The fixed width side memcpys a part into place. The text side
+    # cannot, because a part's payload offsets are relative to that part's block,
+    # so every element is appended one at a time and the payload is rebuilt.
+    def concat_text() raises {imm text, imm text_other}:
+        var out = concat_two_any(text, text_other)
+        keep(len(out))
+
+    harness.record("text/concat_text", "rows", rows * 2, concat_text)
+
+    def concat_number() raises {imm number, imm number_other}:
+        var out = concat_two_any(number, number_other)
+        keep(len(out))
+
+    harness.record("text/concat_number", "rows", rows * 2, concat_number)
+
+    var half = rows // 2
+    if half < 1:
+        half = 1
+
+    def slice_text() raises {imm text, imm half}:
+        var out = text.slice(0, half)
+        keep(len(out))
+
+    harness.record("text/slice_text", "rows", half, slice_text)
+
+    def slice_number() raises {imm number, imm half}:
+        var out = number.slice(0, half)
+        keep(len(out))
+
+    harness.record("text/slice_number", "rows", half, slice_number)
+
+    # The guard on its own, with as little else in the frame as possible. It is
+    # a load and a branch on a field that is in cache, and the row exists so that
+    # the claim it costs nothing is a measurement rather than an assertion.
+    def guard() raises {imm text, imm number}:
+        keep(text)
+        keep(number)
+        var found = Int(text.is_string()) + Int(number.is_string())
+        keep(found)
+
+    harness.record("text/is_string", "calls", 2, guard)
+
+
 def bench_dispatch(mut harness: Harness) raises:
     """Measures what the runtime to compile-time bridge costs per call.
 
@@ -2537,6 +2674,7 @@ def main() raises:
     bench_nulls(harness)
     bench_csv(harness)
     bench_strings(harness)
+    bench_text(harness)
     bench_dispatch(harness)
     var elapsed = Float64(perf_counter_ns() - started) / 1e9
 

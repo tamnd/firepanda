@@ -32,6 +32,7 @@ from std.sys.info import simd_width_of
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
+from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
 
@@ -217,6 +218,16 @@ def coalesce_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
             + " rows and fallback has "
             + String(len(b))
         )
+    if a.is_string() != b.is_string():
+        raise Error(
+            "coalesce: both columns must have the same dtype; got "
+            + String(a.type)
+            + " and "
+            + String(b.type)
+        )
+    if a.is_string():
+        return AnyArray(_coalesce_strings(a.strings(), b.strings()))
+
     comptime for candidate in ALL:
         if a.dtype() == candidate:
             return AnyArray(
@@ -230,6 +241,30 @@ def coalesce_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
                 )
             )
     raise Error("coalesce: unsupported dtype " + String(a.dtype()))
+
+
+def _coalesce_strings(a: StringArray, b: StringArray) raises -> StringArray:
+    """Takes each element from the first column, or the second where it is null.
+
+    Args:
+        a: The preferred column.
+        b: The fallback, either as tall as `a` or one row, which is how filling
+            with a scalar is spelled.
+
+    Returns:
+        A column as tall as `a`, null only where both were.
+    """
+    var builder = StringBuilder(capacity=len(a))
+    for i in range(len(a)):
+        if a.is_valid(i):
+            builder.append(a.unsafe_bytes(i))
+            continue
+        var at = i if len(b) == len(a) else 0
+        if b.is_valid(at):
+            builder.append(b.unsafe_bytes(at))
+        else:
+            builder.append_null()
+    return builder^.finish()
 
 
 def _coalesce_core[
@@ -339,6 +374,9 @@ def fill_forward_any(col: AnyArray, limit: Int = 0) raises -> AnyArray:
     Raises:
         If the dtype has no physical layout.
     """
+    if col.is_string():
+        return AnyArray(_fill_strings[forward=True](col.strings(), limit))
+
     comptime for candidate in ALL:
         if col.dtype() == candidate:
             return AnyArray(
@@ -365,6 +403,9 @@ def fill_backward_any(col: AnyArray, limit: Int = 0) raises -> AnyArray:
     Raises:
         If the dtype has no physical layout.
     """
+    if col.is_string():
+        return AnyArray(_fill_strings[forward=False](col.strings(), limit))
+
     comptime for candidate in ALL:
         if col.dtype() == candidate:
             return AnyArray(
@@ -445,3 +486,55 @@ def _fill_core[
             else:
                 out.data.validity.set(i, False)
     return out^
+
+
+def _fill_strings[
+    forward: Bool
+](col: StringArray, limit: Int) raises -> StringArray:
+    """Carries the last present element across a run of nulls.
+
+    The fixed width version can copy the whole column first and then patch the
+    gaps, because the element it carries is a value in a register. Here the
+    element is a run of bytes somewhere in the payload, so the column is built in
+    one pass and the carried element is the position it came from rather than the
+    element itself.
+
+    Args:
+        col: The column.
+        limit: The longest run of nulls to fill, or zero for no limit.
+
+    Parameters:
+        forward: Whether to carry from earlier rows or from later ones.
+
+    Returns:
+        A column of the same height. A null with no present element on the
+        carrying side stays null.
+    """
+    var n = len(col)
+    var source = List[Int](capacity=n)
+    for _ in range(n):
+        source.append(-1)
+
+    var last = -1
+    var run = 0
+    for k in range(n):
+        var i = k if forward else n - 1 - k
+        if col.is_valid(i):
+            source[i] = i
+            last = i
+            run = 0
+            continue
+        if last < 0:
+            continue
+        run += 1
+        if limit > 0 and run > limit:
+            continue
+        source[i] = last
+
+    var builder = StringBuilder(capacity=n)
+    for i in range(n):
+        if source[i] < 0:
+            builder.append_null()
+        else:
+            builder.append(col.unsafe_bytes(source[i]))
+    return builder^.finish()
