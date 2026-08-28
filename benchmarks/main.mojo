@@ -84,6 +84,7 @@ from firepanda.kernel import (
     AggKind,
     add,
     aggregate_group_any,
+    aggregate_group_strings,
     argsort,
     argsort_any,
     argsort_multi,
@@ -2125,6 +2126,31 @@ def bench_text(mut harness: Harness) raises:
     harness.record(
         "text/group_number_repeated", "rows", rows, group_number_repeated
     )
+
+    # Aggregating a text column rather than grouping by one. The codes come from
+    # the repeated column so that there are a hundred groups to fill, which is
+    # the shape a group by usually hands the aggregation. `agg_min` is the scan
+    # that keeps a row number per group and gathers once at the end, and
+    # `agg_nunique` is the one that factorizes first, so the pair shows what that
+    # extra pass costs.
+    var group_codes = factorize_strings(repeated_keys).into_codes()
+    comptime GROUP_COUNT = 100
+
+    def agg_min() raises {imm distinct_keys, imm group_codes}:
+        var out = aggregate_group_strings(
+            distinct_keys, AggKind.MIN, group_codes, GROUP_COUNT
+        )
+        keep(out)
+
+    harness.record("text/agg_min", "rows", rows, agg_min)
+
+    def agg_nunique() raises {imm distinct_keys, imm group_codes}:
+        var out = aggregate_group_strings(
+            distinct_keys, AggKind.NUNIQUE, group_codes, GROUP_COUNT
+        )
+        keep(out)
+
+    harness.record("text/agg_nunique", "rows", rows, agg_nunique)
 
 
 def bench_dispatch(mut harness: Harness) raises:

@@ -23,9 +23,11 @@ from std.sys import argv
 from std.time import perf_counter_ns
 
 from firepanda.array.any import AnyArray
+from firepanda.array.array import Array
 from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.hash.factorize import factorize_strings
+from firepanda.kernel.group import AggKind, aggregate_group_any
 from firepanda.kernel.sort import argsort_any
 from firepanda.testing.rng import Rng
 
@@ -593,6 +595,82 @@ def main() raises:
                         want[i],
                     )
                 )
+
+        elif op < 99 and len(values) > 0:
+            # Four reductions share one scan and differ only in which row
+            # survives it, so a step runs whichever one the seed picks rather
+            # than all four. The groups are assigned at random here rather than
+            # taken from a factorize, because a reduction has to be right for
+            # codes it did not produce.
+            var groups = Int(rng.next_range(1, 5))
+            var codes = Array[DType.uint32](len(values))
+            var codes_at = codes.unsafe_ptr()
+            var assigned = List[Int](capacity=len(values))
+            for i in range(len(values)):
+                var g = Int(rng.next_below(groups))
+                assigned.append(g)
+                codes_at.unsafe_offset(i).unsafe_store(UInt32(g))
+
+            var pick = rng.next_below(4)
+            var kind = AggKind.MIN
+            if pick == 1:
+                kind = AggKind.MAX
+            elif pick == 2:
+                kind = AggKind.FIRST
+            elif pick == 3:
+                kind = AggKind.LAST
+
+            var got = aggregate_group_any(
+                AnyArray(StringArray(copy=column)), kind, codes, groups
+            )
+            for g in range(groups):
+                var held = String("")
+                var seen = False
+                for i in range(len(values)):
+                    if assigned[i] != g or not present[i]:
+                        continue
+                    if (
+                        not seen
+                        or kind == AggKind.LAST
+                        or (kind == AggKind.MIN and values[i] < held)
+                        or (kind == AggKind.MAX and values[i] > held)
+                    ):
+                        held = values[i]
+                        seen = True
+                if got.is_valid(g) != seen:
+                    raise Error(
+                        String(
+                            "step ",
+                            step,
+                            " seed ",
+                            options.seed,
+                            ": ",
+                            kind,
+                            " group ",
+                            g,
+                            " came back ",
+                            "present" if got.is_valid(g) else "null",
+                            " where the reference has ",
+                            "a value" if seen else "nothing",
+                        )
+                    )
+                if seen and got.strings()[g] != held:
+                    raise Error(
+                        String(
+                            "step ",
+                            step,
+                            " seed ",
+                            options.seed,
+                            ": ",
+                            kind,
+                            " group ",
+                            g,
+                            " came back ",
+                            got.strings()[g],
+                            " where the reference has ",
+                            held,
+                        )
+                    )
 
         else:
             column = build(rng, values, present)

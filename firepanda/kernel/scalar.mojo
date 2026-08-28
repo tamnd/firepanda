@@ -18,6 +18,7 @@ specification in the only form that runs.
 from std.math import sqrt
 
 from firepanda.array.array import Array
+from firepanda.array.strings import StringArray
 
 from .accum import accumulator
 from .group import AggKind
@@ -697,3 +698,73 @@ def is_null_scalar[dt: DType](col: Array[dt]) -> Array[DType.bool]:
     for i in range(len(col)):
         out[i] = not col.is_valid(i)
     return out^
+
+
+def group_text_scalar(
+    col: StringArray,
+    kind: AggKind,
+    codes: Array[DType.uint32],
+    groups: Int,
+) raises -> Tuple[List[String], List[Bool]]:
+    """Aggregates a text column by collecting each group's values and reducing.
+
+    The twin for the four reductions that report a value the column held. The
+    three that count are not here, because a count over text is the same loop as
+    a count over numbers and `group_scalar` already covers it, and a twin that
+    exists only to be a second copy of another twin is a second place to be
+    wrong.
+
+    Values come back as `String` rather than as rows, which is the difference
+    that makes this a check rather than a restatement. The kernel decides which
+    row to keep and gathers at the end; this one holds the bytes and compares
+    them with the language's own comparison, so an error in the byte comparison
+    the kernel uses cannot hide here.
+
+    Args:
+        col: The text column being aggregated.
+        kind: Which reduction.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals.
+
+    Returns:
+        One value per group and one validity flag per group.
+
+    Raises:
+        If the reduction is not one of the four.
+    """
+    if not (
+        kind == AggKind.FIRST
+        or kind == AggKind.LAST
+        or kind == AggKind.MIN
+        or kind == AggKind.MAX
+    ):
+        raise Error(
+            "group by twin: " + String(kind) + " does not report a text value"
+        )
+
+    var values = List[String](capacity=groups)
+    var valid = List[Bool](capacity=groups)
+
+    for g in range(groups):
+        # Every row, for every group, the same as the number twin. It is O(groups
+        # times rows) on purpose: the bucketing pass is the thing being checked,
+        # so the twin cannot use one.
+        var held = String("")
+        var seen = False
+        for i in range(len(codes)):
+            if Int(codes[i]) != g or not col.is_valid(i):
+                continue
+            var value = col[i]
+            if not seen:
+                held = value
+                seen = True
+            elif kind == AggKind.LAST:
+                held = value
+            elif kind == AggKind.MIN and value < held:
+                held = value
+            elif kind == AggKind.MAX and value > held:
+                held = value
+        values.append(held)
+        valid.append(seen)
+
+    return (values^, valid^)

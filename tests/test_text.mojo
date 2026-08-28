@@ -253,10 +253,13 @@ def test_sorting_text_orders_it() raises:
     assert_equal(sorted.text(2), "c")
 
 
-def test_aggregating_text_says_what_is_missing() raises:
+def test_summing_text_says_what_is_missing() raises:
+    """Text has six reductions that mean something and seven that do not. The
+    seven are covered in `test_text_agg.mojo`; this checks that the erased entry
+    point still refuses rather than reading a view as a number."""
     var column = AnyArray(strings_from_list(["a", "b"]))
     var codes = Array[DType.uint32](2)
-    with assert_raises(contains="cannot be aggregated yet"):
+    with assert_raises(contains="sum is not defined for a string column"):
         _ = aggregate_group_any(column, AggKind.SUM, codes, 1)
 
 
