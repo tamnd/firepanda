@@ -36,7 +36,9 @@ for file in "${sources[@]}"; do
   cp "$file" "$work/$file"
 done
 
-if ! (cd "$work" && mojo format --quiet "${roots[@]}"); then
+# The files rather than the roots, because a root with no Mojo in it is not an
+# error here and `mojo format` treats a path it cannot find as one.
+if ! (cd "$work" && mojo format --quiet "${sources[@]}"); then
   echo "mojo format failed on a copy of the tree" >&2
   exit 1
 fi
