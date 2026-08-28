@@ -177,14 +177,18 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-pixi
 
-      # Fewer repetitions and a shorter minimum than a developer would use, and
-      # both numbers are measured rather than picked. The suite costs roughly a
-      # fixed amount per repetition whatever else is set, so the repetition count
-      # is the lever: five repetitions at a fifty millisecond minimum took 309 s
-      # and three at twenty five took 154 s for the same 123 rows. Three is the
-      # fewest that still has a median.
+      # Tighter settings than a developer would use, all three of them measured
+      # rather than picked. `--max-time` is what the suite's runtime is actually
+      # made of: the harness keeps sampling until that bound rather than stopping
+      # at the minimum, so the total is roughly the bound times 123 benchmarks
+      # times the repetitions, and the row count barely enters into it. Halving
+      # the rows moved a full run from 310 s to 276 s. These settings move it from
+      # 316 s to 80 s while keeping five repetitions, and the measured spread
+      # hardly notices: median interquartile range 13.7% against 12.1%, and the
+      # ninetieth percentile identical at 50%. On a shared runner the noise floor
+      # is the machine, not the sampling budget.
       - name: Run
-        run: pixi run bench -- --json=bench.json --label=gha-ubuntu-latest --repetitions=3 --min-time=25
+        run: pixi run bench -- --json=bench.json --label=gha-ubuntu-latest --repetitions=5 --min-time=20 --max-time=40
 
       - uses: actions/upload-artifact@v7
         with:
@@ -217,7 +221,7 @@ jobs:
           git checkout --detach "$parent"
           mkdir -p baseline
           pixi run bench -- --json=baseline/bench.json --label=gha-previous \
-            --repetitions=3 --min-time=25
+            --repetitions=5 --min-time=20 --max-time=40
           git checkout --detach "$head"
           echo "found=true" >> "$GITHUB_OUTPUT"
 
