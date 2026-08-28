@@ -27,7 +27,8 @@ bothered, which is the comparison worth printing.
 
 Usage:
     mojo run -I . benchmarks/main.mojo [--rows=N] [--repetitions=N]
-        [--min-time=MILLISECONDS] [--json=PATH] [--label=NAME] [--filter=SUBSTRING]
+        [--min-time=MILLISECONDS] [--max-time=MILLISECONDS] [--json=PATH]
+        [--label=NAME] [--filter=SUBSTRING]
 
 `--label` goes in the JSON so a result file says which machine produced it, which
 docs/specs/10-benchmarks.md requires and which is easy to forget until two result
@@ -131,6 +132,10 @@ struct Options(Copyable, Movable):
     var min_seconds: Float64
     """The minimum wall clock time of a single repetition."""
 
+    var max_seconds: Float64
+    """The most wall clock time a single repetition may spend. Zero means the
+    default, which is three times the minimum plus a quarter of a second."""
+
     var json_path: String
     """Where to write the machine readable results. Empty means nowhere."""
 
@@ -145,6 +150,7 @@ struct Options(Copyable, Movable):
         self.rows = DEFAULT_ROWS
         self.repetitions = DEFAULT_REPETITIONS
         self.min_seconds = 0.1
+        self.max_seconds = 0.0
         self.json_path = String("")
         self.label = String("")
         self.filter = String("")
@@ -169,6 +175,8 @@ def parse_options() raises -> Options:
             options.repetitions = Int(arg[byte=14:])
         elif arg.startswith("--min-time="):
             options.min_seconds = Float64(Int(arg[byte=11:])) / 1000.0
+        elif arg.startswith("--max-time="):
+            options.max_seconds = Float64(Int(arg[byte=11:])) / 1000.0
         elif arg.startswith("--json="):
             options.json_path = String(arg[byte=7:])
         elif arg.startswith("--label="):
@@ -451,6 +459,17 @@ struct Harness(Movable):
             return True
         return self.options.filter in name
 
+    def max_seconds(self) -> Float64:
+        """Returns the wall clock ceiling on one repetition.
+
+        Returns:
+            The `--max-time` value, or three times the minimum plus a quarter of
+            a second when it was not given.
+        """
+        if self.options.max_seconds > 0.0:
+            return self.options.max_seconds
+        return self.options.min_seconds * 3.0 + 0.25
+
     def record(
         mut self,
         name: String,
@@ -479,11 +498,19 @@ struct Harness(Movable):
             # takes a nanosecond needs hundreds of millions of iterations to fill
             # the minimum runtime, and without a cap a single row of this table
             # can own the pull request for half a minute.
+            #
+            # It is also what the suite's total runtime is actually made of, which
+            # is not obvious and was worth measuring. `run` keeps sampling until
+            # this bound rather than stopping at the minimum, so nearly every row
+            # costs the bound, and the suite costs the bound times the number of
+            # benchmarks times the repetitions almost regardless of the row count.
+            # Halving the rows moved a full run from 310 s to 276 s; halving this
+            # halves it. That is why it is a flag.
             var report = run(
                 body,
                 num_warmup_iters=1,
                 min_runtime_secs=self.options.min_seconds,
-                max_runtime_secs=self.options.min_seconds * 3.0 + 0.25,
+                max_runtime_secs=self.max_seconds(),
             )
             samples.append(report.mean(Unit.s))
 
@@ -2243,6 +2270,8 @@ def results_json(harness: Harness) -> String:
         harness.options.repetitions,
         ', "min_runtime_secs": ',
         harness.options.min_seconds,
+        ', "max_runtime_secs": ',
+        harness.max_seconds(),
         "},\n",
     )
     out += String('  "benchmarks": [\n')
