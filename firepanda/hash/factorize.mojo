@@ -21,6 +21,12 @@ The switch is `DIRECT_LIMIT` and it is a memory bound rather than a guess about
 cardinality: the direct table costs four bytes per possible value, so it is worth
 taking exactly when the range is small enough that the table behaves like cache.
 
+Text has a third route, `factorize_strings`, and it is the hash table with the
+key comparison put back, because a string does not fit in the 64 bits the table
+stores. It hands back a representative row per group rather than the keys
+themselves, which is the one place its shape differs from the numeric one and is
+explained on the function.
+
 Nulls get a group. A null is a value that rows can share, pandas with
 `dropna=False` gives it a group, and dropping it later is a filter on one ordinal
 while inventing it later would be another pass over the column. When a column has
@@ -34,10 +40,11 @@ a second bookkeeping structure.
 from std.sys.info import size_of
 
 from firepanda.array.array import Array, from_list
+from firepanda.array.strings import StringArray
 from firepanda.buffer.buffer import Buffer
 from firepanda.kernel.agg import AggResult, max_of, min_of
 
-from .function import DEFAULT_SEED, hash_chunk
+from .function import DEFAULT_SEED, hash_chunk, hash_strings_chunk
 from .table import HashTable
 
 comptime DIRECT_LIMIT = 1 << 16
@@ -331,3 +338,102 @@ def _finish[
     if null_group >= 0:
         out.set_null(null_group)
     return Factorized[dt](codes^, out^, null_group)
+
+
+struct FactorizedStrings(Movable):
+    """A string column rewritten as group ordinals, plus where to find the keys.
+    """
+
+    var codes: Array[DType.uint32]
+    """One group ordinal per row of the input, in `[0, groups)`."""
+
+    var firsts: List[Int]
+    """For each non-null group, the first row that had it, in ordinal order.
+
+    This is where it differs from `Factorized`, which hands back the key values
+    themselves. A string key is not a scalar, so returning the keys would mean
+    gathering them into a second column, and both callers there are, the frame
+    layer's group by and the join, already recover key values by taking rows.
+    Building a column they were going to throw away is a pass over the group
+    count that nobody asked for.
+    """
+
+    var null_group: Int
+    """The ordinal the nulls got, which is zero, or -1 if the column had none."""
+
+    def __init__(
+        out self,
+        var codes: Array[DType.uint32],
+        var firsts: List[Int],
+        null_group: Int,
+    ):
+        """Constructs a result.
+
+        Args:
+            codes: The per-row ordinals.
+            firsts: A representative row per non-null group.
+            null_group: The ordinal for nulls, or -1.
+        """
+        self.codes = codes^
+        self.firsts = firsts^
+        self.null_group = null_group
+
+    def count(self) -> Int:
+        """Returns the number of groups.
+
+        Returns:
+            The group count, including the null group if there is one.
+        """
+        return len(self.firsts) + (1 if self.null_group >= 0 else 0)
+
+    def into_codes(deinit self) -> Array[DType.uint32]:
+        """Gives up the ordinals without copying them, dropping the rest.
+
+        Returns:
+            The per-row ordinals.
+        """
+        return self.codes^
+
+
+def factorize_strings(
+    col: StringArray, seed: UInt64 = DEFAULT_SEED
+) -> FactorizedStrings:
+    """Assigns a group ordinal to every element of a string column.
+
+    There is no direct route here. The direct route exists because an integer
+    can index a table by being itself, and a string cannot, so everything goes
+    through the hash table.
+
+    Args:
+        col: The column to group.
+        seed: The per-query hash seed.
+
+    Returns:
+        The ordinals, a representative row per group, and which ordinal the
+        nulls got.
+    """
+    var n = len(col)
+    var has_null = col.null_count() > 0
+    var offset = 1 if has_null else 0
+    var codes = Array[DType.uint32](n)
+    var null_group = -1
+    if has_null:
+        null_group = 0
+
+    # Same chunking as the numeric path and for the same reason, except that the
+    # hashes cost more to produce here, so there is more to hide behind the
+    # prefetch and the chunk earns more than it does there.
+    var hashes = Buffer(CHUNK_ROWS * 8)
+    var firsts = List[Int]()
+    var table = HashTable(0, seed)
+
+    var base = 0
+    while base < n:
+        var count = min(CHUNK_ROWS, n - base)
+        hash_strings_chunk(col, base, count, seed, hashes)
+        table.build_strings(
+            hashes, col, has_null, base, count, n, offset, codes, firsts
+        )
+        base += count
+
+    return FactorizedStrings(codes^, firsts^, null_group)

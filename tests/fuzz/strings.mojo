@@ -25,6 +25,7 @@ from std.time import perf_counter_ns
 from firepanda.array.any import AnyArray
 from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
+from firepanda.hash.factorize import factorize_strings
 from firepanda.kernel.sort import argsort_any
 from firepanda.testing.rng import Rng
 
@@ -195,6 +196,47 @@ def reference_argsort(
     if not nulls_first:
         for i in range(len(nulls)):
             out.append(nulls[i])
+    return out^
+
+
+def reference_factorize(values: List[String], present: List[Bool]) -> List[Int]:
+    """Assigns group ordinals the slow obvious way, over whole strings.
+
+    A scan of the groups found so far, comparing `String` against `String`, so it
+    shares nothing with the kernel and in particular does not hash. That is the
+    point of it here: the string route through the hash table is the one place in
+    the library where two different keys can meet on the same hash, and a
+    reference that hashed would agree with the bug.
+
+    Args:
+        values: The reference elements.
+        present: The reference validity.
+
+    Returns:
+        One ordinal per row, with zero reserved for the nulls when there are any.
+    """
+    var has_null = False
+    for i in range(len(present)):
+        if not present[i]:
+            has_null = True
+            break
+    var offset = 1 if has_null else 0
+
+    var seen = List[String]()
+    var out = List[Int](capacity=len(values))
+    for i in range(len(values)):
+        if not present[i]:
+            out.append(0)
+            continue
+        var at = -1
+        for j in range(len(seen)):
+            if seen[j] == values[i]:
+                at = j
+                break
+        if at < 0:
+            at = len(seen)
+            seen.append(values[i])
+        out.append(at + offset)
     return out^
 
 
@@ -524,6 +566,30 @@ def main() raises:
                         " at ",
                         i,
                         " where the reference put ",
+                        want[i],
+                    )
+                )
+
+        elif op < 98 and len(values) > 0:
+            # The ordinals are compared rather than the group count, because a
+            # column can produce the right number of groups and put the wrong
+            # rows in them.
+            var want = reference_factorize(values, present)
+            var got = factorize_strings(StringArray(copy=column)).into_codes()
+            for i in range(len(want)):
+                if Int(got[i]) == want[i]:
+                    continue
+                raise Error(
+                    String(
+                        "step ",
+                        step,
+                        " seed ",
+                        options.seed,
+                        ": factorize put row ",
+                        i,
+                        " in group ",
+                        Int(got[i]),
+                        " where the reference put it in ",
                         want[i],
                     )
                 )

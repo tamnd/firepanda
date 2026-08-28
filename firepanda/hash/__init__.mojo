@@ -27,8 +27,13 @@ time it is seen, so an aggregation writes into a flat array indexed by ordinal
 rather than back into the table. That keeps the table read-mostly during the
 aggregate and it is what makes radix partitioning worth anything.
 
-What is not here yet: string keys, the dictionary encoded bypass, and the
-parallel build. Strings need the StringView comparison path, the dictionary
+**Text is the exception to the first idea.** A string does not fit in 64 bits, so
+its hash is a real hash and two different strings can land on the same one. The
+string route through the table compares the bytes on a hash match rather than
+taking it as proof, which is the one place in this package where a probe does
+more than compare two integers.
+
+What is not here yet: the dictionary encoded bypass and the parallel build. The
 bypass needs dictionary encoded columns to exist, and the parallel build needs
 the executor. `partition.mojo` is the piece the parallel build will stand on and
 it is written and tested now because the layout it produces constrains the rest.
@@ -38,16 +43,29 @@ Every function here has a twin in `scalar.mojo`, on the same terms as
 fast one is wrong.
 """
 
-from .factorize import CHUNK_ROWS, DIRECT_LIMIT, Factorized, factorize
+from .factorize import (
+    CHUNK_ROWS,
+    DIRECT_LIMIT,
+    Factorized,
+    FactorizedStrings,
+    factorize,
+    factorize_strings,
+)
 from .function import (
     DEFAULT_SEED,
+    hash_bytes,
     hash_chunk,
     hash_into,
     hash_of,
+    hash_strings_chunk,
     key_bits,
     mix,
 )
 from .grouping import Grouping, group_ordinals
 from .partition import Partitioning, radix_partition
-from .scalar import factorize_dict, factorize_linear
+from .scalar import (
+    factorize_dict,
+    factorize_linear,
+    factorize_strings_linear,
+)
 from .table import HashTable

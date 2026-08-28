@@ -17,12 +17,22 @@ matters because the batch path hashes a thousand keys before it probes anything.
 The seed is per query and not per build. A published seed is a published
 collision recipe, and a group by on user supplied keys is exactly the place
 somebody would use one.
+
+Text is the exception to all of this and it is worth being explicit about why.
+`key_bits` cannot reduce a string to 64 bits without losing information, so
+`hash_bytes` is a real hash rather than a relabelling, two different strings can
+land on the same 64 bits, and everything the table gets to assume about a fixed
+width key stops being true. That is why the string route through the table
+compares the bytes on a hash match instead of taking the match as proof. See
+`HashTable.build_strings`.
 """
 
+from std.collections.span import Span
 from std.math import isnan
 from std.sys.info import simd_width_of
 
 from firepanda.array.array import Array
+from firepanda.array.strings import StringArray
 from firepanda.buffer.buffer import Buffer
 
 comptime DEFAULT_SEED = UInt64(0x243F6A8885A308D3)
@@ -182,3 +192,95 @@ def hash_chunk[
         )
         out.unsafe_offset(i).unsafe_store(mix(k, seed))
         i += width
+
+
+comptime BYTE_WORD = 8
+"""Bytes folded into the running hash at a time. One 64-bit word."""
+
+comptime BYTE_SHIFTS = SIMD[DType.uint64, BYTE_WORD](
+    0, 8, 16, 24, 32, 40, 48, 56
+)
+"""Where each byte of a word goes when eight of them are packed into one.
+
+The order is little endian and it does not matter which order it is, only that it
+is the same one every time. This is a hash rather than a comparison, and unlike
+`StringArray.sort_prefix`, which packs the other way round because there the
+integer order has to be the byte order.
+"""
+
+
+def hash_bytes(bytes: Span[UInt8, _], seed: UInt64 = DEFAULT_SEED) -> UInt64:
+    """Hashes a run of bytes.
+
+    A word at a time through `mix`, which is two multiplies per eight bytes and
+    is where nearly all of the time goes on the short fields a dataframe is
+    actually full of. A dedicated wide hash would win on paragraphs and lose on
+    names.
+
+    The length is folded in before any bytes are, because without it the tail
+    cannot tell "ab" from "ab\\0": both leave the same bits in a word that was
+    zero to begin with. Folding it at the start rather than the end also means a
+    column of same-length keys, which is most categorical data, starts from a
+    value the seed has already spread out.
+
+    The word loop loads eight lanes of one byte rather than one lane of eight,
+    because an element's bytes start wherever the payload put them and a 64-bit
+    load off an odd address is an unaligned access. The pack afterwards is a
+    shift and a reduction and it vectorizes.
+
+    Args:
+        bytes: The bytes to hash.
+        seed: The per-query seed.
+
+    Returns:
+        The hash. Unlike the fixed width path this is a real hash, so equal
+        hashes do not mean equal keys and a caller that needs equality has to
+        compare the bytes.
+    """
+    var count = len(bytes)
+    var ptr = bytes.unsafe_ptr()
+    var h = UInt64(count)
+
+    var i = 0
+    while i + BYTE_WORD <= count:
+        var chunk = ptr.unsafe_offset(i).unsafe_load[width=BYTE_WORD]()
+        h = mix(
+            h ^ (chunk.cast[DType.uint64]() << BYTE_SHIFTS).reduce_or(), seed
+        )
+        i += BYTE_WORD
+
+    var tail = UInt64(0)
+    var shift = UInt64(0)
+    while i < count:
+        tail |= UInt64(ptr.unsafe_offset(i).unsafe_load()) << shift
+        shift += 8
+        i += 1
+    return mix(h ^ tail, seed)
+
+
+def hash_strings_chunk(
+    col: StringArray, start: Int, count: Int, seed: UInt64, mut hashes: Buffer
+):
+    """Hashes a run of a string column's elements into the front of a buffer.
+
+    The counterpart of `hash_chunk` for text, and it is a loop rather than
+    anything clever because every element is a different length and there is no
+    register shape that covers them.
+
+    A null hashes as the empty string. The caller ignores the answer for a null
+    row the same way it does on the fixed width path, and branching here to skip
+    the work would cost more than the work.
+
+    Args:
+        col: The column.
+        start: The first element to hash.
+        count: How many to hash.
+        seed: The per-query seed.
+        hashes: Where to write them, from its own first element. Must be at least
+            `8 * count` bytes.
+    """
+    var out = hashes.bitcast[DType.uint64]()
+    for i in range(count):
+        out.unsafe_offset(i).unsafe_store(
+            hash_bytes(col.unsafe_bytes(start + i), seed)
+        )

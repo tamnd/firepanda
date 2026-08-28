@@ -58,6 +58,7 @@ put in the columns of the side that had nothing.
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
+from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
 from firepanda.hash.grouping import group_ordinals
@@ -408,6 +409,11 @@ def take_pair(
     Raises:
         If the dtypes differ or have no physical layout.
     """
+    if a.is_string() != b.is_string():
+        raise Error(
+            "join: cannot combine a text key column with one of "
+            + String(b.dtype() if a.is_string() else a.dtype())
+        )
     if a.dtype() != b.dtype():
         raise Error(
             "join: cannot combine key columns of "
@@ -415,6 +421,10 @@ def take_pair(
             + " and "
             + String(b.dtype())
         )
+    # Before the dispatch, because uint8 is in ALL and two text columns would
+    # match it and produce a key column holding the first byte of each view.
+    if a.is_string():
+        return AnyArray(_pair_strings(a.strings(), b.strings(), a_at, b_at))
     comptime for candidate in ALL:
         if a.dtype() == candidate:
             return AnyArray(
@@ -465,6 +475,36 @@ def _pair_core[
         else:
             out.data.validity.set(i, False)
     return out^
+
+
+def _pair_strings(
+    a: StringArray,
+    b: StringArray,
+    a_at: List[Int],
+    b_at: List[Int],
+) -> StringArray:
+    """The two-source gather for text.
+
+    Appending rather than writing into a fresh column, because the output's
+    payload size is not known until the rows have been chosen and a string
+    column is built once and not edited.
+    """
+    var n = len(a_at)
+    var builder = StringBuilder(capacity=n)
+    for i in range(n):
+        var at = a_at[i]
+        if at < 0:
+            at = b_at[i]
+            if at >= 0 and b.is_valid(at):
+                builder.append(b.unsafe_bytes(at))
+            else:
+                builder.append_null()
+            continue
+        if a.is_valid(at):
+            builder.append(a.unsafe_bytes(at))
+        else:
+            builder.append_null()
+    return builder^.finish()
 
 
 def _cross(left_rows: Int, right_rows: Int) -> JoinIndices:
