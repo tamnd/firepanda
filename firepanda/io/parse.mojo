@@ -18,14 +18,17 @@ something to stop at, so `12abc` is not the integer 12 and `1.2.3` is not 1.2.
 A parser that stops early turns a corrupt file into a clean one with wrong
 numbers in it, which is the worst available outcome.
 
-**The integer path is exact and the float path is exact in the common case.**
-Integers detect overflow of the accumulator and then range check against the
-target dtype, so nothing wraps silently. Floats take a single rounding when the
-mantissa fits in 53 bits and the decimal exponent is within the range where the
-power of ten is itself exact, which covers essentially every number a person
-types into a spreadsheet. Outside that range the result can be an ulp or two off
-from a correctly rounded `strtod`, which is documented rather than hidden and is
-where a Grisu or Eisel-Lemire implementation would go.
+**Both paths are exact.** Integers detect overflow of the accumulator and then
+range check against the target dtype, so nothing wraps silently. Floats take a
+single rounding when the mantissa fits in 53 bits and the decimal exponent is
+within the range where the power of ten is itself exact, which covers
+essentially every number a person types into a spreadsheet and is one multiply.
+Outside that range the scaling would compound a rounding per step and land an
+ulp or two from the correctly rounded value, so the field goes to the platform's
+`strtod` instead. That is slower and it is also the only way a value written at
+seventeen digits reads back as the value it was written from. An Eisel-Lemire
+implementation would replace the fallback and keep the fast path exactly as it
+is.
 """
 
 from std.collections.span import Span
@@ -255,6 +258,22 @@ def parse_float[dt: DType](field: Span[UInt8, _]) -> Parsed[dt]:
             at += 1
         exponent += -magnitude if exp_negative else magnitude
 
+    # The fast path is a single rounding and is therefore the correctly rounded
+    # answer. Everything else is not, and the error is small but real: scaling
+    # 1.2345678901234567e100 in steps of 1e22 rounds five times and lands one ulp
+    # away, so a value written at seventeen digits does not read back as itself.
+    # The field is handed to the platform's `strtod` in that case, which is
+    # correctly rounded at every exponent and is slow enough to be worth avoiding
+    # and rare enough not to matter. The grammar has already been checked here,
+    # so this is being asked for a value and not for an opinion on the syntax.
+    if not _scaling_is_exact(mantissa, exponent, truncated):
+        try:
+            return Parsed[dt](
+                atof(StringSlice(unsafe_from_utf8=field)).cast[dt](), True
+            )
+        except:
+            pass
+
     var value = _scale(mantissa, exponent, truncated)
     return Parsed[dt]((-value if negative else value).cast[dt](), True)
 
@@ -381,6 +400,25 @@ def _pow10(exponent: Int) -> Float64:
         if left > 0:
             base *= base
     return result
+
+
+def _scaling_is_exact(mantissa: UInt64, exponent: Int, truncated: Bool) -> Bool:
+    """Reports whether one multiply or divide gives the correctly rounded value.
+
+    That needs the significand to be exact in a float64 and the power of ten to
+    be exact in one too, which together make the scaling a single rounding.
+
+    Args:
+        mantissa: The significant digits as an integer.
+        exponent: The power of ten to multiply them by.
+        truncated: Whether digits were dropped from the significand.
+
+    Returns:
+        True if `_scale` is correctly rounded for these arguments.
+    """
+    if truncated or mantissa >= MANTISSA_LIMIT:
+        return False
+    return exponent >= -EXACT_POWER and exponent <= EXACT_POWER
 
 
 def _scale(mantissa: UInt64, exponent: Int, truncated: Bool) -> Float64:

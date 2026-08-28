@@ -356,22 +356,56 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         out.rows = len(out.columns[0])
         return out^
 
-    def cast(self, name: String, to: DType) raises -> Self:
+    def cast(self, name: String, to: DType, strict: Bool = True) raises -> Self:
         """Returns a frame with one column converted to another dtype.
 
         Args:
             name: The column to convert.
             to: The target dtype.
+            strict: Whether a text value that is not a number raises rather than
+                becoming a null.
 
         Returns:
             A frame with that column converted and the rest untouched.
 
         Raises:
-            If the name is missing or either dtype has no physical layout.
+            If the name is missing, either dtype has no physical layout, or the
+            column is text and strict and some value is not a number.
         """
-        var at = self.schema.index_of(name)
-        var converted = cast_any(self.columns[at], to)
+        return self._cast(
+            name, cast_any(self.columns[self.schema.index_of(name)], to, strict)
+        )
 
+    def cast(
+        self, name: String, to: LogicalType, strict: Bool = True
+    ) raises -> Self:
+        """Returns a frame with one column converted to another logical type.
+
+        This is the overload that can name text. `frame.cast("id",
+        LogicalType.STRING)` renders a number column as text, and the reverse
+        reads it back.
+
+        Args:
+            name: The column to convert.
+            to: The target type.
+            strict: Whether a text value that is not a number raises rather than
+                becoming a null.
+
+        Returns:
+            A frame with that column converted and the rest untouched.
+
+        Raises:
+            If the name is missing, the type has no conversion from this
+            column's, or the column is text and strict and some value is not a
+            number.
+        """
+        return self._cast(
+            name, cast_any(self.columns[self.schema.index_of(name)], to, strict)
+        )
+
+    def _cast(self, name: String, var converted: AnyArray) raises -> Self:
+        """Puts a converted column back in place of the one it came from."""
+        var at = self.schema.index_of(name)
         var out = Self(copy=self)
         out.schema.fields[at] = Field(name, converted.type)
         out.columns[at] = converted^

@@ -239,10 +239,15 @@ def test_concat_of_text_and_bytes_is_refused() raises:
         _ = concat_two_any(text, bytes)
 
 
-def test_casting_text_is_refused_rather_than_reading_a_view() raises:
+def test_casting_text_reads_it_rather_than_reading_a_view() raises:
+    """A string column is physically uint8, so the numeric arm would have found
+    it and converted the first byte of every sixteen byte view. It goes to the
+    parser instead, and 123 comes back as the number and not as the byte 49."""
     var s = Series("s", strings_from_list(["123"]))
-    with assert_raises(contains="string column cannot be converted"):
-        _ = s.cast(DType.int64)
+    var out = s.cast(DType.int64)
+    assert_equal(
+        out.values.unsafe_ptr[DType.int64]().unsafe_offset(0).unsafe_load(), 123
+    )
 
 
 def test_sorting_text_orders_it() raises:
