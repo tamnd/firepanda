@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.7] - 2026-08-28
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A text column can be aggregated, not only grouped by. With 0.6.5 sorting one and 0.6.6 grouping by one, a string column is now a first class column everywhere a group by can reach it.
+
+A patch bump. One fix, and the rest is addition.
+
 ### Added
 
 - A text column can be aggregated. `count`, `size`, `nunique`, `first`, `last`, `min` and `max` all work on a string column, per group, through the same `group_by` call the number columns go through.
@@ -518,7 +526,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.6...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.7...HEAD
+[0.6.7]: https://github.com/tamnd/firepanda/releases/tag/v0.6.7
 [0.6.6]: https://github.com/tamnd/firepanda/releases/tag/v0.6.6
 [0.6.5]: https://github.com/tamnd/firepanda/releases/tag/v0.6.5
 [0.6.4]: https://github.com/tamnd/firepanda/releases/tag/v0.6.4
