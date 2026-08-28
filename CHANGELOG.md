@@ -8,6 +8,62 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-08-28
+
+Built against Mojo 1.0.0 (ed45d567).
+
+The two halves of a CSV reader that do not need a frame: a scanner that finds where every field in a buffer is, and parsers that turn a field's bytes into an integer, a float or a boolean. There is no `read_csv` yet, because there is still no variable width string column for a text field to land in, and building that column and the reader and these kernels in one change would have made a pull request nobody could review.
+
+A patch bump. Everything here is a new module and nothing that existed changed shape or behaviour.
+
+### Added
+
+- `firepanda/io/scan.mojo`, an RFC 4180 field scanner. `scan_csv` takes a span of bytes and a `Dialect` and returns a `Scan`, which is one flat list of field spans plus a list of row offsets into it, the same shape as an Arrow offsets buffer and for the same reason: one allocation for the file rather than one per row. A field span carries its start, its end and a flag saying whether it contains a doubled quote, so the reader only pays for unescaping on the fields that need it.
+- `firepanda/io/parse.mojo`, the field parsers. `parse_int` handles an optional sign and digits with the range check done against the target dtype rather than against `Int64`, so `parse_int[DType.int8]` refuses 128 and `parse_int[DType.uint32]` refuses a negative. `parse_float` handles a sign, a decimal point, an exponent and the words `nan`, `inf` and `infinity` in any case. `parse_bool` takes `true` and `false` in the three usual capitalisations and nothing else. `is_missing` recognises the empty field along with `-`, `na`, `n/a`, `nan`, `nil`, `null` and `none`.
+- `firepanda/io/scalar.mojo`, a byte at a time scanner that produces byte identical output to the vectorized one, so a block boundary landing in the middle of a field cannot pass a test unnoticed.
+- `field_bytes` and `unescape` in `firepanda/io/scan.mojo`, for turning a span back into bytes with and without the doubled quotes collapsed.
+- Forty six tests across `tests/test_parse.mojo` and `tests/test_scan.mojo`, including four hundred random buffers drawn from an alphabet loaded with commas, quotes, newlines and carriage returns, on which the two scanners have to agree on whether the buffer is legal and on every field boundary in it.
+- Eight benchmark rows under `csv/`, covering a narrow file, a wide one, a quoted one, a long text one, and the two scanners run against each other on both the narrow and the long shapes.
+
+### How it works, and what follows from it
+
+A parse failure is a value and not an exception. `parse_int` and friends return a `Parsed[dt]` holding a value and an `ok` flag, because a reader with a bad field in row four million wants to record which row it was and carry on, and an exception per bad field would cost more than the parse.
+
+Nothing is guessed. A field with trailing bytes after the number is a failure rather than a truncated value, so `12abc` does not become 12. A quoted field that never closes is an error naming the row and the byte, and so are bytes sitting between a closing quote and the next delimiter. Readers that accept those files do it by inventing a value, and an invented value in a data file is worse than a failed read.
+
+The integer path is exact by construction and the float path is exact in the common case. The integer accumulator checks for overflow before the multiply rather than after it, so it never relies on wraparound. The float path builds the mantissa as a `UInt64` and applies the decimal exponent in one multiply or divide when the mantissa fits in 53 bits and the exponent is within 22, which is the range where a single rounding is provably correct, and falls back to scaling in exact steps of 1e22 outside it.
+
+The scan is a separate pass over the buffer rather than a parse as it goes loop. That is one more pass over the text, and it buys three things: the second pass walks a compact offsets array instead of text, each column's parse knows its dtype and can be a tight typed loop instead of a switch, and the row count is known before a single column is allocated so nothing has to grow.
+
+Blank lines are skipped, which is what pandas does and what stops a file ending in a newline from producing a phantom last row. Ragged rows are reported through `Scan.is_ragged()` rather than refused, because what to do about them is the reader's policy question and not the scanner's.
+
+### Notes on the numbers
+
+Measured on the reference machine, 16 physical cores, 32 byte registers, at 1,048,576 rows for the narrow shapes and 262,144 for the long one, 10 repetitions, median with the interquartile range next to it.
+
+```
+csv/scan_narrow               10.293 ms    34.8%    39.263 ns    25.47 Mrows/s
+csv/scan_scalar_twin          10.419 ms     3.8%    39.745 ns    25.16 Mrows/s
+csv/scan_long_text             3.049 ms     2.7%    46.523 ns    21.49 Mrows/s
+csv/scan_long_twin             6.045 ms     5.9%    92.238 ns    10.84 Mrows/s
+csv/parse_int                  3.165 ms     2.9%     6.037 ns 165.65 Mfields/s
+csv/parse_float                3.061 ms     3.9%    11.676 ns  85.64 Mfields/s
+```
+
+The first version of the scanner was slower than its own byte at a time twin, and the benchmark is what caught it. A register can be tested against the delimiter, the newline and the carriage return in three instructions, but there is no packed movemask reachable from this stdlib, so a register that hits still has to be walked byte by byte to find the lane. In a file whose fields are five bytes long every register hits, which means the vector compare is added to the byte walk rather than replacing it.
+
+The fix is that a search walks the first eight bytes one at a time and only starts testing registers once a field has proved it is longer than a word. Narrow files now scan at the same speed as the scalar scanner, 10.293 ms against 10.419 ms, and long text fields scan at twice its speed, 3.049 ms against 6.045 ms. Eight was measured rather than assumed; a whole register as the threshold gave up most of the win on the long fields and bought nothing on the short ones.
+
+Both parsers are far cheaper than fetching the field they parse, 6.0 ns and 11.7 ns per field, which is the right shape for what comes next: once there is a reader, the cost will be in the scan and the allocation, not in turning digits into numbers.
+
+### Known limitations
+
+There is no `read_csv`, no schema inference and no writer. Those need a variable width string column, which is the next change.
+
+The scanner assumes the buffer is one whole file or a block already split on a row boundary. Splitting a file into blocks for parallel scanning has to respect quoted newlines and is not done here.
+
+Quoting is RFC 4180 only. There is no backslash escape mode and no comment character.
+
 ## [0.6.1] - 2026-08-28
 
 Built against Mojo 1.0.0 (ed45d567).

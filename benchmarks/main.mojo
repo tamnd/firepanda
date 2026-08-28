@@ -66,6 +66,9 @@ from firepanda.hash import (
     mix,
     radix_partition,
 )
+from firepanda.io.parse import parse_float, parse_int
+from firepanda.io.scalar import scan_csv_scalar
+from firepanda.io.scan import default_dialect, field_bytes, scan_csv
 from firepanda.join import JoinKind, join_indices
 from firepanda.frame.concat import concat
 from firepanda.kernel import (
@@ -207,6 +210,22 @@ def fixed(value: Float64, decimals: Int = 2) -> String:
     while text.byte_length() < decimals:
         text = String("0", text)
     return String(whole, ".", text)
+
+
+def bytes_of(var text: String) -> List[UInt8]:
+    """Copies a string's bytes into a list the CSV scanner can span.
+
+    Args:
+        text: The string.
+
+    Returns:
+        The bytes, without a terminator.
+    """
+    var out = List[UInt8](capacity=text.byte_length())
+    var ptr = text.unsafe_ptr()
+    for i in range(text.byte_length()):
+        out.append(ptr.unsafe_offset(i).unsafe_load())
+    return out^
 
 
 def pad(text: String, width: Int) -> String:
@@ -1489,6 +1508,160 @@ def bench_nulls(mut harness: Harness) raises:
     harness.record("nulls/drop_nulls", "rows", rows, drop_nulls)
 
 
+def bench_csv(mut harness: Harness) raises:
+    """Times the CSV field scanner and the field parsers.
+
+    The scanner rows are all the same total number of bytes and differ only in
+    shape, because the thing being measured is how often the block loop finds a
+    boundary rather than how much text there is. A narrow file has a delimiter
+    every few bytes and a wide one has a row ending every few, so the two should
+    land close together and both should be well short of the memory bandwidth a
+    scan with no boundaries at all would reach.
+
+    The quoted row is the one that should hurt. A quoted field cannot use the
+    block loop at all, because the closing quote has to be found by looking at
+    every byte in case the next one doubles it, so a file where everything is
+    quoted is the worst case by construction.
+
+    The two twin rows are here for the ratio and not for their own sake. Each is
+    the same algorithm with the register skipping removed, and the pair of gaps
+    is the whole argument for the block loop: against `csv/scan_narrow` it
+    should be a wash, because a five byte field is found before the vector path
+    turns on at all, and against `csv/scan_long_text` it should be several times
+    slower, because that is where there is something to skip.
+
+    The parser rows are per field rather than per row. An integer field is a
+    handful of multiply-adds and a float field is that plus one scaling multiply,
+    so the two should be within a small factor, and both should be far cheaper
+    than the cache miss that fetching the field cost.
+
+    Args:
+        harness: The harness.
+
+    Raises:
+        If a benchmark raises.
+    """
+    # A quarter of the usual height, because a row here is twenty five bytes of
+    # text rather than eight bytes of int64 and the setup would otherwise build
+    # a hundred megabytes of string before measuring anything.
+    var rows = harness.options.rows // 4
+    var rng = Rng(0x0C5D)
+
+    # Four narrow columns, which is the shape of almost every file anybody
+    # actually reads: an identifier, a couple of measurements and a label.
+    var narrow_text = String()
+    for _ in range(rows):
+        narrow_text += String(rng.next_below(1000000))
+        narrow_text += ","
+        narrow_text += String(rng.next_below(100))
+        narrow_text += ".25,"
+        narrow_text += String(rng.next_below(10000))
+        narrow_text += ",ab\n"
+    var narrow = bytes_of(narrow_text)
+
+    # The same bytes cut into shorter rows, so the scan meets a row ending far
+    # more often for the same amount of text.
+    var wide_rows = rows // 4
+    var wide_text = String()
+    for _ in range(wide_rows):
+        for c in range(16):
+            if c > 0:
+                wide_text += ","
+            wide_text += String(rng.next_below(1000))
+        wide_text += "\n"
+    var wide = bytes_of(wide_text)
+
+    var quoted_text = String()
+    for _ in range(rows):
+        quoted_text += '"abcdef","ghijkl","mnopqr","stuvwx"\n'
+    var quoted = bytes_of(quoted_text)
+
+    # Two columns of sentence length text, which is where a field is longer than
+    # a register and the block loop has something to skip.
+    var long_rows = rows // 4
+    var long_text = String()
+    for _ in range(long_rows):
+        for c in range(2):
+            if c > 0:
+                long_text += ","
+            for _ in range(8):
+                long_text += "the quick brown fox "[
+                    byte = 0 : Int(4 + rng.next_below(16))
+                ]
+        long_text += "\n"
+    var long_fields = bytes_of(long_text)
+
+    def scan_narrow() raises {imm narrow, imm rows}:
+        keep(rows)
+        var scan = scan_csv(narrow, default_dialect())
+        keep(len(scan))
+
+    harness.record("csv/scan_narrow", "rows", rows, scan_narrow)
+
+    def scan_wide() raises {imm wide, imm wide_rows}:
+        keep(wide_rows)
+        var scan = scan_csv(wide, default_dialect())
+        keep(len(scan))
+
+    harness.record("csv/scan_wide", "rows", wide_rows, scan_wide)
+
+    def scan_quoted() raises {imm quoted, imm rows}:
+        keep(rows)
+        var scan = scan_csv(quoted, default_dialect())
+        keep(len(scan))
+
+    harness.record("csv/scan_quoted", "rows", rows, scan_quoted)
+
+    def scan_long() raises {imm long_fields, imm long_rows}:
+        keep(long_rows)
+        var scan = scan_csv(long_fields, default_dialect())
+        keep(len(scan))
+
+    harness.record("csv/scan_long_text", "rows", long_rows, scan_long)
+
+    def scan_twin() raises {imm narrow, imm rows}:
+        keep(rows)
+        var scan = scan_csv_scalar(narrow, default_dialect())
+        keep(len(scan))
+
+    harness.record("csv/scan_scalar_twin", "rows", rows, scan_twin)
+
+    def scan_long_twin() raises {imm long_fields, imm long_rows}:
+        keep(long_rows)
+        var scan = scan_csv_scalar(long_fields, default_dialect())
+        keep(len(scan))
+
+    harness.record("csv/scan_long_twin", "rows", long_rows, scan_long_twin)
+
+    # The parsers are timed over the fields the scan just found, so the field
+    # boundaries are realistic rather than a loop over one string.
+    var found = scan_csv(narrow, default_dialect())
+    var integers = List[Int](capacity=rows * 2)
+    var floats = List[Int](capacity=rows)
+    for r in range(len(found)):
+        integers.append(found.starts[r] + 0)
+        integers.append(found.starts[r] + 2)
+        floats.append(found.starts[r] + 1)
+
+    def parse_integers() raises {imm narrow, imm found, imm integers}:
+        var total = Int64(0)
+        for i in range(len(integers)):
+            var span = found.fields[integers[i]]
+            total += parse_int[DType.int64](field_bytes(narrow, span)).value
+        keep(Int(total))
+
+    harness.record("csv/parse_int", "fields", len(integers), parse_integers)
+
+    def parse_floats() raises {imm narrow, imm found, imm floats}:
+        var total = Float64(0.0)
+        for i in range(len(floats)):
+            var span = found.fields[floats[i]]
+            total += parse_float[DType.float64](field_bytes(narrow, span)).value
+        keep(Int(total))
+
+    harness.record("csv/parse_float", "fields", len(floats), parse_floats)
+
+
 def bench_dispatch(mut harness: Harness) raises:
     """Measures what the runtime to compile-time bridge costs per call.
 
@@ -2149,6 +2322,7 @@ def main() raises:
     bench_group(harness)
     bench_join(harness)
     bench_nulls(harness)
+    bench_csv(harness)
     bench_dispatch(harness)
     var elapsed = Float64(perf_counter_ns() - started) / 1e9
 
