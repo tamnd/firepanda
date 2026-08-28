@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.8] - 2026-08-29
+
+Built against Mojo 1.0.0 (ed45d567).
+
+firepanda reads and writes CSV files, and a text column converts to a number and back. Those are the last two things on M1's scope list that were missing rather than merely slow.
+
+A patch bump. Two fixes, and the rest is addition.
+
 ### Added
 
 - A text column casts to a number and a number column casts to text. `cast_strings_to` reads bytes through the same parser the CSV reader uses, and `cast_to_strings` writes them the way the CSV writer writes them, so a value that survives a file round trip survives this one.
