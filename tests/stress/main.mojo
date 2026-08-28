@@ -108,7 +108,7 @@ def csv_row(index: Int) -> String:
         The row, line feed included.
     """
     if index % 5 == 0:
-        return String(index, ',"a,', index, "\nb\",", index * 3, "\n")
+        return String(index, ',"a,', index, '\nb",', index * 3, "\n")
     return String(index, ",plain", index, ",", index * 3, "\n")
 
 
@@ -148,8 +148,16 @@ def stress_the_csv_reader(mut rng: Rng, round: Int, seed: UInt64) raises:
     var rows = rng.next_range(1, MAX_CSV_ROWS)
     var blocks = rng.next_range(1, MAX_CSV_BLOCKS + 1)
     var data = csv_bytes(rows)
-    var where = String(
-        " (round ", round, " seed ", seed, ", ", rows, " rows, ", blocks, " blocks)"
+    var shape = String(
+        " (round ",
+        round,
+        " seed ",
+        seed,
+        ", ",
+        rows,
+        " rows, ",
+        blocks,
+        " blocks)",
     )
 
     var whole = scan_csv(Span(data), default_dialect())
@@ -159,7 +167,9 @@ def stress_the_csv_reader(mut rng: Rng, round: Int, seed: UInt64) raises:
     for b in range(len(parts)):
         for r in range(len(parts[b])):
             if at >= len(whole):
-                raise Error(String("the blocks found more rows than one pass", where))
+                raise Error(
+                    String("the blocks found more rows than one pass", shape)
+                )
             if parts[b].width(r) != whole.width(at):
                 raise Error(
                     String(
@@ -170,7 +180,7 @@ def stress_the_csv_reader(mut rng: Rng, round: Int, seed: UInt64) raises:
                         " fields in blocks and ",
                         whole.width(at),
                         " in one pass",
-                        where,
+                        shape,
                     )
                 )
             for c in range(parts[b].width(r)):
@@ -192,14 +202,18 @@ def stress_the_csv_reader(mut rng: Rng, round: Int, seed: UInt64) raises:
                             "..",
                             theirs.end,
                             " in one pass",
-                            where,
+                            shape,
                         )
                     )
             at += 1
     if at != len(whole):
         raise Error(
             String(
-                "the blocks found ", at, " rows and one pass found ", len(whole), where
+                "the blocks found ",
+                at,
+                " rows and one pass found ",
+                len(whole),
+                shape,
             )
         )
 
@@ -207,7 +221,9 @@ def stress_the_csv_reader(mut rng: Rng, round: Int, seed: UInt64) raises:
     # the values go back to the generator rather than to the other path.
     var frame = read_csv_bytes(Span(data), ReadOptions())
     if len(frame) != rows:
-        raise Error(String("read ", len(frame), " rows and wrote ", rows, where))
+        raise Error(
+            String("read ", len(frame), " rows and wrote ", rows, shape)
+        )
     var first = frame.column("a").as_typed[DType.int64]().unsafe_ptr()
     var last = frame.column("c").as_typed[DType.int64]().unsafe_ptr()
     for row in range(rows):
@@ -218,7 +234,7 @@ def stress_the_csv_reader(mut rng: Rng, round: Int, seed: UInt64) raises:
                     row,
                     " column a came back ",
                     first.unsafe_offset(row).unsafe_load(),
-                    where,
+                    shape,
                 )
             )
         if last.unsafe_offset(row).unsafe_load() != Int64(row * 3):
@@ -228,7 +244,7 @@ def stress_the_csv_reader(mut rng: Rng, round: Int, seed: UInt64) raises:
                     row,
                     " column c came back ",
                     last.unsafe_offset(row).unsafe_load(),
-                    where,
+                    shape,
                 )
             )
     for row in range(0, rows, 5):
@@ -243,7 +259,7 @@ def stress_the_csv_reader(mut rng: Rng, round: Int, seed: UInt64) raises:
                     "' rather than '",
                     wanted,
                     "'",
-                    where,
+                    shape,
                 )
             )
 
