@@ -36,6 +36,7 @@ from .read import (
     infer_column,
     infer_schema,
     read_csv,
+    read_csv_as,
     read_csv_bytes,
     read_csv_bytes_as,
     scan_blocks,
