@@ -1165,6 +1165,54 @@ def read_csv(path: String, options: ReadOptions) raises -> DataFrame:
     return read_csv_bytes(Span(data), options)
 
 
+def read_csv_as(
+    path: String, var schema: Schema, options: ReadOptions
+) raises -> DataFrame:
+    """Reads a whole CSV file using types the caller already knows.
+
+    The same mapping as `read_csv`, and the same reason for the fallback. What
+    it saves over `read_csv` is inference, which is a whole pass over every
+    field in the file before a single value is parsed.
+
+    Args:
+        path: The file to read.
+        schema: The types to read as, in column order.
+        options: The read options.
+
+    Returns:
+        The frame.
+
+    Raises:
+        Error: If the file cannot be read, if the schema does not have one
+            field per column, or if a value does not fit its declared type.
+    """
+    var mapped = map_file(path)
+    if mapped:
+        ref file = mapped.value()
+        return read_csv_bytes_as(file.bytes(), schema^, options)
+    var handle = open(path, "r")
+    var data = handle.read_bytes()
+    handle.close()
+    return read_csv_bytes_as(Span(data), schema^, options)
+
+
+def read_csv_as(path: String, var schema: Schema) raises -> DataFrame:
+    """Reads a whole CSV file as a known schema with the default options.
+
+    Args:
+        path: The file to read.
+        schema: The types to read as, in column order.
+
+    Returns:
+        The frame.
+
+    Raises:
+        Error: If the file cannot be read, if the schema does not have one
+            field per column, or if a value does not fit its declared type.
+    """
+    return read_csv_as(path, schema^, ReadOptions())
+
+
 def read_csv(path: String) raises -> DataFrame:
     """Reads a whole CSV file with the default options.
 

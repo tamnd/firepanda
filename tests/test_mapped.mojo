@@ -13,10 +13,22 @@ that as its signal to fall back, and a file with nothing in it is the ordinary
 case that `mmap` rejects.
 """
 
-from std.testing import TestSuite, assert_equal, assert_false, assert_true
+from std.testing import (
+    TestSuite,
+    assert_equal,
+    assert_false,
+    assert_raises,
+    assert_true,
+)
 
-from firepanda.dtype import LogicalType
-from firepanda.io import ReadOptions, map_file, read_csv, read_csv_bytes
+from firepanda.dtype import Field, LogicalType, Schema
+from firepanda.io import (
+    ReadOptions,
+    map_file,
+    read_csv,
+    read_csv_as,
+    read_csv_bytes,
+)
 
 
 def write_file(path: String, text: String) raises:
@@ -93,6 +105,36 @@ def test_reading_a_file_agrees_with_reading_its_bytes() raises:
     assert_equal(from_disk[0].as_typed[DType.int64]()[2], Int64(5))
     assert_equal(from_disk[1].as_typed[DType.float64]()[2], Float64(6.5))
     assert_equal(from_disk[2].strings()[2], "zzz")
+
+
+def test_reading_a_file_as_a_declared_schema() raises:
+    """A declared schema skips inference and can widen a column on the way in.
+
+    The first column holds integers and is asked for as a float, which is the
+    thing a caller cannot get out of inference at all, and the last is asked
+    for as text so that a column of digits stays digits.
+    """
+    var path = String("/tmp/firepanda-mapped-typed.csv")
+    write_file(path, String("a,b\n1,10\n2,20\n3,30\n"))
+    var fields = List[Field]()
+    fields.append(Field("a", LogicalType.FLOAT64))
+    fields.append(Field("b", LogicalType.STRING))
+    var frame = read_csv_as(path, Schema(fields^))
+    assert_equal(len(frame), 3)
+    assert_true(frame.schema[0].dtype == LogicalType.FLOAT64)
+    assert_true(frame.schema[1].dtype == LogicalType.STRING)
+    assert_equal(frame[0].as_typed[DType.float64]()[2], Float64(3.0))
+    assert_equal(frame[1].strings()[2], "30")
+
+
+def test_a_declared_schema_that_does_not_fit_the_file_is_refused() raises:
+    """The width check has to happen on the mapped path too."""
+    var path = String("/tmp/firepanda-mapped-typed-wrong.csv")
+    write_file(path, String("a,b\n1,10\n"))
+    var fields = List[Field]()
+    fields.append(Field("a", LogicalType.INT64))
+    with assert_raises():
+        _ = read_csv_as(path, Schema(fields^))
 
 
 def test_reading_an_empty_file_goes_through_the_fallback() raises:

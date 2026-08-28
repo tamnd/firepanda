@@ -10,6 +10,7 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ### Added
 
+- `read_csv_as(path, schema)` and `read_csv_as(path, schema, options)`, which read a file with types the caller already knows. `read_csv_bytes_as` has always existed, so the only way to declare a schema was to open and copy the file yourself, which gave up the mapping and read the file twice as slowly for the trouble.
 - `Scan.push` and `Scan.field`, the two functions that know how a scanned field is packed, and `Scan.long`, where the length of a field too long to pack is kept.
 - `LongField`, the position and length of a field of four megabytes or more.
 
