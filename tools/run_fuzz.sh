@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 # Runs every fuzzer, all of them at once, and passes its arguments to each.
 #
-# The four fuzzers are independent programs with no shared state, and each one
-# spends its first several seconds in the compiler. Running them in sequence made
-# the pull request wait for the sum of four compiles when the machine could do
-# them at the same time.
+# The fuzzers are independent programs with no shared state, and each one spends
+# its first several seconds in the compiler. Running them in sequence made the
+# pull request wait for the sum of every compile when the machine could do them at
+# the same time.
 #
 # `--max-total-time=N` means N seconds per fuzzer rather than N in total, which
 # is the same as it meant when they ran in sequence.
 #
 # Output is collected per fuzzer and printed when everything is done, in a fixed
-# order, because four fuzzers writing progress to the same terminal is unreadable.
+# order, because five fuzzers writing progress to the same terminal is unreadable.
 
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
 
-fuzzers=(main kernel hash join)
+fuzzers=(main kernel hash join strings)
 
 # BSD mktemp wants a template, so the macOS job needs one too.
 logs=$(mktemp -d "${TMPDIR:-/tmp}/firepanda.XXXXXXXX")

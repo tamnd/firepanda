@@ -36,6 +36,7 @@ files disagree and nobody can say why.
 """
 
 from std.benchmark import Unit, keep, run
+from std.collections.span import Span
 from std.sys import argv
 from std.sys.info import (
     CompilationTarget,
@@ -47,6 +48,8 @@ from std.time import perf_counter_ns
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
+from firepanda.array.strings import StringArray, StringBuilder
+from firepanda.array.strview import PREFIX_LENGTH
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer
 from firepanda.buffer.pool import BufferPool
@@ -1689,6 +1692,187 @@ def bench_csv(mut harness: Harness) raises:
     harness.record("csv/parse_float", "fields", len(floats), parse_floats)
 
 
+def _string_column(
+    count: Int, width: Int, vary_prefix: Bool
+) raises -> StringArray:
+    """Builds a column of fixed width elements for the string benchmarks.
+
+    Every element differs from its neighbour in its last byte, so a comparison
+    between two adjacent elements always has to run to the end unless something
+    earlier settles it. What settles it earlier is the prefix, which is what
+    `vary_prefix` turns on.
+
+    Args:
+        count: How many elements.
+        width: How many bytes in each.
+        vary_prefix: Whether the first four bytes differ between neighbours.
+
+    Returns:
+        The column.
+
+    Raises:
+        If the builder raises.
+    """
+    var pool = List[UInt8](capacity=count * width)
+    for i in range(count):
+        for j in range(width):
+            if vary_prefix and j < PREFIX_LENGTH:
+                pool.append(UInt8(97 + (i + j) % 26))
+            elif j == width - 1:
+                pool.append(UInt8(97 + i % 26))
+            else:
+                pool.append(UInt8(97 + j % 26))
+
+    var builder = StringBuilder(capacity=count)
+    var base = pool.unsafe_ptr()
+    for i in range(count):
+        builder.append(
+            Span[UInt8, origin_of(pool)](
+                unsafe_ptr=base.unsafe_offset(i * width), length=width
+            )
+        )
+    return builder^.finish()
+
+
+def bench_strings(mut harness: Harness) raises:
+    """Times the variable width string column on both sides of the inline limit.
+
+    Every row here is measured twice, once at eight bytes and once at thirty two,
+    because twelve is where an element stops living inside its own view and moves
+    to the payload and that is the only interesting thing about this layout. The
+    short column should never touch the payload at all.
+
+    `strings/length_short` and `strings/length_long` should land on top of each
+    other. A length is in the view either way, so asking for one costs a single
+    load whatever the element is, which is the thing the classic offsets layout
+    cannot say.
+
+    `strings/bytes_short` against `strings/bytes_long` does not open the gap that
+    it looks like it should. Reading a short element stays inside the views array
+    and reading a long one goes to a second buffer, but both walks are in order
+    and a prefetcher has no trouble with two sequential streams, so the pair lands
+    level. The inline layout is not worth anything to a scan. It is worth
+    something to everything that jumps.
+
+    The two equality rows are the argument for the four byte prefix, and they are
+    where the layout actually pays. Both compare adjacent long elements that are
+    not equal, and both answer false. The only difference is where the difference
+    is: in the prefix, which the view settles on its own, or in the last byte,
+    which costs a walk into a buffer the view alone would never have touched.
+
+    Args:
+        harness: The harness.
+
+    Raises:
+        If a benchmark raises.
+    """
+    # A quarter of the usual row count, because sixteen bytes of view per element
+    # plus a payload is a lot of memory to hold three copies of.
+    var rows = harness.options.rows // 4
+    if rows < 1:
+        rows = 1
+
+    var short = _string_column(rows, 8, True)
+    var long = _string_column(rows, 32, True)
+    var late = _string_column(rows, 32, False)
+
+    def build_short() raises {imm short, imm rows}:
+        var builder = StringBuilder(capacity=rows)
+        for i in range(rows):
+            builder.append(short.unsafe_bytes(i))
+        var out = builder^.finish()
+        keep(len(out))
+
+    harness.record("strings/build_short", "rows", rows, build_short)
+
+    def build_long() raises {imm long, imm rows}:
+        var builder = StringBuilder(capacity=rows)
+        for i in range(rows):
+            builder.append(long.unsafe_bytes(i))
+        var out = builder^.finish()
+        keep(len(out))
+
+    harness.record("strings/build_long", "rows", rows, build_long)
+
+    def length_short() raises {imm short, imm rows}:
+        var total = 0
+        for i in range(rows):
+            total += short.byte_length(i)
+        keep(total)
+
+    harness.record("strings/length_short", "rows", rows, length_short)
+
+    def length_long() raises {imm long, imm rows}:
+        var total = 0
+        for i in range(rows):
+            total += long.byte_length(i)
+        keep(total)
+
+    harness.record("strings/length_long", "rows", rows, length_long)
+
+    def bytes_short() raises {imm short, imm rows}:
+        var total = 0
+        for i in range(rows):
+            var bytes = short.unsafe_bytes(i)
+            total += Int(bytes[len(bytes) - 1])
+        keep(total)
+
+    harness.record("strings/bytes_short", "rows", rows, bytes_short)
+
+    def bytes_long() raises {imm long, imm rows}:
+        var total = 0
+        for i in range(rows):
+            var bytes = long.unsafe_bytes(i)
+            total += Int(bytes[len(bytes) - 1])
+        keep(total)
+
+    harness.record("strings/bytes_long", "rows", rows, bytes_long)
+
+    def equals_prefix() raises {imm long, imm rows}:
+        var same = 0
+        for i in range(rows - 1):
+            if long.element_equals(i, i + 1):
+                same += 1
+        keep(same)
+
+    harness.record("strings/equals_prefix", "pairs", rows - 1, equals_prefix)
+
+    def equals_payload() raises {imm late, imm rows}:
+        var same = 0
+        for i in range(rows - 1):
+            if late.element_equals(i, i + 1):
+                same += 1
+        keep(same)
+
+    harness.record("strings/equals_payload", "pairs", rows - 1, equals_payload)
+
+    # A stride that is coprime with any plausible row count, so the gather walks
+    # the whole column without ever settling into a pattern a prefetcher can pick
+    # up. This is the access a join or a sort permutation actually produces.
+    var picks = List[Int](capacity=rows)
+    var step = 0
+    for _ in range(rows):
+        step = (step + 7919) % rows
+        picks.append(step)
+
+    def take_scattered() raises {imm long, imm picks}:
+        var out = long.take(picks)
+        keep(len(out))
+
+    harness.record("strings/take", "rows", rows, take_scattered)
+
+    var mask = Bitmap(rows)
+    mask.clear_all()
+    for i in range(0, rows, 2):
+        mask.set(i, True)
+
+    def filter_half() raises {imm long, imm mask}:
+        var out = long.filter(mask)
+        keep(len(out))
+
+    harness.record("strings/filter", "rows", rows, filter_half)
+
+
 def bench_dispatch(mut harness: Harness) raises:
     """Measures what the runtime to compile-time bridge costs per call.
 
@@ -2352,6 +2536,7 @@ def main() raises:
     bench_join(harness)
     bench_nulls(harness)
     bench_csv(harness)
+    bench_strings(harness)
     bench_dispatch(harness)
     var elapsed = Float64(perf_counter_ns() - started) / 1e9
 
