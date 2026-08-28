@@ -584,3 +584,116 @@ def group_scalar[
             raise Error("group by: unsupported aggregation")
 
     return (values^, valid^)
+
+
+def concat_scalar[dt: DType](parts: List[Array[dt]]) -> Array[dt]:
+    """Stacks columns end to end, one element at a time.
+
+    Args:
+        parts: The columns, in output order.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column as tall as the parts put together.
+    """
+    var total = 0
+    for p in range(len(parts)):
+        total += len(parts[p])
+
+    var out = Array[dt](total)
+    var at = 0
+    for p in range(len(parts)):
+        for i in range(len(parts[p])):
+            if parts[p].is_valid(i):
+                out.set_valid(at, parts[p][i])
+            else:
+                out.set_null(at)
+            at += 1
+    return out^
+
+
+def coalesce_scalar[dt: DType](a: Array[dt], b: Array[dt]) -> Array[dt]:
+    """Picks the first present value of the two, one row at a time.
+
+    A fallback of one row is used for every row, which is how filling with a
+    scalar is spelled.
+
+    Args:
+        a: The preferred column.
+        b: The fallback, either as tall as `a` or one row.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column as tall as `a`.
+    """
+    var out = Array[dt](len(a))
+    for i in range(len(a)):
+        if a.is_valid(i):
+            out.set_valid(i, a[i])
+            continue
+        var at = 0 if len(b) == 1 else i
+        if at < len(b) and b.is_valid(at):
+            out.set_valid(i, b[at])
+        else:
+            out.set_null(i)
+    return out^
+
+
+def fill_scalar[
+    dt: DType, //, forward: Bool
+](col: Array[dt], limit: Int) -> Array[dt]:
+    """Carries the nearest present value over the nulls, one row at a time.
+
+    Args:
+        col: The column.
+        limit: The longest run of nulls to fill, or zero for no limit.
+
+    Parameters:
+        dt: The dtype.
+        forward: True to carry from earlier rows, false to carry from later ones.
+
+    Returns:
+        A column of the same height.
+    """
+    var out = Array[dt](len(col))
+    for i in range(len(col)):
+        if col.is_valid(i):
+            out.set_valid(i, col[i])
+            continue
+
+        var run = 0
+        var found = False
+        var step = i - 1 if forward else i + 1
+        while step >= 0 and step < len(col):
+            run += 1
+            if col.is_valid(step):
+                if limit <= 0 or run <= limit:
+                    out.set_valid(i, col[step])
+                    found = True
+                break
+            step = step - 1 if forward else step + 1
+        if not found:
+            out.set_null(i)
+    return out^
+
+
+def is_null_scalar[dt: DType](col: Array[dt]) -> Array[DType.bool]:
+    """Reports which rows are missing, one row at a time.
+
+    Args:
+        col: The column.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A bool column with no nulls of its own.
+    """
+    var out = Array[DType.bool](len(col))
+    for i in range(len(col)):
+        out[i] = not col.is_valid(i)
+    return out^

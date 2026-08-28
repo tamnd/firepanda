@@ -67,6 +67,7 @@ from firepanda.hash import (
     radix_partition,
 )
 from firepanda.join import JoinKind, join_indices
+from firepanda.frame.concat import concat
 from firepanda.kernel import (
     AggKind,
     add,
@@ -74,7 +75,10 @@ from firepanda.kernel import (
     argsort,
     argsort_multi,
     cast_to,
+    coalesce,
+    concat_arrays,
     divide,
+    fill_forward,
     filter_rows,
     group_first,
     group_mean,
@@ -87,6 +91,7 @@ from firepanda.kernel import (
     group_var,
     less,
     mean_of,
+    is_null,
     min_of,
     multiply,
     sum_of,
@@ -1336,6 +1341,154 @@ def bench_hash(mut harness: Harness) raises:
     harness.record("hash/radix_partition_256", "rows", rows, partition)
 
 
+def bench_nulls(mut harness: Harness) raises:
+    """Times the null-handling kernels and `concat`.
+
+    Null density is the variable that matters in this section and every row here
+    comes in two densities for that reason. A column with no nulls skips the
+    repair pass entirely, because the output of a fresh `Array` is already all
+    present and there is nothing to fix. A column that is one in eight null pays
+    per row. The gap between the two is the whole design of these kernels and it
+    should be visible in the numbers rather than only in the comments.
+
+    `nulls/is_null` is the one operation here that never reads a value. Its cost
+    is the expansion from a bit per row to a byte per row, so it should run at
+    close to the speed of a memory write and should not care about density at
+    all, since an all-present word and an all-null word are both a block store.
+
+    `nulls/ffill` is the only scan. Row `i` depends on row `i - 1`, so there is
+    nothing to vectorize and the only saving available is skipping the words with
+    no nulls in them. On a dense column that saving is everything and on a sparse
+    one it is nothing, which makes the pair of rows a direct reading of how much
+    the word at a time shortcut is worth.
+
+    `concat/*` is pure memory traffic. Two parts and eight parts of the same
+    total height do the same amount of copying, so the difference between them is
+    per-part overhead, and the frame row adds a schema walk and three columns.
+
+    Args:
+        harness: The harness.
+
+    Raises:
+        If a benchmark raises.
+    """
+    var rows = harness.options.rows
+    var rng = Rng(0x4E0115)
+
+    var dense = Array[BENCH_DTYPE](rows)
+    var sparse = Array[BENCH_DTYPE](rows)
+    var fallback = Array[BENCH_DTYPE](rows)
+    for i in range(rows):
+        var draw = rng.next_u64()
+        dense[i] = Scalar[BENCH_DTYPE](Int(draw % 1000))
+        fallback[i] = Scalar[BENCH_DTYPE](Int(draw % 7))
+        if draw % 8 == 0:
+            sparse.set_null(i)
+        else:
+            sparse.set_valid(i, Scalar[BENCH_DTYPE](Int(draw % 1000)))
+
+    def null_mask_dense() raises {imm dense, imm rows}:
+        keep(rows)
+        var mask = is_null(dense)
+        keep(len(mask))
+
+    harness.record("nulls/is_null", "rows", rows, null_mask_dense)
+
+    def null_mask_sparse() raises {imm sparse, imm rows}:
+        keep(rows)
+        var mask = is_null(sparse)
+        keep(len(mask))
+
+    harness.record("nulls/is_null_sparse", "rows", rows, null_mask_sparse)
+
+    def coalesce_dense() raises {imm dense, imm fallback, imm rows}:
+        keep(rows)
+        var out = coalesce(dense, fallback)
+        keep(len(out))
+
+    harness.record("nulls/coalesce", "rows", rows, coalesce_dense)
+
+    def coalesce_sparse() raises {imm sparse, imm fallback, imm rows}:
+        keep(rows)
+        var out = coalesce(sparse, fallback)
+        keep(len(out))
+
+    harness.record("nulls/coalesce_sparse", "rows", rows, coalesce_sparse)
+
+    def ffill_dense() raises {imm dense, imm rows}:
+        keep(rows)
+        var out = fill_forward(dense)
+        keep(len(out))
+
+    harness.record("nulls/ffill", "rows", rows, ffill_dense)
+
+    def ffill_sparse() raises {imm sparse, imm rows}:
+        keep(rows)
+        var out = fill_forward(sparse)
+        keep(len(out))
+
+    harness.record("nulls/ffill_sparse", "rows", rows, ffill_sparse)
+
+    # Two lists of parts covering the same total height, so the difference
+    # between the two rows is per-part overhead and nothing else.
+    var halves = List[Array[BENCH_DTYPE]]()
+    halves.append(sparse.slice(0, rows // 2))
+    halves.append(sparse.slice(rows // 2, rows))
+
+    var eighths = List[Array[BENCH_DTYPE]]()
+    for p in range(8):
+        eighths.append(sparse.slice(p * rows // 8, (p + 1) * rows // 8))
+
+    def concat_two() raises {imm halves, imm rows}:
+        keep(rows)
+        var out = concat_arrays(halves)
+        keep(len(out))
+
+    harness.record("concat/two_parts", "rows", rows, concat_two)
+
+    def concat_eight() raises {imm eighths, imm rows}:
+        keep(rows)
+        var out = concat_arrays(eighths)
+        keep(len(out))
+
+    harness.record("concat/eight_parts", "rows", rows, concat_eight)
+
+    var half_series = List[Series]()
+    half_series.append(Series("a", sparse.slice(0, rows // 2)))
+    half_series.append(Series("b", dense.slice(0, rows // 2)))
+    half_series.append(Series("c", fallback.slice(0, rows // 2)))
+    var top = DataFrame.from_series(half_series^)
+
+    var rest_series = List[Series]()
+    rest_series.append(Series("a", sparse.slice(rows // 2, rows)))
+    rest_series.append(Series("b", dense.slice(rows // 2, rows)))
+    rest_series.append(Series("c", fallback.slice(rows // 2, rows)))
+    var bottom = DataFrame.from_series(rest_series^)
+
+    var pair = List[DataFrame]()
+    pair.append(top^)
+    pair.append(bottom^)
+
+    def concat_frames() raises {imm pair, imm rows}:
+        keep(rows)
+        var out = concat(pair)
+        keep(out.rows)
+
+    harness.record("concat/frame_three_columns", "rows", rows, concat_frames)
+
+    var frame_series = List[Series]()
+    frame_series.append(Series("a", Array[BENCH_DTYPE](copy=sparse)))
+    frame_series.append(Series("b", Array[BENCH_DTYPE](copy=dense)))
+    var frame = DataFrame.from_series(frame_series^)
+
+    def drop_nulls() raises {imm frame}:
+        keep(frame.rows)
+        var out = frame.drop_nulls()
+        keep(out.rows)
+
+    harness.record("nulls/drop_nulls", "rows", rows, drop_nulls)
+
+
 def bench_dispatch(mut harness: Harness) raises:
     """Measures what the runtime to compile-time bridge costs per call.
 
@@ -1995,6 +2148,7 @@ def main() raises:
     bench_hash(harness)
     bench_group(harness)
     bench_join(harness)
+    bench_nulls(harness)
     bench_dispatch(harness)
     var elapsed = Float64(perf_counter_ns() - started) / 1e9
 

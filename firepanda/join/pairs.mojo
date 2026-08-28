@@ -61,6 +61,7 @@ from firepanda.array.array import Array
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
 from firepanda.hash.grouping import group_ordinals
+from firepanda.kernel.concat import concat_two_any
 
 
 struct JoinKind(Equatable, ImplicitlyCopyable, Movable, Writable):
@@ -518,46 +519,4 @@ def _concat_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
             + " and "
             + String(b.dtype())
         )
-    comptime for candidate in ALL:
-        if a.dtype() == candidate:
-            return AnyArray(
-                _concat_core(
-                    a.unsafe_ptr[candidate](),
-                    a.data.validity,
-                    len(a),
-                    b.unsafe_ptr[candidate](),
-                    b.data.validity,
-                    len(b),
-                )
-            )
-    raise Error("join: unsupported key dtype")
-
-
-def _concat_core[
-    dt: DType, //, first: ImmOrigin, second: ImmOrigin
-](
-    a: Pointer[Scalar[dt], first],
-    a_valid: Bitmap,
-    a_len: Int,
-    b: Pointer[Scalar[dt], second],
-    b_valid: Bitmap,
-    b_len: Int,
-) -> Array[dt]:
-    """The copy loop, over pointers and bitmaps rather than columns."""
-    var out = Array[dt](a_len + b_len)
-    var target = out.unsafe_ptr()
-
-    # The values go across unconditionally, nulls included, because a null holds
-    # a zero and copying it preserves the invariant the whole kernel layer rests
-    # on. Only the bits need a branch.
-    for i in range(a_len):
-        target.unsafe_offset(i).unsafe_store(a.unsafe_offset(i).unsafe_load())
-        if not a_valid.get(i):
-            out.data.validity.set(i, False)
-    for i in range(b_len):
-        target.unsafe_offset(a_len + i).unsafe_store(
-            b.unsafe_offset(i).unsafe_load()
-        )
-        if not b_valid.get(i):
-            out.data.validity.set(a_len + i, False)
-    return out^
+    return concat_two_any(a, b)

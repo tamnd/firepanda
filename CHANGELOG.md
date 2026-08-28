@@ -8,6 +8,56 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-08-28
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Concat and the null handling functions. Stacking columns, series and frames, and the five things everybody does with a missing value: ask where they are, replace them from somewhere else, carry the last value forward, carry the next one back, and drop the rows.
+
+A patch bump. Everything here is new surface and nothing that existed changed shape or behaviour.
+
+### Added
+
+- `firepanda.kernel.concat`: `concat_arrays` for a list of typed columns, `concat_any` for a list of erased ones, and `concat_two_any` for the two argument case that borrows rather than owns.
+- `firepanda.kernel.nulls`: `is_null` and `is_not_null` in typed and erased spellings, `coalesce`, `fill_forward`, `fill_backward` with an optional run limit, and `all_valid_mask` for the intersection of several columns' validity.
+- `firepanda.frame.concat`: the free functions `concat` for frames and `concat_series` for series, both re-exported from `firepanda`.
+- `Series.is_null`, `Series.is_not_null`, `Series.drop_nulls`, `Series.fill_null`, `Series.fill_forward` and `Series.fill_backward`.
+- `DataFrame.drop_nulls`, taking an optional subset of column names, and `DataFrame.fill_null`.
+- Scalar twins in `firepanda.kernel.scalar`: `concat_scalar`, `coalesce_scalar`, `fill_scalar` and `is_null_scalar`, on the same terms as the twins already there.
+- Tests: 21 in `tests/test_concat.mojo` and 32 in `tests/test_nulls.mojo`.
+- Benchmarks: seven `nulls/*` rows and three `concat/*` rows.
+
+### Changed
+
+- `firepanda.join.pairs` no longer carries its own private concatenation. It keeps its own dtype error message, which is about key columns rather than about columns in general, and then calls `concat_two_any`. The kernel copies values a SIMD register at a time where the join's copy went element by element, so the join benchmarks came out level to slightly better: `join/indices_1000` 12.046 ms against 11.773 before, `join/inner_1000` 19.337 against 19.562, `join/many_to_many` 1.741 against 1.870.
+
+### How it works, and what follows from it
+
+- A fresh `Array` is zeroed and marked all present, so a part with no nulls costs concat nothing beyond the value copy. Only a part that actually has nulls pays a validity pass, and that pass runs a word at a time and skips any word that is all ones.
+- The validity repair in concat runs a bit at a time rather than a word at a time, because the destination offset is a running total of the earlier parts' heights and is almost never a multiple of 64. Shifting and masking a source word into a destination that straddles two words is the faster spelling and is not written yet.
+- Filling with a scalar and filling from a column are the same operation. A fallback of exactly one row broadcasts, so `fill_null` takes a `Series` in both cases rather than growing an erased scalar type that would have to carry its own dtype tag. That is also what SQL `COALESCE` already means.
+- `fill_forward` and `fill_backward` are one core with a `comptime` direction rather than two loops, so the two directions cannot drift apart. A `limit` of zero means no limit, and the run counter resets at every present value rather than at the start of the column.
+- Nothing here promotes. `coalesce` of an int32 column and a float64 fallback is refused, for the same reason concat and join refuse it.
+- Frame concat matches columns by name, not by position, so a frame whose columns are in a different order still stacks. Stacking by position would put two different meanings in one column with nothing at the call site to catch it.
+- `drop_nulls` implements only pandas' `how="any"` rule. `subset` is the control that matters and `how="all"` is a filter anybody can write in one line against `is_null`.
+- There is no horizontal concat. Putting two frames side by side means deciding which row of one lines up with which row of the other, and without an index the only answer available is position. It waits until there is something to align on.
+
+### Notes on the numbers
+
+Measured on the reference machine, a 16 core x86_64 with 32 byte SIMD, at 1,048,576 rows over 10 repetitions. Sparse means one row in eight is null.
+
+- `nulls/is_null` is 34.524 us on a column with no nulls and `nulls/is_null_sparse` is 380.886 us on one that has them. The 11x gap is the whole value of the word at a time scan: an all ones or all zeros validity word turns into a block store of the same answer, and only a mixed word is walked bit by bit.
+- `nulls/coalesce` is 447.310 us and `nulls/coalesce_sparse` is 1.951 ms. `nulls/ffill` is 441.804 us and `nulls/ffill_sparse` is 1.955 ms. Both operations show the same 4.4x, which says the cost is the repair pass over the missing rows and not the copy that precedes it, and that the two operations are doing the same amount of work per missing row.
+- `concat/eight_parts` is 1.723 ms against `concat/two_parts` at 1.694 ms for the same total height. Within 2%, so per part overhead is not measurable and the operation is memory bandwidth and nothing else.
+- `concat/frame_three_columns` is 3.820 ms, a shade over twice the single column figure for three columns, so the schema walk and the name lookups cost nothing worth naming.
+- `nulls/drop_nulls` is 6.885 ms, which is `is_null` plus a `filter` over three columns, and the filter is all of it.
+
+### Known limitations
+
+- Frame concat of three or more frames copies every column into a `List[AnyArray]` before concatenating, because the list spelling owns its parts. The two frame call, which is the common one, borrows and does not. Reference counted columns would remove the copy from both this and `DataFrame.drop_nulls`.
+- `fill_forward` and `fill_backward` are serial by construction, since a filled value can depend on one arbitrarily far back. Splitting the column into blocks and resolving the carry between them is the parallel form and is not written.
+- `coalesce` reads the fallback for every missing row rather than gathering the missing rows first, so a column that is mostly null pays a scattered read.
+
 ## [0.6.0] - 2026-08-26
 
 Built against Mojo 1.0.0 (ed45d567).

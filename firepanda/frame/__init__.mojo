@@ -19,6 +19,7 @@ common, and taking that rather than a `DataFrame` is what lets both import it
 without a cycle.
 """
 
+from .concat import concat, concat_series
 from .display import DisplayOptions, render_column, render_table
 from .frame import DataFrame
 from .groupby import AggSpec
