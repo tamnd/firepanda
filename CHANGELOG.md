@@ -8,6 +8,29 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added
+
+- `Scan.push` and `Scan.field`, the two functions that know how a scanned field is packed, and `Scan.long`, where the length of a field too long to pack is kept.
+- `LongField`, the position and length of a field of four megabytes or more.
+
+### Changed
+
+- A scanned field is one 64-bit word rather than a struct of two offsets and two flags. Forty bits address the buffer, twenty two hold the length and two are the flags. The index a scan produces is the largest thing a read allocates and it is written once and read once, so its size is very nearly all of its cost: for a four column file of ten million rows it was 960 MB over a 357 MB input and it is now 320 MB. `Scan.at` still returns a `FieldSpan`, so nothing above the scanner changed.
+- A buffer larger than a terabyte is refused by the scanner with a message that says so, rather than recording offsets that do not fit. A field of four megabytes or more keeps its length in `Scan.long` and is not refused, because a file with one in it is a real file.
+
+### Notes on the numbers
+
+Ten million rows on an i9-13900K, five repetitions, warm cache, reading off a mapping, the two builds run alternately in one session because the machine was not in the same state as it was for 0.6.11.
+
+| file | before | after | peak RSS before | peak RSS after |
+| --- | --- | --- | --- | --- |
+| narrow | 460 ms | 372 ms | 2.10 GB | 1.41 GB |
+| quoted | 655 ms | 570 ms | 2.80 GB | 2.23 GB |
+| nulls | 940 ms | 660 ms | 3.10 GB | 1.83 GB |
+| wide | 830 ms | 780 ms | 2.03 GB | 1.27 GB |
+
+The nulls file gains the most of the four on both counts, which is what a file of nine columns and very short fields should do: it has the highest ratio of index to content, so shrinking the index is worth the most there.
+
 ## [0.6.11] - 2026-08-29
 
 Built against Mojo 1.0.0 (ed45d567).
