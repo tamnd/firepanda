@@ -34,7 +34,9 @@ renumbers what they found into one set of ordinals. That merge is as long as the
 groups the workers found between them, so a column where every row is its own key
 gets no benefit and stays on one thread; `_projected_groups` is the check that
 tells the two apart before either has run, and `_factorize_hashed_parallel` is
-where the argument for the shape lives.
+where the argument for the shape lives. Text takes the same route through
+`_factorize_strings_parallel`, which differs only in that its merge compares two
+rows where the numeric one trusts a hash.
 
 Nulls get a group. A null is a value that rows can share, pandas with
 `dropna=False` gives it a group, and dropping it later is a filter on one ordinal
@@ -746,15 +748,210 @@ struct FactorizedStrings(Movable):
 
 def factorize_strings(
     col: StringArray, seed: UInt64 = DEFAULT_SEED
-) -> FactorizedStrings:
+) raises -> FactorizedStrings:
     """Assigns a group ordinal to every element of a string column.
 
     There is no direct route here. The direct route exists because an integer
     can index a table by being itself, and a string cannot, so everything goes
-    through the hash table.
+    through the hash table, on one thread or on all of them.
 
     Args:
         col: The column to group.
+        seed: The per-query hash seed.
+
+    Returns:
+        The ordinals, a representative row per group, and which ordinal the
+        nulls got.
+    """
+    var n = len(col)
+    if n >= PARALLEL_ROWS:
+        var workers = min(worker_count(), n // PARALLEL_MIN_SLICE)
+        if workers > 1:
+            var groups = _projected_groups_strings(col, seed, n)
+            if groups * MERGE_HEADROOM <= n // workers:
+                return _factorize_strings_parallel(col, seed, workers)
+    return _factorize_strings_serial(col, seed)
+
+
+def _projected_groups_strings(col: StringArray, seed: UInt64, n: Int) -> Int:
+    """Guesses how many groups a string column has, by building the front of it.
+
+    `_projected_groups` for text, and it exists for the same reason and answers
+    the same question. It is worth a little more here than it is there, because
+    a string key costs more to hash and to compare than an integer one does, so
+    the sample is a larger share of the work it is deciding about and the wrong
+    decision is a larger share of it too.
+
+    Args:
+        col: The column.
+        seed: The per-query hash seed.
+        n: The column's length.
+
+    Returns:
+        A guess at the number of distinct keys in the whole column.
+    """
+    var sample = min(PARALLEL_SAMPLE, n // 16)
+    var has_null = col.null_count() > 0
+    var codes = Array[DType.uint32](sample)
+    var firsts = List[Int]()
+    var hashes = Buffer(CHUNK_ROWS * 8)
+    var table = HashTable(0, seed)
+
+    var half = 0
+    var measured = False
+    var base = 0
+    while base < sample:
+        var count = min(CHUNK_ROWS, sample - base)
+        hash_strings_chunk(col, base, count, seed, hashes)
+        table.build_strings(
+            hashes,
+            col,
+            has_null,
+            base,
+            base,
+            count,
+            sample,
+            0,
+            codes,
+            firsts,
+        )
+        base += count
+        if not measured and base * 2 >= sample:
+            half = len(table)
+            measured = True
+
+    return project_groups(len(table), half, sample, n)
+
+
+def _factorize_strings_parallel(
+    col: StringArray, seed: UInt64, workers: Int
+) raises -> FactorizedStrings:
+    """Factorizes a string column with one hash table per core.
+
+    `_factorize_hashed_parallel` with the key comparison put back, and the
+    argument for the shape is the one made there. What differs is the merge.
+    The numeric merge probes on the hash alone, because for it the hash is the
+    key; this one probes on the hash and then compares the two rows behind it,
+    which is `insert_string` rather than `insert`. That comparison needs a
+    representative row per group and produces one, so the `firsts` the merge
+    builds is not bookkeeping that gets thrown away at the end, it is the result
+    this function returns.
+
+    The workers' representative rows feed it. A worker records the absolute row
+    of every key that was new to its own table, and the merge walks those in the
+    same workers-in-order, ordinals-in-order sequence that gives the numeric
+    route its first-appearance ordering, so the row that ends up representing a
+    group is the earliest row in the column that has that key, exactly as one
+    thread would have chosen.
+
+    Args:
+        col: The column.
+        seed: The per-query hash seed.
+        workers: How many slices to cut the column into.
+
+    Returns:
+        The ordinals, a representative row per group, and which ordinal the
+        nulls got.
+    """
+    var n = len(col)
+    var has_null = col.null_count() > 0
+    var offset = 1 if has_null else 0
+    var codes = Array[DType.uint32](n)
+    var null_group = -1
+    if has_null:
+        null_group = 0
+
+    var chunks = (n + CHUNK_ROWS - 1) // CHUNK_ROWS
+    var bounds = List[Int](capacity=workers + 1)
+    for w in range(workers):
+        bounds.append(chunks * w // workers * CHUNK_ROWS)
+    bounds.append(n)
+
+    var tables = List[HashTable](capacity=workers)
+    var founds = List[List[Int]](capacity=workers)
+    for _ in range(workers):
+        tables.append(HashTable(0, seed))
+        founds.append(List[Int]())
+
+    def one(w: Int) raises {mut tables, mut founds, mut codes, imm}:
+        var start = bounds[w]
+        var stop = bounds[w + 1]
+        var hashes = Buffer(CHUNK_ROWS * 8)
+        var base = start
+        while base < stop:
+            var count = min(CHUNK_ROWS, stop - base)
+            hash_strings_chunk(col, base, count, seed, hashes)
+            tables[w].build_strings(
+                hashes,
+                col,
+                has_null,
+                base,
+                base - start,
+                count,
+                stop - start,
+                0,
+                codes,
+                founds[w],
+            )
+            base += count
+
+    parallel_for(one, workers)
+
+    var starts = List[Int](capacity=workers + 1)
+    var total = 0
+    for w in range(workers):
+        starts.append(total)
+        total += len(tables[w])
+    starts.append(total)
+
+    var found = Buffer(total * 8)
+
+    def dump(w: Int) raises {mut found, imm}:
+        tables[w].keys_by_ordinal(found, starts[w])
+
+    parallel_for(dump, workers)
+
+    var hashed = found.bitcast[DType.uint64]()
+    var map = Buffer(overwritten=total * 4)
+    var mapped = map.bitcast[DType.uint32]()
+
+    var merged = HashTable(total, seed)
+    var firsts = List[Int]()
+    for w in range(workers):
+        var at = starts[w]
+        for k in range(len(tables[w])):
+            var ordinal = merged.insert_string(
+                hashed.unsafe_offset(at + k).unsafe_load(),
+                founds[w][k],
+                col,
+                firsts,
+            )
+            mapped.unsafe_offset(at + k).unsafe_write(UInt32(ordinal + offset))
+
+    def remap(w: Int) raises {mut codes, imm}:
+        var out = codes.unsafe_ptr()
+        var at = starts[w]
+        for i in range(bounds[w], bounds[w + 1]):
+            if has_null and not col.is_valid(i):
+                out.unsafe_offset(i).unsafe_write(UInt32(0))
+                continue
+            var local = Int(out.unsafe_offset(i).unsafe_load())
+            out.unsafe_offset(i).unsafe_write(
+                mapped.unsafe_offset(at + local).unsafe_load()
+            )
+
+    parallel_for(remap, workers)
+
+    return FactorizedStrings(codes^, firsts^, null_group)
+
+
+def _factorize_strings_serial(
+    col: StringArray, seed: UInt64
+) -> FactorizedStrings:
+    """Factorizes a string column through one hash table on one thread.
+
+    Args:
+        col: The column.
         seed: The per-query hash seed.
 
     Returns:

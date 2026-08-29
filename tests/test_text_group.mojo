@@ -40,7 +40,11 @@ from firepanda.array.strings import (
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.groupby import AggSpec
 from firepanda.frame.series import Series
-from firepanda.hash.factorize import factorize_strings
+from firepanda.hash.factorize import (
+    _factorize_strings_parallel,
+    _factorize_strings_serial,
+    factorize_strings,
+)
 from firepanda.hash.function import DEFAULT_SEED, hash_bytes
 from firepanda.hash.scalar import factorize_strings_linear
 from firepanda.join.pairs import JoinKind
@@ -87,7 +91,7 @@ def keyed(
     return DataFrame.from_series(series^)
 
 
-def codes_of(col: StringArray) -> List[Int]:
+def codes_of(col: StringArray) raises -> List[Int]:
     """Runs the fast factorize and returns its ordinals as a list."""
     var codes = factorize_strings(col).into_codes()
     var out = List[Int](capacity=len(codes))
@@ -354,6 +358,129 @@ def test_joining_text_against_bytes_is_refused() raises:
     var right = DataFrame.from_series(right_series^)
     with assert_raises():
         _ = left.join(right, ["k"])
+
+
+def repeating_text(n: Int, groups: Int) raises -> StringArray:
+    """Builds `n` rows of text cycling through `groups` distinct keys.
+
+    Every key starts with the same four bytes, which is the prefix a view
+    stores, so a probe that matches on the hash still has to read the payload to
+    settle. A generator that varied the first byte would leave the comparison
+    doing nothing on the route these tests are here to check.
+
+    Args:
+        n: How many rows.
+        groups: How many distinct keys to cycle through.
+
+    Returns:
+        The column.
+    """
+    var builder = StringBuilder(capacity=n)
+    for i in range(n):
+        builder.append(String("key_", (i * 37) % groups).as_bytes())
+    return builder^.finish()
+
+
+def same_string_routes(col: StringArray, workers: Int, what: String) raises:
+    """Runs both string routes over one column and asserts they agree.
+
+    The comparison is exact: the group count, the null group, every ordinal and
+    every representative row. It scans for the first disagreement and asserts
+    once rather than asserting per row, because building a failure message for
+    a row that passes costs more than the factorization it is checking.
+
+    Args:
+        col: The column.
+        workers: How many slices to give the parallel route.
+        what: A label for the failure message.
+    """
+    var serial = _factorize_strings_serial(col, DEFAULT_SEED)
+    var parallel = _factorize_strings_parallel(col, DEFAULT_SEED, workers)
+
+    assert_equal(parallel.count(), serial.count(), what)
+    assert_equal(parallel.null_group, serial.null_group, what)
+    assert_equal(len(parallel.firsts), len(serial.firsts), what)
+
+    var row = -1
+    for i in range(len(serial.codes)):
+        if serial.codes[i] != parallel.codes[i]:
+            row = i
+            break
+    assert_equal(row, -1, String(what, ": ordinals differ"))
+
+    var group = -1
+    for g in range(len(serial.firsts)):
+        if serial.firsts[g] != parallel.firsts[g]:
+            group = g
+            break
+    assert_equal(group, -1, String(what, ": representative rows differ"))
+
+
+def test_the_parallel_string_route_agrees_on_a_few_groups() raises:
+    same_string_routes(repeating_text(4096, 100), 4, "few")
+
+
+def test_the_parallel_string_route_agrees_on_many_groups() raises:
+    same_string_routes(repeating_text(4096, 3000), 8, "many")
+
+
+def test_the_parallel_string_route_agrees_when_every_row_is_its_own_key() raises:
+    same_string_routes(repeating_text(4096, 4096), 6, "distinct")
+
+
+def test_the_parallel_string_route_agrees_on_an_uneven_slice_count() raises:
+    same_string_routes(repeating_text(4096, 1500), 7, "uneven")
+
+
+def test_the_parallel_string_route_agrees_with_one_worker() raises:
+    same_string_routes(repeating_text(4096, 500), 1, "one worker")
+
+
+def test_the_parallel_string_route_agrees_with_nulls_scattered() raises:
+    var builder = StringBuilder(capacity=4096)
+    for i in range(4096):
+        if i % 11 == 0:
+            builder.append_null()
+        else:
+            builder.append(String("key_", i % 400).as_bytes())
+    same_string_routes(builder^.finish(), 5, "nulls")
+
+
+def test_the_parallel_string_route_agrees_when_every_row_is_null() raises:
+    var builder = StringBuilder(capacity=4096)
+    for _ in range(4096):
+        builder.append_null()
+    same_string_routes(builder^.finish(), 4, "all null")
+
+
+def test_the_parallel_string_route_keeps_first_appearance_order_across_slices() raises:
+    # Four quarters, each introducing one key nothing before it had, so the
+    # ordinals can only come out right if the merge walks the workers in order.
+    var quarter = 1024
+    var builder = StringBuilder(capacity=quarter * 4)
+    for q in range(4):
+        for i in range(quarter):
+            if i == 0:
+                builder.append(String("new_", q).as_bytes())
+            else:
+                builder.append(String("key_", i % 7).as_bytes())
+    var col = builder^.finish()
+
+    var found = _factorize_strings_parallel(col, DEFAULT_SEED, 4)
+    assert_equal(found.count(), 4 + 7)
+    assert_equal(found.null_group, -1)
+
+    # The first quarter introduces `new_0` and then seven shared keys, so the
+    # first eight ordinals are settled before any other slice contributes one.
+    assert_equal(Int(found.codes[0]), 0)
+    for i in range(1, 8):
+        assert_equal(Int(found.codes[i]), i)
+    assert_equal(Int(found.codes[quarter]), 8)
+    assert_equal(Int(found.codes[quarter * 2]), 9)
+    assert_equal(Int(found.codes[quarter * 3]), 10)
+    assert_equal(found.firsts[8], quarter)
+    assert_equal(found.firsts[9], quarter * 2)
+    assert_equal(found.firsts[10], quarter * 3)
 
 
 def main() raises:
