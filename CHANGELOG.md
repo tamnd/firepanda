@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.18] - 2026-08-29
+
+Built against Mojo 1.0.0 (ed45d567).
+
 `factorize` decides which route to take in one pass that can give up early, instead of two full passes that always finish.
 
 The choice is between a direct table indexed by the value and a hash table, and it is made from the column's minimum and maximum. Those came from a `min_of` and a `max_of`, which is two complete reductions over the column before any grouping starts. Both are thrown away on every column that ends up hashed, which is every float column, every wide-ranging integer column, and every join key that is an identifier rather than a category. On ten million rows a standalone probe puts them at 8.5 ms of the 61 ms `factorize` takes at a hundred groups.
@@ -991,7 +995,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.17...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.18...HEAD
+[0.6.18]: https://github.com/tamnd/firepanda/releases/tag/v0.6.18
 [0.6.17]: https://github.com/tamnd/firepanda/releases/tag/v0.6.17
 [0.6.16]: https://github.com/tamnd/firepanda/releases/tag/v0.6.16
 [0.6.15]: https://github.com/tamnd/firepanda/releases/tag/v0.6.15
