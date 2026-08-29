@@ -29,14 +29,37 @@ Peak resident memory is unchanged, within a couple of percent either way across 
 
 The four ingestion files give byte identical schemas and null counts before and after.
 
+The field index is sized once instead of grown by doubling. With the fill halved the scan is the larger half again, and a scan does two things: it finds the boundaries and it records them. Finding them is a SIMD compare over the block, which is memory bound and near the limit. Recording them was an append to a list that started at nothing, so a ten million row file's index reached three hundred and twenty megabytes through twenty five reallocations that copied about as many bytes as the index ends up holding, on the memory system the compare is already saturating.
+
+So the scan now guesses the size first. A quarter megabyte of the block is counted with the same SIMD compare, the count is extrapolated over the block, an eighth is added on top, and the result is clamped to the one field per two bytes that is the arithmetic ceiling. The guess does not have to be right, only close and on the high side: short by a little costs one reallocation of a nearly finished list, and long costs address space that is never written and so never becomes a page. A delimiter inside a quoted field is counted as a boundary it is not, which pushes the guess up, which is the safe direction.
+
+Measured against a build of the previous release, the two run alternately in one session, five reps each, three rounds, on an i9-13900K, warm cache, reading off a mapping. Medians.
+
+| file | fields | scan before | scan after | ratio | read before | read after | ratio |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| nulls | 90.0M | 58.3 ms | 30.5 ms | 0.52 | 102.8 ms | 75.6 ms | 0.74 |
+| narrow | 40.0M | 35.3 ms | 21.5 ms | 0.61 | 75.3 ms | 59.3 ms | 0.79 |
+| wide | 50.0M | 39.0 ms | 25.4 ms | 0.65 | 115.0 ms | 100.1 ms | 0.87 |
+| quoted | 30.0M | 32.1 ms | 25.9 ms | 0.81 | 102.1 ms | 97.4 ms | 0.95 |
+
+The fill is flat on all four to within noise, which is the control: nothing outside the scan was touched.
+
+How far off the guess is, whole file, estimated against actual: wide 56.3M against 50.0M, nulls 108.8M against 90.0M, narrow 53.7M against 40.0M, quoted 70.7M against 30.0M. Narrow is high because its early rows have the short ids and short labels and the rest of the file does not, and quoted is high because most of its commas are inside quotes. Both are the harmless direction, and the memory numbers say so.
+
+Peak resident memory for one read in one process, the two builds run alternately, three repeats each, medians in megabytes: narrow 1167 to 1090, quoted 1611 to 1577, nulls 1788 to 1655, wide 1305 to 1277. Every file is lower, because the doubling had to hold the old buffer and the new one at once at every step and this does not. A reserved page that is never written costs nothing resident, which a standalone probe confirms: reserving eight hundred megabytes and touching none of it leaves the process at fourteen.
+
+One caveat on that measurement, because an earlier version of this entry had it wrong. A process that reads the same file several times in a row has a peak resident set well above what one read costs, and it climbs with each read on both builds, because the allocator does not return every freed block to the system and the reads do not ask for the same sizes in the same order. Read once per process and the numbers above are what a read costs. Read four times and the high water mark is several hundred megabytes above that on both builds, which is a property of the arena rather than of the reader.
+
 ### Changed
 
 - The sweep allocates its fixed width columns unzeroed and writes every slot itself, including a zero where the field is missing and where it did not parse. The declared type path in `fill_column` still allocates zeroed, because a block there stops at the first value that does not fit and so does not write every slot.
 - The sweep's per value three way test on which group a column is in is hoisted out of the row loop into `fill_tile`, which takes the dtype as a parameter and the destination as a pointer.
+- `scan_csv` reserves its field index from a sample of the block instead of growing it from nothing. The index still grows if the guess was short, so a file that defeats the sample is slower than it would have been and not wrong.
 
 ### Added
 
 - `Array.__init__(overwritten=)` and `ColumnData.__init__(overwritten_bytes=)`, the column level form of the `Buffer` constructor of the same name, for a caller that will write every element.
+- `Scan.__init__(capacity=)`, which sizes the field index up front, and `estimate_fields`, which says what to size it to.
 
 ## [0.6.16] - 2026-08-29
 
