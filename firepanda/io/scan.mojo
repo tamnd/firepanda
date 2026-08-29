@@ -669,6 +669,40 @@ def field_bytes[
     )
 
 
+def collapsed_length(
+    data: Span[UInt8, _], field: FieldSpan, quote: UInt8
+) -> Int:
+    """Returns how many bytes a field is once its doubled quotes are collapsed.
+
+    A reader that wants to write a field straight into a column it has already
+    allocated has to know this before it writes anything, and it is the only
+    thing about a field that cannot be read off the index. Only worth calling on
+    a field whose span says it is escaped; everything else is its own length.
+
+    Args:
+        data: The buffer the span points into.
+        field: The span.
+        quote: The quote character.
+
+    Returns:
+        The literal byte count.
+    """
+    var ptr = data.unsafe_ptr()
+    var length = 0
+    var at = field.start
+    while at < field.end:
+        length += 1
+        if (
+            ptr.unsafe_offset(at).unsafe_load() == quote
+            and at + 1 < field.end
+            and ptr.unsafe_offset(at + 1).unsafe_load() == quote
+        ):
+            at += 2
+            continue
+        at += 1
+    return length
+
+
 def unescape(
     data: Span[UInt8, _], field: FieldSpan, quote: UInt8
 ) -> List[UInt8]:

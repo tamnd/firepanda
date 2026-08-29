@@ -57,10 +57,15 @@ block fills a bitmap of its own and those are pasted in afterwards, which is a
 pass over a bit per row rather than over a value per row. A block with no nulls
 is not pasted at all.
 
-**A string column still builds pieces and stacks them.** A block's payload size
-is not known until the block has been read, so there is nothing to write into.
-The stacking is two memcpys per block since 0.6.10, which is most of the way to
-the same place.
+**A string column is written once too, since 0.6.15.** The obstacle used to be
+that a block's payload size is not known until the block has been read. It is
+knowable without reading it: the field index already records where every field
+starts and ends, so a pass over the index adds up the lengths, and the only
+fields that need the file are the escaped ones, whose doubled quotes have to be
+counted before they collapse. Those block totals are prefix summed, the column
+is allocated once at its full height and payload size, and each block writes its
+own slice of views and its own slice of payload at absolute offsets. Nothing is
+stacked and nothing is rebased.
 
 **Columns are done one at a time.** Doing every column's blocks at once would
 hold the whole file's worth of pieces at the peak. Each column still fills every
@@ -72,9 +77,23 @@ and that is the answer the caller gets.
 """
 
 from std.collections.span import Span
+from std.memory import unsafe_memcpy
 
-from firepanda.array import Array, AnyArray, StringArray, StringBuilder
+from firepanda.array import (
+    Array,
+    AnyArray,
+    INLINE_CAPACITY,
+    PREFIX_LENGTH,
+    StringArray,
+    StringBuilder,
+    StringView,
+    VIEW_SIZE,
+    collapse_into,
+    make_inline_at,
+    make_long_at,
+)
 from firepanda.bitmap import Bitmap
+from firepanda.buffer import Buffer
 from firepanda.dtype import Field, LogicalType, Schema
 from firepanda.exec import parallel_for, worker_count
 from firepanda.frame import DataFrame
@@ -86,6 +105,7 @@ from .scan import (
     Dialect,
     FieldSpan,
     Scan,
+    collapsed_length,
     default_dialect,
     field_bytes,
     scan_block,
@@ -181,6 +201,22 @@ struct BlockFill(Movable):
 
     var saw_value: Bool
     """Whether any row of the block held a value at all."""
+
+
+@fieldwise_init
+struct TextFill(Movable):
+    """What one block made of one text column.
+
+    Text has no type to get wrong, so the only thing a block can report is
+    whether it got to the end, which under `inline_only` it does not when it
+    meets an element that needs a payload.
+    """
+
+    var valid: Bitmap
+    """Which of the block's rows held a value."""
+
+    var done: Bool
+    """Whether the block filled every row it was given."""
 
 
 @fieldwise_init
@@ -1188,6 +1224,12 @@ def stack_column(
     Raises:
         Error: If a value does not fit the column's declared type.
     """
+    if field.dtype == LogicalType.STRING:
+        var rows = 0
+        for b in range(len(scans)):
+            rows += layout[b].count
+        return AnyArray(fill_text(data, scans, layout, column, rows, options))
+
     var blocks = len(scans)
     var pieces = List[AnyArray](capacity=blocks)
     for _ in range(blocks):
@@ -1210,6 +1252,269 @@ def stack_column(
 
     parallel_for(one, blocks)
     return concat_any(pieces)
+
+
+def text_payload_bytes(
+    data: Span[UInt8, _],
+    scan: Scan,
+    column: Int,
+    first_row: Int,
+    rows: Int,
+    options: ReadOptions,
+) -> Int:
+    """Returns how many payload bytes one block's rows of a text column need.
+
+    Only elements longer than twelve bytes reach the payload, and a missing
+    value writes nothing at all, so this is usually a walk over the index that
+    touches none of the file. It has to look at an escaped field's bytes,
+    because collapsing doubled quotes is the one thing about a field's length
+    that the index does not record, and those are rare.
+
+    A field longer than twelve bytes is never a missing value, since the longest
+    token `is_missing` accepts is four, so the null test is skipped for exactly
+    the fields whose length would have to be counted.
+
+    Args:
+        data: The buffer the scan points into.
+        scan: The scanned fields.
+        column: Which column to measure.
+        first_row: The first value row within `scan`.
+        rows: How many value rows to measure.
+        options: The read options, for the quote character.
+
+    Returns:
+        The byte count.
+    """
+    var total = 0
+    for i in range(rows):
+        var span = scan.at(first_row + i, column)
+        var length = span.end - span.start
+        if length <= INLINE_CAPACITY:
+            continue
+        if span.escaped:
+            length = collapsed_length(data, span, options.dialect.quote)
+            if length <= INLINE_CAPACITY:
+                continue
+        total += length
+    return total
+
+
+def fill_text(
+    data: Span[UInt8, _],
+    scans: List[Scan],
+    layout: List[BlockRows],
+    column: Int,
+    rows: Int,
+    options: ReadOptions,
+) raises -> StringArray:
+    """Reads one text column, every block writing straight into it.
+
+    The reason a string column used to build a piece per block and stack them is
+    that a block's payload size is not known until the block has been read. It
+    is knowable without reading it, though: an element's payload cost is its
+    length, the index already holds every length, and the only length the index
+    gets wrong is an escaped field's, which is a rare enough case to measure
+    directly. So the block sizes are added up first and the fill writes into one
+    column, and the stacking is gone rather than made faster.
+
+    That is worth more than the copy it removes. The concat allocated a second
+    payload as large as the first and then touched every page of it, and on a
+    ten million row text column the page faults alone were most of the cost.
+
+    Measuring is a second walk over the index, though, and a column whose
+    elements all fit inside their views has no payload for that walk to find.
+    That is the ordinary case: country codes, labels, identifiers. So the fill
+    is tried first on the guess that nothing reaches the payload, and a block
+    that meets an element too long to inline stops where it stands and says so.
+    Then, and only then, the column is measured and filled again. The guess is
+    the whole read when it holds, and when it does not the block that disproves
+    it usually does so within a few rows, because a column with long elements in
+    it rarely hides them at the end. This is the same bargain the type ladder
+    makes: be right almost always and cheap always, and pay one extra pass over
+    one column when wrong.
+
+    Validity cannot be written in place, for the reason `fill_column` gives, so
+    each block fills a bitmap of its own and they are pasted afterwards.
+
+    Args:
+        data: The buffer the scans point into.
+        scans: One scan per block.
+        layout: Each block's share of the rows.
+        column: Which column to read.
+        rows: The height of the finished column.
+        options: The read options, for the quote character.
+
+    Returns:
+        The column.
+
+    Raises:
+        Error: Never directly. The signature is inherited from `parallel_for`.
+    """
+    var blocks = len(scans)
+    var bases = List[Int](length=blocks, fill=0)
+    var payload_bytes = 0
+
+    # Every view and every payload byte below is written by the fill, a null
+    # included, so neither buffer needs zeroing first.
+    var views = Buffer(overwritten=rows * VIEW_SIZE)
+    # The origins are dropped for the reason `fill_column` gives: the blocks
+    # partition both buffers and that is not a fact the origin system can hold.
+    var slots = views.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+    var payload = Buffer(overwritten=0)
+    var parts = List[TextFill](capacity=blocks)
+    for b in range(blocks):
+        parts.append(TextFill(Bitmap(layout[b].count), True))
+
+    var inline_only = True
+    for _ in range(2):
+        var bytes = payload.unsafe_ptr().unsafe_origin_cast[
+            MutUntrackedOrigin
+        ]()
+
+        def one(b: Int) raises {mut parts, imm}:
+            parts[b] = fill_text_block(
+                data,
+                scans[b],
+                column,
+                layout[b].first,
+                layout[b].count,
+                slots.unsafe_offset(layout[b].before * VIEW_SIZE),
+                bytes,
+                bases[b],
+                inline_only,
+                options,
+            )
+
+        parallel_for(one, blocks)
+        if not inline_only:
+            break
+        var held = True
+        for b in range(blocks):
+            if not parts[b].done:
+                held = False
+                break
+        if held:
+            break
+
+        inline_only = False
+        var sizes = List[Int](length=blocks, fill=0)
+
+        def measure(b: Int) raises {mut sizes, imm}:
+            sizes[b] = text_payload_bytes(
+                data,
+                scans[b],
+                column,
+                layout[b].first,
+                layout[b].count,
+                options,
+            )
+
+        parallel_for(measure, blocks)
+        for b in range(blocks):
+            bases[b] = payload_bytes
+            payload_bytes += sizes[b]
+        payload = Buffer(overwritten=payload_bytes)
+
+    var validity = Bitmap(rows)
+    validity.set_all()
+    for b in range(blocks):
+        if layout[b].count > 0 and not parts[b].valid.all_valid():
+            validity.paste(layout[b].before, parts[b].valid, layout[b].count)
+    return StringArray(views^, payload^, validity^, rows)
+
+
+def fill_text_block(
+    data: Span[UInt8, _],
+    scan: Scan,
+    column: Int,
+    first_row: Int,
+    rows: Int,
+    slots: Pointer[UInt8, MutUntrackedOrigin],
+    payload: Pointer[UInt8, MutUntrackedOrigin],
+    base: Int,
+    inline_only: Bool,
+    options: ReadOptions,
+) -> TextFill:
+    """Writes one block's rows of a text column into the finished buffers.
+
+    An escaped field that collapses to twelve bytes or fewer is built in a
+    register rather than in the payload, because the payload has room for
+    exactly what `text_payload_bytes` counted and that element was counted as
+    costing nothing.
+
+    Under `inline_only` there is no payload at all, so an element that does not
+    fit inside its view ends the block. What has been written so far is left
+    where it is and overwritten by the second attempt, which is why the caller
+    keeps one views buffer across both.
+
+    Args:
+        data: The buffer the scan points into.
+        scan: The scanned fields.
+        column: Which column to read.
+        first_row: The first value row within `scan`.
+        rows: How many value rows to read.
+        slots: The column's views, offset to this block's first row.
+        payload: The column's payload, from its first byte.
+        base: This block's first payload byte.
+        inline_only: Whether the payload is known to be empty, in which case an
+            element needing one stops the block rather than writing to it.
+        options: The read options, for the quote character.
+
+    Returns:
+        A bitmap of this block's rows set where the value is present, and
+        whether the block ran to the end.
+    """
+    var valid = Bitmap(rows)
+    valid.set_all()
+    var views = slots.unsafe_bitcast[StringView]()
+    var quote = options.dialect.quote
+    var offset = base
+    for i in range(rows):
+        var span = scan.at(first_row + i, column)
+        var field = field_bytes(data, span)
+        var length = len(field)
+        if span.escaped:
+            if collapsed_length(data, span, quote) <= INLINE_CAPACITY:
+                var scratch = InlineArray[UInt8, INLINE_CAPACITY](fill=0)
+                var short = collapse_into(Pointer(to=scratch[0]), field, quote)
+                views.unsafe_offset(i)[] = make_inline_at(
+                    Pointer(to=scratch[0]), short
+                )
+                continue
+            if inline_only:
+                return TextFill(valid^, False)
+            var dest = payload.unsafe_offset(offset)
+            var written = collapse_into(dest, field, quote)
+            views.unsafe_offset(i)[] = make_long_at(dest, written, 0, offset)
+            offset += written
+            continue
+        # A quoted field is a value the writer meant literally, including the
+        # quoted empty string and the quoted word `NA`. That is the one place
+        # quoting changes a value rather than a boundary, and it is the only way
+        # a file has of saying which of the two it meant.
+        if length <= INLINE_CAPACITY:
+            if not span.quoted and is_missing(field):
+                views.unsafe_offset(i)[] = StringView()
+                valid.set(i, False)
+                continue
+            # Built in place rather than in a register and stored, because a
+            # sixteen byte load of what a four byte store and a short memcpy
+            # just wrote does not forward, and that stall is per row.
+            var slot = views.unsafe_offset(i)
+            slot[] = StringView(UInt32(length), 0, 0, 0)
+            unsafe_memcpy(
+                dest=slot.unsafe_bitcast[UInt8]().unsafe_offset(PREFIX_LENGTH),
+                src=field.unsafe_ptr(),
+                count=length,
+            )
+            continue
+        if inline_only:
+            return TextFill(valid^, False)
+        var dest = payload.unsafe_offset(offset)
+        unsafe_memcpy(dest=dest, src=field.unsafe_ptr(), count=length)
+        views.unsafe_offset(i)[] = make_long_at(dest, length, 0, offset)
+        offset += length
+    return TextFill(valid^, True)
 
 
 def fill_column[
