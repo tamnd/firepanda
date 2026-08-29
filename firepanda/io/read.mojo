@@ -924,9 +924,9 @@ def build_blocks(
     A fixed width column is allocated at its full height and written in place,
     so all of them can be filled together, and they are: one walk per block over
     the rows, every column of a row done while the index for that row is in
-    cache. A string column cannot join in, because a block's payload size is not
-    known until it has been read, so it builds a piece per block and stacks
-    them, one column at a time.
+    cache. A string column is written in place too, but on its own rather than
+    in the sweep, because it has a payload to size first and the sweep has
+    nothing to say about that.
 
     When `guesses` is not empty the schema is a guess from a sample rather than
     a fact, and a column with a value that does not fit is filled again one rung

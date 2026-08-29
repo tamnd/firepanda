@@ -46,7 +46,7 @@ def scan_csv_scalar(data: Span[UInt8, _], dialect: Dialect) raises -> Scan:
                 at += 1
             continue
 
-        var row = len(out.starts) - 1
+        var row = len(out)
         var done = False
         while not done:
             var start = at
@@ -137,6 +137,6 @@ def scan_csv_scalar(data: Span[UInt8, _], dialect: Dialect) raises -> Scan:
             at += 1
             done = True
 
-        out.starts.append(len(out.fields))
+        out.end_row()
 
     return out^
