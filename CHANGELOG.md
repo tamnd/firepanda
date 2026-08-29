@@ -8,6 +8,31 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+The scan's row offsets are gone. The 0.6.15 notes said the next place to look was the fill, on the grounds that the scan is not search bound. That was right about the scan not being search bound and wrong about where its time went. Lined up against each other the four ingestion files say it plainly: narrow is ten million rows and forty million fields and scans in 60 ms, wide is one million rows and fifty million fields and scans in 42 ms. More fields, more bytes, less time. The scan's cost tracked the row count.
+
+What costs a row is the offset recorded for it. The index is a flat list of packed fields plus a list saying where each row begins in it, which is the Arrow offsets shape and the obvious one. But almost every CSV file is rectangular, and for a rectangular file the offset of row r is r times the width and the list holding it is eight bytes a row of pure redundancy. On a ten million row file that is eighty megabytes written during the scan and read back during every fill.
+
+So the width is kept as a number and the offsets are built only when a row turns up that disagrees, which is a file this reader refuses anyway. `at` multiplies instead of loading, `width` returns a field, and `is_ragged` went from a walk over every row to reading whether the offsets exist, which matters because a read called it once per block and once more for inference.
+
+Measured against a build of the previous release, the two run alternately in one session, five reps each, three rounds, ten million rows on an i9-13900K, warm cache, reading off a mapping. Medians.
+
+| file | rows | scan before | scan after | ratio | read before | read after | ratio | peak RSS after |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| narrow | 10M | 59.9 ms | 35.3 ms | 0.59 | 125 ms | 96 ms | 0.77 | 0.93 |
+| quoted | 10M | 55.5 ms | 33.6 ms | 0.61 | 141 ms | 117 ms | 0.83 | 0.95 |
+| nulls | 10M | 82.2 ms | 58.0 ms | 0.71 | 230 ms | 208 ms | 0.91 | 0.93 |
+| wide | 1M | 41.9 ms | 39.1 ms | 0.93 | 147 ms | 150 ms | 1.00 | 0.98 |
+
+Wide is flat, which is the expected answer and the confirmation: one million rows had one million offsets to skip writing, and the file has fifty times as many fields as it has rows.
+
+The four ingestion files give byte identical schemas and null counts before and after. A patch bump, since nothing changes shape.
+
+### Changed
+
+- `Scan` no longer keeps a row offset per row while the file is rectangular. It keeps the width and the row count, and `at(row, column)` indexes at `row * width + column`. A row that disagrees with the ones before it fills the offsets in for every row up to that point, since they all had the same width, and appends from then on, so a ragged file behaves exactly as it did.
+- `Scan.is_ragged` is now a constant time test rather than a walk over every row.
+- `Scan.end_row` replaces appending to the offsets directly, and both the vectorized scanner and the scalar reference one call it.
+
 ## [0.6.15] - 2026-08-29
 
 Built against Mojo 1.0.0 (ed45d567).

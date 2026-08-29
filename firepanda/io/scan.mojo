@@ -192,13 +192,36 @@ struct Scan(Movable, Sized):
     that does not. `push` and `field` are the only two places that know the
     layout, and `at` still hands back an ordinary `FieldSpan`, so nothing above
     this struct has to think about it.
+
+    The rows are not offsets unless they have to be. Almost every CSV file is
+    rectangular, and for one of those the offset of row r is r times the width
+    and the list holding it is eight bytes a row of pure redundancy. On a ten
+    million row file that list was eighty megabytes written during the scan and
+    read back during the fill, and it cost more than the fields themselves: the
+    scan's time tracked the row count rather than the field count or the byte
+    count. So the width is kept as a number and the offsets are built only when
+    a row turns up that disagrees, which is a file this reader refuses anyway.
     """
 
     var fields: List[UInt64]
     """Every field, in file order, packed."""
 
-    var starts: List[Int]
-    """Where each row begins in `fields`, with a final entry for the end."""
+    var _rows: Int
+    """How many rows have been closed."""
+
+    var _uniform: Int
+    """Fields per row, while every row has agreed. Zero before the first row."""
+
+    var _open: Int
+    """Where the row being pushed began in `fields`."""
+
+    var _starts: List[Int]
+    """Where each row begins in `fields`, once a row has disagreed.
+
+    Empty while the file is rectangular. When one is not, it is filled in for
+    every row up to that point, since they all had `_uniform` fields, and
+    appended to from then on.
+    """
 
     var quotes: Int
     """How many quote bytes this scan read as structure rather than as data.
@@ -221,10 +244,34 @@ struct Scan(Movable, Sized):
     def __init__(out self):
         """Constructs an empty scan."""
         self.fields = List[UInt64]()
-        self.starts = List[Int]()
-        self.starts.append(0)
+        self._rows = 0
+        self._uniform = 0
+        self._open = 0
+        self._starts = List[Int]()
         self.long = List[LongField]()
         self.quotes = 0
+
+    def end_row(mut self):
+        """Closes the row whose fields have just been pushed."""
+        var here = len(self.fields)
+        var got = here - self._open
+        self._open = here
+        self._rows += 1
+        if len(self._starts) > 0:
+            self._starts.append(here)
+            return
+        if self._rows == 1:
+            self._uniform = got
+            return
+        if got == self._uniform:
+            return
+        # This row disagrees, so the offsets have to exist after all. Every row
+        # before it had the same width, so they are an arithmetic sequence and
+        # writing them out is the whole of the fallback.
+        self._starts = List[Int](capacity=self._rows + 1)
+        for r in range(self._rows):
+            self._starts.append(r * self._uniform)
+        self._starts.append(here)
 
     def push(mut self, start: Int, end: Int, escaped: Bool, quoted: Bool):
         """Records one field.
@@ -300,7 +347,7 @@ struct Scan(Movable, Sized):
         Returns:
             The row count.
         """
-        return len(self.starts) - 1
+        return self._rows
 
     def width(self, row: Int) -> Int:
         """Returns how many fields a row has.
@@ -311,7 +358,22 @@ struct Scan(Movable, Sized):
         Returns:
             The field count.
         """
-        return self.starts[row + 1] - self.starts[row]
+        if len(self._starts) > 0:
+            return self._starts[row + 1] - self._starts[row]
+        return self._uniform
+
+    def row_start(self, row: Int) -> Int:
+        """Returns where a row's fields begin in `fields`.
+
+        Args:
+            row: The row number.
+
+        Returns:
+            The position of the row's first field.
+        """
+        if len(self._starts) > 0:
+            return self._starts[row]
+        return row * self._uniform
 
     def at(self, row: Int, column: Int) -> FieldSpan:
         """Returns one field's span.
@@ -323,7 +385,7 @@ struct Scan(Movable, Sized):
         Returns:
             The span.
         """
-        return self.field(self.starts[row] + column)
+        return self.field(self.row_start(row) + column)
 
     def is_ragged(self) -> Bool:
         """Returns whether the rows disagree on how many fields they have.
@@ -331,13 +393,7 @@ struct Scan(Movable, Sized):
         Returns:
             True if any row has a different width from the first.
         """
-        if len(self) < 2:
-            return False
-        var expected = self.width(0)
-        for r in range(1, len(self)):
-            if self.width(r) != expected:
-                return True
-        return False
+        return len(self._starts) > 0
 
 
 def scan_csv(
@@ -386,7 +442,7 @@ def scan_csv(
 
         while True:
             if at < n and ptr.unsafe_offset(at).unsafe_load() == dialect.quote:
-                at = _quoted_field(out, data, at, dialect, len(out.starts) - 1)
+                at = _quoted_field(out, data, at, dialect, out._rows)
             else:
                 at = _plain_field(out, data, at, dialect)
             if at >= n:
@@ -408,7 +464,7 @@ def scan_csv(
             at += 1
             break
 
-        out.starts.append(len(out.fields))
+        out.end_row()
 
     return out^
 
