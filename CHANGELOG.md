@@ -8,9 +8,46 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.13] - 2026-08-29
+
+Built against Mojo 1.0.0 (ed45d567).
+
+One change, to how a read walks the field index. A column at a time meant walking the whole index once per column, and a column's fields sit one row stride apart in it, so a wide file used one word of every cache line it fetched and then came back for the next column and fetched them all again. Filling every fixed width column of a block together, a tile of rows at a time, reads the index once and uses all of it. The wide file, fifty columns, halves. A patch bump: no API changes shape, and the four ingestion files give byte identical schemas and null counts before and after.
+
+Measured against a build of the previous commit, the two run alternately in one session, ten million rows on an i9-13900K, warm cache, reading off a mapping.
+
+| file | columns | before | after | ratio |
+| --- | --- | --- | --- | --- |
+| narrow | 4 | 167 ms | 151 ms | 0.90 |
+| quoted | 3 | 291 ms | 297 ms | 1.02 |
+| nulls | 9 | 317 ms | 219 ms | 0.69 |
+| wide | 50 | 412 ms | 198 ms | 0.48 |
+
+Peak RSS is unchanged, within a tenth on every file, which is the expected answer: the same buffers are allocated, in a different order.
+
+The quoted file is flat because almost none of its time is in this loop. Two of its three columns are text and go through unescaping, which this change does not touch, and that is where the next reader change should go.
+
 ### Changed
 
-- `read_csv` fills every fixed width column of a block in one pass over the block, a tile of rows at a time, instead of walking the whole file once per column. A column's fields sit one row stride apart in the field index, so a column at a time read the index once per column and used one word of each cache line it fetched. On a fifty column file that came to 7.6 ns a value against 1.6 ns a value on a four column file of the same types. The tile is sized to keep its slice of the index in the data cache, so the reads after the first come out of cache, and the columns are still done one at a time within the tile, so a column's running state stays in a register. Ten million rows on an i9-13900K, warm, against a build of the previous commit run alternately with it: narrow 0.90, quoted 1.02, nulls 0.69, wide 0.48.
+- `read_csv` fills every fixed width column of a block in one pass over the block, a tile of rows at a time, instead of walking the whole file once per column. The tile is sized to keep its slice of the field index in the data cache, so every read after the first in a tile comes out of cache, and the columns are still done one at a time within a tile, so a column's running state stays in a register rather than in a list. The two have to be traded off against each other and the tile is where the trade is made.
+- The fixed width columns of a frame are grouped by type before they are filled, so the branch that picks a parser is resolved once per column group instead of once per value.
+
+### Added
+
+- `TILE_BYTES`, how much of the field index one tile of a fixed width sweep works over, `sweep_fixed`, which does the sweeping, and `wanted_of`, which names a rung for an error message.
+
+### Notes on the numbers
+
+Three other shapes were built and measured the same way before this one was kept, because the first two were slower than what they replaced.
+
+| shape | narrow | quoted | nulls | wide |
+| --- | --- | --- | --- | --- |
+| a row at a time, type chosen per value | 1.19 | 1.00 | 0.75 | 0.55 |
+| a row at a time, columns grouped by type | 1.12 | 1.03 | 0.87 | 0.54 |
+| one parallel region, still a column at a time | 1.07 | 1.10 | 1.01 | 0.97 |
+| a tile of rows at a time, columns grouped | 0.90 | 1.02 | 0.69 | 0.48 |
+
+The first two cost narrow more than they saved it. Going row major turns a column's accepted flag, its first bad row and its validity bitmap from things the compiler keeps in registers into list elements indexed by column, and on a four column file that is most of the loop. The third shape is the control: it keeps the column at a time walk and only removes the barrier between columns, and it moves nothing, which is what says the wide file's win is the index traversal and not the scheduling.
 
 ## [0.6.12] - 2026-08-29
 
@@ -733,7 +770,11 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.9...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.13...HEAD
+[0.6.13]: https://github.com/tamnd/firepanda/releases/tag/v0.6.13
+[0.6.12]: https://github.com/tamnd/firepanda/releases/tag/v0.6.12
+[0.6.11]: https://github.com/tamnd/firepanda/releases/tag/v0.6.11
+[0.6.10]: https://github.com/tamnd/firepanda/releases/tag/v0.6.10
 [0.6.9]: https://github.com/tamnd/firepanda/releases/tag/v0.6.9
 [0.6.8]: https://github.com/tamnd/firepanda/releases/tag/v0.6.8
 [0.6.7]: https://github.com/tamnd/firepanda/releases/tag/v0.6.7
