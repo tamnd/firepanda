@@ -8,6 +8,17 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed
+
+- A quoted field is now unescaped straight into the string column's payload instead of into a temporary `String` that is then appended. Collapsing a doubled quote only ever shortens a field, so the builder reserves the raw length, copies the runs between the doubled pairs, and builds the view from what it actually wrote. A field that shortens past twelve bytes ends up inline and the payload offset does not move.
+- Concatenating string columns now writes the parts in parallel when the output is at least 65536 rows and there is more than one part. Every part's destination is known before any of it is written, since the row and payload offsets are prefix sums over the parts, so each part memcpys its views and its payload into its own slice and then rebases the offsets in the views it just wrote. Validity is still merged serially, which costs nothing next to the payload copy. Below the threshold the old sequential paste runs unchanged.
+- `concat_any` no longer has its own paste loop for the string case. It builds the same part descriptors the typed path builds and takes the same parallel route, which is what a read actually reaches.
+
+### Added
+
+- `Buffer(overwritten=n)`, for a caller that will write every one of the n bytes. It skips the zeroing pass an ordinary `Buffer` does and still zeroes the pad up to the 64-byte capacity, so a vectorized kernel reading one register past the end still sees zeroes. The string concat output is allocated this way.
+- `make_inline_at` and `make_long_at` in `firepanda.array.strview`, which build a view from a pointer and a length rather than from a span, for a caller that has already written the bytes.
+
 ## [0.6.13] - 2026-08-29
 
 Built against Mojo 1.0.0 (ed45d567).

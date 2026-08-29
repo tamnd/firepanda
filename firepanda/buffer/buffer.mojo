@@ -57,6 +57,40 @@ struct Buffer(Copyable, Movable, Sized):
         self._capacity = capacity
         self._size = size
 
+    def __init__(out self, *, overwritten: Int):
+        """Allocates a buffer whose bytes the caller promises to write.
+
+        The zeroing an ordinary `Buffer` does is a full pass over the
+        allocation, and a caller that is about to memcpy over every byte of it
+        pays for that pass twice. A concat is the case that matters: it writes
+        every view and every payload byte of its output and nothing else, and on
+        a ten million row string column the memset alone was a third of it.
+
+        The pad between the requested size and the 64-byte capacity is still
+        zeroed, so a vectorized kernel reading one register past the logical end
+        sees zeroes rather than whatever the allocator left there, which is the
+        invariant the rest of the engine is written against. Only the caller's
+        own bytes are left alone, and reading one before writing it is a bug in
+        the caller.
+
+        Args:
+            overwritten: The number of bytes the caller will write, all of them.
+        """
+        var capacity = round_up(overwritten, ALIGNMENT)
+        if capacity == 0:
+            capacity = ALIGNMENT
+        var allocation = alloc(
+            Layout[UInt8](count=capacity, alignment=ALIGNMENT)
+        )
+        var pad = capacity - overwritten
+        if pad > 0:
+            unsafe_memset_zero(
+                allocation.unsafe_ptr().unsafe_offset(overwritten), pad
+            )
+        self._mem = allocation^.into_managed()
+        self._capacity = capacity
+        self._size = overwritten
+
     def __init__(out self, *, copy: Self):
         """Copies a buffer's bytes into a fresh allocation.
 

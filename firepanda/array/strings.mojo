@@ -55,7 +55,9 @@ from .strview import (
     StringView,
     VIEW_SIZE,
     make_inline,
+    make_inline_at,
     make_long,
+    make_long_at,
     views_equal_short,
 )
 
@@ -507,6 +509,68 @@ struct StringBuilder(Movable, Sized):
             )
             self._payload_size = offset + len(bytes)
             self._views.append(make_long(bytes, 0, offset))
+        self._nulls.append(False)
+
+    def append_escaped(mut self, bytes: Span[UInt8, _], quote: UInt8):
+        """Appends one present element, collapsing doubled quotes as it copies.
+
+        The literal is written straight into the payload rather than into a
+        temporary the caller then appends. A CSV field that needs unescaping is
+        common enough to matter: a file whose text column always carries an
+        embedded quote pays one heap allocation and one extra copy per row for
+        the temporary, on top of the copy that was going to happen anyway.
+
+        The bytes between two doubled quotes are copied in runs rather than one
+        at a time, so a field with a quote in it costs about what a field
+        without one costs. Unescaping only ever shortens, so the payload is
+        reserved for the escaped length and the size committed afterwards is the
+        literal length. A literal short enough to live in the view is built from
+        the scratch the payload lent it and the payload is not advanced at all.
+
+        Args:
+            bytes: The field's bytes as they appear in the file, without the
+                surrounding quotes.
+            quote: The quote character, which is doubled where it is meant
+                literally.
+        """
+        var count = len(bytes)
+        var offset = self._payload_size
+        self._reserve(offset + count)
+        var dest = self._payload.unsafe_ptr().unsafe_offset(offset)
+        var src = bytes.unsafe_ptr()
+        var written = 0
+        var run = 0
+        var at = 0
+        while at < count:
+            if (
+                src.unsafe_offset(at).unsafe_load() == quote
+                and at + 1 < count
+                and src.unsafe_offset(at + 1).unsafe_load() == quote
+            ):
+                var span = at + 1 - run
+                unsafe_memcpy(
+                    dest=dest.unsafe_offset(written),
+                    src=src.unsafe_offset(run),
+                    count=span,
+                )
+                written += span
+                at += 2
+                run = at
+                continue
+            at += 1
+        if count > run:
+            unsafe_memcpy(
+                dest=dest.unsafe_offset(written),
+                src=src.unsafe_offset(run),
+                count=count - run,
+            )
+            written += count - run
+
+        if written <= INLINE_CAPACITY:
+            self._views.append(make_inline_at(dest, written))
+        else:
+            self._views.append(make_long_at(dest, written, 0, offset))
+            self._payload_size = offset + written
         self._nulls.append(False)
 
     def _reserve(mut self, needed: Int):

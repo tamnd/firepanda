@@ -11,6 +11,8 @@ from .strview import (
     StringView,
     VIEW_SIZE,
     make_inline,
+    make_inline_at,
     make_long,
+    make_long_at,
     views_equal_short,
 )

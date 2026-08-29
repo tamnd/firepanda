@@ -94,6 +94,33 @@ def test_zero_clears_everything() raises:
         )
 
 
+def test_overwritten_still_zeroes_the_pad() raises:
+    # The caller's own bytes are left alone, but the pad between the size asked
+    # for and the 64-byte capacity is what a vectorized kernel reads when it
+    # runs one register past the end, so it has to be zero.
+    for size in [1, 63, 64, 65, 100, 4095]:
+        var buffer = Buffer(overwritten=size)
+        assert_equal(len(buffer), size, "size is what was asked for")
+        assert_true(
+            buffer.capacity() >= size, "capacity covers the requested size"
+        )
+        for i in range(size, buffer.capacity()):
+            assert_equal(
+                buffer.unsafe_ptr().unsafe_offset(i).unsafe_load(),
+                UInt8(0),
+                "pad byte " + String(i) + " of " + String(size),
+            )
+
+
+def test_overwritten_of_nothing_is_still_a_buffer() raises:
+    var buffer = Buffer(overwritten=0)
+    assert_equal(len(buffer), 0, "empty")
+    for i in range(buffer.capacity()):
+        assert_equal(
+            buffer.unsafe_ptr().unsafe_offset(i).unsafe_load(), UInt8(0)
+        )
+
+
 def test_size_classes_are_monotonic_and_sufficient() raises:
     var previous = -1
     for size in [1, 64, 65, 128, 129, 4096, 100000]:

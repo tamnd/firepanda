@@ -37,6 +37,16 @@ from firepanda.array.strview import StringView, VIEW_SIZE
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer
 from firepanda.dtype.lists import ALL
+from firepanda.exec import parallel_for
+
+comptime PARALLEL_ROWS = 1 << 16
+"""Rows below which a string concat stays on one thread.
+
+Handing a part to a worker costs something and copying a short column costs
+almost nothing, so a concat of a few thousand rows is faster left alone. Sixty
+five thousand rows of views is a megabyte, which is where the copy stops fitting
+in a core's own cache and starts being worth spreading.
+"""
 
 
 def concat_arrays[dt: DType](parts: List[Array[dt]]) -> Array[dt]:
@@ -100,11 +110,21 @@ def concat_any(parts: List[AnyArray]) raises -> AnyArray:
 
     if parts[0].is_string():
         var payload_bytes = 0
+        var pieces = List[_Piece](capacity=len(parts))
+        var row = 0
         for p in range(len(parts)):
-            payload_bytes += len(parts[p].strings().payload)
+            ref col = parts[p].strings()
+            pieces.append(_piece_of(col, row, payload_bytes))
+            row += len(col)
+            payload_bytes += len(col.payload)
         var out = _StringStack(total, payload_bytes)
-        for p in range(len(parts)):
-            out.paste(parts[p].strings())
+        # A read reaches this spelling and not the typed one, so this is the
+        # path that has to be the fast one.
+        if len(parts) > 1 and total >= PARALLEL_ROWS:
+            out.paste_all(pieces, total, payload_bytes)
+        else:
+            for p in range(len(parts)):
+                out.paste(parts[p].strings())
         return AnyArray(out^.finish())
 
     comptime for candidate in ALL:
@@ -187,14 +207,65 @@ def concat_strings(parts: List[StringArray]) raises -> StringArray:
     """
     var rows = 0
     var payload_bytes = 0
+    var at = List[Int](capacity=len(parts))
+    var base = List[Int](capacity=len(parts))
     for p in range(len(parts)):
+        at.append(rows)
+        base.append(payload_bytes)
         rows += len(parts[p])
         payload_bytes += len(parts[p].payload)
 
     var out = _StringStack(rows, payload_bytes)
-    for p in range(len(parts)):
-        out.paste(parts[p])
+    if len(parts) > 1 and rows >= PARALLEL_ROWS:
+        var pieces = List[_Piece](capacity=len(parts))
+        for p in range(len(parts)):
+            pieces.append(_piece_of(parts[p], at[p], base[p]))
+        out.paste_all(pieces, rows, payload_bytes)
+    else:
+        for p in range(len(parts)):
+            out.paste(parts[p])
     return out^.finish()
+
+
+@fieldwise_init
+struct _Piece(ImplicitlyCopyable, Movable):
+    """Where one part of a string concat is and where it lands.
+
+    Pointers rather than the column itself, because the erased spelling of the
+    concat only ever holds a reference to its parts and putting them in a list
+    to hand over would deep copy every buffer in them, which is the whole cost
+    of the operation paid twice over to avoid writing this struct.
+    """
+
+    var views: Pointer[UInt8, ImmUntrackedOrigin]
+    var payload: Pointer[UInt8, ImmUntrackedOrigin]
+    var validity: Pointer[Bitmap, ImmUntrackedOrigin]
+    var rows: Int
+    var bytes: Int
+    var at: Int
+    var base: Int
+
+
+def _piece_of(imm col: StringArray, at: Int, base: Int) -> _Piece:
+    """Describes one part of a concat without copying any of it.
+
+    Args:
+        col: The part. Must outlive the piece.
+        at: The part's first row in the output.
+        base: The part's payload offset in the output.
+
+    Returns:
+        The description.
+    """
+    return _Piece(
+        col.views.unsafe_ptr().unsafe_origin_cast[ImmUntrackedOrigin](),
+        col.payload.unsafe_ptr().unsafe_origin_cast[ImmUntrackedOrigin](),
+        Pointer(to=col.validity).unsafe_origin_cast[ImmUntrackedOrigin](),
+        len(col),
+        len(col.payload),
+        at,
+        base,
+    )
 
 
 struct _StringStack(Movable):
@@ -236,8 +307,11 @@ struct _StringStack(Movable):
                     " a column can address",
                 )
             )
-        self._views = Buffer(rows * VIEW_SIZE)
-        self._payload = Buffer(payload_bytes)
+        # Every view and every payload byte is written by the pastes, and
+        # `finish` refuses a stack that was not filled to the row it was
+        # allocated for, so neither of these needs zeroing first.
+        self._views = Buffer(overwritten=rows * VIEW_SIZE)
+        self._payload = Buffer(overwritten=payload_bytes)
         self._validity = Bitmap(rows)
         self._rows = rows
         self._at = 0
@@ -276,6 +350,75 @@ struct _StringStack(Movable):
 
         self._at += n
         self._base += bytes
+
+    def paste_all(
+        mut self,
+        pieces: List[_Piece],
+        rows: Int,
+        payload_bytes: Int,
+    ) raises:
+        """Copies every part in at once, one worker to a part.
+
+        Where each part lands is known before any of them is copied, from the
+        two prefix sums the caller has already taken, so the parts do not have
+        to go in one at a time to keep the offsets in step. That is what lets
+        this run on every core, and it is worth running on every core: this is
+        two memcpys and a walk over the views per part, all of it memory
+        traffic, and one thread of it reaches about a sixth of what the machine
+        can move.
+
+        Validity stays sequential. It is addressed in bits, so two parts whose
+        boundary falls inside a byte would each have to read, modify and write
+        that byte, and it is one bit a row against sixteen bytes a row for the
+        views, so there is nothing to win by racing for it.
+
+        Args:
+            pieces: Where each part is and where it lands, in order.
+            rows: The total row count.
+            payload_bytes: The total payload size.
+        """
+        var views = self._views.unsafe_ptr().unsafe_origin_cast[
+            MutUntrackedOrigin
+        ]()
+        var payload = self._payload.unsafe_ptr().unsafe_origin_cast[
+            MutUntrackedOrigin
+        ]()
+
+        def one(p: Int) raises {imm}:
+            var piece = pieces[p]
+            if piece.rows == 0:
+                return
+            var slots = views.unsafe_offset(piece.at * VIEW_SIZE)
+            unsafe_memcpy(
+                dest=slots, src=piece.views, count=piece.rows * VIEW_SIZE
+            )
+            if piece.bytes == 0:
+                return
+            unsafe_memcpy(
+                dest=payload.unsafe_offset(piece.base),
+                src=piece.payload,
+                count=piece.bytes,
+            )
+            if piece.base == 0:
+                return
+            var typed = slots.unsafe_bitcast[StringView]()
+            var shift = UInt32(piece.base)
+            for i in range(piece.rows):
+                var slot = typed.unsafe_offset(i)
+                var view = slot[]
+                if not view.is_inline():
+                    view.shift_offset(shift)
+                    slot[] = view
+
+        parallel_for(one, len(pieces))
+
+        for p in range(len(pieces)):
+            var piece = pieces[p]
+            if piece.rows > 0 and not piece.validity[].all_valid():
+                self._validity.paste(piece.at, piece.validity[], piece.rows)
+
+        self._at = rows
+        self._base = payload_bytes
 
     def _rebase(mut self, n: Int):
         """Moves the just-copied views onto the stacked payload.

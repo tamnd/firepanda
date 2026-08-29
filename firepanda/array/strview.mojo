@@ -136,6 +136,58 @@ struct StringView(ImplicitlyCopyable, Movable, Sized):
         )
 
 
+def make_inline_at(src: Pointer[UInt8, _], length: Int) -> StringView:
+    """Builds a view for a string that fits inside the view.
+
+    Takes a pointer rather than a span, for the caller that has just written the
+    bytes into a buffer it owns and would have to name that buffer's origin to
+    hand over a span of them.
+
+    Args:
+        src: The string bytes. Must be readable for `length` bytes.
+        length: How long the string is. Must be at most 12.
+
+    Returns:
+        A short view holding the bytes.
+    """
+    var view = StringView()
+    view._length = UInt32(length)
+    var dest = (
+        Pointer(to=view).unsafe_bitcast[UInt8]().unsafe_offset(PREFIX_LENGTH)
+    )
+    unsafe_memcpy(dest=dest, src=src, count=length)
+    return view
+
+
+def make_long_at(
+    src: Pointer[UInt8, _], length: Int, block: Int, offset: Int
+) -> StringView:
+    """Builds a view for a string held in a payload block.
+
+    The pointer counterpart of `make_long`, for the same reason as
+    `make_inline_at`.
+
+    Args:
+        src: The string bytes. Must be readable for at least four bytes. Only
+            the prefix is copied into the view.
+        length: How long the string is. Must be more than 12.
+        block: The index of the payload block holding the data.
+        offset: The byte offset of the data within that block.
+
+    Returns:
+        A long view pointing at the payload.
+    """
+    var view = StringView()
+    view._length = UInt32(length)
+    var prefix_dest = (
+        Pointer(to=view).unsafe_bitcast[UInt8]().unsafe_offset(PREFIX_LENGTH)
+    )
+    unsafe_memcpy(dest=prefix_dest, src=src, count=PREFIX_LENGTH)
+    view._w2 = UInt32(block)
+    view._w3 = UInt32(offset)
+    return view
+
+
 def make_inline(data: Span[UInt8, _]) -> StringView:
     """Builds a view for a string that fits inside the view.
 
@@ -145,14 +197,7 @@ def make_inline(data: Span[UInt8, _]) -> StringView:
     Returns:
         A short view holding the bytes.
     """
-    var length = len(data)
-    var view = StringView()
-    view._length = UInt32(length)
-    var dest = (
-        Pointer(to=view).unsafe_bitcast[UInt8]().unsafe_offset(PREFIX_LENGTH)
-    )
-    unsafe_memcpy(dest=dest, src=data.unsafe_ptr(), count=length)
-    return view
+    return make_inline_at(data.unsafe_ptr(), len(data))
 
 
 def make_long(data: Span[UInt8, _], block: Int, offset: Int) -> StringView:
@@ -167,15 +212,7 @@ def make_long(data: Span[UInt8, _], block: Int, offset: Int) -> StringView:
     Returns:
         A long view pointing at the payload.
     """
-    var view = StringView()
-    view._length = UInt32(len(data))
-    var prefix_dest = (
-        Pointer(to=view).unsafe_bitcast[UInt8]().unsafe_offset(PREFIX_LENGTH)
-    )
-    unsafe_memcpy(dest=prefix_dest, src=data.unsafe_ptr(), count=PREFIX_LENGTH)
-    view._w2 = UInt32(block)
-    view._w3 = UInt32(offset)
-    return view
+    return make_long_at(data.unsafe_ptr(), len(data), block, offset)
 
 
 def views_equal_short(a: StringView, b: StringView) -> Bool:
