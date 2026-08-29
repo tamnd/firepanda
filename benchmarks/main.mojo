@@ -1688,9 +1688,9 @@ def bench_csv(mut harness: Harness) raises:
     var integers = List[Int](capacity=rows * 2)
     var floats = List[Int](capacity=rows)
     for r in range(len(found)):
-        integers.append(found.starts[r] + 0)
-        integers.append(found.starts[r] + 2)
-        floats.append(found.starts[r] + 1)
+        integers.append(found.row_start(r) + 0)
+        integers.append(found.row_start(r) + 2)
+        floats.append(found.row_start(r) + 1)
 
     def parse_integers() raises {imm narrow, imm found, imm integers}:
         var total = Int64(0)

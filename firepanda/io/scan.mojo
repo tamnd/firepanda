@@ -362,6 +362,19 @@ struct Scan(Movable, Sized):
             return self._starts[row + 1] - self._starts[row]
         return self._uniform
 
+    def row_start(self, row: Int) -> Int:
+        """Returns where a row's fields begin in `fields`.
+
+        Args:
+            row: The row number.
+
+        Returns:
+            The position of the row's first field.
+        """
+        if len(self._starts) > 0:
+            return self._starts[row]
+        return row * self._uniform
+
     def at(self, row: Int, column: Int) -> FieldSpan:
         """Returns one field's span.
 
@@ -372,9 +385,7 @@ struct Scan(Movable, Sized):
         Returns:
             The span.
         """
-        if len(self._starts) > 0:
-            return self.field(self._starts[row] + column)
-        return self.field(row * self._uniform + column)
+        return self.field(self.row_start(row) + column)
 
     def is_ragged(self) -> Bool:
         """Returns whether the rows disagree on how many fields they have.
