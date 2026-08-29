@@ -8,6 +8,41 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+`factorize` decides which route to take in one pass that can give up early, instead of two full passes that always finish.
+
+The choice is between a direct table indexed by the value and a hash table, and it is made from the column's minimum and maximum. Those came from a `min_of` and a `max_of`, which is two complete reductions over the column before any grouping starts. Both are thrown away on every column that ends up hashed, which is every float column, every wide-ranging integer column, and every join key that is an identifier rather than a category. On ten million rows a standalone probe puts them at 8.5 ms of the 61 ms `factorize` takes at a hundred groups.
+
+Nothing about the decision needs the exact bounds. The bounds only ever widen as the scan goes, so once the span has passed what a direct table is allowed to be, or once a value has landed outside the window the subtraction is safe in, no later row can bring it back. So the two reductions are fused into one and the test that was waiting for them is moved inside the loop, checked once per validity word. A column of scattered keys now answers in the first few thousand rows rather than in ten million.
+
+The scan is the same shape the aggregation kernels use, which is what makes it cheap on the columns that do take the direct route. A validity word that is all ones and covers a whole block is read as SIMD lanes and reduced with `min` and `max`, and only a partial or gappy word falls back to a row at a time. The all-null column is the one case that has no bounds at all, and it gets a single slot it never reads rather than a hash table.
+
+Measured against a build of the previous release, the two run alternately in one session, five reps each, six rounds, ten million rows on an i9-13900K. Medians. The machine was running other people's benchmark suites throughout, so the `hash/dict_*` rows are carried as a control: they call none of this code and should not move.
+
+| benchmark | before | after | ratio |
+| --- | --- | --- | --- |
+| factorize_nulls | 65.1 ms | 44.3 ms | 0.68 |
+| factorize_direct | 17.8 ms | 14.1 ms | 0.79 |
+| factorize_100 | 53.8 ms | 43.1 ms | 0.80 |
+| factorize_10k | 61.2 ms | 50.0 ms | 0.82 |
+| factorize_all_distinct | 305.9 ms | 299.6 ms | 0.98 |
+| dict_100 (control) | 36.2 ms | 35.9 ms | 0.99 |
+| dict_10k (control) | 41.9 ms | 41.4 ms | 0.99 |
+| dict_all_distinct (control) | 724.9 ms | 779.0 ms | 1.07 |
+
+Every row that runs this code improves and the two quiet controls do not move. The third control is a heavy allocator benchmark whose variance is wide enough on a contended machine that its ratio says nothing either way, which is worth stating rather than dropping.
+
+The size of each gain is the fraction of the work the bounds were. `all_distinct` barely moves because three hundred milliseconds of hashing swamps eight of scanning. `nulls` moves most because its bounds pass was the slowest of the five and the new one skips whole validity words of nulls without reading a value.
+
+What this does not do is win the milestone's group by criterion. Against the language's own `Dict` at ten million rows on this machine, `factorize` is now 43.1 ms against 35.9 at a hundred groups and 50.0 against 41.4 at ten thousand, so `Dict` is still ahead at low and medium cardinality, and 299.6 against 779.0 at all distinct, where the table is ahead by two and a half times. Removing the wasted passes closed part of the gap and did not close it. What is left is in the probe and the build, not in the decision.
+
+### Changed
+
+- `factorize` gets its route from `_direct_plan`, which fuses the minimum and the maximum into one scan and returns as soon as the answer is settled. `_direct_span` and the `min_of` and `max_of` pair it called are gone.
+
+### Added
+
+- `DirectPlan`, the result of that decision, carrying the number of slots a direct table would need and the value that indexes slot zero.
+
 ## [0.6.17] - 2026-08-29
 
 Built against Mojo 1.0.0 (ed45d567).
