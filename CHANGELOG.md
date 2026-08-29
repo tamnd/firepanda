@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.15] - 2026-08-29
+
+Built against Mojo 1.0.0 (ed45d567).
+
 The string concat is gone. The 0.6.14 entry ended by saying that what remained of it was close to the cost of first touching the output pages, so the next change should remove it rather than speed it up, by sizing the string column up front from the field index and letting each block write into its own slice. That is this change.
 
 Sizing it up front means knowing the payload before reading the file, and the field index already holds it. An element costs payload bytes only when it is longer than twelve, the index records every field's start and end, and the one length the index gets wrong is an escaped field's, whose doubled quotes collapse. So the block payload sizes are added up, prefix summed, and the column is allocated once at its full height; each block then writes its own slice of views and its own slice of payload at absolute offsets, so nothing is stacked and no offset is rebased afterwards.
@@ -831,7 +835,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.14...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.15...HEAD
+[0.6.15]: https://github.com/tamnd/firepanda/releases/tag/v0.6.15
 [0.6.14]: https://github.com/tamnd/firepanda/releases/tag/v0.6.14
 [0.6.13]: https://github.com/tamnd/firepanda/releases/tag/v0.6.13
 [0.6.12]: https://github.com/tamnd/firepanda/releases/tag/v0.6.12
