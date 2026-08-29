@@ -5,7 +5,7 @@ identified by its own version and by the toolchain that produced it. Both are
 reported by `firepanda.version()`.
 """
 
-comptime VERSION = "0.6.16"
+comptime VERSION = "0.6.17"
 """The library version.
 
 Bumped in the release pull request, alongside `pixi.toml` and `pyproject.toml`,
