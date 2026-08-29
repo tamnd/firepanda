@@ -8,6 +8,35 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+The string concat is gone. The 0.6.14 entry ended by saying that what remained of it was close to the cost of first touching the output pages, so the next change should remove it rather than speed it up, by sizing the string column up front from the field index and letting each block write into its own slice. That is this change.
+
+Sizing it up front means knowing the payload before reading the file, and the field index already holds it. An element costs payload bytes only when it is longer than twelve, the index records every field's start and end, and the one length the index gets wrong is an escaped field's, whose doubled quotes collapse. So the block payload sizes are added up, prefix summed, and the column is allocated once at its full height; each block then writes its own slice of views and its own slice of payload at absolute offsets, so nothing is stacked and no offset is rebased afterwards.
+
+Measuring is itself a second walk over the index, though, and a column whose elements all fit inside their views has no payload for that walk to find. That is the ordinary case, and it is what narrow and wide are: `"row9999999"` and `"s615"` both inline. So the fill is tried first on the guess that nothing reaches the payload, and a block that meets an element too long to inline stops where it stands and reports it; only then is the column measured and filled again. The guess is the whole read when it holds, and the block that disproves it usually does so within a few rows, because a column with long elements rarely hides them at the end. It is the bargain the type ladder already makes.
+
+Measured against a build of the previous release, the two run alternately in one session, five reps each, three rounds, ten million rows on an i9-13900K, warm cache, reading off a mapping.
+
+| file | columns | before | after | ratio | peak RSS before | peak RSS after | ratio |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| narrow | 4 | 127 ms | 128 ms | 1.01 | 1.65 GB | 1.50 GB | 0.90 |
+| quoted | 3 | 215 ms | 151 ms | 0.70 | 2.70 GB | 1.75 GB | 0.65 |
+| nulls | 9 | 240 ms | 207 ms | 0.86 | 2.17 GB | 2.19 GB | 1.01 |
+| wide | 50 | 165 ms | 151 ms | 0.92 | 1.46 GB | 1.38 GB | 0.95 |
+
+The nulls row should be read as flat, not as a gain. That file has no text column at all, so it does not reach any of this, and its 0.86 is the machine drifting between the two builds. The honest results are quoted, which is what the change was aimed at, and wide. Narrow is a wash on time and a tenth better on memory: its one text column is entirely inline, so it takes the guessed path, writes its views once instead of writing them into a per block piece and copying them into the column, and never allocates a payload.
+
+The four ingestion files give byte identical schemas and null counts before and after. A patch bump, since nothing changes shape.
+
+### Changed
+
+- A string column is now filled in place rather than built per block and concatenated. The payload size is derived from the field index, the block sizes are prefix summed, and each block writes its views and its payload bytes into its own slice of one column. The concat of string columns is still there and still parallel, it is simply no longer on the path a read takes.
+- The fill of a text column speculates that every element fits inside its view, which needs no payload and so no measuring pass. A block that meets a longer element stops and the column is measured and filled again. On a column that is entirely inline this removes the index walk that 0.6.14's design would have added.
+
+### Added
+
+- `collapse_into` in `firepanda.array.strings`, which copies a field's bytes to a destination and collapses doubled quotes as it goes, returning what it wrote. `StringBuilder.append_escaped` now delegates to it, and the reader calls it to write straight into a column's payload.
+- `collapsed_length` in `firepanda.io.scan`, which reports what an escaped field measures once its doubled quotes collapse, for a reader sizing a column before it fills it.
+
 ## [0.6.14] - 2026-08-29
 
 Built against Mojo 1.0.0 (ed45d567).

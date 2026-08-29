@@ -537,34 +537,7 @@ struct StringBuilder(Movable, Sized):
         var offset = self._payload_size
         self._reserve(offset + count)
         var dest = self._payload.unsafe_ptr().unsafe_offset(offset)
-        var src = bytes.unsafe_ptr()
-        var written = 0
-        var run = 0
-        var at = 0
-        while at < count:
-            if (
-                src.unsafe_offset(at).unsafe_load() == quote
-                and at + 1 < count
-                and src.unsafe_offset(at + 1).unsafe_load() == quote
-            ):
-                var span = at + 1 - run
-                unsafe_memcpy(
-                    dest=dest.unsafe_offset(written),
-                    src=src.unsafe_offset(run),
-                    count=span,
-                )
-                written += span
-                at += 2
-                run = at
-                continue
-            at += 1
-        if count > run:
-            unsafe_memcpy(
-                dest=dest.unsafe_offset(written),
-                src=src.unsafe_offset(run),
-                count=count - run,
-            )
-            written += count - run
+        var written = collapse_into(dest, bytes, quote)
 
         if written <= INLINE_CAPACITY:
             self._views.append(make_inline_at(dest, written))
@@ -633,6 +606,63 @@ struct StringBuilder(Movable, Sized):
                 validity.set(i, False)
 
         return StringArray(views^, payload^, validity^, count)
+
+
+def collapse_into[
+    origin: MutOrigin
+](dest: Pointer[UInt8, origin], bytes: Span[UInt8, _], quote: UInt8) -> Int:
+    """Copies a field's bytes somewhere, collapsing doubled quotes as it goes.
+
+    The bytes between two doubled quotes are copied in runs rather than one at a
+    time, so a field with a quote in it costs about what a field without one
+    costs. Collapsing only ever shortens, which is what lets a caller reserve
+    the escaped length and commit the literal one.
+
+    Args:
+        dest: Where to write. Must have room for `len(bytes)`, not for the
+            shorter answer, because the runs are copied before the total is
+            known.
+        bytes: The field's bytes as they appear in the file, without the
+            surrounding quotes.
+        quote: The quote character, which is doubled where it is meant
+            literally.
+
+    Returns:
+        How many bytes were written.
+
+    Parameters:
+        origin: Where the destination lives.
+    """
+    var count = len(bytes)
+    var src = bytes.unsafe_ptr()
+    var written = 0
+    var run = 0
+    var at = 0
+    while at < count:
+        if (
+            src.unsafe_offset(at).unsafe_load() == quote
+            and at + 1 < count
+            and src.unsafe_offset(at + 1).unsafe_load() == quote
+        ):
+            var span = at + 1 - run
+            unsafe_memcpy(
+                dest=dest.unsafe_offset(written),
+                src=src.unsafe_offset(run),
+                count=span,
+            )
+            written += span
+            at += 2
+            run = at
+            continue
+        at += 1
+    if count > run:
+        unsafe_memcpy(
+            dest=dest.unsafe_offset(written),
+            src=src.unsafe_offset(run),
+            count=count - run,
+        )
+        written += count - run
+    return written
 
 
 def strings_from_list(values: List[String]) -> StringArray:
