@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.16] - 2026-08-29
+
+Built against Mojo 1.0.0 (ed45d567).
+
 The scan's row offsets are gone. The 0.6.15 notes said the next place to look was the fill, on the grounds that the scan is not search bound. That was right about the scan not being search bound and wrong about where its time went. Lined up against each other the four ingestion files say it plainly: narrow is ten million rows and forty million fields and scans in 60 ms, wide is one million rows and fifty million fields and scans in 42 ms. More fields, more bytes, less time. The scan's cost tracked the row count.
 
 What costs a row is the offset recorded for it. The index is a flat list of packed fields plus a list saying where each row begins in it, which is the Arrow offsets shape and the obvious one. But almost every CSV file is rectangular, and for a rectangular file the offset of row r is r times the width and the list holding it is eight bytes a row of pure redundancy. On a ten million row file that is eighty megabytes written during the scan and read back during every fill.
@@ -860,7 +864,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.15...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.16...HEAD
+[0.6.16]: https://github.com/tamnd/firepanda/releases/tag/v0.6.16
 [0.6.15]: https://github.com/tamnd/firepanda/releases/tag/v0.6.15
 [0.6.14]: https://github.com/tamnd/firepanda/releases/tag/v0.6.14
 [0.6.13]: https://github.com/tamnd/firepanda/releases/tag/v0.6.13
