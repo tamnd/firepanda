@@ -8,6 +8,33 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+The string `factorize` runs on every core too.
+
+Text was the one key type left on a single thread after 0.6.18, and it is the type that matters most for the group by queries anyone benchmarks. It now takes the same route the numeric one does: one contiguous slice per worker, a private table per slice, and a sequential merge that renumbers the local ordinals into global ones in workers-then-ordinals order, which is what preserves first-appearance ordering.
+
+The merge is where the two differ. The numeric one probes on the hash alone, because for it the hash is the key. A string does not fit in a hash, so a match there is a candidate and the rows behind the two keys have to be compared, which is the new `HashTable.insert_string`. That comparison needs a representative row per group and produces one, so the list the merge builds is not scratch that gets discarded, it is the result `factorize_strings` returns. The workers feed it: each records the absolute row of every key that was new to its own table, and the merge visits those in an order that makes the surviving representative the earliest row in the column with that key, which is the row one thread would have picked.
+
+The same cardinality guard applies. A column of distinct strings gets nothing from being split, because the merge would rebuild all of it after the workers already had, so a sample is built first and anything projecting more than half a slice of groups goes to the serial route.
+
+Ten million rows on an i9-13900K, alternating builds in one session, five reps each, four rounds, medians. Fourteen untouched `text/*` and `hash/*` benchmarks ran alongside as controls and all but two sat within four percent.
+
+| benchmark | before | after | ratio |
+| --- | --- | --- | --- |
+| text/group_repeated | 27.16 ms | 4.19 ms | 0.15 |
+| text/group_distinct | 50.59 ms | 51.90 ms | 1.03 |
+| text/group_prefixed | 55.74 ms | 55.55 ms | 1.00 |
+
+Only the first of those three is meant to move. The other two are columns of distinct keys, which is exactly what the guard is there to keep on one thread, and their staying flat is the guard working rather than the change failing.
+
+### Changed
+
+- `factorize_strings` is `raises`, and picks between `_factorize_strings_serial` and `_factorize_strings_parallel` the way the numeric one picks between its two.
+
+### Added
+
+- `_factorize_strings_parallel`, the multi threaded string route, `_factorize_strings_serial`, the single threaded one, and `_projected_groups_strings`, the sample build that chooses between them.
+- `HashTable.insert_string`, which is `insert` with the key comparison `build_strings` does, for the merge at the end of a parallel string build.
+
 ## [0.6.18] - 2026-08-29
 
 Built against Mojo 1.0.0 (ed45d567).

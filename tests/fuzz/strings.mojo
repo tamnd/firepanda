@@ -26,7 +26,12 @@ from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
-from firepanda.hash.factorize import factorize_strings
+from firepanda.hash.factorize import (
+    _factorize_strings_parallel,
+    _factorize_strings_serial,
+    factorize_strings,
+)
+from firepanda.hash.function import DEFAULT_SEED
 from firepanda.kernel.group import AggKind, aggregate_group_any
 from firepanda.kernel.sort import argsort_any
 from firepanda.testing.rng import Rng
@@ -43,6 +48,14 @@ comptime MAX_BYTES = 29
 
 comptime PREFIX_COUNT = 4
 """How many shared prefixes `shared_prefix` can return."""
+
+comptime PARALLEL_LENGTH = 3_000
+"""Longest column the two string routes are compared on.
+
+The column the rest of this file mutates is far shorter than one chunk, and a
+column shorter than a chunk cannot be cut into more than one slice however many
+workers it is offered. So the parallel case builds its own column, long enough
+to reach several chunks and so to give the merge something to merge."""
 
 
 def shared_prefix(k: Int) -> String:
@@ -403,6 +416,33 @@ def build(
     return builder^.finish()
 
 
+def parallel_text_column(mut rng: Rng, length: Int) -> StringArray:
+    """Builds a column for the two string routes to be compared on.
+
+    The keys share their first four bytes, which is the prefix a view stores, so
+    the comparison the string table exists for runs on every hash match rather
+    than being skipped on the prefix. The group count is drawn per column so
+    that a case is sometimes a category, sometimes an identifier, and sometimes
+    the awkward middle, and one case in five has nulls in it.
+
+    Args:
+        rng: The generator.
+        length: How many rows.
+
+    Returns:
+        The column.
+    """
+    var groups = Int(rng.next_range(1, length + 2))
+    var nulls = rng.next_below(5) == 0
+    var builder = StringBuilder(capacity=length)
+    for _ in range(length):
+        if nulls and rng.next_below(9) == 0:
+            builder.append_null()
+            continue
+        builder.append(String("key_", Int(rng.next_below(groups))).as_bytes())
+    return builder^.finish()
+
+
 def main() raises:
     var options = parse_options()
     print(
@@ -572,7 +612,7 @@ def main() raises:
                     )
                 )
 
-        elif op < 98 and len(values) > 0:
+        elif op < 97 and len(values) > 0:
             # The ordinals are compared rather than the group count, because a
             # column can produce the right number of groups and put the wrong
             # rows in them.
@@ -593,6 +633,77 @@ def main() raises:
                         Int(got[i]),
                         " where the reference put it in ",
                         want[i],
+                    )
+                )
+
+        elif op < 98:
+            # The two string routes on a column long enough to be cut up. They
+            # have to agree exactly, on the ordinals and on the representative
+            # rows both, because the merge picks the representative row and a
+            # merge that walked the workers out of order would still produce a
+            # correct grouping with the wrong row standing for it.
+            var length = Int(rng.next_below(PARALLEL_LENGTH))
+            var workers = Int(rng.next_range(1, 17))
+            var wide = parallel_text_column(rng, length)
+            var serial = _factorize_strings_serial(
+                StringArray(copy=wide), DEFAULT_SEED
+            )
+            var threaded = _factorize_strings_parallel(
+                wide, DEFAULT_SEED, workers
+            )
+            if serial.count() != threaded.count():
+                raise Error(
+                    String(
+                        "step ",
+                        step,
+                        " seed ",
+                        options.seed,
+                        ": ",
+                        workers,
+                        " workers found ",
+                        threaded.count(),
+                        " groups in ",
+                        length,
+                        " rows where one thread found ",
+                        serial.count(),
+                    )
+                )
+            for i in range(length):
+                if serial.codes[i] == threaded.codes[i]:
+                    continue
+                raise Error(
+                    String(
+                        "step ",
+                        step,
+                        " seed ",
+                        options.seed,
+                        ": ",
+                        workers,
+                        " workers put row ",
+                        i,
+                        " in group ",
+                        Int(threaded.codes[i]),
+                        " where one thread put it in ",
+                        Int(serial.codes[i]),
+                    )
+                )
+            for g in range(len(serial.firsts)):
+                if serial.firsts[g] == threaded.firsts[g]:
+                    continue
+                raise Error(
+                    String(
+                        "step ",
+                        step,
+                        " seed ",
+                        options.seed,
+                        ": ",
+                        workers,
+                        " workers let row ",
+                        threaded.firsts[g],
+                        " stand for group ",
+                        g,
+                        " where one thread picked ",
+                        serial.firsts[g],
                     )
                 )
 

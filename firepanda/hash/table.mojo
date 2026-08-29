@@ -252,6 +252,54 @@ struct HashTable(Movable, Sized):
                 return Int(ordinal) - 1
             i = (i + 1) & self._mask
 
+    def insert_string(
+        mut self,
+        hash: UInt64,
+        row: Int,
+        col: StringArray,
+        mut firsts: List[Int],
+    ) -> Int:
+        """Looks a string key up and inserts it if it is not there.
+
+        `insert` with the comparison `build_strings` does. It exists for the
+        merge at the end of a parallel string build, which is handed one key per
+        group per worker and has to fold them into a single table. A hash match
+        is a candidate rather than an answer here, and what settles it is the row
+        that first produced the ordinal, which is why `firsts` is passed in and
+        written to rather than being something the caller keeps to itself.
+
+        Args:
+            hash: The key. A worker's table already holds it, so the merge does
+                not hash the row again.
+            row: The row this key came from, which becomes the group's
+                representative row if the key turns out to be new.
+            col: The column, for the comparison. Indexed by absolute row.
+            firsts: The representative row per ordinal, read when a hash matches
+                and appended to when a key is new.
+
+        Returns:
+            The group ordinal, which is the one it already had or the next one up.
+        """
+        if (self._count + 1) * 2 > self._capacity:
+            self._grow()
+
+        var slots = self._slots.bitcast[DType.uint64]()
+        var i = hash & self._mask
+        while True:
+            var at = Int(i) * SLOT_WORDS
+            var ordinal = slots.unsafe_offset(at + 1).unsafe_load()
+            if ordinal == 0:
+                var assigned = self._count
+                slots.unsafe_offset(at).unsafe_write(hash)
+                slots.unsafe_offset(at + 1).unsafe_write(UInt64(assigned + 1))
+                self._count = assigned + 1
+                firsts.append(row)
+                return assigned
+            if slots.unsafe_offset(at).unsafe_load() == hash:
+                if col.element_equals(row, firsts[Int(ordinal) - 1]):
+                    return Int(ordinal) - 1
+            i = (i + 1) & self._mask
+
     def build(
         mut self,
         hashes: Buffer,
