@@ -30,6 +30,7 @@ from .read import (
     INFER_ALL,
     MIN_BLOCK,
     SPECULATE_ROWS,
+    TILE_BYTES,
     ReadOptions,
     TypeGuess,
     block_count,
@@ -43,6 +44,8 @@ from .read import (
     rung_of,
     sample_columns,
     scan_blocks,
+    sweep_fixed,
+    wanted_of,
 )
 from .scalar import scan_csv_scalar
 from .scan import (

@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed
+
+- `read_csv` fills every fixed width column of a block in one pass over the block, a tile of rows at a time, instead of walking the whole file once per column. A column's fields sit one row stride apart in the field index, so a column at a time read the index once per column and used one word of each cache line it fetched. On a fifty column file that came to 7.6 ns a value against 1.6 ns a value on a four column file of the same types. The tile is sized to keep its slice of the index in the data cache, so the reads after the first come out of cache, and the columns are still done one at a time within the tile, so a column's running state stays in a register. Ten million rows on an i9-13900K, warm, against a build of the previous commit run alternately with it: narrow 0.90, quoted 1.02, nulls 0.69, wide 0.48.
+
 ## [0.6.12] - 2026-08-29
 
 Built against Mojo 1.0.0 (ed45d567).

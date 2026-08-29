@@ -657,6 +657,224 @@ def rung_of(dtype: LogicalType) -> Int:
     return _STRING
 
 
+def wanted_of(rung: Int) -> String:
+    """Names a rung the way an error message names it.
+
+    Args:
+        rung: One of `_BOOL`, `_INT` and `_FLOAT`.
+
+    Returns:
+        The phrase that goes after "is not".
+    """
+    if rung == _BOOL:
+        return "a boolean"
+    if rung == _INT:
+        return "an integer"
+    return "a number"
+
+
+def merge_reports(
+    parts: List[BlockFill], blocks: Int, width: Int, k: Int
+) -> FillReport:
+    """Combines one column's per block reports into one.
+
+    Args:
+        parts: One report per block per fixed width column.
+        blocks: How many blocks there are.
+        width: How many fixed width columns there are.
+        k: Which of them to combine.
+
+    Returns:
+        Whether every value fitted, the lowest file row that did not, and
+        whether any value was seen anywhere in the column.
+    """
+    var out = FillReport(True, 0, False)
+    for b in range(blocks):
+        ref part = parts[b * width + k]
+        out.saw_value = out.saw_value or part.saw_value
+        if not part.ok and (out.ok or part.row < out.row):
+            # The lowest failing row rather than whichever block happened to
+            # finish first, so a malformed file always names the same line.
+            out.ok = False
+            out.row = part.row
+    return out
+
+
+def paste_validity[
+    dt: DType
+](
+    mut column: Array[dt],
+    parts: List[BlockFill],
+    layout: List[BlockRows],
+    blocks: Int,
+    width: Int,
+    k: Int,
+):
+    """Copies one column's per block bitmaps into the column's own.
+
+    Args:
+        column: The column to paste into.
+        parts: One report per block per fixed width column.
+        layout: Each block's share of the rows.
+        blocks: How many blocks there are.
+        width: How many fixed width columns there are.
+        k: Which of them to paste.
+
+    Parameters:
+        dt: The column's dtype.
+    """
+    for b in range(blocks):
+        ref part = parts[b * width + k]
+        if not part.valid.all_valid():
+            column.data.validity.paste(
+                layout[b].before, part.valid, layout[b].count
+            )
+
+
+comptime TILE_BYTES = 1 << 14
+"""How much of the field index one tile of a fixed width sweep works over.
+
+Sixteen kilobytes, which is a third of a data cache and leaves the rest to the
+file bytes and the columns being written. What it buys is on
+`sweep_fixed`.
+"""
+
+
+def sweep_fixed(
+    data: Span[UInt8, _],
+    scans: List[Scan],
+    layout: List[BlockRows],
+    header: Int,
+    width: Int,
+    fixed: List[Int],
+    ints: List[Pointer[Scalar[DType.int64], MutUntrackedOrigin]],
+    floats: List[Pointer[Scalar[DType.float64], MutUntrackedOrigin]],
+    bools: List[Pointer[Scalar[DType.bool], MutUntrackedOrigin]],
+    mut parts: List[BlockFill],
+) raises:
+    """Fills every fixed width column, one parallel pass, a tile of rows at a
+    time.
+
+    A column at a time is the wrong way round for a wide file. A column's fields
+    sit `width` words apart in the index, so reading one column of a fifty column
+    file touches one word of every cache line and leaves the other seven, and
+    then the next column comes back for those. The index is read fifty times
+    over to be used once, and it is far too big to still be there on the second
+    pass. Filling the fixed width columns of a fifty column file cost 7.6 ns a
+    value against 1.6 ns a value on a four column file of the same types, and
+    nothing about a value costs four times more because it has more neighbours.
+
+    Going by row instead reads the index once, in order, and fixes the fifty
+    column file. It also makes the four column file twelve per cent slower,
+    which is the other half of the problem: a column's running state, whether
+    every value has fitted and where the first that did not was, cannot sit in a
+    register when the loop moves to a different column on every value.
+
+    So the rows are done in tiles. A tile is chosen to make its slice of the
+    index about `TILE_BYTES`, and within a tile the columns are still done one
+    at a time. The index slice is read once per column as before, but the reads
+    after the first are out of the data cache rather than out of memory, and the
+    per column state is a register again for the length of the tile. Neither
+    file pays for the other.
+
+    A string column is not in here. It cannot be, since a block's payload size
+    is not known until it has been read, so those are still done one at a time.
+
+    Args:
+        data: The buffer the scans point into.
+        scans: One scan per block.
+        layout: Each block's share of the rows.
+        header: One if the file has a header row, zero if not.
+        width: How many fields a row of the file has.
+        fixed: The schema positions of the fixed width columns, integer columns
+            first, then float, then boolean, in schema order within each group.
+        ints: Where each integer column's values go, one per column of the
+            first group.
+        floats: The same for the second group.
+        bools: The same for the third.
+        parts: One report per block per fixed width column, in the order `fixed`
+            is in. Filled in.
+
+    Raises:
+        Error: Never directly. The signature is inherited from `parallel_for`.
+    """
+    var count = len(fixed)
+    var blocks = len(scans)
+    var n_int = len(ints)
+    var n_float = len(floats)
+    var tile = TILE_BYTES // (width * 8)
+    if tile < 16:
+        tile = 16
+
+    def one(b: Int) raises {mut parts, imm}:
+        ref scan = scans[b]
+        var rows = layout[b].count
+        var before = layout[b].before
+        var first = layout[b].first
+        var file_row = before + header
+        var base = b * count
+        var valids = List[Bitmap](capacity=count)
+        var ok = List[Bool](length=count, fill=True)
+        var bad = List[Int](length=count, fill=0)
+        var saw = List[Bool](length=count, fill=False)
+        for _ in range(count):
+            valids.append(Bitmap(rows))
+
+        for start in range(0, rows, tile):
+            var stop = start + tile
+            if stop > rows:
+                stop = rows
+            for k in range(count):
+                var column = fixed[k]
+                ref valid = valids[k]
+                var column_ok = ok[k]
+                var column_bad = bad[k]
+                var column_saw = saw[k]
+                for i in range(start, stop):
+                    var bytes = field_bytes(data, scan.at(first + i, column))
+                    if is_missing(bytes):
+                        # A null is a zero in the values buffer, and the buffer
+                        # arrived zeroed, so marking the bit is the whole of it.
+                        valid.set(i, False)
+                        continue
+                    column_saw = True
+                    var fits: Bool
+                    if k < n_int:
+                        var parsed = parse_int[DType.int64](bytes)
+                        fits = parsed.ok
+                        if fits:
+                            ints[k].unsafe_offset(before + i)[] = parsed.value
+                    elif k < n_int + n_float:
+                        var parsed = parse_float[DType.float64](bytes)
+                        fits = parsed.ok
+                        if fits:
+                            floats[k - n_int].unsafe_offset(
+                                before + i
+                            )[] = parsed.value
+                    else:
+                        var parsed = parse_bool(bytes)
+                        fits = parsed.ok
+                        if fits:
+                            bools[k - n_int - n_float].unsafe_offset(
+                                before + i
+                            )[] = parsed.value
+                    if not fits and column_ok:
+                        # The column is wrong for the file and every value in it
+                        # will be read again, but the other columns of this
+                        # block are not, so this cannot stop at the first bad
+                        # value the way one column at a time could.
+                        column_ok = False
+                        column_bad = file_row + i
+                ok[k] = column_ok
+                bad[k] = column_bad
+                saw[k] = column_saw
+
+        for k in range(count):
+            parts[base + k] = BlockFill(valids.pop(0), ok[k], bad[k], saw[k])
+
+    parallel_for(one, blocks)
+
+
 def build_blocks(
     data: Span[UInt8, _],
     scans: List[Scan],
@@ -665,19 +883,21 @@ def build_blocks(
     options: ReadOptions,
     guesses: List[TypeGuess],
 ) raises -> DataFrame:
-    """Fills one column at a time, every block of it at once.
+    """Fills every fixed width column in one pass and the text ones after.
 
-    A fixed width column is allocated once at its full height and every block
-    parses its rows straight into its own range of it. A string column cannot
-    do that, because a block's payload size is not known until it has been read,
-    so it builds a piece per block and stacks them.
+    A fixed width column is allocated at its full height and written in place,
+    so all of them can be filled together, and they are: one walk per block over
+    the rows, every column of a row done while the index for that row is in
+    cache. A string column cannot join in, because a block's payload size is not
+    known until it has been read, so it builds a piece per block and stacks
+    them, one column at a time.
 
     When `guesses` is not empty the schema is a guess from a sample rather than
-    a fact, and a value that does not fit its column promotes the column and
-    reads it again instead of failing. The ladder only goes up, so a column is
-    read at most four times and in every file anyone has it is read once. What
-    that buys is the whole of inference: deciding the type properly means
-    parsing every field in the file before parsing every field in the file.
+    a fact, and a column with a value that does not fit is filled again one rung
+    higher. The ladder only goes up, so a column is read at most four times and
+    in every file anyone has it is read once. What that buys is the whole of
+    inference: deciding the type properly means parsing every field in the file
+    before parsing every field in the file.
 
     When `guesses` is empty the schema came from the caller and a value that
     does not fit is an error, which is the only thing a declared type can mean.
@@ -701,9 +921,9 @@ def build_blocks(
     var rows = 0
     for b in range(blocks):
         rows += layout[b].count
-    var columns = List[AnyArray](capacity=len(schema))
     var speculating = len(guesses) > 0
 
+    var starts = List[Int](capacity=len(schema))
     for column in range(len(schema)):
         var rung = rung_of(schema[column].dtype)
         if speculating and not guesses[column].saw_value:
@@ -711,92 +931,235 @@ def build_blocks(
             # the right answer only if the whole column turns out to be null.
             # Start at the bottom and let the first value that turns up decide.
             rung = _BOOL
+        starts.append(rung)
 
-        var done = False
-        var report = FillReport(True, 0, False)
-        while not done:
-            if speculating:
-                # The schema follows the rung rather than the other way round,
-                # and it has to be right before the attempt rather than after
-                # it, because the string path reads the type out of it.
-                var settled = logical_of(TypeGuess(rung, True))
-                if settled != schema[column].dtype:
-                    schema.fields[column] = Field(schema[column].name, settled)
-            if rung == _BOOL:
-                var bools = fill_column[DType.bool, _BOOL](
+    # Grouped by rung rather than left in schema order, because the sweep walks
+    # a row once per group and a group with its rung known in advance is a
+    # straight loop rather than a loop with a three way test in it.
+    var fixed = List[Int]()
+    var place = List[Int](length=len(schema), fill=-1)
+    var ints = List[Array[DType.int64]]()
+    var floats = List[Array[DType.float64]]()
+    var bools = List[Array[DType.bool]]()
+    for column in range(len(schema)):
+        if starts[column] == _INT:
+            place[column] = len(fixed)
+            fixed.append(column)
+            ints.append(Array[DType.int64](rows))
+    for column in range(len(schema)):
+        if starts[column] == _FLOAT:
+            place[column] = len(fixed)
+            fixed.append(column)
+            floats.append(Array[DType.float64](rows))
+    for column in range(len(schema)):
+        if starts[column] == _BOOL:
+            place[column] = len(fixed)
+            fixed.append(column)
+            bools.append(Array[DType.bool](rows))
+
+    var count = len(fixed)
+    # Placeholders. Every entry is overwritten by the sweep, which builds its
+    # own bitmap of the right size, and `BlockFill` is not copyable so the list
+    # cannot be filled any more cheaply than this.
+    var parts = List[BlockFill](capacity=blocks * count)
+    for _ in range(blocks * count):
+        parts.append(BlockFill(Bitmap(0), True, 0, False))
+    if count > 0:
+        # The origins are dropped deliberately. Every block writes a range of
+        # its own and the ranges partition each column, which is the fact that
+        # makes this safe, and it is not a fact the origin system can be told.
+        var int_at = List[Pointer[Scalar[DType.int64], MutUntrackedOrigin]]()
+        for i in range(len(ints)):
+            int_at.append(
+                ints[i].unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+            )
+        var float_at = List[
+            Pointer[Scalar[DType.float64], MutUntrackedOrigin]
+        ]()
+        for i in range(len(floats)):
+            float_at.append(
+                floats[i].unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+            )
+        var bool_at = List[Pointer[Scalar[DType.bool], MutUntrackedOrigin]]()
+        for i in range(len(bools)):
+            bool_at.append(
+                bools[i].unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+            )
+        sweep_fixed(
+            data,
+            scans,
+            layout,
+            header,
+            len(schema),
+            fixed,
+            int_at,
+            float_at,
+            bool_at,
+            parts,
+        )
+
+    var columns = List[AnyArray](capacity=len(schema))
+    for column in range(len(schema)):
+        var rung = starts[column]
+        if rung == _STRING:
+            columns.append(
+                stack_column(
                     data,
                     scans,
                     layout,
                     column,
                     header,
                     schema[column],
-                    rows,
-                    report,
+                    options,
                 )
-                if report.ok and (report.saw_value or not speculating):
-                    columns.append(AnyArray(bools^))
-                    done = True
-                elif not report.ok and not speculating:
-                    raise Error(
-                        bad_value(schema[column].name, report.row, "a boolean")
-                    )
-                else:
-                    rung = _STRING if report.ok else _INT
-            elif rung == _INT:
-                var ints = fill_column[DType.int64, _INT](
-                    data,
-                    scans,
-                    layout,
-                    column,
-                    header,
-                    schema[column],
-                    rows,
-                    report,
-                )
-                if report.ok and (report.saw_value or not speculating):
-                    columns.append(AnyArray(ints^))
-                    done = True
-                elif not report.ok and not speculating:
-                    raise Error(
-                        bad_value(schema[column].name, report.row, "an integer")
-                    )
-                else:
-                    rung = _STRING if report.ok else _FLOAT
-            elif rung == _FLOAT:
-                var floats = fill_column[DType.float64, _FLOAT](
-                    data,
-                    scans,
-                    layout,
-                    column,
-                    header,
-                    schema[column],
-                    rows,
-                    report,
-                )
-                if report.ok and (report.saw_value or not speculating):
-                    columns.append(AnyArray(floats^))
-                    done = True
-                elif not report.ok and not speculating:
-                    raise Error(
-                        bad_value(schema[column].name, report.row, "a number")
-                    )
-                else:
-                    rung = _STRING
-            else:
-                columns.append(
-                    stack_column(
-                        data,
-                        scans,
-                        layout,
-                        column,
-                        header,
-                        schema[column],
-                        options,
-                    )
-                )
-                done = True
+            )
+            continue
+
+        # Every group holds its columns in schema order, so the one wanted
+        # here is always the one at the front of its list.
+        var k = place[column]
+        var report = merge_reports(parts, blocks, count, k)
+        var accepted = report.ok and (report.saw_value or not speculating)
+        if rung == _INT:
+            var values = ints.pop(0)
+            if accepted:
+                paste_validity(values, parts, layout, blocks, count, k)
+                columns.append(AnyArray(values^))
+        elif rung == _FLOAT:
+            var values = floats.pop(0)
+            if accepted:
+                paste_validity(values, parts, layout, blocks, count, k)
+                columns.append(AnyArray(values^))
+        else:
+            var values = bools.pop(0)
+            if accepted:
+                paste_validity(values, parts, layout, blocks, count, k)
+                columns.append(AnyArray(values^))
+        if accepted:
+            continue
+
+        if not report.ok and not speculating:
+            raise Error(
+                bad_value(schema[column].name, report.row, wanted_of(rung))
+            )
+        # Either a value did not fit, which is one rung up, or the column turned
+        # out to hold no value at all, which is text.
+        var next = _STRING if report.ok else rung + 1
+        columns.append(
+            refill_column(
+                data,
+                scans,
+                layout,
+                column,
+                header,
+                rows,
+                next,
+                speculating,
+                schema,
+                options,
+            )
+        )
 
     return DataFrame(schema^, columns^)
+
+
+def refill_column(
+    data: Span[UInt8, _],
+    scans: List[Scan],
+    layout: List[BlockRows],
+    column: Int,
+    header: Int,
+    rows: Int,
+    var rung: Int,
+    speculating: Bool,
+    mut schema: Schema,
+    options: ReadOptions,
+) raises -> AnyArray:
+    """Reads one column again, a rung at a time, until it fits.
+
+    Only a column the sweep guessed too narrow for gets here, which is a column
+    whose first hundred and odd rows of every block disagreed with the rest of
+    it. On the way it keeps the schema in step with the rung, because the text
+    path reads the type out of the schema rather than being told it.
+
+    Args:
+        data: The buffer the scans point into.
+        scans: One scan per block.
+        layout: Each block's share of the rows.
+        column: Which column to read.
+        header: One if the file has a header row, zero if not.
+        rows: The height of the finished column.
+        rung: The rung to try first.
+        speculating: Whether a value that does not fit is a wrong guess rather
+            than an error.
+        schema: Updated to the type the column settles on.
+        options: The read options.
+
+    Returns:
+        The column.
+
+    Raises:
+        Error: If a value does not fit a declared column's type.
+    """
+    var report = FillReport(True, 0, False)
+    while True:
+        if speculating:
+            var settled = logical_of(TypeGuess(rung, True))
+            if settled != schema[column].dtype:
+                schema.fields[column] = Field(schema[column].name, settled)
+        if rung == _STRING:
+            return stack_column(
+                data, scans, layout, column, header, schema[column], options
+            )
+
+        var accepted: Bool
+        var values: AnyArray
+        if rung == _BOOL:
+            var got = fill_column[DType.bool, _BOOL](
+                data,
+                scans,
+                layout,
+                column,
+                header,
+                schema[column],
+                rows,
+                report,
+            )
+            accepted = report.ok and (report.saw_value or not speculating)
+            values = AnyArray(got^)
+        elif rung == _INT:
+            var got = fill_column[DType.int64, _INT](
+                data,
+                scans,
+                layout,
+                column,
+                header,
+                schema[column],
+                rows,
+                report,
+            )
+            accepted = report.ok and (report.saw_value or not speculating)
+            values = AnyArray(got^)
+        else:
+            var got = fill_column[DType.float64, _FLOAT](
+                data,
+                scans,
+                layout,
+                column,
+                header,
+                schema[column],
+                rows,
+                report,
+            )
+            accepted = report.ok and (report.saw_value or not speculating)
+            values = AnyArray(got^)
+        if accepted:
+            return values^
+        if not report.ok and not speculating:
+            raise Error(
+                bad_value(schema[column].name, report.row, wanted_of(rung))
+            )
+        rung = _STRING if report.ok else rung + 1
 
 
 def stack_column(
