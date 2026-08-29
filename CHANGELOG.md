@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.17] - 2026-08-29
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Two changes to the CSV reader, one to each half of it. The fill stopped zeroing memory it was about to overwrite, and the scan stopped growing its index by doubling. Together they take a ten million row narrow file from 98.7 ms to 59.3 and a nine column numeric file from 197.9 to 75.6, on an i9-13900K reading off a warm mapping.
+
 The fixed width columns are no longer zeroed before they are filled. The 0.6.16 entry ended with the fill being the larger half of a read for the first time and the numeric columns being where to look, so this is the measurement of that. A single integer column of ten million rows read in 27 ms, and a file of one digit integers read in the same time as a file of seven digit ones, which says the digits are not what is being paid for. What is being paid for is the allocation: `Array[int64](10_000_000)` takes 5.2 ms on its own, all of it a memset, and it runs on one thread before the parallel fill it is for can be handed out.
 
 Nothing needs it. The sweep visits every row of every fixed width column, so the only slot it was leaving to the memset was one holding a missing or unparseable field, and writing a zero there is one store on a path that was already clearing a validity bit. So the columns are allocated with the `Buffer(overwritten=)` the string fill has used since 0.6.15, and the sweep writes the zero itself.
@@ -917,7 +923,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.16...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.17...HEAD
+[0.6.17]: https://github.com/tamnd/firepanda/releases/tag/v0.6.17
 [0.6.16]: https://github.com/tamnd/firepanda/releases/tag/v0.6.16
 [0.6.15]: https://github.com/tamnd/firepanda/releases/tag/v0.6.15
 [0.6.14]: https://github.com/tamnd/firepanda/releases/tag/v0.6.14
