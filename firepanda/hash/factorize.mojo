@@ -27,6 +27,15 @@ stores. It hands back a representative row per group rather than the keys
 themselves, which is the one place its shape differs from the numeric one and is
 explained on the function.
 
+The hash route runs on every core when there is enough of a column to be worth
+splitting and its keys repeat often enough for the split to pay. Each worker
+builds its own table over a contiguous slice, and a sequential merge afterwards
+renumbers what they found into one set of ordinals. That merge is as long as the
+groups the workers found between them, so a column where every row is its own key
+gets no benefit and stays on one thread; `_projected_groups` is the check that
+tells the two apart before either has run, and `_factorize_hashed_parallel` is
+where the argument for the shape lives.
+
 Nulls get a group. A null is a value that rows can share, pandas with
 `dropna=False` gives it a group, and dropping it later is a filter on one ordinal
 while inventing it later would be another pass over the column. When a column has
@@ -42,11 +51,12 @@ from std.sys.info import simd_width_of, size_of
 from firepanda.array.array import Array, from_list
 from firepanda.array.strings import StringArray
 from firepanda.buffer.buffer import Buffer
+from firepanda.exec import parallel_for, worker_count
 from firepanda.kernel.accum import highest, lowest
 from firepanda.kernel.agg import BLOCK
 
 from .function import DEFAULT_SEED, hash_chunk, hash_strings_chunk
-from .table import HashTable
+from .table import HashTable, project_groups
 
 comptime DIRECT_LIMIT = 1 << 16
 """Largest integer range that skips the hash table.
@@ -74,6 +84,51 @@ on a low cardinality column. Four thousand measured slower on every shape here,
 which is what you would expect from a buffer that no longer fits. Smaller chunks
 start losing the last `PROBE_LOOKAHEAD` rows of each one to a prefetch that has
 nowhere to run.
+"""
+
+comptime PARALLEL_ROWS = 1 << 17
+"""Rows below which the hash route stays on one thread.
+
+The parallel route costs a merge over every group every worker found and a
+second pass over the column to renumber them, and neither of those exists on the
+serial one. A hundred and thirty thousand rows is where the threads start paying
+for that on the machines this targets. Below it the whole column is a few
+milliseconds anyway.
+"""
+
+comptime PARALLEL_MIN_SLICE = 1 << 15
+"""Smallest slice a worker is given.
+
+Two workers on a column that fits in L2 spend more time in the merge than they
+save in the build. Capping the worker count by this rather than dropping to one
+thread means a column just over `PARALLEL_ROWS` gets the few workers it can keep
+busy instead of all of them.
+"""
+
+comptime MERGE_HEADROOM = 2
+"""How many times a worker's slice has to outnumber the groups projected in it.
+
+The merge after a parallel build is the one part of it that is sequential, and
+its length is the number of groups the workers found between them. On a column
+whose groups are far fewer than a slice is long that is a rounding error. On a
+column where every row is its own key it is the whole column over again, and the
+parallel route is then slower than the serial one it replaced, which was
+measured at ten million rows before this check existed.
+
+Requiring a slice to be twice the projected group count puts the merge at a
+third of the column at the boundary, and at a half if the projection is off by a
+factor of two, which is more than it usually is. Both of those are still ahead of
+a serial build that walks all of it.
+"""
+
+comptime PARALLEL_SAMPLE = 1 << 16
+"""Most rows the group count is projected from.
+
+The projection is `project_groups` reading a discovery rate, which is what the
+table already sizes itself with, and sixty five thousand rows is where that
+function is asked to believe what it sees. On a shorter column the sample is a
+sixteenth of it instead, so that the cost of a decision stays proportional to the
+work the decision is about.
 """
 
 
@@ -132,7 +187,7 @@ struct Factorized[dt: DType](Movable):
 
 def factorize[
     dt: DType
-](col: Array[dt], seed: UInt64 = DEFAULT_SEED) -> Factorized[dt]:
+](col: Array[dt], seed: UInt64 = DEFAULT_SEED) raises -> Factorized[dt]:
     """Assigns a group ordinal to every row.
 
     Args:
@@ -318,8 +373,91 @@ def _factorize_direct[
 
 def _factorize_hashed[
     dt: DType
+](col: Array[dt], seed: UInt64) raises -> Factorized[dt]:
+    """Factorizes through the hash table, on one thread or on all of them.
+
+    Args:
+        col: The column.
+        seed: The per-query hash seed.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        The factorization.
+    """
+    var n = len(col)
+    if n >= PARALLEL_ROWS:
+        var workers = min(worker_count(), n // PARALLEL_MIN_SLICE)
+        if workers > 1:
+            var groups = _projected_groups[dt](col, seed, n)
+            if groups * MERGE_HEADROOM <= n // workers:
+                return _factorize_hashed_parallel[dt](col, seed, workers)
+    return _factorize_hashed_serial[dt](col, seed)
+
+
+def _projected_groups[dt: DType](col: Array[dt], seed: UInt64, n: Int) -> Int:
+    """Guesses how many groups a column has, by building the front of it.
+
+    The parallel route is worth taking when the groups are few and worth
+    refusing when nearly every row is one, and nothing knows which of those a
+    column is until it has been built. So this builds a sample of it and reads
+    the discovery rate the same way the table sizes itself, through
+    `project_groups`.
+
+    The sample is thrown away rather than handed to whichever route runs next.
+    It is a sixteenth of the column at most, and keeping it would mean both
+    routes had to be able to start from a table somebody else had already put
+    rows into, which is a lot of coupling to buy back that sixteenth.
+
+    Args:
+        col: The column.
+        seed: The per-query hash seed.
+        n: The column's length.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        A guess at the number of distinct keys in the whole column.
+    """
+    var sample = min(PARALLEL_SAMPLE, n // 16)
+    var has_null = col.null_count() > 0
+    var codes = Array[DType.uint32](sample)
+    var firsts = List[Int]()
+    var hashes = Buffer(CHUNK_ROWS * 8)
+    var table = HashTable(0, seed)
+
+    var half = 0
+    var measured = False
+    var base = 0
+    while base < sample:
+        var count = min(CHUNK_ROWS, sample - base)
+        hash_chunk(col, base, count, seed, hashes)
+        table.build(
+            hashes,
+            col.data.validity,
+            has_null,
+            base,
+            base,
+            count,
+            sample,
+            0,
+            codes,
+            firsts,
+        )
+        base += count
+        if not measured and base * 2 >= sample:
+            half = len(table)
+            measured = True
+
+    return project_groups(len(table), half, sample, n)
+
+
+def _factorize_hashed_serial[
+    dt: DType
 ](col: Array[dt], seed: UInt64) -> Factorized[dt]:
-    """Factorizes through the hash table.
+    """Factorizes through one hash table on one thread.
 
     Args:
         col: The column.
@@ -368,6 +506,7 @@ def _factorize_hashed[
             col.data.validity,
             has_null,
             base,
+            base,
             count,
             n,
             offset,
@@ -378,6 +517,150 @@ def _factorize_hashed[
 
     for at in range(len(firsts)):
         keys.append(values.unsafe_offset(firsts[at]).unsafe_load())
+
+    return _finish[dt](codes^, keys^, null_group)
+
+
+def _factorize_hashed_parallel[
+    dt: DType
+](col: Array[dt], seed: UInt64, workers: Int) raises -> Factorized[dt]:
+    """Factorizes through one hash table per core, then merges what they found.
+
+    The column is cut into one contiguous slice per worker and each worker runs
+    the serial build over its own slice into its own table, numbering its groups
+    from zero. Nothing is shared, so nothing is locked, and the only writes that
+    land in the same array are the ordinals, which are indexed by row and so
+    never touch the same word twice.
+
+    That leaves every worker with a private numbering, and a merge to turn those
+    into one. The merge walks the workers in order and, within a worker, its
+    groups in the order it found them, inserting each into a single table that
+    hands out the final ordinals. That order is exactly first-appearance order
+    over the whole column: the slices are contiguous and in order, and a worker
+    numbers its groups by when it first saw them, so the first time any key turns
+    up anywhere is the first time the merge is offered it. The ordinals come out
+    identical to the serial route's, which is what makes this a substitution
+    rather than a second set of semantics.
+
+    The merge is the part that does not parallelize, and its cost is the number
+    of groups the workers found between them rather than the number of rows. On
+    the columns a group by is usually run on, where the groups are thousands and
+    the rows are millions, it disappears. On a column where every row is its own
+    key it is the whole operation again, and this route breaks even there rather
+    than winning. It probes with the hashes the workers already computed, which
+    `HashTable.keys_by_ordinal` reads back out of their slots, so at least it
+    does not hash anything twice.
+
+    Args:
+        col: The column.
+        seed: The per-query hash seed.
+        workers: How many slices to cut the column into. At least two.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        The factorization.
+    """
+    var n = len(col)
+    var has_null = col.null_count() > 0
+    var offset = 1 if has_null else 0
+    var codes = Array[DType.uint32](n)
+
+    # Slices land on chunk boundaries so that every worker's inner loop is the
+    # same shape as the serial one's, with a short chunk only at the very end.
+    var chunks = (n + CHUNK_ROWS - 1) // CHUNK_ROWS
+    var bounds = List[Int](capacity=workers + 1)
+    for w in range(workers):
+        bounds.append(chunks * w // workers * CHUNK_ROWS)
+    bounds.append(n)
+
+    var tables = List[HashTable](capacity=workers)
+    var founds = List[List[Int]](capacity=workers)
+    for _ in range(workers):
+        tables.append(HashTable(0, seed))
+        founds.append(List[Int]())
+
+    def one(w: Int) raises {mut tables, mut founds, mut codes, imm}:
+        var start = bounds[w]
+        var stop = bounds[w + 1]
+        var hashes = Buffer(CHUNK_ROWS * 8)
+        var base = start
+        while base < stop:
+            var count = min(CHUNK_ROWS, stop - base)
+            hash_chunk(col, base, count, seed, hashes)
+            tables[w].build(
+                hashes,
+                col.data.validity,
+                has_null,
+                base,
+                base - start,
+                count,
+                stop - start,
+                0,
+                codes,
+                founds[w],
+            )
+            base += count
+
+    parallel_for(one, workers)
+
+    # Where each worker's block of local ordinals starts once they are laid end
+    # to end. This is the number the remap adds to a local ordinal to find its
+    # entry in the map.
+    var starts = List[Int](capacity=workers + 1)
+    var total = 0
+    for w in range(workers):
+        starts.append(total)
+        total += len(tables[w])
+    starts.append(total)
+
+    var found = Buffer(total * 8)
+
+    def dump(w: Int) raises {mut found, imm}:
+        tables[w].keys_by_ordinal(found, starts[w])
+
+    parallel_for(dump, workers)
+
+    var keys = List[Scalar[dt]]()
+    var null_group = -1
+    if has_null:
+        null_group = 0
+        keys.append(Scalar[dt](0))
+
+    var values = col.unsafe_ptr()
+    var hashed = found.bitcast[DType.uint64]()
+    var map = Buffer(overwritten=total * 4)
+    var mapped = map.bitcast[DType.uint32]()
+
+    # Sized for every local group rather than for the distinct ones, because the
+    # distinct ones are not known until this loop has run. It over-reserves by at
+    # most the worker count, and only on a column whose groups are few enough
+    # that the table is small either way.
+    var merged = HashTable(total, seed)
+    for w in range(workers):
+        var at = starts[w]
+        for k in range(len(tables[w])):
+            var ordinal = merged.insert(
+                hashed.unsafe_offset(at + k).unsafe_load()
+            )
+            mapped.unsafe_offset(at + k).unsafe_write(UInt32(ordinal + offset))
+            if ordinal + offset == len(keys):
+                keys.append(values.unsafe_offset(founds[w][k]).unsafe_load())
+
+    def remap(w: Int) raises {mut codes, imm}:
+        var out = codes.unsafe_ptr()
+        var at = starts[w]
+        for i in range(bounds[w], bounds[w + 1]):
+            if has_null and not col.is_valid(i):
+                out.unsafe_offset(i).unsafe_write(UInt32(0))
+                continue
+            var local = Int(out.unsafe_offset(i).unsafe_load())
+            out.unsafe_offset(i).unsafe_write(
+                mapped.unsafe_offset(at + local).unsafe_load()
+            )
+
+    parallel_for(remap, workers)
 
     return _finish[dt](codes^, keys^, null_group)
 
@@ -498,7 +781,7 @@ def factorize_strings(
         var count = min(CHUNK_ROWS, n - base)
         hash_strings_chunk(col, base, count, seed, hashes)
         table.build_strings(
-            hashes, col, has_null, base, count, n, offset, codes, firsts
+            hashes, col, has_null, base, base, count, n, offset, codes, firsts
         )
         base += count
 
