@@ -30,8 +30,13 @@ from firepanda.hash import (
     mix,
     radix_partition,
 )
+from firepanda.hash.factorize import (
+    _factorize_hashed_parallel,
+    _factorize_hashed_serial,
+)
 from firepanda.hash.table import (
     SIZING_EARLY,
+    SIZING_LATE,
     next_power_of_two,
     project_groups,
 )
@@ -96,6 +101,194 @@ def same_codes[dt: DType](col: Array[dt], what: String) raises:
             assert_equal(
                 at, got.null_group, String(what, ": null not in null group")
             )
+
+
+def same_routes[dt: DType](col: Array[dt], workers: Int, what: String) raises:
+    """Asserts the parallel hashed route lands exactly on the serial one.
+
+    Every ordinal, every key and the null group, not merely the same partition
+    of the rows. The parallel route is a substitution for the serial one rather
+    than an equivalent-up-to-renumbering version of it, and a test that only
+    checked which rows ended up together would pass on a route that had quietly
+    lost first-appearance order.
+
+    The worker count is passed in rather than taken from the machine so that the
+    test means the same thing on a runner with one core as on one with thirty
+    two, and so that a slice count that does not divide the column is covered.
+
+    The comparisons find the first disagreement and then assert once, rather
+    than asserting per row. Building a failure message for every one of a
+    hundred thousand rows that were about to pass costs more than the
+    factorization being tested.
+
+    Args:
+        col: The column.
+        workers: How many slices to cut it into.
+        what: A label for the failure message.
+
+    Parameters:
+        dt: The dtype.
+
+    Raises:
+        If the two routes disagree anywhere.
+    """
+    var one = _factorize_hashed_serial[dt](col, DEFAULT_SEED)
+    var many = _factorize_hashed_parallel[dt](col, DEFAULT_SEED, workers)
+
+    assert_equal(many.count(), one.count(), String(what, ": group count"))
+    assert_equal(many.null_group, one.null_group, String(what, ": null group"))
+
+    var row = -1
+    for i in range(len(col)):
+        if many.codes[i] != one.codes[i]:
+            row = i
+            break
+    assert_equal(row, -1, String(what, ": ordinals differ at row ", row))
+
+    var key = -1
+    for g in range(one.count()):
+        if many.keys.is_valid(g) != one.keys.is_valid(g):
+            key = g
+            break
+        if one.keys.is_valid(g) and key_bits(many.keys[g]) != key_bits(
+            one.keys[g]
+        ):
+            key = g
+            break
+    assert_equal(key, -1, String(what, ": keys differ at group ", key))
+
+
+def hashed_column(n: Int, groups: Int) -> Array[DType.int64]:
+    """Builds a column the direct route would refuse, with a known group count.
+
+    The values are spread past `DIRECT_LIMIT` so that `factorize` would send this
+    to the hash table, and they are strided so that every group appears in every
+    slice a parallel build could cut.
+
+    Args:
+        n: The number of rows.
+        groups: The number of distinct values.
+
+    Returns:
+        The column, with no nulls.
+    """
+    var col = Array[DType.int64](n)
+    for i in range(n):
+        col[i] = Int64((i * 37) % groups) * Int64(DIRECT_LIMIT + 17)
+    return col^
+
+
+def test_the_parallel_route_agrees_on_a_low_cardinality_column() raises:
+    same_routes(hashed_column(8192, 100), 4, "parallel 100 groups")
+
+
+def test_the_parallel_route_agrees_on_a_high_cardinality_column() raises:
+    same_routes(hashed_column(8192, 6000), 8, "parallel 10k groups")
+
+
+def test_the_parallel_route_agrees_when_every_row_is_its_own_group() raises:
+    var n = 8192
+    var col = Array[DType.int64](n)
+    for i in range(n):
+        col[i] = Int64(i) * Int64(DIRECT_LIMIT + 17)
+    same_routes(col, 6, "parallel all distinct")
+
+
+def test_the_parallel_route_agrees_on_an_uneven_slice_count() raises:
+    # Twenty four thousand rows into seven slices, so no slice boundary lands
+    # where it would have if the column had been cut evenly.
+    same_routes(hashed_column(8192, 3000), 7, "parallel 7 workers")
+
+
+def test_the_parallel_route_on_one_worker_is_the_serial_route() raises:
+    same_routes(hashed_column(8192, 500), 1, "parallel 1 worker")
+
+
+def test_the_parallel_route_agrees_with_nulls_scattered_through_it() raises:
+    var n = 8192
+    var col = hashed_column(n, 2000)
+    for i in range(n):
+        if i % 11 == 0:
+            col.set_null(i)
+    same_routes(col, 5, "parallel with nulls")
+
+    var got = _factorize_hashed_parallel(col, DEFAULT_SEED, 5)
+    assert_equal(got.null_group, 0)
+    assert_false(got.keys.is_valid(0))
+
+
+def test_the_parallel_route_agrees_when_every_row_is_null() raises:
+    var n = 8192
+    var col = hashed_column(n, 64)
+    for i in range(n):
+        col.set_null(i)
+    same_routes(col, 4, "parallel all null")
+
+    var got = _factorize_hashed_parallel(col, DEFAULT_SEED, 4)
+    assert_equal(got.count(), 1)
+    var bad = -1
+    for i in range(n):
+        if got.codes[i] != 0:
+            bad = i
+            break
+    assert_equal(bad, -1, String("null row not in group zero at ", bad))
+
+
+def test_the_parallel_route_keeps_first_appearance_order_across_slices() raises:
+    # Each quarter of the column introduces one group of its own, in order, so
+    # the ordinals only come out right if the merge walks the slices in order.
+    var n = 8192
+    var col = Array[DType.int64](n)
+    var step = Int64(DIRECT_LIMIT + 17)
+    for i in range(n):
+        col[i] = Int64(i * 4 // n) * step
+
+    var got = _factorize_hashed_parallel(col, DEFAULT_SEED, 4)
+    assert_equal(got.count(), 4)
+    var bad = -1
+    for i in range(n):
+        if got.codes[i] != UInt32(i * 4 // n):
+            bad = i
+            break
+    assert_equal(bad, -1, String("out of first appearance order at ", bad))
+    for g in range(4):
+        assert_equal(got.keys[g], Int64(g) * step)
+
+
+def test_the_parallel_route_sizes_a_slice_past_the_late_checkpoint() raises:
+    # Two slices, each longer than `SIZING_LATE`, so each worker's own row count
+    # crosses both sizing checkpoints. A worker that counted rows from the start
+    # of the column rather than from the start of its own slice would size the
+    # second slice off the first row it ever saw, or not size it at all.
+    #
+    # The expected answer is written out rather than taken from the serial
+    # route, because the column is long enough that running it twice is most of
+    # what this file costs. Three hundred groups keeps the tables small so the
+    # row count is what is being paid for.
+    var n = 2 * (SIZING_LATE + 2048)
+    var col = Array[DType.int64](n)
+    for i in range(n):
+        col[i] = Int64(i % 300) * Int64(DIRECT_LIMIT + 17)
+
+    var got = _factorize_hashed_parallel(col, DEFAULT_SEED, 2)
+    assert_equal(got.count(), 300)
+    var bad = -1
+    for i in range(n):
+        if got.codes[i] != UInt32(i % 300):
+            bad = i
+            break
+    assert_equal(bad, -1, String("slice sizing changed the answer at ", bad))
+
+
+def test_the_parallel_route_agrees_on_floats() raises:
+    var n = 8192
+    var nan = Float64(0.0) / Float64(0.0)
+    var col = Array[DType.float64](n)
+    for i in range(n):
+        col[i] = Float64((i * 37) % 700) * Float64(0.5)
+    for i in range(0, n, 13):
+        col[i] = nan
+    same_routes(col, 4, "parallel floats")
 
 
 def test_key_bits_widens_signed_values_consistently() raises:

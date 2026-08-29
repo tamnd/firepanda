@@ -258,6 +258,7 @@ struct HashTable(Movable, Sized):
         validity: Bitmap,
         has_null: Bool,
         base: Int,
+        rank: Int,
         count: Int,
         rows: Int,
         offset: Int,
@@ -285,6 +286,13 @@ struct HashTable(Movable, Sized):
         single call would. Call the chunks in row order and pass the same `rows`
         every time, which is what building a column in pieces means.
 
+        The row a chunk starts at and the number of rows this table has already
+        seen are two arguments rather than one because a parallel build gives a
+        worker a slice out of the middle of a column. Its rows keep their
+        absolute numbers, because that is what the validity bitmap and the output
+        are indexed by, while its table is sized against the slice it was given
+        rather than against a column it will only ever see a fraction of.
+
         The prefetch is issued from here for the same reason. It only pays on a
         table too large for cache, and on a small one it is not free, but a
         version of this loop with the prefetch removed measured no faster on
@@ -301,9 +309,11 @@ struct HashTable(Movable, Sized):
                 only when `has_null`.
             has_null: Whether the column has any nulls at all.
             base: The absolute row index this chunk starts at.
+            rank: How many rows this table has already been given. Equal to
+                `base` for a column built front to back on one thread.
             count: How many rows are in this chunk.
-            rows: The length of the whole column, which the sizing schedule needs
-                and which does not change between chunks.
+            rows: How many rows this table will be given in total, which the
+                sizing schedule needs and which does not change between chunks.
             offset: Added to every ordinal written to `codes`. This is how the
                 caller reserves low ordinals for groups the table knows nothing
                 about, which right now means the null group.
@@ -331,8 +341,9 @@ struct HashTable(Movable, Sized):
 
         for j in range(count):
             var i = base + j
+            var seen = rank + j
 
-            if i == mark:
+            if seen == mark:
                 if stage == 0:
                     half = found
                     mark = SIZING_EARLY
@@ -341,7 +352,7 @@ struct HashTable(Movable, Sized):
                     self._count = found
                     self._reserve(
                         min(
-                            project_groups(found, half, i, rows),
+                            project_groups(found, half, seen, rows),
                             found * EARLY_JUMP,
                         )
                     )
@@ -358,7 +369,7 @@ struct HashTable(Movable, Sized):
                     stage = 3
                 else:
                     self._count = found
-                    self._reserve(project_groups(found, half, i, rows))
+                    self._reserve(project_groups(found, half, seen, rows))
                     slots = self._slots.bitcast[DType.uint64]()
                     mask = self._mask
                     capacity = self._capacity
@@ -415,6 +426,7 @@ struct HashTable(Movable, Sized):
         col: StringArray,
         has_null: Bool,
         base: Int,
+        rank: Int,
         count: Int,
         rows: Int,
         offset: Int,
@@ -452,8 +464,9 @@ struct HashTable(Movable, Sized):
             col: The column, needed for the comparison. Indexed by absolute row.
             has_null: Whether the column has any nulls at all.
             base: The absolute row index this chunk starts at.
+            rank: How many rows this table has already been given.
             count: How many rows are in this chunk.
-            rows: The length of the whole column.
+            rows: How many rows this table will be given in total.
             offset: Added to every ordinal written to `codes`.
             codes: Where the per-row ordinals go, indexed by absolute row.
             firsts: Appended with the absolute row index of every key that was
@@ -475,8 +488,9 @@ struct HashTable(Movable, Sized):
 
         for j in range(count):
             var i = base + j
+            var seen = rank + j
 
-            if i == mark:
+            if seen == mark:
                 if stage == 0:
                     half = found
                     mark = SIZING_EARLY
@@ -485,7 +499,7 @@ struct HashTable(Movable, Sized):
                     self._count = found
                     self._reserve(
                         min(
-                            project_groups(found, half, i, rows),
+                            project_groups(found, half, seen, rows),
                             found * EARLY_JUMP,
                         )
                     )
@@ -502,7 +516,7 @@ struct HashTable(Movable, Sized):
                     stage = 3
                 else:
                     self._count = found
-                    self._reserve(project_groups(found, half, i, rows))
+                    self._reserve(project_groups(found, half, seen, rows))
                     slots = self._slots.bitcast[DType.uint64]()
                     mask = self._mask
                     capacity = self._capacity
@@ -553,6 +567,33 @@ struct HashTable(Movable, Sized):
         self._stage = stage
         self._half = half
         self._mark = mark
+
+    def keys_by_ordinal(self, mut out: Buffer, at: Int):
+        """Writes every key this table holds out, indexed by its ordinal.
+
+        A parallel build ends with one table per worker and a merge that has to
+        put their keys into a single table. The keys are already here, as the
+        hashes that are what this table calls a key, so the merge can probe
+        without hashing a single row again. All it needs is them in ordinal
+        order, which the slots are not in, and this is the pass that fixes that.
+        It costs a scan of the slots, which is a scan of twice the group count,
+        and it replaces hashing the whole group count over again.
+
+        Args:
+            out: Where the hashes go. Must hold `at + len(self)` of them.
+            at: The index the first ordinal writes to, so that several tables can
+                fill one buffer back to back.
+        """
+        var slots = self._slots.bitcast[DType.uint64]()
+        var dest = out.bitcast[DType.uint64]()
+        for slot in range(self._capacity):
+            var word = slot * SLOT_WORDS
+            var ordinal = slots.unsafe_offset(word + 1).unsafe_load()
+            if ordinal == 0:
+                continue
+            dest.unsafe_offset(at + Int(ordinal) - 1).unsafe_write(
+                slots.unsafe_offset(word).unsafe_load()
+            )
 
     def _reserve(mut self, groups: Int):
         """Grows the table to hold a group count without further growth.

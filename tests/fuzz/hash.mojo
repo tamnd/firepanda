@@ -23,6 +23,12 @@ The float cases are separate and deliberate. NaN and negative zero are the two
 values where the right answer disagrees with `==`, and a generator that only
 draws ordinary floats will never produce either.
 
+The parallel case is separate for the opposite reason: it needs a column long
+enough to be cut into slices, which is thirty times longer than anything else
+here draws, and it compares the two hashed routes against each other rather than
+against the twin because what it is looking for is a merge that renumbers
+correctly-partitioned rows in the wrong order.
+
 Usage:
     mojo run -I . tests/fuzz/hash.mojo [--cases=N] [--seed=N] [--max-total-time=SECONDS]
 """
@@ -41,6 +47,10 @@ from firepanda.hash import (
     key_bits,
     mix,
     radix_partition,
+)
+from firepanda.hash.factorize import (
+    _factorize_hashed_parallel,
+    _factorize_hashed_serial,
 )
 from firepanda.testing.rng import Rng
 
@@ -63,6 +73,16 @@ case that grows the table the most times."""
 comptime SPREAD_BOUNDARY = 2
 """Values in a range straddling `DIRECT_LIMIT`, so that neighbouring cases take
 different routes for reasons the generator does not control."""
+
+comptime PARALLEL_LENGTH = 9_000
+"""Rows in the longest column the parallel check draws.
+
+The slices a parallel build cuts land on chunk boundaries, so a column shorter
+than a chunk cannot be cut into more than one piece and a check on one would be
+checking nothing. Nine thousand rows is eight chunks, which is enough slices to
+have a merge worth being wrong about, and still small enough that a case runs in
+about a millisecond.
+"""
 
 comptime SPREAD_HUGE = 3
 """Values large enough that the direct route declines on the range check rather
@@ -279,6 +299,132 @@ def random_floats(
     return out^
 
 
+def parallel_column(
+    mut rng: Rng, length: Int, nulls: Bool
+) -> Array[DType.int64]:
+    """Builds a column for the parallel check.
+
+    Mostly the ordinary generator, and one case in four a column where every row
+    is its own group. That is the shape where the merge does the most work and
+    where a worker's table grows the most times, and the ordinary generator
+    never draws it because its group count is capped well below the lengths this
+    check uses.
+
+    Args:
+        rng: The generator.
+        length: The number of rows.
+        nulls: Whether to punch nulls into it.
+
+    Returns:
+        The column.
+    """
+    if rng.next_below(4) != 0:
+        return random_column[DType.int64](
+            rng, length, rng.next_below(4), nulls
+        )
+
+    var out = Array[DType.int64](length)
+    for i in range(length):
+        out[i] = Int64(i) * Int64(DIRECT_LIMIT + 17)
+    if nulls:
+        for i in range(length):
+            if rng.next_below(5) == 0:
+                out.set_null(i)
+    return out^
+
+
+def check_parallel(mut rng: Rng, step: Int, seed: UInt64) raises:
+    """Checks that the parallel hashed route lands on the serial one's answer.
+
+    Everything else in this file works on columns of a few hundred rows, which
+    is the right size for finding a table that loses a key and the wrong size
+    for finding a merge that renumbers wrongly, because a column that short is
+    never cut into more than one slice. So this case draws a longer one and
+    compares the two routes against each other rather than against the twin.
+
+    The failure it is looking for does not look like a crash. A merge that
+    walked the workers out of order, or that numbered a worker's groups by
+    anything other than when it first saw them, still partitions the rows
+    correctly and still hands back dense ordinals. What it loses is
+    first-appearance order, and only the serial answer says what that is.
+
+    Args:
+        rng: The generator.
+        step: The case number.
+        seed: The generator seed, for the message.
+
+    Raises:
+        If the two routes disagree.
+    """
+    var length = rng.next_below(PARALLEL_LENGTH)
+    var workers = rng.next_range(1, 17)
+    var run = rng.next_u64()
+    var nulls = rng.next_bool()
+
+    var col = parallel_column(rng, length, nulls)
+
+    var one = _factorize_hashed_serial(col, run)
+    var many = _factorize_hashed_parallel(col, run, workers)
+
+    if many.count() != one.count():
+        fail(
+            step,
+            seed,
+            "parallel",
+            String(
+                workers,
+                " workers found ",
+                many.count(),
+                " groups, serial found ",
+                one.count(),
+            ),
+        )
+    if many.null_group != one.null_group:
+        fail(
+            step,
+            seed,
+            "parallel",
+            String("null group ", many.null_group, " serial ", one.null_group),
+        )
+
+    for i in range(length):
+        if many.codes[i] != one.codes[i]:
+            fail(
+                step,
+                seed,
+                "parallel",
+                String(
+                    workers,
+                    " workers, row ",
+                    i,
+                    " code ",
+                    many.codes[i],
+                    " serial ",
+                    one.codes[i],
+                ),
+            )
+
+    for g in range(one.count()):
+        if many.keys.is_valid(g) != one.keys.is_valid(g):
+            fail(step, seed, "parallel", String("key ", g, " validity"))
+        if not one.keys.is_valid(g):
+            continue
+        if key_bits(many.keys[g]) != key_bits(one.keys[g]):
+            fail(
+                step,
+                seed,
+                "parallel",
+                String(
+                    "key ",
+                    g,
+                    " is ",
+                    many.keys[g],
+                    " serial ",
+                    one.keys[g],
+                ),
+            )
+
+
 def check_partition(mut rng: Rng, step: Int, seed: UInt64) raises:
     """Checks that a partitioning is a permutation and respects its own offsets.
 
@@ -433,7 +579,7 @@ def main() raises:
 
         # Rotating rather than drawing keeps the mix even over a short run, the
         # same reason the kernel fuzzer rotates.
-        var which = step % 8
+        var which = step % 9
         if which == 0:
             run_one[DType.int8](rng, step, options.seed)
         elif which == 1:
@@ -450,8 +596,10 @@ def main() raises:
             check(col, rng.next_u64(), step, options.seed)
         elif which == 6:
             check_table(rng, step, options.seed)
-        else:
+        elif which == 7:
             check_partition(rng, step, options.seed)
+        else:
+            check_parallel(rng, step, options.seed)
 
         applied += 1
 

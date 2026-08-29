@@ -35,13 +35,46 @@ The size of each gain is the fraction of the work the bounds were. `all_distinct
 
 What this does not do is win the milestone's group by criterion. Against the language's own `Dict` at ten million rows on this machine, `factorize` is now 43.1 ms against 35.9 at a hundred groups and 50.0 against 41.4 at ten thousand, so `Dict` is still ahead at low and medium cardinality, and 299.6 against 779.0 at all distinct, where the table is ahead by two and a half times. Removing the wasted passes closed part of the gap and did not close it. What is left is in the probe and the build, not in the decision.
 
+The hashed `factorize` runs on every core.
+
+A group by spends most of its time turning a key column into ordinals, and until now that happened on one thread while every engine we are measured against used all of them. The column is now cut into one contiguous slice per worker, each worker builds a private table over its own slice, and a sequential merge afterwards renumbers what they all found into one set of ordinals.
+
+Cutting a column into private tables is easy and getting first-appearance order out the other side is not, because that order is what pandas returns and what every test here compares against. It falls out of two facts. The slices are contiguous and taken in order, so a group's first row is in the earliest slice that contains the group at all. And within a slice the local ordinals are already in first-appearance order, because that is what a build produces. So the merge walking workers in order, and within a worker walking local ordinals in order, visits every group's first row before any later one, and assigning global ordinals in that visiting order gives exactly the sequence one thread would have produced.
+
+The merge costs one probe per group per worker and it is the one part that does not parallelize, so the route is only worth taking when a column's groups are far fewer than a slice is long. A column where every row is its own key would spend the merge rebuilding the whole column serially, having already built it once in parallel, and that measured as a clear loss before this was guarded. So a sample of the column is built first, at most sixty five thousand rows, and the discovery rate over it is extrapolated by the same `project_groups` the table already sizes itself with. A projection of more than half a slice sends the column to the serial route.
+
+Nothing is hashed twice. The workers' tables already hold the hashes, which is what this table calls a key, and `HashTable.keys_by_ordinal` scans the slots to write them out in ordinal order so the merge can probe with them directly. That scan is twice the group count and it replaces hashing the group count over again.
+
+Measured against a build of the previous commit, the two run alternately in one session, five reps each, four rounds, ten million rows on an i9-13900K with thirty two logical cores. Medians. The machine was busy, so three untouched benchmarks are carried as controls.
+
+| benchmark | before | after | ratio |
+| --- | --- | --- | --- |
+| factorize_100 | 45.5 ms | 8.2 ms | 0.18 |
+| factorize_nulls | 46.1 ms | 14.1 ms | 0.31 |
+| factorize_10k | 41.5 ms | 14.1 ms | 0.34 |
+| factorize_all_distinct | 298.7 ms | 291.9 ms | 0.98 |
+| dict_10k (control) | 45.4 ms | 42.0 ms | 0.93 |
+| dict_100 (control) | 36.2 ms | 36.6 ms | 1.01 |
+| table_probe (control) | 176.3 ms | 219.3 ms | 1.24 |
+
+The three shapes a group by actually meets get between three and five and a half times faster, and `all_distinct` is left alone by the guard as intended. The controls are the honest part of this table: two of them sit within seven percent of where they started and the third moved twenty four percent against us on code neither build touched, which is the size of the noise on this machine on this day and is the reason nothing in the five to ten percent range is claimed here as a result either way.
+
+This clears the milestone's group by criterion. Against the language's own `Dict` at ten million rows, `factorize` is now 8.2 ms against 36.2 at a hundred groups, 14.1 against 45.4 at ten thousand, and 291.9 against 739.5 at all distinct, so the table is ahead by four and a half, three, and two and a half times respectively. Before this it was behind at low and medium cardinality.
+
+Strings are still on one thread. `build_strings` takes the new argument the parallel route needs and nothing calls it that way yet, which is the next piece of work, because four of the ten db-benchmark group by queries key on text.
+
 ### Changed
 
 - `factorize` gets its route from `_direct_plan`, which fuses the minimum and the maximum into one scan and returns as soon as the answer is settled. `_direct_span` and the `min_of` and `max_of` pair it called are gone.
+- `HashTable.build` and `HashTable.build_strings` take a `rank` alongside `base`. `base` stays the absolute row a chunk starts at, which is what the validity bitmap and the output are indexed by, and `rank` is how many rows this table has already seen, which is what the sizing schedule reads. They are the same number for a column built front to back on one thread, which is every existing caller.
+- `factorize` and `_factorize_hashed` are `raises`, because the parallel route calls `parallel_for`.
 
 ### Added
 
 - `DirectPlan`, the result of that decision, carrying the number of slots a direct table would need and the value that indexes slot zero.
+- `_factorize_hashed_parallel`, the multi threaded hashed route, and `_factorize_hashed_serial`, the single threaded one it is chosen against.
+- `_projected_groups`, which builds a sample of a column and extrapolates its group count, so the choice between those two can be made before either has run.
+- `HashTable.keys_by_ordinal`, which writes every key a table holds into a buffer indexed by its ordinal.
 
 ## [0.6.17] - 2026-08-29
 
