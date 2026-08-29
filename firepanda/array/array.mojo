@@ -37,6 +37,27 @@ struct Array[dt: DType](Copyable, Movable, Sized):
             byte_size=length * size_of[Self.dt](), length=length
         )
 
+    def __init__(out self, *, overwritten: Int):
+        """Constructs an array whose values the caller promises to write.
+
+        The ordinary constructor zeroes the values buffer, which for a caller
+        that writes every element, including a zero where a value is missing, is
+        a whole pass over the column it does not need. On ten million int64s
+        that pass is five milliseconds and it runs before any of the work that
+        needs it can be handed out.
+
+        Every element from zero to `overwritten` must be written before it is
+        read. The validity bitmap is built the usual way and still says present
+        everywhere, so a caller that means a null has to say so.
+
+        Args:
+            overwritten: The number of values, all of which will be written.
+        """
+        self.data = ColumnData(
+            overwritten_bytes=overwritten * size_of[Self.dt](),
+            length=overwritten,
+        )
+
     def __init__(out self, var data: ColumnData):
         """Constructs an array over storage the caller already built.
 

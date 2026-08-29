@@ -220,6 +220,25 @@ struct TextFill(Movable):
 
 
 @fieldwise_init
+struct TileState(ImplicitlyCopyable, Movable):
+    """One fixed width column's running state across the tiles of one block.
+
+    The sweep leaves a column to come back to it a tile of rows later, so this
+    is what it has to put down and pick up again. It is three registers for the
+    length of a tile and a list entry in between.
+    """
+
+    var ok: Bool
+    """Whether every value so far parsed as the type asked for."""
+
+    var bad: Int
+    """The file row of the first value that did not, when `ok` is false."""
+
+    var saw: Bool
+    """Whether any row so far held a value at all."""
+
+
+@fieldwise_init
 struct FillReport(ImplicitlyCopyable, Movable):
     """What every block together made of one column, apart from the values.
 
@@ -816,6 +835,11 @@ def sweep_fixed(
     A string column is not in here. It cannot be, since a block's payload size
     is not known until it has been read, so those are still done one at a time.
 
+    Every value slot is written, including a zero where the field is missing and
+    where it did not parse, so the columns are allocated unzeroed. What that
+    removes is a memset of the whole column, five milliseconds on ten million
+    int64s, run before the sweep can start rather than inside it.
+
     Args:
         data: The buffer the scans point into.
         scans: One scan per block.
@@ -850,9 +874,9 @@ def sweep_fixed(
         var file_row = before + header
         var base = b * count
         var valids = List[Bitmap](capacity=count)
-        var ok = List[Bool](length=count, fill=True)
-        var bad = List[Int](length=count, fill=0)
-        var saw = List[Bool](length=count, fill=False)
+        var states = List[TileState](
+            length=count, fill=TileState(True, 0, False)
+        )
         for _ in range(count):
             valids.append(Bitmap(rows))
 
@@ -860,55 +884,134 @@ def sweep_fixed(
             var stop = start + tile
             if stop > rows:
                 stop = rows
+            # The group a column is in is settled before the rows are walked, so
+            # the walk is a straight loop with its destination in a register
+            # rather than one asking on every value which of three kinds of
+            # value it is about to parse.
             for k in range(count):
                 var column = fixed[k]
-                ref valid = valids[k]
-                var column_ok = ok[k]
-                var column_bad = bad[k]
-                var column_saw = saw[k]
-                for i in range(start, stop):
-                    var bytes = field_bytes(data, scan.at(first + i, column))
-                    if is_missing(bytes):
-                        # A null is a zero in the values buffer, and the buffer
-                        # arrived zeroed, so marking the bit is the whole of it.
-                        valid.set(i, False)
-                        continue
-                    column_saw = True
-                    var fits: Bool
-                    if k < n_int:
-                        var parsed = parse_int[DType.int64](bytes)
-                        fits = parsed.ok
-                        if fits:
-                            ints[k].unsafe_offset(before + i)[] = parsed.value
-                    elif k < n_int + n_float:
-                        var parsed = parse_float[DType.float64](bytes)
-                        fits = parsed.ok
-                        if fits:
-                            floats[k - n_int].unsafe_offset(
-                                before + i
-                            )[] = parsed.value
-                    else:
-                        var parsed = parse_bool(bytes)
-                        fits = parsed.ok
-                        if fits:
-                            bools[k - n_int - n_float].unsafe_offset(
-                                before + i
-                            )[] = parsed.value
-                    if not fits and column_ok:
-                        # The column is wrong for the file and every value in it
-                        # will be read again, but the other columns of this
-                        # block are not, so this cannot stop at the first bad
-                        # value the way one column at a time could.
-                        column_ok = False
-                        column_bad = file_row + i
-                ok[k] = column_ok
-                bad[k] = column_bad
-                saw[k] = column_saw
+                if k < n_int:
+                    fill_tile[DType.int64, _INT](
+                        data,
+                        scan,
+                        column,
+                        first,
+                        start,
+                        stop,
+                        file_row,
+                        ints[k].unsafe_offset(before),
+                        valids[k],
+                        states[k],
+                    )
+                elif k < n_int + n_float:
+                    fill_tile[DType.float64, _FLOAT](
+                        data,
+                        scan,
+                        column,
+                        first,
+                        start,
+                        stop,
+                        file_row,
+                        floats[k - n_int].unsafe_offset(before),
+                        valids[k],
+                        states[k],
+                    )
+                else:
+                    fill_tile[DType.bool, _BOOL](
+                        data,
+                        scan,
+                        column,
+                        first,
+                        start,
+                        stop,
+                        file_row,
+                        bools[k - n_int - n_float].unsafe_offset(before),
+                        valids[k],
+                        states[k],
+                    )
 
         for k in range(count):
-            parts[base + k] = BlockFill(valids.pop(0), ok[k], bad[k], saw[k])
+            parts[base + k] = BlockFill(
+                valids.pop(0), states[k].ok, states[k].bad, states[k].saw
+            )
 
     parallel_for(one, blocks)
+
+
+def fill_tile[
+    dt: DType, rung: Int
+](
+    data: Span[UInt8, _],
+    scan: Scan,
+    column: Int,
+    first: Int,
+    start: Int,
+    stop: Int,
+    file_row: Int,
+    values: Pointer[Scalar[dt], MutUntrackedOrigin],
+    mut valid: Bitmap,
+    mut state: TileState,
+) raises:
+    """Parses one tile of rows of one fixed width column.
+
+    Args:
+        data: The buffer the scan points into.
+        scan: The scanned fields.
+        column: Which column to read.
+        first: The block's first value row within `scan`.
+        start: The first row of the tile, counted from the block's first.
+        stop: One past the tile's last row.
+        file_row: The row number in the whole file of the block's first row.
+        values: The block's first value slot, so the tile indexes it by the same
+            row number it indexes the bitmap by.
+        valid: The block's validity for this column, cleared where a field is
+            missing.
+        state: The column's running state, carried across the block's tiles.
+
+    Raises:
+        Error: Never. A value that does not fit is recorded in `state`, because
+            whether it is an error at all is the caller's question. The
+            signature is inherited from the sweep.
+
+    Parameters:
+        dt: The dtype to read as.
+        rung: Which of `_BOOL`, `_INT` and `_FLOAT` the values are parsed as.
+    """
+    for i in range(start, stop):
+        var bytes = field_bytes(data, scan.at(first + i, column))
+        if is_missing(bytes):
+            # A null is a zero in the values buffer and nothing else put one
+            # there, since the column was allocated unzeroed.
+            comptime if rung == _BOOL:
+                values.unsafe_offset(i)[] = rebind[Scalar[dt]](False)
+            else:
+                values.unsafe_offset(i)[] = Scalar[dt](0)
+            valid.set(i, False)
+            continue
+        state.saw = True
+
+        # A failed parse leaves zero in `parsed`, so the store happens either
+        # way and the branch is only about the report.
+        var fits: Bool
+        comptime if rung == _BOOL:
+            var parsed = parse_bool(bytes)
+            values.unsafe_offset(i)[] = rebind[Scalar[dt]](parsed.value)
+            fits = parsed.ok
+        elif rung == _INT:
+            var parsed = parse_int[dt](bytes)
+            values.unsafe_offset(i)[] = parsed.value
+            fits = parsed.ok
+        else:
+            var parsed = parse_float[dt](bytes)
+            values.unsafe_offset(i)[] = parsed.value
+            fits = parsed.ok
+        if not fits and state.ok:
+            # The column is wrong for the file and every value in it will be
+            # read again, but the other columns of this block are not, so this
+            # cannot stop at the first bad value the way one column at a time
+            # could.
+            state.ok = False
+            state.bad = file_row + i
 
 
 def build_blocks(
@@ -981,17 +1084,17 @@ def build_blocks(
         if starts[column] == _INT:
             place[column] = len(fixed)
             fixed.append(column)
-            ints.append(Array[DType.int64](rows))
+            ints.append(Array[DType.int64](overwritten=rows))
     for column in range(len(schema)):
         if starts[column] == _FLOAT:
             place[column] = len(fixed)
             fixed.append(column)
-            floats.append(Array[DType.float64](rows))
+            floats.append(Array[DType.float64](overwritten=rows))
     for column in range(len(schema)):
         if starts[column] == _BOOL:
             place[column] = len(fixed)
             fixed.append(column)
-            bools.append(Array[DType.bool](rows))
+            bools.append(Array[DType.bool](overwritten=rows))
 
     var count = len(fixed)
     # Placeholders. Every entry is overwritten by the sweep, which builds its

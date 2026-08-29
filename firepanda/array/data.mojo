@@ -49,6 +49,20 @@ struct ColumnData(Copyable, Movable):
         self.validity = Bitmap(length)
         self.length = length
 
+    def __init__(out self, *, overwritten_bytes: Int, length: Int):
+        """Allocates unzeroed storage with every value marked present.
+
+        See `Buffer.__init__(overwritten=)` for what the caller is promising.
+
+        Args:
+            overwritten_bytes: The size of the values buffer in bytes, every one
+                of which the caller will write before reading it.
+            length: The number of values.
+        """
+        self.values = Buffer(overwritten=overwritten_bytes)
+        self.validity = Bitmap(length)
+        self.length = length
+
     def __init__(out self, *, copy: Self):
         """Deep-copies storage.
 

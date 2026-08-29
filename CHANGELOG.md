@@ -8,6 +8,36 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+The fixed width columns are no longer zeroed before they are filled. The 0.6.16 entry ended with the fill being the larger half of a read for the first time and the numeric columns being where to look, so this is the measurement of that. A single integer column of ten million rows read in 27 ms, and a file of one digit integers read in the same time as a file of seven digit ones, which says the digits are not what is being paid for. What is being paid for is the allocation: `Array[int64](10_000_000)` takes 5.2 ms on its own, all of it a memset, and it runs on one thread before the parallel fill it is for can be handed out.
+
+Nothing needs it. The sweep visits every row of every fixed width column, so the only slot it was leaving to the memset was one holding a missing or unparseable field, and writing a zero there is one store on a path that was already clearing a validity bit. So the columns are allocated with the `Buffer(overwritten=)` the string fill has used since 0.6.15, and the sweep writes the zero itself.
+
+The rest of the entry is the sweep's inner loop, which the change made worth rewriting. It asked on every value which of three kinds of value it was about to parse, though the answer is settled per column before the rows are walked, and it reached the destination through a list index per value. Both are now hoisted into a `fill_tile` parameterized on the dtype, so a tile of rows is a straight loop with its destination in a register. A failed parse also stores now rather than branching around the store, since the parse leaves a zero to store either way.
+
+Measured against a build of the previous release, the two run alternately in one session, five reps each, three rounds, on an i9-13900K, warm cache, reading off a mapping. Medians.
+
+| file | fixed width columns | fill before | fill after | ratio | read before | read after | ratio |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| nulls | 9 | 139.2 ms | 44.8 ms | 0.32 | 197.9 ms | 105.5 ms | 0.53 |
+| narrow | 3 | 62.0 ms | 39.9 ms | 0.64 | 98.7 ms | 76.9 ms | 0.78 |
+| wide | 40 | 102.3 ms | 75.4 ms | 0.74 | 145.6 ms | 116.5 ms | 0.80 |
+| quoted | 1 | 77.9 ms | 73.5 ms | 0.94 | 111.4 ms | 106.9 ms | 0.96 |
+
+The order of that table is the number of fixed width columns per row of the file, which is the amount of memset removed, and it is also the order of the gains. Nulls is nine columns of ten million values, so it was zeroing seven hundred and twenty megabytes before reading anything. Quoted is one, and it barely moves.
+
+Peak resident memory is unchanged, within a couple of percent either way across repeated runs. It would be: the pages are touched by the fill whether or not they were touched by a memset first. What the change removes is a pass, not a page.
+
+The four ingestion files give byte identical schemas and null counts before and after.
+
+### Changed
+
+- The sweep allocates its fixed width columns unzeroed and writes every slot itself, including a zero where the field is missing and where it did not parse. The declared type path in `fill_column` still allocates zeroed, because a block there stops at the first value that does not fit and so does not write every slot.
+- The sweep's per value three way test on which group a column is in is hoisted out of the row loop into `fill_tile`, which takes the dtype as a parameter and the destination as a pointer.
+
+### Added
+
+- `Array.__init__(overwritten=)` and `ColumnData.__init__(overwritten_bytes=)`, the column level form of the `Buffer` constructor of the same name, for a caller that will write every element.
+
 ## [0.6.16] - 2026-08-29
 
 Built against Mojo 1.0.0 (ed45d567).
