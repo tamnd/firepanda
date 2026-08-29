@@ -8,6 +8,27 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.14] - 2026-08-29
+
+Built against Mojo 1.0.0 (ed45d567).
+
+The reader's text path. The 0.6.13 entry ended by saying the quoted file was flat because its time is in unescaping rather than in the index walk, and that this was where to look next. It was half right. Unescaping was costing something, but the larger cost was not the parse at all, it was the concat that stitches the per block columns back into one column at the end of a read. On the quoted file that concat was 175 ms against 68 ms for the parse of the same column.
+
+So this release is three changes on the join rather than on the parse: unescape into the payload instead of into a temporary, do not zero a buffer that is about to be completely overwritten, and paste the parts in parallel now that every part's destination is a prefix sum known in advance. A patch bump, since nothing changes shape and the four ingestion files give byte identical schemas and null counts before and after.
+
+Measured against a build of the previous release, the two run alternately in one session, ten million rows on an i9-13900K, warm cache, reading off a mapping.
+
+| file | columns | before | after | ratio |
+| --- | --- | --- | --- | --- |
+| narrow | 4 | 157 ms | 130 ms | 0.83 |
+| quoted | 3 | 292 ms | 197 ms | 0.68 |
+| nulls | 9 | 225 ms | 221 ms | 0.98 |
+| wide | 50 | 180 ms | 164 ms | 0.91 |
+
+Per column, on the quoted file and in the same session, the `note` column's concat went from 159 and 152 ms to 29 and 35 ms, and `label`'s from 14.5 and 41 ms to 5.7 and 5.6 ms. Narrow and wide move as well because they have text columns of their own. The nulls file is flat, which is the expected answer: its columns are mostly fixed width and 0.6.13 already took that path.
+
+What remains of the string concat is close to the cost of first touching the output pages, so the next change on this path is to remove the concat rather than speed it up, by sizing the string column up front from the field index and letting each block write into its own slice.
+
 ### Changed
 
 - A quoted field is now unescaped straight into the string column's payload instead of into a temporary `String` that is then appended. Collapsing a doubled quote only ever shortens a field, so the builder reserves the raw length, copies the runs between the doubled pairs, and builds the view from what it actually wrote. A field that shortens past twelve bytes ends up inline and the payload offset does not move.
@@ -781,7 +802,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.13...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.14...HEAD
+[0.6.14]: https://github.com/tamnd/firepanda/releases/tag/v0.6.14
 [0.6.13]: https://github.com/tamnd/firepanda/releases/tag/v0.6.13
 [0.6.12]: https://github.com/tamnd/firepanda/releases/tag/v0.6.12
 [0.6.11]: https://github.com/tamnd/firepanda/releases/tag/v0.6.11
