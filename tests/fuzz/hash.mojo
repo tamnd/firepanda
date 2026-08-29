@@ -319,9 +319,7 @@ def parallel_column(
         The column.
     """
     if rng.next_below(4) != 0:
-        return random_column[DType.int64](
-            rng, length, rng.next_below(4), nulls
-        )
+        return random_column[DType.int64](rng, length, rng.next_below(4), nulls)
 
     var out = Array[DType.int64](length)
     for i in range(length):

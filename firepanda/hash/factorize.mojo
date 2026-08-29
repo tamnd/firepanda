@@ -396,9 +396,7 @@ def _factorize_hashed[
     return _factorize_hashed_serial[dt](col, seed)
 
 
-def _projected_groups[
-    dt: DType
-](col: Array[dt], seed: UInt64, n: Int) -> Int:
+def _projected_groups[dt: DType](col: Array[dt], seed: UInt64, n: Int) -> Int:
     """Guesses how many groups a column has, by building the front of it.
 
     The parallel route is worth taking when the groups are few and worth
