@@ -1720,8 +1720,7 @@ def read_text(
         var span = scan.at(first_row + i, column)
         var bytes = field_bytes(data, span)
         if span.escaped:
-            var literal = unescape(data, span, options.dialect.quote)
-            builder.append(Span(literal))
+            builder.append_escaped(bytes, options.dialect.quote)
         # A quoted field is a value the writer meant literally, including the
         # quoted empty string and the quoted word `NA`. That is the one place
         # quoting changes a value rather than a boundary, and it is the only way

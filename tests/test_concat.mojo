@@ -27,6 +27,7 @@ from firepanda.frame.concat import concat, concat_series
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.series import Series
 from firepanda.kernel.concat import (
+    PARALLEL_ROWS,
     concat_any,
     concat_arrays,
     concat_strings,
@@ -478,6 +479,84 @@ def test_concat_strings_through_any_and_pairs() raises:
         assert_equal(listed_out[i], paired_out[i], "row " + String(i))
     assert_equal(listed_out[0], "one over twelve bytes long", "row 0")
     assert_equal(listed_out[3], "", "row 3 is the null")
+
+
+def test_concat_strings_over_the_parallel_threshold() raises:
+    # Past `PARALLEL_ROWS` the parts are copied on every core at once rather
+    # than one after another, and the two paths have to give the same column.
+    # The reference here is the sequential path, reached by splitting the same
+    # elements into a single part, and the elements straddle the inline
+    # boundary so the payload rebase runs on most parts but not on all of them.
+    var rng = Rng(0xC0FFEE01)
+    var texts = List[String]()
+    var nulls = List[Bool]()
+    for _ in range(PARALLEL_ROWS + 517):
+        if rng.next_below(9) == 0:
+            texts.append(String(""))
+            nulls.append(True)
+            continue
+        var text = String("")
+        for _ in range(2 + rng.next_below(24)):
+            text += String(chr(97 + rng.next_below(26)))
+        texts.append(text)
+        nulls.append(False)
+
+    var whole = StringBuilder(capacity=len(texts))
+    for i in range(len(texts)):
+        if nulls[i]:
+            whole.append_null()
+        else:
+            whole.append(texts[i].as_bytes())
+    var one_part = List[StringArray]()
+    one_part.append(whole^.finish())
+    var slow = concat_strings(one_part)
+
+    var parts = List[StringArray]()
+    var at = 0
+    var take = 1
+    while at < len(texts):
+        var stop = at + take
+        if stop > len(texts):
+            stop = len(texts)
+        var builder = StringBuilder(capacity=stop - at)
+        for i in range(at, stop):
+            if nulls[i]:
+                builder.append_null()
+            else:
+                builder.append(texts[i].as_bytes())
+        parts.append(builder^.finish())
+        at = stop
+        take = take * 2 + 1
+    assert_true(len(parts) > 1, "the split has to make several parts")
+    var fast = concat_strings(parts)
+
+    assert_equal(len(fast), len(slow), "same height")
+    for i in range(len(fast)):
+        assert_equal(
+            fast.is_valid(i), slow.is_valid(i), "validity row " + String(i)
+        )
+        assert_equal(fast[i], slow[i], "row " + String(i))
+
+
+def test_concat_strings_through_any_over_the_threshold() raises:
+    # The erased spelling is the one `read_csv` reaches, so it gets its own
+    # pass over the parallel path rather than relying on the typed one.
+    var parts = List[AnyArray]()
+    var expected = List[String]()
+    for p in range(4):
+        var rows = PARALLEL_ROWS // 3
+        var builder = StringBuilder(capacity=rows)
+        for i in range(rows):
+            var text = String("part ", p, " row ", i, " padded out a bit")
+            builder.append(text.as_bytes())
+            expected.append(text)
+        parts.append(AnyArray(builder^.finish()))
+
+    var out = concat_any(parts)
+    ref stacked = out.strings()
+    assert_equal(len(stacked), len(expected), "height")
+    for i in range(len(expected)):
+        assert_equal(stacked[i], expected[i], "row " + String(i))
 
 
 def main() raises:

@@ -281,5 +281,71 @@ def test_many_random_elements_round_trip() raises:
         assert_equal(column[i], values[i], "row " + String(i))
 
 
+def test_append_escaped_collapses_doubled_quotes() raises:
+    # The reference is the obvious loop: copy a byte, and skip the second of a
+    # doubled pair. Cases here cover a pair at the start, at the end, back to
+    # back pairs, a field that is nothing but quotes, and lengths on both sides
+    # of the inline boundary, because a literal that shortens past twelve bytes
+    # has to end up in the view rather than in the payload.
+    var cases = List[String]()
+    cases.append(String(""))
+    cases.append(String("plain"))
+    cases.append(String('""'))
+    cases.append(String('""""'))
+    cases.append(String('""a'))
+    cases.append(String('a""'))
+    cases.append(String('a""""b'))
+    cases.append(String('say ""hello"" there'))
+    cases.append(String('thirteen char""'))
+    cases.append(repeated(String('x""'), 40))
+
+    var builder = StringBuilder(capacity=len(cases))
+    for c in range(len(cases)):
+        builder.append_escaped(cases[c].as_bytes(), UInt8(ord('"')))
+    var column = builder^.finish()
+
+    assert_equal(len(column), len(cases), "one element per case")
+    for c in range(len(cases)):
+        var wanted = String("")
+        var bytes = cases[c].as_bytes()
+        var at = 0
+        while at < len(bytes):
+            wanted += String(chr(Int(bytes[at])))
+            if (
+                bytes[at] == UInt8(ord('"'))
+                and at + 1 < len(bytes)
+                and bytes[at + 1] == UInt8(ord('"'))
+            ):
+                at += 2
+                continue
+            at += 1
+        assert_equal(column[c], wanted, "case " + String(c))
+        assert_true(column.is_valid(c), "case " + String(c) + " is present")
+
+
+def test_append_escaped_interleaves_with_the_other_appends() raises:
+    # The payload is shared, so an escaped element that lands in the view must
+    # not leave the payload offset where the next long element would overwrite
+    # what an earlier one wrote.
+    var builder = StringBuilder()
+    builder.append(String("a long plain element here").as_bytes())
+    builder.append_escaped(String('sh""rt').as_bytes(), UInt8(ord('"')))
+    builder.append(String("another long plain element").as_bytes())
+    builder.append_escaped(
+        String('a long ""escaped"" element here').as_bytes(),
+        UInt8(ord('"')),
+    )
+    builder.append_null()
+    builder.append(String("tail").as_bytes())
+    var column = builder^.finish()
+
+    assert_equal(column[0], "a long plain element here", "row 0")
+    assert_equal(column[1], 'sh"rt', "row 1")
+    assert_equal(column[2], "another long plain element", "row 2")
+    assert_equal(column[3], 'a long "escaped" element here', "row 3")
+    assert_false(column.is_valid(4), "row 4 is null")
+    assert_equal(column[5], "tail", "row 5")
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
