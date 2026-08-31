@@ -14,25 +14,28 @@ already exists and composing it is both cheaper and easier to be sure of.
 Group on the first key and you have an ordinal per row in `[0, g0)`. Group on the
 second and you have another in `[0, g1)`. The pair `(c0, c1)` identifies the tuple
 exactly, and `c0 * g1 + c1` packs the pair into one integer without collisions.
-That integer is then factorized itself, which makes it dense again, and the
-process repeats for the third key and the fourth.
+Multiply by `g2` and add the third key's ordinal, and so on down the key list. The
+running value is in `[0, g0 * g1 * g2 * ...)`, it identifies the tuple exactly at
+every step, and one factorize of it at the end turns it into the dense
+first-appearance ordering the result wants.
 
-Refactorizing after every combine is what keeps this from overflowing. Without
-it, the running product is `g0 * g1 * g2 * ...`, which is the size of the full
-cross product and reaches int64 on four columns of a thousand values each. With
-it, the running ordinal count is the number of key tuples actually observed,
-which can never exceed the row count, so the product being packed is bounded by
-`rows * g_next` and stays inside int64 for any table that fits on a machine. The
-bound is checked anyway, because "cannot happen" is not a thing to rely on in the
-one function every group by goes through.
+Only at the end. Refactorizing after every combine also works, and is what this
+did, and the reason to stop is that it is a full hashed pass over every row per
+key on exactly the group bys that are already the slowest. What it buys is a
+smaller running space, which matters only when the space would leave an int64.
+The product of the group counts reaches nineteen digits on twenty six columns of
+a hundred values each, or six of a thousand, so a real table does not get there;
+`_condense` is what runs if one does, and the bound is checked either way,
+because "cannot happen" is not a thing to rely on in the one function every group
+by goes through.
 
-There is a real cost to this and it should not be hidden: `n` keys means `n`
-factorize passes plus `n - 1` more over the combined column. A single fused hash
-of the tuple would be one pass. The reason to start here is that the composition
-reuses the direct route, so grouping on three small integer columns never hashes
-anything at all, and a fused tuple hash would hash all three. Which of those wins
-is a measurement, and the benchmark that settles it is `group/ordinals_two_keys`
-against `group/ordinals_one_key`.
+There is still a real cost here and it should not be hidden: `n` keys means `n`
+factorize passes plus `n - 1` packing passes plus one more factorize. A single
+fused hash of the tuple would be one pass. The reason to start here is that the
+composition reuses the direct route, so grouping on three small integer columns
+hashes once instead of three times, and a fused tuple hash would hash all of
+them. Which of those wins is a measurement, and the benchmark that settles it is
+`group/ordinals_two_keys` against `group/ordinals_one_key`.
 
 ## The representative row
 
@@ -58,19 +61,20 @@ already in first-appearance order, because every route recognizes a group by the
 row that introduced it, and that row is the representative one. So the pass would
 rewrite every code to the value it already held.
 
-A key that is not the first one needs neither either, whatever its dtype and
-whatever its nulls, because only its group count is read here. The packed column
-is factorized again and that is what fixes the ordinals for the result.
+No key of a group by on several needs it either, first or not, whatever its
+dtype and whatever its nulls, because only its group count and its ordinals as
+values are read there. Where those ordinals put their null group changes which
+integer a tuple packs to and changes nothing else, and the factorize at the
+bottom is what fixes the ordering for the result.
 
-Nor does the packed column itself. It is written a row at a time from two code
-arrays, so it has no nulls at all, and its factorize's ordinals and representative
-rows are already what the pass would have made of them. That is one pass per key
-after the first, which is five of them on a six key group by.
+Nor does the packed column itself. It is written a row at a time, so it has no
+nulls at all, and its factorize's ordinals and representative rows are already
+what the pass would have made of them.
 
-What is left paying is a first key with nulls, of any dtype, because all four
-routes put the null group at ordinal zero wherever its first null is.
-`_factorize_any` reports what its route knows in a `KeyCodes` and `group_ordinals`
-decides from that.
+What is left paying is a group by on one key that has nulls, of any dtype,
+because all four routes put the null group at ordinal zero wherever its first
+null is and there is no later factorize to fix it. `_factorize_any` reports what
+its route knows in a `KeyCodes` and `group_ordinals` decides from that.
 """
 
 from firepanda.array.any import AnyArray
@@ -139,9 +143,32 @@ def group_ordinals(
     var codes = Array[DType.uint32](0)
     var rows_at = List[Int]()
     first^.into_parts(codes, rows_at)
-    if not known:
-        rows_at = List[Int]()
-        groups = _densify(codes, rows_at)
+
+    if len(at) == 1:
+        # One key is the whole answer, so its ordinals are the result's and the
+        # only thing that can be wrong with them is where the null group sits.
+        if not known:
+            rows_at = List[Int]()
+            groups = _densify(codes, rows_at)
+        return Grouping(codes^, groups, rows_at^)
+
+    # Two or more. Nothing about the first key's ordinals is read from here on
+    # except their value, so a null group in the wrong place does not matter and
+    # `_densify` is not called on it. The packed column carries the tuple and the
+    # one factorize at the bottom is what makes the result dense and ordered.
+    var running = Array[DType.int64](rows)
+    var start = running.unsafe_ptr()
+    var seed = codes.unsafe_ptr()
+    for i in range(rows):
+        start.unsafe_offset(i).unsafe_store(
+            Int64(seed.unsafe_offset(i).unsafe_load())
+        )
+    # `seed` borrows from `codes` and nothing below reads either, so the loop
+    # above is the last use and the forty megabytes go back here rather than at
+    # the end of the function. That matters because the factorize at the bottom
+    # allocates a table sized by the tuple count. Each later key's codes are
+    # released by the iteration that made them for the same reason.
+    var space = groups
 
     for k in range(1, len(at)):
         var key = _factorize_any(columns[at[k]])
@@ -150,50 +177,80 @@ def group_ordinals(
         var spare = List[Int]()
         key^.into_parts(next, spare)
         if next_groups < 0:
-            # Only the count matters here, not the order and not the rows. The
-            # packed column is factorized again below and that is what fixes the
-            # ordinals for the result, so a key that knows how many groups it has
-            # can skip the pass even when it cannot say which row each one is on.
+            # Only the count matters here, not the order and not the rows, for
+            # the same reason the first key's order does not matter. A key that
+            # knows how many groups it has can skip the pass even when it cannot
+            # say which row each one is on.
             spare = List[Int]()
             next_groups = _densify(next, spare)
-        if next_groups > 0 and groups > Int(Int64.MAX) // next_groups:
-            raise Error(
-                "group by: the combined key space of "
-                + String(groups)
-                + " by "
-                + String(next_groups)
-                + " does not fit in an int64"
-            )
 
-        # Pack the pair, then make it dense again. The packing is exact and the
-        # refactorize is what stops the product from compounding across keys.
-        var packed = Array[DType.int64](rows)
-        var left = codes.unsafe_ptr()
+        if next_groups > 0 and space > Int(Int64.MAX) // next_groups:
+            space = _condense(running)
+            if space > Int(Int64.MAX) // next_groups:
+                raise Error(
+                    "group by: the combined key space of "
+                    + String(space)
+                    + " by "
+                    + String(next_groups)
+                    + " does not fit in an int64"
+                )
+
         var right = next.unsafe_ptr()
-        var into = packed.unsafe_ptr()
+        var pack = running.unsafe_ptr()
         for i in range(rows):
-            into.unsafe_offset(i).unsafe_store(
-                Int64(left.unsafe_offset(i).unsafe_load()) * Int64(next_groups)
+            pack.unsafe_offset(i).unsafe_store(
+                pack.unsafe_offset(i).unsafe_load() * Int64(next_groups)
                 + Int64(right.unsafe_offset(i).unsafe_load())
             )
-        # Every row of `packed` was just written, so it has no nulls and the
-        # factorize's own ordinals and representative rows are what the pass
-        # would have produced. The check is on the result rather than on that
-        # argument, because a route that stopped reporting either one should
-        # cost a pass here and not an answer.
-        var combined = factorize(packed)
-        var combined_groups = combined.count()
-        var combined_firsts = List[Int]()
-        codes = Array[DType.uint32](0)
-        combined^.into_parts(codes, combined_firsts)
-        if len(combined_firsts) == combined_groups:
-            groups = combined_groups
-            rows_at = combined_firsts^
-        else:
-            rows_at = List[Int]()
-            groups = _densify(codes, rows_at)
+        space *= next_groups
 
-    return Grouping(codes^, groups, rows_at^)
+    # Every row of `running` was written by the loop above, so it has no nulls
+    # and this factorize's own ordinals and representative rows are what
+    # `_densify` would have made of them. The check is on the result rather than
+    # on that argument, because a route that stopped reporting either one should
+    # cost a pass here and not an answer.
+    var combined = factorize(running)
+    var combined_groups = combined.count()
+    var combined_firsts = List[Int]()
+    var out = Array[DType.uint32](0)
+    combined^.into_parts(out, combined_firsts)
+    if len(combined_firsts) == combined_groups:
+        return Grouping(out^, combined_groups, combined_firsts^)
+    var out_rows = List[Int]()
+    var out_groups = _densify(out, out_rows)
+    return Grouping(out^, out_groups, out_rows^)
+
+
+def _condense(mut running: Array[DType.int64]) raises -> Int:
+    """Renumbers the running key into the tuples it actually holds.
+
+    Called only when the next key would push the packed value past an int64,
+    which needs a real column to reach: six keys of a thousand values each get
+    nowhere near it, because the running space is the product of the group
+    counts and int64 holds nineteen digits of that.
+
+    Args:
+        running: The packed key, rewritten in place.
+
+    Returns:
+        The number of distinct tuples, which is the new bound on its values.
+
+    Raises:
+        If the factorize does.
+    """
+    var found = factorize(running)
+    var groups = found.count()
+    var codes = Array[DType.uint32](0)
+    var spare = List[Int]()
+    found^.into_parts(codes, spare)
+
+    var from_at = codes.unsafe_ptr()
+    var to_at = running.unsafe_ptr()
+    for i in range(len(running)):
+        to_at.unsafe_offset(i).unsafe_store(
+            Int64(from_at.unsafe_offset(i).unsafe_load())
+        )
+    return groups
 
 
 struct KeyCodes(Movable):
