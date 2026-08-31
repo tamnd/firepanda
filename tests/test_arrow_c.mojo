@@ -109,21 +109,21 @@ def test_default_array_is_all_zero() raises:
 
 def test_schema_field_order() raises:
     # A distinct value in every field, read back positionally. The two pointer
-    # fields get the addresses of two different static strings, so they are
-    # distinct from each other and from every other slot without having to pick
-    # a magic number that a pointer might happen to equal.
-    var format_text = StaticString("l")
-    var name_text = StaticString("x")
+    # fields get the addresses of two different locals, so they are distinct from
+    # each other and from every other slot without having to pick a magic number
+    # that a pointer might happen to equal.
+    var format_bytes = InlineArray[UInt8, 2](fill=0)
+    var name_bytes = InlineArray[UInt8, 2](fill=0)
     var schema = ArrowSchema()
     schema.format = (
-        format_text.unsafe_ptr()
+        Pointer(to=format_bytes[0])
+        .unsafe_origin_cast[MutUntrackedOrigin]()
         .unsafe_bitcast[c_char]()
-        .unsafe_origin_cast[ImmUntrackedOrigin]()
     )
     schema.name = (
-        name_text.unsafe_ptr()
+        Pointer(to=name_bytes[0])
+        .unsafe_origin_cast[MutUntrackedOrigin]()
         .unsafe_bitcast[c_char]()
-        .unsafe_origin_cast[ImmUntrackedOrigin]()
     )
     schema.flags = 111
     schema.n_children = 222
@@ -279,8 +279,8 @@ def test_buffer_counts() raises:
     assert_equal(buffer_count(LogicalType.BOOL), 2)
     assert_equal(buffer_count(LogicalType.INT64), 2)
     assert_equal(buffer_count(LogicalType.FLOAT64), 2)
-    assert_equal(buffer_count(LogicalType.STRING), 3)
-    assert_equal(buffer_count(LogicalType.BINARY), 3)
+    assert_equal(buffer_count(LogicalType.STRING), 4)
+    assert_equal(buffer_count(LogicalType.BINARY), 4)
 
 
 def main() raises:

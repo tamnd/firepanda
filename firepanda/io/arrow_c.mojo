@@ -50,8 +50,14 @@ from std.ffi import c_char
 from firepanda.dtype.logical import LogicalType
 
 
-comptime CString = Pointer[c_char, ImmUntrackedOrigin]
-"""A borrowed, null terminated C string."""
+comptime CString = Pointer[c_char, MutUntrackedOrigin]
+"""A borrowed, null terminated C string.
+
+Mutable, which is not what `const char*` means and is a concession to Mojo rather
+than a claim about the pointee. `unsafe_origin_cast` preserves mutability, so it
+cannot turn the mutable pointer a producer gets from its own storage into an
+immutable one, and an origin that is untracked in the first place carries no
+guarantee for the cast to preserve. Nothing in firepanda writes through it."""
 
 comptime NullableCString = Optional[CString]
 """A `const char*` that may be null."""
@@ -365,16 +371,21 @@ def buffer_count(type: LogicalType) raises -> Int:
     """Returns how many buffers an array of a type has, as the C interface counts.
 
     A null array has none. A fixed width or boolean array has two, the validity
-    bitmap and the values. A string view array has three or more: validity, the
-    sixteen byte views, then one buffer per variadic data buffer, then a buffer
-    of their sizes. Three is the count when there are no long strings at all, and
-    the export path is what knows the real number.
+    bitmap and the values. A view array has validity, the sixteen byte views, one
+    buffer per variadic data buffer, and then a buffer of their sizes, so its
+    count depends on how many data buffers there are.
+
+    Four is the answer for a view type here because a finished firepanda string
+    column has exactly one payload block, always, including when every string is
+    short enough to live inside its view and the block is empty. Emitting the
+    empty block rather than dropping it keeps the count a constant, and a
+    consumer never reads it because the sizes buffer says it is zero long.
 
     Args:
         type: The column type.
 
     Returns:
-        The buffer count, which for a view type is the minimum.
+        The buffer count.
 
     Raises:
         Error: If the type is not one this file knows.
@@ -382,6 +393,6 @@ def buffer_count(type: LogicalType) raises -> Int:
     if type == LogicalType.NULL:
         return 0
     if type == LogicalType.STRING or type == LogicalType.BINARY:
-        return 3
+        return 4
     _ = format_for(type)
     return 2
