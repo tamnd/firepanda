@@ -3,7 +3,7 @@
 # install rather than against this file; see docs/specs/01-research-2026.md.
 [workspace]
 name = "firepanda"
-version = "0.6.19"
+version = "0.6.20"
 description = "A dataframe library for Mojo with the pandas API"
 authors = ["tamnd <tamnd87@gmail.com>"]
 license = "Apache-2.0"
