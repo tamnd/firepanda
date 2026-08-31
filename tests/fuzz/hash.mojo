@@ -186,22 +186,23 @@ def check[
                 String("row ", i, " code ", got.codes[i], " twin ", twin[i]),
             )
 
+    var keys = got.keys(col)
     for i in range(n):
         var at = Int(got.codes[i])
         if at >= got.count():
             fail(step, seed, "keys", String("row ", i, " code ", at))
         if col.is_valid(i):
-            if not got.keys.is_valid(at):
+            if not keys.is_valid(at):
                 fail(step, seed, "keys", String("row ", i, " key is null"))
             # Compared as key bits rather than as values, because the group a
             # NaN belongs to is defined by its canonical bits and `!=` on two
             # NaNs is true however well the grouping worked.
-            if key_bits(got.keys[at]) != key_bits(col[i]):
+            if key_bits(keys[at]) != key_bits(col[i]):
                 fail(
                     step,
                     seed,
                     "keys",
-                    String("row ", i, " key ", got.keys[at], " value ", col[i]),
+                    String("row ", i, " key ", keys[at], " value ", col[i]),
                 )
         elif at != got.null_group:
             fail(step, seed, "nulls", String("row ", i, " code ", at))
@@ -402,12 +403,14 @@ def check_parallel(mut rng: Rng, step: Int, seed: UInt64) raises:
                 ),
             )
 
+    var many_keys = many.keys(col)
+    var one_keys = one.keys(col)
     for g in range(one.count()):
-        if many.keys.is_valid(g) != one.keys.is_valid(g):
+        if many_keys.is_valid(g) != one_keys.is_valid(g):
             fail(step, seed, "parallel", String("key ", g, " validity"))
-        if not one.keys.is_valid(g):
+        if not one_keys.is_valid(g):
             continue
-        if key_bits(many.keys[g]) != key_bits(one.keys[g]):
+        if key_bits(many_keys[g]) != key_bits(one_keys[g]):
             fail(
                 step,
                 seed,
@@ -416,9 +419,9 @@ def check_parallel(mut rng: Rng, step: Int, seed: UInt64) raises:
                     "key ",
                     g,
                     " is ",
-                    many.keys[g],
+                    many_keys[g],
                     " serial ",
-                    one.keys[g],
+                    one_keys[g],
                 ),
             )
 

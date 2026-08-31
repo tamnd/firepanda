@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed
+
+- `Factorized` no longer carries a `keys` column. It carries the row that introduced each group, which every route already had, and `Factorized.keys(col)` gathers the key values from those rows when somebody wants them. Nobody in the library did: a group by gathers all of its key columns at once by those same rows, and a join reads the ordinals and nothing else. Building them eagerly was a random read per group plus two copies of the result, on every hashed factorize, thrown away immediately. On a group by whose result is ten million rows that was five refactorizations each producing eighty megabytes nobody read.
+
+### Performance
+
+- A group by on six keys at ten million rows is 14 percent faster, and a join of two ten million row frames on a high cardinality key is 6 percent faster, from the above. Queries whose groups number in the thousands are unchanged, because there the discarded column was small.
+
 ## [0.6.21] - 2026-08-31
 
 Built against Mojo 1.0.0 (ed45d567).
