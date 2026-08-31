@@ -352,6 +352,60 @@ def test_take_matches_the_twin() raises:
         assert_equal(taken[i], taken_twin[i])
 
 
+def first_wrong(
+    got: Array[DType.int64], source: Array[DType.int64], picks: List[Int]
+) -> Int:
+    """Returns the first gathered row that is not what the source says, or -1.
+
+    The scalar twin would answer the same question and would build a whole
+    column to do it, and an assertion per row would format a message for each of
+    sixty five thousand of them. These two tests have to gather that many rows to
+    reach the length where the split turns on, so the check is written to cost
+    less than the kernel it is checking.
+    """
+    for i in range(len(picks)):
+        var at = picks[i]
+        var want = at >= 0 and source.is_valid(at)
+        if got.is_valid(i) != want:
+            return i
+        if want and got[i] != source[at]:
+            return i
+    return -1
+
+
+def test_a_take_past_the_split_gathers_the_right_rows() raises:
+    # The gather runs on one thread below `PARALLEL_TAKE_ROWS` and on every core
+    # above it, and the workers share the validity bitmap, one word per sixty
+    # four output rows. So the slice boundaries have to land on word boundaries,
+    # and a length that is not a multiple of sixty four is what catches the last
+    # slice keeping a partial word it never stored. Both are out of reach of the
+    # short columns the other take tests use. The length is one past a multiple
+    # of sixty four so that the tail is a partial word.
+    var col = build[DType.int64](4096, 7)
+    var picks = List[Int](capacity=65_601)
+    for i in range(65_601):
+        picks.append((i * 4093) % 4096)
+    picks[64] = -1
+    picks[65] = -1
+    picks[65_600] = -1
+
+    var taken = take_rows(col, picks)
+    assert_equal(len(taken), len(picks))
+    assert_equal(first_wrong(taken, col, picks), -1, "a gathered row is wrong")
+
+
+def test_a_take_past_the_split_from_a_column_with_no_nulls() raises:
+    # The validity probe is skipped outright when the source has none, so that
+    # arm needs walking at this length too.
+    var col = build[DType.int64](4096, 0)
+    var picks = List[Int](capacity=65_601)
+    for i in range(65_601):
+        picks.append(-1 if i % 1000 == 0 else (i * 4093) % 4096)
+
+    var taken = take_rows(col, picks)
+    assert_equal(first_wrong(taken, col, picks), -1, "a gathered row is wrong")
+
+
 def test_take_turns_a_negative_index_into_a_null() raises:
     var col = from_list[DType.int64]([10, 20, 30])
     var taken = take_rows(col, [2, -1, 0])

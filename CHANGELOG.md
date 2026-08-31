@@ -10,6 +10,25 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ### Changed
 
+`take` gathers on every core and stops probing a validity bitmap the column has none of.
+
+A gather's output row depends on its own index and on nothing else in the output, so it splits by output row. The one thing in there that is not per row is the validity bitmap, which is built a word at a time in a register and stored once every sixty four rows, so the slice boundaries are rounded up to a multiple of sixty four and no two workers touch the same word.
+
+The other half is the probe. The loop read the source's validity bit for every row, which is a second random read into a different array from the values, and doubles the number of cache misses a gather takes. A column with no nulls does not need it. The negative index check has to stay, because that is how a left join reports a row the right side did not have, but the two halves of that condition are separate questions and only one of them was avoidable.
+
+Ten million rows on an i9-13900K, eight paired rounds of five runs each. These are joins because that is where the big gathers are, one per output column.
+
+| query | before | after | ratio |
+| --- | --- | --- | --- |
+| j1 | 235.7 ms | 181.4 ms | 1.34 |
+| j2 | 282.2 ms | 223.7 ms | 1.28 |
+| j3 | 266.6 ms | 226.8 ms | 1.21 |
+| j5 | 961.4 ms | 806.1 ms | 1.18 |
+| j4 | 958.7 ms | 822.2 ms | 1.18 |
+| q1 | 22.6 ms | 21.7 ms | 1.00 |
+
+`filter_rows` is deliberately not split the same way. Where a filtered row lands depends on how many rows before it survived, which is a prefix sum the gather does not need.
+
 The join's bucket build stops allocating a second copy of the group table.
 
 Bucketing the right side is a count, a prefix sum and a scatter, and the scatter needs a cursor per group saying where the next row of that group goes. It was a separate array, filled from the offsets. On a join between two frames that are mostly one to one the group table is as long as the frames, so that is an allocation and a copy the size of the input, plus the zero fill of the bucket array on top, which the scatter overwrites in full anyway.
