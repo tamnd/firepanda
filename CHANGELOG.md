@@ -10,6 +10,25 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ### Changed
 
+The join's bucket build stops allocating a second copy of the group table.
+
+Bucketing the right side is a count, a prefix sum and a scatter, and the scatter needs a cursor per group saying where the next row of that group goes. It was a separate array, filled from the offsets. On a join between two frames that are mostly one to one the group table is as long as the frames, so that is an allocation and a copy the size of the input, plus the zero fill of the bucket array on top, which the scatter overwrites in full anyway.
+
+The offsets can be their own cursor. Group `g` is written from `starts[g]` up to `starts[g + 1]`, so when the scatter finishes each entry holds what its successor held, and one backwards pass over the table puts them back. A group nothing was scattered into needs no special case, because its offset was already equal to its successor's.
+
+Ten million rows on an i9-13900K, eight paired rounds of five runs each, on a quiet machine this time.
+
+| query | groups | before | after | ratio |
+| --- | --- | --- | --- | --- |
+| j5 | 10M | 1094.7 ms | 909.9 ms | 1.17 |
+| j4 | 10M | 1035.6 ms | 918.8 ms | 1.14 |
+| j2 | 100k | 249.3 ms | 247.5 ms | 1.04 |
+| j1 | 10k | 206.1 ms | 206.2 ms | 1.01 |
+| j3 | 100k | 260.1 ms | 261.5 ms | 0.98 |
+| q1 | control | 20.1 ms | 20.2 ms | 0.98 |
+
+j1 through j3 join against a small right frame, so their group tables are ten and a hundred thousand entries and there was nothing there to save. The gain is the whole point of the change: it scales with the number of distinct keys, not with the number of rows.
+
 The join emits its row pairs on every core, and stops looking for null keys in frames that have none.
 
 `join_indices` was two serial walks over the left side, one counting the output rows and one writing them, and on db-benchmark's j queries the writing walk alone was half of the pairing. It is a walk with no carried state: what a left row emits depends on that row and on the right side buckets, which are finished before the walk starts. So both walks now split by left row across cores, with a prefix sum of the per slice counts in between telling each worker where in the output its slice begins. That is what replaces the append, and it is why the counting walk had to split the same way.
