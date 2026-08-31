@@ -21,6 +21,11 @@ The switch is `DIRECT_LIMIT` and it is a memory bound rather than a guess about
 cardinality: the direct table costs four bytes per possible value, so it is worth
 taking exactly when the range is small enough that the table behaves like cache.
 
+That limit is about a range nobody vouched for. `factorize_dense` is the same
+route for a caller who built the values and can say what range they are in, and
+its bound is the table against the column rather than against the cache, because
+a constructed range comes with an idea of how much of itself is occupied.
+
 Text has a third route, `factorize_strings`, and it is the hash table with the
 key comparison put back, because a string does not fit in the 64 bits the table
 stores.
@@ -309,6 +314,47 @@ def factorize[
         var plan = _direct_plan[dt](col)
         if plan.span >= 0:
             return _factorize_direct[dt](col, plan.span, plan.base)
+    return _factorize_hashed[dt](col, seed)
+
+
+def factorize_dense[
+    dt: DType
+](col: Array[dt], span: Int, seed: UInt64 = DEFAULT_SEED) raises -> Factorized[
+    dt
+]:
+    """Factorizes a column whose values the caller knows are in `[0, span)`.
+
+    `factorize` has to learn the range by scanning, and what a scan finds is a
+    bound on data the library did not construct. A span of ten million says
+    nothing about whether ten values occupy it or ten million do, and a direct
+    table over a span that is mostly empty is the same random access the hash
+    was going to be with worse density and a larger allocation. That is what
+    `DIRECT_LIMIT` declines, and against an unknown column it is right to.
+
+    A caller that built the values knows more than the scan can. The packed key
+    of a group by on several columns is the case this exists for: its span is
+    the product of the key group counts, its occupancy is the number of key
+    tuples actually present, and the shapes where the span is large are exactly
+    the shapes where a large fraction of it is occupied. So the bound here is
+    the table against the column instead of the table against the cache, which
+    keeps the direct route from ever costing more memory than four bytes a row,
+    and the scan is skipped because its answer was already known.
+
+    Args:
+        col: The column, with every value in `[0, span)`.
+        span: The width of that range.
+        seed: The per-query hash seed, used only if the table is declined.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        The ordinals, a representative row per group, and which ordinal the
+        nulls got.
+    """
+    comptime if dt.is_integral():
+        if span >= 0 and (span <= DIRECT_LIMIT or span <= len(col)):
+            return _factorize_direct[dt](col, span, Scalar[dt](0))
     return _factorize_hashed[dt](col, seed)
 
 

@@ -49,6 +49,7 @@ from .factorize import (
     Factorized,
     FactorizedStrings,
     factorize,
+    factorize_dense,
     factorize_strings,
 )
 from .function import (

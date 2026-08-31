@@ -477,6 +477,48 @@ def test_two_keys_collapse_when_the_pairs_repeat() raises:
     assert_equal(grouping.codes[1], grouping.codes[3])
 
 
+def test_two_keys_whose_packed_space_is_wider_than_the_cache_table() raises:
+    """Three hundred by two hundred and twenty, a span no scan would index.
+
+    The packed space is sixty six thousand, past `DIRECT_LIMIT` and no wider
+    than the column, so this is the shape where the group by indexes a table on
+    the range it computed rather than hashing. The second key is a function of
+    the first, so only three hundred of those sixty six thousand cells are ever
+    occupied, and the route is still the right one: a group by knows its range
+    exactly, and a lookup into a mostly empty table it sized itself is still one
+    lookup a row.
+    """
+    var side = 300
+    var wrap = 220
+    var rows = 220 * side
+    var left = Array[DType.int64](rows)
+    var right = Array[DType.int64](rows)
+    for i in range(rows):
+        left[i] = Int64(i % side)
+        right[i] = Int64((i % side) * 7 % wrap)
+    var columns = List[AnyArray]()
+    columns.append(AnyArray(left^))
+    columns.append(AnyArray(right^))
+    var at = List[Int]()
+    at.append(0)
+    at.append(1)
+    var grouping = group_ordinals(columns, at, rows)
+    assert_equal(grouping.groups, side)
+
+    # Seven and two hundred and twenty are coprime, so the second key takes all
+    # two hundred and twenty of its values and the packed space is the full sixty
+    # six thousand even though the pair is decided by the first key alone. The
+    # first three hundred rows introduce the three hundred pairs in row order, so
+    # a row's ordinal is its first key.
+    ref got = grouping.codes
+    var bad = -1
+    for i in range(rows):
+        if Int(got[i]) != i % side:
+            bad = i
+            break
+    assert_equal(bad, -1, String("wrong ordinal at row ", bad))
+
+
 def test_enough_keys_to_overflow_the_packed_space_still_groups() raises:
     """Seven keys of a thousand values each, which is where `_condense` runs.
 

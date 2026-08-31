@@ -29,6 +29,14 @@ a hundred values each, or six of a thousand, so a real table does not get there;
 because "cannot happen" is not a thing to rely on in the one function every group
 by goes through.
 
+Carrying the space forward is also what lets the last factorize be
+`factorize_dense` rather than `factorize`. The packed value's range is not
+something anyone has to scan for, it is `g0 * g1 * g2 * ...` and it was computed
+on the way down, and a range that a group by constructed out of dense ordinals is
+itself densely occupied. So the group bys where the space is large enough to
+matter are the ones where a table over it is mostly full, and they index it
+instead of hashing.
+
 There is still a real cost here and it should not be hidden: `n` keys means `n`
 factorize passes plus `n - 1` packing passes plus one more factorize. A single
 fused hash of the tuple would be one pass. The reason to start here is that the
@@ -83,7 +91,7 @@ from firepanda.dtype.lists import ALL
 
 from firepanda.kernel.agg import max_of
 
-from .factorize import factorize, factorize_strings
+from .factorize import factorize, factorize_dense, factorize_strings
 
 
 struct Grouping(Movable):
@@ -185,7 +193,7 @@ def group_ordinals(
             next_groups = _densify(next, spare)
 
         if next_groups > 0 and space > Int(Int64.MAX) // next_groups:
-            space = _condense(running)
+            space = _condense(running, space)
             if space > Int(Int64.MAX) // next_groups:
                 raise Error(
                     "group by: the combined key space of "
@@ -209,7 +217,11 @@ def group_ordinals(
     # `_densify` would have made of them. The check is on the result rather than
     # on that argument, because a route that stopped reporting either one should
     # cost a pass here and not an answer.
-    var combined = factorize(running)
+    #
+    # `space` is passed along because it is exactly the range the packing put the
+    # values in, and knowing it is what lets a group by whose key space is dense
+    # index a table instead of hashing.
+    var combined = factorize_dense(running, space)
     var combined_groups = combined.count()
     var combined_firsts = List[Int]()
     var out = Array[DType.uint32](0)
@@ -221,7 +233,7 @@ def group_ordinals(
     return Grouping(out^, out_groups, out_rows^)
 
 
-def _condense(mut running: Array[DType.int64]) raises -> Int:
+def _condense(mut running: Array[DType.int64], space: Int) raises -> Int:
     """Renumbers the running key into the tuples it actually holds.
 
     Called only when the next key would push the packed value past an int64,
@@ -231,6 +243,7 @@ def _condense(mut running: Array[DType.int64]) raises -> Int:
 
     Args:
         running: The packed key, rewritten in place.
+        space: The range the packing has put its values in.
 
     Returns:
         The number of distinct tuples, which is the new bound on its values.
@@ -238,7 +251,7 @@ def _condense(mut running: Array[DType.int64]) raises -> Int:
     Raises:
         If the factorize does.
     """
-    var found = factorize(running)
+    var found = factorize_dense(running, space)
     var groups = found.count()
     var codes = Array[DType.uint32](0)
     var spare = List[Int]()
