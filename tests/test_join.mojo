@@ -479,5 +479,134 @@ def test_a_join_leaves_both_inputs_alone() raises:
     assert_equal(a[0], 10)
 
 
+def wide_left(rows: Int, null_at: Int) raises -> DataFrame:
+    """A left frame long enough that the emit splits across workers.
+
+    The key cycles through five values so that most left rows match more than one
+    right row, which is what makes a worker's slice emit more rows than it holds
+    and puts the write offsets to work.
+    """
+    var k = Array[DType.int64](rows)
+    var a = Array[DType.int64](rows)
+    for i in range(rows):
+        k[i] = Int64(i % 5)
+        a[i] = Int64(i)
+    if null_at >= 0:
+        k.set_null(null_at)
+    return pair_frame(Series("k", k^), Series("a", a^))
+
+
+def wide_right() raises -> DataFrame:
+    """Eight right rows against `wide_left`.
+
+    Keys 0 and 1 appear twice, key 9 matches nothing, and key 4 is on a single
+    row, so a left slice can contain rows that emit two, one and zero pairs.
+    """
+    return pair_frame(
+        Series("k", ints([0, 1, 2, 3, 4, 0, 1, 9])),
+        Series("b", ints([100, 110, 120, 130, 140, 150, 160, 170])),
+    )
+
+
+def nested_pairs(
+    left: DataFrame, right: DataFrame, kind: JoinKind
+) raises -> List[Int]:
+    """The pairing a single obvious loop produces, flattened to left, right.
+
+    `join_nested` would do this, but it is quadratic in a way that a frame this
+    long cannot afford, and it does not need to be: the right side here is eight
+    rows, so the obvious loop over both is a few million comparisons.
+    """
+    var lk = left.column("k").as_typed[DType.int64]()
+    var rk = right.column("k").as_typed[DType.int64]()
+    var out = List[Int](capacity=4 * len(lk))
+    for i in range(len(lk)):
+        var here = lk[i]
+        var live = lk.is_valid(i)
+        var hits = 0
+        for r in range(len(rk)):
+            if not live or not rk.is_valid(r) or here != rk[r]:
+                continue
+            hits += 1
+            if kind == JoinKind.INNER or kind == JoinKind.LEFT:
+                out.append(i)
+                out.append(r)
+            elif kind == JoinKind.SEMI and hits == 1:
+                out.append(i)
+                out.append(-1)
+        if hits > 0:
+            continue
+        if kind == JoinKind.LEFT or kind == JoinKind.ANTI:
+            out.append(i)
+            out.append(-1)
+    return out^
+
+
+def test_a_frame_past_the_split_pairs_what_one_loop_would() raises:
+    # The emit runs on one thread below `PARALLEL_LEFT_ROWS` and on every core
+    # above it, and the second of those is only correct if each worker writes at
+    # exactly the offset the counting pass left for it. An off by one in that
+    # arithmetic shows up as a pair in the wrong place or as an uninitialised
+    # row, neither of which the short frames above can reach.
+    var left = wide_left(140_000, -1)
+    var right = wide_right()
+    var kinds: List[JoinKind] = [
+        JoinKind.INNER,
+        JoinKind.LEFT,
+        JoinKind.SEMI,
+        JoinKind.ANTI,
+    ]
+    for i in range(len(kinds)):
+        var fast = join_indices(
+            left.columns, keys(0), 140_000, right.columns, keys(0), 8, kinds[i]
+        )
+        var want = nested_pairs(left, right, kinds[i])
+        assert_equal(
+            len(fast) * 2, len(want), String("row count for ", kinds[i])
+        )
+        for r in range(len(fast)):
+            assert_equal(
+                fast.left_at[r],
+                want[2 * r],
+                String("left row ", r, " for ", kinds[i]),
+            )
+            assert_equal(
+                fast.right_at[r],
+                want[2 * r + 1],
+                String("right row ", r, " for ", kinds[i]),
+            )
+
+
+def test_a_null_key_past_the_split_still_matches_nothing() raises:
+    # The null check is skipped outright when no key column has one, so the path
+    # that keeps it has to be walked at this length too. The null is put in the
+    # back half so that it lands on a worker other than the first.
+    var left = wide_left(140_000, 110_001)
+    var right = wide_right()
+    var inner = join_indices(
+        left.columns,
+        keys(0),
+        140_000,
+        right.columns,
+        keys(0),
+        8,
+        JoinKind.INNER,
+    )
+    assert_equal(
+        len(inner), len(nested_pairs(left, right, JoinKind.INNER)) // 2
+    )
+    for r in range(len(inner)):
+        assert_true(inner.left_at[r] != 110_001, "the null key matched")
+
+    var anti = join_indices(
+        left.columns, keys(0), 140_000, right.columns, keys(0), 8, JoinKind.ANTI
+    )
+    var kept = False
+    for r in range(len(anti)):
+        if anti.left_at[r] == 110_001:
+            kept = True
+    assert_true(kept, "the null key was dropped by the anti join")
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

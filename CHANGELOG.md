@@ -8,6 +8,31 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed
+
+The join emits its row pairs on every core, and stops looking for null keys in frames that have none.
+
+`join_indices` was two serial walks over the left side, one counting the output rows and one writing them, and on db-benchmark's j queries the writing walk alone was half of the pairing. It is a walk with no carried state: what a left row emits depends on that row and on the right side buckets, which are finished before the walk starts. So both walks now split by left row across cores, with a prefix sum of the per slice counts in between telling each worker where in the output its slice begins. That is what replaces the append, and it is why the counting walk had to split the same way.
+
+An outer join is left on one thread on purpose. It has to remember which right rows it paired so it can emit the leftovers afterwards, and that memory is a validity bitmap whose set is a read modify write of a word that eight rows share, so two workers marking at once would drop marks and invent unmatched rows.
+
+The other half is a pass that did not need to run at all. Before touching any of the above, the pairing built a `List[Bool]` over both frames saying whether each row's key tuple contained a null, one branch per key per row, and on a frame with no nulls anywhere the answer was False every time. Asking each key column for its null count first is a popcount per validity word, a sixty fourth of the pass, and db-benchmark's keys have no nulls. That was 14 ms of the 97 ms pairing on j1 and 27 ms on j4.
+
+Ten million rows on an i9-13900K, alternating builds, eight rounds of five runs each, one process per measurement, reported as the median of the per round paired ratios with the full range of those ratios in the last two columns. The machine was under an unrelated load again, which is what the pairing is for.
+
+| query | shape | before | after | ratio | low | high |
+| --- | --- | --- | --- | --- | --- | --- |
+| j4 | 10M to 10M, one match a row | 2280.7 ms | 1335.8 ms | 1.72 | 1.26 | 1.90 |
+| j5 | 10M to 10M, then aggregated | 2232.3 ms | 1342.6 ms | 1.67 | 1.37 | 2.07 |
+| j1 | 10M to 10k, one match a row | 386.5 ms | 255.3 ms | 1.49 | 1.13 | 1.71 |
+| j3 | 10M to 100k, left join | 417.2 ms | 321.8 ms | 1.32 | 0.97 | 1.66 |
+| j2 | 10M to 100k, inner join | 413.3 ms | 318.0 ms | 1.30 | 1.01 | 1.46 |
+| q1 | group by, no join | 26.7 ms | 25.8 ms | 1.03 | 0.79 | 1.37 |
+
+q1 is the control and touches none of this. The before column is higher across the board than the numbers quoted in the 0.6.20 notes because the machine was busier during this run, which is exactly the reason the ratios are paired rather than divided at the end.
+
+What is left in the j4 pairing is the scatter that fills the buckets, which is 354 ms of random writes into a 10M entry table, and the factorize of the 20M row concatenated key column, which is 390 ms. Neither is touched here.
+
 ## [0.6.20] - 2026-08-31
 
 Built against Mojo 1.0.0 (ed45d567).
