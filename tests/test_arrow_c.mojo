@@ -279,8 +279,8 @@ def test_buffer_counts() raises:
     assert_equal(buffer_count(LogicalType.BOOL), 2)
     assert_equal(buffer_count(LogicalType.INT64), 2)
     assert_equal(buffer_count(LogicalType.FLOAT64), 2)
-    assert_equal(buffer_count(LogicalType.STRING), 3)
-    assert_equal(buffer_count(LogicalType.BINARY), 3)
+    assert_equal(buffer_count(LogicalType.STRING), 4)
+    assert_equal(buffer_count(LogicalType.BINARY), 4)
 
 
 def main() raises:

@@ -19,13 +19,12 @@ from std.testing import (
     TestSuite,
     assert_equal,
     assert_false,
-    assert_raises,
     assert_true,
 )
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
-from firepanda.array.strings import strings_from_list
+from firepanda.array.strings import StringBuilder, strings_from_list
 from firepanda.dtype.logical import LogicalType
 from firepanda.io.arrow_c import (
     ARROW_FLAG_NULLABLE,
@@ -201,17 +200,120 @@ def test_every_fixed_width_type_exports() raises:
     release_array(d)
 
 
-def test_bool_is_refused_with_its_reason() raises:
-    # Not exported wrong, and not silently omitted. A firepanda bool column is a
-    # byte per value where Arrow wants a bit per value.
-    with assert_raises(contains="byte per value"):
-        _ = export_array(AnyArray(Array[DType.bool](4)))
+def test_a_bool_column_is_packed_to_a_bit_per_value() raises:
+    # The one copy in the exporter, and it is not avoidable: firepanda stores a
+    # bool as a byte because that is what a kernel loads, Arrow stores it as a
+    # bit. Checked bit by bit through the void pointer.
+    var column = Array[DType.bool](11)
+    for i in range(11):
+        column.set_valid(i, i % 3 == 0)
+
+    var array = export_array(AnyArray(column^))
+    assert_equal(array.length, 11)
+    assert_equal(array.n_buffers, 2)
+    var bits = _buffer_at(array, 1).value().unsafe_bitcast[UInt8]()
+    for i in range(11):
+        var byte = bits.unsafe_offset(i >> 3).unsafe_load()
+        var bit = ((byte >> UInt8(i & 7)) & 1) != 0
+        assert_equal(bit, i % 3 == 0)
+    release_array(array)
 
 
-def test_strings_are_refused_with_their_reason() raises:
-    var text = strings_from_list(["a", "b"])
-    with assert_raises(contains="variadic data buffers"):
-        _ = export_array(AnyArray(text^))
+def test_the_bool_values_buffer_is_the_packed_one_not_the_column() raises:
+    # The negative of test_the_values_buffer_is_not_copied, and worth asserting
+    # for the same reason: handing out the byte per value buffer here would look
+    # right in every test that only reads index zero.
+    var column = Array[DType.bool](8)
+    for i in range(8):
+        column.set_valid(i, True)
+    var byte_values = Int(column.data.values.unsafe_ptr())
+
+    var array = export_array(AnyArray(column^))
+    assert_true(Int(_buffer_at(array, 1).value()) != byte_values)
+    release_array(array)
+
+
+def test_a_string_column_exports_four_buffers() raises:
+    var array = export_array(AnyArray(strings_from_list(["a", "bb", "ccc"])))
+    assert_equal(array.length, 3)
+    assert_equal(array.n_buffers, 4)
+    assert_equal(array.null_count, 0)
+    release_array(array)
+
+
+def test_the_string_views_are_not_copied() raises:
+    var text = strings_from_list(["alpha", "beta", "gamma"])
+    var views_before = Int(text.views.unsafe_ptr())
+    var payload_before = Int(text.payload.unsafe_ptr())
+
+    var array = export_array(AnyArray(text^))
+    assert_equal(Int(_buffer_at(array, 1).value()), views_before)
+    assert_equal(Int(_buffer_at(array, 2).value()), payload_before)
+    release_array(array)
+
+
+def test_the_view_layout_is_arrows_view_layout() raises:
+    # firepanda picked this layout for its own reasons and landing on Arrow's was
+    # not one of them, so the bytes are compared rather than the coincidence
+    # trusted. A short string is a little endian uint32 length followed by the
+    # data inline; a long one is the length, a four byte prefix, a uint32 buffer
+    # index and a uint32 offset.
+    var array = export_array(
+        AnyArray(strings_from_list(["hi", "a string longer than twelve bytes"]))
+    )
+    var views = _buffer_at(array, 1).value().unsafe_bitcast[UInt8]()
+
+    var short_length = views.unsafe_bitcast[UInt32]().unsafe_load()
+    assert_equal(short_length, UInt32(2))
+    assert_equal(views.unsafe_offset(4).unsafe_load(), UInt8(ord("h")))
+    assert_equal(views.unsafe_offset(5).unsafe_load(), UInt8(ord("i")))
+
+    var long_words = views.unsafe_offset(16).unsafe_bitcast[UInt32]()
+    assert_equal(long_words.unsafe_load(), UInt32(33))
+    # The prefix is the first four bytes of the string, stored as they appear
+    # rather than byte swapped, which is what makes it Arrow's prefix and not
+    # just a comparison key of our own.
+    var prefix = String("a st")
+    for i in range(4):
+        assert_equal(
+            views.unsafe_offset(20 + i).unsafe_load(), prefix.as_bytes()[i]
+        )
+    # Buffer index zero, because a finished column has exactly one payload block
+    # and Arrow numbers the variadic buffers from zero.
+    assert_equal(long_words.unsafe_offset(2).unsafe_load(), UInt32(0))
+    assert_equal(long_words.unsafe_offset(3).unsafe_load(), UInt32(0))
+    release_array(array)
+
+
+def test_the_sizes_buffer_reports_the_payload_length() raises:
+    # The last buffer of a view array is one int64 per variadic data buffer.
+    var text = strings_from_list(["a string longer than twelve bytes"])
+    var payload_length = len(text.payload)
+
+    var array = export_array(AnyArray(text^))
+    var sizes = _buffer_at(array, 3).value().unsafe_bitcast[Int64]()
+    assert_equal(sizes.unsafe_load(), Int64(payload_length))
+    assert_true(payload_length > 0)
+    release_array(array)
+
+
+def test_a_column_of_only_short_strings_still_has_four_buffers() raises:
+    # Nothing goes to the payload when every string fits inside its view, and the
+    # empty block is emitted anyway so that the buffer count is a constant. A
+    # consumer never reads it, because the sizes buffer says it is zero long.
+    var array = export_array(AnyArray(strings_from_list(["a", "bb"])))
+    assert_equal(array.n_buffers, 4)
+    var sizes = _buffer_at(array, 3).value().unsafe_bitcast[Int64]()
+    assert_equal(sizes.unsafe_load(), Int64(0))
+    release_array(array)
+
+
+def test_the_format_string_of_a_string_column_is_the_view_one() raises:
+    # "vu", not "u". A consumer that read "u" would expect an offsets buffer and
+    # find sixteen byte views.
+    var schema = export_schema(LogicalType.STRING, "label")
+    assert_equal(_c_string_at(schema.format.value()), "vu")
+    release_schema(schema)
 
 
 def main() raises:

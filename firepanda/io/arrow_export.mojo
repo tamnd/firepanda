@@ -39,22 +39,40 @@ convenience choice. firepanda columns are deep copied rather than refcounted tod
 so sharing one between a `DataFrame` and a consumer is not something this layer can
 offer, and a signature that borrowed would be promising it.
 
-### What is not here yet
+### Strings, which turned out to be free
 
-Bool, string, binary and null. Each is a real conversion rather than an oversight.
+A firepanda string column is already the Arrow view layout, byte for byte. Both
+store sixteen bytes per element: a little endian uint32 length, then either the
+data inlined when it is at most twelve bytes, or a four byte prefix followed by a
+uint32 buffer index and a uint32 offset. firepanda chose that layout for its own
+reasons, recorded in `array/strview.mojo`, and landing on Arrow's was not one of
+them, so a test compares the bytes rather than trusting the coincidence to hold.
 
-A firepanda bool column stores a byte per value and Arrow stores a bit per value,
-so exporting one is a bit packing pass. A string column is the variable size binary
-view layout, which needs the variadic data buffers and the trailing buffer of their
-sizes, so its buffer count is not a constant and the box has more to hold. Both are
-follow-ups, and until then they raise with the reason rather than exporting
-something a consumer would misread.
+The consequence is that a string column exports without copying either, which is
+the case that would have hurt most: the payload of a text column is usually the
+largest buffer in the frame. A finished firepanda column has exactly one payload
+block, so it exports as four buffers, and the block is emitted even when it is
+empty so that the count is a constant. A consumer never reads an empty one,
+because the sizes buffer says it is zero long.
+
+### Bool, which is not
+
+The one copy in this file. firepanda stores a bool as a byte, because that is what
+a kernel wants to load, and Arrow stores it as a bit, so exporting one is a packing
+pass. It shrinks by a factor of eight on the way, which is why the cost of it
+hardly shows, and the packed buffer lives in the box like everything else.
+
+### What is still not here
+
+The null type, which firepanda has as a `LogicalType` but not as a column anything
+constructs, so there is nothing to export. It raises with that reason.
 """
 
 from std.ffi import c_char, external_call
 from std.sys import size_of
 
 from firepanda.array.any import AnyArray
+from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.logical import LogicalType
 
 from .arrow_c import (
@@ -104,22 +122,38 @@ struct _ArrayBox(Movable):
 
     The column, which is what keeps the values and the validity alive, and the
     array of buffer pointers, which the C struct points at rather than owns.
+
+    Two fields exist only for the types that need more than the column already
+    has. `packed` is the bit packed values of a bool column, which is the one
+    buffer this file ever builds. `sizes` is the lengths of a view column's
+    variadic data buffers, which Arrow wants as a buffer rather than a field, so
+    they cannot be a local.
     """
 
     var column: AnyArray
     var buffers: List[NullableVoidPtr]
+    var packed: Optional[Bitmap]
+    var sizes: List[Int64]
 
     def __init__(
-        out self, var column: AnyArray, var buffers: List[NullableVoidPtr]
+        out self,
+        var column: AnyArray,
+        var buffers: List[NullableVoidPtr],
+        var packed: Optional[Bitmap],
+        var sizes: List[Int64],
     ):
         """Constructs the box.
 
         Args:
             column: The column being exported, moved in.
             buffers: The pointers, in Arrow's order.
+            packed: The bit packed values of a bool column, empty otherwise.
+            sizes: The lengths of the variadic data buffers, for a view column.
         """
         self.column = column^
         self.buffers = buffers^
+        self.packed = packed^
+        self.sizes = sizes^
 
 
 def _c_string(text: StringSlice) -> List[UInt8]:
@@ -156,6 +190,34 @@ def _as_void[o: MutOrigin](p: Pointer[UInt8, o]) -> VoidPtr:
         The same address, as a `void*`.
     """
     return p.unsafe_origin_cast[MutUntrackedOrigin]().unsafe_bitcast[NoneType]()
+
+
+def _pack_bools(column: AnyArray) -> Bitmap:
+    """Packs a byte per value bool column into a bit per value buffer.
+
+    The one copy in this file, and it is not avoidable: firepanda stores a bool
+    as a byte because that is what a kernel wants to load, and Arrow stores it as
+    a bit. Eight rows per byte rather than one, so the copy also shrinks by a
+    factor of eight, which is why the cost of it barely shows.
+
+    A null row's value byte is not meaningful, and neither is its Arrow value
+    bit, so nulls are packed as whatever the byte happened to hold rather than
+    being special cased. Arrow says the values buffer is undefined where validity
+    says null.
+
+    Args:
+        column: The bool column.
+
+    Returns:
+        A bitmap holding one bit per value.
+    """
+    var length = len(column)
+    var out = Bitmap(length, all_valid=False)
+    var values = column.data.values.unsafe_ptr()
+    for i in range(length):
+        if values.unsafe_offset(i).unsafe_load() != 0:
+            out.set(i, True)
+    return out^
 
 
 def _release_exported_schema(schema: SchemaPtr) abi("C") -> None:
@@ -240,13 +302,17 @@ def export_array(var column: AnyArray) raises -> ArrowArray:
     """Hands a firepanda column to a C consumer without copying its values.
 
     The column is moved into a box that lives until the returned array is
-    released. Nothing is copied: `buffers[1]` is the column's own values pointer
+    released. Nothing is copied for any type except bool: `buffers[1]` is the
+    column's own values pointer, or its own views pointer for a string column,
     and `buffers[0]` is its own validity pointer.
 
     The validity buffer is null when the column has no nulls, which Arrow allows
     and consumers use to skip a branch per value. A column that has nulls hands
     out its bitmap as it stands, because firepanda's bitmap and Arrow's are the
     same bytes in the same order with the same meaning.
+
+    Two buffers for a fixed width or bool column, four for a string or binary
+    one: validity, the views, the single payload block, and the block's length.
 
     Args:
         column: The column, consumed.
@@ -255,33 +321,42 @@ def export_array(var column: AnyArray) raises -> ArrowArray:
         An array the caller owns and must release exactly once.
 
     Raises:
-        Error: If the type is one the exporter cannot hand over without
-            converting it, which today means bool, string, binary and null.
+        Error: If the column is of the null type, which nothing constructs, or
+            is a string column with no text storage, which nothing constructs
+            either but which would be read as a column of garbage views.
     """
     var type = column.type
-    if type == LogicalType.BOOL:
-        raise Error(
-            "arrow: cannot export a bool column yet, because firepanda stores a"
-            " byte per value and Arrow wants a bit per value"
-        )
-    if type == LogicalType.STRING or type == LogicalType.BINARY:
-        raise Error(
-            "arrow: cannot export a string or binary column yet, because the"
-            " view layout needs the variadic data buffers"
-        )
     if type == LogicalType.NULL:
-        raise Error("arrow: cannot export a null column yet")
+        raise Error(
+            "arrow: cannot export a null column yet, because firepanda has no"
+            " column that carries the null type at run time"
+        )
+    var is_view = type == LogicalType.STRING or type == LogicalType.BINARY
+    if is_view and not column.text:
+        raise Error(
+            "arrow: a string column with no text storage cannot be exported"
+        )
     # Raises for anything else that has no format string, before the box exists
     # and there is something to leak.
     _ = format_for(type)
 
     var length = len(column)
     var null_count = column.data.validity.null_count()
+    var packed = Optional[Bitmap](None)
+    if type == LogicalType.BOOL:
+        packed = _pack_bools(column)
 
     var box = external_call["malloc", Pointer[_ArrayBox, MutUntrackedOrigin]](
         size_of[_ArrayBox]()
     )
-    box.unsafe_write(_ArrayBox(column^, List[NullableVoidPtr](capacity=2)))
+    box.unsafe_write(
+        _ArrayBox(
+            column^,
+            List[NullableVoidPtr](capacity=4),
+            packed^,
+            List[Int64](capacity=1),
+        )
+    )
 
     # Filled after the move, so the pointers are the box's copy of the column
     # rather than a local that is about to go away.
@@ -289,13 +364,30 @@ def export_array(var column: AnyArray) raises -> ArrowArray:
         box[].buffers.append(None)
     else:
         box[].buffers.append(_as_void(box[].column.data.validity.unsafe_ptr()))
-    box[].buffers.append(_as_void(box[].column.data.values.unsafe_ptr()))
+
+    var n_buffers = 2
+    if type == LogicalType.BOOL:
+        box[].buffers.append(_as_void(box[].packed.value().unsafe_ptr()))
+    elif is_view:
+        n_buffers = 4
+        ref text = box[].column.text.value()
+        box[].sizes.append(Int64(len(text.payload)))
+        box[].buffers.append(_as_void(text.views.unsafe_ptr()))
+        box[].buffers.append(_as_void(text.payload.unsafe_ptr()))
+        box[].buffers.append(
+            box[]
+            .sizes.unsafe_ptr()
+            .unsafe_origin_cast[MutUntrackedOrigin]()
+            .unsafe_bitcast[NoneType]()
+        )
+    else:
+        box[].buffers.append(_as_void(box[].column.data.values.unsafe_ptr()))
 
     var array = ArrowArray()
     array.length = Int64(length)
     array.null_count = Int64(null_count)
     array.offset = 0
-    array.n_buffers = 2
+    array.n_buffers = Int64(n_buffers)
     array.n_children = 0
     array.buffers = (
         box[].buffers.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
