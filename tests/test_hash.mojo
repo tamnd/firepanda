@@ -80,6 +80,7 @@ def same_codes[dt: DType](col: Array[dt], what: String) raises:
         If anything disagrees.
     """
     var got = factorize(col)
+    var keys = got.keys(col)
     var twin = factorize_linear(col)
     var viadict = factorize_dict(col)
 
@@ -92,13 +93,11 @@ def same_codes[dt: DType](col: Array[dt], what: String) raises:
         var at = Int(got.codes[i])
         assert_true(at < got.count(), String(what, ": code out of range"))
         if col.is_valid(i):
-            assert_true(
-                got.keys.is_valid(at), String(what, ": key marked null")
-            )
+            assert_true(keys.is_valid(at), String(what, ": key marked null"))
             # Compared as key bits, so that a NaN column can go through here
             # too. Two NaNs in the same group are not equal to each other.
             assert_equal(
-                key_bits(got.keys[at]),
+                key_bits(keys[at]),
                 key_bits(col[i]),
                 String(what, ": key mismatch"),
             )
@@ -150,13 +149,15 @@ def same_routes[dt: DType](col: Array[dt], workers: Int, what: String) raises:
             break
     assert_equal(row, -1, String(what, ": ordinals differ at row ", row))
 
+    var many_keys = many.keys(col)
+    var one_keys = one.keys(col)
     var key = -1
     for g in range(one.count()):
-        if many.keys.is_valid(g) != one.keys.is_valid(g):
+        if many_keys.is_valid(g) != one_keys.is_valid(g):
             key = g
             break
-        if one.keys.is_valid(g) and key_bits(many.keys[g]) != key_bits(
-            one.keys[g]
+        if one_keys.is_valid(g) and key_bits(many_keys[g]) != key_bits(
+            one_keys[g]
         ):
             key = g
             break
@@ -219,7 +220,7 @@ def test_the_parallel_route_agrees_with_nulls_scattered_through_it() raises:
 
     var got = _factorize_hashed_parallel(col, DEFAULT_SEED, 5)
     assert_equal(got.null_group, 0)
-    assert_false(got.keys.is_valid(0))
+    assert_false(got.keys(col).is_valid(0))
 
 
 def test_the_parallel_route_agrees_when_every_row_is_null() raises:
@@ -256,8 +257,9 @@ def test_the_parallel_route_keeps_first_appearance_order_across_slices() raises:
             bad = i
             break
     assert_equal(bad, -1, String("out of first appearance order at ", bad))
+    var keys = got.keys(col)
     for g in range(4):
-        assert_equal(got.keys[g], Int64(g) * step)
+        assert_equal(keys[g], Int64(g) * step)
 
 
 def test_the_parallel_route_sizes_a_slice_past_the_late_checkpoint() raises:
@@ -547,9 +549,10 @@ def test_factorize_small_integers() raises:
     assert_equal(got.codes[3], 1)
     assert_equal(got.codes[4], 1)
     assert_equal(got.codes[5], 2)
-    assert_equal(got.keys[0], 7)
-    assert_equal(got.keys[1], 3)
-    assert_equal(got.keys[2], 9)
+    var keys = got.keys(col)
+    assert_equal(keys[0], 7)
+    assert_equal(keys[1], 3)
+    assert_equal(keys[2], 9)
     same_codes(col, "small integers")
 
 
@@ -562,9 +565,10 @@ def test_factorize_assigns_ordinals_in_first_appearance_order() raises:
     for i in range(60):
         col[i] = order[i % 3]
     var got = factorize(col)
-    assert_equal(got.keys[0], 50)
-    assert_equal(got.keys[1], 10)
-    assert_equal(got.keys[2], 30)
+    var keys = got.keys(col)
+    assert_equal(keys[0], 50)
+    assert_equal(keys[1], 10)
+    assert_equal(keys[2], 30)
 
 
 def test_factorize_gives_nulls_group_zero() raises:
@@ -578,7 +582,7 @@ def test_factorize_gives_nulls_group_zero() raises:
     assert_equal(got.null_group, 0)
     assert_equal(got.codes[1], 0)
     assert_equal(got.codes[4], 0)
-    assert_false(got.keys.is_valid(0), "the null group's key is not null")
+    assert_false(got.keys(col).is_valid(0), "the null group's key is not null")
     for i in range(6):
         if col.is_valid(i):
             assert_true(got.codes[i] != 0, "a value landed in the null group")

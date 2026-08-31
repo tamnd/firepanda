@@ -1,8 +1,8 @@
 """Turning a column into group ordinals, by whichever route is cheapest.
 
 This is the operation a group by is built on. Every row gets an integer naming
-the group it belongs to, the distinct keys come back so the ordinal can be turned
-back into a value, and everything downstream aggregates into a flat array indexed
+the group it belongs to, a row per group comes back so the ordinal can be turned
+back into a key, and everything downstream aggregates into a flat array indexed
 by that integer. pandas calls this `factorize` and the name is worth keeping.
 
 There are two routes and the interesting one is that the fast route is not the
@@ -23,9 +23,16 @@ taking exactly when the range is small enough that the table behaves like cache.
 
 Text has a third route, `factorize_strings`, and it is the hash table with the
 key comparison put back, because a string does not fit in the 64 bits the table
-stores. It hands back a representative row per group rather than the keys
-themselves, which is the one place its shape differs from the numeric one and is
-explained on the function.
+stores.
+
+Neither route hands back the key values. All three record the row that introduced
+each group, which they are standing on anyway, and `Factorized.keys` turns that
+into a column of keys for whoever wants one. Nobody in the library does: a group
+by gathers its key columns by those rows, with the take kernel it already has and
+for every key at once, and a join reads the ordinals and nothing else. Building
+the keys eagerly was a random read per group and two copies of the result, which
+on a join of ten million distinct keys is eighty megabytes written twice and then
+dropped.
 
 The hash route splits a long column across cores. Each worker builds its own
 table over a contiguous slice, and a sequential merge afterwards renumbers what
@@ -44,20 +51,21 @@ Nulls get a group. A null is a value that rows can share, pandas with
 while inventing it later would be another pass over the column. When a column has
 any nulls the null group is ordinal zero and the non-null keys follow in
 first-appearance order. Fixing it at zero rather than at the position of the
-first null is what keeps the ordinals the table hands out and the positions in
-`keys` a constant apart, which is the difference between one addition per row and
-a second bookkeeping structure.
+first null is what keeps the ordinals the table hands out and the ordinals that
+come back a constant apart, which is the difference between one addition per row
+and a second bookkeeping structure.
 """
 
 from std.math import exp
 from std.sys.info import simd_width_of, size_of
 
-from firepanda.array.array import Array, from_list
+from firepanda.array.array import Array
 from firepanda.array.strings import StringArray
 from firepanda.buffer.buffer import Buffer
 from firepanda.exec import parallel_for, worker_count
 from firepanda.kernel.accum import highest, lowest
 from firepanda.kernel.agg import BLOCK
+from firepanda.kernel.select import take_rows
 
 from .function import DEFAULT_SEED, hash_chunk, hash_strings_chunk
 from .table import HashTable
@@ -162,23 +170,19 @@ decision stays proportional to the work the decision is about.
 
 
 struct Factorized[dt: DType](Movable):
-    """A column rewritten as group ordinals, plus the keys they name."""
+    """A column rewritten as group ordinals, plus a row per group they name."""
 
     var codes: Array[DType.uint32]
-    """One group ordinal per row of the input, in `[0, len(keys))`.
+    """One group ordinal per row of the input, in `[0, count())`.
 
     Every ordinal in that range belongs to at least one row, on both routes. The
     hashed one only makes an ordinal because a row asked for one, and the direct
-    one indexes its table by value but appends to `keys` only on first sight, so
-    the gaps in the table are not gaps in the ordinals. A group by relies on that
+    one indexes its table by value but hands out an ordinal only on first sight,
+    so the gaps in the table are not gaps in the ordinals. A group by relies on that
     to skip a renumbering pass,
     `test_no_shape_of_column_factorizes_to_a_sparse_ordinal`
     holds it, and a route added later that does not hold it has to say so.
     """
-
-    var keys: Array[Self.dt]
-    """The distinct keys. Index it by an ordinal from `codes` to get the value
-    back. Entry zero is the null group when there is one."""
 
     var firsts: List[Int]
     """For each non-null group, the first row that had it, in ordinal order.
@@ -201,7 +205,6 @@ struct Factorized[dt: DType](Movable):
     def __init__(
         out self,
         var codes: Array[DType.uint32],
-        var keys: Array[Self.dt],
         var firsts: List[Int],
         null_group: Int,
     ):
@@ -209,12 +212,10 @@ struct Factorized[dt: DType](Movable):
 
         Args:
             codes: The per-row ordinals.
-            keys: The distinct keys.
             firsts: A representative row per non-null group.
             null_group: The ordinal for nulls, or -1.
         """
         self.codes = codes^
-        self.keys = keys^
         self.firsts = firsts^
         self.null_group = null_group
 
@@ -224,14 +225,45 @@ struct Factorized[dt: DType](Movable):
         Returns:
             The group count, including the null group if there is one.
         """
-        return len(self.keys)
+        return len(self.firsts) + (1 if self.null_group >= 0 else 0)
+
+    def keys(self, col: Array[Self.dt]) raises -> Array[Self.dt]:
+        """Builds the distinct keys, in ordinal order.
+
+        Index the result by an ordinal from `codes` to get the value back. Entry
+        zero is the null group when there is one, and it is null.
+
+        This is a gather by `firsts` and it is not done unless it is asked for.
+        Every group's row is a row this factorize already stood on, so recording
+        it cost an append per group, while reading the value out of it costs a
+        random load per group and a column to put it in. The library's own
+        callers want the rows rather than the values: a group by gathers all of
+        its key columns by them at once, and a join wants neither.
+
+        Args:
+            col: The column this factorization came from.
+
+        Returns:
+            A column of `count()` rows, the key of each group in ordinal order.
+
+        Raises:
+            If the gather fails, which for indices this produced it will not.
+        """
+        var picks = List[Int](capacity=self.count())
+        if self.null_group >= 0:
+            # A negative index gathers a null, which is what the null group's key
+            # is, so the offset that `firsts` leaves at the front fills itself in.
+            picks.append(-1)
+        for at in range(len(self.firsts)):
+            picks.append(self.firsts[at])
+        return take_rows(col, picks)
 
     def into_codes(deinit self) -> Array[DType.uint32]:
         """Gives up the ordinals without copying them, dropping the rest.
 
         A caller that groups on several columns wants the ordinals and has no use
-        for the keys, and Mojo will not let it reach in and move `codes` out from
-        under a struct that still owns `keys`. `deinit` says the rest is being
+        for the rows, and Mojo will not let it reach in and move `codes` out from
+        under a struct that still owns `firsts`. `deinit` says the rest is being
         torn down, which is what makes the move legal. Same arrangement as
         `Series.into_values`.
 
@@ -270,7 +302,8 @@ def factorize[
         dt: The column's dtype.
 
     Returns:
-        The ordinals, the distinct keys, and which ordinal the nulls got.
+        The ordinals, a representative row per group, and which ordinal the
+        nulls got.
     """
     comptime if dt.is_integral():
         var plan = _direct_plan[dt](col)
@@ -415,14 +448,13 @@ def _factorize_direct[
     var slots = seen.bitcast[DType.uint32]()
 
     var has_null = col.null_count() > 0
+    var offset = 1 if has_null else 0
     var codes = Array[DType.uint32](n)
     var out = codes.unsafe_ptr()
-    var keys = List[Scalar[dt]]()
     var firsts = List[Int]()
     var null_group = -1
     if has_null:
         null_group = 0
-        keys.append(Scalar[dt](0))
 
     for i in range(n):
         if has_null and not col.is_valid(i):
@@ -433,17 +465,17 @@ def _factorize_direct[
         var at = Int(value) - Int(base)
         var stored = slots.unsafe_offset(at).unsafe_load()
         if stored == 0:
-            var assigned = len(keys)
-            keys.append(value)
+            var assigned = len(firsts) + offset
             # The row that introduced the group, which this loop is standing on
-            # anyway. The other two routes have the same row for the same reason.
+            # anyway. The other two routes have the same row for the same reason,
+            # and it is the only thing any of them records about the key.
             firsts.append(i)
             slots.unsafe_offset(at).unsafe_write(UInt32(assigned + 1))
             out.unsafe_offset(i).unsafe_write(UInt32(assigned))
         else:
             out.unsafe_offset(i).unsafe_write(stored - 1)
 
-    return _finish[dt](codes^, keys^, firsts^, null_group)
+    return Factorized[dt](codes^, firsts^, null_group)
 
 
 def _factorize_hashed[
@@ -660,16 +692,13 @@ def _factorize_hashed_serial[
         The factorization.
     """
     var n = len(col)
-    var values = col.unsafe_ptr()
 
     var has_null = col.null_count() > 0
     var offset = 1 if has_null else 0
     var codes = Array[DType.uint32](n)
-    var keys = List[Scalar[dt]]()
     var null_group = -1
     if has_null:
         null_group = 0
-        keys.append(Scalar[dt](0))
 
     # Hash a chunk, probe that chunk, move on. Hashing ahead of the probe is what
     # makes the prefetch possible, because a loop that hashed and probed one row
@@ -681,9 +710,9 @@ def _factorize_hashed_serial[
     var hashes = Buffer(CHUNK_ROWS * 8)
 
     # The table writes the ordinals and hands back the row that first produced
-    # each one. Reading the key values out of those rows afterwards is a pass
-    # over the group count rather than over the row count, and it keeps the table
-    # free of any idea of what a value is.
+    # each one, which keeps it free of any idea of what a value is. Reading the
+    # key values out of those rows is `Factorized.keys` and is not done here,
+    # because no caller in the library wants them.
     var firsts = List[Int]()
     var table = HashTable(0, seed)
 
@@ -705,10 +734,7 @@ def _factorize_hashed_serial[
         )
         base += count
 
-    for at in range(len(firsts)):
-        keys.append(values.unsafe_offset(firsts[at]).unsafe_load())
-
-    return _finish[dt](codes^, keys^, firsts^, null_group)
+    return Factorized[dt](codes^, firsts^, null_group)
 
 
 def _factorize_hashed_parallel[
@@ -812,14 +838,11 @@ def _factorize_hashed_parallel[
 
     parallel_for(dump, workers)
 
-    var keys = List[Scalar[dt]]()
     var firsts = List[Int]()
     var null_group = -1
     if has_null:
         null_group = 0
-        keys.append(Scalar[dt](0))
 
-    var values = col.unsafe_ptr()
     var hashed = found.bitcast[DType.uint64]()
     var map = Buffer(overwritten=total * 4)
     var mapped = map.bitcast[DType.uint32]()
@@ -836,8 +859,7 @@ def _factorize_hashed_parallel[
                 hashed.unsafe_offset(at + k).unsafe_load()
             )
             mapped.unsafe_offset(at + k).unsafe_write(UInt32(ordinal + offset))
-            if ordinal + offset == len(keys):
-                keys.append(values.unsafe_offset(founds[w][k]).unsafe_load())
+            if ordinal == len(firsts):
                 # The earliest row anywhere with this key, by the same argument
                 # that makes the merge's ordinals first-appearance order: the
                 # slices are contiguous and in order, and a worker offers its
@@ -858,35 +880,7 @@ def _factorize_hashed_parallel[
 
     parallel_for(remap, workers)
 
-    return _finish[dt](codes^, keys^, firsts^, null_group)
-
-
-def _finish[
-    dt: DType
-](
-    var codes: Array[DType.uint32],
-    var keys: List[Scalar[dt]],
-    var firsts: List[Int],
-    null_group: Int,
-) -> Factorized[dt]:
-    """Packages the two routes' common output.
-
-    Args:
-        codes: The per-row ordinals.
-        keys: The distinct keys.
-        firsts: A representative row per non-null group.
-        null_group: The ordinal for nulls, or -1.
-
-    Parameters:
-        dt: The column's dtype.
-
-    Returns:
-        The factorization, with the null group's key marked null.
-    """
-    var out = from_list[dt](keys)
-    if null_group >= 0:
-        out.set_null(null_group)
-    return Factorized[dt](codes^, out^, firsts^, null_group)
+    return Factorized[dt](codes^, firsts^, null_group)
 
 
 struct FactorizedStrings(Movable):
@@ -899,12 +893,9 @@ struct FactorizedStrings(Movable):
     var firsts: List[Int]
     """For each non-null group, the first row that had it, in ordinal order.
 
-    This is where it differs from `Factorized`, which hands back the key values
-    themselves. A string key is not a scalar, so returning the keys would mean
-    gathering them into a second column, and both callers there are, the frame
-    layer's group by and the join, already recover key values by taking rows.
-    Building a column they were going to throw away is a pass over the group
-    count that nobody asked for.
+    `Factorized` records the same thing, and this is the shape both of them are.
+    A string key is not a scalar, so there is no column of keys this one could
+    hand back even on request, which is the only way the two still differ.
     """
 
     var null_group: Int
