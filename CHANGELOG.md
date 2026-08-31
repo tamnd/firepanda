@@ -8,6 +8,34 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.23] - 2026-08-31
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Two changes, one to the group by and one to the join, and both of them are the same observation from different ends: the library was choosing a general shape in places where it already knew the specific one.
+
+The group by on several keys packs its keys into one integer per row and factorizes that at the end. Factorize decides between a direct table indexed by value and a hash table by scanning the column for its range, and it declines the table above sixty five thousand, because a scan is a measurement of data the library did not construct and a span of ten million says nothing about whether ten values or ten million occupy it. A packed key is not in that position. Its range is `g0 * g1 * g2 * ...`, computed on the way down out of ordinals that are dense by construction, and a range built that way out of dense parts is itself densely occupied. So there is now a `factorize_dense` for callers who can name the range, and its rule is the table against the column rather than the table against the cache: index it when the span fits in what the column already costs, which caps the direct route at four bytes a row. Two keys of a hundred by a hundred thousand is a span of exactly ten million on ten million rows, and it now indexes instead of hashing.
+
+The join builds its right side by bucketing rows by code: count per code, prefix sum, scatter, undo the cursor. That is the general answer and it stays, because a right key can repeat and then a left row pairs with several. But a join onto a primary key has one right row per code, and there the counts, the prefix sum, the cursor walk and the bucket array all exist to say "one". The build now assumes the right key is unique and fills a single table from code to row in one pass, and the first code it finds already taken abandons that and runs the general build from the top. Being wrong costs part of one scan of the right side. Being right saves two walks of a table as long as the frame plus an array as long as it again, and the table is `int32` rather than `Int`, so the widest join in the suite carries forty megabytes where the general shape carried a hundred and sixty.
+
+Ten million rows on an i9-13900K, v0.6.22 against this release, alternating builds, one process per measurement, median of the per round paired ratios.
+
+| query | shape | 0.6.22 | 0.6.23 | ratio |
+| --- | --- | --- | --- | --- |
+| j5 | ten million to ten million, then aggregated | 777.5 ms | 625.8 ms | 1.28 |
+| j4 | ten million to ten million | 753.3 ms | 618.5 ms | 1.21 |
+| q6 | group by two keys, six million out | 627.8 ms | 522.0 ms | 1.19 |
+| q2 | group by two keys, ten thousand out | 75.2 ms | 72.6 ms | 1.06 |
+| j2 | ten million to a hundred thousand | 204.8 ms | 199.3 ms | 1.02 |
+| q3 | group by one key, hundred thousand out | 138.3 ms | 135.6 ms | 1.02 |
+| j1 | ten million to ten thousand | 155.8 ms | 152.7 ms | 1.01 |
+| j3 | left join, ten million to a hundred thousand | 205.0 ms | 206.9 ms | 1.00 |
+| q10 | group by six keys, ten million out | 1009.0 ms | 1015.7 ms | 0.99 |
+
+The two halves land on disjoint queries, which is what their code predicts. q6 is the query the dense table was written for and j4 and j5 are the joins the unique table was written for, and neither change touches the other's shape. q10 is a control for the first and a control it stays: a space of ten to the eighteen declines the table on either route. j3 is a control for the second in the same sense, since its build side is a hundred thousand rows and there was never much there to save.
+
+Two things learned in the measuring are worth carrying forward. The unique join route was first written as an `if` inside the two hot loops rather than as its own pair of loops, and in that form j4 and j5 gained about what they gain now while j3 read 0.898 and j1 read 0.994. The predicate is loop invariant and answers the same way on all ten million rows, and it is still a compare and a jump on each of them, so on the joins with a small build side it was pure cost. Splitting the loops put j3 back to 1.000 with nothing lost at the other end. And q10 first read 0.927 on eight rounds, which looked like a regression on the widest query and is not one: it is bimodal on this machine with modes near 980 and 1090 ms that both builds visit, and twenty two rounds put it at 0.974 with the two ranges overlapping across their whole width. A reading that contradicts the mechanism needs more samples before it gets a hypothesis.
+
 ### Added
 
 - `factorize_dense`, for a caller that already knows the range its values are in. `factorize` learns the range by scanning, and what a scan finds is a bound on data the library did not construct, so it declines a direct table above `DIRECT_LIMIT` because a span of ten million says nothing about whether ten values or ten million occupy it. A group by on several keys is not in that position. Its packed key has a range of `g0 * g1 * g2 * ...`, computed on the way down out of ordinals that are dense by construction, and the shapes where that product is large are the shapes where most of it is occupied. So the bound for a caller who can name the range is the table against the column rather than the table against the cache, which caps the direct route at four bytes a row and never more. Two keys of a hundred by a hundred thousand is a span of exactly ten million on ten million rows, which now indexes a table instead of hashing.
@@ -1256,7 +1284,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.22...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.23...HEAD
+[0.6.23]: https://github.com/tamnd/firepanda/releases/tag/v0.6.23
 [0.6.22]: https://github.com/tamnd/firepanda/releases/tag/v0.6.22
 [0.6.21]: https://github.com/tamnd/firepanda/releases/tag/v0.6.21
 [0.6.20]: https://github.com/tamnd/firepanda/releases/tag/v0.6.20
