@@ -60,6 +60,20 @@ Done when every dtype round trips through pyarrow via the C Data Interface with 
 
 From here on, anything we have not implemented can be handed to DuckDB or pyarrow without copying. That converts incompleteness from a blocker into an inconvenience and it is the highest leverage risk reduction in the plan.
 
+## M2b, Chunked execution engine
+
+Added after the first several releases of M1 kernel work, because the kernel work was optimizing the wrong shape. The full argument and the design are in [`engine/`](engine/00-README.md), and the short version is here.
+
+firepanda runs one kernel over one whole column and writes a whole new column, which is pandas' execution model. At ten million int64 rows a column is eighty megabytes, so every operator boundary is a full round trip through DRAM that a chunked engine does not do at all. DuckDB never had this model and Polars replaced it, measuring three to seven times on PDS-H from the change alone.
+
+Make `ChunkedArray` what a `DataFrame` column is, and give every kernel a chunked entry point that walks chunks and calls the existing contiguous kernel per chunk. Add a morsel queue with an atomic cursor on top of `parallel_for`, and convert every kernel that currently slices the input into equal per worker pieces. Add a node interface of three methods, a pipeline of source, operators and sink cut at breakers, and a materializing fallback node so that anything not yet ported still works. Add selection vectors so that filter, take and join output stop copying. Add a memory manager that counts, and operator controlled spilling in sort, group by and join.
+
+This pulls the morsel scheduler forward from M5 and the spilling forward from M10, because they are one design and doing them separately means building the scheduler twice. M5 and M10 keep the wider operator coverage and the distributed pieces.
+
+Done when every existing test passes with the engine on, when group by queries at 5GB are at least 1.5x their pre M2b selves and joins at least 2x, when a group by and a join over an input larger than the memory limit complete rather than fail, when q8 is answered, and when the worker count sweep shows no interior optimum.
+
+Deliberately not in it: a buffer manager, a lazy frame, an optimizer, window functions, and anything distributed or GPU.
+
 ## M3, The Python front door
 
 Everything in document 07.

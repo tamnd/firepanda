@@ -18,6 +18,7 @@ says what was already decided and why.
 | [09-quality-bar.md](09-quality-bar.md) | Testing, and living without a race detector |
 | [10-benchmarks.md](10-benchmarks.md) | What gets measured and against whom |
 | [11-package-layout.md](11-package-layout.md) | The tree, and why Mojo 1.0's import rules decide it |
+| [engine/](engine/00-README.md) | How DuckDB and Polars execute a query, and what firepanda is going to do about it |
 
 ## How to read this
 

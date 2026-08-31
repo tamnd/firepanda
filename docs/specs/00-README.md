@@ -52,8 +52,11 @@ Three divergences are worth knowing before reading further, because they are wha
 | 09 | `09-quality-bar.md` | what stdlib quality means in a language with no race detector |
 | 10 | `10-benchmarks.md` | `tamnd/firepanda-bench`, against pandas, Polars, DuckDB, cuDF and MojoFrame |
 | 11 | `11-package-layout.md` | the tree, Mojo 1.0's re-export rules, stability tiers |
+| | `engine/` | how DuckDB and Polars execute a query, and the firepanda plan that came out of reading them |
 
 Read 04 first if you only read one, because the product is the developer experience and everything else is in service of it. Read 03 second, because it is where the engine differs from every other dataframe library.
+
+`engine/` was added later, in August 2026, after several releases of kernel level optimization gave diminishing returns and the reason turned out to be that the execution model above the kernels was the one pandas has. It is the newest and most consequential part of this specification and `engine/01-what-we-take.md` is the summary.
 
 ## The decisions already made
 
