@@ -44,7 +44,11 @@ from firepanda.frame.display import DisplayOptions, render_table
 from firepanda.hash.grouping import group_ordinals
 from firepanda.join.pairs import JoinKind, join_indices, take_pair
 from firepanda.kernel.cast import cast_any
-from firepanda.kernel.group import AggKind, aggregate_group_any
+from firepanda.kernel.group import (
+    AggKind,
+    aggregate_group_any,
+    aggregate_group_pair_any,
+)
 from firepanda.kernel.nulls import all_valid_mask, coalesce_any
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.sort import argsort_any_into, identity_permutation
@@ -662,12 +666,22 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                         "group by: two output columns would both be called "
                         + name
                     )
-            var produced = aggregate_group_any(
-                self.columns[self.schema.index_of(specs[s].column)],
-                specs[s].kind,
-                grouping.codes,
-                grouping.groups,
-            )
+            var produced: AnyArray
+            if specs[s].kind.reads_two_columns():
+                produced = aggregate_group_pair_any(
+                    self.columns[self.schema.index_of(specs[s].column)],
+                    self.columns[self.schema.index_of(specs[s].other)],
+                    specs[s].kind,
+                    grouping.codes,
+                    grouping.groups,
+                )
+            else:
+                produced = aggregate_group_any(
+                    self.columns[self.schema.index_of(specs[s].column)],
+                    specs[s].kind,
+                    grouping.codes,
+                    grouping.groups,
+                )
             fields.append(Field(name, produced.type))
             columns.append(produced^)
 

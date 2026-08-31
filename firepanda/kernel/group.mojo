@@ -58,21 +58,24 @@ from firepanda.dtype.lists import ALL
 from firepanda.hash.factorize import factorize_strings
 from firepanda.kernel.accum import accumulator, highest, lowest
 from firepanda.kernel.agg import max_of
+from firepanda.kernel.cast import cast_any
 
 
 struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
     """Which reduction a grouped aggregation should run.
 
     This is a runtime tag rather than a parameter because the erased path
-    instantiates its body once per dtype. Thirteen entry points over twelve
-    dtypes would be a hundred and fifty six instantiations of one loop; one entry
-    point carrying a tag is twelve instantiations of thirteen loops, which is the
-    same code with one dispatch chain instead of thirteen.
+    instantiates its body once per dtype. Thirteen single column entry points
+    over twelve dtypes would be a hundred and fifty six instantiations of one
+    loop; one entry point carrying a tag is twelve instantiations of thirteen
+    loops, which is the same code with one dispatch chain instead of thirteen.
+    `CORR` and `COV` read a pair of columns and so are not in that chain at all,
+    for a reason `aggregate_group_pair_any` gives.
 
-    Three of the reductions take a number as well as a name. `VAR` and `STD` take
-    a delta degrees of freedom and `QUANTILE` takes the quantile itself, so the
-    tag carries a `Float64` beside the code. Anything that does not use it leaves
-    it at zero.
+    Four of the reductions take a number as well as a name. `VAR` and `STD` take
+    a delta degrees of freedom, `COV` takes one too, and `QUANTILE` takes the
+    quantile itself, so the tag carries a `Float64` beside the code. Anything
+    that does not use it leaves it at zero.
 
     Two kinds are equal when their codes are, and `param` is deliberately not
     part of that. `kind == AggKind.QUANTILE` has to be true for the ninetieth
@@ -121,10 +124,10 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             code: Which reduction.
 
         Returns:
-            One for the two dispersions, a half for the two order statistics, and
-            zero for the rest.
+            One for the two dispersions and the covariance, a half for the two
+            order statistics, and zero for the rest.
         """
-        if code == 8 or code == 9:
+        if code == 8 or code == 9 or code == 14:
             return 1.0
         if code == 10 or code == 11:
             return 0.5
@@ -153,6 +156,18 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             The kind.
         """
         return Self(9, Float64(ddof))
+
+    @staticmethod
+    def cov_with(ddof: Int) -> Self:
+        """Returns a covariance with an explicit delta degrees of freedom.
+
+        Args:
+            ddof: Subtracted from the pairwise count to give the divisor.
+
+        Returns:
+            The kind.
+        """
+        return Self(14, Float64(ddof))
 
     @staticmethod
     def quantile_at(q: Float64) -> Self:
@@ -205,6 +220,14 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
     comptime NUNIQUE = Self(12)
     """How many distinct non-null values the group has."""
 
+    comptime CORR = Self(13)
+    """The Pearson correlation of two columns, over the rows where both are
+    present. The only pair of kinds that reads a second column."""
+
+    comptime COV = Self(14)
+    """The covariance of two columns, dividing by the pairwise count minus
+    `param`."""
+
     def __eq__(self, other: Self) -> Bool:
         """Compares two kinds, by reduction and not by parameter.
 
@@ -235,6 +258,16 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
         """
         return self == Self.SIZE
 
+    def reads_two_columns(self) -> Bool:
+        """Reports whether this reduction needs a second column.
+
+        Returns:
+            True for `CORR` and `COV`, which are statements about a pair of
+            columns rather than about one, and which therefore travel a different
+            entry point from every other kind here.
+        """
+        return self == Self.CORR or self == Self.COV
+
     def result_dtype(self, dt: DType) -> DType:
         """Returns the dtype this reduction produces over a column of `dt`.
 
@@ -254,6 +287,8 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             or self == Self.STD
             or self == Self.MEDIAN
             or self == Self.QUANTILE
+            or self == Self.CORR
+            or self == Self.COV
         ):
             return DType.float64
         if self == Self.SUM:
@@ -290,6 +325,10 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("median")
         elif self == Self.QUANTILE:
             writer.write("quantile")
+        elif self == Self.CORR:
+            writer.write("corr")
+        elif self == Self.COV:
+            writer.write("cov")
         else:
             writer.write("nunique")
 
@@ -1043,6 +1082,270 @@ def _nunique_core[
     return out^
 
 
+def group_corr[
+    dx: DType, dy: DType
+](x: Array[dx], y: Array[dy], codes: Array[DType.uint32], groups: Int) -> Array[
+    DType.float64
+]:
+    """Returns the Pearson correlation of two columns within each group.
+
+    Args:
+        x: One of the two columns.
+        y: The other.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals.
+
+    Parameters:
+        dx: The first column's dtype.
+        dy: The second column's dtype.
+
+    Returns:
+        A column of `groups` correlations between minus one and one. A group with
+        fewer than two rows in which both values are present is null, and so is a
+        group in which either column does not vary, because the correlation is a
+        zero over a zero there.
+    """
+    return _pair_core[want_corr=True](
+        x.unsafe_ptr(),
+        x.data.validity,
+        x.null_count() > 0,
+        y.unsafe_ptr(),
+        y.data.validity,
+        y.null_count() > 0,
+        codes,
+        groups,
+        1,
+    )
+
+
+def group_cov[
+    dx: DType, dy: DType
+](
+    x: Array[dx],
+    y: Array[dy],
+    codes: Array[DType.uint32],
+    groups: Int,
+    ddof: Int = 1,
+) -> Array[DType.float64]:
+    """Returns the covariance of two columns within each group.
+
+    Args:
+        x: One of the two columns.
+        y: The other.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals.
+        ddof: Subtracted from the pairwise count to give the divisor. One is the
+            sample covariance and is what pandas defaults to.
+
+    Parameters:
+        dx: The first column's dtype.
+        dy: The second column's dtype.
+
+    Returns:
+        A column of `groups` covariances. A group with `ddof` or fewer pairwise
+        present rows is null.
+    """
+    return _pair_core[want_corr=False](
+        x.unsafe_ptr(),
+        x.data.validity,
+        x.null_count() > 0,
+        y.unsafe_ptr(),
+        y.data.validity,
+        y.null_count() > 0,
+        codes,
+        groups,
+        ddof,
+    )
+
+
+def _pair_core[
+    dx: DType,
+    dy: DType,
+    //,
+    want_corr: Bool,
+    ox: ImmOrigin,
+    oy: ImmOrigin,
+](
+    left: Pointer[Scalar[dx], ox],
+    left_valid: Bitmap,
+    left_has_null: Bool,
+    right: Pointer[Scalar[dy], oy],
+    right_valid: Bitmap,
+    right_has_null: Bool,
+    codes: Array[DType.uint32],
+    groups: Int,
+    ddof: Int,
+) -> Array[DType.float64]:
+    """Centres both columns on their pairwise means and accumulates the products.
+
+    Two passes, for the reason `_var_core` takes two. The one pass form keeps the
+    five raw sums and subtracts at the end, and the subtraction is where a
+    correlation between two columns of timestamps stops having any significant
+    digits left. This computes each group's two means first and then accumulates
+    deviations, which is the same arithmetic the variance already does here and
+    is stable for the same reason.
+
+    Pairwise means rather than per column ones. A row where one of the two values
+    is null contributes to neither sum, because a covariance is a statement about
+    rows in which both were observed, and centring x on a mean taken over rows y
+    was missing from would bias every product afterwards. That is also what
+    pandas does, and it is why this cannot reuse `_mean_core`, which knows about
+    one column's validity and not two.
+    """
+    var count = List[Int](length=groups, fill=0)
+    var mean_x = List[Float64](length=groups, fill=0.0)
+    var mean_y = List[Float64](length=groups, fill=0.0)
+
+    var at = codes.unsafe_ptr()
+    var n_at = count.unsafe_ptr()
+    var mx = mean_x.unsafe_ptr()
+    var my = mean_y.unsafe_ptr()
+    var rows = len(codes)
+
+    for i in range(rows):
+        if left_has_null and not left_valid.get(i):
+            continue
+        if right_has_null and not right_valid.get(i):
+            continue
+        var g = Int(at.unsafe_offset(i).unsafe_load())
+        n_at.unsafe_offset(g).unsafe_write(
+            n_at.unsafe_offset(g).unsafe_load() + 1
+        )
+        mx.unsafe_offset(g).unsafe_write(
+            mx.unsafe_offset(g).unsafe_load()
+            + left.unsafe_offset(i).unsafe_load().cast[DType.float64]()
+        )
+        my.unsafe_offset(g).unsafe_write(
+            my.unsafe_offset(g).unsafe_load()
+            + right.unsafe_offset(i).unsafe_load().cast[DType.float64]()
+        )
+
+    for g in range(groups):
+        var n = n_at.unsafe_offset(g).unsafe_load()
+        if n == 0:
+            continue
+        mx.unsafe_offset(g).unsafe_write(
+            mx.unsafe_offset(g).unsafe_load() / Float64(n)
+        )
+        my.unsafe_offset(g).unsafe_write(
+            my.unsafe_offset(g).unsafe_load() / Float64(n)
+        )
+
+    var sxx = List[Float64](length=groups if want_corr else 0, fill=0.0)
+    var syy = List[Float64](length=groups if want_corr else 0, fill=0.0)
+    var out = Array[DType.float64](groups)
+    var sxy = out.unsafe_ptr()
+    var xx = sxx.unsafe_ptr()
+    var yy = syy.unsafe_ptr()
+
+    for i in range(rows):
+        if left_has_null and not left_valid.get(i):
+            continue
+        if right_has_null and not right_valid.get(i):
+            continue
+        var g = Int(at.unsafe_offset(i).unsafe_load())
+        var a = (
+            left.unsafe_offset(i).unsafe_load().cast[DType.float64]()
+            - mx.unsafe_offset(g).unsafe_load()
+        )
+        var b = (
+            right.unsafe_offset(i).unsafe_load().cast[DType.float64]()
+            - my.unsafe_offset(g).unsafe_load()
+        )
+        sxy.unsafe_offset(g).unsafe_store(
+            sxy.unsafe_offset(g).unsafe_load() + a * b
+        )
+        comptime if want_corr:
+            xx.unsafe_offset(g).unsafe_write(
+                xx.unsafe_offset(g).unsafe_load() + a * a
+            )
+            yy.unsafe_offset(g).unsafe_write(
+                yy.unsafe_offset(g).unsafe_load() + b * b
+            )
+
+    for g in range(groups):
+        var n = n_at.unsafe_offset(g).unsafe_load()
+        comptime if want_corr:
+            var spread = (
+                xx.unsafe_offset(g).unsafe_load()
+                * yy.unsafe_offset(g).unsafe_load()
+            )
+            if n < 2 or not (spread > 0.0):
+                out.data.validity.set(g, False)
+                sxy.unsafe_offset(g).unsafe_store(0.0)
+                continue
+            # The quotient is one in exact arithmetic when the two columns are
+            # the same column, and floating point reaches 1.0000000000000002
+            # often enough that a caller squaring it or taking its arccosine
+            # would notice. Clamping is cheaper than pretending it cannot
+            # happen.
+            var r = sxy.unsafe_offset(g).unsafe_load() / sqrt(spread)
+            if r > 1.0:
+                r = 1.0
+            elif r < -1.0:
+                r = -1.0
+            sxy.unsafe_offset(g).unsafe_store(r)
+        else:
+            var divisor = n - ddof
+            if divisor <= 0:
+                out.data.validity.set(g, False)
+                sxy.unsafe_offset(g).unsafe_store(0.0)
+                continue
+            sxy.unsafe_offset(g).unsafe_store(
+                sxy.unsafe_offset(g).unsafe_load() / Float64(divisor)
+            )
+    return out^
+
+
+def aggregate_group_pair_any(
+    x: AnyArray,
+    y: AnyArray,
+    kind: AggKind,
+    codes: Array[DType.uint32],
+    groups: Int,
+) raises -> AnyArray:
+    """Runs a two column reduction over columns whose dtypes are runtime values.
+
+    The single column reductions dispatch on the dtype and instantiate one loop
+    per dtype. A two column reduction would have to dispatch on both, which is a
+    hundred and forty four instantiations of a loop that reads its inputs as
+    float64 in either case. So this casts instead: the erased path converts both
+    columns once and calls one instantiation, and the typed spellings above stay
+    generic for callers who know their dtypes and want no copy.
+
+    Args:
+        x: The first column.
+        y: The second.
+        kind: `CORR` or `COV`.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals.
+
+    Returns:
+        A float64 column of `groups` values.
+
+    Raises:
+        If the reduction is not a two column one, if either column has no
+        physical layout as float64, or if the lengths disagree.
+    """
+    if len(x) != len(y):
+        raise Error(
+            "group by: a two column reduction needs two columns of the same"
+            " length, got "
+            + String(len(x))
+            + " and "
+            + String(len(y))
+        )
+    if x.is_string() or y.is_string():
+        raise Error("group by: a two column reduction needs numeric columns")
+    var a = cast_any(x, DType.float64).into_typed[DType.float64]()
+    var b = cast_any(y, DType.float64).into_typed[DType.float64]()
+    if kind == AggKind.CORR:
+        return AnyArray(group_corr(a, b, codes, groups))
+    if kind == AggKind.COV:
+        return AnyArray(group_cov(a, b, codes, groups, Int(kind.param)))
+    raise Error("group by: unsupported two column aggregation")
+
+
 def aggregate_group[
     dt: DType
 ](
@@ -1063,7 +1366,7 @@ def aggregate_group[
         A column of `groups` values in whatever dtype the reduction produces.
 
     Raises:
-        If the reduction is not one of the eight.
+        If the reduction is not one of the thirteen single column ones.
     """
     return _dispatch_core(
         values.unsafe_ptr(),
@@ -1085,7 +1388,8 @@ def _dispatch_core[
     codes: Array[DType.uint32],
     groups: Int,
 ) raises -> AnyArray:
-    """Picks the reduction. One instantiation per dtype, eight loops inside."""
+    """Picks the reduction. One instantiation per dtype, thirteen loops inside.
+    """
     if kind == AggKind.SIZE:
         return AnyArray(group_size(codes, groups))
     if kind == AggKind.COUNT:

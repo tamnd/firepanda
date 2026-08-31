@@ -44,7 +44,10 @@ from firepanda.kernel.group import (
     AggKind,
     aggregate_group,
     aggregate_group_any,
+    aggregate_group_pair_any,
+    group_corr,
     group_count,
+    group_cov,
     group_first,
     group_last,
     group_max,
@@ -961,6 +964,178 @@ def test_the_new_reductions_name_themselves() raises:
     assert_equal(String(AggKind.MEDIAN), "median")
     assert_equal(String(AggKind.QUANTILE), "quantile")
     assert_equal(String(AggKind.NUNIQUE), "nunique")
+    assert_equal(String(AggKind.CORR), "corr")
+    assert_equal(String(AggKind.COV), "cov")
+
+
+def floats(values: List[Scalar[DType.float64]]) -> Array[DType.float64]:
+    """Builds a float64 column."""
+    return from_list(values)
+
+
+def test_a_perfect_line_correlates_at_one_or_minus_one() raises:
+    # Group 0 rises, group 1 falls, both exactly. The answers are the two ends of
+    # the range and neither is allowed to overshoot them, which is what the clamp
+    # in the kernel is for.
+    var x = floats([1.0, 2.0, 3.0, 1.0, 2.0, 3.0])
+    var y = floats([2.0, 4.0, 6.0, 9.0, 6.0, 3.0])
+    var out = group_corr(x, y, codes_of([0, 0, 0, 1, 1, 1]), 2)
+    assert_almost_equal(out[0], 1.0, atol=1e-12)
+    assert_almost_equal(out[1], -1.0, atol=1e-12)
+
+
+def test_a_correlation_matches_the_value_computed_by_hand() raises:
+    # x is 1, 2, 3, 4 and y is 2, 4, 5, 9. The deviations are -1.5, -0.5, 0.5,
+    # 1.5 and -3, -1, 0, 4, so the products sum to 11, and the two sums of
+    # squares are 5 and 26. 11 over the root of 130 is 0.96476...
+    var x = floats([1.0, 2.0, 3.0, 4.0])
+    var y = floats([2.0, 4.0, 5.0, 9.0])
+    var out = group_corr(x, y, codes_of([0, 0, 0, 0]), 1)
+    assert_almost_equal(out[0], 11.0 / (130.0**0.5), atol=1e-12)
+
+
+def test_a_correlation_of_a_column_that_does_not_vary_is_null() raises:
+    # Every x in group 0 is the same, so the denominator is a zero and the
+    # answer is not a number rather than an infinity. pandas gives NaN here.
+    var x = floats([7.0, 7.0, 7.0, 1.0, 2.0, 3.0])
+    var y = floats([1.0, 5.0, 9.0, 1.0, 2.0, 3.0])
+    var out = group_corr(x, y, codes_of([0, 0, 0, 1, 1, 1]), 2)
+    assert_false(out.is_valid(0), "a flat column has no correlation")
+    assert_true(out.is_valid(1))
+
+
+def test_a_correlation_of_fewer_than_two_pairs_is_null() raises:
+    var x = floats([1.0, 5.0])
+    var y = floats([2.0, 9.0])
+    var out = group_corr(x, y, codes_of([0, 1]), 2)
+    assert_false(out.is_valid(0), "one pair does not make a correlation")
+    assert_false(out.is_valid(1))
+
+
+def test_a_correlation_drops_a_row_where_either_value_is_null() raises:
+    # The third row of group 0 would drag the correlation off 1 if it counted,
+    # and its y is null, so the group is a two point line and correlates at one.
+    # The centring has to use the pairwise means for that to come out: centring
+    # x on the mean of all three rows leaves the two survivors both on the same
+    # side of it and the answer is still 1 by luck, so the fourth row is here to
+    # break the luck, being a third point that only x has.
+    var x = floats([1.0, 2.0, 30.0, 40.0, 1.0, 2.0])
+    var y = floats([2.0, 4.0, 5.0, 5.0, 1.0, 2.0])
+    y.set_null(2)
+    y.set_null(3)
+    var out = group_corr(x, y, codes_of([0, 0, 0, 0, 1, 1]), 2)
+    assert_almost_equal(out[0], 1.0, atol=1e-12)
+
+
+def test_a_correlation_keeps_its_digits_on_large_values() raises:
+    # Timestamps around 1.7e9 with a spread of a few seconds. The one pass form
+    # that keeps raw sums and subtracts at the end has nothing left here, which
+    # is why this takes two passes, the same as the variance above.
+    var base = 1_700_000_000.0
+    var x = floats([base + 1.0, base + 2.0, base + 3.0, base + 4.0])
+    var y = floats([base + 2.0, base + 4.0, base + 6.0, base + 8.0])
+    var out = group_corr(x, y, codes_of([0, 0, 0, 0]), 1)
+    assert_almost_equal(out[0], 1.0, atol=1e-9)
+
+
+def test_a_covariance_divides_by_the_count_it_was_asked_for() raises:
+    # The deviation products sum to 11 over four rows, so the sample covariance
+    # is 11 over 3 and the population one is 11 over 4.
+    var x = floats([1.0, 2.0, 3.0, 4.0])
+    var y = floats([2.0, 4.0, 5.0, 9.0])
+    var codes = codes_of([0, 0, 0, 0])
+    var sample = group_cov(x, y, codes, 1)
+    var population = group_cov(x, y, codes, 1, ddof=0)
+    assert_almost_equal(sample[0], 11.0 / 3.0, atol=1e-12)
+    assert_almost_equal(population[0], 11.0 / 4.0, atol=1e-12)
+
+
+def test_a_covariance_of_one_pair_is_null_at_the_default_divisor() raises:
+    var x = floats([1.0, 5.0])
+    var y = floats([2.0, 9.0])
+    var out = group_cov(x, y, codes_of([0, 1]), 2)
+    assert_false(out.is_valid(0))
+    assert_false(out.is_valid(1))
+
+
+def test_a_covariance_of_a_column_with_itself_is_its_variance() raises:
+    var x = floats([1.0, 2.0, 3.0, 4.0])
+    var codes = codes_of([0, 0, 0, 0])
+    var covariance = group_cov(x, x, codes, 1)
+    var spread = group_var(x, codes, 1)
+    assert_almost_equal(covariance[0], spread[0], atol=1e-12)
+
+
+def test_the_pair_reductions_agree_through_their_erased_spelling() raises:
+    # The erased path casts both columns to float64 and calls one instantiation,
+    # so this is checking the cast as much as the reduction: the inputs are
+    # int64 here and the typed call reads them as int64 without a copy.
+    var x = ints([1, 2, 3, 4])
+    var y = ints([2, 4, 5, 9])
+    var codes = codes_of([0, 0, 0, 0])
+    var direct = group_corr(x, y, codes, 1)
+    var through = aggregate_group_pair_any(
+        AnyArray(ints([1, 2, 3, 4])),
+        AnyArray(ints([2, 4, 5, 9])),
+        AggKind.CORR,
+        codes,
+        1,
+    ).as_typed[DType.float64]()
+    assert_almost_equal(through[0], direct[0], atol=1e-12)
+
+
+def test_a_pair_reduction_over_columns_of_different_lengths_is_refused() raises:
+    with assert_raises(contains="same length"):
+        _ = aggregate_group_pair_any(
+            AnyArray(ints([1, 2, 3])),
+            AnyArray(ints([1, 2])),
+            AggKind.CORR,
+            codes_of([0, 0, 0]),
+            1,
+        )
+
+
+def test_a_single_column_kind_is_refused_by_the_pair_entry_point() raises:
+    with assert_raises(contains="unsupported two column"):
+        _ = aggregate_group_pair_any(
+            AnyArray(ints([1, 2])),
+            AnyArray(ints([1, 2])),
+            AggKind.SUM,
+            codes_of([0, 0]),
+            1,
+        )
+
+
+def test_a_frame_correlates_two_columns_within_each_group() raises:
+    # This is db-benchmark's q9 in miniature: group on a key, correlate two
+    # value columns, and read the square of what comes back.
+    var frame = DataFrame.from_series(
+        [
+            Series("k", ints([1, 1, 1, 2, 2, 2])),
+            Series("a", ints([1, 2, 3, 1, 2, 3])),
+            Series("b", ints([2, 4, 6, 9, 6, 3])),
+        ]
+    )
+    var specs = List[AggSpec]()
+    specs.append(AggSpec("a", "b", AggKind.CORR))
+    specs.append(AggSpec("a", "b", AggKind.COV, "together"))
+    var out = frame.group_by(["k"], specs)
+
+    assert_equal(len(out), 2)
+    var r = out.column("a_b_corr").as_typed[DType.float64]()
+    var together = out.column("together").as_typed[DType.float64]()
+    assert_almost_equal(r[0], 1.0, atol=1e-12)
+    assert_almost_equal(r[1], -1.0, atol=1e-12)
+    assert_almost_equal(together[0], 2.0, atol=1e-12)
+    assert_almost_equal(together[1], -3.0, atol=1e-12)
+
+
+def test_a_pair_spec_names_both_of_its_columns() raises:
+    assert_equal(AggSpec("a", "b", AggKind.CORR).output_name(), "a_b_corr")
+    assert_equal(String(AggSpec("a", "b", AggKind.COV)), "cov(a, b) as a_b_cov")
+    # The one column constructor leaves the second name empty, so a sum is
+    # spelled the way it always was.
+    assert_equal(String(AggSpec("a", AggKind.SUM)), "sum(a) as a_sum")
 
 
 def test_a_frame_groups_by_the_new_reductions() raises:
