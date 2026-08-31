@@ -48,6 +48,16 @@ implemented that way: swap, run a left join, swap the result back. That makes a
 right join come out in right row order, which is what pandas does and what
 somebody asking for a right join instead of a left one is asking for.
 
+Buckets are the general answer and most joins do not need the general answer. A
+join onto a primary key, which is most of them, has one right row per code, and
+then the counts, the prefix sum, the cursor walk and the bucket array itself are
+all machinery for saying "one". So the build starts by assuming the right key is
+unique and filling one table from code to row, and the first code it finds
+already taken abandons that and runs the general build from the top. The cost of
+being wrong is part of one scan of the right side; the cost of not trying was
+two extra walks of a table as long as the frame, plus an array as long as it
+again.
+
 ## Splitting the emit
 
 The left walk is the tallest part of the pairing on a wide result, and what a
@@ -341,6 +351,35 @@ def join_indices(
                     break
             absent.append(missing)
 
+    # Most joins are onto a key that is unique on the right, and a bucket per
+    # code is the wrong shape for those: every bucket holds one row, so the
+    # counts, the prefix sum, the cursor walk and the bucket array itself all
+    # exist to express "one". A single table from code to row says the same
+    # thing in one pass and one allocation, and the allocation is `int32` rather
+    # than `Int`, so the widest join in the suite carries forty megabytes here
+    # where the general shape carries a hundred and sixty.
+    #
+    # Uniqueness is not asked in advance, it is assumed and then contradicted.
+    # The first right row whose code is already taken ends the pass and the
+    # general build runs from the top, having lost that much of one scan and
+    # nothing else. A key with duplicates usually reaches its first one early,
+    # and a key without them was never going to pay.
+    var unique = right_rows <= Int(Int32.MAX)
+    var only = List[Int32]()
+    if unique:
+        only = List[Int32](length=groups, fill=-1)
+        var seat = only.unsafe_ptr()
+        for r in range(right_rows):
+            if has_nulls and absent[left_rows + r]:
+                continue
+            var g = Int(codes.unsafe_offset(left_rows + r).unsafe_load())
+            if seat.unsafe_offset(g).unsafe_load() >= 0:
+                unique = False
+                break
+            seat.unsafe_offset(g).unsafe_write(Int32(r))
+        if not unique:
+            only = List[Int32]()
+
     # Bucket the right side by code: count, prefix sum, scatter. Scanning in
     # increasing row order is what puts each bucket in increasing row order,
     # which is what fixes the output order within a left row.
@@ -350,44 +389,46 @@ def join_indices(
     # frames themselves. So it is worth not walking it more times than the three
     # this needs, and the loops below go through the pointer rather than through
     # `List.__setitem__` for the same reason.
-    var starts = List[Int](length=groups + 1, fill=0)
-    var edge = starts.unsafe_ptr()
-    for r in range(right_rows):
-        if has_nulls and absent[left_rows + r]:
-            continue
-        var g = Int(codes.unsafe_offset(left_rows + r).unsafe_load()) + 1
-        edge.unsafe_offset(g).unsafe_write(
-            edge.unsafe_offset(g).unsafe_load() + 1
-        )
-    for g in range(groups):
-        edge.unsafe_offset(g + 1).unsafe_write(
-            edge.unsafe_offset(g + 1).unsafe_load()
-            + edge.unsafe_offset(g).unsafe_load()
-        )
+    var starts = List[Int](length=0 if unique else groups + 1, fill=0)
+    var bucket = List[Int]()
+    if not unique:
+        var edge = starts.unsafe_ptr()
+        for r in range(right_rows):
+            if has_nulls and absent[left_rows + r]:
+                continue
+            var g = Int(codes.unsafe_offset(left_rows + r).unsafe_load()) + 1
+            edge.unsafe_offset(g).unsafe_write(
+                edge.unsafe_offset(g).unsafe_load() + 1
+            )
+        for g in range(groups):
+            edge.unsafe_offset(g + 1).unsafe_write(
+                edge.unsafe_offset(g + 1).unsafe_load()
+                + edge.unsafe_offset(g).unsafe_load()
+            )
 
-    # The scatter uses the group table as its own cursor rather than a copy of
-    # it. Group `g` is written from `starts[g]` up to `starts[g + 1]`, so when
-    # the scatter finishes every entry holds what its successor held, and one
-    # backwards pass puts them back. That is a sequential walk over the table
-    # instead of another allocation of it and a copy into it, and `starts[g]`
-    # for an empty group already equals `starts[g + 1]`, so a group nothing was
-    # scattered into comes out the same way.
-    var bucket = List[Int](
-        unsafe_uninit_length=edge.unsafe_offset(groups).unsafe_load()
-    )
-    var into = bucket.unsafe_ptr()
-    for r in range(right_rows):
-        if has_nulls and absent[left_rows + r]:
-            continue
-        var g = Int(codes.unsafe_offset(left_rows + r).unsafe_load())
-        var at = edge.unsafe_offset(g).unsafe_load()
-        into.unsafe_offset(at).unsafe_write(r)
-        edge.unsafe_offset(g).unsafe_write(at + 1)
-    for g in range(groups, 0, -1):
-        edge.unsafe_offset(g).unsafe_write(
-            edge.unsafe_offset(g - 1).unsafe_load()
+        # The scatter uses the group table as its own cursor rather than a copy
+        # of it. Group `g` is written from `starts[g]` up to `starts[g + 1]`, so
+        # when the scatter finishes every entry holds what its successor held,
+        # and one backwards pass puts them back. That is a sequential walk over
+        # the table instead of another allocation of it and a copy into it, and
+        # `starts[g]` for an empty group already equals `starts[g + 1]`, so a
+        # group nothing was scattered into comes out the same way.
+        bucket = List[Int](
+            unsafe_uninit_length=edge.unsafe_offset(groups).unsafe_load()
         )
-    edge.unsafe_offset(0).unsafe_write(0)
+        var into = bucket.unsafe_ptr()
+        for r in range(right_rows):
+            if has_nulls and absent[left_rows + r]:
+                continue
+            var g = Int(codes.unsafe_offset(left_rows + r).unsafe_load())
+            var at = edge.unsafe_offset(g).unsafe_load()
+            into.unsafe_offset(at).unsafe_write(r)
+            edge.unsafe_offset(g).unsafe_write(at + 1)
+        for g in range(groups, 0, -1):
+            edge.unsafe_offset(g).unsafe_write(
+                edge.unsafe_offset(g - 1).unsafe_load()
+            )
+        edge.unsafe_offset(0).unsafe_write(0)
 
     var wants_right = kind == JoinKind.OUTER
     var matched = Bitmap(right_rows if wants_right else 0, all_valid=False)
@@ -426,8 +467,30 @@ def join_indices(
     # where slice `w + 1` starts, which leaves the total in `counts[workers]`.
     var counts = List[Int](length=workers + 1, fill=0)
 
+    # The unique route is written as its own pair of loops rather than as a
+    # branch inside these two. The branch would be the same answer on every one
+    # of ten million rows and it is still a compare and a jump on every one of
+    # them, and the loop it sits in does about four other things. Splitting them
+    # measured the difference between the widest joins moving and the narrow
+    # ones going backwards.
+    #
     # The pointer is taken again inside each body rather than captured, because
     # its origin names `grouping` and a capture list cannot carry that.
+    def tally_one(w: Int) raises {mut counts, imm}:
+        var code_at = grouping.codes.unsafe_ptr()
+        var seat = only.unsafe_ptr()
+        var here = 0
+        for i in range(bounds[w], bounds[w + 1]):
+            var hit = False
+            if not has_nulls or not absent[i]:
+                var g = Int(code_at.unsafe_offset(i).unsafe_load())
+                hit = seat.unsafe_offset(g).unsafe_load() >= 0
+            if not hit:
+                here += Int(kind.keeps_unmatched_left())
+            elif kind != JoinKind.ANTI:
+                here += 1
+        counts[w + 1] = here
+
     def tally(w: Int) raises {mut counts, imm}:
         var code_at = grouping.codes.unsafe_ptr()
         var here = 0
@@ -446,7 +509,10 @@ def join_indices(
                 here += width
         counts[w + 1] = here
 
-    parallel_for(tally, workers)
+    if unique:
+        parallel_for(tally_one, workers)
+    else:
+        parallel_for(tally, workers)
     for w in range(workers):
         counts[w + 1] += counts[w]
 
@@ -454,6 +520,44 @@ def join_indices(
     # knowing how many of them there are means having already done the probe.
     var out_left = List[Int](unsafe_uninit_length=counts[workers])
     var out_right = List[Int](unsafe_uninit_length=counts[workers])
+
+    # The unique twin of the loop below. A left row pairs with at most one right
+    # row here, so the inner loop over a bucket is gone and with it the reason
+    # to look up where the bucket started.
+    def spill_one(
+        w: Int,
+    ) raises {mut out_left, mut out_right, mut matched, imm}:
+        var code_at = grouping.codes.unsafe_ptr()
+        var seat = only.unsafe_ptr()
+        var left_out = out_left.unsafe_ptr()
+        var right_out = out_right.unsafe_ptr()
+        var put = counts[w]
+        for i in range(bounds[w], bounds[w + 1]):
+            var r = -1
+            if not has_nulls or not absent[i]:
+                var g = Int(code_at.unsafe_offset(i).unsafe_load())
+                r = Int(seat.unsafe_offset(g).unsafe_load())
+
+            if r < 0:
+                if kind.keeps_unmatched_left():
+                    left_out.unsafe_offset(put).unsafe_write(i)
+                    right_out.unsafe_offset(put).unsafe_write(-1)
+                    put += 1
+                continue
+
+            if kind == JoinKind.ANTI:
+                continue
+            if kind == JoinKind.SEMI:
+                left_out.unsafe_offset(put).unsafe_write(i)
+                right_out.unsafe_offset(put).unsafe_write(-1)
+                put += 1
+                continue
+
+            left_out.unsafe_offset(put).unsafe_write(i)
+            right_out.unsafe_offset(put).unsafe_write(r)
+            put += 1
+            if wants_right:
+                matched.set(r, True)
 
     def spill(w: Int) raises {mut out_left, mut out_right, mut matched, imm}:
         var code_at = grouping.codes.unsafe_ptr()
@@ -490,7 +594,10 @@ def join_indices(
                 if wants_right:
                     matched.set(bucket[p], True)
 
-    parallel_for(spill, workers)
+    if unique:
+        parallel_for(spill_one, workers)
+    else:
+        parallel_for(spill, workers)
 
     if wants_right:
         for r in range(right_rows):
