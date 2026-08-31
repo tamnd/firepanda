@@ -27,16 +27,17 @@ stores. It hands back a representative row per group rather than the keys
 themselves, which is the one place its shape differs from the numeric one and is
 explained on the function.
 
-The hash route runs on every core when there is enough of a column to be worth
-splitting and its keys repeat often enough for the split to pay. Each worker
-builds its own table over a contiguous slice, and a sequential merge afterwards
-renumbers what they found into one set of ordinals. That merge is as long as the
-groups the workers found between them, so a column where every row is its own key
-gets no benefit and stays on one thread; `_projected_groups` is the check that
-tells the two apart before either has run, and `_factorize_hashed_parallel` is
-where the argument for the shape lives. Text takes the same route through
-`_factorize_strings_parallel`, which differs only in that its merge compares two
-rows where the numeric one trusts a hash.
+The hash route splits a long column across cores. Each worker builds its own
+table over a contiguous slice, and a sequential merge afterwards renumbers what
+they found into one set of ordinals. That merge is as long as the groups the
+workers found between them, and every worker added rediscovers the groups in its
+own slice, so the merge grows as the build shrinks and the best number of cores
+to use is rarely all of them and sometimes none. `_projected_groups` guesses the
+key count before either route has run, `_parallel_workers` turns that into a
+worker count, and `_factorize_hashed_parallel` is where the argument for the
+shape lives. Text takes the same route through `_factorize_strings_parallel`,
+which differs only in that its merge compares two rows where the numeric one
+trusts a hash.
 
 Nulls get a group. A null is a value that rows can share, pandas with
 `dropna=False` gives it a group, and dropping it later is a filter on one ordinal
@@ -48,6 +49,7 @@ first null is what keeps the ordinals the table hands out and the positions in
 a second bookkeeping structure.
 """
 
+from std.math import exp
 from std.sys.info import simd_width_of, size_of
 
 from firepanda.array.array import Array, from_list
@@ -58,7 +60,7 @@ from firepanda.kernel.accum import highest, lowest
 from firepanda.kernel.agg import BLOCK
 
 from .function import DEFAULT_SEED, hash_chunk, hash_strings_chunk
-from .table import HashTable, project_groups
+from .table import HashTable
 
 comptime DIRECT_LIMIT = 1 << 16
 """Largest integer range that skips the hash table.
@@ -107,30 +109,55 @@ thread means a column just over `PARALLEL_ROWS` gets the few workers it can keep
 busy instead of all of them.
 """
 
-comptime MERGE_HEADROOM = 2
-"""How many times a worker's slice has to outnumber the groups projected in it.
+comptime REMAP_SHARE = 0.25
+"""What a remapped row costs against a built one.
 
-The merge after a parallel build is the one part of it that is sequential, and
-its length is the number of groups the workers found between them. On a column
-whose groups are far fewer than a slice is long that is a rounding error. On a
-column where every row is its own key it is the whole column over again, and the
-parallel route is then slower than the serial one it replaced, which was
-measured at ten million rows before this check existed.
+The parallel route walks the column twice, once to build the per worker tables
+and once to rewrite their local ordinals into global ones. The second pass
+hashes nothing and probes nothing, it loads a code and stores a code, so it is
+counted at a quarter of a build row rather than a whole one. The number is a
+measurement of those two loops against each other on a low cardinality column
+and it only has to be close, since it moves the chosen worker count by one step
+at most.
+"""
 
-Requiring a slice to be twice the projected group count puts the merge at a
-third of the column at the boundary, and at a half if the projection is off by a
-factor of two, which is more than it usually is. Both of those are still ahead of
-a serial build that walks all of it.
+comptime MERGE_COST = 2.0
+"""What a merged group costs against a built row.
+
+Both are a probe into a hash table, so the naive number here is one. It is two
+because the merge probes a table that is still growing, walks a list of hashes
+rather than a column, and gets none of the chunked prefetching the build gets,
+and because it is the only part of the route that no other thread is helping
+with. The number comes from timing the parallel route at every worker count from
+two to thirty two, on columns of a hundred, ten thousand, a hundred thousand and
+five hundred thousand groups, and taking the weight that puts the model's
+cheapest worker count on the measured minimum. At two the model lands on the
+best count for three of those four and within five percent of the best time on
+the fourth. At one and at four it is out by a factor of two on the worker count
+and by a quarter on the time.
+"""
+
+comptime SPLIT_MARGIN = 1.25
+"""How much cheaper the model has to say a split is before it is taken.
+
+The model gives the build a perfect speedup and charges nothing for waking the
+threads, so a column it calls a wash is a column that loses. It is not off by
+much once `MERGE_COST` is in it, predicting the measured serial to parallel
+ratio to within about forty percent on the columns above, so a quarter of
+headroom is enough. Anything larger starts refusing columns that were measured
+to win, which is what a factor of two did to a column of five hundred thousand
+groups.
 """
 
 comptime PARALLEL_SAMPLE = 1 << 16
-"""Most rows the group count is projected from.
+"""Most rows the group count is estimated from.
 
-The projection is `project_groups` reading a discovery rate, which is what the
-table already sizes itself with, and sixty five thousand rows is where that
-function is asked to believe what it sees. On a shorter column the sample is a
-sixteenth of it instead, so that the cost of a decision stays proportional to the
-work the decision is about.
+Two counts come out of it, one at the halfway mark and one at the end, and
+`_estimate_groups` reads the ratio between them. Sixty five thousand rows is
+enough for that ratio to be steady on every shape measured here and small enough
+that building it is under a percent of the column it is deciding about. On a
+shorter column the sample is a sixteenth of it instead, so the cost of the
+decision stays proportional to the work the decision is about.
 """
 
 
@@ -376,7 +403,7 @@ def _factorize_direct[
 def _factorize_hashed[
     dt: DType
 ](col: Array[dt], seed: UInt64) raises -> Factorized[dt]:
-    """Factorizes through the hash table, on one thread or on all of them.
+    """Factorizes through the hash table, on one thread or on several.
 
     Args:
         col: The column.
@@ -389,13 +416,128 @@ def _factorize_hashed[
         The factorization.
     """
     var n = len(col)
-    if n >= PARALLEL_ROWS:
-        var workers = min(worker_count(), n // PARALLEL_MIN_SLICE)
+    if n >= PARALLEL_ROWS and worker_count() > 1:
+        var workers = _parallel_workers(_projected_groups[dt](col, seed, n), n)
         if workers > 1:
-            var groups = _projected_groups[dt](col, seed, n)
-            if groups * MERGE_HEADROOM <= n // workers:
-                return _factorize_hashed_parallel[dt](col, seed, workers)
+            return _factorize_hashed_parallel[dt](col, seed, workers)
     return _factorize_hashed_serial[dt](col, seed)
+
+
+def _parallel_workers(groups: Int, n: Int) -> Int:
+    """Chooses how many workers to split a column across, or one to stay serial.
+
+    Splitting trades a shorter build for a merge that no thread can help with.
+    The build shortens as workers are added and the merge lengthens, because
+    every worker rediscovers the groups that fall in its own slice, so the two
+    cross somewhere and the best worker count is at the crossing rather than at
+    either end. A column with a hundred groups wants every core, since a
+    hundred groups per worker is nothing to merge. A column with a hundred
+    thousand groups over ten million rows wants eight of thirty two, and it was
+    staying serial before this because asking for all of them was the only other
+    thing it could do. A column where every row is a new key wants none,
+    since each worker's slice is its own group count and the merge is the whole
+    column again.
+
+    Costs are in rows touched. The build is `n / w` on each worker, the remap
+    that follows it is the same length at `REMAP_SHARE` of the price, and the
+    merge is however many groups the workers found between them, which is
+    `w * groups * (1 - e^(-slice/groups))` from the same curve `_estimate_groups`
+    fits, at `MERGE_COST` each. Serial is `n`, one pass and no merge. The scan
+    below is over at most the core count, and it runs once per column against a
+    build that is four orders of magnitude longer.
+
+    Args:
+        groups: The estimated distinct key count of the whole column.
+        n: The column's length.
+
+    Returns:
+        A worker count of two or more, or one to stay on the serial route.
+    """
+    var most = min(worker_count(), n // PARALLEL_MIN_SLICE)
+    if most < 2 or groups < 1:
+        return 1
+
+    var best = 1
+    var best_cost = Float64(n)
+    var g = Float64(groups)
+    for workers in range(2, most + 1):
+        var slice = Float64(n) / Float64(workers)
+        var found = g * (1.0 - exp(-slice / g))
+        var cost = (
+            slice * (1.0 + REMAP_SHARE) + MERGE_COST * Float64(workers) * found
+        )
+        if cost < best_cost:
+            best_cost = cost
+            best = workers
+
+    if best_cost * SPLIT_MARGIN > Float64(n):
+        return 1
+    return best
+
+
+def _estimate_groups(seen: Int, half: Int, rows: Int, n: Int) -> Int:
+    """Estimates a column's distinct key count from two points on its curve.
+
+    `project_groups` answers a different question from the same two numbers and
+    it is deliberately wrong in a direction this cannot use. It sizes a table,
+    where guessing high costs memory and guessing low costs a rehash, so it
+    extrapolates the discovery rate flat and overshoots on purpose.
+    `_parallel_workers` needs an estimate rather than a bound. A column of ten
+    million rows with a hundred thousand groups is one the split wins on by a
+    lot, and the flat extrapolation calls it six million and sends it to one
+    thread.
+
+    So this fits the curve instead of the tangent. Drawing `m` rows out of a
+    column with `g` evenly spread keys turns up `g * (1 - e^(-m/g))` of them,
+    which is the coupon collector shape, and the ratio between the count at `m`
+    and the count at `m / 2` pins down `m / g` on its own without the scale of
+    either count entering into it. That ratio runs from two, when every row is
+    still a new key, down to one, when the keys ran out long ago, and it is
+    monotone in between, so forty steps of bisection settle it to more digits
+    than anything downstream reads.
+
+    Keys that are not evenly spread make it read low, because a skewed column
+    hides its rare keys from a sample. Reading low means taking the parallel
+    route with more workers than the column deserved, and absorbing that is
+    what `SPLIT_MARGIN` is for.
+
+    Args:
+        seen: Groups found in the first `rows` rows.
+        half: Groups found in the first `rows / 2` of them.
+        rows: How many rows were sampled.
+        n: The column length.
+
+    Returns:
+        An estimate of the distinct key count of the whole column, never above
+        `n` and never below what the sample already found.
+    """
+    if half == 0 or seen <= half:
+        # Discovery stopped inside the sample, so what the sample holds is what
+        # the column holds, give or take a tail no sample can see.
+        return min(n, seen + seen // 4)
+
+    var ratio = Float64(seen) / Float64(half)
+    if ratio >= 1.999:
+        # Still finding a new key in nearly every row, which the model can only
+        # answer with a number larger than the column.
+        return n
+
+    # `f` falls from two to one as `r` grows, so a bisection that walks towards
+    # the larger `r` whenever `f` is still above the ratio converges on it.
+    var low = 1.0e-6
+    var high = 64.0
+    for _ in range(40):
+        var mid = (low + high) * 0.5
+        var f = (1.0 - exp(-mid)) / (1.0 - exp(-mid * 0.5))
+        if f > ratio:
+            low = mid
+        else:
+            high = mid
+
+    var estimate = Float64(rows) / ((low + high) * 0.5)
+    if estimate >= Float64(n):
+        return n
+    return max(seen, Int(estimate))
 
 
 def _projected_groups[dt: DType](col: Array[dt], seed: UInt64, n: Int) -> Int:
@@ -403,9 +545,9 @@ def _projected_groups[dt: DType](col: Array[dt], seed: UInt64, n: Int) -> Int:
 
     The parallel route is worth taking when the groups are few and worth
     refusing when nearly every row is one, and nothing knows which of those a
-    column is until it has been built. So this builds a sample of it and reads
-    the discovery rate the same way the table sizes itself, through
-    `project_groups`.
+    column is until it has been built. So this builds a sample of it, counting
+    the groups at the halfway mark as well as at the end, and hands both to
+    `_estimate_groups`.
 
     The sample is thrown away rather than handed to whichever route runs next.
     It is a sixteenth of the column at most, and keeping it would mean both
@@ -453,7 +595,7 @@ def _projected_groups[dt: DType](col: Array[dt], seed: UInt64, n: Int) -> Int:
             half = len(table)
             measured = True
 
-    return project_groups(len(table), half, sample, n)
+    return _estimate_groups(len(table), half, sample, n)
 
 
 def _factorize_hashed_serial[
@@ -753,7 +895,7 @@ def factorize_strings(
 
     There is no direct route here. The direct route exists because an integer
     can index a table by being itself, and a string cannot, so everything goes
-    through the hash table, on one thread or on all of them.
+    through the hash table, on one thread or on several.
 
     Args:
         col: The column to group.
@@ -764,12 +906,12 @@ def factorize_strings(
         nulls got.
     """
     var n = len(col)
-    if n >= PARALLEL_ROWS:
-        var workers = min(worker_count(), n // PARALLEL_MIN_SLICE)
+    if n >= PARALLEL_ROWS and worker_count() > 1:
+        var workers = _parallel_workers(
+            _projected_groups_strings(col, seed, n), n
+        )
         if workers > 1:
-            var groups = _projected_groups_strings(col, seed, n)
-            if groups * MERGE_HEADROOM <= n // workers:
-                return _factorize_strings_parallel(col, seed, workers)
+            return _factorize_strings_parallel(col, seed, workers)
     return _factorize_strings_serial(col, seed)
 
 
@@ -820,7 +962,7 @@ def _projected_groups_strings(col: StringArray, seed: UInt64, n: Int) -> Int:
             half = len(table)
             measured = True
 
-    return project_groups(len(table), half, sample, n)
+    return _estimate_groups(len(table), half, sample, n)
 
 
 def _factorize_strings_parallel(
