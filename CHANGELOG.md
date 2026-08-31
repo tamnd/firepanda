@@ -8,6 +8,27 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+A group by now chooses how many cores to use, rather than choosing between one and all of them.
+
+Splitting a factorize across workers buys a shorter build and pays for it with a merge no thread can help with, and the merge grows with every worker added, because each one rediscovers whatever groups fall in its own slice. So the two curves cross, and the best worker count is at the crossing. Until now the code could only ask for all of them or none, and it decided with a guard that refused anything projecting more than half a slice of groups. That guard was reading the wrong number. `project_groups` exists to size a hash table, where guessing high costs memory and guessing low costs a rehash, so it extrapolates the discovery rate flat and overshoots on purpose. On ten million rows with a hundred thousand groups it answers six million, and a column that a split wins two and a third times on was going to one thread.
+
+There are two pieces. `_estimate_groups` fits the coupon collector curve those two sample counts actually lie on instead of the tangent, which recovers ninety nine thousand for that column and nine hundred and thirty six thousand for a genuinely high cardinality one, so the refusals that should happen still happen. `_parallel_workers` then costs the route at every worker count the machine can offer, in rows touched, and takes the cheapest if it beats the serial cost by a quarter. The two weights in that cost, what a remap row costs against a build row and what a merged group costs against one, were measured rather than guessed: the route was timed at every worker count from two to thirty two across four cardinalities, and `MERGE_COST` is the weight that puts the model's answer on the measured minimum.
+
+This supersedes the cardinality guard described below, which shipped in the same release cycle and never reached a version of its own.
+
+Ten million rows on an i9-13900K, alternating builds, five reps each, four rounds, medians, one process per measurement. Fifteen untouched benchmarks ran as controls and fourteen of them sat within seven percent.
+
+| benchmark | groups | before | after | ratio |
+| --- | --- | --- | --- | --- |
+| hash/factorize_100k | 100000 | 88.63 ms | 38.06 ms | 0.43 |
+| text/group_medium | 100000 | 49.90 ms | 34.02 ms | 0.68 |
+| hash/factorize_10k | 10000 | 11.56 ms | 9.80 ms | 0.85 |
+| hash/factorize_nulls | 10000 | 10.64 ms | 9.40 ms | 0.88 |
+| hash/factorize_100 | 100 | 6.10 ms | 6.23 ms | 1.02 |
+| hash/factorize_all_distinct | 10000000 | 218.20 ms | 214.95 ms | 0.99 |
+
+The first two are the columns this is for and neither was being split at all before. The next two were already parallel and gain from being given twenty five workers instead of thirty two, which is the model declining the last seven because their share of the merge costs more than their share of the build saves. The last two are the ends of the range, where the answer was already right and the point is that it did not change.
+
 The string `factorize` runs on every core too.
 
 Text was the one key type left on a single thread after 0.6.18, and it is the type that matters most for the group by queries anyone benchmarks. It now takes the same route the numeric one does: one contiguous slice per worker, a private table per slice, and a sequential merge that renumbers the local ordinals into global ones in workers-then-ordinals order, which is what preserves first-appearance ordering.
@@ -28,12 +49,16 @@ Only the first of those three is meant to move. The other two are columns of dis
 
 ### Changed
 
+- Both hashed routes ask `_parallel_workers` how many workers to use instead of testing a projected group count against half a slice, and `_projected_groups` and `_projected_groups_strings` answer with `_estimate_groups` instead of `project_groups`.
 - `factorize_strings` is `raises`, and picks between `_factorize_strings_serial` and `_factorize_strings_parallel` the way the numeric one picks between its two.
 
 ### Added
 
+- `_parallel_workers`, which costs the parallel route at every available worker count and returns the cheapest, or one to stay serial, with `REMAP_SHARE`, `MERGE_COST` and `SPLIT_MARGIN` as its weights.
+- `_estimate_groups`, which reads a cardinality off two sample counts by fitting the curve they lie on rather than the tangent, replacing `MERGE_HEADROOM`.
 - `_factorize_strings_parallel`, the multi threaded string route, `_factorize_strings_serial`, the single threaded one, and `_projected_groups_strings`, the sample build that chooses between them.
 - `HashTable.insert_string`, which is `insert` with the key comparison `build_strings` does, for the merge at the end of a parallel string build.
+- `hash/factorize_100k` and `text/group_medium` benchmarks, a numeric and a text column of a hundred thousand randomly drawn keys, which is the cardinality band the suite had nothing in.
 
 ## [0.6.18] - 2026-08-29
 

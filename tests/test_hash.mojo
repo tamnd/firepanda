@@ -30,9 +30,14 @@ from firepanda.hash import (
     mix,
     radix_partition,
 )
+from firepanda.exec import worker_count
 from firepanda.hash.factorize import (
+    PARALLEL_MIN_SLICE,
+    PARALLEL_ROWS,
+    _estimate_groups,
     _factorize_hashed_parallel,
     _factorize_hashed_serial,
+    _parallel_workers,
 )
 from firepanda.hash.table import (
     SIZING_EARLY,
@@ -746,6 +751,112 @@ def test_factorize_with_nulls_on_the_hashed_route() raises:
     var got = factorize(col)
     assert_equal(got.null_group, 0)
     assert_equal(got.count(), 201)
+
+
+def test_estimate_groups_on_a_sample_that_stopped_discovering() raises:
+    """Both counts equal means the keys ran out well inside the sample, and the
+    answer is what was found plus the quarter of headroom for a tail no sample
+    sees."""
+    assert_equal(_estimate_groups(100, 100, 65536, 10_000_000), 125)
+
+
+def test_estimate_groups_when_every_row_is_a_new_key() raises:
+    """A ratio of two is the model saying the column is larger than the sample
+    can bound, and the only honest answer left is the column."""
+    assert_equal(_estimate_groups(65536, 32768, 65536, 10_000_000), 10_000_000)
+
+
+def test_estimate_groups_recovers_a_middling_cardinality() raises:
+    """The shape this function exists for, and the one the flat extrapolation it
+    replaced was worst at. A hundred thousand keys evenly spread over ten
+    million rows put 48074 of themselves in a 65536 row sample and 27941 in the
+    first half of it."""
+    var got = _estimate_groups(48074, 27941, 65536, 10_000_000)
+    assert_true(got > 90_000, String("estimated ", got))
+    assert_true(got < 110_000, String("estimated ", got))
+
+
+def test_estimate_groups_recovers_a_high_cardinality() raises:
+    """A million keys over the same ten million rows. Worth checking separately
+    because the ratio here is 1.97, close enough to the two that means give up
+    that a bisection with the wrong bracket would."""
+    var got = _estimate_groups(63435, 32237, 65536, 10_000_000)
+    assert_true(got > 850_000, String("estimated ", got))
+    assert_true(got < 1_200_000, String("estimated ", got))
+
+
+def test_estimate_groups_stays_between_what_was_seen_and_the_column() raises:
+    """Neither bound is reachable by the model on its own, so both are clamps
+    rather than consequences, and a caller sizing anything off this needs them
+    to hold."""
+    for seen in range(2, 400, 37):
+        for half in range(1, seen + 1, 5):
+            var got = _estimate_groups(seen, half, 800, 100_000)
+            assert_true(got >= seen, String("seen ", seen, " half ", half))
+            assert_true(got <= 100_000, String("seen ", seen, " half ", half))
+
+
+def test_parallel_workers_takes_every_core_on_few_groups() raises:
+    """A hundred groups over ten million rows costs a hundred groups per worker
+    to merge, which is nothing against the slice they came from, so there is
+    nothing to trade and the answer is whatever the machine has."""
+    var most = min(worker_count(), 10_000_000 // PARALLEL_MIN_SLICE)
+    assert_equal(_parallel_workers(100, 10_000_000), most)
+
+
+def test_parallel_workers_refuses_a_column_of_distinct_keys() raises:
+    """Every worker's slice is its own group count here, so the merge is the
+    whole column over again and the split cannot win however it is cut."""
+    assert_equal(_parallel_workers(10_000_000, 10_000_000), 1)
+    assert_equal(_parallel_workers(5_000_000, 10_000_000), 1)
+
+
+def test_parallel_workers_splits_a_middling_column() raises:
+    """The shape the whole model is for. A hundred thousand groups over ten
+    million rows is worth splitting, and before this it was not split at all,
+    because every core was the only alternative to none of them and every core
+    on this column merges more than it builds."""
+    var most = min(worker_count(), 10_000_000 // PARALLEL_MIN_SLICE)
+    if most < 8:
+        return
+    assert_true(_parallel_workers(100_000, 10_000_000) > 1)
+
+
+def test_parallel_workers_stops_short_of_the_cores_it_has() raises:
+    """Half a million groups over ten million rows puts the crossing at five
+    workers, and it stays at five however many more the machine offers, which is
+    the part a count that could only be one or all of them could not express."""
+    var most = min(worker_count(), 10_000_000 // PARALLEL_MIN_SLICE)
+    if most < 8:
+        return
+    var got = _parallel_workers(500_000, 10_000_000)
+    assert_true(got > 1, String("chose ", got, " of ", most))
+    assert_true(got < 8, String("chose ", got, " of ", most))
+
+
+def test_parallel_workers_never_slices_below_the_minimum() raises:
+    """The worker count is what divides the column, so it has to leave every
+    worker a slice worth waking a thread for."""
+    for rows in range(PARALLEL_ROWS, 1 << 21, 1 << 16):
+        var got = _parallel_workers(4, rows)
+        assert_true(got >= 1, String("rows ", rows, " chose ", got))
+        assert_true(
+            rows // got >= PARALLEL_MIN_SLICE,
+            String("rows ", rows, " chose ", got),
+        )
+
+
+def test_parallel_workers_is_monotone_in_cardinality() raises:
+    """Adding groups to a column only ever makes the merge longer, so it can
+    only ever want the same worker count or fewer. A model that wobbled here
+    would be routing on noise."""
+    var last = _parallel_workers(1, 10_000_000)
+    var groups = 2
+    while groups <= 8_000_000:
+        var got = _parallel_workers(groups, 10_000_000)
+        assert_true(got <= last, String("groups ", groups, " chose ", got))
+        last = got
+        groups *= 2
 
 
 def main() raises:

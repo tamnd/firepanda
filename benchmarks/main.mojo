@@ -1289,10 +1289,19 @@ def bench_hash(mut harness: Harness) raises:
 
     var low = Array[DType.int64](rows)
     var mid = Array[DType.int64](rows)
+    # A hundred thousand groups is the band where the sample the parallel route
+    # decides from is still finding new keys when it runs out, and it is the
+    # band db-benchmark's q3 and q7 sit in. Its keys are drawn at random rather
+    # than cycled like the other three, because a cycle puts every key in the
+    # first hundred thousand rows and the front of the column then looks exactly
+    # like a column of distinct values to anything reading a prefix of it.
+    var many = Array[DType.int64](rows)
+    var many_rng = Rng(0x9E3F21)
     var high = Array[DType.int64](rows)
     for i in range(rows):
         low[i] = Int64(i % 100) * stride
         mid[i] = Int64(i % 10000) * stride
+        many[i] = Int64(many_rng.next_below(100000)) * stride
         high[i] = Int64(i) * stride
 
     def factorize_low() raises {imm low}:
@@ -1308,6 +1317,13 @@ def bench_hash(mut harness: Harness) raises:
         keep(out.codes)
 
     harness.record("hash/factorize_10k", "rows", rows, factorize_mid)
+
+    def factorize_many() raises {imm many}:
+        keep(many)
+        var out = factorize(many)
+        keep(out.codes)
+
+    harness.record("hash/factorize_100k", "rows", rows, factorize_many)
 
     def factorize_high() raises {imm high}:
         keep(high)
@@ -2150,9 +2166,20 @@ def bench_text(mut harness: Harness) raises:
     # pathological case it is for the sort, because the hash reads every byte
     # rather than the first eight, so a shared prefix costs the bytes it adds and
     # nothing more.
+    # A fourth column that only the group rows read, with a hundred thousand
+    # keys drawn at random. It is the shape db-benchmark groups on and it sits
+    # between the two the sort rows care about, far enough above `group_repeated`
+    # that the merge after a parallel build is a real cost and far enough below
+    # `group_distinct` that paying it is still worth doing.
+    var medium = List[String](capacity=rows)
+    var medium_rng = Rng(0x51D2A7)
+    for _ in range(rows):
+        medium.append(String("id", medium_rng.next_below(100000)))
+
     var distinct_keys = StringArray(copy=distinct_col.strings())
     var prefixed_keys = StringArray(copy=prefixed_col.strings())
     var repeated_keys = StringArray(copy=repeated_col.strings())
+    var medium_keys = strings_from_list(medium)
 
     def group_distinct() raises {imm distinct_keys}:
         var found = factorize_strings(distinct_keys)
@@ -2171,6 +2198,12 @@ def bench_text(mut harness: Harness) raises:
         keep(found.codes)
 
     harness.record("text/group_repeated", "rows", rows, group_repeated)
+
+    def group_medium() raises {imm medium_keys}:
+        var found = factorize_strings(medium_keys)
+        keep(found.codes)
+
+    harness.record("text/group_medium", "rows", rows, group_medium)
 
     # The numeric pair, spread far enough apart to be denied the direct route, so
     # both sides of the comparison are the same hash table doing the same job on
