@@ -608,5 +608,55 @@ def test_a_null_key_past_the_split_still_matches_nothing() raises:
     assert_true(kept, "the null key was dropped by the anti join")
 
 
+def unique_right() raises -> DataFrame:
+    """Five right rows whose keys are all distinct.
+
+    `wide_right` repeats keys 0 and 1, which sends the build down the general
+    bucket route, so it cannot reach the one this exists for. Key 4 is left out
+    so that a fifth of the left rows match nothing, and key 9 is in so that a
+    right row matches nothing, which between them keep the unmatched branches on
+    both sides live.
+    """
+    return pair_frame(
+        Series("k", ints([0, 1, 2, 3, 9])),
+        Series("b", ints([100, 110, 120, 130, 190])),
+    )
+
+
+def test_a_unique_right_key_past_the_split_pairs_what_one_loop_would() raises:
+    # The build assumes the right key is unique and gives up on the first repeat,
+    # and every other frame at this length repeats, so this is the only test that
+    # walks the fast route through the split. The null is in the back half so
+    # that it lands on a worker other than the first.
+    var left = wide_left(140_000, 110_001)
+    var right = unique_right()
+    var kinds: List[JoinKind] = [
+        JoinKind.INNER,
+        JoinKind.LEFT,
+        JoinKind.SEMI,
+        JoinKind.ANTI,
+    ]
+    for i in range(len(kinds)):
+        var fast = join_indices(
+            left.columns, keys(0), 140_000, right.columns, keys(0), 5, kinds[i]
+        )
+        var want = nested_pairs(left, right, kinds[i])
+        assert_equal(
+            len(fast) * 2, len(want), String("row count for ", kinds[i])
+        )
+        # One assertion for the whole comparison rather than one per row. The
+        # message is built on every call whether or not it fails, and at this
+        # length that costs more than the join being checked.
+        var bad = -1
+        for r in range(len(fast)):
+            if (
+                fast.left_at[r] != want[2 * r]
+                or fast.right_at[r] != want[2 * r + 1]
+            ):
+                bad = r
+                break
+        assert_equal(bad, -1, String("pair ", bad, " for ", kinds[i]))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
