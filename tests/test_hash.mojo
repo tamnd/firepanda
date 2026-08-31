@@ -22,6 +22,7 @@ from firepanda.hash import (
     DIRECT_LIMIT,
     HashTable,
     factorize,
+    factorize_dense,
     factorize_dict,
     factorize_linear,
     hash_into,
@@ -646,6 +647,58 @@ def test_the_two_routes_agree_on_the_same_data() raises:
     assert_equal(a.count(), b.count())
     for i in range(n):
         assert_equal(a.codes[i], b.codes[i], String("routes disagree at ", i))
+
+
+def test_factorize_dense_takes_a_table_wider_than_the_scan_would() raises:
+    """A span past `DIRECT_LIMIT` that one route indexes and the other hashes.
+
+    Eighty thousand slots is over the limit a scan will accept and no wider than
+    the column, so this is the case the function exists for. Only five hundred
+    values in the span are used, which is the point: the route is chosen from the
+    range the caller promised, not from how much of it turns out to be occupied,
+    and the answer has to be the one the hash gives either way.
+    """
+    var span = DIRECT_LIMIT + 15000
+    var n = span
+    var col = Array[DType.int64](n)
+    for i in range(n):
+        col[i] = Int64((i * 7) % 500)
+
+    var dense = factorize_dense(col, span)
+    var hashed = factorize(col)
+    assert_equal(dense.count(), 500)
+    assert_equal(dense.count(), hashed.count())
+    ref got = dense.codes
+    ref want = hashed.codes
+    var bad = -1
+    for i in range(n):
+        if got[i] != want[i]:
+            bad = i
+            break
+    assert_equal(bad, -1, String("routes disagree at ", bad))
+
+
+def test_factorize_dense_declines_a_table_wider_than_the_column() raises:
+    # Values spread over a span far larger than the column, which is the shape a
+    # table would be mostly empty for. The values are still inside the span they
+    # were promised, so the only thing being checked is that declining the table
+    # changes the cost and not the answer.
+    var n = 2000
+    var col = Array[DType.int64](n)
+    for i in range(n):
+        col[i] = Int64((i % 300) * 900_000)
+
+    var declined = factorize_dense(col, 300 * 900_000)
+    var reference = factorize(col)
+    assert_equal(declined.count(), 300)
+    ref got = declined.codes
+    ref want = reference.codes
+    var bad = -1
+    for i in range(n):
+        if got[i] != want[i]:
+            bad = i
+            break
+    assert_equal(bad, -1, String("declining the table moved a code at ", bad))
 
 
 def test_factorize_of_negative_integers() raises:

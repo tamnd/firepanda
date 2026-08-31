@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added
+
+- `factorize_dense`, for a caller that already knows the range its values are in. `factorize` learns the range by scanning, and what a scan finds is a bound on data the library did not construct, so it declines a direct table above `DIRECT_LIMIT` because a span of ten million says nothing about whether ten values or ten million occupy it. A group by on several keys is not in that position. Its packed key has a range of `g0 * g1 * g2 * ...`, computed on the way down out of ordinals that are dense by construction, and the shapes where that product is large are the shapes where most of it is occupied. So the bound for a caller who can name the range is the table against the column rather than the table against the cache, which caps the direct route at four bytes a row and never more. Two keys of a hundred by a hundred thousand is a span of exactly ten million on ten million rows, which now indexes a table instead of hashing.
+
+### Changed
+
+- The multi key group by asks for `factorize_dense` at the end and inside `_condense`, passing the space it already computed. Ten million rows on an i9-13900K, alternating builds, one process per measurement, median of the per round paired ratios: q6 627.8 ms to 522.0 ms for a ratio of 1.19 over eight rounds, and q2 75.2 ms to 72.6 ms for 1.06 over twenty two. q6 is the query the table route is for. q2 is a smaller and different win, since its space of ten thousand was under `DIRECT_LIMIT` and took the direct route already, and what it saves is the scan that used to walk ten million int64 values to learn a range the group by had computed. q10 is unchanged at 0.974 over twenty two rounds with the two distributions overlapping across their whole width, which is what its code predicts: a space of ten to the eighteen declines the table on either route, and the scan that no longer runs was stopping on its first few rows anyway. q3, q1 and j4 sit at 1.02, 1.01 and 0.99.
+
 ## [0.6.22] - 2026-08-31
 
 Built against Mojo 1.0.0 (ed45d567).
