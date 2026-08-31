@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.19] - 2026-08-31
+
+Built against Mojo 1.0.0 (ed45d567).
+
 A group by now chooses how many cores to use, rather than choosing between one and all of them.
 
 Splitting a factorize across workers buys a shorter build and pays for it with a merge no thread can help with, and the merge grows with every worker added, because each one rediscovers whatever groups fall in its own slice. So the two curves cross, and the best worker count is at the crossing. Until now the code could only ask for all of them or none, and it decided with a guard that refused anything projecting more than half a slice of groups. That guard was reading the wrong number. `project_groups` exists to size a hash table, where guessing high costs memory and guessing low costs a rehash, so it extrapolates the discovery rate flat and overshoots on purpose. On ten million rows with a hundred thousand groups it answers six million, and a column that a split wins two and a third times on was going to one thread.
@@ -1047,7 +1051,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.18...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.19...HEAD
+[0.6.19]: https://github.com/tamnd/firepanda/releases/tag/v0.6.19
 [0.6.18]: https://github.com/tamnd/firepanda/releases/tag/v0.6.18
 [0.6.17]: https://github.com/tamnd/firepanda/releases/tag/v0.6.17
 [0.6.16]: https://github.com/tamnd/firepanda/releases/tag/v0.6.16
