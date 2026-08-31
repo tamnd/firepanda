@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added
+
+- `AggKind.CORR` and `AggKind.COV`, the first two reductions that read a pair of columns rather than one. `AggSpec` gains a second column name and a constructor that takes it, so a correlation is a spec like any other and composes with the rest in one call: asking for a correlation and three sums over the same keys groups the rows once. The kernel centres both columns on their pairwise means before accumulating, the way `group_var` does and for the same reason, and pairwise means it: a row where either value is null contributes to neither mean, because a covariance is a statement about rows in which both were observed. A group with fewer than two such rows is null, and so is a correlation whose denominator is a zero. The erased entry point casts both columns to float64 and calls one instantiation rather than dispatching on both dtypes, which would be a hundred and forty four instantiations of a loop that reads its inputs as float64 in either case; the typed spellings stay generic and copy nothing.
+
 ## [0.6.23] - 2026-08-31
 
 Built against Mojo 1.0.0 (ed45d567).

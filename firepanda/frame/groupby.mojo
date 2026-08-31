@@ -47,6 +47,10 @@ struct AggSpec(Copyable, Movable, Writable):
     var kind: AggKind
     """Which reduction."""
 
+    var other: String
+    """The second column, for the reductions that read a pair of them. Empty for
+    every other kind, and `AggKind.reads_two_columns` is what says which."""
+
     var name: String
     """The output column name. Empty means derive it, which gives `x_sum`."""
 
@@ -59,6 +63,34 @@ struct AggSpec(Copyable, Movable, Writable):
             name: The output name, or empty to derive one from the other two.
         """
         self.column = column
+        self.other = ""
+        self.kind = kind
+        self.name = name
+
+    def __init__(
+        out self,
+        column: String,
+        other: String,
+        kind: AggKind,
+        name: String = "",
+    ):
+        """Constructs a spec for a reduction that reads two columns.
+
+        `CORR` and `COV` are statements about a pair of columns rather than about
+        one, which is the only reason `AggSpec` has a second column at all. They
+        live here rather than in a method of their own on `DataFrame` so that a
+        correlation composes with the other reductions in one call: asking for a
+        correlation and three sums over the same keys should group the rows once,
+        and it does.
+
+        Args:
+            column: The first column.
+            other: The second.
+            kind: The reduction, which must be one that reads two columns.
+            name: The output name, or empty to derive one.
+        """
+        self.column = column
+        self.other = other
         self.kind = kind
         self.name = name
 
@@ -77,6 +109,8 @@ struct AggSpec(Copyable, Movable, Writable):
         """
         if self.name != "":
             return self.name
+        if self.kind.reads_two_columns():
+            return String(self.column, "_", self.other, "_", self.kind)
         return String(self.column, "_", self.kind)
 
     def write_to(self, mut writer: Some[Writer]):
@@ -85,4 +119,7 @@ struct AggSpec(Copyable, Movable, Writable):
         Args:
             writer: The sink.
         """
-        writer.write(self.kind, "(", self.column, ") as ", self.output_name())
+        writer.write(self.kind, "(", self.column)
+        if self.kind.reads_two_columns():
+            writer.write(", ", self.other)
+        writer.write(") as ", self.output_name())
