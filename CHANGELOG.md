@@ -11,10 +11,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 ### Changed
 
 - `Factorized` no longer carries a `keys` column. It carries the row that introduced each group, which every route already had, and `Factorized.keys(col)` gathers the key values from those rows when somebody wants them. Nobody in the library did: a group by gathers all of its key columns at once by those same rows, and a join reads the ordinals and nothing else. Building them eagerly was a random read per group plus two copies of the result, on every hashed factorize, thrown away immediately. On a group by whose result is ten million rows that was five refactorizations each producing eighty megabytes nobody read.
+- A group by on several keys packs all of them into one running integer and factorizes it once, at the end, instead of refactorizing after every key it folds in. The intermediate factorizes existed to keep the running value small enough to stay in an int64, which is a bound that a real table does not come near: the running space is the product of the group counts, and int64 holds nineteen digits of it. `_condense` renumbers the running key if a column ever would come near it, so the bound is still enforced, it is just no longer paid for on every group by that does not need it.
 
 ### Performance
 
-- A group by on six keys at ten million rows is 14 percent faster, and a join of two ten million row frames on a high cardinality key is 6 percent faster, from the above. Queries whose groups number in the thousands are unchanged, because there the discarded column was small.
+- A group by on six keys at ten million rows is 40 percent faster. Six keys used to mean eleven hashed passes over ten million rows, six for the keys and five to redensify after each fold; it is now seven, and the four that went away are the whole difference. Two keys are unchanged, as they should be, because two keys never had a redundant pass to remove.
+- A group by on six keys at ten million rows is a further 14 percent faster, and a join of two ten million row frames on a high cardinality key 6 percent faster, from the `Factorized` change above. Queries whose groups number in the thousands are unchanged, because there the discarded column was small.
 
 ## [0.6.21] - 2026-08-31
 

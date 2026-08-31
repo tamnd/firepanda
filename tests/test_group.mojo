@@ -477,6 +477,42 @@ def test_two_keys_collapse_when_the_pairs_repeat() raises:
     assert_equal(grouping.codes[1], grouping.codes[3])
 
 
+def test_enough_keys_to_overflow_the_packed_space_still_groups() raises:
+    """Seven keys of a thousand values each, which is where `_condense` runs.
+
+    The running space is the product of the group counts and it is not condensed
+    until it would leave an int64, so this is the only shape in the suite that
+    reaches that. A thousand to the sixth is inside the range and a thousand to
+    the seventh is not, so the seventh key is the one that triggers the pass, and
+    what comes out afterwards has to be the same grouping a smaller key list
+    would have produced.
+
+    Every key here is the same column, so there are exactly a thousand tuples and
+    each row is in the group its own value names, which makes the answer easy to
+    state and impossible to get right by accident on a packing that overflowed.
+    """
+    var rows = 1000
+    var series = List[Series]()
+    for k in range(7):
+        var col = Array[DType.int64](rows)
+        for i in range(rows):
+            col[i] = Int64(i)
+        series.append(Series(String("k", k), col^))
+    var frame = DataFrame.from_series(series^)
+    var at = List[Int]()
+    for k in range(7):
+        at.append(k)
+
+    var grouping = group_ordinals(frame.columns, at, frame.rows)
+    assert_equal(grouping.groups, rows)
+    var bad = -1
+    for i in range(rows):
+        if Int(grouping.codes[i]) != i or grouping.rows_at[i] != i:
+            bad = i
+            break
+    assert_equal(bad, -1, String("wrong group at row ", bad))
+
+
 def test_no_keys_is_refused() raises:
     var frame = sample_frame()
     with assert_raises():
