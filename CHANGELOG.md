@@ -8,15 +8,43 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.22] - 2026-08-31
+
+Built against Mojo 1.0.0 (ed45d567).
+
+The group by on several keys. Two changes, both of them work that was being done and then discarded, and on the widest shape in db-benchmark they take a third off the query.
+
+Grouping on more than one key works by packing the keys into a single integer per row. Group on the first key and every row has an ordinal in `[0, g0)`; group on the second and it has another in `[0, g1)`; then `c0 * g1 + c1` names the pair exactly. Fold in a third key by multiplying by `g2` and adding, and so on down the list. Factorize the packed value at the end and the group by is done.
+
+That packed value was being factorized after every single key it folded in, not just at the end. The reason was overflow: without the intermediate passes the running space is the product of all the group counts rather than the number of tuples actually present, and the concern was that the product would leave an int64. It does not, for anything anyone has. Nineteen digits is twenty six columns of a hundred distinct values, or six columns of a thousand. So the packing now happens in place and the factorize happens once, and `_condense` renumbers the running key into the tuples it actually holds if a column list ever does approach the bound. The bound is still checked before every multiply. A six key group by at ten million rows was eleven hashed passes over the full column, six for the keys and five to redensify after each fold, and it is now seven.
+
+Separately, every hashed factorize was building a column of the distinct key values and returning it, and nothing in the library ever read it. A group by does not need it, because it gathers all of its key columns at once at the end by the rows that introduced each group. A join does not need it either, because it reads the ordinals and nothing else. So `Factorized` now carries those representative rows, which every route already had, and building the key values is something a caller asks for. On the six key query the old code produced five of those columns at eighty megabytes each and dropped all five.
+
+Ten million rows on an i9-13900K, v0.6.21 against this release, alternating builds, six rounds of five runs each, one process per measurement, median of the per round paired ratios.
+
+| query | shape | 0.6.21 | 0.6.22 | ratio |
+| --- | --- | --- | --- | --- |
+| q10 | group by six keys, ten million out | 1747.8 ms | 1132.0 ms | 1.56 |
+| q6 | group by two keys, six million out | 811.3 ms | 663.4 ms | 1.21 |
+| q2 | group by two keys, ten thousand out | 83.2 ms | 70.8 ms | 1.18 |
+| j5 | ten million to ten million, then aggregated | 807.7 ms | 747.5 ms | 1.07 |
+| j1 | ten million to ten thousand | 156.8 ms | 150.9 ms | 1.03 |
+| j4 | ten million to ten million | 793.9 ms | 770.5 ms | 1.03 |
+| q1 | group by one key, hundred out | 20.3 ms | 19.8 ms | 1.02 |
+| q7 | group by one key, then a subtraction | 126.6 ms | 126.0 ms | 1.01 |
+| j2 | ten million to hundred thousand | 206.5 ms | 204.8 ms | 1.01 |
+| q5 | group by one key, hundred thousand out | 78.4 ms | 82.5 ms | 0.99 |
+| q3 | group by one key, hundred thousand out | 135.2 ms | 138.3 ms | 0.98 |
+
+The last two are inside the noise band this setup shows on changes known to do nothing, which is about three percent. q10 is not: its two distributions do not overlap, 1705 to 1784 ms before and 1022 to 1152 ms after.
+
+Where the credit goes is worth being precise about, because the two changes help different shapes. The packing change is the whole of q10 and none of q6, since two keys never had a redundant fold to remove. The discarded key column is the whole of q6 and q2, since both produce enough groups for that column to be large. One key queries were never paying for either.
+
+A note for anyone measuring this themselves: q6 on this machine is bimodal, with a fast mode near 600 ms and a slow one near 770 ms that every build visits, so its median moves by twenty percent depending on which mode the samples land in. Paired ratios are stable there and raw medians are not.
+
 ### Changed
 
-- `Factorized` no longer carries a `keys` column. It carries the row that introduced each group, which every route already had, and `Factorized.keys(col)` gathers the key values from those rows when somebody wants them. Nobody in the library did: a group by gathers all of its key columns at once by those same rows, and a join reads the ordinals and nothing else. Building them eagerly was a random read per group plus two copies of the result, on every hashed factorize, thrown away immediately. On a group by whose result is ten million rows that was five refactorizations each producing eighty megabytes nobody read.
-- A group by on several keys packs all of them into one running integer and factorizes it once, at the end, instead of refactorizing after every key it folds in. The intermediate factorizes existed to keep the running value small enough to stay in an int64, which is a bound that a real table does not come near: the running space is the product of the group counts, and int64 holds nineteen digits of it. `_condense` renumbers the running key if a column ever would come near it, so the bound is still enforced, it is just no longer paid for on every group by that does not need it.
-
-### Performance
-
-- A group by on six keys at ten million rows is 40 percent faster. Six keys used to mean eleven hashed passes over ten million rows, six for the keys and five to redensify after each fold; it is now seven, and the four that went away are the whole difference. Two keys are unchanged, as they should be, because two keys never had a redundant pass to remove.
-- A group by on six keys at ten million rows is a further 14 percent faster, and a join of two ten million row frames on a high cardinality key 6 percent faster, from the `Factorized` change above. Queries whose groups number in the thousands are unchanged, because there the discarded column was small.
+- `Factorized` no longer carries a `keys` column. Read the key values with `Factorized.keys(col)`, passing the column that was factorized, which gathers them from the representative rows. Callers who were reading `.keys` as a field want `.keys(col)` as a call; callers who were ignoring it, which was everyone inside the library, want nothing.
 
 ## [0.6.21] - 2026-08-31
 
@@ -1219,7 +1247,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.21...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.22...HEAD
+[0.6.22]: https://github.com/tamnd/firepanda/releases/tag/v0.6.22
 [0.6.21]: https://github.com/tamnd/firepanda/releases/tag/v0.6.21
 [0.6.20]: https://github.com/tamnd/firepanda/releases/tag/v0.6.20
 [0.6.19]: https://github.com/tamnd/firepanda/releases/tag/v0.6.19
