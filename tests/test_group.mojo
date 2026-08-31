@@ -37,7 +37,9 @@ from firepanda.array.array import Array, from_list
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.groupby import AggSpec
 from firepanda.frame.series import Series
+from firepanda.hash.factorize import factorize
 from firepanda.hash.grouping import group_ordinals
+from firepanda.testing.rng import Rng
 from firepanda.kernel.group import (
     AggKind,
     aggregate_group,
@@ -257,6 +259,70 @@ def test_ordinals_agree_on_equal_keys() raises:
     assert_equal(grouping.codes[3], grouping.codes[5])
     assert_equal(grouping.codes[0], 0, "first seen is ordinal zero")
     assert_equal(grouping.codes[1], 1)
+
+
+def test_no_shape_of_column_factorizes_to_a_sparse_ordinal() raises:
+    """Every ordinal below the count has to belong to a row, on both routes.
+
+    `group_ordinals` skips a pass over every row for a key that is not the first
+    one, and what makes that safe is the group count being exact. It reads the
+    count straight off `factorize`, so a route that handed out an ordinal nothing
+    carries would not produce a crash, it would produce an aggregation row with
+    no key and everything after it shifted by one.
+
+    Neither route does. The hashed one makes an ordinal only when a row asks for
+    it, and the direct one indexes its table by value but appends to `keys` on
+    first sight, so the gaps in the table are not gaps in the ordinals. That is a
+    property of two implementations rather than a promise either of them states,
+    which is why it is swept rather than spot checked: the row counts and value
+    bounds here put roughly fifty columns down each route, including columns
+    that are entirely null and columns of one row.
+    """
+    var rng = Rng(UInt64(0x0DE5))
+    for _ in range(120):
+        var n = 1 + rng.next_below(200)
+        var bound = 1 + rng.next_below(500)
+        var col = Array[DType.int64](n)
+        for i in range(n):
+            col[i] = Int64(rng.next_below(bound)) - 100
+        for _ in range(rng.next_below(4)):
+            col.set_null(rng.next_below(n))
+
+        var found = factorize(col)
+        var carried = List[Bool]()
+        for _ in range(found.count()):
+            carried.append(False)
+        for i in range(n):
+            carried[Int(found.codes[i])] = True
+        for g in range(found.count()):
+            assert_true(carried[g], "ordinal with no row behind it")
+
+
+def test_a_numeric_key_is_still_renumbered() raises:
+    """It has no representative rows of its own, so the pass still runs."""
+    var frame = sample_frame()
+    var at = List[Int]()
+    at.append(0)
+    var grouping = group_ordinals(frame.columns, at, frame.rows)
+    assert_equal(grouping.groups, 4)
+    assert_equal(len(grouping.rows_at), 4)
+    for g in range(grouping.groups):
+        assert_equal(Int(grouping.codes[grouping.rows_at[g]]), g)
+
+
+def test_a_null_key_lands_where_its_first_null_is() raises:
+    """The renumbering moves it there, and the factorize puts it at zero.
+
+    Row 4 is the null and rows 0 to 3 carry two keys between them, so the null
+    group is the third one seen. A group by that skipped the renumbering would
+    report it first.
+    """
+    var frame = sample_frame()
+    var at = List[Int]()
+    at.append(0)
+    var grouping = group_ordinals(frame.columns, at, frame.rows)
+    assert_equal(Int(grouping.codes[4]), 2)
+    assert_equal(grouping.rows_at[2], 4)
 
 
 def test_two_keys_do_not_merge_groups() raises:

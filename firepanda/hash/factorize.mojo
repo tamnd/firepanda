@@ -165,7 +165,16 @@ struct Factorized[dt: DType](Movable):
     """A column rewritten as group ordinals, plus the keys they name."""
 
     var codes: Array[DType.uint32]
-    """One group ordinal per row of the input, in `[0, len(keys))`."""
+    """One group ordinal per row of the input, in `[0, len(keys))`.
+
+    Every ordinal in that range belongs to at least one row, on both routes. The
+    hashed one only makes an ordinal because a row asked for one, and the direct
+    one indexes its table by value but appends to `keys` only on first sight, so
+    the gaps in the table are not gaps in the ordinals. A group by relies on that
+    to skip a renumbering pass,
+    `test_no_shape_of_column_factorizes_to_a_sparse_ordinal`
+    holds it, and a route added later that does not hold it has to say so.
+    """
 
     var keys: Array[Self.dt]
     """The distinct keys. Index it by an ordinal from `codes` to get the value
@@ -812,7 +821,9 @@ def _factorize_hashed_parallel[
 def _finish[
     dt: DType
 ](
-    var codes: Array[DType.uint32], var keys: List[Scalar[dt]], null_group: Int
+    var codes: Array[DType.uint32],
+    var keys: List[Scalar[dt]],
+    null_group: Int,
 ) -> Factorized[dt]:
     """Packages the two routes' common output.
 
@@ -886,6 +897,24 @@ struct FactorizedStrings(Movable):
             The per-row ordinals.
         """
         return self.codes^
+
+    def into_parts(
+        deinit self, mut codes: Array[DType.uint32], mut firsts: List[Int]
+    ):
+        """Gives up the ordinals and the representative rows together.
+
+        A caller that keeps both cannot move them out one at a time, because the
+        first move leaves a struct that still owns the second, and it cannot take
+        them as a tuple either, because unpacking one copies. `deinit` says the
+        rest is being torn down, which is what makes both moves legal, and the
+        two arguments are what makes them reachable.
+
+        Args:
+            codes: Overwritten with the per-row ordinals.
+            firsts: Overwritten with a representative row per non-null group.
+        """
+        codes = self.codes^
+        firsts = self.firsts^
 
 
 def factorize_strings(

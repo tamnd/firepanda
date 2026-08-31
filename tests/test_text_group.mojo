@@ -46,6 +46,7 @@ from firepanda.hash.factorize import (
     factorize_strings,
 )
 from firepanda.hash.function import DEFAULT_SEED, hash_bytes
+from firepanda.hash.grouping import group_ordinals
 from firepanda.hash.scalar import factorize_strings_linear
 from firepanda.join.pairs import JoinKind
 from firepanda.kernel.group import AggKind
@@ -278,6 +279,58 @@ def test_a_null_key_is_dropped_or_kept_as_pandas_does() raises:
     var keys = kept.column("k")
     assert_false(keys.is_valid(2))
     assert_equal(kept.column("v_sum").as_typed[DType.int64]()[2], 4)
+
+
+def test_a_text_key_is_grouped_without_renumbering_its_ordinals() raises:
+    """The factorize's answer is already the one the renumbering would give.
+
+    Its ordinals come out in first-appearance order and its representative rows
+    are the list its merge built to compare keys with, so `group_ordinals` uses
+    both as they are. This asserts they are what the pass would have produced
+    rather than that the pass was skipped, because the second is not observable
+    and the first is the only reason skipping is allowed.
+    """
+    var frame = keyed(
+        text(["oslo", "lima", "oslo", "kyiv", "lima"]), [1, 2, 3, 4, 5]
+    )
+    var at = List[Int]()
+    at.append(0)
+    var grouping = group_ordinals(frame.columns, at, frame.rows)
+
+    assert_equal(grouping.groups, 3)
+    var expected: List[Int] = [0, 1, 0, 2, 1]
+    for i in range(len(expected)):
+        assert_equal(Int(grouping.codes[i]), expected[i])
+    var rows: List[Int] = [0, 1, 3]
+    for g in range(len(rows)):
+        assert_equal(grouping.rows_at[g], rows[g])
+
+
+def test_a_text_key_with_nulls_is_renumbered_after_all() raises:
+    """The factorize puts the null group first and first-appearance does not.
+
+    `factorize_strings` fixes the null group at ordinal zero wherever its first
+    null is, and it returns a representative row for every group except that one,
+    so neither half of what `group_ordinals` needs is there. It runs the pass, and
+    the null group comes out third here because row 3 is where the first null is.
+    """
+    var frame = keyed(
+        with_nulls(
+            ["oslo", "lima", "oslo", "x", "lima"],
+            [True, True, True, False, True],
+        ),
+        [1, 2, 3, 4, 5],
+    )
+    var at = List[Int]()
+    at.append(0)
+    var grouping = group_ordinals(frame.columns, at, frame.rows)
+
+    assert_equal(grouping.groups, 3)
+    var expected: List[Int] = [0, 1, 0, 2, 1]
+    for i in range(len(expected)):
+        assert_equal(Int(grouping.codes[i]), expected[i])
+    assert_equal(grouping.rows_at[2], 3)
+    assert_false(frame.columns[0].is_valid(grouping.rows_at[2]))
 
 
 def test_a_text_key_combines_with_a_number_key() raises:

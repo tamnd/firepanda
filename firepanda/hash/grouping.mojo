@@ -47,6 +47,24 @@ For that to be possible every group has to have a row, which is not something
 `factorize` promises, so `_densify` renumbers the ordinals into the order they
 were first seen and discards the ones nothing carries. Its docstring has the case
 that forced it.
+
+`_densify` is a pass over every row, and most of what it was written for is no
+longer true. No route produces an ordinal that no row carries, so it is not the
+density that needs fixing. What it still does is put the null group where its
+first null is rather than at ordinal zero, and build the representative row list.
+
+A string key with no nulls needs neither. Its ordinals are already in
+first-appearance order and its representative rows are the list the merge built
+to compare keys with, so the pass rewrites every code to the value it already
+held. Skipping it takes fourteen milliseconds off a ten million row string key.
+
+A key that is not the first one needs neither either, whatever its dtype and
+whatever its nulls, because only its group count is read here. The packed column
+is factorized again and that is what fixes the ordinals for the result.
+
+What is left paying for the pass is a numeric first key, and a string one with
+nulls. `_factorize_any` reports what its route knows in a `KeyCodes` and
+`group_ordinals` decides from that.
 """
 
 from firepanda.array.any import AnyArray
@@ -109,14 +127,29 @@ def group_ordinals(
     if len(at) == 0:
         raise Error("group by: at least one key column is required")
 
-    var codes = _factorize_any(columns[at[0]])
+    var first = _factorize_any(columns[at[0]])
+    var groups = first.groups
+    var known = first.knows_rows()
+    var codes = Array[DType.uint32](0)
     var rows_at = List[Int]()
-    var groups = _densify(codes, rows_at)
+    first^.into_parts(codes, rows_at)
+    if not known:
+        rows_at = List[Int]()
+        groups = _densify(codes, rows_at)
 
     for k in range(1, len(at)):
-        var next = _factorize_any(columns[at[k]])
+        var key = _factorize_any(columns[at[k]])
+        var next_groups = key.groups
+        var next = Array[DType.uint32](0)
         var spare = List[Int]()
-        var next_groups = _densify(next, spare)
+        key^.into_parts(next, spare)
+        if next_groups < 0:
+            # Only the count matters here, not the order and not the rows. The
+            # packed column is factorized again below and that is what fixes the
+            # ordinals for the result, so a key that knows how many groups it has
+            # can skip the pass even when it cannot say which row each one is on.
+            spare = List[Int]()
+            next_groups = _densify(next, spare)
         if next_groups > 0 and groups > Int(Int64.MAX) // next_groups:
             raise Error(
                 "group by: the combined key space of "
@@ -144,7 +177,74 @@ def group_ordinals(
     return Grouping(codes^, groups, rows_at^)
 
 
-def _factorize_any(col: AnyArray) raises -> Array[DType.uint32]:
+struct KeyCodes(Movable):
+    """One key column's ordinals, and what its factorize already knows of them.
+    """
+
+    var codes: Array[DType.uint32]
+    """The ordinal each row was given."""
+
+    var groups: Int
+    """How many ordinals are in use. Never -1 today, because both numeric routes
+    and the string one hand out ordinals only to rows, but the field is read
+    rather than assumed so a route that cannot say has somewhere to say it."""
+
+    var firsts: List[Int]
+    """The first row of each group in ordinal order, or empty if the route did
+    not produce one. Empty is not the same as unknown for a column with no rows,
+    but the two want the same handling, so nothing distinguishes them."""
+
+    def __init__(
+        out self,
+        var codes: Array[DType.uint32],
+        groups: Int,
+        var firsts: List[Int],
+    ):
+        """Constructs a result.
+
+        Args:
+            codes: The per-row ordinals.
+            groups: The group count, or -1 if the ordinals may be sparse.
+            firsts: A representative row per group, or empty.
+        """
+        self.codes = codes^
+        self.groups = groups
+        self.firsts = firsts^
+
+    def into_parts(
+        deinit self, mut codes: Array[DType.uint32], mut firsts: List[Int]
+    ):
+        """Gives up both lists, since a caller that wants one usually wants both.
+
+        Two arguments rather than a return value because a struct cannot have two
+        of its fields moved out one at a time, and unpacking a returned tuple
+        copies.
+
+        Args:
+            codes: Overwritten with the per-row ordinals.
+            firsts: Overwritten with the representative rows, which may be empty.
+        """
+        codes = self.codes^
+        firsts = self.firsts^
+
+    def knows_rows(self) -> Bool:
+        """Whether these ordinals can be used as they are, with no renumbering.
+
+        Both halves have to hold. A sparse count means an ordinal with no row
+        behind it and an aggregation row nobody asked for. A missing or partial
+        representative list means there is no key value to report for some group,
+        which is the case for a string column with nulls: the string route
+        returns a row for every non-null group and puts the null group at ordinal
+        zero, so the list is one short and the ordinals are no longer in
+        first-seen order either.
+
+        Returns:
+            Whether `groups` and `firsts` between them describe every group.
+        """
+        return self.groups >= 0 and len(self.firsts) == self.groups
+
+
+def _factorize_any(col: AnyArray) raises -> KeyCodes:
     """Factorizes a column whose dtype is a runtime value.
 
     The typed copy this takes is the one avoidable cost in the whole group by and
@@ -157,7 +257,8 @@ def _factorize_any(col: AnyArray) raises -> Array[DType.uint32]:
         col: The key column.
 
     Returns:
-        One ordinal per row.
+        One ordinal per row, with the group count and the representative rows
+        when the route that produced them knows them.
 
     Raises:
         If the dtype has no physical layout.
@@ -166,31 +267,52 @@ def _factorize_any(col: AnyArray) raises -> Array[DType.uint32]:
     # match it and group on the first byte of each view, which puts every name
     # starting with the same letter in one group.
     if col.is_string():
-        return factorize_strings(col.strings()).into_codes()
+        var text = factorize_strings(col.strings())
+        var groups = text.count()
+        # With no nulls the ordinals are the merge's, which are handed out in
+        # first-appearance order, and `firsts` is the row list the merge built to
+        # compare keys with. That is exactly what `_densify` would have produced.
+        # With nulls the null group takes ordinal zero regardless of where its
+        # first null is, and `firsts` covers the other groups only, so the pass
+        # is still needed.
+        if text.null_group >= 0:
+            return KeyCodes(text^.into_codes(), groups, List[Int]())
+        var text_codes = Array[DType.uint32](0)
+        var text_firsts = List[Int]()
+        text^.into_parts(text_codes, text_firsts)
+        return KeyCodes(text_codes^, groups, text_firsts^)
 
     comptime for candidate in ALL:
         if col.dtype() == candidate:
-            return factorize(col.as_typed[candidate]()).into_codes()
+            # The count is exact on both numeric routes, which is what lets a
+            # second key skip the renumbering pass. What neither of them has is a
+            # representative row per group, so a numeric first key still pays for
+            # one. Recording those rows during the build is the obvious next step
+            # and is a separate change.
+            var found = factorize(col.as_typed[candidate]())
+            var groups = found.count()
+            return KeyCodes(found^.into_codes(), groups, List[Int]())
     raise Error("group by: unsupported key dtype")
 
 
 def _densify(mut codes: Array[DType.uint32], mut rows_at: List[Int]) -> Int:
-    """Renumbers ordinals into first-seen order and drops the unused ones.
+    """Renumbers ordinals into first-seen order and collects a row for each.
 
-    `factorize` does not promise that every ordinal it can produce belongs to a
-    row. The direct integer route builds its key table from the physical values
-    it saw, and a null row still has a physical value, so a column of 10s and 20s
-    with one null yields four ordinals where only three are reachable: the null
-    group, 10, 20, and a fourth for the zero that `set_null` left behind. Passing
-    that count downstream would produce an aggregation row nobody asked for, with
-    no row to recover its key from.
+    This was written because `factorize` did not promise that every ordinal it
+    can produce belongs to a row, and it dropped the ones that did not. It does
+    promise that now, on every route, so dropping is no longer the reason to call
+    it. Two reasons are left and both are real.
 
-    Renumbering by first appearance fixes that and pays for itself twice more. It
-    makes the group count exact, which is what bounds the packed key space when a
-    second key is combined in. It fills the representative row table in the same
-    pass rather than a second one. And it defines what `sort=False` means at the
-    frame layer, which is the order the groups were first seen in, matching what
-    pandas and Polars both do.
+    It puts the null group where its first null is. Both factorizes fix the null
+    group at ordinal zero, because that keeps the ordinals the table hands out
+    and the positions in the key list a constant apart. First appearance order is
+    what `sort=False` means at the frame layer, which is what pandas and Polars
+    both do, and a null group is a group like any other there.
+
+    And it fills the representative row table, which is how the frame layer gets
+    a group's key values back. The string route already returns one, so the
+    caller that has a string key with no nulls needs neither of these and skips
+    the pass. The numeric routes do not, yet.
 
     Args:
         codes: The ordinals, rewritten in place.
