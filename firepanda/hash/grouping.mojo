@@ -53,18 +53,24 @@ longer true. No route produces an ordinal that no row carries, so it is not the
 density that needs fixing. What it still does is put the null group where its
 first null is rather than at ordinal zero, and build the representative row list.
 
-A string key with no nulls needs neither. Its ordinals are already in
-first-appearance order and its representative rows are the list the merge built
-to compare keys with, so the pass rewrites every code to the value it already
-held. Skipping it takes fourteen milliseconds off a ten million row string key.
+A key with no nulls needs neither, on any of the four routes. Its ordinals are
+already in first-appearance order, because every route recognizes a group by the
+row that introduced it, and that row is the representative one. So the pass would
+rewrite every code to the value it already held.
 
 A key that is not the first one needs neither either, whatever its dtype and
 whatever its nulls, because only its group count is read here. The packed column
 is factorized again and that is what fixes the ordinals for the result.
 
-What is left paying for the pass is a numeric first key, and a string one with
-nulls. `_factorize_any` reports what its route knows in a `KeyCodes` and
-`group_ordinals` decides from that.
+Nor does the packed column itself. It is written a row at a time from two code
+arrays, so it has no nulls at all, and its factorize's ordinals and representative
+rows are already what the pass would have made of them. That is one pass per key
+after the first, which is five of them on a six key group by.
+
+What is left paying is a first key with nulls, of any dtype, because all four
+routes put the null group at ordinal zero wherever its first null is.
+`_factorize_any` reports what its route knows in a `KeyCodes` and `group_ordinals`
+decides from that.
 """
 
 from firepanda.array.any import AnyArray
@@ -170,9 +176,22 @@ def group_ordinals(
                 Int64(left.unsafe_offset(i).unsafe_load()) * Int64(next_groups)
                 + Int64(right.unsafe_offset(i).unsafe_load())
             )
-        codes = factorize(packed).into_codes()
-        rows_at = List[Int]()
-        groups = _densify(codes, rows_at)
+        # Every row of `packed` was just written, so it has no nulls and the
+        # factorize's own ordinals and representative rows are what the pass
+        # would have produced. The check is on the result rather than on that
+        # argument, because a route that stopped reporting either one should
+        # cost a pass here and not an answer.
+        var combined = factorize(packed)
+        var combined_groups = combined.count()
+        var combined_firsts = List[Int]()
+        codes = Array[DType.uint32](0)
+        combined^.into_parts(codes, combined_firsts)
+        if len(combined_firsts) == combined_groups:
+            groups = combined_groups
+            rows_at = combined_firsts^
+        else:
+            rows_at = List[Int]()
+            groups = _densify(codes, rows_at)
 
     return Grouping(codes^, groups, rows_at^)
 
@@ -233,10 +252,10 @@ struct KeyCodes(Movable):
         Both halves have to hold. A sparse count means an ordinal with no row
         behind it and an aggregation row nobody asked for. A missing or partial
         representative list means there is no key value to report for some group,
-        which is the case for a string column with nulls: the string route
-        returns a row for every non-null group and puts the null group at ordinal
-        zero, so the list is one short and the ordinals are no longer in
-        first-seen order either.
+        which is the case for any column with nulls: every route returns a row
+        for each non-null group and puts the null group at ordinal zero, so the
+        list is one short and the ordinals are no longer in first-seen order
+        either.
 
         Returns:
             Whether `groups` and `firsts` between them describe every group.
@@ -284,14 +303,19 @@ def _factorize_any(col: AnyArray) raises -> KeyCodes:
 
     comptime for candidate in ALL:
         if col.dtype() == candidate:
-            # The count is exact on both numeric routes, which is what lets a
-            # second key skip the renumbering pass. What neither of them has is a
-            # representative row per group, so a numeric first key still pays for
-            # one. Recording those rows during the build is the obvious next step
-            # and is a separate change.
+            # Same shape as the string branch above, and for the same reason. All
+            # three numeric routes recognize a group by the row that introduced
+            # it, so `firsts` is what one thread would have picked and is already
+            # in ordinal order. Nulls are the exception again: they take ordinal
+            # zero wherever their first one is, and `firsts` does not cover them.
             var found = factorize(col.as_typed[candidate]())
             var groups = found.count()
-            return KeyCodes(found^.into_codes(), groups, List[Int]())
+            if found.null_group >= 0:
+                return KeyCodes(found^.into_codes(), groups, List[Int]())
+            var found_codes = Array[DType.uint32](0)
+            var found_firsts = List[Int]()
+            found^.into_parts(found_codes, found_firsts)
+            return KeyCodes(found_codes^, groups, found_firsts^)
     raise Error("group by: unsupported key dtype")
 
 
@@ -310,9 +334,9 @@ def _densify(mut codes: Array[DType.uint32], mut rows_at: List[Int]) -> Int:
     both do, and a null group is a group like any other there.
 
     And it fills the representative row table, which is how the frame layer gets
-    a group's key values back. The string route already returns one, so the
-    caller that has a string key with no nulls needs neither of these and skips
-    the pass. The numeric routes do not, yet.
+    a group's key values back. Every route returns one of those now, covering its
+    non-null groups, so a first key with no nulls skips the pass entirely and a
+    first key with nulls is the only thing left calling it for either reason.
 
     Args:
         codes: The ordinals, rewritten in place.

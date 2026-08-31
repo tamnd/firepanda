@@ -298,8 +298,13 @@ def test_no_shape_of_column_factorizes_to_a_sparse_ordinal() raises:
             assert_true(carried[g], "ordinal with no row behind it")
 
 
-def test_a_numeric_key_is_still_renumbered() raises:
-    """It has no representative rows of its own, so the pass still runs."""
+def test_a_numeric_key_with_nulls_is_still_renumbered() raises:
+    """A null takes ordinal zero, so its representative rows are one short.
+
+    `sample_frame`'s key has a null on row 4. The factorize reports four groups
+    and hands back three representative rows, and `knows_rows` refuses that, so
+    the pass runs and every group ends up with a row that carries its ordinal.
+    """
     var frame = sample_frame()
     var at = List[Int]()
     at.append(0)
@@ -308,6 +313,66 @@ def test_a_numeric_key_is_still_renumbered() raises:
     assert_equal(len(grouping.rows_at), 4)
     for g in range(grouping.groups):
         assert_equal(Int(grouping.codes[grouping.rows_at[g]]), g)
+
+
+def test_a_numeric_key_without_nulls_keeps_the_factorize_ordinals() raises:
+    """With no null there is nothing to move, so the pass is skipped.
+
+    Both numeric routes hand out ordinals in first-appearance order and know the
+    row that introduced each one, so what the pass would produce is what they
+    already have. This asserts the result rather than the skipping, because the
+    skipping is only worth anything if the two agree: the ordinals are
+    first-appearance and `rows_at` names the first row of each group.
+
+    The span here is 15 against 7 rows, which is over `_direct_plan`'s ceiling,
+    so this is the hashed route. The direct one is covered by the same
+    assertions on a narrow column in `test_a_direct_route_key_keeps_them_too`.
+    """
+    var keys = ints([20, 10, 20, 10, 25, 10, 15])
+    var values = ints([10, 20, 30, 40, 50, 60, 70])
+    var series = List[Series]()
+    series.append(Series("k", keys^))
+    series.append(Series("v", values^))
+    var frame = DataFrame.from_series(series^)
+
+    var at = List[Int]()
+    at.append(0)
+    var grouping = group_ordinals(frame.columns, at, frame.rows)
+    assert_equal(grouping.groups, 4)
+    var want: List[Int] = [0, 1, 0, 1, 2, 1, 3]
+    for i in range(len(want)):
+        assert_equal(Int(grouping.codes[i]), want[i])
+    assert_equal(len(grouping.rows_at), 4)
+    var rows: List[Int] = [0, 1, 4, 6]
+    for g in range(len(rows)):
+        assert_equal(grouping.rows_at[g], rows[g])
+
+
+def test_a_direct_route_key_keeps_them_too() raises:
+    """The same, on the route that indexes a table by the value itself.
+
+    Values 0 to 3 over four rows put the span inside `_direct_plan`'s ceiling,
+    so no hashing happens. That route appends to `keys` on first sight, which is
+    where its representative row comes from, and it is a different loop from the
+    hashed one's so it gets its own assertion.
+    """
+    var keys = ints([3, 1, 3, 0])
+    var values = ints([10, 20, 30, 40])
+    var series = List[Series]()
+    series.append(Series("k", keys^))
+    series.append(Series("v", values^))
+    var frame = DataFrame.from_series(series^)
+
+    var at = List[Int]()
+    at.append(0)
+    var grouping = group_ordinals(frame.columns, at, frame.rows)
+    assert_equal(grouping.groups, 3)
+    var want: List[Int] = [0, 1, 0, 2]
+    for i in range(len(want)):
+        assert_equal(Int(grouping.codes[i]), want[i])
+    var rows: List[Int] = [0, 1, 3]
+    for g in range(len(rows)):
+        assert_equal(grouping.rows_at[g], rows[g])
 
 
 def test_a_null_key_lands_where_its_first_null_is() raises:
@@ -323,6 +388,61 @@ def test_a_null_key_lands_where_its_first_null_is() raises:
     var grouping = group_ordinals(frame.columns, at, frame.rows)
     assert_equal(Int(grouping.codes[4]), 2)
     assert_equal(grouping.rows_at[2], 4)
+
+
+def test_the_packed_column_keeps_the_factorize_ordinals() raises:
+    """The combine step skips the pass too, and has to agree with it.
+
+    `packed` is written a row at a time from two code arrays, so it has no nulls
+    and its factorize hands out first-appearance ordinals with a representative
+    row for each. That is a pass per key after the first. The pairs here repeat
+    out of order and one of them appears only at the end, so an ordinal assigned
+    by anything other than first appearance shows up in `want`.
+    """
+    var left = ints([7, 8, 7, 8, 7, 9])
+    var right = ints([1, 1, 2, 1, 1, 3])
+    var series = List[Series]()
+    series.append(Series("a", left^))
+    series.append(Series("b", right^))
+    var frame = DataFrame.from_series(series^)
+    var at = List[Int]()
+    at.append(0)
+    at.append(1)
+    var grouping = group_ordinals(frame.columns, at, frame.rows)
+    assert_equal(grouping.groups, 4)
+    var want: List[Int] = [0, 1, 2, 1, 0, 3]
+    for i in range(len(want)):
+        assert_equal(Int(grouping.codes[i]), want[i])
+    var rows: List[Int] = [0, 1, 2, 5]
+    for g in range(len(rows)):
+        assert_equal(grouping.rows_at[g], rows[g])
+
+
+def test_a_null_in_the_first_of_two_keys_still_lands_in_place() raises:
+    """The packed column has no nulls even when the key it came from does.
+
+    A null key becomes ordinal zero in the first factorize and the renumbering
+    moves it to where its first null is. What is packed after that is a code, not
+    a value, so the combine step sees a column with no nulls and the group the
+    null belongs to still has to come out third here.
+    """
+    var left = ints([20, 10, 20, 99, 10])
+    left.set_null(3)
+    var right = ints([1, 1, 1, 1, 1])
+    var series = List[Series]()
+    series.append(Series("a", left^))
+    series.append(Series("b", right^))
+    var frame = DataFrame.from_series(series^)
+    var at = List[Int]()
+    at.append(0)
+    at.append(1)
+    var grouping = group_ordinals(frame.columns, at, frame.rows)
+    assert_equal(grouping.groups, 3)
+    var want: List[Int] = [0, 1, 0, 2, 1]
+    for i in range(len(want)):
+        assert_equal(Int(grouping.codes[i]), want[i])
+    assert_equal(grouping.rows_at[2], 3)
+    assert_false(frame.columns[0].is_valid(grouping.rows_at[2]))
 
 
 def test_two_keys_do_not_merge_groups() raises:
