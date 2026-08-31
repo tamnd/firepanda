@@ -8,6 +8,27 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+The numeric factorize routes hand back a representative row per group, which is the last thing that was keeping the renumbering pass on the critical path.
+
+The change below took the pass off a string key with no nulls, because the string merge already produced that list on its way to comparing candidate keys. The numeric routes had the same row for the same reason and were throwing it away. All three of them recognize a new group by the row that introduced it: the direct one appends to `keys` on first sight, the hashed serial one already gets the list back from `HashTable.build` and reads the key values out of it, and the parallel merge picks its representative when a worker's local group turns out to be new. So `Factorized` grows a `firsts` and each route fills it where it already had the row in hand, which is one append per group rather than a pass.
+
+That covers the first key. The other place the pass was running unconditionally is the combine step, once per key after the first. What it renumbers there is the packed column, which is written a row at a time from two code arrays and therefore has no nulls at all, so its factorize's ordinals are already in first-appearance order and its representative rows are already the ones the pass would have collected. That is five passes over every row on a six key group by.
+
+What is left calling `_densify` is a first key with nulls, of any dtype. All four routes put the null group at ordinal zero wherever its first null actually is, and `sort=False` at the frame layer means first appearance, so something has to move it.
+
+Ten million rows on an i9-13900K, alternating builds, twenty rounds of five runs each, one process per measurement. The machine was running an unrelated benchmark throughout, which is why this is reported as the median of the per round paired ratios rather than as a ratio of medians: the pairing is what makes the contention cancel. The full range of those per round ratios is in the last two columns.
+
+| query | keys | before | after | ratio | low | high |
+| --- | --- | --- | --- | --- | --- | --- |
+| q4 | id4, integer | 51.6 ms | 41.9 ms | 1.22 | 1.14 | 1.38 |
+| q5 | id6, integer | 94.7 ms | 80.1 ms | 1.17 | 0.97 | 1.31 |
+| q6 | id4 and id5, integer | 898.3 ms | 813.4 ms | 1.11 | 1.08 | 1.15 |
+| q10 | id1 through id6, mixed | 1904.0 ms | 1736.2 ms | 1.11 | 1.02 | 1.19 |
+| q3 | id3, string | 130.1 ms | 133.5 ms | 0.98 | 0.91 | 1.07 |
+| j1 | id1, join | 329.2 ms | 308.0 ms | 1.05 | 0.95 | 1.17 |
+
+q4 and q5 are single integer keys and they get the first key pass removed. q6 gets that plus one combine, and q10 gets five combines on top of a string first key that was already free. q3 is the control: it went through the change below and there was nothing left here for it to gain, and it did not. j1 is the other control and its spread covers one, so the five percent is not a claim.
+
 A group by no longer renumbers ordinals it has no reason to renumber.
 
 `group_ordinals` ran `_densify` over every row of every key. That pass was written because `factorize` did not promise that every ordinal it can produce belongs to some row, and an ordinal nothing carries becomes an aggregation row nobody asked for. It does promise that now, on all three routes, and a fuzz over three thousand random int64 columns covering both numeric routes found no sparse ordinal on either, so the density is not what the pass is still buying. Two other things are. It puts the null group where its first null appears instead of at ordinal zero, which is what `sort=False` means at the frame layer, and it fills the representative row table the frame layer gathers key values with.
@@ -36,11 +57,14 @@ The first five are the string keyed queries, which is the set the change targets
 ### Changed
 
 - `_factorize_any` returns a `KeyCodes` carrying the ordinals, the group count and the representative rows, instead of the ordinals alone, and `group_ordinals` skips `_densify` for any key whose `KeyCodes` describes every group.
+- `group_ordinals` skips it for the packed column too, which is one pass per key after the first.
+- `Factorized` carries a `firsts`, so its constructor and `_finish` take a fourth argument. Both are internal to `firepanda/hash`, and `factorize` itself is unchanged at the call site.
 - `_densify`'s docstring records that the sparse ordinal case it was written for no longer happens, and what it is still for.
 
 ### Added
 
-- `FactorizedStrings.into_parts` and `KeyCodes.into_parts`, which give up the ordinals and the representative rows together, because a struct cannot have two of its fields moved out one at a time and unpacking a returned tuple copies.
+- `FactorizedStrings.into_parts`, `Factorized.into_parts` and `KeyCodes.into_parts`, which give up the ordinals and the representative rows together, because a struct cannot have two of its fields moved out one at a time and unpacking a returned tuple copies.
+- Tests that a numeric key without nulls keeps the factorize's ordinals on both the hashed and the direct route, that the packed column keeps them too, and that a null in the first of two keys still lands where its first null is.
 - `test_no_shape_of_column_factorizes_to_a_sparse_ordinal`, a swept property test over a hundred and twenty random int64 columns with varying length, value span and null count, which holds the promise the skipping now depends on across both numeric routes.
 - Tests that a numeric key is still renumbered, that a null key still lands where its first null is, that a text key is grouped without renumbering its ordinals, and that a text key with nulls is renumbered after all.
 

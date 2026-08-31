@@ -180,6 +180,21 @@ struct Factorized[dt: DType](Movable):
     """The distinct keys. Index it by an ordinal from `codes` to get the value
     back. Entry zero is the null group when there is one."""
 
+    var firsts: List[Int]
+    """For each non-null group, the first row that had it, in ordinal order.
+
+    All three routes have this row already, because each of them recognizes a new
+    group by the row that introduced it, so recording it costs one append per
+    group rather than a pass. The frame layer's group by wants exactly this and
+    used to rebuild it with a pass over every row.
+
+    The null group is not in here, and the offset that leaves is why. A column
+    with nulls puts them at ordinal zero regardless of which row the first one is
+    on, so the rows in here name groups one and up and are not in first
+    appearance order over the whole column. `KeyCodes.knows_rows` catches that by
+    length and sends the caller back to the renumbering pass.
+    """
+
     var null_group: Int
     """The ordinal the nulls got, which is zero, or -1 if the column had none."""
 
@@ -187,6 +202,7 @@ struct Factorized[dt: DType](Movable):
         out self,
         var codes: Array[DType.uint32],
         var keys: Array[Self.dt],
+        var firsts: List[Int],
         null_group: Int,
     ):
         """Constructs a result.
@@ -194,10 +210,12 @@ struct Factorized[dt: DType](Movable):
         Args:
             codes: The per-row ordinals.
             keys: The distinct keys.
+            firsts: A representative row per non-null group.
             null_group: The ordinal for nulls, or -1.
         """
         self.codes = codes^
         self.keys = keys^
+        self.firsts = firsts^
         self.null_group = null_group
 
     def count(self) -> Int:
@@ -209,7 +227,7 @@ struct Factorized[dt: DType](Movable):
         return len(self.keys)
 
     def into_codes(deinit self) -> Array[DType.uint32]:
-        """Gives up the ordinals without copying them, dropping the keys.
+        """Gives up the ordinals without copying them, dropping the rest.
 
         A caller that groups on several columns wants the ordinals and has no use
         for the keys, and Mojo will not let it reach in and move `codes` out from
@@ -221,6 +239,21 @@ struct Factorized[dt: DType](Movable):
             The per-row ordinals.
         """
         return self.codes^
+
+    def into_parts(
+        deinit self, mut codes: Array[DType.uint32], mut firsts: List[Int]
+    ):
+        """Gives up the ordinals and the representative rows together.
+
+        Two out parameters rather than a returned pair, for the reason
+        `FactorizedStrings.into_parts` gives.
+
+        Args:
+            codes: Overwritten with the per-row ordinals.
+            firsts: Overwritten with a representative row per non-null group.
+        """
+        codes = self.codes^
+        firsts = self.firsts^
 
 
 def factorize[
@@ -385,6 +418,7 @@ def _factorize_direct[
     var codes = Array[DType.uint32](n)
     var out = codes.unsafe_ptr()
     var keys = List[Scalar[dt]]()
+    var firsts = List[Int]()
     var null_group = -1
     if has_null:
         null_group = 0
@@ -401,12 +435,15 @@ def _factorize_direct[
         if stored == 0:
             var assigned = len(keys)
             keys.append(value)
+            # The row that introduced the group, which this loop is standing on
+            # anyway. The other two routes have the same row for the same reason.
+            firsts.append(i)
             slots.unsafe_offset(at).unsafe_write(UInt32(assigned + 1))
             out.unsafe_offset(i).unsafe_write(UInt32(assigned))
         else:
             out.unsafe_offset(i).unsafe_write(stored - 1)
 
-    return _finish[dt](codes^, keys^, null_group)
+    return _finish[dt](codes^, keys^, firsts^, null_group)
 
 
 def _factorize_hashed[
@@ -671,7 +708,7 @@ def _factorize_hashed_serial[
     for at in range(len(firsts)):
         keys.append(values.unsafe_offset(firsts[at]).unsafe_load())
 
-    return _finish[dt](codes^, keys^, null_group)
+    return _finish[dt](codes^, keys^, firsts^, null_group)
 
 
 def _factorize_hashed_parallel[
@@ -776,6 +813,7 @@ def _factorize_hashed_parallel[
     parallel_for(dump, workers)
 
     var keys = List[Scalar[dt]]()
+    var firsts = List[Int]()
     var null_group = -1
     if has_null:
         null_group = 0
@@ -800,6 +838,11 @@ def _factorize_hashed_parallel[
             mapped.unsafe_offset(at + k).unsafe_write(UInt32(ordinal + offset))
             if ordinal + offset == len(keys):
                 keys.append(values.unsafe_offset(founds[w][k]).unsafe_load())
+                # The earliest row anywhere with this key, by the same argument
+                # that makes the merge's ordinals first-appearance order: the
+                # slices are contiguous and in order, and a worker offers its
+                # groups in the order it found them, so the first offer wins.
+                firsts.append(founds[w][k])
 
     def remap(w: Int) raises {mut codes, imm}:
         var out = codes.unsafe_ptr()
@@ -815,7 +858,7 @@ def _factorize_hashed_parallel[
 
     parallel_for(remap, workers)
 
-    return _finish[dt](codes^, keys^, null_group)
+    return _finish[dt](codes^, keys^, firsts^, null_group)
 
 
 def _finish[
@@ -823,6 +866,7 @@ def _finish[
 ](
     var codes: Array[DType.uint32],
     var keys: List[Scalar[dt]],
+    var firsts: List[Int],
     null_group: Int,
 ) -> Factorized[dt]:
     """Packages the two routes' common output.
@@ -830,6 +874,7 @@ def _finish[
     Args:
         codes: The per-row ordinals.
         keys: The distinct keys.
+        firsts: A representative row per non-null group.
         null_group: The ordinal for nulls, or -1.
 
     Parameters:
@@ -841,7 +886,7 @@ def _finish[
     var out = from_list[dt](keys)
     if null_group >= 0:
         out.set_null(null_group)
-    return Factorized[dt](codes^, out^, null_group)
+    return Factorized[dt](codes^, out^, firsts^, null_group)
 
 
 struct FactorizedStrings(Movable):
