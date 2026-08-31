@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.20] - 2026-08-31
+
+Built against Mojo 1.0.0 (ed45d567).
+
 The numeric factorize routes hand back a representative row per group, which is the last thing that was keeping the renumbering pass on the critical path.
 
 The change below took the pass off a string key with no nulls, because the string merge already produced that list on its way to comparing candidate keys. The numeric routes had the same row for the same reason and were throwing it away. All three of them recognize a new group by the row that introduced it: the direct one appends to `keys` on first sight, the hashed serial one already gets the list back from `HashTable.build` and reads the key values out of it, and the parallel merge picks its representative when a worker's local group turns out to be new. So `Factorized` grows a `firsts` and each route fills it where it already had the row in hand, which is one append per group rather than a pass.
@@ -1111,7 +1115,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.19...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.20...HEAD
+[0.6.20]: https://github.com/tamnd/firepanda/releases/tag/v0.6.20
 [0.6.19]: https://github.com/tamnd/firepanda/releases/tag/v0.6.19
 [0.6.18]: https://github.com/tamnd/firepanda/releases/tag/v0.6.18
 [0.6.17]: https://github.com/tamnd/firepanda/releases/tag/v0.6.17
