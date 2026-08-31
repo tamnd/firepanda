@@ -50,8 +50,14 @@ from std.ffi import c_char
 from firepanda.dtype.logical import LogicalType
 
 
-comptime CString = Pointer[c_char, ImmUntrackedOrigin]
-"""A borrowed, null terminated C string."""
+comptime CString = Pointer[c_char, MutUntrackedOrigin]
+"""A borrowed, null terminated C string.
+
+Mutable, which is not what `const char*` means and is a concession to Mojo rather
+than a claim about the pointee. `unsafe_origin_cast` preserves mutability, so it
+cannot turn the mutable pointer a producer gets from its own storage into an
+immutable one, and an origin that is untracked in the first place carries no
+guarantee for the cast to preserve. Nothing in firepanda writes through it."""
 
 comptime NullableCString = Optional[CString]
 """A `const char*` that may be null."""
