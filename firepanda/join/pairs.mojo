@@ -344,29 +344,50 @@ def join_indices(
     # Bucket the right side by code: count, prefix sum, scatter. Scanning in
     # increasing row order is what puts each bucket in increasing row order,
     # which is what fixes the output order within a left row.
-    var starts = List[Int](capacity=groups + 1)
-    for _ in range(groups + 1):
-        starts.append(0)
+    #
+    # The group table is as long as the number of distinct key tuples, which on
+    # a join between two frames that are mostly one to one is as long as the
+    # frames themselves. So it is worth not walking it more times than the three
+    # this needs, and the loops below go through the pointer rather than through
+    # `List.__setitem__` for the same reason.
+    var starts = List[Int](length=groups + 1, fill=0)
+    var edge = starts.unsafe_ptr()
     for r in range(right_rows):
         if has_nulls and absent[left_rows + r]:
             continue
-        starts[Int(codes.unsafe_offset(left_rows + r).unsafe_load()) + 1] += 1
+        var g = Int(codes.unsafe_offset(left_rows + r).unsafe_load()) + 1
+        edge.unsafe_offset(g).unsafe_write(
+            edge.unsafe_offset(g).unsafe_load() + 1
+        )
     for g in range(groups):
-        starts[g + 1] += starts[g]
+        edge.unsafe_offset(g + 1).unsafe_write(
+            edge.unsafe_offset(g + 1).unsafe_load()
+            + edge.unsafe_offset(g).unsafe_load()
+        )
 
-    var total = starts[groups]
-    var bucket = List[Int](capacity=total)
-    for _ in range(total):
-        bucket.append(0)
-    var cursor = List[Int](capacity=groups)
-    for g in range(groups):
-        cursor.append(starts[g])
+    # The scatter uses the group table as its own cursor rather than a copy of
+    # it. Group `g` is written from `starts[g]` up to `starts[g + 1]`, so when
+    # the scatter finishes every entry holds what its successor held, and one
+    # backwards pass puts them back. That is a sequential walk over the table
+    # instead of another allocation of it and a copy into it, and `starts[g]`
+    # for an empty group already equals `starts[g + 1]`, so a group nothing was
+    # scattered into comes out the same way.
+    var bucket = List[Int](
+        unsafe_uninit_length=edge.unsafe_offset(groups).unsafe_load()
+    )
+    var into = bucket.unsafe_ptr()
     for r in range(right_rows):
         if has_nulls and absent[left_rows + r]:
             continue
         var g = Int(codes.unsafe_offset(left_rows + r).unsafe_load())
-        bucket[cursor[g]] = r
-        cursor[g] += 1
+        var at = edge.unsafe_offset(g).unsafe_load()
+        into.unsafe_offset(at).unsafe_write(r)
+        edge.unsafe_offset(g).unsafe_write(at + 1)
+    for g in range(groups, 0, -1):
+        edge.unsafe_offset(g).unsafe_write(
+            edge.unsafe_offset(g - 1).unsafe_load()
+        )
+    edge.unsafe_offset(0).unsafe_write(0)
 
     var wants_right = kind == JoinKind.OUTER
     var matched = Bitmap(right_rows if wants_right else 0, all_valid=False)
