@@ -36,6 +36,8 @@ files disagree and nobody can say why.
 """
 
 from std.benchmark import Unit, keep, run
+from std.ffi import c_char
+from std.memory import unsafe_memcpy
 from std.collections.span import Span
 from std.sys import argv
 from std.sys.info import (
@@ -53,7 +55,12 @@ from firepanda.array.strings import (
     StringBuilder,
     strings_from_list,
 )
-from firepanda.array.strview import PREFIX_LENGTH
+from firepanda.array.strview import (
+    PREFIX_LENGTH,
+    VIEW_SIZE,
+    StringView,
+    make_long_at,
+)
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer
 from firepanda.buffer.pool import BufferPool
@@ -77,6 +84,17 @@ from firepanda.hash import (
     mix,
     radix_partition,
 )
+from firepanda.io.arrow_c import (
+    ArrayPtr,
+    ArrowArray,
+    ArrowSchema,
+    NullableVoidPtr,
+    SchemaPtr,
+    VoidPtr,
+    array_release_callback,
+    schema_release_callback,
+)
+from firepanda.io.arrow_import import import_array
 from firepanda.io.parse import parse_float, parse_int
 from firepanda.io.read import (
     ReadOptions,
@@ -2880,6 +2898,251 @@ def results_json(harness: Harness) -> String:
     return out^
 
 
+def _bench_release_array(array: ArrayPtr) abi("C") -> None:
+    """Releases a benchmark's array by doing nothing.
+
+    Deliberately not conforming. A real producer clears its own release field so
+    that a second release is a no-op, and this one leaves the structure intact so
+    that the same bytes can be fed to the importer a few hundred thousand times.
+    Everything it points at is a local of `bench_arrow`, so there is nothing to
+    free either.
+    """
+    pass
+
+
+def _bench_release_schema(schema: SchemaPtr) abi("C") -> None:
+    """Releases a benchmark's schema by doing nothing. See above."""
+    pass
+
+
+def _bench_void[o: MutOrigin](p: Pointer[UInt8, o]) -> VoidPtr:
+    """Reinterprets a byte pointer as the `void*` a buffer array holds."""
+    return p.unsafe_origin_cast[MutUntrackedOrigin]().unsafe_bitcast[NoneType]()
+
+
+def _bench_format(
+    mut bytes: List[UInt8],
+) -> Optional[Pointer[c_char, MutUntrackedOrigin]]:
+    """Points a schema at a null terminated format string the caller owns."""
+    return (
+        bytes.unsafe_ptr()
+        .unsafe_origin_cast[MutUntrackedOrigin]()
+        .unsafe_bitcast[c_char]()
+    )
+
+
+def bench_arrow(mut harness: Harness) raises:
+    """Measures reading a column in through the Arrow C Data Interface.
+
+    Only the import direction is here. An export is a handful of stores whatever
+    the column is, apart from a bool, and timing it would be timing the harness
+    around it. An import copies, so it has a real cost and a floor to be measured
+    against: `buffer/alloc_fresh` is what the allocation alone costs, and the
+    fixed width row should not be far above it.
+
+    The four rows are the four kinds of work the import does. Fixed width is a
+    memcpy. Bool is a bit at a time unpack into a byte per value. The view row is
+    the layout we share with Arrow and still have to rebuild, because a foreign
+    producer may spread its long elements over any number of data buffers. The
+    offsets row is the layout pyarrow produces by default, which is the one that
+    will actually be read in anger.
+
+    The producer is built by hand rather than by our own exporter, because the
+    exporter consumes its column and a benchmark needs to hand over the same
+    bytes on every iteration.
+
+    Args:
+        harness: The harness.
+
+    Raises:
+        If a benchmark raises.
+    """
+    var rows = harness.options.rows
+
+    var numbers = Array[DType.int64](rows)
+    for i in range(rows):
+        numbers.set_valid(i, Int64(i))
+    var number_buffers = List[NullableVoidPtr](capacity=2)
+    number_buffers.append(None)
+    number_buffers.append(_bench_void(numbers.data.values.unsafe_ptr()))
+
+    var flags = Bitmap(rows, all_valid=False)
+    for i in range(rows):
+        if i % 3 == 0:
+            flags.set(i, True)
+    var flag_buffers = List[NullableVoidPtr](capacity=2)
+    flag_buffers.append(None)
+    flag_buffers.append(_bench_void(flags.unsafe_ptr()))
+
+    # Ten bytes an element, so nothing inlines and every element goes through
+    # the payload. A column of short labels would take the cheap path and say
+    # nothing about the expensive one.
+    var builder = StringBuilder(capacity=rows)
+    for i in range(rows):
+        var element = String("row", i, "----------")
+        builder.append(element.as_bytes()[0:14])
+    var text = builder^.finish()
+    var view_sizes = List[Int64](capacity=1)
+    view_sizes.append(Int64(len(text.payload)))
+    var view_buffers = List[NullableVoidPtr](capacity=4)
+    view_buffers.append(None)
+    view_buffers.append(_bench_void(text.views.unsafe_ptr()))
+    view_buffers.append(_bench_void(text.payload.unsafe_ptr()))
+    view_buffers.append(
+        _bench_void(view_sizes.unsafe_ptr().unsafe_bitcast[UInt8]())
+    )
+
+    # The same elements again spread over two data buffers, which is the shape a
+    # producer that built its column in chunks hands over and the shape that
+    # forces the views to be rewritten. Our own exporter can never produce it.
+    var block0 = Buffer(len(text.payload))
+    var block1 = Buffer(len(text.payload))
+    var split_views = Buffer(rows * VIEW_SIZE)
+    var split_target = split_views.unsafe_ptr().unsafe_bitcast[StringView]()
+    var w0 = 0
+    var w1 = 0
+    for i in range(rows):
+        var element = text.unsafe_bytes(i)
+        var count = len(element)
+        if i % 2 == 0:
+            var dest = block0.unsafe_ptr().unsafe_offset(w0)
+            unsafe_memcpy(dest=dest, src=element.unsafe_ptr(), count=count)
+            split_target.unsafe_offset(i)[] = make_long_at(dest, count, 0, w0)
+            w0 += count
+        else:
+            var dest = block1.unsafe_ptr().unsafe_offset(w1)
+            unsafe_memcpy(dest=dest, src=element.unsafe_ptr(), count=count)
+            split_target.unsafe_offset(i)[] = make_long_at(dest, count, 1, w1)
+            w1 += count
+    var split_sizes = List[Int64](capacity=2)
+    split_sizes.append(Int64(w0))
+    split_sizes.append(Int64(w1))
+    var split_buffers = List[NullableVoidPtr](capacity=5)
+    split_buffers.append(None)
+    split_buffers.append(_bench_void(split_views.unsafe_ptr()))
+    split_buffers.append(_bench_void(block0.unsafe_ptr()))
+    split_buffers.append(_bench_void(block1.unsafe_ptr()))
+    split_buffers.append(
+        _bench_void(split_sizes.unsafe_ptr().unsafe_bitcast[UInt8]())
+    )
+
+    # The same elements again in the offset based layout, which is a second copy
+    # of the data rather than a view onto the first, because the two layouts do
+    # not share a data buffer: ours holds only the elements too long to inline.
+    var offsets = List[Int32](capacity=rows + 1)
+    var payload = Buffer(rows * 14)
+    var written = 0
+    for i in range(rows):
+        offsets.append(Int32(written))
+        var element = text.unsafe_bytes(i)
+        unsafe_memcpy(
+            dest=payload.unsafe_ptr().unsafe_offset(written),
+            src=element.unsafe_ptr(),
+            count=len(element),
+        )
+        written += len(element)
+    offsets.append(Int32(written))
+    var offset_buffers = List[NullableVoidPtr](capacity=3)
+    offset_buffers.append(None)
+    offset_buffers.append(
+        _bench_void(offsets.unsafe_ptr().unsafe_bitcast[UInt8]())
+    )
+    offset_buffers.append(_bench_void(payload.unsafe_ptr()))
+
+    var schema = ArrowSchema()
+    schema.release = schema_release_callback(_bench_release_schema)
+    var array = ArrowArray()
+    array.length = Int64(rows)
+    array.null_count = 0
+    array.offset = 0
+    array.release = array_release_callback(_bench_release_array)
+
+    var fixed_format: List[UInt8] = [UInt8(ord("l")), 0]
+    schema.format = _bench_format(fixed_format)
+    array.n_buffers = 2
+    array.buffers = number_buffers.unsafe_ptr().unsafe_origin_cast[
+        MutUntrackedOrigin
+    ]()
+
+    def fixed() raises {mut schema, mut array}:
+        var out = import_array(schema, array)
+        keep(out)
+
+    harness.record("arrow/import_int64", "rows", rows, fixed)
+
+    var bool_format: List[UInt8] = [UInt8(ord("b")), 0]
+    schema.format = _bench_format(bool_format)
+    array.n_buffers = 2
+    array.buffers = flag_buffers.unsafe_ptr().unsafe_origin_cast[
+        MutUntrackedOrigin
+    ]()
+
+    def booleans() raises {mut schema, mut array}:
+        var out = import_array(schema, array)
+        keep(out)
+
+    harness.record("arrow/import_bool", "rows", rows, booleans)
+
+    var view_format: List[UInt8] = [UInt8(ord("v")), UInt8(ord("u")), 0]
+    schema.format = _bench_format(view_format)
+    array.n_buffers = 4
+    array.buffers = view_buffers.unsafe_ptr().unsafe_origin_cast[
+        MutUntrackedOrigin
+    ]()
+
+    def views() raises {mut schema, mut array}:
+        var out = import_array(schema, array)
+        keep(out)
+
+    harness.record("arrow/import_string_view", "rows", rows, views)
+
+    array.n_buffers = 5
+    array.buffers = split_buffers.unsafe_ptr().unsafe_origin_cast[
+        MutUntrackedOrigin
+    ]()
+
+    def split() raises {mut schema, mut array}:
+        var out = import_array(schema, array)
+        keep(out)
+
+    harness.record("arrow/import_string_two_blocks", "rows", rows, split)
+
+    var offset_format: List[UInt8] = [UInt8(ord("u")), 0]
+    schema.format = _bench_format(offset_format)
+    array.n_buffers = 3
+    array.buffers = offset_buffers.unsafe_ptr().unsafe_origin_cast[
+        MutUntrackedOrigin
+    ]()
+
+    def offset_strings() raises {mut schema, mut array}:
+        var out = import_array(schema, array)
+        keep(out)
+
+    harness.record("arrow/import_string_offsets", "rows", rows, offset_strings)
+
+    # Every buffer above is a local, and Mojo destroys a local at its last use,
+    # which for all of these was the line that took a pointer to it.
+    _ = numbers^
+    _ = flags^
+    _ = text^
+    _ = payload^
+    _ = offsets^
+    _ = number_buffers^
+    _ = flag_buffers^
+    _ = view_buffers^
+    _ = view_sizes^
+    _ = offset_buffers^
+    _ = block0^
+    _ = block1^
+    _ = split_views^
+    _ = split_sizes^
+    _ = split_buffers^
+    _ = fixed_format^
+    _ = bool_format^
+    _ = view_format^
+    _ = offset_format^
+
+
 def main() raises:
     """Runs the suite and writes the results.
 
@@ -2925,6 +3188,7 @@ def main() raises:
     bench_strings(harness)
     bench_text(harness)
     bench_dispatch(harness)
+    bench_arrow(harness)
     var elapsed = Float64(perf_counter_ns() - started) / 1e9
 
     print()
