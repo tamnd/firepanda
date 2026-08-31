@@ -8,6 +8,37 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.21] - 2026-08-31
+
+Built against Mojo 1.0.0 (ed45d567).
+
+The join. Three changes, each taking a different pass off it, and together they roughly double it.
+
+The pairing was doing all of its work on one thread. Deciding which left row goes with which right rows is a walk over the left side that carries no state between rows: what a row emits depends on that row and on the right side buckets, which are finished before the walk starts. It is now cut into slices, one per core, with a prefix sum of the per slice output counts in between telling each worker where its slice begins in the result. That prefix sum is why the counting walk, which already existed so the two index lists could be allocated once at the right size, had to be cut the same way. An outer join is left on one thread deliberately, because it has to record which right rows it paired so it can emit the rest afterwards, and that record is a bitmap whose set is a read modify write of a word eight rows share.
+
+`take_rows` got the same treatment for the same reason. It is what actually builds the output columns of a join, once per column, and a gathered row depends on its own index and nothing else in the output. The only part of that loop which is not per row is the validity bitmap, which is built in a register and stored once every sixty four rows, so the slice boundaries round up to a multiple of sixty four and no two workers write the same word.
+
+Then two passes that did not need to happen. The pairing built a per row flag over both frames saying whether that row's key tuple contained a null, one branch per key per row, and answered no every time on a frame that has no nulls; asking each key column for its null count first is a popcount per validity word. And the gather read the source's validity bit for every row, a second random read into a different array from the values, which a column with no nulls does not need either. Between them these are the largest single wins here relative to the code they replace, and neither is clever.
+
+Last, the bucket build stopped allocating a second copy of the group table. The scatter needs a cursor per group, and on a join between two frames that are mostly one to one that table is as long as the frames. The offsets can be their own cursor: group `g` is written from `starts[g]` to `starts[g + 1]`, so afterwards each entry holds what its successor held, and one backwards pass puts them back.
+
+Ten million rows on an i9-13900K, v0.6.20 against this release, alternating builds, six rounds of five runs each, one process per measurement, median of the per round paired ratios.
+
+| query | shape | 0.6.20 | 0.6.21 | ratio |
+| --- | --- | --- | --- | --- |
+| j5 | 10M to 10M, then aggregated | 1745.6 ms | 758.5 ms | 2.30 |
+| j4 | 10M to 10M, one match a row | 1818.4 ms | 746.8 ms | 2.18 |
+| j1 | 10M to 10k, one match a row | 304.0 ms | 155.2 ms | 1.99 |
+| j2 | 10M to 100k, inner join | 341.6 ms | 202.5 ms | 1.75 |
+| j3 | 10M to 100k, left join | 343.6 ms | 209.2 ms | 1.56 |
+| q10 | six key group by, no join | 1752.7 ms | 1728.1 ms | 1.01 |
+| q3 | string key group by, no join | 136.8 ms | 139.7 ms | 1.00 |
+| q1 | one key group by, no join | 19.8 ms | 20.7 ms | 0.95 |
+
+The three group by queries are controls and none of them touches a join.
+
+What is left in the j4 pairing is the factorize of the concatenated twenty million row key column, which is around 390 ms of the 747, and the scatter itself, which is ten million random writes into a table that does not fit in cache. The first of those is the more interesting one, because it is the same code path the group by queries spend their time in. DuckDB does these five queries in 15 to 95 ms, so this is progress rather than arrival.
+
 ### Changed
 
 `take` gathers on every core and stops probing a validity bitmap the column has none of.
@@ -1178,7 +1209,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.20...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.21...HEAD
+[0.6.21]: https://github.com/tamnd/firepanda/releases/tag/v0.6.21
 [0.6.20]: https://github.com/tamnd/firepanda/releases/tag/v0.6.20
 [0.6.19]: https://github.com/tamnd/firepanda/releases/tag/v0.6.19
 [0.6.18]: https://github.com/tamnd/firepanda/releases/tag/v0.6.18
