@@ -7,6 +7,12 @@ What can be done is to keep the branches out of the value loop, and both kernels
 do that in the same way: read unconditionally, because a null holds a zero and
 reading it is harmless, and build the validity bitmap separately.
 
+What the vector unit will not do, the other cores will. A gather's output row
+depends on its own index and on nothing else in the output, so `take_rows` splits
+by output row, on boundaries rounded to a multiple of sixty four because the
+validity bitmap is the one thing in there that is not per row. `filter_rows` has
+no such shape: where a row lands depends on how many rows before it survived.
+
 `take_rows` treats a negative index as a null. That is not a convenience, it is
 how a left join reports that the row on the right did not exist, and it is why
 the index list is signed.
@@ -31,9 +37,24 @@ from firepanda.array.array import Array
 from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
+from firepanda.exec.parallel import parallel_for, worker_count
 
 
-def take_rows[dt: DType](col: Array[dt], indices: List[Int]) -> Array[dt]:
+comptime PARALLEL_TAKE_ROWS = 1 << 16
+"""Below this many gathered rows the take stays on one thread.
+
+A gather is a cache miss a row, so it is a great deal more than a handful of
+nanoseconds and the split pays off sooner than it does for a loop over
+consecutive memory. Half of `join`'s threshold, and picked the same way.
+"""
+
+comptime PARALLEL_MIN_TAKE_SLICE = 1 << 14
+"""And no worker gets a slice shorter than this."""
+
+
+def take_rows[
+    dt: DType
+](col: Array[dt], indices: List[Int]) raises -> Array[dt]:
     """Gathers rows by position.
 
     Args:
@@ -47,7 +68,9 @@ def take_rows[dt: DType](col: Array[dt], indices: List[Int]) -> Array[dt]:
     Returns:
         A column of length `len(indices)`.
     """
-    return _take_core(col.unsafe_ptr(), col.data.validity, indices)
+    return _take_core(
+        col.unsafe_ptr(), col.data.validity, col.null_count() > 0, indices
+    )
 
 
 def take_any(col: AnyArray, indices: List[Int]) raises -> AnyArray:
@@ -70,7 +93,10 @@ def take_any(col: AnyArray, indices: List[Int]) raises -> AnyArray:
         if col.dtype() == candidate:
             return AnyArray(
                 _take_core(
-                    col.unsafe_ptr[candidate](), col.data.validity, indices
+                    col.unsafe_ptr[candidate](),
+                    col.data.validity,
+                    col.null_count() > 0,
+                    indices,
                 )
             )
     raise Error("take: unsupported dtype")
@@ -115,32 +141,66 @@ def _take_strings(col: StringArray, indices: List[Int]) raises -> StringArray:
 def _take_core[
     dt: DType, //, origin: ImmOrigin
 ](
-    source: Pointer[Scalar[dt], origin], validity: Bitmap, indices: List[Int]
-) -> Array[dt]:
+    source: Pointer[Scalar[dt], origin],
+    validity: Bitmap,
+    has_nulls: Bool,
+    indices: List[Int],
+) raises -> Array[dt]:
     """The gather loop, over a pointer and a bitmap rather than a column."""
     var n = len(indices)
     var out = Array[dt](n)
-    var target = out.unsafe_ptr()
     var built = Bitmap(n, all_valid=False)
 
-    # The output positions are consecutive, so the validity bits can be built in
-    # a register and stored once every sixty four rows instead of read-modify-
-    # writing a byte per row. The input side has no such luck; a gather is a
-    # gather.
-    var word = UInt64(0)
-    for i in range(n):
-        var at = indices[i]
-        if at >= 0 and validity.get(at):
-            target.unsafe_offset(i).unsafe_write(
-                source.unsafe_offset(at).unsafe_load()
-            )
-            word |= UInt64(1) << UInt64(i & 63)
-        if i & 63 == 63:
-            built.unsafe_set_word(i >> 6, word)
-            word = 0
+    # Output row `i` depends on `indices[i]` and on nothing else in the output,
+    # so the gather splits by output row. The slice boundaries are rounded up to
+    # a multiple of sixty four so that no two workers write the same validity
+    # word, which is the only thing here that is not per row.
+    var workers = 1
+    if n >= PARALLEL_TAKE_ROWS:
+        workers = worker_count()
+        var most = n // PARALLEL_MIN_TAKE_SLICE
+        if workers > most:
+            workers = most
+        if workers < 1:
+            workers = 1
 
-    if n & 63 != 0:
-        built.unsafe_set_word(n >> 6, word)
+    var bounds = List[Int](capacity=workers + 1)
+    for w in range(workers + 1):
+        var at = (n * w // workers + 63) & ~63
+        bounds.append(at if at < n else n)
+
+    def gather(w: Int) raises {mut out, mut built, imm}:
+        var target = out.unsafe_ptr()
+        var stop = bounds[w + 1]
+
+        # The output positions are consecutive, so the validity bits can be
+        # built in a register and stored once every sixty four rows instead of
+        # read-modify-writing a byte per row. The input side has no such luck; a
+        # gather is a gather.
+        #
+        # The validity probe is the second random read of the row, into a
+        # different array from the values, and a column with no nulls does not
+        # need it. A join gathers with a list that has negatives in it and a
+        # source that usually does not have nulls, so the two halves of that
+        # condition are worth keeping apart.
+        var word = UInt64(0)
+        for i in range(bounds[w], stop):
+            var at = indices[i]
+            if at >= 0 and (not has_nulls or validity.get(at)):
+                target.unsafe_offset(i).unsafe_write(
+                    source.unsafe_offset(at).unsafe_load()
+                )
+                word |= UInt64(1) << UInt64(i & 63)
+            if i & 63 == 63:
+                built.unsafe_set_word(i >> 6, word)
+                word = 0
+
+        # Only a slice that ends part way through a word has anything left in
+        # the register, and by construction that is the last non-empty one.
+        if stop & 63 != 0 and stop > bounds[w]:
+            built.unsafe_set_word(stop >> 6, word)
+
+    parallel_for(gather, workers)
 
     out.data.validity = built^
     return out^
