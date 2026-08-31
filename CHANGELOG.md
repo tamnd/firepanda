@@ -8,6 +8,42 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+A group by no longer renumbers ordinals it has no reason to renumber.
+
+`group_ordinals` ran `_densify` over every row of every key. That pass was written because `factorize` did not promise that every ordinal it can produce belongs to some row, and an ordinal nothing carries becomes an aggregation row nobody asked for. It does promise that now, on all three routes, and a fuzz over three thousand random int64 columns covering both numeric routes found no sparse ordinal on either, so the density is not what the pass is still buying. Two other things are. It puts the null group where its first null appears instead of at ordinal zero, which is what `sort=False` means at the frame layer, and it fills the representative row table the frame layer gathers key values with.
+
+Neither is needed as often as the pass was being run. A string key with no nulls already has both: the merge hands out ordinals in first-appearance order, and the row list it built to compare candidate keys with is exactly the table `_densify` would have produced. A key that is not the first one needs neither either, whatever its dtype and whatever its nulls, because only its group count is read at that point, and the packed column is factorized again afterwards, which is what fixes the ordinals for the result.
+
+So `_factorize_any` now reports what its route knows in a `KeyCodes`, and `group_ordinals` decides from that rather than paying unconditionally. What is left paying is a numeric first key and a string first key with nulls. The numeric routes could record representative rows during the build and skip the pass too, which is the obvious next step and is a separate change.
+
+Ten million rows on an i9-13900K, alternating builds, five runs each, three rounds, medians of the per round medians, one process per measurement. The queries are db-benchmark's at the 0.5GB scale.
+
+| query | key | before | after | ratio |
+| --- | --- | --- | --- | --- |
+| q1 | id1, string, 100 groups | 28.7 ms | 19.9 ms | 0.69 |
+| q2 | id1 and id2, string | 115.2 ms | 90.0 ms | 0.78 |
+| q3 | id3, string, 100k groups | 139.8 ms | 116.3 ms | 0.83 |
+| q7 | id3, string, 100k groups | 130.7 ms | 110.4 ms | 0.84 |
+| q10 | id1 through id6, mixed | 1968.1 ms | 1878.9 ms | 0.95 |
+| q4 | id4, integer | 52.0 ms | 50.0 ms | 0.96 |
+| q5 | id6, integer | 91.9 ms | 89.3 ms | 0.97 |
+| q6 | id4 and id5, integer | 853.9 ms | 835.5 ms | 0.98 |
+| j1 | id1, join | 326.3 ms | 319.7 ms | 0.98 |
+| j4 | id1 through id3, join | 1775.0 ms | 1741.9 ms | 0.98 |
+
+The first five are the string keyed queries, which is the set the change targets. The last five are controls and none of them moved beyond the run to run spread, which is what a change that only removes work should look like.
+
+### Changed
+
+- `_factorize_any` returns a `KeyCodes` carrying the ordinals, the group count and the representative rows, instead of the ordinals alone, and `group_ordinals` skips `_densify` for any key whose `KeyCodes` describes every group.
+- `_densify`'s docstring records that the sparse ordinal case it was written for no longer happens, and what it is still for.
+
+### Added
+
+- `FactorizedStrings.into_parts` and `KeyCodes.into_parts`, which give up the ordinals and the representative rows together, because a struct cannot have two of its fields moved out one at a time and unpacking a returned tuple copies.
+- `test_no_shape_of_column_factorizes_to_a_sparse_ordinal`, a swept property test over a hundred and twenty random int64 columns with varying length, value span and null count, which holds the promise the skipping now depends on across both numeric routes.
+- Tests that a numeric key is still renumbered, that a null key still lands where its first null is, that a text key is grouped without renumbering its ordinals, and that a text key with nulls is renumbered after all.
+
 ## [0.6.19] - 2026-08-31
 
 Built against Mojo 1.0.0 (ed45d567).
