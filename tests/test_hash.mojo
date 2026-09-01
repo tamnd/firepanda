@@ -263,6 +263,43 @@ def test_the_parallel_route_keeps_first_appearance_order_across_slices() raises:
         assert_equal(keys[g], Int64(g) * step)
 
 
+def test_the_parallel_merge_agrees_across_many_buckets() raises:
+    # Sixteen workers puts the merge into sixty four buckets and three thousand
+    # groups spreads entries across all of them, so no bucket sees the column in
+    # the order the workers offered it and the numbering has to be recovered
+    # from the ranking pass rather than from the order a bucket happened to run.
+    same_routes(hashed_column(16384, 3000), 16, "parallel 16 workers")
+
+
+def test_the_parallel_merge_agrees_past_one_ranking_block() raises:
+    # An entry per row is the cheapest way to get more entries than one
+    # `MERGE_BLOCK` holds, since a column can never produce more of them than it
+    # has rows. The ranking pass then has to carry a running count from the
+    # first block into the second, and one block off by one would renumber every
+    # group after it.
+    same_routes(hashed_column(70000, 70000), 16, "parallel past one block")
+
+
+def test_the_parallel_merge_leaves_most_of_its_buckets_empty() raises:
+    # Three groups across sixteen workers is three of sixty four buckets holding
+    # anything at all. A bucket with nothing in it contributes nothing to the
+    # numbering and must not shift what the others get.
+    var n = 8192
+    var col = Array[DType.int64](n)
+    var step = Int64(DIRECT_LIMIT + 17)
+    for i in range(n):
+        col[i] = Int64(i % 3) * step
+
+    var got = _factorize_hashed_parallel(col, DEFAULT_SEED, 16)
+    assert_equal(got.count(), 3)
+    var bad = -1
+    for i in range(n):
+        if got.codes[i] != UInt32(i % 3):
+            bad = i
+            break
+    assert_equal(bad, -1, String("an empty bucket moved an ordinal at ", bad))
+
+
 def test_the_parallel_route_sizes_a_slice_past_the_late_checkpoint() raises:
     # Two slices, each longer than `SIZING_LATE`, so each worker's own row count
     # crosses both sizing checkpoints. A worker that counted rows from the start
@@ -861,11 +898,17 @@ def test_parallel_workers_takes_every_core_on_few_groups() raises:
     assert_equal(_parallel_workers(100, 10_000_000), most)
 
 
-def test_parallel_workers_refuses_a_column_of_distinct_keys() raises:
-    """Every worker's slice is its own group count here, so the merge is the
-    whole column over again and the split cannot win however it is cut."""
-    assert_equal(_parallel_workers(10_000_000, 10_000_000), 1)
-    assert_equal(_parallel_workers(5_000_000, 10_000_000), 1)
+def test_parallel_workers_splits_a_column_of_distinct_keys() raises:
+    """This used to be refused, because the merge was the whole column over
+    again when every worker's slice was its own group count. The merge runs on
+    every core now and the build still divides, so the split wins here too, at
+    a hundred and twenty nine milliseconds against a hundred and seventy four
+    for ten million distinct integers."""
+    var most = min(worker_count(), 10_000_000 // PARALLEL_MIN_SLICE)
+    if most < 8:
+        return
+    assert_true(_parallel_workers(10_000_000, 10_000_000) > 1)
+    assert_true(_parallel_workers(5_000_000, 10_000_000) > 1)
 
 
 def test_parallel_workers_splits_a_middling_column() raises:
@@ -880,15 +923,17 @@ def test_parallel_workers_splits_a_middling_column() raises:
 
 
 def test_parallel_workers_stops_short_of_the_cores_it_has() raises:
-    """Half a million groups over ten million rows puts the crossing at five
-    workers, and it stays at five however many more the machine offers, which is
-    the part a count that could only be one or all of them could not express."""
+    """Half a million groups is sixteen megabytes of table on its own, so two
+    workers already have more of it than the cache holds and the rest would be
+    probing memory. The answer has to be below the core count without being
+    one, which is the part a count that could only be all of them or none could
+    not express."""
     var most = min(worker_count(), 10_000_000 // PARALLEL_MIN_SLICE)
     if most < 8:
         return
     var got = _parallel_workers(500_000, 10_000_000)
     assert_true(got > 1, String("chose ", got, " of ", most))
-    assert_true(got < 8, String("chose ", got, " of ", most))
+    assert_true(got < most, String("chose ", got, " of ", most))
 
 
 def test_parallel_workers_never_slices_below_the_minimum() raises:

@@ -40,16 +40,15 @@ on a join of ten million distinct keys is eighty megabytes written twice and the
 dropped.
 
 The hash route splits a long column across cores. Each worker builds its own
-table over a contiguous slice, and a sequential merge afterwards renumbers what
-they found into one set of ordinals. That merge is as long as the groups the
-workers found between them, and every worker added rediscovers the groups in its
-own slice, so the merge grows as the build shrinks and the best number of cores
-to use is rarely all of them and sometimes none. `_projected_groups` guesses the
-key count before either route has run, `_parallel_workers` turns that into a
-worker count, and `_factorize_hashed_parallel` is where the argument for the
-shape lives. Text takes the same route through `_factorize_strings_parallel`,
-which differs only in that its merge compares two rows where the numeric one
-trusts a hash.
+table over a contiguous slice, and a merge afterwards renumbers what they found
+into one set of ordinals. That merge runs on every core too: equal keys hash
+equally, so bucketing the workers' groups on the top bits of their hash gives
+each bucket a key range no other bucket can hold, and the buckets have nothing to
+agree about. `_projected_groups` guesses the key count before either route has
+run, `_parallel_workers` turns that into a worker count, and
+`_factorize_hashed_parallel` is where the argument for the shape lives. Text
+takes the same route through `_factorize_strings_parallel`, which differs only in
+that its merge compares two rows where the numeric one trusts a hash.
 
 Nulls get a group. A null is a value that rows can share, pandas with
 `dropna=False` gives it a group, and dropping it later is a filter on one ordinal
@@ -122,44 +121,34 @@ thread means a column just over `PARALLEL_ROWS` gets the few workers it can keep
 busy instead of all of them.
 """
 
-comptime REMAP_SHARE = 0.25
-"""What a remapped row costs against a built one.
+comptime TABLE_BYTES_PER_GROUP = 32
+"""Bytes of hash table a group takes up while it is being built.
 
-The parallel route walks the column twice, once to build the per worker tables
-and once to rewrite their local ordinals into global ones. The second pass
-hashes nothing and probes nothing, it loads a code and stores a code, so it is
-counted at a quarter of a build row rather than a whole one. The number is a
-measurement of those two loops against each other on a low cardinality column
-and it only has to be close, since it moves the chosen worker count by one step
-at most.
+A slot is sixteen bytes, a hash and an ordinal, and the table doubles when it
+passes half full, so a group has two slots standing behind it by the time the
+build is over.
 """
 
-comptime MERGE_COST = 2.0
-"""What a merged group costs against a built row.
+comptime SHARED_CACHE_BYTES = 32 * 1024 * 1024
+"""Last level cache the workers' tables have to share.
 
-Both are a probe into a hash table, so the naive number here is one. It is two
-because the merge probes a table that is still growing, walks a list of hashes
-rather than a column, and gets none of the chunked prefetching the build gets,
-and because it is the only part of the route that no other thread is helping
-with. The number comes from timing the parallel route at every worker count from
-two to thirty two, on columns of a hundred, ten thousand, a hundred thousand and
-five hundred thousand groups, and taking the weight that puts the model's
-cheapest worker count on the measured minimum. At two the model lands on the
-best count for three of those four and within five percent of the best time on
-the fourth. At one and at four it is out by a factor of two on the worker count
-and by a quarter on the time.
+Thirty two megabytes is the reference machine's L3 rounded down. There is no way
+to ask the machine for this at runtime from here, and it is a floor rather than a
+fit: reading it low costs a few workers on a column whose curve is flat across
+that range anyway, while reading it high puts every worker's probes in memory,
+which is the thing this number exists to avoid.
 """
 
-comptime SPLIT_MARGIN = 1.25
-"""How much cheaper the model has to say a split is before it is taken.
+comptime CROWDED_SHARE = 2
+"""Fraction of the cores taken when the tables cannot all fit in cache.
 
-The model gives the build a perfect speedup and charges nothing for waking the
-threads, so a column it calls a wash is a column that loses. It is not off by
-much once `MERGE_COST` is in it, predicting the measured serial to parallel
-ratio to within about forty percent on the columns above, so a quarter of
-headroom is enough. Anything larger starts refusing columns that were measured
-to win, which is what a factor of two did to a column of five hundred thousand
-groups.
+Past the point where the tables stop fitting, every extra worker is another
+table competing for the same cache and the probes go to memory. More workers
+still help there, because more of those misses are in flight at once, but not by
+as much, and past half the cores the memory system is the limit and they start
+getting in each other's way. Half was measured against a hundred thousand and a
+million groups, in both integers and text, and it is within about a tenth of the
+best worker count on all four.
 """
 
 comptime PARALLEL_SAMPLE = 1 << 16
@@ -555,28 +544,424 @@ def _factorize_hashed[
     return _factorize_hashed_serial[dt](col, seed)
 
 
+comptime MERGE_BUCKETS_PER_WORKER = 4
+"""Hash buckets the merge cuts the workers' groups into, per worker.
+
+More buckets than workers, for two reasons. A bucket that draws more than its
+share of the groups is then a quarter of a worker's turn rather than the whole
+tail of the phase, and a bucket's table is a quarter of the size, which is what
+keeps it in L1 while it is being built. Eight measured no better than four on
+any of the shapes here and pays the per bucket setup twice as often.
+"""
+
+comptime MERGE_BLOCK = 1 << 16
+"""Entries per block in the pass that numbers the merged groups.
+
+That pass is a prefix sum, which is one serial walk over the block totals and
+two parallel walks over the entries themselves. Sixty five thousand entries is
+sixty five kilobytes of marks and a quarter of a megabyte of ranks, so a block
+stays in L2 across both of its walks, and a merge with only a few thousand
+groups in it still has more blocks than the machine has cores.
+"""
+
+
+struct _Buckets(Movable):
+    """Group entry indices grouped by the top bits of their hash."""
+
+    var order: Buffer
+    """Entry indices as uint32, grouped by bucket and in entry order within one.
+    """
+
+    var offsets: List[Int]
+    """Where each bucket starts in `order`, with a final entry holding the total.
+    """
+
+    def __init__(out self, var order: Buffer, var offsets: List[Int]):
+        """Constructs a bucketing.
+
+        Args:
+            order: The grouped entry indices.
+            offsets: The bucket boundaries.
+        """
+        self.order = order^
+        self.offsets = offsets^
+
+
+struct _Merged(Movable):
+    """What a merge hands back: a renumbering and a row per group."""
+
+    var map: Buffer
+    """Final ordinal as uint32 for every entry, indexed by entry."""
+
+    var firsts: List[Int]
+    """The first row of each merged group, in final ordinal order."""
+
+    def __init__(out self, var map: Buffer, var firsts: List[Int]):
+        """Constructs a merge result.
+
+        Args:
+            map: The per entry renumbering.
+            firsts: The representative rows.
+        """
+        self.map = map^
+        self.firsts = firsts^
+
+    def into_parts(deinit self, mut map: Buffer, mut firsts: List[Int]):
+        """Gives up both halves together, for the reason `Factorized` gives.
+
+        Args:
+            map: Overwritten with the per entry renumbering.
+            firsts: Overwritten with the representative rows.
+        """
+        map = self.map^
+        firsts = self.firsts^
+
+
+def _merge_bits(workers: Int) -> Int:
+    """Chooses how many high hash bits the merge partitions the groups on.
+
+    Args:
+        workers: How many workers built tables.
+
+    Returns:
+        A bit count of at least one.
+    """
+    var bits = 1
+    while (1 << bits) < workers * MERGE_BUCKETS_PER_WORKER and bits < 16:
+        bits += 1
+    return bits
+
+
+def _flatten_reps(
+    founds: List[List[Int]], starts: List[Int], workers: Int
+) raises -> Buffer:
+    """Lays the workers' representative rows end to end, indexed by entry.
+
+    The merge reads them out of order, once per entry rather than once per
+    worker, and a list of lists costs two loads and a bounds check to do that.
+    Flattening them first is one pass over a number of rows the column dwarfs.
+
+    Args:
+        founds: Each worker's representative row per local ordinal.
+        starts: Where each worker's entries begin, with a final total.
+        workers: How many workers there were.
+
+    Returns:
+        One int64 row index per entry.
+    """
+    var reps = Buffer(overwritten=starts[workers] * 8)
+
+    def one(w: Int) raises {mut reps, imm}:
+        var out = reps.bitcast[DType.int64]()
+        var at = starts[w]
+        for k in range(len(founds[w])):
+            out.unsafe_offset(at + k).unsafe_write(Int64(founds[w][k]))
+
+    parallel_for(one, workers)
+    return reps^
+
+
+def _bucket_entries(
+    found: Buffer, starts: List[Int], workers: Int, bits: Int
+) raises -> _Buckets:
+    """Groups every worker's groups by the top bits of their hash.
+
+    This is `radix_partition` over group entries rather than over rows, written
+    here because it counts in parallel and that one does not. Each worker owns
+    the run of entries its own table produced, counts its buckets into its own
+    row of the count table, and places its entries once the prefix sum has told
+    it where its run of each bucket starts.
+
+    The prefix sum runs bucket major and worker minor, which is what keeps the
+    sort stable. Worker zero's entries for a bucket come before worker one's,
+    and within a worker the entries are already in the order it found them, so
+    walking a bucket afterwards visits its entries in exactly the order the
+    serial merge would have.
+
+    Partitions come from the high bits and the buckets inside each merge table
+    come from the low ones, which have to be different bits or every key in a
+    bucket would probe the same region of that bucket's table.
+
+    Args:
+        found: One hash per entry, from `HashTable.keys_by_ordinal`.
+        starts: Where each worker's entries begin, with a final total.
+        workers: How many workers there were.
+        bits: How many high bits to bucket on. `2 ** bits` buckets.
+
+    Returns:
+        The entry indices grouped by bucket, and the bucket boundaries.
+    """
+    var buckets = 1 << bits
+    var shift = UInt64(64 - bits)
+    var total = starts[workers]
+    var counts = List[Int](length=workers * buckets, fill=0)
+
+    def tally(w: Int) raises {mut counts, imm}:
+        var hashed = found.bitcast[DType.uint64]()
+        var at = w * buckets
+        for e in range(starts[w], starts[w + 1]):
+            var b = Int(hashed.unsafe_offset(e).unsafe_load() >> shift)
+            counts[at + b] += 1
+
+    parallel_for(tally, workers)
+
+    # Rewritten in place into the write cursor each worker uses for each bucket,
+    # with the bucket boundaries copied out first.
+    var offsets = List[Int](capacity=buckets + 1)
+    var running = 0
+    for b in range(buckets):
+        offsets.append(running)
+        for w in range(workers):
+            var seen = counts[w * buckets + b]
+            counts[w * buckets + b] = running
+            running += seen
+    offsets.append(running)
+
+    var order = Buffer(overwritten=total * 4)
+
+    def place(w: Int) raises {mut order, imm}:
+        var hashed = found.bitcast[DType.uint64]()
+        var slot = order.bitcast[DType.uint32]()
+        var at = List[Int](capacity=buckets)
+        for b in range(buckets):
+            at.append(counts[w * buckets + b])
+        for e in range(starts[w], starts[w + 1]):
+            var b = Int(hashed.unsafe_offset(e).unsafe_load() >> shift)
+            slot.unsafe_offset(at[b]).unsafe_write(UInt32(e))
+            at[b] += 1
+
+    parallel_for(place, workers)
+    return _Buckets(order^, offsets^)
+
+
+def _rank_entries(
+    marks: Buffer, owners: Buffer, reps: Buffer, total: Int, offset: Int
+) raises -> _Merged:
+    """Numbers the merged groups in entry order and renumbers every entry.
+
+    A bucket knows which of its entries were the first to offer their key and
+    which entry each of the rest belongs to, but it cannot know what number to
+    give any of them, because the numbering is over all the buckets at once.
+    That is a prefix sum over the marks in entry order, and entry order is
+    worker order and then within a worker the order it found its groups, which
+    is first-appearance order over the whole column. So the count of marks
+    before an entry is the ordinal that entry's group gets, and it comes out
+    identical to what one thread inserting in one pass would have assigned.
+
+    Args:
+        marks: One byte per entry, one where the entry is the first to offer its
+            key and zero otherwise.
+        owners: For every entry, the entry that owns its group.
+        reps: One row index per entry.
+        total: How many entries there are.
+        offset: Added to every final ordinal, reserving the low ones for the
+            null group.
+
+    Returns:
+        The renumbering and the representative row of each merged group.
+    """
+    var blocks = (total + MERGE_BLOCK - 1) // MERGE_BLOCK
+    var base = List[Int](length=blocks + 1, fill=0)
+
+    def tally(b: Int) raises {mut base, imm}:
+        var mark = marks.unsafe_ptr()
+        var stop = min((b + 1) * MERGE_BLOCK, total)
+        var seen = 0
+        for e in range(b * MERGE_BLOCK, stop):
+            seen += Int(mark.unsafe_offset(e).unsafe_load())
+        base[b] = seen
+
+    parallel_for(tally, blocks)
+
+    var groups = 0
+    for b in range(blocks):
+        var seen = base[b]
+        base[b] = groups
+        groups += seen
+    base[blocks] = groups
+
+    var firsts = List[Int](length=groups, fill=0)
+    var ranks = Buffer(overwritten=total * 4)
+
+    def number(b: Int) raises {mut ranks, mut firsts, imm}:
+        var mark = marks.unsafe_ptr()
+        var rank = ranks.bitcast[DType.uint32]()
+        var rep = reps.bitcast[DType.int64]()
+        var stop = min((b + 1) * MERGE_BLOCK, total)
+        var at = base[b]
+        for e in range(b * MERGE_BLOCK, stop):
+            if mark.unsafe_offset(e).unsafe_load() == 0:
+                continue
+            rank.unsafe_offset(e).unsafe_write(UInt32(at))
+            firsts[at] = Int(rep.unsafe_offset(e).unsafe_load())
+            at += 1
+
+    parallel_for(number, blocks)
+
+    var map = Buffer(overwritten=total * 4)
+
+    def project(b: Int) raises {mut map, imm}:
+        var mapped = map.bitcast[DType.uint32]()
+        var rank = ranks.bitcast[DType.uint32]()
+        var own = owners.bitcast[DType.uint32]()
+        var stop = min((b + 1) * MERGE_BLOCK, total)
+        for e in range(b * MERGE_BLOCK, stop):
+            var winner = Int(own.unsafe_offset(e).unsafe_load())
+            mapped.unsafe_offset(e).unsafe_write(
+                rank.unsafe_offset(winner).unsafe_load() + UInt32(offset)
+            )
+
+    parallel_for(project, blocks)
+    return _Merged(map^, firsts^)
+
+
+def _merge_hashed(
+    found: Buffer,
+    starts: List[Int],
+    founds: List[List[Int]],
+    workers: Int,
+    offset: Int,
+    seed: UInt64,
+) raises -> _Merged:
+    """Folds the workers' numeric tables into one numbering, on every core.
+
+    Every entry with the same key has the same hash and so lands in the same
+    bucket, which is what makes the buckets independent: no two of them can
+    discover the same group, so no two of them have anything to agree about.
+    Each one dedupes its own entries into a table of its own and records, for
+    every entry, which entry owns the group it belongs to. `_rank_entries` turns
+    those into the final numbers.
+
+    Args:
+        found: One hash per entry.
+        starts: Where each worker's entries begin, with a final total.
+        founds: Each worker's representative row per local ordinal.
+        workers: How many workers built tables.
+        offset: Added to every final ordinal.
+        seed: The per-query hash seed.
+
+    Returns:
+        The renumbering and the representative row of each merged group.
+    """
+    var total = starts[workers]
+    var bits = _merge_bits(workers)
+    var buckets = 1 << bits
+    var split = _bucket_entries(found, starts, workers, bits)
+    var reps = _flatten_reps(founds, starts, workers)
+    var owners = Buffer(overwritten=total * 4)
+    var marks = Buffer(total)
+
+    def one(b: Int) raises {mut owners, mut marks, imm}:
+        var hashed = found.bitcast[DType.uint64]()
+        var slot = split.order.bitcast[DType.uint32]()
+        var own = owners.bitcast[DType.uint32]()
+        var mark = marks.unsafe_ptr()
+        var start = split.offsets[b]
+        var stop = split.offsets[b + 1]
+        var table = HashTable(stop - start, seed)
+        var winners = List[Int]()
+        for at in range(start, stop):
+            var e = Int(slot.unsafe_offset(at).unsafe_load())
+            var ordinal = table.insert(hashed.unsafe_offset(e).unsafe_load())
+            if ordinal == len(winners):
+                winners.append(e)
+                mark.unsafe_offset(e).unsafe_store(UInt8(1))
+            own.unsafe_offset(e).unsafe_write(UInt32(winners[ordinal]))
+
+    parallel_for(one, buckets)
+    return _rank_entries(marks, owners, reps, total, offset)
+
+
+def _merge_strings(
+    found: Buffer,
+    starts: List[Int],
+    founds: List[List[Int]],
+    workers: Int,
+    offset: Int,
+    seed: UInt64,
+    col: StringArray,
+) raises -> _Merged:
+    """`_merge_hashed` with the key comparison put back.
+
+    A hash match is a candidate rather than an answer for text, so a bucket
+    carries the representative row of each of its own groups and compares the
+    two rows behind a match. Nothing else differs: equal keys hash equally, so
+    they still land in the same bucket, and the buckets are still independent.
+
+    Args:
+        found: One hash per entry.
+        starts: Where each worker's entries begin, with a final total.
+        founds: Each worker's representative row per local ordinal.
+        workers: How many workers built tables.
+        offset: Added to every final ordinal.
+        seed: The per-query hash seed.
+        col: The column, for the comparison.
+
+    Returns:
+        The renumbering and the representative row of each merged group.
+    """
+    var total = starts[workers]
+    var bits = _merge_bits(workers)
+    var buckets = 1 << bits
+    var split = _bucket_entries(found, starts, workers, bits)
+    var reps = _flatten_reps(founds, starts, workers)
+    var owners = Buffer(overwritten=total * 4)
+    var marks = Buffer(total)
+
+    def one(b: Int) raises {mut owners, mut marks, imm}:
+        var hashed = found.bitcast[DType.uint64]()
+        var rep = reps.bitcast[DType.int64]()
+        var slot = split.order.bitcast[DType.uint32]()
+        var own = owners.bitcast[DType.uint32]()
+        var mark = marks.unsafe_ptr()
+        var start = split.offsets[b]
+        var stop = split.offsets[b + 1]
+        var table = HashTable(stop - start, seed)
+        var local = List[Int]()
+        var winners = List[Int]()
+        for at in range(start, stop):
+            var e = Int(slot.unsafe_offset(at).unsafe_load())
+            var ordinal = table.insert_string(
+                hashed.unsafe_offset(e).unsafe_load(),
+                Int(rep.unsafe_offset(e).unsafe_load()),
+                col,
+                local,
+            )
+            if ordinal == len(winners):
+                winners.append(e)
+                mark.unsafe_offset(e).unsafe_store(UInt8(1))
+            own.unsafe_offset(e).unsafe_write(UInt32(winners[ordinal]))
+
+    parallel_for(one, buckets)
+    return _rank_entries(marks, owners, reps, total, offset)
+
+
 def _parallel_workers(groups: Int, n: Int) -> Int:
     """Chooses how many workers to split a column across, or one to stay serial.
 
-    Splitting trades a shorter build for a merge that no thread can help with.
-    The build shortens as workers are added and the merge lengthens, because
-    every worker rediscovers the groups that fall in its own slice, so the two
-    cross somewhere and the best worker count is at the crossing rather than at
-    either end. A column with a hundred groups wants every core, since a
-    hundred groups per worker is nothing to merge. A column with a hundred
-    thousand groups over ten million rows wants eight of thirty two, and it was
-    staying serial before this because asking for all of them was the only other
-    thing it could do. A column where every row is a new key wants none,
-    since each worker's slice is its own group count and the merge is the whole
-    column again.
+    Every worker builds a table that ends up holding roughly all of the column's
+    groups, because a slice drawn from anywhere in a column sees the same keys
+    the whole column has. So the tables together are the group count times the
+    worker count, and where that lands decides the answer. While they all fit in
+    the shared cache, every probe is a cache hit and the build is the only cost
+    that matters, so take every core. Once they stop fitting, every probe is a
+    trip to memory and the extra workers are buying overlap rather than
+    throughput, so take half of them.
 
-    Costs are in rows touched. The build is `n / w` on each worker, the remap
-    that follows it is the same length at `REMAP_SHARE` of the price, and the
-    merge is however many groups the workers found between them, which is
-    `w * groups * (1 - e^(-slice/groups))` from the same curve `_estimate_groups`
-    fits, at `MERGE_COST` each. Serial is `n`, one pass and no merge. The scan
-    below is over at most the core count, and it runs once per column against a
-    build that is four orders of magnitude longer.
+    That is the whole rule. It used to be a cost model with a merge term in it,
+    because the merge was serial and grew with the worker count, and the model
+    spent most of its effort deciding when the merge had eaten the split. The
+    merge runs on every core now, so what is left is a question about cache.
+
+    Measured on ten million rows on the reference machine, against every worker
+    count from two to thirty two, on integer and text columns of a hundred, a
+    hundred thousand and a million groups. The rule picks thirty two on the low
+    cardinality columns, which is their best, and sixteen on the other four,
+    where the best times are at six to twenty four and sixteen is within about a
+    tenth of all of them. Every one of the six is at least twice the serial
+    route. So is a column where every row is its own key, by a smaller margin,
+    at a hundred and twenty nine milliseconds against a hundred and seventy
+    four, which is why nothing here returns one on a column this long.
 
     Args:
         groups: The estimated distinct key count of the whole column.
@@ -589,22 +974,9 @@ def _parallel_workers(groups: Int, n: Int) -> Int:
     if most < 2 or groups < 1:
         return 1
 
-    var best = 1
-    var best_cost = Float64(n)
-    var g = Float64(groups)
-    for workers in range(2, most + 1):
-        var slice = Float64(n) / Float64(workers)
-        var found = g * (1.0 - exp(-slice / g))
-        var cost = (
-            slice * (1.0 + REMAP_SHARE) + MERGE_COST * Float64(workers) * found
-        )
-        if cost < best_cost:
-            best_cost = cost
-            best = workers
-
-    if best_cost * SPLIT_MARGIN > Float64(n):
-        return 1
-    return best
+    if groups * TABLE_BYTES_PER_GROUP * most <= SHARED_CACHE_BYTES:
+        return most
+    return max(2, most // CROWDED_SHARE)
 
 
 def _estimate_groups(seen: Int, half: Int, rows: Int, n: Int) -> Int:
@@ -630,8 +1002,9 @@ def _estimate_groups(seen: Int, half: Int, rows: Int, n: Int) -> Int:
 
     Keys that are not evenly spread make it read low, because a skewed column
     hides its rare keys from a sample. Reading low means taking the parallel
-    route with more workers than the column deserved, and absorbing that is
-    what `SPLIT_MARGIN` is for.
+    route with more workers than the column deserved, and the cost of that is
+    bounded: the worst it can do is take every core on a column whose tables
+    would rather have had half of them.
 
     Args:
         seen: Groups found in the first `rows` rows.
@@ -803,23 +1176,21 @@ def _factorize_hashed_parallel[
     never touch the same word twice.
 
     That leaves every worker with a private numbering, and a merge to turn those
-    into one. The merge walks the workers in order and, within a worker, its
-    groups in the order it found them, inserting each into a single table that
-    hands out the final ordinals. That order is exactly first-appearance order
-    over the whole column: the slices are contiguous and in order, and a worker
-    numbers its groups by when it first saw them, so the first time any key turns
-    up anywhere is the first time the merge is offered it. The ordinals come out
-    identical to the serial route's, which is what makes this a substitution
-    rather than a second set of semantics.
+    into one. Laid end to end, the workers' groups are already in
+    first-appearance order over the whole column: the slices are contiguous and
+    in order, and a worker numbers its groups by when it first saw them, so the
+    first time any key turns up anywhere is the first time it appears in that
+    sequence. The merge's job is to find the repeats and to number what is left
+    without disturbing that order, and `_merge_hashed` does it on every core by
+    bucketing on the hash. The ordinals come out identical to the serial route's,
+    which is what makes this a substitution rather than a second set of
+    semantics.
 
-    The merge is the part that does not parallelize, and its cost is the number
-    of groups the workers found between them rather than the number of rows. On
-    the columns a group by is usually run on, where the groups are thousands and
-    the rows are millions, it disappears. On a column where every row is its own
-    key it is the whole operation again, and this route breaks even there rather
-    than winning. It probes with the hashes the workers already computed, which
-    `HashTable.keys_by_ordinal` reads back out of their slots, so at least it
-    does not hash anything twice.
+    It probes with the hashes the workers already computed, which
+    `HashTable.keys_by_ordinal` reads back out of their slots, so nothing is
+    hashed twice. What is left that no thread helps with is a prefix sum over
+    the block totals of the ranking pass, which is one number per sixty five
+    thousand groups.
 
     Args:
         col: The column.
@@ -892,33 +1263,16 @@ def _factorize_hashed_parallel[
 
     parallel_for(dump, workers)
 
-    var firsts = List[Int]()
     var null_group = -1
     if has_null:
         null_group = 0
 
-    var hashed = found.bitcast[DType.uint64]()
-    var map = Buffer(overwritten=total * 4)
+    var map = Buffer(0)
+    var firsts = List[Int]()
+    _merge_hashed(found, starts, founds, workers, offset, seed).into_parts(
+        map, firsts
+    )
     var mapped = map.bitcast[DType.uint32]()
-
-    # Sized for every local group rather than for the distinct ones, because the
-    # distinct ones are not known until this loop has run. It over-reserves by at
-    # most the worker count, and only on a column whose groups are few enough
-    # that the table is small either way.
-    var merged = HashTable(total, seed)
-    for w in range(workers):
-        var at = starts[w]
-        for k in range(len(tables[w])):
-            var ordinal = merged.insert(
-                hashed.unsafe_offset(at + k).unsafe_load()
-            )
-            mapped.unsafe_offset(at + k).unsafe_write(UInt32(ordinal + offset))
-            if ordinal == len(firsts):
-                # The earliest row anywhere with this key, by the same argument
-                # that makes the merge's ordinals first-appearance order: the
-                # slices are contiguous and in order, and a worker offers its
-                # groups in the order it found them, so the first offer wins.
-                firsts.append(founds[w][k])
 
     def remap(w: Int) raises {mut codes, imm}:
         var out = codes.unsafe_ptr()
@@ -1093,13 +1447,10 @@ def _factorize_strings_parallel(
     argument for the shape is the one made there. What differs is the merge.
     The numeric merge probes on the hash alone, because for it the hash is the
     key; this one probes on the hash and then compares the two rows behind it,
-    which is `insert_string` rather than `insert`. That comparison needs a
-    representative row per group and produces one, so the `firsts` the merge
-    builds is not bookkeeping that gets thrown away at the end, it is the result
-    this function returns.
+    which is `_merge_strings` rather than `_merge_hashed`.
 
     The workers' representative rows feed it. A worker records the absolute row
-    of every key that was new to its own table, and the merge walks those in the
+    of every key that was new to its own table, and the merge keeps those in the
     same workers-in-order, ordinals-in-order sequence that gives the numeric
     route its first-appearance ordering, so the row that ends up representing a
     group is the earliest row in the column that has that key, exactly as one
@@ -1172,22 +1523,12 @@ def _factorize_strings_parallel(
 
     parallel_for(dump, workers)
 
-    var hashed = found.bitcast[DType.uint64]()
-    var map = Buffer(overwritten=total * 4)
-    var mapped = map.bitcast[DType.uint32]()
-
-    var merged = HashTable(total, seed)
+    var map = Buffer(0)
     var firsts = List[Int]()
-    for w in range(workers):
-        var at = starts[w]
-        for k in range(len(tables[w])):
-            var ordinal = merged.insert_string(
-                hashed.unsafe_offset(at + k).unsafe_load(),
-                founds[w][k],
-                col,
-                firsts,
-            )
-            mapped.unsafe_offset(at + k).unsafe_write(UInt32(ordinal + offset))
+    _merge_strings(
+        found, starts, founds, workers, offset, seed, col
+    ).into_parts(map, firsts)
+    var mapped = map.bitcast[DType.uint32]()
 
     def remap(w: Int) raises {mut codes, imm}:
         var out = codes.unsafe_ptr()
