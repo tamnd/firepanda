@@ -41,6 +41,7 @@ from firepanda.hash.factorize import factorize
 from firepanda.hash.grouping import group_ordinals
 from firepanda.testing.rng import Rng
 from firepanda.kernel.group import (
+    PRIVATE_ROWS,
     AggKind,
     aggregate_group,
     aggregate_group_any,
@@ -1170,6 +1171,95 @@ def test_two_quantiles_of_one_column_need_explicit_names() raises:
     specs.append(AggSpec("v", AggKind.quantile_at(0.75)))
     with assert_raises(contains="would both be called"):
         _ = sample_frame().group_by(["k"], specs)
+
+
+def test_a_group_by_past_the_parallel_threshold_agrees_with_a_serial_loop() raises:
+    # Past `PRIVATE_ROWS` rows the reductions stop scattering into one table and
+    # start building a private one per worker to merge afterwards, which is a
+    # different loop from the one every other test in this file reaches. So the
+    # same questions are asked again at a size that gets there, against a loop
+    # written out longhand rather than against the twin.
+    #
+    # The codes are `i % 977`, which is prime and so does not line up with the
+    # worker boundaries, and every thirteenth row is null so the merge has to
+    # agree about which groups were seen. Group zero is null in every row it has,
+    # which is the case a merge gets wrong by reporting the identity it started
+    # from as if it were a value.
+    comptime ROWS = PRIVATE_ROWS + 10_000
+    comptime GROUPS = 977
+    comptime FLOOR = -(1 << 62)
+
+    var values = Array[DType.int64](ROWS)
+    var codes = Array[DType.uint32](ROWS)
+    for i in range(ROWS):
+        values[i] = Int64(i % 7919) - 3000
+        codes[i] = UInt32(i % GROUPS)
+    for i in range(0, ROWS, 13):
+        values.set_null(i)
+    for i in range(0, ROWS, GROUPS):
+        values.set_null(i)
+
+    var want_sum = List[Int64]()
+    var want_count = List[Int64]()
+    var want_size = List[Int64]()
+    var want_min = List[Int64]()
+    var want_max = List[Int64]()
+    var want_seen = List[Bool]()
+    for _ in range(GROUPS):
+        want_sum.append(0)
+        want_count.append(0)
+        want_size.append(0)
+        want_min.append(-FLOOR)
+        want_max.append(FLOOR)
+        want_seen.append(False)
+
+    for i in range(ROWS):
+        var g = Int(codes[i])
+        want_size[g] += 1
+        if not values.data.validity.get(i):
+            continue
+        var v = values[i]
+        want_sum[g] += v
+        want_count[g] += 1
+        want_seen[g] = True
+        if v < want_min[g]:
+            want_min[g] = v
+        if v > want_max[g]:
+            want_max[g] = v
+
+    var summed = group_sum(values, codes, GROUPS)
+    var counted = group_count(values, codes, GROUPS)
+    var sized = group_size(codes, GROUPS)
+    var averaged = group_mean(values, codes, GROUPS)
+    var smallest = group_min(values, codes, GROUPS)
+    var largest = group_max(values, codes, GROUPS)
+
+    for g in range(GROUPS):
+        # Bound to an `Int64` because the sum's dtype is spelled
+        # `accumulator(DType.int64)` and the comparison cannot see through that.
+        var total = Int64(summed[g])
+        assert_equal(total, want_sum[g])
+        assert_equal(counted[g], want_count[g])
+        assert_equal(sized[g], want_size[g])
+        if not want_seen[g]:
+            # A group nothing was seen for reads null and holds a zero, the way
+            # every other null in the package does.
+            assert_false(smallest.data.validity.get(g))
+            assert_false(largest.data.validity.get(g))
+            assert_false(averaged.data.validity.get(g))
+            assert_equal(smallest[g], 0)
+            assert_equal(largest[g], 0)
+            continue
+        assert_true(smallest.data.validity.get(g))
+        assert_true(largest.data.validity.get(g))
+        assert_true(averaged.data.validity.get(g))
+        assert_equal(smallest[g], want_min[g])
+        assert_equal(largest[g], want_max[g])
+        assert_almost_equal(
+            averaged[g],
+            Float64(want_sum[g]) / Float64(want_count[g]),
+            atol=1e-9,
+        )
 
 
 def main() raises:

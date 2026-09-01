@@ -21,6 +21,27 @@ cardinalities a group by actually has it stays in cache. When it does not, the
 fix is radix partitioning the rows first, which is what `firepanda/hash/
 partition.mojo` exists for and which belongs to the executor rather than here.
 
+## Why a big one runs on every core and a small one does not
+
+A scatter cannot be split by handing each worker a slice of the rows and letting
+them all write to the same table, because two rows in two slices can belong to
+the same group and the increments would be lost. So each worker gets its own
+table and the tables are added together afterwards, which is the same shape
+`firepanda/hash/factorize.mojo` uses for the same reason.
+
+That trade has a ceiling in it, and the ceiling is why `PRIVATE_BYTES` exists.
+The merge costs `groups * workers` rather than `rows`, so at a hundred groups it
+is nothing and at a million it is most of the work. Past the ceiling the
+reduction stays on one core, and the answer for that case is partitioning the
+rows by code so that each worker owns a range of groups outright and there is no
+merge at all. That is a change to `firepanda/hash/partition.mojo` and the
+executor rather than to this file.
+
+Ten million float64 rows on an i9-13900K, medians of five: a sum over a hundred
+groups is 5.4 ms on one core and 1.9 ms on all of them, a mean is 8.5 ms against
+2.8 ms, a maximum is 8.1 ms against 2.5 ms. At a million groups, where the
+ceiling holds it to four workers, a sum is 16.4 ms against 10.0 ms.
+
 ## What a group with nothing in it produces
 
 pandas is not consistent here and it has reasons, so this copies it rather than
@@ -49,16 +70,136 @@ covers both.
 
 from std.collections.span import Span
 from std.math import sqrt
+from std.sys.info import simd_width_of, size_of
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
+from firepanda.exec.parallel import parallel_for, worker_count
 from firepanda.hash.factorize import factorize_strings
 from firepanda.kernel.accum import accumulator, highest, lowest
 from firepanda.kernel.agg import max_of
 from firepanda.kernel.cast import cast_any
+
+comptime PRIVATE_BYTES = 32 * 1024 * 1024
+"""How much memory the private accumulator tables may take, in total.
+
+The tables are the whole cost of the parallel route and the whole reason it has
+a ceiling. One per worker means the memory is `groups * workers * width`, so at
+thirty two workers and eight byte accumulators a hundred thousand groups is
+twenty five megabytes and a million groups would be two hundred and fifty six.
+Past a point the allocation and the merge cost more than the scatter they are
+speeding up, and the answer for that case is partitioning the rows by code
+rather than replicating the table, which is a separate change.
+
+Thirty two megabytes is chosen so the tables are at worst a couple of times an
+L3 cache rather than a fraction of main memory.
+"""
+
+comptime PRIVATE_ROWS = 1 << 16
+"""Rows below which a grouped reduction stays on one core.
+
+Sixty five thousand, which is half a morsel. A scatter of that many rows is a
+couple of hundred microseconds, and starting a task per worker and merging their
+tables afterwards is a fair fraction of that, so below here the parallel route is
+break even at best and the serial one is the honest answer.
+"""
+
+
+def _private_workers[dt: DType](rows: Int, groups: Int) -> Int:
+    """Decides how many private tables a grouped reduction should build.
+
+    Args:
+        rows: How many rows are being scattered.
+        groups: How wide one table is.
+
+    Parameters:
+        dt: The accumulator dtype, which sets how wide a table entry is.
+
+    Returns:
+        The worker count, or one to say the reduction should stay serial.
+    """
+    if rows < PRIVATE_ROWS or groups <= 0:
+        return 1
+
+    var workers = worker_count()
+    if workers <= 1:
+        return 1
+
+    var affordable = PRIVATE_BYTES // (groups * size_of[dt]())
+    if affordable < 2:
+        return 1
+    return workers if workers < affordable else affordable
+
+
+def _row_bounds(rows: Int, workers: Int) -> List[Int]:
+    """Cuts a row range into one contiguous piece per worker.
+
+    A static split rather than a morsel queue, because every row of a scatter
+    costs the same and there is nothing for a queue to balance. What the split
+    does buy is that each worker's piece is contiguous, so the values and the
+    codes are read forwards.
+
+    Args:
+        rows: How many rows there are.
+        workers: How many pieces to cut them into.
+
+    Returns:
+        `workers + 1` offsets, the first zero and the last `rows`.
+    """
+    var bounds = List[Int](capacity=workers + 1)
+    for w in range(workers):
+        bounds.append(rows * w // workers)
+    bounds.append(rows)
+    return bounds^
+
+
+def _merge_sums[
+    dt: DType
+](partials: Array[dt], groups: Int, workers: Int) -> Array[dt]:
+    """Adds the private tables together into one.
+
+    This is the half of the parallel route that is not parallel, and it is
+    vectorized because it can be: the tables are laid out one after another, so
+    adding table `w` into the answer is a walk of two contiguous arrays and the
+    scatter's dependent stores are gone. The cost is `groups * workers` adds
+    against the `rows` the scatter did, which is why `PRIVATE_BYTES` is the
+    thing that decides whether any of this was worth doing.
+
+    Args:
+        partials: One table per worker, laid end to end.
+        groups: How wide one table is.
+        workers: How many tables there are.
+
+    Parameters:
+        dt: The accumulator dtype.
+
+    Returns:
+        A column of `groups` totals, every one of them present.
+    """
+    comptime width = simd_width_of[dt]()
+
+    var out = Array[dt](groups)
+    var totals = out.unsafe_ptr()
+    var tables = partials.unsafe_ptr()
+    for w in range(workers):
+        var table = tables.unsafe_offset(w * groups)
+        var g = 0
+        while g + width <= groups:
+            totals.unsafe_offset(g).unsafe_store(
+                totals.unsafe_offset(g).unsafe_load[width=width]()
+                + table.unsafe_offset(g).unsafe_load[width=width]()
+            )
+            g += width
+        while g < groups:
+            totals.unsafe_offset(g).unsafe_store(
+                totals.unsafe_offset(g).unsafe_load()
+                + table.unsafe_offset(g).unsafe_load()
+            )
+            g += 1
+    return out^
 
 
 struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
@@ -333,7 +474,9 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("nunique")
 
 
-def group_size(codes: Array[DType.uint32], groups: Int) -> Array[DType.int64]:
+def group_size(
+    codes: Array[DType.uint32], groups: Int
+) raises -> Array[DType.int64]:
     """Counts the rows in each group, nulls included.
 
     The only reduction that does not look at a values column at all, which is why
@@ -345,21 +488,20 @@ def group_size(codes: Array[DType.uint32], groups: Int) -> Array[DType.int64]:
 
     Returns:
         A column of `groups` counts, every one of them present.
+
+    Raises:
+        If one of the workers the parallel route starts cannot be run. A
+        reduction small enough to stay on one core cannot fail.
     """
-    var out = Array[DType.int64](groups)
-    var totals = out.unsafe_ptr()
-    var at = codes.unsafe_ptr()
-    for i in range(len(codes)):
-        var g = Int(at.unsafe_offset(i).unsafe_load())
-        totals.unsafe_offset(g).unsafe_store(
-            totals.unsafe_offset(g).unsafe_load() + 1
-        )
-    return out^
+    # The bitmap is not read, because `check` is false, and it is passed rather
+    # than made optional because a `Bitmap` argument is a borrow and costs
+    # nothing. The codes' own validity is the one already in hand.
+    return _tally_core[check=False](codes.data.validity, codes, groups)
 
 
 def group_count[
     dt: DType
-](values: Array[dt], codes: Array[DType.uint32], groups: Int) -> Array[
+](values: Array[dt], codes: Array[DType.uint32], groups: Int) raises -> Array[
     DType.int64
 ]:
     """Counts the non-null values in each group.
@@ -375,6 +517,10 @@ def group_count[
     Returns:
         A column of `groups` counts, every one of them present. A group whose
         values are all null counts zero rather than reporting null.
+
+    Raises:
+        If one of the workers the parallel route starts cannot be run. A
+        reduction small enough to stay on one core cannot fail.
     """
     return _count_core(
         values.data.validity, values.null_count() > 0, codes, groups
@@ -386,26 +532,70 @@ def _count_core(
     has_null: Bool,
     codes: Array[DType.uint32],
     groups: Int,
-) -> Array[DType.int64]:
+) raises -> Array[DType.int64]:
     """Counts the present rows per group. Needs no dtype and reads no values."""
     if not has_null:
         return group_size(codes, groups)
+    return _tally_core[check=True](validity, codes, groups)
 
-    var out = Array[DType.int64](groups)
-    var totals = out.unsafe_ptr()
-    var at = codes.unsafe_ptr()
-    for i in range(len(codes)):
-        if validity.get(i):
+
+def _tally_core[
+    check: Bool
+](validity: Bitmap, codes: Array[DType.uint32], groups: Int) raises -> Array[
+    DType.int64
+]:
+    """Counts rows per group, either all of them or only the present ones.
+
+    Args:
+        validity: Which rows are present. Read only when `check`.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals.
+
+    Parameters:
+        check: True to skip null rows, False to count every row.
+
+    Returns:
+        A column of `groups` counts, every one of them present.
+    """
+    var n = len(codes)
+    var workers = _private_workers[DType.int64](n, groups)
+
+    if workers <= 1:
+        var out = Array[DType.int64](groups)
+        var totals = out.unsafe_ptr()
+        var at = codes.unsafe_ptr()
+        for i in range(n):
+            comptime if check:
+                if not validity.get(i):
+                    continue
             var g = Int(at.unsafe_offset(i).unsafe_load())
             totals.unsafe_offset(g).unsafe_store(
                 totals.unsafe_offset(g).unsafe_load() + 1
             )
-    return out^
+        return out^
+
+    var bounds = _row_bounds(n, workers)
+    var partials = Array[DType.int64](groups * workers)
+
+    def one(w: Int) raises {mut partials, imm}:
+        var totals = partials.unsafe_ptr().unsafe_offset(w * groups)
+        var at = codes.unsafe_ptr()
+        for i in range(bounds[w], bounds[w + 1]):
+            comptime if check:
+                if not validity.get(i):
+                    continue
+            var g = Int(at.unsafe_offset(i).unsafe_load())
+            totals.unsafe_offset(g).unsafe_store(
+                totals.unsafe_offset(g).unsafe_load() + 1
+            )
+
+    parallel_for(one, workers)
+    return _merge_sums(partials, groups, workers)
 
 
 def group_sum[
     dt: DType
-](values: Array[dt], codes: Array[DType.uint32], groups: Int) -> Array[
+](values: Array[dt], codes: Array[DType.uint32], groups: Int) raises -> Array[
     accumulator(dt)
 ]:
     """Adds up the non-null values in each group.
@@ -426,6 +616,10 @@ def group_sum[
         A column of `groups` sums in the accumulator dtype, every one present. A
         group with no non-null values sums to zero, matching pandas at its
         default `min_count` of zero.
+
+    Raises:
+        If one of the workers the parallel route starts cannot be run. A
+        reduction small enough to stay on one core cannot fail.
     """
     return _sum_core(values.unsafe_ptr(), codes, groups)
 
@@ -436,24 +630,44 @@ def _sum_core[
     source: Pointer[Scalar[dt], origin],
     codes: Array[DType.uint32],
     groups: Int,
-) -> Array[accumulator(dt)]:
+) raises -> Array[accumulator(dt)]:
     """Accumulates every row into its group, validity ignored on purpose."""
     comptime acc = accumulator(dt)
-    var out = Array[acc](groups)
-    var totals = out.unsafe_ptr()
-    var at = codes.unsafe_ptr()
-    for i in range(len(codes)):
-        var g = Int(at.unsafe_offset(i).unsafe_load())
-        totals.unsafe_offset(g).unsafe_store(
-            totals.unsafe_offset(g).unsafe_load()
-            + source.unsafe_offset(i).unsafe_load().cast[acc]()
-        )
-    return out^
+    var n = len(codes)
+    var workers = _private_workers[acc](n, groups)
+
+    if workers <= 1:
+        var out = Array[acc](groups)
+        var totals = out.unsafe_ptr()
+        var at = codes.unsafe_ptr()
+        for i in range(n):
+            var g = Int(at.unsafe_offset(i).unsafe_load())
+            totals.unsafe_offset(g).unsafe_store(
+                totals.unsafe_offset(g).unsafe_load()
+                + source.unsafe_offset(i).unsafe_load().cast[acc]()
+            )
+        return out^
+
+    var bounds = _row_bounds(n, workers)
+    var partials = Array[acc](groups * workers)
+
+    def one(w: Int) raises {mut partials, imm}:
+        var totals = partials.unsafe_ptr().unsafe_offset(w * groups)
+        var at = codes.unsafe_ptr()
+        for i in range(bounds[w], bounds[w + 1]):
+            var g = Int(at.unsafe_offset(i).unsafe_load())
+            totals.unsafe_offset(g).unsafe_store(
+                totals.unsafe_offset(g).unsafe_load()
+                + source.unsafe_offset(i).unsafe_load().cast[acc]()
+            )
+
+    parallel_for(one, workers)
+    return _merge_sums(partials, groups, workers)
 
 
 def group_mean[
     dt: DType
-](values: Array[dt], codes: Array[DType.uint32], groups: Int) -> Array[
+](values: Array[dt], codes: Array[DType.uint32], groups: Int) raises -> Array[
     DType.float64
 ]:
     """Averages the non-null values in each group.
@@ -473,6 +687,10 @@ def group_mean[
     Returns:
         A column of `groups` means. A group with no non-null values is null,
         because zero would be a value the group does not have.
+
+    Raises:
+        If one of the workers the parallel route starts cannot be run. A
+        reduction small enough to stay on one core cannot fail.
     """
     return _mean_core(
         values.unsafe_ptr(),
@@ -491,7 +709,7 @@ def _mean_core[
     has_null: Bool,
     codes: Array[DType.uint32],
     groups: Int,
-) -> Array[DType.float64]:
+) raises -> Array[DType.float64]:
     """Divides a grouped sum by a grouped count, one group at a time."""
     var sums = _sum_core(source, codes, groups)
     var counts = _count_core(validity, has_null, codes, groups)
@@ -514,7 +732,9 @@ def _mean_core[
 
 def group_min[
     dt: DType
-](values: Array[dt], codes: Array[DType.uint32], groups: Int) -> Array[dt]:
+](values: Array[dt], codes: Array[DType.uint32], groups: Int) raises -> Array[
+    dt
+]:
     """Returns the smallest non-null value in each group.
 
     Args:
@@ -527,6 +747,10 @@ def group_min[
 
     Returns:
         A column of `groups` minima, null for any group with no non-null values.
+
+    Raises:
+        If one of the workers the parallel route starts cannot be run. A
+        reduction small enough to stay on one core cannot fail.
     """
     return _extreme_core[want_min=True](
         values.unsafe_ptr(),
@@ -539,7 +763,9 @@ def group_min[
 
 def group_max[
     dt: DType
-](values: Array[dt], codes: Array[DType.uint32], groups: Int) -> Array[dt]:
+](values: Array[dt], codes: Array[DType.uint32], groups: Int) raises -> Array[
+    dt
+]:
     """Returns the largest non-null value in each group.
 
     Args:
@@ -552,6 +778,10 @@ def group_max[
 
     Returns:
         A column of `groups` maxima, null for any group with no non-null values.
+
+    Raises:
+        If one of the workers the parallel route starts cannot be run. A
+        reduction small enough to stay on one core cannot fail.
     """
     return _extreme_core[want_min=False](
         values.unsafe_ptr(),
@@ -570,7 +800,7 @@ def _extreme_core[
     has_null: Bool,
     codes: Array[DType.uint32],
     groups: Int,
-) -> Array[dt]:
+) raises -> Array[dt]:
     """Reduces each group to its smallest or largest non-null value.
 
     Min and max differ by one comparison, so they share a body on the same terms
@@ -583,26 +813,81 @@ def _extreme_core[
     """
     comptime identity = highest[dt]() if want_min else lowest[dt]()
 
+    var n = len(codes)
+    var workers = _private_workers[dt](n, groups)
+
     var out = Array[dt](groups)
     var best = out.unsafe_ptr()
     out.data.validity.clear_all()
     for g in range(groups):
         best.unsafe_offset(g).unsafe_store(identity)
 
-    var at = codes.unsafe_ptr()
-    for i in range(len(codes)):
-        if has_null and not validity.get(i):
-            continue
-        var g = Int(at.unsafe_offset(i).unsafe_load())
-        var value = source.unsafe_offset(i).unsafe_load()
-        var current = best.unsafe_offset(g).unsafe_load()
-        comptime if want_min:
-            if value < current:
-                best.unsafe_offset(g).unsafe_store(value)
-        else:
-            if value > current:
-                best.unsafe_offset(g).unsafe_store(value)
-        out.data.validity.set(g, True)
+    if workers <= 1:
+        var at = codes.unsafe_ptr()
+        for i in range(n):
+            if has_null and not validity.get(i):
+                continue
+            var g = Int(at.unsafe_offset(i).unsafe_load())
+            var value = source.unsafe_offset(i).unsafe_load()
+            var current = best.unsafe_offset(g).unsafe_load()
+            comptime if want_min:
+                if value < current:
+                    best.unsafe_offset(g).unsafe_store(value)
+            else:
+                if value > current:
+                    best.unsafe_offset(g).unsafe_store(value)
+            out.data.validity.set(g, True)
+    else:
+        var bounds = _row_bounds(n, workers)
+        var partials = Array[dt](groups * workers)
+        var start = partials.unsafe_ptr()
+        for i in range(groups * workers):
+            start.unsafe_offset(i).unsafe_store(identity)
+
+        # Which groups a worker saw is a byte per group rather than a bit,
+        # because a bitmap packs sixty four groups into one word and two workers
+        # owning neighbouring groups would be writing the same word at once. A
+        # byte each is `groups * workers` bytes on top of the tables, which is
+        # an eighth of what the tables themselves cost at eight bytes a value.
+        var seen = Array[DType.uint8](groups * workers)
+
+        def one(w: Int) raises {mut partials, mut seen, imm}:
+            var mine = partials.unsafe_ptr().unsafe_offset(w * groups)
+            var hit = seen.unsafe_ptr().unsafe_offset(w * groups)
+            var at = codes.unsafe_ptr()
+            for i in range(bounds[w], bounds[w + 1]):
+                if has_null and not validity.get(i):
+                    continue
+                var g = Int(at.unsafe_offset(i).unsafe_load())
+                var value = source.unsafe_offset(i).unsafe_load()
+                var current = mine.unsafe_offset(g).unsafe_load()
+                comptime if want_min:
+                    if value < current:
+                        mine.unsafe_offset(g).unsafe_store(value)
+                else:
+                    if value > current:
+                        mine.unsafe_offset(g).unsafe_store(value)
+                hit.unsafe_offset(g).unsafe_store(UInt8(1))
+
+        parallel_for(one, workers)
+
+        var tables = partials.unsafe_ptr()
+        var hits = seen.unsafe_ptr()
+        for w in range(workers):
+            var table = tables.unsafe_offset(w * groups)
+            var hit = hits.unsafe_offset(w * groups)
+            for g in range(groups):
+                if hit.unsafe_offset(g).unsafe_load() == 0:
+                    continue
+                var value = table.unsafe_offset(g).unsafe_load()
+                var current = best.unsafe_offset(g).unsafe_load()
+                comptime if want_min:
+                    if value < current:
+                        best.unsafe_offset(g).unsafe_store(value)
+                else:
+                    if value > current:
+                        best.unsafe_offset(g).unsafe_store(value)
+                out.data.validity.set(g, True)
 
     # A group that was never seen still holds the identity, which is a real value
     # of the dtype and would read as a maximum of negative infinity. Zero it, so
@@ -717,7 +1002,7 @@ def group_var[
     codes: Array[DType.uint32],
     groups: Int,
     ddof: Int = 1,
-) -> Array[DType.float64]:
+) raises -> Array[DType.float64]:
     """Returns the variance of the non-null values in each group.
 
     Args:
@@ -733,6 +1018,10 @@ def group_var[
     Returns:
         A column of `groups` variances. A group with `ddof` or fewer non-null
         values is null, which is the case pandas reports as NaN.
+
+    Raises:
+        If one of the workers the parallel route starts cannot be run. A
+        reduction small enough to stay on one core cannot fail.
     """
     return _var_core[want_std=False](
         values.unsafe_ptr(),
@@ -751,7 +1040,7 @@ def group_std[
     codes: Array[DType.uint32],
     groups: Int,
     ddof: Int = 1,
-) -> Array[DType.float64]:
+) raises -> Array[DType.float64]:
     """Returns the standard deviation of the non-null values in each group.
 
     Args:
@@ -766,6 +1055,10 @@ def group_std[
     Returns:
         A column of `groups` standard deviations, null on the same groups
         `group_var` reports null on.
+
+    Raises:
+        If one of the workers the parallel route starts cannot be run. A
+        reduction small enough to stay on one core cannot fail.
     """
     return _var_core[want_std=True](
         values.unsafe_ptr(),
@@ -786,7 +1079,7 @@ def _var_core[
     codes: Array[DType.uint32],
     groups: Int,
     ddof: Int,
-) -> Array[DType.float64]:
+) raises -> Array[DType.float64]:
     """Sums the squared deviations from each group's own mean.
 
     Two passes rather than one. The single pass version accumulates the sum and
@@ -835,7 +1128,7 @@ def _var_core[
 
 def group_median[
     dt: DType
-](values: Array[dt], codes: Array[DType.uint32], groups: Int) -> Array[
+](values: Array[dt], codes: Array[DType.uint32], groups: Int) raises -> Array[
     DType.float64
 ]:
     """Returns the median of the non-null values in each group.
@@ -852,6 +1145,10 @@ def group_median[
         A column of `groups` medians, null where a group has no non-null values.
         An even count interpolates between the two middle values, so the median
         of a column of integers is a float and can be a half.
+
+    Raises:
+        If one of the workers the parallel route starts cannot be run. A
+        reduction small enough to stay on one core cannot fail.
     """
     return _quantile_core(
         values.unsafe_ptr(),
@@ -903,7 +1200,7 @@ def group_quantile[
 
 def group_nunique[
     dt: DType
-](values: Array[dt], codes: Array[DType.uint32], groups: Int) -> Array[
+](values: Array[dt], codes: Array[DType.uint32], groups: Int) raises -> Array[
     DType.int64
 ]:
     """Counts the distinct non-null values in each group.
@@ -920,6 +1217,10 @@ def group_nunique[
         A column of `groups` counts, every one of them present. A group with no
         non-null values counts zero rather than reporting null, which is what
         pandas does and is the same choice `group_count` makes.
+
+    Raises:
+        If one of the workers the parallel route starts cannot be run. A
+        reduction small enough to stay on one core cannot fail.
     """
     return _nunique_core(
         values.unsafe_ptr(),
@@ -989,7 +1290,7 @@ def _quantile_core[
     codes: Array[DType.uint32],
     groups: Int,
     q: Float64,
-) -> Array[DType.float64]:
+) raises -> Array[DType.float64]:
     """Sorts each group's values and reads the position `q` falls at."""
     var counts = _count_core(validity, has_null, codes, groups)
     var bounds = _slab_bounds(counts, groups)
@@ -1041,7 +1342,7 @@ def _nunique_core[
     has_null: Bool,
     codes: Array[DType.uint32],
     groups: Int,
-) -> Array[DType.int64]:
+) raises -> Array[DType.int64]:
     """Sorts each group's values and counts the runs.
 
     Sorting to count distinct values rather than putting them in a hash set. The
