@@ -12,6 +12,14 @@ string next to a long one, and a column with no nulls at all so the reader has
 to notice the difference. The file is snappy compressed, which is what pyarrow
 writes by default and therefore what most Parquet in the world is.
 
+A Hive partitioned directory is built by the tests that read one, two copies
+of the same file under `year=/month=` directories. Identical files are the point
+rather than a shortcut: everything that tells the two halves of that result apart
+is in the paths and nowhere in the bytes. DuckDB finds a `key=value` directory by
+itself, so the interesting default is the one that turns that off, and the
+partition columns come back after the file's own columns sorted by name rather
+than in the order the path visits them.
+
 There is no test here for a file of several row groups, because DuckDB hands
 back chunks of two thousand rows and a fixture that large cannot be checked in
 as hex. The glob test covers the same code path from the other side: two files
@@ -22,6 +30,7 @@ Without it every one of them fails at the first call with a message saying so,
 which is the intended behaviour and not a broken test.
 """
 
+from std.os import makedirs
 from std.testing import (
     TestSuite,
     assert_equal,
@@ -31,7 +40,7 @@ from std.testing import (
 )
 
 from firepanda.dtype.logical import LogicalType
-from firepanda.io.parquet import quote, read_parquet
+from firepanda.io.parquet import ParquetOptions, quote, read_parquet
 
 comptime SINGLE = "/tmp/firepanda_parquet_one.parquet"
 """Where the fixture is written for the tests that read one file."""
@@ -44,6 +53,12 @@ comptime SECOND = "/tmp/firepanda_parquet_glob_b.parquet"
 
 comptime PATTERN = "/tmp/firepanda_parquet_glob_*.parquet"
 """What matches both of them and nothing else."""
+
+comptime HIVE = "/tmp/firepanda_parquet_hive"
+"""The root of the partitioned directory the dataset tests read."""
+
+comptime HIVE_GLOB = "/tmp/firepanda_parquet_hive/*/*/*.parquet"
+"""What matches every file under it, which is what a scan is pointed at."""
 
 
 def _nibble(byte: UInt8) raises -> Int:
@@ -162,6 +177,100 @@ def test_naming_columns_reads_only_those_and_in_that_order() raises:
     assert_equal(frame.names()[1], "id")
     assert_equal(frame[0].strings()[0], "a")
     assert_equal(frame[1].as_typed[DType.int64]()[5], Int64(6))
+
+
+def _put_hive() raises:
+    """Writes the fixture twice into a `year=/month=` tree.
+
+    The two files are identical, which is the point: everything that tells the
+    two halves of the result apart is in the paths and nowhere in the bytes, so a
+    test that reads the partition columns back cannot be passing by accident.
+
+    Raises:
+        Error: If the directories or the files cannot be written.
+    """
+    makedirs(String(HIVE, "/year=2024/month=3"), exist_ok=True)
+    makedirs(String(HIVE, "/year=2025/month=7"), exist_ok=True)
+    _put(String(HIVE, "/year=2024/month=3/part.parquet"))
+    _put(String(HIVE, "/year=2025/month=7/part.parquet"))
+
+
+def test_a_partitioned_directory_reads_its_directories_as_columns() raises:
+    # The two files are the same six rows, so year and month are the only thing
+    # that distinguishes the first half of this frame from the second, and
+    # neither of them is in either file.
+    _put_hive()
+    var options = ParquetOptions()
+    var frame = read_parquet(HIVE_GLOB, options)
+    assert_equal(len(frame), 12)
+    assert_equal(frame.width(), 7)
+    # After the file's own columns and sorted by name, not in path order.
+    assert_equal(frame.names()[5], "month")
+    assert_equal(frame.names()[6], "year")
+    var months = frame[5].as_typed[DType.int64]()
+    var years = frame[6].as_typed[DType.int64]()
+    assert_equal(years[0], Int64(2024))
+    assert_equal(months[0], Int64(3))
+    assert_equal(years[11], Int64(2025))
+    assert_equal(months[11], Int64(7))
+    assert_equal(frame[6].null_count(), 0)
+
+
+def test_turning_the_partitioning_off_leaves_just_the_files() raises:
+    # Off has to be sayable, because a directory with an equals sign in its name
+    # that does not mean anything by it is a real thing and DuckDB reads one as
+    # partitions unless it is told not to.
+    _put_hive()
+    var options = ParquetOptions()
+    options.hive_partitioning = False
+    var frame = read_parquet(HIVE_GLOB, options)
+    assert_equal(len(frame), 12)
+    assert_equal(frame.width(), 5)
+
+
+def test_a_partition_column_can_be_projected_like_any_other() raises:
+    # Naming year alongside a real column is the case where the projection and
+    # the partitioning have to agree with each other, because one of the two
+    # names is in the file and the other one is in the path.
+    _put_hive()
+    var options = ParquetOptions()
+    options.columns = ["year", "id"]
+    var frame = read_parquet(HIVE_GLOB, options)
+    assert_equal(frame.width(), 2)
+    assert_equal(len(frame), 12)
+    assert_equal(frame.names()[0], "year")
+    assert_equal(frame.names()[1], "id")
+    assert_equal(frame[0].as_typed[DType.int64]()[0], Int64(2024))
+    assert_equal(frame[1].as_typed[DType.int64]()[0], Int64(1))
+
+
+def test_asking_where_a_row_came_from_adds_a_filename_column() raises:
+    _put_hive()
+    var options = ParquetOptions()
+    options.hive_partitioning = False
+    options.filename = True
+    var frame = read_parquet(HIVE_GLOB, options)
+    assert_equal(frame.width(), 6)
+    assert_equal(frame.names()[5], "filename")
+    assert_true("year=2024" in frame[5].strings()[0])
+    assert_true("year=2025" in frame[5].strings()[11])
+
+
+def test_every_option_at_once_is_still_one_query() raises:
+    # Each setting is a clause in the same table function call, so the one thing
+    # that can go wrong with all three on is the punctuation between them.
+    # Unioning by name over files that already agree is a no op by design, and
+    # here it is checking that asking for it does not break anything.
+    _put_hive()
+    var options = ParquetOptions()
+    options.union_by_name = True
+    options.filename = True
+    var frame = read_parquet(HIVE_GLOB, options)
+    assert_equal(len(frame), 12)
+    assert_equal(frame.width(), 8)
+    assert_equal(frame.names()[5], "filename")
+    assert_equal(frame.names()[6], "month")
+    assert_equal(frame.names()[7], "year")
 
 
 def test_a_glob_of_two_files_reads_as_one_frame() raises:

@@ -23,6 +23,14 @@ something needs them; what a caller wants from here is `read_arrow` and
 `mapped.mojo` is how a file on disk becomes bytes in the first place. It maps
 the file instead of copying it, which is worth a paragraph of libc and four
 constants because the copy was the largest single part of a read.
+
+`parquet.mojo`, `duckdb.mojo` and `duckvector.mojo` are the Parquet side, and
+the shape is different from the rest of this directory because Parquet is
+decoded by DuckDB rather than by us. The last two are a binding and a buffer
+reader that nothing outside should need; what a caller wants from here is
+`read_parquet`, which takes a path, or a path and the columns to read, or a path
+and a `ParquetOptions` when the path is a partitioned directory rather than a
+file.
 """
 
 from .arrow_ipc import (
@@ -39,6 +47,7 @@ from .arrow_ipc_write import (
     write_ipc_stream_bytes,
 )
 from .mapped import MappedFile, map_file
+from .parquet import ParquetOptions, quote, read_parquet
 from .parse import (
     Parsed,
     is_missing,
