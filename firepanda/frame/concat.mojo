@@ -29,7 +29,12 @@ waits until there is something to align on.
 
 from firepanda.array.any import AnyArray
 from firepanda.dtype.schema import Field, Schema
-from firepanda.kernel.concat import concat_any, concat_two_any
+from firepanda.kernel.concat import (
+    column_ref,
+    concat_any,
+    concat_refs_any,
+    concat_two_any,
+)
 
 from .frame import DataFrame
 from .series import Series
@@ -90,18 +95,22 @@ def concat(frames: List[DataFrame]) raises -> DataFrame:
     var columns = List[AnyArray](capacity=len(names))
     for c in range(len(names)):
         if len(frames) == 2:
-            # The common call, and the one worth a branch. Handing the kernel a
-            # `List[AnyArray]` means owning the parts, which for columns this
-            # function only borrows means deep copying every one of them before
-            # the copy that concat itself does. Two arguments borrow.
+            # The common call, and the one worth a branch: two arguments say
+            # what they mean and skip building a list at all.
             columns.append(
                 concat_two_any(frames[0][at[0][c]], frames[1][at[1][c]])
             )
             continue
-        var parts = List[AnyArray](capacity=len(frames))
+        # References rather than columns. This function only borrows its
+        # frames, so a `List[AnyArray]` would mean deep copying every part
+        # before the copy the concat itself does, which is the whole cost of
+        # the operation paid twice.
+        var parts = List[Pointer[AnyArray, ImmUntrackedOrigin]](
+            capacity=len(frames)
+        )
         for f in range(len(frames)):
-            parts.append(AnyArray(copy=frames[f][at[f][c]]))
-        columns.append(concat_any(parts))
+            parts.append(column_ref(frames[f][at[f][c]]))
+        columns.append(concat_refs_any(parts))
 
     var fields = List[Field](capacity=len(names))
     for c in range(len(names)):
@@ -127,7 +136,9 @@ def concat_series(parts: List[Series]) raises -> Series:
     if len(parts) == 0:
         raise Error("concat: at least one series is required")
 
-    var columns = List[AnyArray](capacity=len(parts))
+    var columns = List[Pointer[AnyArray, ImmUntrackedOrigin]](
+        capacity=len(parts)
+    )
     for p in range(len(parts)):
-        columns.append(AnyArray(copy=parts[p].values))
-    return Series(parts[0].name, concat_any(columns))
+        columns.append(column_ref(parts[p].values))
+    return Series(parts[0].name, concat_refs_any(columns))
