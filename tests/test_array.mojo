@@ -8,6 +8,7 @@ copying them is the whole reason `ColumnData` exists.
 """
 
 from std.builtin.rebind import rebind
+from std.sys.info import size_of
 from std.testing import (
     TestSuite,
     assert_equal,
@@ -18,6 +19,7 @@ from std.testing import (
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array, from_list
+from firepanda.array.data import ColumnData
 from firepanda.array.chunked import ChunkedArray
 from firepanda.dtype.lists import ALL, NUMERIC
 from firepanda.dtype.logical import LogicalType, logical_for
@@ -220,6 +222,46 @@ def test_empty_chunked_column() raises:
     assert_equal(len(column), 0)
     assert_equal(column.num_chunks(), 0)
     assert_equal(column.null_count(), 0)
+
+
+def test_a_typed_array_has_the_layout_of_the_storage_it_holds() raises:
+    """The assumption `AnyArray.as_typed_view` reinterprets a pointer under.
+
+    A struct of one field has that field's layout, so a pointer to a
+    `ColumnData` is a pointer to an `Array` over it. That is true today and
+    nothing in the language promises it stays true if `Array` gains a second
+    field, so it is asserted here rather than left to be discovered by a group
+    by reading the wrong bytes.
+    """
+    assert_equal(size_of[Array[DType.int64]](), size_of[ColumnData]())
+    assert_equal(size_of[Array[DType.uint8]](), size_of[ColumnData]())
+    assert_equal(size_of[Array[DType.float64]](), size_of[ColumnData]())
+
+
+def test_a_typed_view_reads_the_column_without_copying_it() raises:
+    var typed = Array[DType.int64](4)
+    for i in range(4):
+        typed[i] = Int64(i * 7)
+    typed.set_null(2)
+
+    var column = AnyArray(typed^)
+    ref view = column.as_typed_view[DType.int64]()
+
+    assert_equal(len(view), 4)
+    assert_equal(view[0], Int64(0))
+    assert_equal(view[3], Int64(21))
+    assert_false(view.is_valid(2))
+    assert_equal(view.null_count(), 1)
+    # The point of the view is that it is the column's own storage and not a
+    # copy of it, which is one pointer comparison to establish.
+    assert_true(view.unsafe_ptr() == column.unsafe_ptr[DType.int64]())
+
+
+def test_a_typed_view_refuses_the_wrong_dtype() raises:
+    var typed = Array[DType.int64](2)
+    var column = AnyArray(typed^)
+    with assert_raises(contains="dtype mismatch"):
+        ref view = column.as_typed_view[DType.float64]()
 
 
 def main() raises:

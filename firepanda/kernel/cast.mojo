@@ -266,7 +266,8 @@ def cast_any(
             return AnyArray(StringArray(copy=col.strings()))
         comptime for source in ALL:
             if col.dtype() == source:
-                return AnyArray(cast_to_strings(col.as_typed[source]()))
+                ref view = col.as_typed_view[source]()
+                return AnyArray(cast_to_strings(view))
         raise Error("cast: unsupported source dtype")
     if to.kind == TypeKind.NULL:
         raise Error("cast: nothing converts to the null type")

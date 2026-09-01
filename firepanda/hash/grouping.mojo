@@ -350,11 +350,11 @@ struct KeyCodes(Movable):
 def _factorize_any(col: AnyArray) raises -> KeyCodes:
     """Factorizes a column whose dtype is a runtime value.
 
-    The typed copy this takes is the one avoidable cost in the whole group by and
-    it is here because `factorize` reduces the column with `min_of` and `max_of`
-    to decide whether it can skip hashing, and those take an `Array` rather than a
-    pointer. Rewriting that path to pointer form is worth doing and is not worth
-    doing in the change that introduces group by.
+    This used to make a typed copy of the whole column, because `factorize` takes
+    an `Array[dt]` and a borrowed `AnyArray` had no way to produce one without
+    copying. On a forty megabyte key column that was about a third of the
+    ordinals, and a group by on six keys paid it six times. It reads through
+    `as_typed_view` now, which borrows.
 
     Args:
         col: The key column.
@@ -392,7 +392,8 @@ def _factorize_any(col: AnyArray) raises -> KeyCodes:
             # it, so `firsts` is what one thread would have picked and is already
             # in ordinal order. Nulls are the exception again: they take ordinal
             # zero wherever their first one is, and `firsts` does not cover them.
-            var found = factorize(col.as_typed[candidate]())
+            ref view = col.as_typed_view[candidate]()
+            var found = factorize(view)
             var groups = found.count()
             if found.null_group >= 0:
                 return KeyCodes(found^.into_codes(), groups, List[Int]())

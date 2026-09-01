@@ -205,9 +205,15 @@ def align_keys(
             comptime for candidate in ALL:
                 if left.dtype() == candidate:
                     var codes = Array[DType.uint32](left_rows + right_rows)
+                    # Views and not copies. A join key column is as large as the
+                    # side it belongs to, and copying both of them before
+                    # looking at either was the same waste a group by used to
+                    # pay on every key.
+                    ref left_view = left.as_typed_view[candidate]()
+                    ref right_view = right.as_typed_view[candidate]()
                     var groups = _probe_route[candidate](
-                        left.as_typed[candidate](),
-                        right.as_typed[candidate](),
+                        left_view,
+                        right_view,
                         left_rows,
                         codes,
                     )

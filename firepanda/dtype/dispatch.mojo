@@ -64,12 +64,14 @@ def dispatch_typed[
     //,
     list: List[DType],
 ](col: AnyArray, operation: op) raises -> R:
-    """Calls an operation with a typed copy of the column.
+    """Calls an operation with a typed reference to the column.
 
     Use this when the operation wants an `Array[dt]` rather than the erased
-    column. It costs a deep copy of the buffers, so kernels on the hot path take
-    the erased column and read through `unsafe_ptr` after dispatch has already
-    proved the dtype.
+    column. It used to hand over a deep copy of the buffers, which made this the
+    expensive dispatch and the reason kernels on the hot path take the erased
+    column and read through `unsafe_ptr` instead. It borrows now, through
+    `AnyArray.as_typed_view`, so the operation reads the column's own storage
+    and may only read it.
 
     Args:
         col: The type-erased column.
@@ -88,7 +90,8 @@ def dispatch_typed[
     """
     comptime for candidate in list:
         if col.dtype() == candidate:
-            return operation[candidate](col.as_typed[candidate]())
+            ref view = col.as_typed_view[candidate]()
+            return operation[candidate](view)
     raise Error(
         "unsupported dtype "
         + String(col.dtype())
