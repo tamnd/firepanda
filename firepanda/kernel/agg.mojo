@@ -17,6 +17,14 @@ one of the first two, and the third is only ever paid for on the boundary.
 
 `count_of` is a popcount and does not look at the values at all.
 
+Every reduction comes in two spellings. The `_of` one takes a typed column and
+is what a caller with an `Array[dt]` in hand wants. The `_over` one takes the
+values pointer, the validity and the row count, and is what a caller holding an
+`AnyArray` wants, because turning one of those into an `Array[dt]` copies the
+whole column and the reduction was supposed to be one pass over it. `reduce.mojo`
+is the caller that needed the second spelling. The loop lives in the `_over` one
+and the `_of` one is three lines that unpack the column.
+
 Every function here has a twin in `scalar.mojo` and the fuzz harness runs them
 against each other. See the note on the null-is-zero invariant in `__init__.mojo`.
 """
@@ -24,6 +32,7 @@ against each other. See the note on the null-is-zero invariant in `__init__.mojo
 from std.sys.info import simd_width_of
 
 from firepanda.array.array import Array
+from firepanda.bitmap.bitmap import Bitmap
 
 from .accum import accumulator, highest, lowest
 
@@ -100,11 +109,29 @@ def sum_of[dt: DType](col: Array[dt]) -> AggResult[accumulator(dt)]:
     Returns:
         The total, widened to int64, uint64 or float64.
     """
+    return sum_over(col.unsafe_ptr(), len(col))
+
+
+def sum_over[
+    dt: DType, //, origin: ImmOrigin
+](source: Pointer[Scalar[dt], origin], n: Int) -> AggResult[accumulator(dt)]:
+    """Adds up `n` values, nulls included, because a null holds a zero.
+
+    Args:
+        source: The values.
+        n: How many of them.
+
+    Parameters:
+        dt: The value dtype.
+        origin: Where the values live.
+
+    Returns:
+        The total, widened to int64, uint64 or float64.
+    """
     comptime acc = accumulator(dt)
     comptime width = simd_width_of[dt]()
 
-    var ptr = col.unsafe_ptr()
-    var n = len(col)
+    var ptr = source
     var lanes = SIMD[acc, width](0)
     var i = 0
     while i + width <= n:
@@ -130,7 +157,9 @@ def min_of[dt: DType](col: Array[dt]) -> AggResult[dt]:
     Returns:
         The minimum, or an invalid result if every value is null.
     """
-    return _extreme[dt, want_min=True](col)
+    return extreme_over[want_min=True](
+        col.unsafe_ptr(), col.data.validity, len(col)
+    )
 
 
 def max_of[dt: DType](col: Array[dt]) -> AggResult[dt]:
@@ -145,21 +174,30 @@ def max_of[dt: DType](col: Array[dt]) -> AggResult[dt]:
     Returns:
         The maximum, or an invalid result if every value is null.
     """
-    return _extreme[dt, want_min=False](col)
+    return extreme_over[want_min=False](
+        col.unsafe_ptr(), col.data.validity, len(col)
+    )
 
 
-def _extreme[dt: DType, want_min: Bool](col: Array[dt]) -> AggResult[dt]:
-    """Reduces a column to its smallest or largest non-null value.
+def extreme_over[
+    dt: DType, //, origin: ImmOrigin, want_min: Bool
+](source: Pointer[Scalar[dt], origin], validity: Bitmap, n: Int) -> AggResult[
+    dt
+]:
+    """Reduces `n` values to the smallest or largest non-null one.
 
     Min and max differ by one comparison and nothing else, so they share a body
     parameterized on which one it is. `want_min` is a parameter rather than an
     argument so the branch is gone before the loop exists.
 
     Args:
-        col: The column.
+        source: The values.
+        validity: Which of them are present.
+        n: How many of them.
 
     Parameters:
-        dt: The column's dtype.
+        dt: The value dtype.
+        origin: Where the values live.
         want_min: True for a minimum, False for a maximum.
 
     Returns:
@@ -168,17 +206,16 @@ def _extreme[dt: DType, want_min: Bool](col: Array[dt]) -> AggResult[dt]:
     comptime width = simd_width_of[dt]()
     comptime identity = highest[dt]() if want_min else lowest[dt]()
 
-    var ptr = col.unsafe_ptr()
-    var n = len(col)
+    var ptr = source
     var best = identity
     var seen = False
 
-    # The bitmap is read through the column rather than bound to a local. A local
-    # would be a copy, and `Bitmap` owns an allocation, so binding it here would
-    # allocate and memcpy the whole validity of the column before the loop that
-    # is supposed to be reading it cheaply had started.
-    for w in range(col.data.validity.word_count()):
-        var word = col.data.validity.unsafe_word(w)
+    # The bitmap is read through the argument rather than bound to a local. A
+    # local would be a copy, and `Bitmap` owns an allocation, so binding it here
+    # would allocate and memcpy the whole validity of the column before the loop
+    # that is supposed to be reading it cheaply had started.
+    for w in range(validity.word_count()):
+        var word = validity.unsafe_word(w)
         if word == 0:
             continue
 
@@ -260,10 +297,36 @@ def mean_of[dt: DType](col: Array[dt]) -> AggResult[DType.float64]:
     Returns:
         The mean, or an invalid result if every value is null.
     """
-    var present = count_of(col)
+    return mean_over(col.unsafe_ptr(), col.data.validity.count_ones(), len(col))
+
+
+def mean_over[
+    dt: DType, //, origin: ImmOrigin
+](source: Pointer[Scalar[dt], origin], present: Int, n: Int) -> AggResult[
+    DType.float64
+]:
+    """Returns the mean of the values that are present.
+
+    The count comes in as an argument rather than being derived here, because
+    every caller already knows it. A frame knows its null count and a grouped
+    reduction has just counted, so recomputing a popcount over the whole bitmap
+    would be a second pass bought for nothing.
+
+    Args:
+        source: The values.
+        present: How many of them are not null.
+        n: How many there are in total.
+
+    Parameters:
+        dt: The value dtype.
+        origin: Where the values live.
+
+    Returns:
+        The mean, or an invalid result if every value is null.
+    """
     if present == 0:
         return AggResult[DType.float64].none()
-    var total = sum_of(col)
+    var total = sum_over(source, n)
     return AggResult[DType.float64](
         Float64(total.value) / Float64(present), True
     )

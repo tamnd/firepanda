@@ -27,9 +27,15 @@ firepanda/
 
   kernel/                  every kernel, comptime parameterized over DType
     __init__.mojo
-    compare.mojo  filter.mojo  aggregate.mojo  arith.mojo
-    string.mojo   regex.mojo   sort.mojo       cast.mojo
-    scalar/                the twins, @no_inline, never called in production
+    compare.mojo  select.mojo  agg.mojo        arith.mojo
+    accum.mojo    group.mojo   reduce.mojo     concat.mojo
+    mask.mojo     nulls.mojo   sort.mojo       cast.mojo
+    string.mojo   regex.mojo                                              M6
+    scalar.mojo            the twins, @no_inline, never called in production
+
+  join/                    which rows pair with which, and nothing about schemas
+    keys.mojo              putting both sides' keys in one space of ordinals
+    pairs.mojo             the buckets, the counting pass and the emit
 
   frame/                   DataFrame, Series, the eager surface
   expr/                    Expr, the node types, the builders
