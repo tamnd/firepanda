@@ -46,8 +46,10 @@ fast one is wrong.
 from .factorize import (
     CHUNK_ROWS,
     DIRECT_LIMIT,
+    DirectPlan,
     Factorized,
     FactorizedStrings,
+    direct_plan,
     factorize,
     factorize_dense,
     factorize_strings,

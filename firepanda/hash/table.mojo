@@ -468,6 +468,87 @@ struct HashTable(Movable, Sized):
         self._half = half
         self._mark = mark
 
+    def probe(
+        self,
+        hashes: Buffer,
+        validity: Bitmap,
+        has_null: Bool,
+        base: Int,
+        count: Int,
+        out_at: Int,
+        miss: UInt32,
+        mut codes: Array[DType.uint32],
+    ):
+        """Looks a chunk of a column's keys up without inserting any of them.
+
+        `build`'s read only twin, and the reason it exists is the join. A join
+        does not want both sides in one table. It wants the smaller side's keys
+        in a table and then one question asked of that table per row of the
+        larger side, and the answer to a question a table has never seen is "not
+        here" rather than a new group.
+
+        Being read only takes out more than the insert. There is no growth
+        check, no sizing schedule and no `firsts` to append to, so the loop is a
+        load, a compare and a branch, and every worker can run it against the
+        same table at once because none of them writes to it.
+
+        Chunked for the reason `build` is chunked: the caller hashes a few
+        thousand rows into a small buffer and probes them while they are still in
+        cache. The prefetch is the same one and pays for the same reason, which
+        is a table larger than the cache and an address that is known eight rows
+        early.
+
+        Args:
+            hashes: Hashes for this chunk, indexed from zero, from `hash_chunk`.
+                Hashed with this table's seed, or nothing matches.
+            validity: The probe column's validity bitmap, indexed by absolute
+                row. Read only when `has_null`.
+            has_null: Whether the probe column has any nulls at all.
+            base: The absolute row index this chunk starts at.
+            count: How many rows are in this chunk.
+            out_at: Added to the row index to get where in `codes` it goes. A
+                join writes both sides into one list, so the side that is not
+                first starts partway along it, and `build` cannot do the same
+                because its row index is also its index into the validity bitmap.
+            miss: The ordinal written for a row whose key is not in the table,
+                and for a null row. A caller reserves one past the last real
+                ordinal for it, so that a miss reads as a group nothing was ever
+                put into rather than as a value needing a branch.
+            codes: Where the per-row ordinals go, indexed by absolute row.
+        """
+        var hash = hashes.bitcast[DType.uint64]()
+        var out = codes.unsafe_ptr()
+        var slots = self._slots.bitcast[DType.uint64]()
+        var mask = self._mask
+
+        for j in range(count):
+            var i = base + j
+            var to = out_at + i
+            if has_null and not validity.get(i):
+                out.unsafe_offset(to).unsafe_write(miss)
+                continue
+
+            if j + PROBE_LOOKAHEAD < count:
+                var ahead = (
+                    hash.unsafe_offset(j + PROBE_LOOKAHEAD).unsafe_load() & mask
+                )
+                prefetch[PrefetchOptions().for_read().high_locality()](
+                    slots.unsafe_offset(Int(ahead) * SLOT_WORDS)
+                )
+
+            var wanted = hash.unsafe_offset(j).unsafe_load()
+            var at = wanted & mask
+            while True:
+                var slot = Int(at) * SLOT_WORDS
+                var ordinal = slots.unsafe_offset(slot + 1).unsafe_load()
+                if ordinal == 0:
+                    out.unsafe_offset(to).unsafe_write(miss)
+                    break
+                if slots.unsafe_offset(slot).unsafe_load() == wanted:
+                    out.unsafe_offset(to).unsafe_write(UInt32(Int(ordinal) - 1))
+                    break
+                at = (at + 1) & mask
+
     def build_strings(
         mut self,
         hashes: Buffer,

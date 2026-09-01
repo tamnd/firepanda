@@ -311,7 +311,7 @@ def factorize[
         nulls got.
     """
     comptime if dt.is_integral():
-        var plan = _direct_plan[dt](col)
+        var plan = direct_plan[dt](col, min(DIRECT_LIMIT, len(col)))
         if plan.span >= 0:
             return _factorize_direct[dt](col, plan.span, plan.base)
     return _factorize_hashed[dt](col, seed)
@@ -369,7 +369,7 @@ struct DirectPlan[dt: DType](Copyable, Movable):
     """The value that indexes slot zero, which is the column's minimum."""
 
 
-def _direct_plan[dt: DType](col: Array[dt]) -> DirectPlan[dt]:
+def direct_plan[dt: DType](col: Array[dt], ceiling: Int) -> DirectPlan[dt]:
     """Decides whether the direct route applies, in one pass that can stop early.
 
     This used to be a `min_of` and a `max_of` and then a test on the two answers,
@@ -384,8 +384,17 @@ def _direct_plan[dt: DType](col: Array[dt]) -> DirectPlan[dt]:
     change the answer and the scan returns. On a ten million row column of
     scattered keys that is eight milliseconds down to under one.
 
+    The widest span worth a table is the caller's to say, because it depends on
+    what the table is for. A factorize wants it small: a span far past the row
+    count is a table mostly full of holes, and the random access into it is the
+    one the hash was going to be anyway with worse density. A join's build side
+    wants it as wide as the build side is tall, because there the table replaces
+    a hash table of the same order and the alternative is hashing every probe
+    row. So the number comes in rather than being decided here.
+
     Args:
         col: The column.
+        ceiling: The widest span to accept. A wider one returns the hash plan.
 
     Parameters:
         dt: The column's dtype, which the caller has already established is
@@ -400,7 +409,6 @@ def _direct_plan[dt: DType](col: Array[dt]) -> DirectPlan[dt]:
 
     comptime width = simd_width_of[dt]()
     comptime safe = Scalar[dt](1 << SAFE_RANGE_BITS)
-    var ceiling = DIRECT_LIMIT if DIRECT_LIMIT < n else n
 
     var ptr = col.unsafe_ptr()
     var low = highest[dt]()
@@ -476,7 +484,7 @@ def _factorize_direct[
 
     Args:
         col: The column.
-        span: The table width, from `_direct_plan`.
+        span: The table width, from `direct_plan`.
         base: The value that indexes slot zero, which is the column's minimum.
 
     Parameters:
