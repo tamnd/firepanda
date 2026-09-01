@@ -23,6 +23,7 @@ and that an output name collision is refused rather than silently taking the las
 one.
 """
 
+from std.math import sqrt
 from std.testing import (
     TestSuite,
     assert_almost_equal,
@@ -1325,6 +1326,134 @@ def test_three_keys_past_the_morsel_size_pack_the_same_as_one_loop() raises:
             break
         used[code] = True
     assert_equal(twice, -1, String("two tuples share an ordinal at ", twice))
+
+
+def test_the_spread_reductions_past_the_threshold_agree_with_a_serial_loop() raises:
+    # The variance, the correlation and the quantiles were the three reductions
+    # still running on one core, and each of them now splits differently. The
+    # first two build a private table per worker and merge them afterwards. The
+    # third cuts the group range into pieces and lets each piece sort its own
+    # groups' runs of the slab, which needs the cut to fall on a byte of the
+    # output validity so that two workers clearing presence bits do not clear
+    # each other's.
+    #
+    # Nine hundred and seventy seven groups, prime and one past a multiple of
+    # eight, so the pieces do not line up with the row split either. Every
+    # eleventh row is null, and every group whose ordinal is a multiple of a
+    # hundred and thirty is null in all of its rows, which puts an empty group
+    # in several pieces and makes their writers clear a bit in a byte a
+    # neighbouring group also lives in.
+    comptime ROWS = PRIVATE_ROWS + 10_000
+    comptime GROUPS = 977
+
+    var x = Array[DType.float64](ROWS)
+    var y = Array[DType.float64](ROWS)
+    var codes = Array[DType.uint32](ROWS)
+    for i in range(ROWS):
+        x[i] = Float64((i * 37) % 7919) - 3000.0
+        y[i] = Float64((i * 91) % 6053) - 2000.0
+        codes[i] = UInt32(i % GROUPS)
+    for i in range(0, ROWS, 11):
+        x.set_null(i)
+    for i in range(ROWS):
+        if Int(codes[i]) % 130 == 0:
+            x.set_null(i)
+
+    var held = List[List[Float64]]()
+    var beside = List[List[Float64]]()
+    for _ in range(GROUPS):
+        held.append(List[Float64]())
+        beside.append(List[Float64]())
+    for i in range(ROWS):
+        if not x.data.validity.get(i):
+            continue
+        var g = Int(codes[i])
+        held[g].append(x[i])
+        beside[g].append(y[i])
+
+    var median = group_median(x, codes, GROUPS)
+    var deviation = group_std(x, codes, GROUPS)
+    var distinct = group_nunique(x, codes, GROUPS)
+    var correlation = group_corr(x, y, codes, GROUPS)
+
+    for g in range(GROUPS):
+        var n = len(held[g])
+        if n == 0:
+            assert_false(
+                median.data.validity.get(g),
+                String("group ", g, " has a median"),
+            )
+            assert_false(
+                deviation.data.validity.get(g),
+                String("group ", g, " has a deviation"),
+            )
+            assert_false(
+                correlation.data.validity.get(g),
+                String("group ", g, " has a correlation"),
+            )
+            assert_equal(distinct[g], 0, String("group ", g, " counted values"))
+            continue
+
+        var sorted = held[g].copy()
+        for a in range(n):
+            for b in range(a + 1, n):
+                if sorted[b] < sorted[a]:
+                    var swap = sorted[a]
+                    sorted[a] = sorted[b]
+                    sorted[b] = swap
+
+        var position = 0.5 * Float64(n - 1)
+        var lower = Int(position)
+        var upper = lower + 1 if lower + 1 < n else lower
+        assert_almost_equal(
+            median[g],
+            sorted[lower]
+            + (sorted[upper] - sorted[lower]) * (position - Float64(lower)),
+            atol=1e-9,
+            msg=String("median of group ", g),
+        )
+
+        var runs = 1
+        for a in range(1, n):
+            if sorted[a] != sorted[a - 1]:
+                runs += 1
+        assert_equal(distinct[g], Int64(runs), String("nunique of group ", g))
+
+        var mx = 0.0
+        var my = 0.0
+        for a in range(n):
+            mx += held[g][a]
+            my += beside[g][a]
+        mx /= Float64(n)
+        my /= Float64(n)
+
+        var sxy = 0.0
+        var sxx = 0.0
+        var syy = 0.0
+        for a in range(n):
+            var da = held[g][a] - mx
+            var db = beside[g][a] - my
+            sxy += da * db
+            sxx += da * da
+            syy += db * db
+
+        # Every group here holds several dozen rows that vary, so the degenerate
+        # answers are asserted as unreachable rather than skipped over. A build
+        # that made one of these groups a singleton would be testing nothing.
+        assert_true(n >= 2, String("group ", g, " holds one row"))
+        assert_true(sxx * syy > 0.0, String("group ", g, " does not vary"))
+        assert_almost_equal(
+            deviation[g],
+            sqrt(sxx / Float64(n - 1)),
+            rtol=1e-9,
+            msg=String("deviation of group ", g),
+        )
+        assert_almost_equal(
+            correlation[g],
+            sxy / sqrt(sxx * syy),
+            atol=1e-9,
+            msg=String("correlation of group ", g),
+        )
 
 
 def main() raises:
