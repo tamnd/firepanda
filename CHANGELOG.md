@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.27] - 2026-09-01
+
+Built against Mojo 1.0.0 (ed45d567).
+
+firepanda reads Parquet. `read_parquet` takes a path, or a path and a list of column names, and the path goes to DuckDB verbatim, so a glob, a directory of Hive partitions and an `s3://` URL are all just paths and none of them needed code here. Naming columns pushes the projection into the scan rather than reading everything and dropping, so a file of forty columns read for two costs two columns of decompression.
+
+The library is DuckDB and not Arrow C++, which is what the spec said, and the spec has been changed to match. Arrow C++ exports no unmangled C symbols, so there is nothing for `dlsym` to find and nothing an `abi("C")` function type can describe. The dependency is soft: the library is dlopened on first use and a machine without it is a machine where `read_parquet` raises and nothing else in firepanda changes.
+
+The honest number is that a read of ten million rows takes 292 ms against Polars' 32 ms, which is parity with the library we are calling and a long way from the 2x of Polars M2 asks for. The phase timing says the DuckDB scan is 83 ms of that and the per chunk Arrow conversion is most of the rest, and the conversion buys nothing because a DuckDB data chunk is already columnar. That is the next change.
+
+Also in this release, the code that builds one frame out of many Arrow arrays moved out of the IPC reader, because a Parquet reader has row groups and a query result has result chunks and all three want the same thing done with them.
+
 ### Added
 
 - `read_parquet` in `firepanda/io/parquet.mojo`, in two forms: a path, and a path with a list of column names. The path goes to DuckDB verbatim, so a glob, a directory of Hive partitions and an `s3://` URL are all just paths and none of them needed code here. Naming columns is a projection rather than a read followed by a drop, so a file of forty columns read for two costs two columns of decompression, and the order asked for is the order that comes back.
