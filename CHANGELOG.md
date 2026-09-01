@@ -8,6 +8,26 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.24] - 2026-09-01
+
+Built against Mojo 1.0.0 (ed45d567).
+
+This release is the Arrow C Data Interface, declared, exported and imported, plus the first two reductions that read a pair of columns.
+
+The interface is what makes every later gap survivable, which is why it comes this early. Anything firepanda cannot read yet, something else can read and hand over, and anything firepanda cannot write yet can be handed to something that can. It landed in three pieces on purpose. The declarations went in on their own with the layout pinned by tests, because a mistake at that layer is invisible until it surfaces as a wrong pointer read inside somebody else's process. Then the export, then the import.
+
+The export copies nothing for any type except bool. That was expected for fixed width columns and was not expected for strings. A firepanda string column turns out to be Arrow's view layout byte for byte, which is a coincidence rather than a plan, since the layout was chosen for short string inlining and prefix comparison. The tests read the actual bytes rather than trusting it, because the payload of a text column is usually the largest buffer in a frame and it is the one case where a copy would really cost. Bool is packed on the way out, a byte per value to a bit per value, and there is no way around that one.
+
+The import copies, and that is structural rather than something left for later. Three separate reasons force it and any one would be enough. Our buffers are 64 byte aligned and padded to whole blocks so a kernel can read past the last value it cares about, and Arrow promises neither. An Arrow array carries a row offset, so what arrives is often a slice of somebody else's column. And a foreign view column may spread its long elements over any number of data buffers where ours has exactly one. The practical consequence is that the pointer identity property holds in the export direction only, which is worth knowing before someone goes looking for it in the other one.
+
+The import also accepts the offset based string formats that the export side refuses, which is not an inconsistency. pyarrow emits `u` unless it is asked for views, so a reader that took only `vu` would be a reader that works with almost nothing.
+
+Both string paths are two passes rather than a builder, because every length is known before the first byte is read and that is exactly what a builder cannot assume. A builder doubles its payload as it grows and then copies every view again on the way out. Measured over a million elements on an i9-13900K, the two pass reader spends 3.58 ns an element against the 14.36 ns per element that `strings/build_long` spends going through the builder. A producer with one data buffer and no row offset has handed over a column already shaped like ours, and that case reduces to two memcpys at 3.50 ns an element against 7.07 for the same column split over two data buffers. Fixed width imports at 0.23 ns a row, where two thirds of the time is the allocation rather than the copy.
+
+Every view is checked against the length of the buffer it names before anything is read, including on the fast path. A view is three numbers a stranger chose, and following one unchecked is an out of bounds read waiting for a malformed file.
+
+`CORR` and `COV` are the other half of the release. They are the first aggregations that read two columns instead of one, so `AggSpec` grew a second column name, and a correlation is now a spec like any other: asking for one alongside three sums over the same keys groups the rows once. Both centre their inputs on pairwise means, so a row where either value is null contributes to neither mean, because a covariance is a statement about rows in which both were observed.
+
 ### Added
 
 - `firepanda/io/arrow_c.mojo`, the Arrow C Data Interface declared: `ArrowSchema`, `ArrowArray`, the flag constants, the format string in both directions, and the release protocol. No producer and no consumer yet, which is deliberate. This is the layer where a mistake is invisible until it is a wrong pointer read inside pyarrow, so it lands on its own with the layout pinned by tests before anything is built on it. The tests write a distinct value into every field and read the struct back as an array of eight byte words, which catches two fields swapping places, and they call an actual `abi("C")` function pointer through the release field, which is the mechanism the whole interface rests on and was the part in most doubt. `ArrowSchema` is seventy two bytes and `ArrowArray` is eighty, as the specification says.
@@ -1303,7 +1323,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.23...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.24...HEAD
+[0.6.24]: https://github.com/tamnd/firepanda/releases/tag/v0.6.24
 [0.6.23]: https://github.com/tamnd/firepanda/releases/tag/v0.6.23
 [0.6.22]: https://github.com/tamnd/firepanda/releases/tag/v0.6.22
 [0.6.21]: https://github.com/tamnd/firepanda/releases/tag/v0.6.21
