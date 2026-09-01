@@ -7,19 +7,22 @@ well is a performance project, and document 08 puts that at M8. What this
 milestone wants is the capability, now, so that a TPC-H file loads and everything
 after this can be measured against something real.
 
-So the file is handed to DuckDB, which decodes it into its own vectors, converts
-each one to an Arrow array, and hands those back over the C Data Interface that
-firepanda already speaks in both directions. The copy out of Arrow and into a
-firepanda frame is the same `assemble` the IPC reader uses, so a Parquet file of
-a hundred row groups costs what its bytes cost, the same as an IPC file of a
-hundred record batches.
+So the file is handed to DuckDB, which decodes it into its own vectors, and
+`duckvector.mojo` reads those vectors as Arrow arrays without asking DuckDB to
+convert them, because for most types they already are. The copy into a firepanda
+frame is the same `assemble` the IPC reader uses, so a Parquet file of a hundred
+row groups costs what its bytes cost, the same as an IPC file of a hundred record
+batches. A result holding a type `duckvector` does not read yet goes through
+`duckdb_data_chunk_to_arrow` instead, which is the path this file shipped with
+and still the correct one.
 
 The reason it is a SQL string rather than a reader object is that everything else
-this milestone needs is already a SQL string. A Hive partitioned directory is
-`read_parquet('dir/**/*.parquet', hive_partitioning = true)`. Reading some of the
-columns is naming them instead of a star, and it is a real projection pushdown
-rather than a filter after the fact, because DuckDB never decodes the pages it
-was not asked for. None of that is code here.
+this milestone needs is already a SQL string. A Hive partitioned directory is a
+path and a setting. Reading some of the columns is naming them instead of a star,
+and it is a real projection pushdown rather than a filter after the fact, because
+DuckDB never decodes the pages it was not asked for. None of that is code here,
+and `ParquetOptions` at the bottom is three booleans and a list of names rather
+than a reader with a life of its own.
 
 What is here, and matters, is that the query is built rather than interpolated.
 A path with an apostrophe in it is a path, not a syntax error and not an
@@ -597,6 +600,140 @@ struct Session(Movable):
         _ = held^
 
 
+@fieldwise_init
+struct ParquetOptions(Copyable, Movable):
+    """What to read, and what to read it as, beyond the path.
+
+    Everything here is a decision about a set of files rather than about one
+    file, which is why none of it is an argument to the one path form. A
+    directory written by Spark or by pyarrow is a tree of directories named
+    `key=value` holding files that do not contain those columns, and reading it
+    correctly means reading the paths as data.
+    """
+
+    var columns: List[String]
+    """The columns to read, in the order they should come back. Empty means all
+    of them, which is not the same as none of them."""
+
+    var hive_partitioning: Bool
+    """Whether the directories on the way to each file are data. On, which is the
+    default, a file at `sales/year=2024/month=03/part-0.parquet` contributes a
+    `year` and a `month` column that are nowhere in the file, filled with 2024
+    and 3 for every row that came out of it, and a query naming neither one never
+    opens the directories that cannot match. The partition columns come back
+    after the file's own columns, sorted by name rather than in the order the
+    path visits them, which is DuckDB's choice and not ours. This defaults to on
+    because DuckDB detects a `key=value` directory by itself, so off would be the
+    surprising one: it is here to turn the detection off for a tree that has
+    equals signs in its directory names and does not mean anything by them."""
+
+    var union_by_name: Bool
+    """Whether files with different schemas line up by column name rather than by
+    position. Off, which is DuckDB's default too, every file must have the same
+    columns in the same order and a mismatch is an error. On, a column missing
+    from one file is null for that file's rows, which is what a directory that
+    grew a column halfway through its life needs."""
+
+    var filename: Bool
+    """Whether to add a `filename` column holding the path each row came from.
+    Useful for a dataset assembled out of files that are not interchangeable, and
+    for finding the one file in ten thousand that has the bad row in it."""
+
+    def __init__(out self):
+        """The defaults: every column, partitioning detected, no unioning, no
+        filename."""
+        self.columns = List[String]()
+        self.hive_partitioning = True
+        self.union_by_name = False
+        self.filename = False
+
+
+def _scan_of(path: StringSlice, options: ParquetOptions) -> String:
+    """Builds the `read_parquet(...)` call for a path and a set of options.
+
+    Only the settings that are on are named, so the query stays the short thing
+    it was for the ordinary case and the long one is what asked for it. The
+    exception is `hive_partitioning`, which is written either way because leaving
+    it out is not the same as writing false: DuckDB detects a partitioned
+    directory on its own, so saying nothing means yes.
+
+    Args:
+        path: The file, glob or directory.
+        options: What to read it as.
+
+    Returns:
+        The table function call, ready to go after a `FROM`.
+    """
+    var out = String("read_parquet(", quote(path))
+    if options.hive_partitioning:
+        out += ", hive_partitioning = true"
+    else:
+        out += ", hive_partitioning = false"
+    if options.union_by_name:
+        out += ", union_by_name = true"
+    if options.filename:
+        out += ", filename = true"
+    out += ")"
+    return out^
+
+
+def _projection_of(columns: List[String]) raises -> String:
+    """Builds the select list for a set of column names.
+
+    Args:
+        columns: The names, in the order they should come back. Empty is a star.
+
+    Returns:
+        The select list.
+
+    Raises:
+        Error: Never. The empty case is a star rather than an error here, because
+            the caller that means it separates the two.
+    """
+    if len(columns) == 0:
+        return String("*")
+    var out = String()
+    for i in range(len(columns)):
+        if i != 0:
+            out += ", "
+        out += _quoted_name(columns[i])
+    return out^
+
+
+def read_parquet(
+    path: StringSlice, options: ParquetOptions
+) raises -> DataFrame:
+    """Reads a Parquet file, a glob, or a partitioned directory of them.
+
+    This is the form that reads a dataset rather than a file.
+    `read_parquet("sales/**/*.parquet", options)` over a tree of
+    `year=2024/month=03` directories comes back with `year` and `month` columns
+    that are in no file, and a query that names neither of them never opens the
+    directories that cannot match.
+
+    Args:
+        path: The file, glob or directory.
+        options: What to read, and what to read it as.
+
+    Returns:
+        The rows, with any partition columns on the end.
+
+    Raises:
+        Error: If DuckDB is not installed, the files cannot be read, a named
+            column is not in them, or a column holds a type firepanda cannot
+            read.
+    """
+    var session = Session()
+    return session.run(
+        String(
+            "SELECT ",
+            _projection_of(options.columns),
+            " FROM ",
+            _scan_of(path, options),
+        )
+    )
+
+
 def read_parquet(path: StringSlice) raises -> DataFrame:
     """Reads a Parquet file, or a glob of them, into a frame.
 
@@ -636,14 +773,15 @@ def read_parquet(path: StringSlice, columns: List[String]) raises -> DataFrame:
     """
     if len(columns) == 0:
         raise Error("parquet: asked for no columns, which is no frame")
-    var wanted = String()
-    for i in range(len(columns)):
-        if i != 0:
-            wanted += ", "
-        wanted += _quoted_name(columns[i])
     var session = Session()
     return session.run(
-        String("SELECT ", wanted, " FROM read_parquet(", quote(path), ")")
+        String(
+            "SELECT ",
+            _projection_of(columns),
+            " FROM read_parquet(",
+            quote(path),
+            ")",
+        )
     )
 
 
