@@ -8,6 +8,13 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed
+
+- A grouped sum, count, size, mean, minimum and maximum runs on every core instead of one. A scatter cannot be split by handing each worker a slice of the rows and letting them all write to the same table, because two rows in two slices can belong to the same group and the increments would be lost, so each worker gets its own table and the tables are added together afterwards. That is the same shape `firepanda/hash/factorize.mojo` already uses for the same reason. Ten million float64 rows on an i9-13900K, medians of five: a sum over a hundred groups is 5.4 ms on one core and 1.9 ms on all of them, a mean is 8.5 ms against 2.8 ms, a maximum is 8.1 ms against 2.5 ms. At a hundred thousand groups a sum is 8.4 ms against 4.4 ms, and at a million, where the memory ceiling holds it to four workers, 16.4 ms against 10.0 ms.
+- The route has a ceiling on it, `PRIVATE_BYTES`, because the merge costs `groups * workers` rather than `rows` and past a point it costs more than the scatter it is speeding up. Thirty two megabytes of tables, so a reduction over more than a million groups gets fewer workers than the machine has and one over many million stays serial. The answer for that case is partitioning the rows by code so that each worker owns a range of groups outright and there is no merge at all, which is a change to the executor rather than to the kernel.
+- The grouped reductions now declare `raises`, because starting a worker is something that can fail and a reduction that stays on one core cannot. Nothing above them needed changing, because every caller was already in a raising context.
+- `tools/probes/group_phases.mojo`, which times a group by phase by phase at four cardinalities. It is checked in because of what it found rather than what it does: on ten million rows the ordinals cost 20 ms at a hundred distinct keys, 50 ms at a hundred thousand and 144 ms at a million, against 2 to 10 ms for the reduction that follows. So a group by is mostly the factorize and this change speeds up the smaller half. The direct route in `firepanda/hash/factorize.mojo`, which is the one an integer key column takes, is still a single core loop and that is the next thing.
+
 ## [0.6.28] - 2026-09-01
 
 Built against Mojo 1.0.0 (ed45d567).
