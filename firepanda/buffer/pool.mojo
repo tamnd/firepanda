@@ -5,7 +5,7 @@ profile. The pool keeps retired buffers in per-size-class free lists and hands
 them back instead of returning them to the allocator.
 
 The pool is an explicit object rather than a global. A global would be shared
-mutable state, which the engine confines to `firepanda/exec/shared.mojo` and
+mutable state, which the engine confines to `firepanda/exec/morsel.mojo` and
 guards in CI, and it would need a lock or a thread-local. When the executor lands
 it will own one pool per worker thread and pass it down; until then callers that
 want pooling construct one and hold it. Callers that do not care keep using

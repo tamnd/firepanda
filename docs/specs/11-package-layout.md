@@ -35,7 +35,8 @@ firepanda/
   expr/                    Expr, the node types, the builders
   plan/                    logical plan, optimizer passes, explain, profile
   exec/                    morsel scheduler, operators, selection vectors
-    shared.mojo            every atomic and mutable global in the library
+    parallel.mojo          parallel_for, one task per index, no shared state
+    morsel.mojo            the morsel queue, and every atomic in the library
     device.mojo            GPU affinity, transfer nodes                     M9
     stream.mojo            spillable sinks, the memory manager              M10
 
@@ -73,7 +74,7 @@ pyproject.toml
 
 **`frame` depends on `plan`, not the other way round.** The eager surface builds plans, per document 04 section 3. If that dependency ever points the other way, the facade has leaked and the optimizer has stopped seeing whole queries.
 
-**`exec/shared.mojo` is a file rather than a scattered set of declarations** because it is the substitute for a race detector. A CI grep asserts that `Atomic` and mutable globals appear nowhere else in the library. Document 09 section 3.
+**Every atomic in the library is in `exec/morsel.mojo`** because one named file is the substitute for a race detector. A CI grep asserts that `Atomic` and mutable globals appear nowhere else. The earlier plan was a `shared.mojo` holding nothing but declarations, and that turned out to be worse. There is exactly one atomic, the morsel queue's cursor, and a file that keeps a struct's own field away from the struct hides the thing it was meant to make obvious. Document 09 section 3.
 
 **`py` depends on everything and nothing depends on `py`.** The Python front door is a leaf. Nothing in the engine may import from it, and a test asserts that, because the moment a kernel knows about `PythonObject` the whole no-boundary argument is gone.
 

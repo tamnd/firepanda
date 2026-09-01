@@ -74,6 +74,27 @@ jobs:
           fi
           echo "milestones defined: $(tr '\n' ' ' < /tmp/defined)"
 
+      # Document 09 section 3 makes one file the substitute for a race detector.
+      # The rule is only worth anything if something checks it, so this is that
+      # something. A grep is enough because the rule is about where a declaration
+      # is written, not about what it does.
+      - name: Shared mutable state stays in one file
+        run: |
+          rc=0
+          stray=$(grep -rln 'Atomic\[' firepanda --include='*.mojo' | grep -v '^firepanda/exec/morsel.mojo$' || true)
+          if [ -n "$stray" ]; then
+            echo "::error::Atomic outside firepanda/exec/morsel.mojo: $stray"
+            rc=1
+          fi
+          # A module level var is a mutable global. Comptime aliases are not, and
+          # neither is anything indented, which is a field or a local.
+          globals=$(grep -rn '^var ' firepanda --include='*.mojo' || true)
+          if [ -n "$globals" ]; then
+            echo "::error::mutable global: $globals"
+            rc=1
+          fi
+          exit $rc
+
       - name: Internal document cross-references resolve
         run: |
           rc=0

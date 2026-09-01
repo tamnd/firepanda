@@ -6,7 +6,7 @@
 
 # Shared mutable state is the substitute for a race detector in a language that
 # does not have one. Every change to this file is a concurrency design change.
-/firepanda/exec/shared.mojo  @tamnd
+/firepanda/exec/morsel.mojo  @tamnd
 
 # Supply chain surface.
 /.github/workflows/     @tamnd
