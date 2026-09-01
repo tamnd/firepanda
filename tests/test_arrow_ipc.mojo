@@ -26,13 +26,18 @@ from std.testing import (
     assert_true,
 )
 
+from firepanda.array.array import Array
+from firepanda.array.strings import StringBuilder
 from firepanda.dtype.logical import LogicalType
+from firepanda.frame.frame import DataFrame
+from firepanda.frame.series import Series
 from firepanda.io.arrow_ipc import (
     read_arrow,
     read_arrow_bytes,
     read_ipc_file,
     read_ipc_stream,
 )
+from firepanda.io.arrow_ipc_write import write_ipc_stream_bytes
 
 
 def _from_hex(text: StringSlice) raises -> List[UInt8]:
@@ -165,6 +170,94 @@ def test_a_schema_with_no_batches_is_an_empty_frame_not_no_frame() raises:
     assert_equal(frame.names()[0], "a")
     assert_true(frame.schema[0].dtype == LogicalType.INT64)
     assert_true(frame.schema[1].dtype == LogicalType.STRING)
+
+
+def test_a_view_column_split_across_batches_keeps_every_payload() raises:
+    # The one case the reader gets wrong if the fill in place arithmetic is
+    # wrong. A view column whose producer used one data buffer is copied
+    # wholesale, buffer and all, and every long element's offset then has to move
+    # by the amount of payload the batches before it contributed. The first batch
+    # moves by nothing, which is why a fixture of one batch would pass either
+    # way, and this one has three.
+    var bytes = _view_batches_stream()
+    var frame = read_ipc_stream(Span(bytes))
+    assert_equal(len(frame), 6)
+    assert_equal(frame.width(), 2)
+    assert_equal(frame[0].strings()[0], "short one")
+    assert_false(frame[0].is_valid(1))
+    assert_equal(frame[0].strings()[2], "a rather long string value here")
+    assert_equal(frame[0].strings()[3], "tiny")
+    assert_equal(frame[0].strings()[4], "another quite long string value")
+    assert_equal(frame[0].strings()[5], "")
+    assert_equal(frame[0].null_count(), 1)
+
+
+def test_the_rows_of_a_split_view_column_still_line_up_with_their_number() raises:
+    # The columns of a batch are filled by separate tasks, so a column that ends
+    # up one row out of step with the one beside it is a real failure mode and
+    # not one a single column fixture can show.
+    var bytes = _view_batches_stream()
+    var frame = read_ipc_stream(Span(bytes))
+    var numbers = frame[1].as_typed[DType.int32]()
+    for i in range(6):
+        assert_equal(numbers[i], Int32(i))
+
+
+def test_a_batch_bigger_than_a_piece_is_copied_by_more_than_one_task() raises:
+    # The one test here whose bytes are ours rather than pyarrow's, because a
+    # fixture of two hundred thousand rows cannot be checked in as hex and what
+    # this pins is arithmetic on row counts rather than anything about the
+    # format. A batch is cut into pieces of sixty five thousand five hundred and
+    # thirty six rows, so this batch becomes four, and the rows either side of
+    # every cut are the ones a wrong offset moves.
+    var rows = 200000
+    var numbers = Array[DType.int64](rows)
+    var text = StringBuilder(capacity=rows)
+    for i in range(rows):
+        numbers.set_valid(i, Int64(i))
+        if i % 5 == 0:
+            text.append_null()
+        elif i % 3 == 0:
+            text.append(
+                String("a long enough string to need payload ", i).as_bytes()
+            )
+        else:
+            text.append(String("s", i % 100).as_bytes())
+
+    var columns = List[Series]()
+    columns.append(Series("n", numbers^))
+    columns.append(Series("s", text^.finish()))
+    var written = write_ipc_stream_bytes(DataFrame.from_series(columns^))
+
+    var frame = read_ipc_stream(Span(written))
+    assert_equal(len(frame), rows)
+    var back = frame[0].as_typed[DType.int64]()
+    ref strings = frame[1].strings()
+    for i in range(rows):
+        assert_equal(back[i], Int64(i))
+    var edges: List[Int] = [
+        0,
+        1,
+        65535,
+        65536,
+        65537,
+        131071,
+        131072,
+        196607,
+        196608,
+        199999,
+    ]
+    for edge in edges:
+        if edge % 5 == 0:
+            assert_false(frame[1].is_valid(edge))
+        elif edge % 3 == 0:
+            assert_equal(
+                strings[edge],
+                String("a long enough string to need payload ", edge),
+            )
+        else:
+            assert_equal(strings[edge], String("s", edge % 100))
+    assert_equal(frame[1].null_count(), rows // 5)
 
 
 def test_the_reader_tells_a_file_from_a_stream() raises:
@@ -302,6 +395,50 @@ def _mixed_file() raises -> List[UInt8]:
         "620000000400040004000000100014000800060007000c000000100010000000"
         "0000010310000000180000000400000000000000010000006600060008000600"
         "0600000000000200000100004152524f5731"
+    )
+
+
+def _view_batches_stream() raises -> List[UInt8]:
+    """1216 bytes from pyarrow 25, six rows of string view in three batches."""
+    return _from_hex(
+        "ffffffffa80000001000000000000a000c000600050008000a00000000010400"
+        "0c00000008000800000004000800000004000000020000004c00000004000000"
+        "ccffffff00000102100000001c0000000400000000000000010000006e000000"
+        "08000c0008000700080000000000000120000000100014000800060007000c00"
+        "0000100010000000000001181000000018000000040000000000000001000000"
+        "73000000040004000400000000000000ffffffffe00000001400000000000000"
+        "0c0016000600050008000c000c000000000304001c0000008000000000000000"
+        "00000e001c0010000400080000000c000e000000800000002400000010000000"
+        "0200000000000000000000000100000001000000000000000000000005000000"
+        "0000000000000000010000000000000008000000000000002000000000000000"
+        "28000000000000003e0000000000000068000000000000000000000000000000"
+        "6800000000000000180000000000000000000000020000000200000000000000"
+        "0100000000000000020000000000000000000000000000003d00000000000000"
+        "0900000073686f7274206f6e6500000000000000000000000000000000000000"
+        "6120726174686572206c6f6e6720737472696e672076616c7565206865726561"
+        "6e6f74686572207175697465206c6f6e6720737472696e672076616c75650000"
+        "000000000100000002000000030000000400000005000000ffffffffe0000000"
+        "14000000000000000c0016000600050008000c000c000000000304001c000000"
+        "680000000000000000000e001c0010000400080000000c000e00000080000000"
+        "2400000010000000020000000000000000000000010000000100000000000000"
+        "0000000005000000000000000000000000000000000000000000000000000000"
+        "200000000000000020000000000000003e000000000000006000000000000000"
+        "0000000000000000600000000000000008000000000000000000000002000000"
+        "0200000000000000000000000000000002000000000000000000000000000000"
+        "1f0000006120726100000000000000000400000074696e790000000000000000"
+        "6120726174686572206c6f6e6720737472696e672076616c7565206865726561"
+        "6e6f74686572207175697465206c6f6e6720737472696e672076616c75650000"
+        "0200000003000000ffffffffe000000014000000000000000c00160006000500"
+        "08000c000c000000000304001c000000680000000000000000000e001c001000"
+        "0400080000000c000e0000008000000024000000100000000200000000000000"
+        "0000000001000000010000000000000000000000050000000000000000000000"
+        "0000000000000000000000000000000020000000000000002000000000000000"
+        "3e00000000000000600000000000000000000000000000006000000000000000"
+        "0800000000000000000000000200000002000000000000000000000000000000"
+        "020000000000000000000000000000001f000000616e6f74000000001f000000"
+        "000000000000000000000000000000006120726174686572206c6f6e67207374"
+        "72696e672076616c75652068657265616e6f74686572207175697465206c6f6e"
+        "6720737472696e672076616c756500000400000005000000ffffffff00000000"
     )
 
 
