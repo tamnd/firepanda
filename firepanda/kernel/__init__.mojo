@@ -28,7 +28,17 @@ import is where that shows up in review.
 """
 
 from .accum import accumulator, highest, lowest
-from .agg import AggResult, count_of, max_of, mean_of, min_of, sum_of
+from .agg import (
+    AggResult,
+    count_of,
+    extreme_over,
+    max_of,
+    mean_of,
+    mean_over,
+    min_of,
+    sum_of,
+    sum_over,
+)
 from .arith import add, divide, multiply, subtract
 from .cast import cast_any, cast_strings_to, cast_to, cast_to_strings
 from .compare import equal, greater, greater_equal, less, less_equal, not_equal
@@ -76,6 +86,7 @@ from .nulls import (
     is_null,
     is_null_any,
 )
+from .reduce import reduce_any
 from .select import filter_any, filter_rows, take_any, take_rows
 from .sort import (
     argsort,
