@@ -459,6 +459,11 @@ def join_indices(
     var parallel = left_rows >= PARALLEL_LEFT_ROWS and not wants_right
     var chunk = LEFT_MORSEL_ROWS if parallel else max(left_rows, 1)
     var pieces = (left_rows + chunk - 1) // chunk
+    if pieces == 0:
+        # An empty left side rounds down to no morsels at all, and the passes
+        # below still run once and still write where their morsel ends. One
+        # empty morsel is the shape that costs nothing and reads correctly.
+        pieces = 1
 
     # Count the output rows before emitting any, so the two lists are allocated
     # once at the right size. Same trade as `_filter_core`: a second pass over
