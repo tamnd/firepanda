@@ -33,8 +33,10 @@ from .arith import add, divide, multiply, subtract
 from .cast import cast_any, cast_strings_to, cast_to, cast_to_strings
 from .compare import equal, greater, greater_equal, less, less_equal, not_equal
 from .concat import (
+    column_ref,
     concat_any,
     concat_arrays,
+    concat_refs_any,
     concat_strings,
     concat_two_any,
 )

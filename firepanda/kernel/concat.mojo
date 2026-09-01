@@ -5,10 +5,25 @@ traffic. There is no arithmetic in it and no branch that depends on a value, so
 the only thing worth designing is how few passes it makes over the bytes and how
 much of the validity work it can skip.
 
-It skips a lot. A fresh `Array` is zeroed and marked present everywhere, so a
-part with no nulls needs no validity work at all: the bits it wants are already
-there. On the columns most people actually concatenate, that is the whole bitmap
-loop gone, and what remains is a vectorized copy of the values.
+It skips a lot. The output is allocated unzeroed, because between them the parts
+write every row of it, and it starts marked present everywhere, so a part with no
+nulls needs no validity work at all: the bits it wants are already there. On the
+columns most people actually concatenate, that is a pass over the values and the
+whole bitmap loop gone, and what remains is a vectorized copy.
+
+The parts are independent once the offset each one lands on is known, and those
+offsets are a prefix sum taken before anything is copied, so a concat over the
+parallel threshold hands one part to each core. That is worth doing for the same
+reason the copy is the only thing here worth designing: one thread of memcpy
+reaches about a sixth of what the machine can move.
+
+There are two spellings of the erased concat and the difference between them is
+ownership rather than behaviour. `concat_any` takes the columns, and
+`concat_refs_any` takes references to them. A caller whose columns live inside
+frames, or inside a list of record batches, only borrows them, and building a
+`List[AnyArray]` to hand over would deep copy every one first. That copy is the
+same size as the concat, so it doubles an operation that is already nothing but
+memory traffic.
 
 The parts that do have nulls go through `Bitmap.paste`, which copies a word at a
 time and shifts across the boundary when the destination offset is not a multiple
@@ -32,6 +47,7 @@ from std.sys.info import simd_width_of
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
+from firepanda.array.data import ColumnData
 from firepanda.array.strings import StringArray
 from firepanda.array.strview import StringView, VIEW_SIZE
 from firepanda.bitmap.bitmap import Bitmap
@@ -40,16 +56,18 @@ from firepanda.dtype.lists import ALL
 from firepanda.exec import parallel_for
 
 comptime PARALLEL_ROWS = 1 << 16
-"""Rows below which a string concat stays on one thread.
+"""Rows below which a concat stays on one thread.
 
 Handing a part to a worker costs something and copying a short column costs
 almost nothing, so a concat of a few thousand rows is faster left alone. Sixty
 five thousand rows of views is a megabyte, which is where the copy stops fitting
-in a core's own cache and starts being worth spreading.
+in a core's own cache and starts being worth spreading. A fixed width column of
+the same height is half that at eight bytes a row, and the threshold is shared
+rather than tuned per type because the cost either side of it is small.
 """
 
 
-def concat_arrays[dt: DType](parts: List[Array[dt]]) -> Array[dt]:
+def concat_arrays[dt: DType](parts: List[Array[dt]]) raises -> Array[dt]:
     """Stacks columns end to end, in the order given.
 
     Args:
@@ -61,17 +79,29 @@ def concat_arrays[dt: DType](parts: List[Array[dt]]) -> Array[dt]:
 
     Returns:
         A column as tall as the parts put together.
+
+    Raises:
+        Error: If a worker fails. Nothing here can fail on its own, and the
+            signature says so only because the copies run on every core.
     """
     var total = 0
+    var fixed = List[_Part](capacity=len(parts))
     for p in range(len(parts)):
+        fixed.append(_part_of(parts[p].data, total))
         total += len(parts[p])
+    return _stack_fixed[dt](fixed, total)
 
-    var out = Array[dt](total)
-    var at = 0
-    for p in range(len(parts)):
-        _copy_into(out, at, parts[p].unsafe_ptr(), parts[p].data.validity)
-        at += len(parts[p])
-    return out^
+
+def column_ref(imm col: AnyArray) -> Pointer[AnyArray, ImmUntrackedOrigin]:
+    """Takes a reference to a column, for handing to `concat_refs_any`.
+
+    Args:
+        col: The column. Must outlive the reference.
+
+    Returns:
+        The reference.
+    """
+    return Pointer(to=col).unsafe_origin_cast[ImmUntrackedOrigin]()
 
 
 def concat_any(parts: List[AnyArray]) raises -> AnyArray:
@@ -87,33 +117,63 @@ def concat_any(parts: List[AnyArray]) raises -> AnyArray:
         If the list is empty, if two parts disagree on dtype, or if the dtype
         has no physical layout.
     """
+    var refs = List[Pointer[AnyArray, ImmUntrackedOrigin]](capacity=len(parts))
+    for p in range(len(parts)):
+        refs.append(column_ref(parts[p]))
+    return concat_refs_any(refs)
+
+
+def concat_refs_any(
+    parts: List[Pointer[AnyArray, ImmUntrackedOrigin]],
+) raises -> AnyArray:
+    """Stacks columns the caller only borrows.
+
+    This is the spelling anything holding its parts inside something else wants,
+    and the list of columns is the one that has to be built from it rather than
+    the other way round. A caller with the columns inside frames, or inside a
+    list of batches, cannot hand over a `List[AnyArray]` without deep copying
+    every column into it first, and that copy is the same size as the concat, so
+    the operation costs twice what it should. Reading an Arrow file of a hundred
+    and fifty record batches was paying exactly that.
+
+    Args:
+        parts: References to the columns, in output row order. All of them must
+            have the same dtype, and all must outlive the call.
+
+    Returns:
+        A column as tall as the parts put together.
+
+    Raises:
+        If the list is empty, if two parts disagree on dtype, or if the dtype
+        has no physical layout.
+    """
     if len(parts) == 0:
         raise Error("concat: at least one column is required")
 
-    var dt = parts[0].dtype()
+    var dt = parts[0][].dtype()
     var total = 0
     for p in range(len(parts)):
         # The `is_string` half is not redundant. A string column's physical
         # dtype is uint8, so a string column and a column of bytes agree on
         # `dtype()` and are not the same column at all.
         if (
-            parts[p].dtype() != dt
-            or parts[p].is_string() != parts[0].is_string()
+            parts[p][].dtype() != dt
+            or parts[p][].is_string() != parts[0][].is_string()
         ):
             raise Error(
                 "concat: every column must have the same dtype; got "
-                + String(parts[0].type)
+                + String(parts[0][].type)
                 + " and "
-                + String(parts[p].type)
+                + String(parts[p][].type)
             )
-        total += len(parts[p])
+        total += len(parts[p][])
 
-    if parts[0].is_string():
+    if parts[0][].is_string():
         var payload_bytes = 0
         var pieces = List[_Piece](capacity=len(parts))
         var row = 0
         for p in range(len(parts)):
-            ref col = parts[p].strings()
+            ref col = parts[p][].strings()
             pieces.append(_piece_of(col, row, payload_bytes))
             row += len(col)
             payload_bytes += len(col.payload)
@@ -124,32 +184,27 @@ def concat_any(parts: List[AnyArray]) raises -> AnyArray:
             out.paste_all(pieces, total, payload_bytes)
         else:
             for p in range(len(parts)):
-                out.paste(parts[p].strings())
+                out.paste(parts[p][].strings())
         return AnyArray(out^.finish())
+
+    var fixed = List[_Part](capacity=len(parts))
+    var at = 0
+    for p in range(len(parts)):
+        fixed.append(_part_of(parts[p][].data, at))
+        at += len(parts[p][])
 
     comptime for candidate in ALL:
         if dt == candidate:
-            var out = Array[candidate](total)
-            var at = 0
-            for p in range(len(parts)):
-                _copy_into(
-                    out,
-                    at,
-                    parts[p].unsafe_ptr[candidate](),
-                    parts[p].data.validity,
-                )
-                at += len(parts[p])
-            return AnyArray(out^)
+            return AnyArray(_stack_fixed[candidate](fixed, total))
     raise Error("concat: unsupported dtype " + String(dt))
 
 
 def concat_two_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
     """Stacks exactly two columns whose dtype is a runtime value.
 
-    The list spelling would be the same operation, and it is not the one a join
-    can use: building a `List[AnyArray]` out of two columns it only borrows means
-    deep copying both, which on the key alignment path is the entire cost of the
-    operation paid a second time. Two arguments borrow.
+    `concat_refs_any` would give the same answer, and this is still the spelling
+    a join wants: two arguments say what they mean, and there is no list to
+    build for a case that is known to have exactly two parts.
 
     Args:
         a: The first column.
@@ -184,12 +239,13 @@ def concat_two_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
         out.paste(b.strings())
         return AnyArray(out^.finish())
 
+    var fixed = List[_Part](capacity=2)
+    fixed.append(_part_of(a.data, 0))
+    fixed.append(_part_of(b.data, len(a)))
+
     comptime for candidate in ALL:
         if a.dtype() == candidate:
-            var out = Array[candidate](len(a) + len(b))
-            _copy_into(out, 0, a.unsafe_ptr[candidate](), a.data.validity)
-            _copy_into(out, len(a), b.unsafe_ptr[candidate](), b.data.validity)
-            return AnyArray(out^)
+            return AnyArray(_stack_fixed[candidate](fixed, len(a) + len(b)))
     raise Error("concat: unsupported dtype " + String(a.dtype()))
 
 
@@ -468,57 +524,125 @@ struct _StringStack(Movable):
         )
 
 
-def _copy_into[
-    dt: DType, //, origin: ImmOrigin
-](
-    mut out: Array[dt],
-    at: Int,
-    src: Pointer[Scalar[dt], origin],
-    valid: Bitmap,
-):
-    """Writes one part into the output at a row offset.
+@fieldwise_init
+struct _Part(ImplicitlyCopyable, Movable):
+    """Where one part of a fixed width concat is and where it lands.
 
-    The values go across unconditionally, nulls included, because a null holds a
-    zero and copying it preserves the invariant the rest of the kernel layer
-    rests on. Only the bits need a decision, and only when there are nulls.
+    The same shape as `_Piece` and there for the same reason: the erased concat
+    borrows its parts, so a worker has to be handed addresses rather than
+    columns. The values are typed once the dtype is known, which is why they are
+    bytes here.
+    """
+
+    var values: Pointer[UInt8, ImmUntrackedOrigin]
+    var validity: Pointer[Bitmap, ImmUntrackedOrigin]
+    var rows: Int
+    var at: Int
+
+
+def _part_of(imm col: ColumnData, at: Int) -> _Part:
+    """Describes one part of a fixed width concat without copying any of it.
+
+    It takes the storage rather than the column so that the typed spelling and
+    the erased one reach the same description, which is the point of having one.
 
     Args:
-        out: The output column. Must have room for the part at `at`.
+        col: The part's storage. Must outlive the description.
+        at: The part's first row in the output.
+
+    Returns:
+        The description.
+    """
+    return _Part(
+        col.values.unsafe_ptr().unsafe_origin_cast[ImmUntrackedOrigin](),
+        Pointer(to=col.validity).unsafe_origin_cast[ImmUntrackedOrigin](),
+        col.length,
+        at,
+    )
+
+
+def _stack_fixed[dt: DType](parts: List[_Part], total: Int) raises -> Array[dt]:
+    """Copies every part into a fresh column, on every core when it pays.
+
+    The output is allocated unzeroed, because between them the parts write every
+    row of it. That is a whole pass over the column saved, and on a column of a
+    hundred and sixty megabytes the pass is not free.
+
+    Validity stays sequential for the same reason it does in the string stack.
+    It is one bit a row against at least eight bytes a row for the values, and
+    two parts whose boundary falls inside a byte would each have to read, modify
+    and write that byte, so there is nothing to win by racing for it.
+
+    Args:
+        parts: Where each part is and where it lands, in order.
+        total: The output row count, which the parts add up to.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        The stacked column.
+
+    Raises:
+        Error: If a worker fails.
+    """
+    var out = Array[dt](overwritten=total)
+    var target = out.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+
+    def one(p: Int) raises {imm}:
+        ref part = parts[p]
+        _copy_values(
+            target,
+            part.at,
+            part.values.unsafe_bitcast[Scalar[dt]](),
+            part.rows,
+        )
+
+    if len(parts) > 1 and total >= PARALLEL_ROWS:
+        parallel_for(one, len(parts))
+    else:
+        for p in range(len(parts)):
+            one(p)
+
+    for p in range(len(parts)):
+        ref part = parts[p]
+        if part.rows > 0 and not part.validity[].all_valid():
+            out.data.validity.paste(part.at, part.validity[], part.rows)
+    return out^
+
+
+def _copy_values[
+    dt: DType, //, origin: ImmOrigin
+](
+    target: Pointer[Scalar[dt], MutUntrackedOrigin],
+    at: Int,
+    src: Pointer[Scalar[dt], origin],
+    count: Int,
+):
+    """Writes one part's values into the output at a row offset.
+
+    Nulls go across with everything else, because a null holds a zero and
+    copying it preserves the invariant the rest of the kernel layer rests on.
+
+    Args:
+        target: The output values.
         at: The row the part starts on.
         src: The part's values.
-        valid: The part's validity. Its length is the part's height.
+        count: How many values to copy.
 
     Parameters:
         dt: The dtype.
         origin: The part's origin.
     """
     comptime width = simd_width_of[dt]()
-    var n = len(valid)
-    var target = out.unsafe_ptr()
-
     var i = 0
-    while i + width <= n:
+    while i + width <= count:
         target.unsafe_offset(at + i).unsafe_store(
             src.unsafe_offset(i).unsafe_load[width=width]()
         )
         i += width
-    while i < n:
+    while i < count:
         target.unsafe_offset(at + i).unsafe_store(
             src.unsafe_offset(i).unsafe_load()
         )
         i += 1
-
-    # The output starts all present, so a part with no nulls is already right.
-    if valid.all_valid():
-        return
-    for w in range(valid.word_count()):
-        var word = valid.unsafe_word(w)
-        if word == UInt64.MAX:
-            continue
-        var base = w * 64
-        var last = base + 64
-        if last > n:
-            last = n
-        for r in range(base, last):
-            if (word >> UInt64(r - base)) & 1 == 0:
-                out.data.validity.set(at + r, False)

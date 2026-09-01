@@ -28,7 +28,9 @@ from firepanda.frame.frame import DataFrame
 from firepanda.frame.series import Series
 from firepanda.kernel.concat import (
     PARALLEL_ROWS,
+    column_ref,
     concat_any,
+    concat_refs_any,
     concat_arrays,
     concat_strings,
     concat_two_any,
@@ -557,6 +559,69 @@ def test_concat_strings_through_any_over_the_threshold() raises:
     assert_equal(len(stacked), len(expected), "height")
     for i in range(len(expected)):
         assert_equal(stacked[i], expected[i], "row " + String(i))
+
+
+def test_concat_fixed_over_the_parallel_threshold() raises:
+    # Past `PARALLEL_ROWS` the value copies are handed out one part to a worker
+    # while the validity still goes in one part at a time, so this is the test
+    # that the two halves agree about where a part lands. The part lengths are
+    # deliberately not multiples of sixty four, so most boundaries fall inside a
+    # byte of the bitmap.
+    var parts = List[AnyArray]()
+    var expected = List[Int64]()
+    var present = List[Bool]()
+    var take = 4001
+    var value = Int64(0)
+    while len(expected) < PARALLEL_ROWS + 1000:
+        var part = Array[DType.int64](take)
+        for i in range(take):
+            if (Int(value) + i) % 7 == 3:
+                part.set_null(i)
+                expected.append(0)
+                present.append(False)
+            else:
+                part.set_valid(i, value + Int64(i))
+                expected.append(value + Int64(i))
+                present.append(True)
+        value += Int64(take)
+        parts.append(AnyArray(part^))
+        take += 997
+    assert_true(len(parts) > 1, "the split has to make several parts")
+
+    var out = concat_any(parts)
+    ref stacked = out.as_typed[DType.int64]()
+    assert_equal(len(stacked), len(expected), "height")
+    for i in range(len(expected)):
+        assert_equal(stacked.is_valid(i), present[i], "validity " + String(i))
+        assert_equal(stacked[i], expected[i], "row " + String(i))
+
+
+def test_concat_refs_any_matches_the_owning_spelling() raises:
+    # The borrowing spelling is what the frame layer and the Arrow reader use,
+    # so it gets checked against the one that owns its parts rather than being
+    # trusted because it shares the body.
+    var owned = List[AnyArray]()
+    for p in range(5):
+        var part = from_list[DType.int32]([Int32(p), Int32(p + 10)])
+        owned.append(AnyArray(part^))
+
+    var refs = List[Pointer[AnyArray, ImmUntrackedOrigin]]()
+    for p in range(len(owned)):
+        refs.append(column_ref(owned[p]))
+
+    var borrowed = concat_refs_any(refs)
+    var copied = concat_any(owned)
+    ref left = borrowed.as_typed[DType.int32]()
+    ref right = copied.as_typed[DType.int32]()
+    assert_equal(len(left), 10, "height")
+    assert_equal(len(right), 10, "height")
+    for i in range(10):
+        assert_equal(left[i], right[i], "row " + String(i))
+
+    # The parts are still readable, which is the property that makes handing out
+    # references reasonable at all.
+    assert_equal(len(owned), 5, "the parts survive")
+    assert_equal(owned[4].as_typed[DType.int32]()[1], 14, "part 4 survives")
 
 
 def main() raises:
