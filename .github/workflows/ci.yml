@@ -85,13 +85,16 @@ jobs:
       # A link check that talks to the internet is a flaky check, and this one
       # failed a pull request because contributor-covenant.org reset a single
       # connection. Retries make a transient reset cost two seconds instead of a
-      # rerun, and 429 is a host rate limiting us rather than a broken link.
+      # rerun, and 429 is a host rate limiting us rather than a broken link. 301
+      # and 308 are here for the same reason: a host that moves a page and says
+      # where it went has not broken the link, and mojolang.org failed a release
+      # by redirecting to itself with a trailing slash.
       - name: Link check
         uses: lycheeverse/lychee-action@v2
         with:
           args: >-
             --no-progress --max-concurrency 4 --max-retries 3 --retry-wait-time 2
-            --accept 200,206,429 './**/*.md'
+            --accept 200,206,301,308,429 './**/*.md'
           fail: true
 
   format:
