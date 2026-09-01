@@ -8,6 +8,17 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added
+
+- `firepanda/io/duckvector.mojo`, which reads a DuckDB data chunk's vectors directly rather than asking DuckDB to convert the chunk to Arrow first. A flat DuckDB vector of BIGINT is a contiguous array of int64, which is what an Arrow array of int64 is, so for every fixed width type the column is already in the shape we want and the work is describing it rather than copying it. Booleans are the one type DuckDB stores a byte at a time where Arrow wants a bit, and strings are the one type that needs the tail of each descriptor rewritten, which is sixteen bytes per row and not the string itself for anything under the twelve byte inline threshold that both layouts happen to share.
+- The choice between the direct read and the Arrow conversion is made once for the whole result, by looking at the type of every column before any chunk is fetched. A result with a type `duckvector` does not read yet goes through `duckdb_data_chunk_to_arrow` exactly as it did before, all of it, because the assembler takes one layout and a result read half by one route and half by the other is two ways to be wrong instead of one.
+
+### Changed
+
+- `read_parquet` is about eleven percent faster on a fast machine and considerably more than that on a loaded one. Ten million rows of int64, float64 and an eleven character string, 176 MB of snappy Parquet in ten row groups, nine repetitions on an i9-13900K: medians 251 to 266 ms against the 274 to 302 ms the Arrow conversion path gets on the same file in the same run, and bests 232 to 239 against 262 to 268. Phase timing says why the win is not larger: of a read, pulling 4890 chunks out of DuckDB is 124 to 210 ms, describing every vector is 15 to 47 ms, and assembling is 33 to 109 ms. The conversion this change removes was 560 to 1100 ms on an eight core machine under load and much cheaper on sixteen idle ones, so the number here is the small end of the range rather than the large one.
+
+A streaming result was tried and is not in this change, which is worth writing down because it looks like it should obviously win. `duckdb_query` builds the whole answer inside DuckDB and then hands it over a chunk at a time, so the rows are written once by the scan and read once by us, and `duckdb_execute_prepared_streaming` skips the first of those. Measured on the same file and machine, the streaming read is half again as slow, 400 to 445 ms against 251 to 266. A streaming result is produced by one thread pulling on the pipeline while a materialised one is produced by every thread DuckDB has, and the copy out is cheaper than the parallelism it costs.
+
 ## [0.6.27] - 2026-09-01
 
 Built against Mojo 1.0.0 (ed45d567).
