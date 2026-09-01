@@ -466,10 +466,68 @@ def direct_plan[dt: DType](col: Array[dt], ceiling: Int) -> DirectPlan[dt]:
     return DirectPlan[dt](Int(high) - Int(low) + 1, low)
 
 
+comptime DIRECT_MERGE_BYTES = 256 * 1024
+"""How much table the merge is allowed to walk for one value.
+
+The merge reads one slot out of every worker's table at each value in the range,
+and those slots are a table apart, so it touches one cache line per worker per
+value and the footprint of that walk is the range times the worker count. Past
+the point where it leaves a core's private cache every value in it is a miss,
+and the measurement says that is what turns the split from a win into a loss: a
+range of a hundred takes every core and runs in two thirds of the serial time, a
+range of ten thousand wants six workers, and a range of sixty five thousand is
+better off on one thread. A quarter of a megabyte is the number that picks all
+three of those correctly.
+"""
+
+comptime DIRECT_MIN_WORKERS = 4
+"""The fewest workers worth splitting a direct factorize across."""
+
+comptime DIRECT_CLAIM_BLOCK = 1 << 12
+"""Values one task of the direct merge settles.
+
+The merge walks the value range rather than the rows, reading one slot per
+worker at each value, so a block of four thousand values is the worker count
+times sixteen kilobytes of reads. Small enough that the whole block's worth of
+slots stays in cache while it is being walked, and large enough that a range at
+`DIRECT_LIMIT` is sixteen tasks rather than sixteen thousand.
+"""
+
+
 def _factorize_direct[
     dt: DType
-](col: Array[dt], span: Int, base: Scalar[dt]) -> Factorized[dt]:
+](col: Array[dt], span: Int, base: Scalar[dt]) raises -> Factorized[dt]:
     """Factorizes by indexing a table with the value itself.
+
+    Args:
+        col: The column.
+        span: The table width, from `direct_plan`.
+        base: The value that indexes slot zero, which is the column's minimum.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        The factorization.
+    """
+    var n = len(col)
+    if n >= PARALLEL_ROWS and span > 0:
+        var affordable = DIRECT_MERGE_BYTES // (span * 4)
+        var workers = min(worker_count(), n // PARALLEL_MIN_SLICE)
+        if affordable < workers:
+            workers = affordable
+        # Four and not two. Two workers were slower than one thread on every
+        # range measured, by about half again, because the split pays a second
+        # read of the column and two cores are not enough to make that back.
+        if workers >= DIRECT_MIN_WORKERS:
+            return _factorize_direct_parallel[dt](col, span, base, workers)
+    return _factorize_direct_serial[dt](col, span, base)
+
+
+def _factorize_direct_serial[
+    dt: DType
+](col: Array[dt], span: Int, base: Scalar[dt]) -> Factorized[dt]:
+    """Factorizes by indexing a table with the value itself, on one thread.
 
     Args:
         col: The column.
@@ -492,7 +550,9 @@ def _factorize_direct[
 
     var has_null = col.null_count() > 0
     var offset = 1 if has_null else 0
-    var codes = Array[DType.uint32](n)
+    # Every row below is written, the null ones with a zero, so the array does
+    # not need the pass that zeroes it first.
+    var codes = Array[DType.uint32](overwritten=n)
     var out = codes.unsafe_ptr()
     var firsts = List[Int]()
     var null_group = -1
@@ -518,6 +578,172 @@ def _factorize_direct[
         else:
             out.unsafe_offset(i).unsafe_write(stored - 1)
 
+    return Factorized[dt](codes^, firsts^, null_group)
+
+
+def _factorize_direct_parallel[
+    dt: DType
+](
+    col: Array[dt], span: Int, base: Scalar[dt], workers: Int
+) raises -> Factorized[dt]:
+    """Factorizes by value with one direct table per core, then merges them.
+
+    Same trade the hashed route makes and for the same reason: two rows in two
+    slices can hold the same value, so the workers cannot share a table, and
+    what they get instead is one each and a merge afterwards. What differs is
+    that the merge here has no probing in it. A direct table is indexed by the
+    value, so the workers' tables are already aligned with each other, and
+    finding every worker that saw a value is reading the same slot out of each
+    of them. The first worker that has it is the one that saw it first, because
+    the slices are contiguous and in order.
+
+    That walk is over the value range rather than over the rows or the groups,
+    which is what makes it worth doing in parallel by value: no two tasks touch
+    the same value, so no two of them can discover the same group. The final
+    numbering is `_rank_entries`, exactly as the hashed merge uses it, over the
+    same entry order, so the ordinals come out in first-appearance order and
+    identical to the serial route's.
+
+    The shape here is two passes over the column and not three. The obvious
+    arrangement is that the first pass writes each row a local ordinal and a
+    third pass rewrites those into the merged ones, which is what this did, and
+    the measurement said two workers were slower than one thread. The direct
+    loop is not short of arithmetic, it is short of memory bandwidth, so the
+    extra read and write of a forty megabyte ordinal column cost more than a
+    second core bought. So the first pass only discovers groups, the merge
+    projects itself back down onto a single table indexed by value, and the
+    second pass reads that table and writes each row once.
+
+    Args:
+        col: The column.
+        span: The table width, from `direct_plan`.
+        base: The value that indexes slot zero, which is the column's minimum.
+        workers: How many slices to cut the column into. At least two.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        The factorization.
+    """
+    var n = len(col)
+    var has_null = col.null_count() > 0
+    var offset = 1 if has_null else 0
+
+    var bounds = List[Int](capacity=workers + 1)
+    for w in range(workers):
+        bounds.append(n * w // workers)
+    bounds.append(n)
+
+    # One table per worker, laid end to end so that the merge reads the same
+    # value out of all of them by striding rather than by chasing a list of
+    # allocations. Zero means unseen and the local ordinal is stored plus one,
+    # which is what lets a zeroed buffer be a ready table.
+    var tables = Buffer(workers * span * 4)
+    var founds = List[List[Int]](capacity=workers)
+    for _ in range(workers):
+        founds.append(List[Int]())
+
+    def discover(w: Int) raises {mut tables, mut founds, imm}:
+        var slots = tables.bitcast[DType.uint32]().unsafe_offset(w * span)
+        var values = col.unsafe_ptr()
+        # The found rows are collected into a local list and handed over once at
+        # the end rather than appended straight into the shared one. A list is
+        # three words, so four of the workers' slots share a cache line, and
+        # appending into them from four cores turns every new group into a line
+        # the other three have to fetch again.
+        var seen = List[Int]()
+        for i in range(bounds[w], bounds[w + 1]):
+            if has_null and not col.is_valid(i):
+                continue
+            var at = Int(values.unsafe_offset(i).unsafe_load()) - Int(base)
+            if slots.unsafe_offset(at).unsafe_load() == 0:
+                seen.append(i)
+                slots.unsafe_offset(at).unsafe_write(UInt32(len(seen)))
+        founds[w] = seen^
+
+    parallel_for(discover, workers)
+
+    var starts = List[Int](capacity=workers + 1)
+    var total = 0
+    for w in range(workers):
+        starts.append(total)
+        total += len(founds[w])
+    starts.append(total)
+
+    var reps = _flatten_reps(founds, starts, workers)
+    var owners = Buffer(overwritten=total * 4)
+    var marks = Buffer(total)
+    # Which entry won each value, so that the merged ordinal can be put back on
+    # the value it belongs to once the ranking has assigned one.
+    var held = Buffer(overwritten=span * 4)
+    var chunks = (span + DIRECT_CLAIM_BLOCK - 1) // DIRECT_CLAIM_BLOCK
+
+    def claim(c: Int) raises {mut owners, mut marks, mut held, imm}:
+        var slots = tables.bitcast[DType.uint32]()
+        var own = owners.bitcast[DType.uint32]()
+        var hold = held.bitcast[DType.uint32]()
+        var mark = marks.unsafe_ptr()
+        var stop = min((c + 1) * DIRECT_CLAIM_BLOCK, span)
+        for v in range(c * DIRECT_CLAIM_BLOCK, stop):
+            var winner = -1
+            for w in range(workers):
+                var stored = slots.unsafe_offset(w * span + v).unsafe_load()
+                if stored == 0:
+                    continue
+                var entry = starts[w] + Int(stored) - 1
+                if winner < 0:
+                    winner = entry
+                    mark.unsafe_offset(entry).unsafe_store(UInt8(1))
+                own.unsafe_offset(entry).unsafe_write(UInt32(winner))
+            hold.unsafe_offset(v).unsafe_write(UInt32(winner))
+
+    parallel_for(claim, chunks)
+
+    var map = Buffer(0)
+    var firsts = List[Int]()
+    _rank_entries(marks, owners, reps, total, offset).into_parts(map, firsts)
+    var mapped = map.bitcast[DType.uint32]()
+
+    # The merged ordinals collapsed back onto the value range. A value nothing
+    # held keeps a zero, which no row can read because no row has that value.
+    var settled = Buffer(overwritten=span * 4)
+
+    def settle(c: Int) raises {mut settled, imm}:
+        var hold = held.bitcast[DType.uint32]()
+        var final = settled.bitcast[DType.uint32]()
+        var stop = min((c + 1) * DIRECT_CLAIM_BLOCK, span)
+        for v in range(c * DIRECT_CLAIM_BLOCK, stop):
+            var winner = hold.unsafe_offset(v).unsafe_load()
+            if winner == UInt32.MAX:
+                final.unsafe_offset(v).unsafe_write(UInt32(0))
+            else:
+                final.unsafe_offset(v).unsafe_write(
+                    mapped.unsafe_offset(Int(winner)).unsafe_load()
+                )
+
+    parallel_for(settle, chunks)
+
+    var codes = Array[DType.uint32](overwritten=n)
+
+    def assign(w: Int) raises {mut codes, imm}:
+        var final = settled.bitcast[DType.uint32]()
+        var values = col.unsafe_ptr()
+        var out = codes.unsafe_ptr()
+        for i in range(bounds[w], bounds[w + 1]):
+            if has_null and not col.is_valid(i):
+                out.unsafe_offset(i).unsafe_write(UInt32(0))
+                continue
+            var at = Int(values.unsafe_offset(i).unsafe_load()) - Int(base)
+            out.unsafe_offset(i).unsafe_write(
+                final.unsafe_offset(at).unsafe_load()
+            )
+
+    parallel_for(assign, workers)
+
+    var null_group = -1
+    if has_null:
+        null_group = 0
     return Factorized[dt](codes^, firsts^, null_group)
 
 
