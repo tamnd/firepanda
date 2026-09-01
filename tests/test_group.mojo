@@ -1262,5 +1262,70 @@ def test_a_group_by_past_the_parallel_threshold_agrees_with_a_serial_loop() rais
         )
 
 
+def test_three_keys_past_the_morsel_size_pack_the_same_as_one_loop() raises:
+    """The packing passes run in morsels on every core, so they need a size.
+
+    Widening the first key's ordinals to int64 and multiplying each later key's
+    into the running value are elementwise passes over every row, and they are
+    vectorized and cut into morsels. Neither the tail of a vector nor the seam
+    between two morsels shows up at the sizes the rest of this file uses, so
+    this one is over three hundred thousand rows, which is more than two morsels
+    and not a multiple of the vector width.
+
+    The three keys have coprime cardinalities so that the tuple count is their
+    product and any two tuples the packing merged would show up as a missing
+    group, and the reference below is the packing written out one row at a time.
+    """
+    comptime ROWS = 3 * 128 * 1024 + 37
+    comptime A = 7
+    comptime B = 11
+    comptime C = 13
+
+    var first = Array[DType.int32](ROWS)
+    var second = Array[DType.int64](ROWS)
+    var third = Array[DType.int32](ROWS)
+    for i in range(ROWS):
+        first[i] = Int32(i % A)
+        second[i] = Int64(i % B)
+        third[i] = Int32(i % C)
+
+    var columns = List[AnyArray]()
+    columns.append(AnyArray(first^))
+    columns.append(AnyArray(second^))
+    columns.append(AnyArray(third^))
+    var at = List[Int]()
+    for k in range(3):
+        at.append(k)
+
+    var grouping = group_ordinals(columns, at, ROWS)
+    assert_equal(grouping.groups, A * B * C)
+    assert_equal(len(grouping.rows_at), A * B * C)
+
+    # The same tuple has to get the same ordinal and two different tuples must
+    # not, which is one pass with a table over the tuple space rather than a
+    # comparison against a second implementation of the same packing.
+    var seen = List[Int](length=A * B * C, fill=-1)
+    var row = -1
+    for i in range(ROWS):
+        var tuple = (i % A) * B * C + (i % B) * C + (i % C)
+        var code = Int(grouping.codes[i])
+        if seen[tuple] < 0:
+            seen[tuple] = code
+        elif seen[tuple] != code:
+            row = i
+            break
+    assert_equal(row, -1, String("tuple split at row ", row))
+
+    var used = List[Bool](length=A * B * C, fill=False)
+    var twice = -1
+    for tuple in range(A * B * C):
+        var code = seen[tuple]
+        if used[code]:
+            twice = tuple
+            break
+        used[code] = True
+    assert_equal(twice, -1, String("two tuples share an ordinal at ", twice))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
