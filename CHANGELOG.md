@@ -8,6 +8,24 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.26] - 2026-09-01
+
+Built against Mojo 1.0.0 (ed45d567).
+
+This release finishes Arrow IPC. 0.6.25 could read a file, and now `write_arrow` and `write_ipc_stream` produce one, so a frame can go out to anything that speaks Arrow and come back. The read also got the change the last set of notes promised, which is that it no longer builds a column per record batch and stacks them at the end.
+
+Two decisions in the writer are worth writing down. The first is that string columns go out as Utf8View and BinaryView rather than as the offset formats, which is the same coincidence the C Data Interface export leans on: a firepanda string column is Arrow's view layout byte for byte. Writing views is a copy of buffers we already have, and writing `u` would mean building an offset array and a compacted payload for every string column on the way out, for the benefit of a reader that does not know a layout that has been in the spec for years. Our own importer takes both, so nothing on this side depends on the choice.
+
+The second is that the body streams straight out of the column's buffers. Writing a 320 MB frame allocates a few kilobytes of metadata and then hands the buffers to the file handle in order, so nothing between the frame and the disk holds a second copy of the data. The offsets each buffer will land at are computed once before anything is written and then checked again as the body goes out, because the entire format is offsets into a body whose padding rules are easy to get subtly wrong and hard to notice afterwards.
+
+On ten million rows of int64, float64 and an eleven character string, both writers pointed at the same ext4 filesystem on an i9-13900K, firepanda writes one batch in a median of 213 ms and a best of 57 ms, against pyarrow's 298 and 276 for the same view layout and 405 and 355 for its default offset layout. The spread inside our own numbers is writeback rather than code: the runs that did not wait on the disk finished in a third of the time of the ones that did. Every file the writer produces was handed to pyarrow, which read back every value exactly, including the null, the empty string and the bools. That check lives outside the test suite because a Mojo test cannot call pyarrow, and a round trip through our own reader would happily agree with any misunderstanding the two of them share.
+
+Then the read. The old path built a `DataFrame` per record batch and concatenated, which wrote every byte a second time and did it on one thread. The reader now decodes every batch's metadata before it copies anything, so the row count of the finished frame is known up front, and each column is allocated once and filled in place. The mistake worth recording is that the first version made a record batch the unit of work. That reads well, and it is what the file looks like, but how a file is chunked is a decision its writer made and says nothing about how many cores are sitting here. A file written as one batch had one task per column, so three columns used three of sixteen cores and came in at 71.6 ms while the 153 batch file beside it was already under 20. The unit is now a range of 65536 rows, which costs nothing to support because an Arrow array has carried an offset since the beginning, so a range of a batch is an ordinary array and the importer needed nothing new to read one.
+
+Validity is the one part that still runs on one thread, because a range boundary lands in the middle of a byte and two threads writing that byte would each be writing bits the other one owns. Each range builds its own bitmap and they are pasted in afterwards, which is one bit per row rather than one value per row and does not show up in the numbers.
+
+Fifteen repetitions on the same data, medians: 153 batches with offset strings went from 126 ms to 18.8 ms against pyarrow's 31.8, one batch from 89 ms to 19.3 against 28.2, and the view layout reads in 18.4 ms and 19.4 ms against 28.1 either way. So we went from 2.6x slower than pyarrow to about 1.5x faster, but the number to look at is that all four are now the same. Reading a file should cost what the bytes cost rather than what its writer picked for a chunk size, and until this release it did not.
+
 ### Added
 
 - `write_arrow`, `write_ipc_stream`, `write_ipc_file_bytes` and `write_ipc_stream_bytes` in `firepanda/io/arrow_ipc_write.mojo`, which completes Arrow IPC in both directions. `write_arrow` takes a frame and a path and produces the random access file format, magic number at both ends and a footer listing every batch; `write_ipc_stream` produces the streaming format for anything that is going down a socket rather than onto a disk. Both take an `IpcWriteOptions` whose only field today is `rows_per_batch`, and the default of zero writes the whole frame as one record batch.
@@ -1382,7 +1400,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.25...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.26...HEAD
+[0.6.26]: https://github.com/tamnd/firepanda/releases/tag/v0.6.26
 [0.6.25]: https://github.com/tamnd/firepanda/releases/tag/v0.6.25
 [0.6.24]: https://github.com/tamnd/firepanda/releases/tag/v0.6.24
 [0.6.23]: https://github.com/tamnd/firepanda/releases/tag/v0.6.23
