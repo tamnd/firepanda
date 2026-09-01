@@ -20,18 +20,12 @@ against the buffer it names applies here unchanged, and the alternative was a
 second implementation of all of it that would drift.
 
 Every batch is located before any of it is copied, which is what lets a file cost
-the same however its writer chunked it. The batches say how many rows there are
-between them, each column is asked how much string payload it needs, each column
-is allocated once, and then every range of rows is told the place it goes. Both
-passes run on every core and nothing is concatenated afterwards. The reader used
-to build a frame per batch and concatenate, and that wrote every byte a second
-time through one thread.
+the same however its writer chunked it. Decoding a batch produces pointers into
+the body rather than data, so the whole file can be looked at before anything is
+allocated, and then the columns are allocated once and filled in place.
 
-The unit of work is a range of rows rather than a batch, because how a file is
-chunked is the writer's decision and says nothing about how many cores are
-sitting here. A batch larger than a piece is cut up, and an Arrow array has
-carried an offset since the beginning, so a piece of a batch is an ordinary array
-and the importer needed nothing new to read one.
+The copy itself is `assemble`, next door, because a Parquet reader and a query
+result want exactly the same thing done with the arrays they produce.
 
 What is not read yet is anything nested, dictionary encoded or compressed. A
 record batch that says its body is compressed is refused by name rather than by
@@ -50,14 +44,13 @@ next column's data.
 from std.collections.span import Span
 
 from firepanda.array.any import AnyArray
-from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
-from firepanda.exec import parallel_for
 from firepanda.frame.frame import DataFrame
 
 from .arrow_c import ArrowArray, NullableVoidPtr, VoidPtr
-from .arrow_import import ColumnSink, build_column, fill_column, payload_for
+from .arrow_import import build_column
+from .assemble import ArrowLayout, assemble
 from .flatbuf import (
     field_scalar,
     field_string,
@@ -342,34 +335,7 @@ def _format_for(
     )
 
 
-struct IpcSchema(Copyable, Movable, Sized):
-    """The column names and format strings a stream's schema message gave."""
-
-    var names: List[String]
-    """The column names, in order."""
-
-    var formats: List[String]
-    """One format string per column, in the same order."""
-
-    var nullable: List[Bool]
-    """Whether each column was declared nullable."""
-
-    def __init__(out self):
-        """Constructs an empty schema."""
-        self.names = List[String]()
-        self.formats = List[String]()
-        self.nullable = List[Bool]()
-
-    def __len__(self) -> Int:
-        """Returns the column count.
-
-        Returns:
-            How many columns the schema has.
-        """
-        return len(self.names)
-
-
-def read_schema(data: Span[UInt8, _], schema: Int) raises -> IpcSchema:
+def read_schema(data: Span[UInt8, _], schema: Int) raises -> ArrowLayout:
     """Reads a schema message's header table.
 
     Args:
@@ -392,7 +358,7 @@ def read_schema(data: Span[UInt8, _], schema: Int) raises -> IpcSchema:
             " to be byte swapped rather than copied"
         )
 
-    var out = IpcSchema()
+    var out = ArrowLayout()
     var fields = field_vector(data, schema, 1)
     if fields < 0:
         return out^
@@ -477,37 +443,24 @@ struct _ColumnRef(Movable):
         self.length = length
         self.nulls = nulls
 
-    def array(self, start: Int, rows: Int) raises -> ArrowArray:
-        """Builds the `ArrowArray` the importer reads for a range of rows.
-
-        A range rather than the whole column, because a file written as one
-        record batch would otherwise use one core per column however many rows
-        it holds. An Arrow array carries an offset and the importer has honoured
-        it since the day it was written, so a slice of a batch is an ordinary
-        array and needs nothing new.
-
-        The null count is the whole column's, which is an overestimate for a
-        slice and is only ever compared against zero. A slice of a column with no
-        nulls still gets the cheap path.
-
-        Args:
-            start: The first row of the range, within this column.
-            rows: How many rows the range holds.
+    def array(self) raises -> ArrowArray:
+        """Builds the `ArrowArray` the importer reads for this column.
 
         Returns:
-            An array pointing into the message body, owning nothing.
+            An array pointing into the message body, owning nothing. The
+            assembler narrows it to a range of rows and never releases it, which
+            is why the release callback stays null.
         """
         var out = ArrowArray()
-        out.length = Int64(rows)
+        out.length = Int64(self.length)
         out.null_count = Int64(self.nulls)
-        out.offset = Int64(start)
         out.n_buffers = Int64(len(self.pointers))
         out.buffers = self.buffers
         return out^
 
 
 def _decode_batch(
-    data: Span[UInt8, _], schema: IpcSchema, message: IpcMessage
+    data: Span[UInt8, _], schema: ArrowLayout, message: IpcMessage
 ) raises -> List[_ColumnRef]:
     """Reads one record batch's metadata and locates every buffer in its body.
 
@@ -662,157 +615,52 @@ def _decode_batch(
     return out^
 
 
-comptime PIECE_ROWS = 65536
-"""How many rows one task copies. A multiple of eight, so that a piece begins on
-a byte of the validity bitmap and the bits are copied rather than shifted."""
+def _arrays(refs: List[List[_ColumnRef]]) raises -> List[List[ArrowArray]]:
+    """Turns the decoded batches into the arrays the assembler takes.
 
+    The refs have to outlive the call this feeds, because each array points at
+    the buffer list its ref owns and nothing in the array says so.
 
-@fieldwise_init
-struct _Piece(ImplicitlyCopyable, Movable):
-    """One task's share of the copy: a range of rows of one batch.
+    Args:
+        refs: One decoded batch per record batch, in order.
 
-    A batch is the unit the writer chose and it is not always a useful unit of
-    work. A file written as one record batch of ten million rows would otherwise
-    be one task per column however many cores are sitting there, so a batch is
-    cut into pieces and the pieces are what run.
+    Returns:
+        The same thing as Arrow arrays.
     """
-
-    var batch: Int
-    """Which batch."""
-
-    var start: Int
-    """The first row of the range, within that batch."""
-
-    var rows: Int
-    """How many rows the range holds."""
-
-    var at: Int
-    """The first row of the range in the finished column."""
-
-    var whole: Bool
-    """Whether the range is the whole batch, which decides whether a view column
-    may take the producer's data buffer as it stands rather than compacting."""
+    var out = List[List[ArrowArray]](capacity=len(refs))
+    for b in range(len(refs)):
+        var row = List[ArrowArray](capacity=len(refs[b]))
+        for c in range(len(refs[b])):
+            row.append(refs[b][c].array())
+        out.append(row^)
+    return out^
 
 
 def _assemble(
-    data: Span[UInt8, _],
-    schema: IpcSchema,
-    batches: List[List[_ColumnRef]],
+    schema: ArrowLayout, var refs: List[List[_ColumnRef]]
 ) raises -> DataFrame:
-    """Turns every batch of a file into one frame, allocating each column once.
-
-    The obvious way to read a file of many batches is to build a frame per batch
-    and concatenate, and it was the way this reader worked. The trouble is that
-    the concatenation writes every byte a second time, so a file that pyarrow
-    chose to write as a hundred and fifty three batches cost half again what the
-    same data cost as one.
-
-    A file does not need it. Every batch is located before any of them is read,
-    so the finished row count is known in advance, and the only thing that is not
-    is how much payload the string columns need. So this asks each array for that
-    number first, which is a pass it was going to make anyway inside the copy,
-    adds the answers up, allocates each column once and then hands every array
-    the place its rows go. Both passes run on every core, and there is nothing to
-    concatenate at the end.
-
-    The unit of work is a piece rather than a batch, because how a file is
-    chunked is the writer's decision and not a statement about how many cores the
-    reader has. A batch of ten million rows becomes a hundred and fifty three
-    pieces, and a batch of sixty thousand stays one.
+    """Builds the frame from every batch of a file.
 
     Args:
-        data: The buffer the batches point into, kept alive across the copy.
         schema: The schema the stream declared.
-        batches: One decoded batch per record batch message, in order.
+        refs: One decoded batch per record batch message, in order.
 
     Returns:
         The frame.
 
     Raises:
         Error: If a column holds a type firepanda cannot read, or a buffer is
-            malformed. The first failure by task index is the one raised.
+            malformed.
     """
-    var width = len(schema)
-    if width == 0:
-        return DataFrame(Schema(List[Field]()), List[AnyArray]())
-
-    var pieces = List[_Piece]()
-    var rows = 0
-    for b in range(len(batches)):
-        var length = batches[b][0].length
-        var start = 0
-        while start < length:
-            var take = min(PIECE_ROWS, length - start)
-            pieces.append(_Piece(b, start, take, rows, take == length))
-            start += take
-            rows += take
-        if length == 0:
-            pieces.append(_Piece(b, 0, 0, rows, True))
-    var count = len(pieces)
-
-    var payload = List[Int](length=width * count, fill=0)
-
-    def plan(task: Int) raises {mut payload, imm}:
-        var c = task // count
-        ref piece = pieces[task % count]
-        payload[task] = payload_for(
-            batches[piece.batch][c].array(piece.start, piece.rows),
-            schema.formats[c],
-            piece.whole,
-        )
-
-    parallel_for(plan, width * count)
-
-    var sinks = List[ColumnSink](capacity=width)
-    for c in range(width):
-        var total = 0
-        for p in range(count):
-            var here = payload[c * count + p]
-            payload[c * count + p] = total
-            total += here
-        sinks.append(ColumnSink(schema.formats[c], rows, total))
-
-    var validity = List[Bitmap](length=width * count, fill=Bitmap(0))
-
-    def fill(task: Int) raises {mut sinks, mut validity, imm}:
-        var c = task // count
-        ref piece = pieces[task % count]
-        validity[task] = fill_column(
-            sinks[c],
-            piece.at,
-            payload[task],
-            batches[piece.batch][c].array(piece.start, piece.rows),
-            schema.formats[c],
-            piece.whole,
-        )
-
-    parallel_for(fill, width * count)
-
-    # Validity is pasted here rather than inside the fill, because a piece
-    # boundary need not fall on a byte of the bitmap and two threads writing the
-    # byte either side of one would lose each other's bits. One pass over a bit
-    # per row does not show up next to the copy it follows.
-    for c in range(width):
-        for p in range(count):
-            ref piece = pieces[p]
-            if batches[piece.batch][c].nulls == 0:
-                continue
-            sinks[c].validity.paste(
-                piece.at, validity[c * count + p], piece.rows
-            )
-
-    var fields = List[Field](capacity=width)
-    var columns = List[AnyArray](capacity=width)
-    for c in range(width):
-        var column = sinks.pop(0).finish()
-        var field = Field(schema.names[c], column.type)
-        field.nullable = schema.nullable[c]
-        fields.append(field^)
-        columns.append(column^)
-    return DataFrame(Schema(fields^), columns^)
+    var arrays = _arrays(refs)
+    var frame = assemble(schema, arrays)
+    # The refs own the buffer lists the arrays point at, and their last use above
+    # is where they would otherwise be destroyed.
+    _ = refs^
+    return frame^
 
 
-def _empty_frame(data: Span[UInt8, _], schema: IpcSchema) raises -> DataFrame:
+def _empty_frame(data: Span[UInt8, _], schema: ArrowLayout) raises -> DataFrame:
     """Builds a frame of no rows with the schema's types.
 
     A stream may carry a schema and no batches, which is what an empty query
@@ -912,7 +760,7 @@ def read_ipc_stream(data: Span[UInt8, _]) raises -> DataFrame:
 
     if len(batches) == 0:
         return _empty_frame(data, schema)
-    return _assemble(data, schema, batches)
+    return _assemble(schema, batches^)
 
 
 def read_ipc_file(data: Span[UInt8, _]) raises -> DataFrame:
@@ -979,7 +827,7 @@ def read_ipc_file(data: Span[UInt8, _]) raises -> DataFrame:
             )
         batches.append(_decode_batch(data, schema, message))
 
-    return _assemble(data, schema, batches)
+    return _assemble(schema, batches^)
 
 
 def read_arrow_bytes(data: Span[UInt8, _]) raises -> DataFrame:
