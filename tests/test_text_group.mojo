@@ -477,6 +477,13 @@ def test_the_parallel_string_route_agrees_on_many_groups() raises:
     same_string_routes(repeating_text(4096, 3000), 8, "many")
 
 
+def test_the_parallel_string_merge_agrees_across_many_buckets() raises:
+    # Sixteen workers puts the merge into sixty four buckets. Every bucket has
+    # to compare the two rows behind a hash match on its own, and the ordinals
+    # still have to come back in the order the workers offered them.
+    same_string_routes(repeating_text(16384, 3000), 16, "many buckets")
+
+
 def test_the_parallel_string_route_agrees_when_every_row_is_its_own_key() raises:
     same_string_routes(repeating_text(4096, 4096), 6, "distinct")
 
