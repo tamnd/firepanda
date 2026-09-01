@@ -112,13 +112,13 @@ The risk is that a wrong query plan still returns a plausible looking result. Th
 
 Build the morsel driven scheduler over `parallelize` with a worker pool sized to the physical core count and work stealing. Build partitioned hash aggregation where each worker owns a private table over a radix partition of the key space. Parallelize the joins and the sort. Add late materialization through selection vectors. Thread the cancellation flag through to morsel boundaries.
 
-Create `firepanda/exec/shared.mojo` and put every piece of shared mutable state in the library in it, each with its invariant. There is no race detector in this language and this file is the substitute, per document 02.
+Keep every piece of shared mutable state in the library in `firepanda/exec/morsel.mojo`, each with its invariant. There is no race detector in this language and one named file is the substitute, per document 02.
 
 Declare the operator interface additions that M9 and M10 need: a device affinity and a streamable flag, both ignored for now.
 
 Determine the chunk size by benchmark in this milestone rather than guessing earlier.
 
-Done when group by scales at least 12x on 16 cores at 100 million rows, and at better than 60 percent efficiency on 8 cores. Done when the concurrency stress suite from document 09 passes ten thousand iterations under load. Done when cancellation latency is under 50 milliseconds at 100 million rows. Done when `shared.mojo` accounts for every atomic and every mutable global in the library, checked by a grep in CI.
+Done when group by scales at least 12x on 16 cores at 100 million rows, and at better than 60 percent efficiency on 8 cores. Done when the concurrency stress suite from document 09 passes ten thousand iterations under load. Done when cancellation latency is under 50 milliseconds at 100 million rows. Done when `morsel.mojo` accounts for every atomic and every mutable global in the library, checked by a grep in CI.
 
 ## M6, pandas parity, first tier
 

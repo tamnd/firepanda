@@ -178,7 +178,7 @@ Six rules govern this layer.
 
 Mojo has no race detector. Go's `-race` would have caught the entire class of bug this layer produces, and there is no equivalent.
 
-The mitigation is structural rather than diagnostic. Workers own their partitions exclusively, shared state is limited to an explicitly enumerated list of atomics, and every piece of that list is documented in `firepanda/exec/shared.mojo` with the invariant it maintains. If it is not in that file it is not shared, and a code review that adds shared state without adding it to that file is rejected.
+The mitigation is structural rather than diagnostic. Workers own their partitions exclusively, shared state is limited to an explicitly enumerated list of atomics, and every piece of that list is documented in `firepanda/exec/morsel.mojo` with the invariant it maintains. If it is not in that file it is not shared, and a code review that adds shared state without adding it to that file is rejected.
 
 That is a weaker guarantee than a race detector and it should be stated as such rather than papered over. Document 09 says what testing has to compensate.
 

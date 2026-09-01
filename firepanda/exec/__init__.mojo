@@ -2,21 +2,25 @@
 
 Tier: unstable, documented. docs/specs/11-package-layout.md.
 
-Today this is one file and one function. `parallel_for` runs a body once per
-index and returns when every index has finished, and every other package that
-wants a second core goes through it. The CSV reader is the first caller and the
-group by and the join are the ones that will care most.
+Two ways of using the machine, and the difference between them is when the work
+is divided up.
 
-The morsel scheduler, the selection vectors and the operator graph that the
-package layout document puts here are M6 work and are not here yet. What is here
-is deliberately the smallest thing that lets a kernel use the machine, so that
-the scheduler when it arrives replaces something measured rather than something
-imagined.
+`parallel_for` runs a body once per index and returns when every index has
+finished. The division happens before any work is done, so it is right when the
+pieces cost the same and it leaves cores idle when they do not.
 
-`shared.mojo` does not exist yet either, and that is the point of the CI grep
-that asserts no `Atomic` and no mutable global appears outside this package.
-`parallel_for` needs neither: each index writes its own slot and nothing is read
-until every task has been waited on.
+`parallel_morsels` runs a body over a range of rows in fixed size pieces, handed
+out by a shared counter to whichever worker asks next. Nothing is decided in
+advance, so a piece that turns out to be expensive costs the job one morsel of
+tail rather than one worker's whole share. That is the scheduler the engine in
+docs/specs/engine is built on, and the operators move onto it one at a time.
+
+The atomic that the counter needs is the reason this package is the one place
+allowed to have one. A grep in CI asserts that `Atomic` and mutable globals
+appear nowhere outside `morsel.mojo`, and in there they are one field of
+`MorselQueue`. `parallel_for` still needs neither: each index writes its own slot
+and nothing is read until every task has been waited on.
 """
 
+from .morsel import MORSEL_ROWS, Morsel, MorselQueue, parallel_morsels
 from .parallel import parallel_for, worker_count

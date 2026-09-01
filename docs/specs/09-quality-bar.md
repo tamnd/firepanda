@@ -53,7 +53,7 @@ Three of those matter more than the rest.
 
 The mitigation is structural, and stating it as structural rather than pretending a test suite substitutes for a sanitizer is the honest framing.
 
-**Enumerate shared state.** `firepanda/exec/shared.mojo` contains every atomic and every mutable global in the library, each with the invariant it maintains and the operators that touch it. A CI grep asserts that no `Atomic` and no mutable global appears anywhere else. A change that adds shared state without adding it to that file does not merge.
+**Enumerate shared state.** `firepanda/exec/morsel.mojo` contains every atomic and every mutable global in the library, each with the invariant it maintains and the operators that touch it. A CI grep asserts that no `Atomic` and no mutable global appears anywhere else. A change that adds shared state without adding it to that file does not merge.
 
 **Workers own their partitions exclusively.** The radix partitioned aggregation from document 05 is chosen partly because it needs no shared mutable state at all: private tables, concatenating merge. Where a design has a lock free and a shared variant with similar performance, take the one with no sharing.
 

@@ -37,7 +37,7 @@ The rule is that a kernel is never internally parallel. Parallelism lives in the
 
 The single exception is a whole-column operation invoked directly from the eager surface with no executor above it, and that path calls the same kernel through a parallel wrapper rather than the kernel parallelizing itself.
 
-There is no GIL, so this is ordinary shared memory parallelism with no ceremony. There is also no race detector, which is document 09's problem and the reason `firepanda/exec/shared.mojo` enumerates every piece of shared mutable state in the library.
+There is no GIL, so this is ordinary shared memory parallelism with no ceremony. There is also no race detector, which is document 09's problem and the reason every piece of shared mutable state in the library lives in `firepanda/exec/morsel.mojo`.
 
 ## 3. The hash table, which we have to write
 
