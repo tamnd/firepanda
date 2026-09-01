@@ -3,7 +3,9 @@
 A frame holds columns of different types in one list, so at the frame boundary
 the dtype has to stop being a parameter and start being a value. `AnyArray` is
 that boundary. It holds the same storage `Array[dt]` holds plus the dtype as a
-field, and it hands out a typed column through `as_typed`.
+field, and it hands out a typed column through `as_typed` and `as_typed_view`.
+The first copies and the second borrows, and anything that only reads should be
+using the second.
 
 `as_typed[dt]()` is a checked reinterpretation, not a conversion. It raises if the
 requested dtype does not match the one in the field. That check is the only thing
@@ -207,9 +209,9 @@ struct AnyArray(Copyable, Movable, Sized):
     def as_typed[dt: DType](self) raises -> Array[dt]:
         """Returns a typed copy of the column.
 
-        The copy is what makes this safe to hand out from a borrowed column. On
-        the hot path, `dispatch` reads through `unsafe_ptr` instead, having
-        already proved the dtype.
+        Use this only when the caller needs to own the result. Anything that
+        reads and hands the column back should take `as_typed_view`, which
+        borrows the same storage and copies nothing.
 
         Parameters:
             dt: The dtype to read the column as.
@@ -222,6 +224,33 @@ struct AnyArray(Copyable, Movable, Sized):
         """
         self.check_dtype[dt]()
         return Array[dt](ColumnData(copy=self.data))
+
+    def as_typed_view[dt: DType](ref self) raises -> ref[self.data] Array[dt]:
+        """Returns a typed reference to the column, borrowing rather than copying.
+
+        `as_typed` is a deep copy of every byte the column holds, which for a
+        forty megabyte key column is a real cost, and a group by pays it once
+        per key column on every query because `factorize` takes an `Array[dt]`
+        and there was no other way to produce one from a borrowed `AnyArray`.
+        This is that other way. It hands back a reference into the column's own
+        storage, so it copies nothing and the caller may only read.
+
+        `Array[dt]` holds one field, a `ColumnData`, and a struct of one field
+        has that field's layout, so a pointer to the storage is a pointer to the
+        array. That is an assumption about layout and it is asserted in
+        `tests/test_array.mojo` rather than left to be noticed later.
+
+        Parameters:
+            dt: The dtype to read the column as.
+
+        Returns:
+            A reference to the column read as a typed array.
+
+        Raises:
+            If `dt` is not the column's dtype.
+        """
+        self.check_dtype[dt]()
+        return Pointer(to=self.data).unsafe_bitcast[Array[dt]]()[]
 
     def into_typed[dt: DType](deinit self) raises -> Array[dt]:
         """Converts to a typed column without copying, consuming this one.
