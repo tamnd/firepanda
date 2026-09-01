@@ -8,6 +8,27 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added
+
+- `read_parquet` in `firepanda/io/parquet.mojo`, in two forms: a path, and a path with a list of column names. The path goes to DuckDB verbatim, so a glob, a directory of Hive partitions and an `s3://` URL are all just paths and none of them needed code here. Naming columns is a projection rather than a read followed by a drop, so a file of forty columns read for two costs two columns of decompression, and the order asked for is the order that comes back.
+- `firepanda/io/duckdb.mojo`, a `dlopen` binding of the DuckDB C API. It is loaded on first use and it is soft: `FIREPANDA_DUCKDB` names a library if you have one somewhere unusual, otherwise the four ordinary names are tried in turn, and a machine with no libduckdb anywhere is a machine where `read_parquet` raises a message saying so and nothing else in firepanda changes.
+- `benchmarks/read_parquet_file.mojo`, which times `read_parquet` on a real file, in the same shape as `read_arrow_file.mojo` beside it and for the same reason.
+- `tests/test_parquet.mojo`, eleven tests against a Parquet file pyarrow wrote, checked in as the bytes pyarrow produced. Five columns and six rows, covering an int64, an int32, a double, a string and a bool, a null in the middle of four of them, an empty string next to one too long to inline, and one column with no nulls at all so the reader has to notice the difference.
+
+### Changed
+
+- The Parquet reader binds DuckDB, not Arrow C++ as `docs/specs/08-milestones.md` said. Arrow C++ exports no unmangled C symbols. `libparquet.so` is a C++ library with a C++ API, so there is nothing for `dlsym` to find and nothing an `abi("C")` function type can describe, and the pyarrow everybody actually uses is a Cython wrapper around that C++ rather than a C shim we could borrow. DuckDB ships a stable C header with an Arrow C Data Interface export built into it, which makes a Parquet read a `SELECT` whose result chunks hand out as Arrow arrays our importer already knows how to take. It also brings globbing, Hive partition discovery and projection pushdown for free. The spec now says so.
+
+Two things about Mojo came out of writing the binding and are worth recording, because both of them look like bugs in DuckDB and neither one is.
+
+A value dies at its last use, and that includes the expression it is being used in. `some_c_function(terminated(s).unsafe_ptr())` frees the buffer before the call runs, so C reads freed memory. This was found by calling `strlen` through the same machinery and getting zero back for an eleven character string. Every call site that hands C a pointer into a Mojo owned buffer now binds the buffer to a local and writes `_ = local^` after the call, and the same rule applies inside `__deinit__`, where a field's last use is still its last use and `self.lib.close(self.cells.at(0))` frees the cells before `close` reads them.
+
+A stack local reached through `Pointer(to=x).unsafe_origin_cast[MutUntrackedOrigin]()` is not a usable C out parameter. Erasing the origin also erases the compiler's reason to believe anything ever wrote there, so C's write lands and the next read of the local still returns what it held before the call. This showed up as `duckdb_connect` returning success with a null connection, which reads exactly like a library bug, and the same program in C works five times in a row. Every out parameter now goes through a small `Cells` type that is a `List[UInt64]`, which is to say the heap, and a write through a pointer into the heap is a write.
+
+Numbers, ten million rows of int64, float64 and an eleven character string, 176 MB snappy Parquet in ten row groups, seven repetitions, medians on an i9-13900K: firepanda 292 ms, DuckDB to an Arrow table 302 ms, pyarrow 69 ms, Polars 32 ms. So we are at parity with the library we are calling, which is what a thin binding should be, and we are nowhere near the 2x of Polars that M2 asks for.
+
+The reason is in the phase timing. Of a read, the DuckDB scan is about 250 ms, pulling the chunks out is 145 ms, converting each 2048 row chunk to an Arrow array is 560 to 1100 ms, and assembling 4890 batches into a frame is 200 to 600 ms. The Arrow conversion is most of the cost and it buys nothing: DuckDB's data chunks are already columnar, a flat vector of int64 is a contiguous array of int64, and the next change is to copy out of the vectors directly and skip both the conversion and the assembly. That is a separate change and this one is the correct reader it will replace the middle of.
+
 ## [0.6.26] - 2026-09-01
 
 Built against Mojo 1.0.0 (ed45d567).

@@ -26,6 +26,14 @@ modular = "*"
 # something we may end up maintaining.
 [feature.dev.dependencies]
 python = ">=3.12"
+# Parquet is read by binding a library rather than by decoding pages ourselves,
+# and the library is DuckDB rather than Arrow C++ because Arrow C++ exports no C
+# symbols at all. See docs/specs/08-milestones.md on M2. It is here rather than
+# in [dependencies] because firepanda loads it at run time and works without it:
+# a build with no libduckdb reachable is a build where read_parquet raises and
+# everything else is unaffected. Tests need it, so the development environment
+# has it.
+libduckdb = { version = ">=1.4", channel = "conda-forge" }
 
 # The nightly channel is scoped to this feature rather than added to the workspace,
 # so a default `pixi run` cannot quietly resolve the toolchain to a nightly build.
