@@ -107,6 +107,14 @@ tables afterwards is a fair fraction of that, so below here the parallel route i
 break even at best and the serial one is the honest answer.
 """
 
+comptime GROUP_BLOCK_ALIGN = 8
+"""Groups a per group loop's pieces are cut on a multiple of.
+
+Eight presence bits are a byte and eight float64 results are a cache line, so
+this is the smallest number that keeps two workers from writing the same byte of
+validity or fighting over the same line of output.
+"""
+
 
 def _private_workers[dt: DType](rows: Int, groups: Int) -> Int:
     """Decides how many private tables a grouped reduction should build.
@@ -153,6 +161,56 @@ def _row_bounds(rows: Int, workers: Int) -> List[Int]:
     for w in range(workers):
         bounds.append(rows * w // workers)
     bounds.append(rows)
+    return bounds^
+
+
+def _group_blocks(rows: Int, groups: Int) -> Int:
+    """Decides how many pieces a per group loop should be cut into.
+
+    A per group loop is not a scatter. Each group's values are already in their
+    own run of the slab, so the pieces touch nothing in common and there are no
+    private tables to pay for. What there is instead is imbalance, because the
+    groups are not the same size, so this asks for four pieces per worker rather
+    than one and lets the short ones finish early.
+
+    Args:
+        rows: How many rows went into the slab.
+        groups: How many groups there are to walk.
+
+    Returns:
+        The number of pieces, or one to say the loop should stay serial.
+    """
+    if rows < PRIVATE_ROWS or groups < GROUP_BLOCK_ALIGN:
+        return 1
+    var blocks = worker_count() * 4
+    var most = groups // GROUP_BLOCK_ALIGN
+    return blocks if blocks < most else most
+
+
+def _group_bounds(groups: Int, blocks: Int) -> List[Int]:
+    """Cuts a group range into pieces that share no byte of the output.
+
+    Every cut is rounded up to a multiple of eight. Eight groups' presence bits
+    are one byte of the output validity, and clearing a bit is a read, a mask and
+    a write, so two workers on the same byte would lose one of the two clears.
+    Eight float64 results are also a cache line, so the same rounding keeps the
+    value writes off each other's lines as well.
+
+    Args:
+        groups: How many groups there are.
+        blocks: How many pieces to cut them into.
+
+    Returns:
+        `blocks + 1` offsets, the first zero and the last `groups`.
+    """
+    var bounds = List[Int](capacity=blocks + 1)
+    for b in range(blocks):
+        var cut = groups * b // blocks
+        cut = ((cut + GROUP_BLOCK_ALIGN - 1) // GROUP_BLOCK_ALIGN) * (
+            GROUP_BLOCK_ALIGN
+        )
+        bounds.append(cut if cut < groups else groups)
+    bounds.append(groups)
     return bounds^
 
 
@@ -1095,23 +1153,39 @@ def _var_core[
     var means = _mean_core(source, validity, has_null, codes, groups)
     var counts = _count_core(validity, has_null, codes, groups)
 
-    var out = Array[DType.float64](groups)
-    var target = out.unsafe_ptr()
+    var rows = len(codes)
+    var workers = _private_workers[DType.float64](rows, groups)
     var centre = means.unsafe_ptr()
     var at = codes.unsafe_ptr()
 
-    for i in range(len(codes)):
-        if has_null and not validity.get(i):
-            continue
-        var g = Int(at.unsafe_offset(i).unsafe_load())
-        var delta = (
-            source.unsafe_offset(i).unsafe_load().cast[DType.float64]()
-            - centre.unsafe_offset(g).unsafe_load()
-        )
-        target.unsafe_offset(g).unsafe_store(
-            target.unsafe_offset(g).unsafe_load() + delta * delta
-        )
+    # The same private table arrangement the sums and the counts already use.
+    # The first pass of this reduction goes through `_mean_core` and has been
+    # parallel for a while; the second one was still a serial scatter, so a
+    # standard deviation cost more than the mean it is built on and used one
+    # core to do it.
+    var partials = Array[DType.float64](groups * workers)
+    var bounds = _row_bounds(rows, workers)
 
+    def one(w: Int) raises {mut partials, imm}:
+        var totals = partials.unsafe_ptr().unsafe_offset(w * groups)
+        for i in range(bounds[w], bounds[w + 1]):
+            if has_null and not validity.get(i):
+                continue
+            var g = Int(at.unsafe_offset(i).unsafe_load())
+            var delta = (
+                source.unsafe_offset(i).unsafe_load().cast[DType.float64]()
+                - centre.unsafe_offset(g).unsafe_load()
+            )
+            totals.unsafe_offset(g).unsafe_store(
+                totals.unsafe_offset(g).unsafe_load() + delta * delta
+            )
+
+    parallel_for(one, workers)
+
+    if workers > 1:
+        partials = _merge_sums(partials, groups, workers)
+    var out = partials^
+    var target = out.unsafe_ptr()
     var n = counts.unsafe_ptr()
     for g in range(groups):
         var divisor = Int(n.unsafe_offset(g).unsafe_load()) - ddof
@@ -1297,40 +1371,52 @@ def _quantile_core[
     var slab = Array[dt](bounds[groups])
     _fill_slab(source, validity, has_null, codes, groups, bounds, slab)
 
-    var values = slab.unsafe_ptr()
     var out = Array[DType.float64](groups)
-    var target = out.unsafe_ptr()
 
-    for g in range(groups):
-        var start = bounds[g]
-        var count = bounds[g + 1] - start
-        if count == 0:
-            out.data.validity.set(g, False)
-            continue
-        sort(
-            Span[Scalar[dt], origin_of(slab)](
-                unsafe_ptr=values.unsafe_offset(start), length=count
+    # One group's run of the slab is nobody else's, so this loop needs no
+    # private tables and no merge, only a cut that leaves two workers off the
+    # same byte of validity. It is the whole cost of a median on a high
+    # cardinality key, where the row count is spread over so many groups that
+    # the sorts are short and there are millions of them.
+    var blocks = _group_blocks(len(codes), groups)
+    var cuts = _group_bounds(groups, blocks)
+
+    def one(b: Int) raises {mut slab, mut out, imm}:
+        var values = slab.unsafe_ptr()
+        var target = out.unsafe_ptr()
+        for g in range(cuts[b], cuts[b + 1]):
+            var start = bounds[g]
+            var count = bounds[g + 1] - start
+            if count == 0:
+                out.data.validity.set(g, False)
+                continue
+            sort(
+                Span[Scalar[dt], origin_of(slab)](
+                    unsafe_ptr=values.unsafe_offset(start), length=count
+                )
             )
-        )
-        # pandas' default interpolation. The position is on the sorted values
-        # rather than between them, so q of zero is the minimum and q of one is
-        # the maximum exactly, and everything in between is a weighted pair.
-        var position = q * Float64(count - 1)
-        var lower = Int(position)
-        var upper = lower + 1 if lower + 1 < count else lower
-        var low = (
-            values.unsafe_offset(start + lower)
-            .unsafe_load()
-            .cast[DType.float64]()
-        )
-        var high = (
-            values.unsafe_offset(start + upper)
-            .unsafe_load()
-            .cast[DType.float64]()
-        )
-        target.unsafe_offset(g).unsafe_store(
-            low + (high - low) * (position - Float64(lower))
-        )
+            # pandas' default interpolation. The position is on the sorted
+            # values rather than between them, so q of zero is the minimum and
+            # q of one is the maximum exactly, and everything in between is a
+            # weighted pair.
+            var position = q * Float64(count - 1)
+            var lower = Int(position)
+            var upper = lower + 1 if lower + 1 < count else lower
+            var low = (
+                values.unsafe_offset(start + lower)
+                .unsafe_load()
+                .cast[DType.float64]()
+            )
+            var high = (
+                values.unsafe_offset(start + upper)
+                .unsafe_load()
+                .cast[DType.float64]()
+            )
+            target.unsafe_offset(g).unsafe_store(
+                low + (high - low) * (position - Float64(lower))
+            )
+
+    parallel_for(one, blocks)
     return out^
 
 
@@ -1358,36 +1444,41 @@ def _nunique_core[
     var slab = Array[dt](bounds[groups])
     _fill_slab(source, validity, has_null, codes, groups, bounds, slab)
 
-    var values = slab.unsafe_ptr()
     var out = Array[DType.int64](groups)
-    var target = out.unsafe_ptr()
+    var blocks = _group_blocks(len(codes), groups)
+    var cuts = _group_bounds(groups, blocks)
 
-    for g in range(groups):
-        var start = bounds[g]
-        var count = bounds[g + 1] - start
-        if count == 0:
-            continue
-        sort(
-            Span[Scalar[dt], origin_of(slab)](
-                unsafe_ptr=values.unsafe_offset(start), length=count
+    def one(b: Int) raises {mut slab, mut out, imm}:
+        var values = slab.unsafe_ptr()
+        var target = out.unsafe_ptr()
+        for g in range(cuts[b], cuts[b + 1]):
+            var start = bounds[g]
+            var count = bounds[g + 1] - start
+            if count == 0:
+                continue
+            sort(
+                Span[Scalar[dt], origin_of(slab)](
+                    unsafe_ptr=values.unsafe_offset(start), length=count
+                )
             )
-        )
-        var distinct = 1
-        for i in range(start + 1, start + count):
-            if (
-                values.unsafe_offset(i).unsafe_load()
-                != values.unsafe_offset(i - 1).unsafe_load()
-            ):
-                distinct += 1
-        target.unsafe_offset(g).unsafe_store(Int64(distinct))
+            var distinct = 1
+            for i in range(start + 1, start + count):
+                if (
+                    values.unsafe_offset(i).unsafe_load()
+                    != values.unsafe_offset(i - 1).unsafe_load()
+                ):
+                    distinct += 1
+            target.unsafe_offset(g).unsafe_store(Int64(distinct))
+
+    parallel_for(one, blocks)
     return out^
 
 
 def group_corr[
     dx: DType, dy: DType
-](x: Array[dx], y: Array[dy], codes: Array[DType.uint32], groups: Int) -> Array[
-    DType.float64
-]:
+](
+    x: Array[dx], y: Array[dy], codes: Array[DType.uint32], groups: Int
+) raises -> Array[DType.float64]:
     """Returns the Pearson correlation of two columns within each group.
 
     Args:
@@ -1405,6 +1496,10 @@ def group_corr[
         fewer than two rows in which both values are present is null, and so is a
         group in which either column does not vary, because the correlation is a
         zero over a zero there.
+
+    Raises:
+        If one of the workers the parallel route starts cannot be run. A
+        reduction small enough to stay on one core cannot fail.
     """
     return _pair_core[want_corr=True](
         x.unsafe_ptr(),
@@ -1427,7 +1522,7 @@ def group_cov[
     codes: Array[DType.uint32],
     groups: Int,
     ddof: Int = 1,
-) -> Array[DType.float64]:
+) raises -> Array[DType.float64]:
     """Returns the covariance of two columns within each group.
 
     Args:
@@ -1445,6 +1540,10 @@ def group_cov[
     Returns:
         A column of `groups` covariances. A group with `ddof` or fewer pairwise
         present rows is null.
+
+    Raises:
+        If one of the workers the parallel route starts cannot be run. A
+        reduction small enough to stay on one core cannot fail.
     """
     return _pair_core[want_corr=False](
         x.unsafe_ptr(),
@@ -1476,7 +1575,7 @@ def _pair_core[
     codes: Array[DType.uint32],
     groups: Int,
     ddof: Int,
-) -> Array[DType.float64]:
+) raises -> Array[DType.float64]:
     """Centres both columns on their pairwise means and accumulates the products.
 
     Two passes, for the reason `_var_core` takes two. The one pass form keeps the
@@ -1493,79 +1592,113 @@ def _pair_core[
     pandas does, and it is why this cannot reuse `_mean_core`, which knows about
     one column's validity and not two.
     """
-    var count = List[Int](length=groups, fill=0)
-    var mean_x = List[Float64](length=groups, fill=0.0)
-    var mean_y = List[Float64](length=groups, fill=0.0)
-
-    var at = codes.unsafe_ptr()
-    var n_at = count.unsafe_ptr()
-    var mx = mean_x.unsafe_ptr()
-    var my = mean_y.unsafe_ptr()
     var rows = len(codes)
+    # Three tables in the first pass and three in the second, all float64, so a
+    # worker's share of the budget is six times a group rather than one.
+    var workers = _private_workers[DType.float64](rows, groups * 6)
+    var bounds = _row_bounds(rows, workers)
+    var at = codes.unsafe_ptr()
 
-    for i in range(rows):
-        if left_has_null and not left_valid.get(i):
-            continue
-        if right_has_null and not right_valid.get(i):
-            continue
-        var g = Int(at.unsafe_offset(i).unsafe_load())
-        n_at.unsafe_offset(g).unsafe_write(
-            n_at.unsafe_offset(g).unsafe_load() + 1
-        )
-        mx.unsafe_offset(g).unsafe_write(
-            mx.unsafe_offset(g).unsafe_load()
-            + left.unsafe_offset(i).unsafe_load().cast[DType.float64]()
-        )
-        my.unsafe_offset(g).unsafe_write(
-            my.unsafe_offset(g).unsafe_load()
-            + right.unsafe_offset(i).unsafe_load().cast[DType.float64]()
-        )
+    var counts = Array[DType.float64](groups * workers)
+    var sum_x = Array[DType.float64](groups * workers)
+    var sum_y = Array[DType.float64](groups * workers)
+
+    def totals(w: Int) raises {mut counts, mut sum_x, mut sum_y, imm}:
+        var n_at = counts.unsafe_ptr().unsafe_offset(w * groups)
+        var mx = sum_x.unsafe_ptr().unsafe_offset(w * groups)
+        var my = sum_y.unsafe_ptr().unsafe_offset(w * groups)
+        for i in range(bounds[w], bounds[w + 1]):
+            if left_has_null and not left_valid.get(i):
+                continue
+            if right_has_null and not right_valid.get(i):
+                continue
+            var g = Int(at.unsafe_offset(i).unsafe_load())
+            n_at.unsafe_offset(g).unsafe_store(
+                n_at.unsafe_offset(g).unsafe_load() + 1.0
+            )
+            mx.unsafe_offset(g).unsafe_store(
+                mx.unsafe_offset(g).unsafe_load()
+                + left.unsafe_offset(i).unsafe_load().cast[DType.float64]()
+            )
+            my.unsafe_offset(g).unsafe_store(
+                my.unsafe_offset(g).unsafe_load()
+                + right.unsafe_offset(i).unsafe_load().cast[DType.float64]()
+            )
+
+    parallel_for(totals, workers)
+
+    if workers > 1:
+        counts = _merge_sums(counts, groups, workers)
+        sum_x = _merge_sums(sum_x, groups, workers)
+        sum_y = _merge_sums(sum_y, groups, workers)
+
+    # The count is carried as a float64 so that it merges with the same
+    # vectorized adder the two sums use. Every count here is a row count under
+    # two to the fifty three, so it is exact and the divisions below are the
+    # ones they would have been in an integer.
+    var n_at = counts.unsafe_ptr()
+    var mx = sum_x.unsafe_ptr()
+    var my = sum_y.unsafe_ptr()
 
     for g in range(groups):
         var n = n_at.unsafe_offset(g).unsafe_load()
-        if n == 0:
+        if n == 0.0:
             continue
-        mx.unsafe_offset(g).unsafe_write(
-            mx.unsafe_offset(g).unsafe_load() / Float64(n)
-        )
-        my.unsafe_offset(g).unsafe_write(
-            my.unsafe_offset(g).unsafe_load() / Float64(n)
-        )
+        mx.unsafe_offset(g).unsafe_store(mx.unsafe_offset(g).unsafe_load() / n)
+        my.unsafe_offset(g).unsafe_store(my.unsafe_offset(g).unsafe_load() / n)
 
-    var sxx = List[Float64](length=groups if want_corr else 0, fill=0.0)
-    var syy = List[Float64](length=groups if want_corr else 0, fill=0.0)
-    var out = Array[DType.float64](groups)
-    var sxy = out.unsafe_ptr()
-    var xx = sxx.unsafe_ptr()
-    var yy = syy.unsafe_ptr()
+    var prod = Array[DType.float64](groups * workers)
+    var square_x = Array[DType.float64](groups * workers if want_corr else 0)
+    var square_y = Array[DType.float64](groups * workers if want_corr else 0)
 
-    for i in range(rows):
-        if left_has_null and not left_valid.get(i):
-            continue
-        if right_has_null and not right_valid.get(i):
-            continue
-        var g = Int(at.unsafe_offset(i).unsafe_load())
-        var a = (
-            left.unsafe_offset(i).unsafe_load().cast[DType.float64]()
-            - mx.unsafe_offset(g).unsafe_load()
+    def spreads(w: Int) raises {mut prod, mut square_x, mut square_y, imm}:
+        var sxy = prod.unsafe_ptr().unsafe_offset(w * groups)
+        var xx = square_x.unsafe_ptr().unsafe_offset(
+            w * groups if want_corr else 0
         )
-        var b = (
-            right.unsafe_offset(i).unsafe_load().cast[DType.float64]()
-            - my.unsafe_offset(g).unsafe_load()
+        var yy = square_y.unsafe_ptr().unsafe_offset(
+            w * groups if want_corr else 0
         )
-        sxy.unsafe_offset(g).unsafe_store(
-            sxy.unsafe_offset(g).unsafe_load() + a * b
-        )
+        for i in range(bounds[w], bounds[w + 1]):
+            if left_has_null and not left_valid.get(i):
+                continue
+            if right_has_null and not right_valid.get(i):
+                continue
+            var g = Int(at.unsafe_offset(i).unsafe_load())
+            var a = (
+                left.unsafe_offset(i).unsafe_load().cast[DType.float64]()
+                - mx.unsafe_offset(g).unsafe_load()
+            )
+            var b = (
+                right.unsafe_offset(i).unsafe_load().cast[DType.float64]()
+                - my.unsafe_offset(g).unsafe_load()
+            )
+            sxy.unsafe_offset(g).unsafe_store(
+                sxy.unsafe_offset(g).unsafe_load() + a * b
+            )
+            comptime if want_corr:
+                xx.unsafe_offset(g).unsafe_store(
+                    xx.unsafe_offset(g).unsafe_load() + a * a
+                )
+                yy.unsafe_offset(g).unsafe_store(
+                    yy.unsafe_offset(g).unsafe_load() + b * b
+                )
+
+    parallel_for(spreads, workers)
+
+    if workers > 1:
+        prod = _merge_sums(prod, groups, workers)
         comptime if want_corr:
-            xx.unsafe_offset(g).unsafe_write(
-                xx.unsafe_offset(g).unsafe_load() + a * a
-            )
-            yy.unsafe_offset(g).unsafe_write(
-                yy.unsafe_offset(g).unsafe_load() + b * b
-            )
+            square_x = _merge_sums(square_x, groups, workers)
+            square_y = _merge_sums(square_y, groups, workers)
+
+    var out = prod^
+    var sxy = out.unsafe_ptr()
+    var xx = square_x.unsafe_ptr()
+    var yy = square_y.unsafe_ptr()
 
     for g in range(groups):
-        var n = n_at.unsafe_offset(g).unsafe_load()
+        var n = Int(n_at.unsafe_offset(g).unsafe_load())
         comptime if want_corr:
             var spread = (
                 xx.unsafe_offset(g).unsafe_load()
