@@ -8,6 +8,23 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.28] - 2026-09-01
+
+Built against Mojo 1.0.0 (ed45d567).
+
+This release is about the engine, and the thread that runs through it is that firepanda kept measuring itself doing work it did not need to do. A join factorized both sides when it could have built a table on the smaller one. A total was computed by grouping on a key that was the same for every row. A Parquet read converted DuckDB's columnar chunks into Arrow's columnar chunks. None of those were wrong, and all three were the cost of reusing a piece that already worked, which is the right first move and the wrong last one.
+
+Joins got the largest share. Building the hash table on the smaller side and probing with the larger, instead of concatenating both key columns and factorizing the result, took db-benchmark j4 at 0.5 GB from 0.523 s to 0.180 s and j5 from 0.542 s to 0.171 s on an i9-13900K. An integer key whose build side has a narrow range skips hashing entirely and indexes a table by the value.
+
+Reductions got the surprise. Timing db-benchmark's j1 phase by phase showed the join was 34 ms of a 131 ms query and the other 81 ms was the benchmark reducing five million joined rows to one by appending a column of zeros and grouping on it, because a frame had no way to reach the vectorized reductions that have been sitting in the kernel layer since M1. `DataFrame.agg` and `DataFrame.agg_all` are that way, and the same ten million rows now reduce in 6 ms rather than 81. j1 through j3 are around 0.042 s each, j4 and j5 around 0.096 s, which puts j4 at 2.1 times Polars 1.44.0 and j5 at 2.5 times, level with DuckDB, and with the lowest peak resident memory of the three on every one of the five.
+
+Parquet stopped converting. Reading DuckDB's vectors directly is about eleven percent faster on an idle sixteen core machine and a good deal more on a loaded one, and the reason it is not larger is now written down in the phase timings rather than guessed at. `ParquetOptions` arrived alongside it, which turns the reader from something that reads a file into something that reads a dataset: Hive partitions, union by name, the source filename, and projection pushdown through all of them.
+
+There is a JSON reader now, `read_ndjson`, one object per line, sixteen times faster than pandas 3.0.5 on a 166 MB file and not yet where it needs to be against Polars or pyarrow. Its scanner decodes nothing on the first pass and refuses everything malformed rather than guessing, which is half of what its tests are about.
+
+Underneath all of it is `parallel_morsels`, a work stealing scheduler that hands out 128k row morsels from an atomic cursor instead of cutting a job into one piece per worker up front. On skewed work it is 3.9 times faster than the static split and on even work it costs nothing, and it is the shape every kernel in the new engine is being moved onto. `take` and the join emit are on it already, neither of them faster for it, both of them measured and written down here anyway, because the point of the move is the loop body's shape and not this quarter's number.
+
+
 ### Added
 
 - `DataFrame.agg(specs)` and `DataFrame.agg_all(kind)`, which reduce a whole frame to one row. This is the last of `sum`, `mean`, `min`, `max` and `count` that was missing: the vectorized reductions have been in `firepanda/kernel/agg.mojo` since M1 and there was no way to reach them from a frame, so the only way to total a column was to group by a key that was the same for every row. That is not a small difference. Ten million float64 rows on an i9-13900K: 81 ms through the group by against 6 ms through `agg`, thirteen times, because the group by allocates forty megabytes of ordinals, walks them beside the values and scatters into a table with one entry in it, while the reduction is a vectorized add over the values buffer.
