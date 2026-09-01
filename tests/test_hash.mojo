@@ -36,6 +36,8 @@ from firepanda.hash.factorize import (
     PARALLEL_MIN_SLICE,
     PARALLEL_ROWS,
     _estimate_groups,
+    _factorize_direct_parallel,
+    _factorize_direct_serial,
     _factorize_hashed_parallel,
     _factorize_hashed_serial,
     _parallel_workers,
@@ -183,6 +185,108 @@ def hashed_column(n: Int, groups: Int) -> Array[DType.int64]:
     for i in range(n):
         col[i] = Int64((i * 37) % groups) * Int64(DIRECT_LIMIT + 17)
     return col^
+
+
+def same_direct_routes(
+    col: Array[DType.int32], span: Int, workers: Int, what: String
+) raises:
+    """Asserts the parallel direct route lands exactly on the serial one.
+
+    Same standard `same_routes` holds the hashed route to, and for the same
+    reason. The direct route is what an integer key column with a narrow range
+    takes, so the ordinals it hands back are what a group by over such a column
+    numbers its groups with, and a merge that got first-appearance order wrong
+    would renumber every one of them.
+
+    Args:
+        col: The column, with every value in `[0, span)`.
+        span: The table width.
+        workers: How many slices to cut the column into.
+        what: A label for the failure message.
+
+    Raises:
+        If the two routes disagree anywhere.
+    """
+    var one = _factorize_direct_serial[DType.int32](col, span, Int32(0))
+    var many = _factorize_direct_parallel[DType.int32](
+        col, span, Int32(0), workers
+    )
+
+    assert_equal(many.count(), one.count(), String(what, ": group count"))
+    assert_equal(many.null_group, one.null_group, String(what, ": null group"))
+
+    var row = -1
+    for i in range(len(col)):
+        if many.codes[i] != one.codes[i]:
+            row = i
+            break
+    assert_equal(row, -1, String(what, ": ordinals differ at row ", row))
+
+    var many_keys = many.keys(col)
+    var one_keys = one.keys(col)
+    var key = -1
+    for g in range(one.count()):
+        if many_keys.is_valid(g) != one_keys.is_valid(g):
+            key = g
+            break
+        if one_keys.is_valid(g) and key_bits(many_keys[g]) != key_bits(
+            one_keys[g]
+        ):
+            key = g
+            break
+    assert_equal(key, -1, String(what, ": keys differ at group ", key))
+
+
+def direct_column(n: Int, span: Int) -> Array[DType.int32]:
+    """Builds a column the direct route would take, covering the whole range.
+
+    The values are strided rather than sequential so that a group's first row
+    and the slice it lands in are not the same thing, which is what a merge that
+    took the last worker to see a value rather than the first would get wrong.
+
+    Args:
+        n: The number of rows.
+        span: The value range, every value of which appears.
+
+    Returns:
+        The column, with no nulls.
+    """
+    var col = Array[DType.int32](n)
+    for i in range(n):
+        col[i] = Int32((i * 37) % span)
+    return col^
+
+
+def test_the_parallel_direct_route_agrees_on_a_narrow_range() raises:
+    same_direct_routes(direct_column(8192, 100), 100, 4, "direct 100 values")
+
+
+def test_the_parallel_direct_route_agrees_past_one_claim_block() raises:
+    same_direct_routes(direct_column(70000, 9000), 9000, 8, "direct 9k values")
+
+
+def test_the_parallel_direct_route_agrees_when_every_row_is_a_group() raises:
+    var n = 8192
+    var col = Array[DType.int32](n)
+    for i in range(n):
+        col[i] = Int32(i)
+    same_direct_routes(col, n, 6, "direct all distinct")
+
+
+def test_the_parallel_direct_route_agrees_with_nulls_present() raises:
+    var col = direct_column(8192, 300)
+    for i in range(len(col)):
+        if i % 11 == 0:
+            col.set_null(i)
+    same_direct_routes(col, 300, 8, "direct with nulls")
+
+
+def test_the_parallel_direct_route_leaves_most_of_its_range_unused() raises:
+    var n = 8192
+    var col = Array[DType.int32](n)
+    for i in range(n):
+        col[i] = Int32((i % 3) * 20000)
+    same_direct_routes(col, 40001, 16, "direct sparse range")
 
 
 def test_the_parallel_route_agrees_on_a_low_cardinality_column() raises:
