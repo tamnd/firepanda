@@ -8,6 +8,21 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added
+
+- `write_arrow`, `write_ipc_stream`, `write_ipc_file_bytes` and `write_ipc_stream_bytes` in `firepanda/io/arrow_ipc_write.mojo`, which completes Arrow IPC in both directions. `write_arrow` takes a frame and a path and produces the random access file format, magic number at both ends and a footer listing every batch; `write_ipc_stream` produces the streaming format for anything that is going down a socket rather than onto a disk. Both take an `IpcWriteOptions` whose only field today is `rows_per_batch`, and the default of zero writes the whole frame as one record batch.
+- String columns go out as Utf8View and BinaryView rather than as the offset formats. This is the same coincidence the C Data Interface export relies on: a firepanda string column is Arrow's view layout byte for byte, so writing views is a copy of the buffers we already have and writing `u` would mean building an offset array and a compacted payload for every string column on the way out. A reader that does not know views is a reader that does not know Arrow as of the current spec, and the importer on our own side accepts both.
+- The body streams straight out of the column's buffers. Nothing between the frame and the file holds a second copy of it, so writing a 320 MB frame allocates a few kilobytes of metadata and then hands the buffers to the file handle in order. The offsets each buffer will land at are worked out once before anything is written and then checked again as the body goes out, because the whole layout is offsets into a body whose alignment rules are easy to get subtly wrong and hard to notice.
+- `benchmarks/write_arrow_file.mojo`, which reads a real Arrow file once, untimed, and then times writing it back. Same reasoning as `read_arrow_file.mojo` beside it: what a write costs depends on what is in the frame, so the comparison has to be two writers given the same rows rather than two writers given two files of the same description.
+
+Measured on an i9-13900K against pyarrow 25, ten million rows of int64, float64 and an eleven character string, both writers pointed at the same ext4 filesystem. Writing one batch, firepanda's median is 213 ms and its best 57 ms against pyarrow's 298 ms and 276 ms for the same view layout, and 405 ms and 355 ms for pyarrow's default offset layout. The spread inside firepanda's own numbers is writeback rather than code: the file is 320 MB and the runs that did not wait on the disk finished in a third of the time of the ones that did. Our file came out 320000778 bytes against pyarrow's 320000802 for the same data, and firepanda's reader reads the two at the same speed, 39.0 ms and 36.6 ms.
+
+Every file this writer produces was also handed to pyarrow, which read back every value exactly, including the null, the empty string and the bools. That check is here rather than in a test because running pyarrow from a Mojo test is not something this repository can do, and a round trip through our own reader would agree with any misunderstanding the two happen to share.
+
+### Changed
+
+- `_pack_bools` in `firepanda/io/arrow_export.mojo` is now `pack_bools`. The IPC writer needs the same byte per value to bit per value pass the C export needs, and a second copy of it would be a second place to fix the same bug.
+
 ## [0.6.25] - 2026-09-01
 
 Built against Mojo 1.0.0 (ed45d567).

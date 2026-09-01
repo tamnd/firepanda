@@ -13,11 +13,12 @@ know what a `DataFrame` is.
 begin on a row boundary, which is what lets the whole read run on every core. It
 knows about quoting and nothing else.
 
-`flatbuf.mojo`, `arrow_c.mojo`, `arrow_export.mojo`, `arrow_import.mojo` and
-`arrow_ipc.mojo` are the Arrow side. The first three are boundaries rather than
-readers and are imported by their full path when something needs them; what a
-caller wants from here is `read_arrow`, which reads an IPC file or stream off
-disk the same way `read_csv` reads a CSV.
+`flatbuf.mojo`, `arrow_c.mojo`, `arrow_export.mojo`, `arrow_import.mojo`,
+`arrow_ipc.mojo` and `arrow_ipc_write.mojo` are the Arrow side. The first three
+are boundaries rather than readers and are imported by their full path when
+something needs them; what a caller wants from here is `read_arrow` and
+`write_arrow`, which read and write an IPC file the same way `read_csv` and
+`write_csv` do a CSV.
 
 `mapped.mojo` is how a file on disk becomes bytes in the first place. It maps
 the file instead of copying it, which is worth a paragraph of libc and four
@@ -29,6 +30,13 @@ from .arrow_ipc import (
     read_arrow_bytes,
     read_ipc_file,
     read_ipc_stream,
+)
+from .arrow_ipc_write import (
+    IpcWriteOptions,
+    write_arrow,
+    write_ipc_file_bytes,
+    write_ipc_stream,
+    write_ipc_stream_bytes,
 )
 from .mapped import MappedFile, map_file
 from .parse import (

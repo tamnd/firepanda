@@ -192,7 +192,7 @@ def _as_void[o: MutOrigin](p: Pointer[UInt8, o]) -> VoidPtr:
     return p.unsafe_origin_cast[MutUntrackedOrigin]().unsafe_bitcast[NoneType]()
 
 
-def _pack_bools(column: AnyArray) -> Bitmap:
+def pack_bools(column: AnyArray) -> Bitmap:
     """Packs a byte per value bool column into a bit per value buffer.
 
     The one copy in this file, and it is not avoidable: firepanda stores a bool
@@ -344,7 +344,7 @@ def export_array(var column: AnyArray) raises -> ArrowArray:
     var null_count = column.data.validity.null_count()
     var packed = Optional[Bitmap](None)
     if type == LogicalType.BOOL:
-        packed = _pack_bools(column)
+        packed = pack_bools(column)
 
     var box = external_call["malloc", Pointer[_ArrayBox, MutUntrackedOrigin]](
         size_of[_ArrayBox]()
