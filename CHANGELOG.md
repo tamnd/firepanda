@@ -8,6 +8,17 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added
+
+- FlatBuffers reader and writer in `firepanda/io/flatbuf.mojo`. Arrow keeps its metadata in FlatBuffers, so this is a prerequisite for reading a single byte of an IPC file. Written rather than vendored or generated because the Arrow schemas use a small corner of the format and because every read wants to be bounds checked against the length of the buffer, which is not a taste question when the buffer came from somewhere else. Scalars are read by memcpy rather than by a pointer cast, since a FlatBuffer inside an IPC message is only guaranteed 8 byte alignment.
+- `read_arrow`, `read_arrow_bytes`, `read_ipc_file` and `read_ipc_stream` in `firepanda/io/arrow_ipc.mojo`. `read_arrow` takes a path and works out from the magic number whether the file is the streaming format or the random access one, so a caller who was handed a `.arrow` file does not have to know which writer produced it. Multiple record batches concatenate into one frame, and on a 295 MB three column file of ten million rows on an i9-13900K that concatenation is currently half the total time: 102 ms when the producer wrote one batch against 200 ms when it wrote 153, where pyarrow takes 49 ms and keeps the batches as chunks rather than joining them. Reading each batch straight into its place in the finished column is the next change and is what closes that gap.
+- `benchmarks/read_arrow_file.mojo`, which times `read_arrow` on a file that already exists. Same reason `read_file.mojo` exists next to it: a fair comparison against another reader has to be two readers pointed at the same bytes, not two readers given two files of the same description.
+- `build_column` is now public in `firepanda/io/arrow_import.mojo`. The IPC reader does not decode buffers itself. It points a synthesized `ArrowArray` at the message body and hands it to the importer that already exists and is already tested, which is the whole reason the C Data Interface went in first.
+
+### Fixed
+
+- `import_array` no longer rejects an array whose release callback is null. The released check moved out of the structural validation and into `import_array`, which is the only place ownership actually means anything. An array synthesized over borrowed memory has no release callback and is not released in any sense that matters.
+
 ## [0.6.24] - 2026-09-01
 
 Built against Mojo 1.0.0 (ed45d567).
