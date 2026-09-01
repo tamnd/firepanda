@@ -376,11 +376,11 @@ def first_wrong(
 def test_a_take_past_the_split_gathers_the_right_rows() raises:
     # The gather runs on one thread below `PARALLEL_TAKE_ROWS` and on every core
     # above it, and the workers share the validity bitmap, one word per sixty
-    # four output rows. So the slice boundaries have to land on word boundaries,
-    # and a length that is not a multiple of sixty four is what catches the last
-    # slice keeping a partial word it never stored. Both are out of reach of the
-    # short columns the other take tests use. The length is one past a multiple
-    # of sixty four so that the tail is a partial word.
+    # four output rows. So the morsel boundaries have to land on word
+    # boundaries, and a length that is not a multiple of sixty four is what
+    # catches the last morsel keeping a partial word it never stored. Both are
+    # out of reach of the short columns the other take tests use. The length is
+    # one past a multiple of sixty four so that the tail is a partial word.
     var col = build[DType.int64](4096, 7)
     var picks = List[Int](capacity=65_601)
     for i in range(65_601):

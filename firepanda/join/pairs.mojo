@@ -63,10 +63,18 @@ again.
 The left walk is the tallest part of the pairing on a wide result, and what a
 left row emits depends on that row and on the finished buckets and on nothing
 else, so it splits by left row across cores. The catch is that a worker cannot
-append: it has to know where in the output its slice begins, which is the sum of
-what every slice before it emits. So the walk is done twice, once counting and
+append: it has to know where in the output its piece begins, which is the sum of
+what every piece before it emits. So the walk is done twice, once counting and
 once writing, with a prefix sum in between, and both passes cut the left side the
-same way so that a slice is counted and written by the same arithmetic.
+same way so that a piece is counted and written by the same arithmetic.
+
+The pieces are morsels rather than one per worker, because what a left row costs
+is the size of the bucket it matches and that is not a constant. A left side
+whose hot keys sit together, which is what a fact table sorted by date looks
+like, hands one worker the whole expensive range and leaves the rest waiting.
+Morsels cost a longer prefix sum, over the morsel count rather than the worker
+count, and that is a few hundred additions on a join large enough to be split at
+all.
 
 An outer join is the exception and stays on one thread. It has to remember which
 right rows were paired so that it can emit the rest afterwards, and that memory
@@ -85,7 +93,7 @@ from firepanda.array.array import Array
 from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
-from firepanda.exec.parallel import parallel_for, worker_count
+from firepanda.exec import parallel_morsels
 from firepanda.hash.grouping import group_ordinals
 from firepanda.kernel.concat import concat_two_any
 
@@ -99,12 +107,17 @@ rows before it is offered. Same shape of constant as `factorize`'s
 `PARALLEL_ROWS` and picked the same way, from where the two costs cross.
 """
 
-comptime PARALLEL_MIN_LEFT_SLICE = 1 << 15
-"""And no worker gets a slice shorter than this.
+comptime LEFT_MORSEL_ROWS = 1 << 15
+"""Left rows a worker takes at a time once the emit is on every core.
 
-A machine with a lot of cores and a frame just past the threshold would
-otherwise cut the left side into slices too short to amortise anything, and the
-count pass has to visit every slice boundary twice.
+What a left row costs is the size of the bucket it matches, and in a real join
+that is not a constant. An order line joined against a customer table pairs with
+one row; the same probe against a table with one enormous key pairs with
+millions. Cut the left side into one piece per worker up front and the worker
+holding the hot range decides when the join finishes.
+
+The count pass and the emit pass have to agree on the boundaries, since the emit
+starts writing where the count said it would, so both walk the same morsels.
 """
 
 
@@ -433,39 +446,38 @@ def join_indices(
     var wants_right = kind == JoinKind.OUTER
     var matched = Bitmap(right_rows if wants_right else 0, all_valid=False)
 
-    # The left side is split into slices, and a slice is counted and then
-    # emitted by the same worker over the same rows. What a left row emits
-    # depends on that row and on the buckets, and the buckets are finished, so
-    # nothing here is shared between two slices except where each of them
-    # writes, which the counts settle before any of them writes anything.
+    # The left side is walked in morsels, and a morsel is counted and then
+    # emitted over the same rows. What a left row emits depends on that row and
+    # on the buckets, and the buckets are finished, so nothing here is shared
+    # between two morsels except where each of them writes, which the counts
+    # settle before any of them writes anything.
     #
     # An outer join stays on one thread. Its emit marks every right row it pairs
     # in `matched`, and setting a bit is a read modify write of a word that eight
     # neighbouring rows share, so two workers doing it at once would drop marks
     # and invent unmatched right rows. No other kind touches anything shared.
-    var workers = 1
-    if left_rows >= PARALLEL_LEFT_ROWS and not wants_right:
-        workers = worker_count()
-        var most = left_rows // PARALLEL_MIN_LEFT_SLICE
-        if workers > most:
-            workers = most
-        if workers < 1:
-            workers = 1
-
-    var bounds = List[Int](capacity=workers + 1)
-    for w in range(workers + 1):
-        bounds.append(left_rows * w // workers)
+    var parallel = left_rows >= PARALLEL_LEFT_ROWS and not wants_right
+    var chunk = LEFT_MORSEL_ROWS if parallel else max(left_rows, 1)
+    var pieces = (left_rows + chunk - 1) // chunk
+    if pieces == 0:
+        # An empty left side rounds down to no morsels at all, and the passes
+        # below still run once and still write where their morsel ends. One
+        # empty morsel is the shape that costs nothing and reads correctly.
+        pieces = 1
 
     # Count the output rows before emitting any, so the two lists are allocated
     # once at the right size. Same trade as `_filter_core`: a second pass over
     # the left rows against a reallocation and a copy of everything already
     # written, several times, on a result that a many-to-many join makes far
-    # taller than either input. Here it buys the split as well, because a worker
-    # can only write where the workers before it stopped.
+    # taller than either input. Here it buys the split as well, because a morsel
+    # can only write where the morsels before it stopped.
     #
-    # `counts[w + 1]` is what slice `w` emits until the prefix sum turns it into
-    # where slice `w + 1` starts, which leaves the total in `counts[workers]`.
-    var counts = List[Int](length=workers + 1, fill=0)
+    # `counts[m + 1]` is what morsel `m` emits until the prefix sum turns it into
+    # where morsel `m + 1` starts, which leaves the total in `counts[pieces]`.
+    # The sum is serial over the morsel count rather than the row count, which at
+    # thirty two thousand rows a morsel is a few hundred additions on a join
+    # large enough to be here at all.
+    var counts = List[Int](length=pieces + 1, fill=0)
 
     # The unique route is written as its own pair of loops rather than as a
     # branch inside these two. The branch would be the same answer on every one
@@ -476,11 +488,11 @@ def join_indices(
     #
     # The pointer is taken again inside each body rather than captured, because
     # its origin names `grouping` and a capture list cannot carry that.
-    def tally_one(w: Int) raises {mut counts, imm}:
+    def tally_one(start: Int, stop: Int) raises {mut counts, imm}:
         var code_at = grouping.codes.unsafe_ptr()
         var seat = only.unsafe_ptr()
         var here = 0
-        for i in range(bounds[w], bounds[w + 1]):
+        for i in range(start, stop):
             var hit = False
             if not has_nulls or not absent[i]:
                 var g = Int(code_at.unsafe_offset(i).unsafe_load())
@@ -489,12 +501,12 @@ def join_indices(
                 here += Int(kind.keeps_unmatched_left())
             elif kind != JoinKind.ANTI:
                 here += 1
-        counts[w + 1] = here
+        counts[start // chunk + 1] = here
 
-    def tally(w: Int) raises {mut counts, imm}:
+    def tally(start: Int, stop: Int) raises {mut counts, imm}:
         var code_at = grouping.codes.unsafe_ptr()
         var here = 0
-        for i in range(bounds[w], bounds[w + 1]):
+        for i in range(start, stop):
             var width = 0
             if not has_nulls or not absent[i]:
                 var g = Int(code_at.unsafe_offset(i).unsafe_load())
@@ -507,32 +519,37 @@ def join_indices(
                 here += 1
             else:
                 here += width
-        counts[w + 1] = here
+        counts[start // chunk + 1] = here
 
-    if unique:
-        parallel_for(tally_one, workers)
+    if not parallel:
+        if unique:
+            tally_one(0, left_rows)
+        else:
+            tally(0, left_rows)
+    elif unique:
+        parallel_morsels(tally_one, left_rows, chunk)
     else:
-        parallel_for(tally, workers)
-    for w in range(workers):
-        counts[w + 1] += counts[w]
+        parallel_morsels(tally, left_rows, chunk)
+    for m in range(pieces):
+        counts[m + 1] += counts[m]
 
     # An outer join's unmatched right rows are appended after the split, because
     # knowing how many of them there are means having already done the probe.
-    var out_left = List[Int](unsafe_uninit_length=counts[workers])
-    var out_right = List[Int](unsafe_uninit_length=counts[workers])
+    var out_left = List[Int](unsafe_uninit_length=counts[pieces])
+    var out_right = List[Int](unsafe_uninit_length=counts[pieces])
 
     # The unique twin of the loop below. A left row pairs with at most one right
     # row here, so the inner loop over a bucket is gone and with it the reason
     # to look up where the bucket started.
     def spill_one(
-        w: Int,
+        start: Int, stop: Int
     ) raises {mut out_left, mut out_right, mut matched, imm}:
         var code_at = grouping.codes.unsafe_ptr()
         var seat = only.unsafe_ptr()
         var left_out = out_left.unsafe_ptr()
         var right_out = out_right.unsafe_ptr()
-        var put = counts[w]
-        for i in range(bounds[w], bounds[w + 1]):
+        var put = counts[start // chunk]
+        for i in range(start, stop):
             var r = -1
             if not has_nulls or not absent[i]:
                 var g = Int(code_at.unsafe_offset(i).unsafe_load())
@@ -559,12 +576,14 @@ def join_indices(
             if wants_right:
                 matched.set(r, True)
 
-    def spill(w: Int) raises {mut out_left, mut out_right, mut matched, imm}:
+    def spill(
+        start: Int, stop: Int
+    ) raises {mut out_left, mut out_right, mut matched, imm}:
         var code_at = grouping.codes.unsafe_ptr()
         var left_out = out_left.unsafe_ptr()
         var right_out = out_right.unsafe_ptr()
-        var put = counts[w]
-        for i in range(bounds[w], bounds[w + 1]):
+        var put = counts[start // chunk]
+        for i in range(start, stop):
             var first = -1
             var last = -1
             if not has_nulls or not absent[i]:
@@ -594,10 +613,15 @@ def join_indices(
                 if wants_right:
                     matched.set(bucket[p], True)
 
-    if unique:
-        parallel_for(spill_one, workers)
+    if not parallel:
+        if unique:
+            spill_one(0, left_rows)
+        else:
+            spill(0, left_rows)
+    elif unique:
+        parallel_morsels(spill_one, left_rows, chunk)
     else:
-        parallel_for(spill, workers)
+        parallel_morsels(spill, left_rows, chunk)
 
     if wants_right:
         for r in range(right_rows):
