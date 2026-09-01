@@ -639,6 +639,487 @@ def build_column(array: ArrowArray, format: StringSlice) raises -> AnyArray:
     return _build(array, format, Int(array.length))
 
 
+def _type_for(format: StringSlice) raises -> LogicalType:
+    """Maps a format string to the column type the import produces.
+
+    The offset based string formats are the reason this is not just
+    `type_for_format`: firepanda has no offset based column, so `u` and `U`
+    become a string column and `z` and `Z` a binary one, which is a decision this
+    file makes rather than one the format string states.
+
+    Args:
+        format: The format string.
+
+    Returns:
+        The type.
+
+    Raises:
+        Error: If the format is one firepanda cannot represent.
+    """
+    if format == "u" or format == "U":
+        return LogicalType.STRING
+    if format == "z" or format == "Z":
+        return LogicalType.BINARY
+    var type = type_for_format(format)
+    if type == LogicalType.NULL:
+        raise Error(
+            "arrow: cannot import a null column, because firepanda has no"
+            " column that carries the null type at run time"
+        )
+    return type
+
+
+struct ColumnSink(Movable):
+    """A column allocated once and filled by several arrays at once.
+
+    `build_column` answers the question a single array asks. This answers the one
+    a file asks, which is different: a reader holding twenty record batches knows
+    the finished column's length before it copies a byte, and building twenty
+    columns and concatenating them means every byte is written twice and the
+    second write is single file through one thread.
+
+    So the reader plans first. It asks each array how much payload it needs, adds
+    the answers up, allocates each column once, and then hands every array the
+    place its rows go. The fills touch disjoint ranges, so they run on every core,
+    and there is nothing to concatenate at the end.
+
+    Validity is the one part that does not fill in place. A batch boundary lands
+    wherever the writer put it, so two batches share a byte of the bitmap and two
+    threads writing it would race over the six bits neither of them owns. Each
+    fill returns its own bitmap and the caller pastes them in order, which is a
+    pass over one bit per row and does not show up in a measurement.
+    """
+
+    var type: LogicalType
+    """The column type."""
+
+    var values: Buffer
+    """Values for a fixed width column, a byte per value for a bool one, and the
+    views for a string or binary one."""
+
+    var payload: Buffer
+    """The string payload, and empty for every other type."""
+
+    var validity: Bitmap
+    """One bit per row, one meaning present, filled by the caller."""
+
+    var rows: Int
+    """The finished length."""
+
+    def __init__(out self, format: StringSlice, rows: Int, payload: Int) raises:
+        """Allocates a column of `rows` rows with room for `payload` bytes.
+
+        Args:
+            format: The format string the arrays will arrive in.
+            rows: The finished length.
+            payload: The total payload bytes, from `payload_for`.
+
+        Raises:
+            Error: If the format is one firepanda cannot represent.
+        """
+        self.type = _type_for(format)
+        self.rows = rows
+        self.validity = Bitmap(rows)
+        if self.type == LogicalType.STRING or self.type == LogicalType.BINARY:
+            self.values = Buffer(rows * VIEW_SIZE)
+            self.payload = Buffer(overwritten=payload)
+        elif self.type == LogicalType.BOOL:
+            self.values = Buffer(overwritten=rows)
+            self.payload = Buffer(0)
+        else:
+            self.values = Buffer(
+                overwritten=rows * dtype_size(self.type.physical)
+            )
+            self.payload = Buffer(0)
+
+    def finish(deinit self) -> AnyArray:
+        """Returns the finished column.
+
+        Returns:
+            The column, owning all of its memory.
+        """
+        if self.type == LogicalType.STRING or self.type == LogicalType.BINARY:
+            return _as_text(
+                self.values^,
+                self.payload^,
+                self.validity^,
+                self.rows,
+                self.type,
+            )
+        return AnyArray(
+            ColumnData(self.values^, self.validity^, self.rows), self.type
+        )
+
+
+def _plan_views(array: ArrowArray, length: Int, whole: Bool) raises -> Int:
+    """Adds up the payload a view array needs, checking every view on the way.
+
+    This is the first of the two passes `_import_views` makes, lifted out so that
+    the second one can write into a column that is already allocated. A view is
+    three numbers a stranger chose, so the checks live here and the fill that
+    follows can follow a view without looking at it again.
+
+    Args:
+        array: The array.
+        length: The number of rows.
+        whole: Whether this array is the producer's whole array rather than a
+            slice of it. A slice cannot take the producer's data buffer
+            wholesale, because every other slice of the same array would take it
+            too and the column would hold the payload once per slice.
+
+    Returns:
+        How many payload bytes this array contributes.
+
+    Raises:
+        Error: If a view names a data buffer the array does not have, or runs
+            past the end of it.
+    """
+    var variadic = Int(array.n_buffers) - 3
+    var validity = _import_validity(array, length)
+    var source = (
+        _bytes_at(array, 1)
+        .unsafe_bitcast[StringView]()
+        .unsafe_offset(Int(array.offset))
+    )
+    var sizes = _bytes_at(array, Int(array.n_buffers) - 1).unsafe_bitcast[
+        Int64
+    ]()
+
+    var needed = 0
+    for i in range(length):
+        if not validity.get(i):
+            continue
+        ref view = source.unsafe_offset(i)[]
+        if view.is_inline():
+            continue
+        var block = view.block()
+        if block >= variadic:
+            raise Error(
+                String(
+                    "arrow: view at row ",
+                    i,
+                    " names data buffer ",
+                    block,
+                    " but the array has ",
+                    variadic,
+                )
+            )
+        var count = len(view)
+        if (
+            view.offset() < 0
+            or Int64(view.offset() + count)
+            > sizes.unsafe_offset(block).unsafe_load()
+        ):
+            raise Error(
+                String(
+                    "arrow: view at row ",
+                    i,
+                    " runs past the end of data buffer ",
+                    block,
+                )
+            )
+        needed += count
+
+    if whole and variadic == 1 and array.offset == 0:
+        # The block goes over whole, gaps and all, because rewriting the offsets
+        # to close them is exactly the work the fill's fast path exists to skip.
+        return Int(sizes.unsafe_load())
+    return needed
+
+
+def _plan_offsets[index: DType](array: ArrowArray, length: Int) raises -> Int:
+    """Adds up the payload an offset based array needs.
+
+    Parameters:
+        index: The offset type.
+
+    Args:
+        array: The array.
+        length: The number of rows.
+
+    Returns:
+        How many payload bytes this array contributes. An element of twelve
+        bytes or fewer contributes none, because it lives inside its own view.
+
+    Raises:
+        Error: If a pair of offsets goes backwards, which is a negative element
+            length and would be an enormous one passed to a copy.
+    """
+    if length == 0:
+        return 0
+    var validity = _import_validity(array, length)
+    var offsets = (
+        _bytes_at(array, 1)
+        .unsafe_bitcast[Scalar[index]]()
+        .unsafe_offset(Int(array.offset))
+    )
+    var needed = 0
+    for i in range(length):
+        if not validity.get(i):
+            continue
+        var count = Int(
+            offsets.unsafe_offset(i + 1).unsafe_load()
+            - offsets.unsafe_offset(i).unsafe_load()
+        )
+        if count < 0:
+            raise Error(String("arrow: offsets go backwards at row ", i))
+        if count > INLINE_CAPACITY:
+            needed += count
+    return needed
+
+
+def payload_for(
+    array: ArrowArray, format: StringSlice, whole: Bool = True
+) raises -> Int:
+    """Checks an array and returns the payload bytes it will contribute.
+
+    The planning half of a fill in place read. Nothing is written and nothing is
+    allocated except a bitmap the size of the array's own rows, so a caller can
+    ask this of every batch in a file before deciding how big anything is.
+
+    Args:
+        array: The array.
+        format: The schema's format string.
+        whole: Whether this array is the producer's whole array rather than a
+            slice of it, which decides whether a view column may take the
+            producer's data buffer as it stands.
+
+    Returns:
+        The payload bytes, and zero for every type that has no payload.
+
+    Raises:
+        Error: If the type or shape is one firepanda cannot read.
+    """
+    _check(array, format)
+    var length = Int(array.length)
+    if format == "u" or format == "z":
+        return _plan_offsets[DType.int32](array, length)
+    if format == "U" or format == "Z":
+        return _plan_offsets[DType.int64](array, length)
+    var type = _type_for(format)
+    if type == LogicalType.STRING or type == LogicalType.BINARY:
+        return _plan_views(array, length, whole)
+    return 0
+
+
+def _fill_views(
+    mut sink: ColumnSink,
+    at: Int,
+    payload_at: Int,
+    array: ArrowArray,
+    whole: Bool,
+) raises -> Bitmap:
+    """Copies a view array into a sink at a row and a payload offset.
+
+    Args:
+        sink: The column being filled.
+        at: The first row this array's rows occupy.
+        payload_at: The first payload byte this array's payload occupies.
+        array: The array.
+        whole: Whether this array is the producer's whole array rather than a
+            slice of it. `payload_for` was asked the same question and the two
+            answers have to agree, because one sized the payload and the other
+            fills it.
+
+    Returns:
+        This array's validity, for the caller to paste.
+
+    Raises:
+        Error: If a buffer is missing.
+    """
+    var length = Int(array.length)
+    var validity = _import_validity(array, length)
+    var variadic = Int(array.n_buffers) - 3
+    var target = (
+        sink.values.unsafe_ptr().unsafe_bitcast[StringView]().unsafe_offset(at)
+    )
+    var sizes = _bytes_at(array, Int(array.n_buffers) - 1).unsafe_bitcast[
+        Int64
+    ]()
+
+    if whole and variadic == 1 and array.offset == 0:
+        # The producer's column is already shaped like ours, so the views and the
+        # payload are one copy each. What is left is arithmetic: a view's offset
+        # was relative to the start of the producer's block and the block has
+        # landed at `payload_at`, so every long view moves by that much. The
+        # first batch of a file has a `payload_at` of zero and skips even that.
+        var total = Int(sizes.unsafe_load())
+        if length > 0:
+            unsafe_memcpy(
+                dest=sink.values.unsafe_ptr().unsafe_offset(at * VIEW_SIZE),
+                src=_bytes_at(array, 1),
+                count=length * VIEW_SIZE,
+            )
+        if total > 0:
+            unsafe_memcpy(
+                dest=sink.payload.unsafe_ptr().unsafe_offset(payload_at),
+                src=_bytes_at(array, 2),
+                count=total,
+            )
+        if payload_at != 0 or array.null_count != 0:
+            for i in range(length):
+                if not validity.get(i):
+                    # A null element's view is whatever the producer left there,
+                    # which nothing downstream should follow.
+                    target.unsafe_offset(i)[] = StringView()
+                    continue
+                if payload_at == 0:
+                    continue
+                var view = target.unsafe_offset(i)[]
+                if view.is_inline():
+                    continue
+                var spot = payload_at + view.offset()
+                target.unsafe_offset(i)[] = make_long_at(
+                    sink.payload.unsafe_ptr().unsafe_offset(spot),
+                    len(view),
+                    0,
+                    spot,
+                )
+        return validity^
+
+    var source = (
+        _bytes_at(array, 1)
+        .unsafe_bitcast[StringView]()
+        .unsafe_offset(Int(array.offset))
+    )
+    var written = 0
+    for i in range(length):
+        if not validity.get(i):
+            target.unsafe_offset(i)[] = StringView()
+            continue
+        ref view = source.unsafe_offset(i)[]
+        if view.is_inline():
+            target.unsafe_offset(i)[] = view
+            continue
+        var count = len(view)
+        var spot = payload_at + written
+        var dest = sink.payload.unsafe_ptr().unsafe_offset(spot)
+        unsafe_memcpy(
+            dest=dest,
+            src=_bytes_at(array, 2 + view.block()).unsafe_offset(view.offset()),
+            count=count,
+        )
+        target.unsafe_offset(i)[] = make_long_at(dest, count, 0, spot)
+        written += count
+    return validity^
+
+
+def _fill_offsets[
+    index: DType
+](
+    mut sink: ColumnSink, at: Int, payload_at: Int, array: ArrowArray
+) raises -> Bitmap:
+    """Copies an offset based array into a sink at a row and a payload offset.
+
+    Parameters:
+        index: The offset type.
+
+    Args:
+        sink: The column being filled.
+        at: The first row this array's rows occupy.
+        payload_at: The first payload byte this array's payload occupies.
+        array: The array.
+
+    Returns:
+        This array's validity, for the caller to paste.
+
+    Raises:
+        Error: If a buffer is missing.
+    """
+    var length = Int(array.length)
+    var validity = _import_validity(array, length)
+    if length == 0:
+        return validity^
+
+    var target = (
+        sink.values.unsafe_ptr().unsafe_bitcast[StringView]().unsafe_offset(at)
+    )
+    var offsets = (
+        _bytes_at(array, 1)
+        .unsafe_bitcast[Scalar[index]]()
+        .unsafe_offset(Int(array.offset))
+    )
+    var data = _bytes_at(array, 2)
+
+    var written = 0
+    for i in range(length):
+        if not validity.get(i):
+            target.unsafe_offset(i)[] = StringView()
+            continue
+        var start = Int(offsets.unsafe_offset(i).unsafe_load())
+        var count = Int(offsets.unsafe_offset(i + 1).unsafe_load()) - start
+        var src = data.unsafe_offset(start)
+        if count <= INLINE_CAPACITY:
+            target.unsafe_offset(i)[] = make_inline_at(src, count)
+            continue
+        var spot = payload_at + written
+        var dest = sink.payload.unsafe_ptr().unsafe_offset(spot)
+        unsafe_memcpy(dest=dest, src=src, count=count)
+        target.unsafe_offset(i)[] = make_long_at(dest, count, 0, spot)
+        written += count
+    return validity^
+
+
+def fill_column(
+    mut sink: ColumnSink,
+    at: Int,
+    payload_at: Int,
+    array: ArrowArray,
+    format: StringSlice,
+    whole: Bool = True,
+) raises -> Bitmap:
+    """Copies one array into its place in a column that is already allocated.
+
+    The other half of `payload_for`, and it must be given the offsets that
+    planning produced: `at` is the running row count and `payload_at` the running
+    payload total, both taken before this array. Nothing here allocates the
+    column, so several calls against one sink may run at once as long as their
+    ranges do not overlap.
+
+    Args:
+        sink: The column being filled.
+        at: The first row this array's rows occupy.
+        payload_at: The first payload byte this array's payload occupies.
+        array: The array.
+        format: The schema's format string.
+        whole: Whether this array is the producer's whole array rather than a
+            slice of it. It has to be the same answer `payload_for` was given.
+
+    Returns:
+        This array's validity, one bit per row of this array. The caller pastes
+        it at `at`, because a batch boundary falls inside a byte and two threads
+        writing that byte would lose each other's bits.
+
+    Raises:
+        Error: If a buffer is missing or the type is one firepanda cannot read.
+    """
+    var length = Int(array.length)
+    if format == "u" or format == "z":
+        return _fill_offsets[DType.int32](sink, at, payload_at, array)
+    if format == "U" or format == "Z":
+        return _fill_offsets[DType.int64](sink, at, payload_at, array)
+    if sink.type == LogicalType.STRING or sink.type == LogicalType.BINARY:
+        return _fill_views(sink, at, payload_at, array, whole)
+    if sink.type == LogicalType.BOOL:
+        if length > 0:
+            var bits = _bytes_at(array, 1)
+            var offset = Int(array.offset)
+            var out = sink.values.unsafe_ptr().unsafe_offset(at)
+            for i in range(length):
+                var bit = offset + i
+                var byte = bits.unsafe_offset(bit >> 3).unsafe_load()
+                out.unsafe_offset(i).unsafe_write((byte >> UInt8(bit & 7)) & 1)
+        return _import_validity(array, length)
+    var width = dtype_size(sink.type.physical)
+    if length > 0:
+        unsafe_memcpy(
+            dest=sink.values.unsafe_ptr().unsafe_offset(at * width),
+            src=_bytes_at(array, 1).unsafe_offset(Int(array.offset) * width),
+            count=length * width,
+        )
+    return _import_validity(array, length)
+
+
 def import_array(
     mut schema: ArrowSchema, mut array: ArrowArray
 ) raises -> AnyArray:
