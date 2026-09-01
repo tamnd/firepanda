@@ -10,6 +10,12 @@ spans and decodes nothing, so a number stays the bytes it was written as until
 `parse.mojo` gets it on the column that turned out to be a number. It is a
 boundary rather than a reader and is imported by its full path.
 
+`ndjson.mojo` is the reader on top of it, one JSON object per line, which is what
+`read_json(lines=True)` means in pandas. It works out the columns as the union of
+every key in the file, so a line that leaves a key out gets a null there rather
+than being a ragged row, and it reuses the type ladder from `read.mojo` so a
+column comes out the same type it would have as CSV.
+
 On top of those, `read.mojo` infers the schema and fills the columns, and
 `write.mojo` renders a frame back out. Those two are the only files here that
 know what a `DataFrame` is.
@@ -52,6 +58,7 @@ from .arrow_ipc_write import (
     write_ipc_stream_bytes,
 )
 from .mapped import MappedFile, map_file
+from .ndjson import NdjsonOptions, read_ndjson, read_ndjson_bytes
 from .parquet import ParquetOptions, quote, read_parquet
 from .parse import (
     Parsed,
