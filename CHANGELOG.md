@@ -8,6 +8,26 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.25] - 2026-09-01
+
+Built against Mojo 1.0.0 (ed45d567).
+
+This release reads Arrow IPC, which means `read_arrow("something.arrow")` now returns a frame, and it makes `concat` stop copying its parts twice on the way there.
+
+The reader went in as two pieces because the first one is a wire format and the second one is a file format, and a mistake in a wire format surfaces a long way from where it was made. The first piece is FlatBuffers, which is how Arrow spells all of its metadata. Vendoring the C++ library or generating code with flatc were both available, and neither was worth it: the Arrow schemas use a small corner of the format, tables and scalars and strings and vectors, with no unions on the wire beyond a type byte and no shared strings or size prefixes. What we wanted instead was every read bounds checked against the length of the buffer, because an IPC file is data from somewhere else and a corrupt vtable offset is otherwise a straight read out of bounds. Scalars are read by memcpy rather than by a pointer cast, since a FlatBuffer embedded in an IPC message is only guaranteed 8 byte alignment.
+
+The second piece is the reader, and the design decision in it is that it does not decode buffers at all. It points a synthesized `ArrowArray` at the record batch body and hands that to the importer that went in with the C Data Interface last release. That is why the C interface came first rather than IPC. Everything the importer knows about shifting a validity bitmap, turning offsets into views and checking a view against the buffer it names applies unchanged, and the alternative was a second implementation of all of it that would drift within a month. There is one genuine mismatch between the two: a view array over the C interface ends with a buffer of block lengths, and IPC keeps the same lengths in the record batch's own buffer entries, so the reader gathers them and appends the buffer the importer expects.
+
+Every fixture byte in the tests came out of pyarrow 25 and is checked in as it came off the wire. A fixture this reader also wrote would agree with any misunderstanding the reader happens to have, and reading what somebody else wrote is the entire point of the format.
+
+Then the real file. Ten million rows, three columns, 295 MB, written by pyarrow with its default chunking, which is 153 record batches. The read was 200 ms against pyarrow's 49, and the same data written as a single batch read in 102 ms. That gap is not the reader. It is that pyarrow keeps the batches as chunks and never joins them while we concatenate, and looking into that turned up something worse: the kernel's list spelling of `concat` took ownership of its parts, so the frame level deep copied every column into a list before handing it over, and that copy is exactly the size of the concat itself. So the multi batch read was copying every byte three times when one of them is genuinely necessary.
+
+`concat_refs_any` takes references, which is what a caller whose columns live inside frames or inside a list of record batches actually has. While that was open, the fixed width path turned out to still be a single thread with a zeroed output buffer and a bit at a time validity loop that predates `Bitmap.paste`, where the string path beside it has run on every core since the CSV reader needed it. All three are fixed. At ten million rows on an i9-13900K, a concat of two parts went from 27.7 ms to 5.5 ms, of eight parts from 24.4 ms to 3.8 ms, and of a three column frame from 44.7 ms to 16.4 ms. The Arrow read went to 126 ms on the multi batch file and 89 ms on the single batch one.
+
+That leaves us at 2.6x pyarrow rather than 4.1x, and the remaining gap is the copy that really is there: an Arrow buffer becomes a firepanda buffer, 64 byte aligned and padded, holding views rather than offsets. Closing it further means reading each batch straight into its place in the finished column instead of building a column per batch and stacking them, which is a change to the importer and is the next thing.
+
+None of the concat problem was visible from the microbenchmarks. concat had benchmarks and they looked fine. It took pointing the reader at a real file that a real writer produced, with the chunking that writer chose rather than the chunking that suited us, to make it obvious.
+
 ### Added
 
 - FlatBuffers reader and writer in `firepanda/io/flatbuf.mojo`. Arrow keeps its metadata in FlatBuffers, so this is a prerequisite for reading a single byte of an IPC file. Written rather than vendored or generated because the Arrow schemas use a small corner of the format and because every read wants to be bounds checked against the length of the buffer, which is not a taste question when the buffer came from somewhere else. Scalars are read by memcpy rather than by a pointer cast, since a FlatBuffer inside an IPC message is only guaranteed 8 byte alignment.
@@ -1340,7 +1360,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.24...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.25...HEAD
+[0.6.25]: https://github.com/tamnd/firepanda/releases/tag/v0.6.25
 [0.6.24]: https://github.com/tamnd/firepanda/releases/tag/v0.6.24
 [0.6.23]: https://github.com/tamnd/firepanda/releases/tag/v0.6.23
 [0.6.22]: https://github.com/tamnd/firepanda/releases/tag/v0.6.22
