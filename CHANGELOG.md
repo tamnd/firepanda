@@ -8,6 +8,24 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.29] - 2026-09-02
+
+Built against Mojo 1.0.0 (ed45d567).
+
+This release is one thing done seven times: a group by now runs on every core it is given, from the first pass over the key columns to the last write of the result. Nothing here changes an API and nothing here changes an answer. Every number a query produced before it produces after, in the same order, including the first-appearance ordering the factorize contracts promise.
+
+The starting point was a measurement rather than a hunch. Running db-benchmark at 0.5 GB on a machine with thirty two logical cores and recording CPU seconds against wall seconds showed firepanda using between two and six cores on the queries where DuckDB used twenty two to twenty six and Polars used eight to twenty one. The wall clock gap was not an algorithmic one. It was that most of a group by was still a single loop on a single thread.
+
+Both halves are now parallel. On the ordinals side, the merge at the end of a hashed factorize buckets the workers' groups on the top bits of their hash so the buckets have nothing to agree about, the direct route an integer key takes builds a private table per worker in two passes rather than three, the multi key packing is vectorized and cut into morsels, and reading a type-erased column as a typed one stopped deep-copying every byte. On the reduction side, the sums, counts, means and extremes build a private accumulator table per worker and merge them, the variance and correlation family does the same for both of its passes, the per group sorts behind the median and the distinct count are cut on an eight group boundary so no two workers share a byte of validity, and the case with too many groups to replicate a table at all now partitions the rows instead of giving up.
+
+Three of the changes are about memory bandwidth rather than about threads, and they are worth naming because they were each larger than they look. `Buffer(copy=)` zeroed an allocation and then overwrote every byte of it, making a copy three passes over memory where two would do. Two columns that are fully written by the pass that follows were being zeroed first. And the typed view of an erased column was a copy, which a group by paid once per key column and a join once per side.
+
+Measured on an i9-13900K, db-benchmark group by at 0.5 GB, memory io, medians of five runs, against 0.6.28. q3 went from 136 ms to 79 ms, q6 from 537 ms to 388 ms, q7 from 114 ms to 84 ms, q9 from 114 ms to 62 ms, q5 from 69 ms to 52 ms and q10 from 1.02 s to 870 ms. q6 is now ahead of DuckDB 1.5.5 on the same box and q9 is nearly four times faster than Polars 1.44.1. Peak resident memory is the lowest of the four engines on every query in the suite, which it already was and which none of this gave up.
+
+What is not fixed: q10 at 870 ms against DuckDB's 217 ms is still the largest absolute gap, and its remaining cost is building ten million group ordinals and materialising ten million output rows across eight columns rather than the aggregation this release sped up. The joins are the other outstanding place, j1 and j3 both around 39 ms against DuckDB's 18 and 15.
+
+Three probes are checked in under `tools/probes/` alongside the changes they justified, `group_phases.mojo`, `factorize_workers.mojo` and `direct_phases.mojo`. They are there so the next person to move one of these thresholds has the curve it was fitted against rather than a constant with a story attached.
+
 ### Changed
 
 - A grouped sum, count, size and mean over more than about two million groups partitions the rows instead of giving up and running on one core. Past that point a private accumulator table per worker does not fit inside `PRIVATE_BYTES` and the reduction fell back to a single serial scatter, which is the worst case it has: every row is a random write into a table far larger than any cache, so each one moves a line in and a line out and the loop spends its whole time waiting on memory. The partitioned route cuts the group range instead of replicating the table. Each partition owns a run of ordinals no other partition holds, so there is one output table, no locks and no merge, and the run is a quarter of a megabyte so it sits in a core's private cache while it is being folded. It costs three passes over the column where the replicated route takes one, which is why it is taken only where the replicated route has given up entirely.
@@ -1512,7 +1530,10 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.26...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.29...HEAD
+[0.6.29]: https://github.com/tamnd/firepanda/releases/tag/v0.6.29
+[0.6.28]: https://github.com/tamnd/firepanda/releases/tag/v0.6.28
+[0.6.27]: https://github.com/tamnd/firepanda/releases/tag/v0.6.27
 [0.6.26]: https://github.com/tamnd/firepanda/releases/tag/v0.6.26
 [0.6.25]: https://github.com/tamnd/firepanda/releases/tag/v0.6.25
 [0.6.24]: https://github.com/tamnd/firepanda/releases/tag/v0.6.24
