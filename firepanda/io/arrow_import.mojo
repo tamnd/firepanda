@@ -568,11 +568,9 @@ def _check(array: ArrowArray, format: StringSlice) raises:
         format: The schema's format string.
 
     Raises:
-        Error: If the array is released, nested, dictionary encoded, or has a
-            buffer count that does not match its type.
+        Error: If the array is nested, dictionary encoded, or has a buffer count
+            that does not match its type.
     """
-    if array.is_released():
-        raise Error("arrow: the array has already been released")
     if array.length < 0:
         raise Error(String("arrow: negative length ", array.length))
     if array.offset < 0:
@@ -616,6 +614,31 @@ def _check(array: ArrowArray, format: StringSlice) raises:
         )
 
 
+def build_column(array: ArrowArray, format: StringSlice) raises -> AnyArray:
+    """Builds a firepanda column out of an Arrow array, checking it first.
+
+    This is `import_array` without the ownership half, for a caller that did not
+    get its buffers from a C producer and so has nothing to release. The Arrow
+    IPC reader is that caller: it has a message body and a map of where each
+    buffer sits inside it, which is an `ArrowArray` in everything but where it
+    came from, and everything this file knows about shifting a validity bitmap
+    or turning offsets into views applies to it unchanged.
+
+    Args:
+        array: The array. Nothing is released and nothing is retained, so the
+            buffers only have to outlive the call.
+        format: The Arrow C Data Interface format string for the type.
+
+    Returns:
+        The column, owning all of its memory.
+
+    Raises:
+        Error: If the type or shape is one firepanda cannot read.
+    """
+    _check(array, format)
+    return _build(array, format, Int(array.length))
+
+
 def import_array(
     mut schema: ArrowSchema, mut array: ArrowArray
 ) raises -> AnyArray:
@@ -649,8 +672,9 @@ def import_array(
 
     var out: AnyArray
     try:
-        _check(array, format)
-        out = _build(array, format, Int(array.length))
+        if array.is_released():
+            raise Error("arrow: the array has already been released")
+        out = build_column(array, format)
     except error:
         release_array(array)
         release_schema(schema)
