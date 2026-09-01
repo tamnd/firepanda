@@ -176,6 +176,22 @@ comptime FnToArrowSchema = def(
 """`duckdb_error_data duckdb_to_arrow_schema(duckdb_arrow_options,
 duckdb_logical_type *, const char **, idx_t, struct ArrowSchema *)`."""
 
+comptime FnTypeId = def(Handle) thin abi("C") -> Int32
+"""`duckdb_type duckdb_get_type_id(duckdb_logical_type type)`."""
+
+comptime FnChunkSize = def(Handle) thin abi("C") -> UInt64
+"""`idx_t duckdb_data_chunk_get_size(duckdb_data_chunk chunk)`."""
+
+comptime FnChunkVector = def(Handle, UInt64) thin abi("C") -> MaybeHandle
+"""`duckdb_vector duckdb_data_chunk_get_vector(duckdb_data_chunk, idx_t)`."""
+
+comptime FnVectorData = def(Handle) thin abi("C") -> MaybeHandle
+"""`void *duckdb_vector_get_data(duckdb_vector vector)`."""
+
+comptime FnVectorValidity = def(Handle) thin abi("C") -> MaybeHandle
+"""`uint64_t *duckdb_vector_get_validity(duckdb_vector vector)`, and null
+means every row of the vector is present."""
+
 comptime FnErrorMessage = def(Handle) thin abi("C") -> MaybeText
 """`const char *duckdb_error_data_message(duckdb_error_data error_data)`."""
 
@@ -357,6 +373,11 @@ struct Library(Movable):
     var destroy_chunk: FnDestroyChunk
     var chunk_to_arrow: FnChunkToArrow
     var to_arrow_schema: FnToArrowSchema
+    var type_id: FnTypeId
+    var chunk_size: FnChunkSize
+    var chunk_vector: FnChunkVector
+    var vector_data: FnVectorData
+    var vector_validity: FnVectorValidity
     var error_message: FnErrorMessage
     var destroy_error: FnDestroyError
     var version: FnVersion
@@ -412,6 +433,19 @@ struct Library(Movable):
         )
         self.to_arrow_schema = _as[FnToArrowSchema](
             _symbol(handle, "duckdb_to_arrow_schema")
+        )
+        self.type_id = _as[FnTypeId](_symbol(handle, "duckdb_get_type_id"))
+        self.chunk_size = _as[FnChunkSize](
+            _symbol(handle, "duckdb_data_chunk_get_size")
+        )
+        self.chunk_vector = _as[FnChunkVector](
+            _symbol(handle, "duckdb_data_chunk_get_vector")
+        )
+        self.vector_data = _as[FnVectorData](
+            _symbol(handle, "duckdb_vector_get_data")
+        )
+        self.vector_validity = _as[FnVectorValidity](
+            _symbol(handle, "duckdb_vector_get_validity")
         )
         self.error_message = _as[FnErrorMessage](
             _symbol(handle, "duckdb_error_data_message")
