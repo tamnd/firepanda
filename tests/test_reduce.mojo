@@ -238,6 +238,28 @@ def test_an_empty_column_sums_to_zero_and_has_no_minimum() raises:
     assert_false(reduce_any(AnyArray(col^), AggKind.MIN).is_valid(0))
 
 
+def test_a_boolean_column_reduces_one_value_at_a_time() raises:
+    # Two hundred rows so the whole block path runs, which is the one that has a
+    # vector reduction in it everywhere except here.
+    var flags = Array[DType.bool](200)
+    for i in range(200):
+        flags[i] = i % 7 == 3
+    assert_false(
+        reduce_any(AnyArray(flags.copy()), AggKind.MIN).as_typed[DType.bool]()[
+            0
+        ]
+    )
+    assert_true(
+        reduce_any(AnyArray(flags.copy()), AggKind.MAX).as_typed[DType.bool]()[
+            0
+        ]
+    )
+    assert_equal(
+        reduce_any(AnyArray(flags^), AggKind.SUM).as_typed[DType.uint64]()[0],
+        29,
+    )
+
+
 def test_a_string_column_counts_without_reading_the_values() raises:
     var col = strings_of(["a", "bb", "ccc"])
     var counted = reduce_any(AnyArray(col^), AggKind.COUNT)

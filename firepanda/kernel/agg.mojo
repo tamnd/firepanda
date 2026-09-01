@@ -228,18 +228,28 @@ def extreme_over[
             # The whole block is present, so the values can go through the vector
             # unit without a single bit test.
             seen = True
-            var lanes = SIMD[dt, width](identity)
             var i = base
-            while i + width <= last:
-                var chunk = ptr.unsafe_offset(i).unsafe_load[width=width]()
 
-                comptime if want_min:
-                    lanes = min(lanes, chunk)
-                else:
-                    lanes = max(lanes, chunk)
-                i += width
-            var folded = lanes.reduce_min() if want_min else lanes.reduce_max()
-            best = _better[dt, want_min](best, folded)
+            # Booleans skip the vector unit and fall straight through to the
+            # loop below. A SIMD minimum over booleans is spelled as a floating
+            # point reduction in the standard library and does not compile on
+            # every target, which is a fair thing for it to do: a column with two
+            # possible values has nothing to gain from sixteen lanes.
+            comptime if dt != DType.bool:
+                var lanes = SIMD[dt, width](identity)
+                while i + width <= last:
+                    var chunk = ptr.unsafe_offset(i).unsafe_load[width=width]()
+
+                    comptime if want_min:
+                        lanes = min(lanes, chunk)
+                    else:
+                        lanes = max(lanes, chunk)
+                    i += width
+                var folded = (
+                    lanes.reduce_min() if want_min else lanes.reduce_max()
+                )
+                best = _better[dt, want_min](best, folded)
+
             while i < last:
                 best = _better[dt, want_min](
                     best, ptr.unsafe_offset(i).unsafe_load()
