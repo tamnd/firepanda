@@ -3,7 +3,12 @@
 The bottom two layers have nothing to do with a frame: `scan.mojo` finds where
 the fields are and `parse.mojo` turns a field's bytes into a value. Both take a
 span of bytes and neither knows what a `Schema` is, which is what lets them be
-tested and fuzzed on their own and reused by the NDJSON reader when it arrives.
+tested and fuzzed on their own.
+
+`jsonscan.mojo` is the same layer for JSON. It finds the members of an object as
+spans and decodes nothing, so a number stays the bytes it was written as until
+`parse.mojo` gets it on the column that turned out to be a number. It is a
+boundary rather than a reader and is imported by its full path.
 
 On top of those, `read.mojo` infers the schema and fills the columns, and
 `write.mojo` renders a frame back out. Those two are the only files here that
