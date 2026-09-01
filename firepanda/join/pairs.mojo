@@ -6,23 +6,19 @@ columns should be. Keeping them apart means the answer to the first is a pair of
 index lists, which the frame layer feeds straight to `take_rows`, and which every
 join kind can produce without knowing anything about dtypes or schemas.
 
-## The key alignment trick
+## The key alignment
 
 Matching rows means comparing key tuples across two frames, and the two frames
 have nothing in common: a code from `factorize` on the left is a number in the
-left column's own space and means nothing on the right.
+left column's own space and means nothing on the right. `keys.mojo` is what puts
+them in one space, either by building a dictionary on the smaller side and
+probing the larger with it, or by concatenating both sides and factorizing the
+lot. This file takes the ordinals and does not care which route produced them.
 
-So this does not factorize the two sides separately. It concatenates each key
-column with its opposite number into one column of `left_rows + right_rows`
-values, hands the whole set to `group_ordinals`, and slices the codes back apart
-afterwards. Two rows share a code exactly when they share a key tuple, whichever
-side they came from, and the multi-key packing, the densifying and the small
-integer fast path all come along for free because they are already in there.
-
-The bill is one extra pass over each key column plus the memory to hold the
-copy. That is real and it is worth it here, because the alternative is a second
-implementation of key handling that has to agree with the first one about null
-keys, float normalization and integer ranges, and the two would drift.
+What it does care about is that a row matching nothing is an ordinal rather than
+a special case. Whatever route ran, an unmatched row comes back holding an
+ordinal that no row of the other side holds, so its bucket is empty and the emit
+reads it the same way it reads every other row rather than testing for it.
 
 ## Nulls do not match nulls
 
@@ -94,8 +90,8 @@ from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
 from firepanda.exec import parallel_morsels
-from firepanda.hash.grouping import group_ordinals
-from firepanda.kernel.concat import concat_two_any
+
+from .keys import align_keys
 
 
 comptime PARALLEL_LEFT_ROWS = 1 << 17
@@ -320,49 +316,18 @@ def join_indices(
             JoinKind.LEFT,
         ).swapped()
 
-    var rows = left_rows + right_rows
-    var merged = List[AnyArray](capacity=len(left_keys))
-    for k in range(len(left_keys)):
-        merged.append(
-            _concat_any(
-                left_columns[left_keys[k]], right_columns[right_keys[k]]
-            )
-        )
-
-    var at = List[Int](capacity=len(merged))
-    for k in range(len(merged)):
-        at.append(k)
-
-    var grouping = group_ordinals(merged, at, rows)
-    var codes = grouping.codes.unsafe_ptr()
-    var groups = grouping.groups
-
-    # A row whose key tuple contains a null matches nothing. Reading that off the
-    # concatenated columns rather than the originals means one loop covers both
-    # sides and the row numbering matches the codes.
-    #
-    # The null counts are asked first, because a key column with no nulls is the
-    # ordinary case and the loop below is a pass over both frames with a branch
-    # per key per row that answers False every time. Asking costs a popcount per
-    # validity word, which is a sixty fourth of the pass it decides against.
-    # Every later read of `absent` is guarded by `has_nulls` and short circuits,
-    # so the empty list is never indexed.
-    var has_nulls = False
-    for k in range(len(merged)):
-        if merged[k].null_count() > 0:
-            has_nulls = True
-            break
-
-    var absent = List[Bool]()
-    if has_nulls:
-        absent = List[Bool](capacity=rows)
-        for i in range(rows):
-            var missing = False
-            for k in range(len(merged)):
-                if not merged[k].is_valid(i):
-                    missing = True
-                    break
-            absent.append(missing)
+    var aligned = align_keys(
+        left_columns,
+        left_keys,
+        left_rows,
+        right_columns,
+        right_keys,
+        right_rows,
+    )
+    var codes = aligned.codes.unsafe_ptr()
+    var groups = aligned.groups
+    var has_nulls = aligned.has_nulls
+    ref absent = aligned.absent
 
     # Most joins are onto a key that is unique on the right, and a bucket per
     # code is the wrong shape for those: every bucket holds one row, so the
@@ -487,9 +452,9 @@ def join_indices(
     # ones going backwards.
     #
     # The pointer is taken again inside each body rather than captured, because
-    # its origin names `grouping` and a capture list cannot carry that.
+    # its origin names `aligned` and a capture list cannot carry that.
     def tally_one(start: Int, stop: Int) raises {mut counts, imm}:
-        var code_at = grouping.codes.unsafe_ptr()
+        var code_at = aligned.codes.unsafe_ptr()
         var seat = only.unsafe_ptr()
         var here = 0
         for i in range(start, stop):
@@ -504,7 +469,7 @@ def join_indices(
         counts[start // chunk + 1] = here
 
     def tally(start: Int, stop: Int) raises {mut counts, imm}:
-        var code_at = grouping.codes.unsafe_ptr()
+        var code_at = aligned.codes.unsafe_ptr()
         var here = 0
         for i in range(start, stop):
             var width = 0
@@ -544,7 +509,7 @@ def join_indices(
     def spill_one(
         start: Int, stop: Int
     ) raises {mut out_left, mut out_right, mut matched, imm}:
-        var code_at = grouping.codes.unsafe_ptr()
+        var code_at = aligned.codes.unsafe_ptr()
         var seat = only.unsafe_ptr()
         var left_out = out_left.unsafe_ptr()
         var right_out = out_right.unsafe_ptr()
@@ -579,7 +544,7 @@ def join_indices(
     def spill(
         start: Int, stop: Int
     ) raises {mut out_left, mut out_right, mut matched, imm}:
-        var code_at = grouping.codes.unsafe_ptr()
+        var code_at = aligned.codes.unsafe_ptr()
         var left_out = out_left.unsafe_ptr()
         var right_out = out_right.unsafe_ptr()
         var put = counts[start // chunk]
@@ -778,31 +743,3 @@ def _cross(left_rows: Int, right_rows: Int) -> JoinIndices:
             out_left.append(i)
             out_right.append(r)
     return JoinIndices(out_left^, out_right^)
-
-
-def _concat_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
-    """Appends one column to another, for columns whose dtype is a runtime value.
-
-    The two dtypes have to match exactly. Promoting them here instead would mean
-    a join silently comparing an int32 column against a float64 one and finding
-    fewer matches than either side expected, so the cast is the caller's to write
-    and is visible where it happens.
-
-    Args:
-        a: The first column.
-        b: The second column.
-
-    Returns:
-        A column of `len(a) + len(b)` rows.
-
-    Raises:
-        If the dtypes differ or have no physical layout.
-    """
-    if a.dtype() != b.dtype():
-        raise Error(
-            "join: key columns must have the same dtype; got "
-            + String(a.dtype())
-            + " and "
-            + String(b.dtype())
-        )
-    return concat_two_any(a, b)

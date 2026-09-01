@@ -124,6 +124,20 @@ struct Grouping(Movable):
         self.groups = groups
         self.rows_at = rows_at^
 
+    def into_codes(deinit self) -> Array[DType.uint32]:
+        """Gives up the ordinals without copying them, dropping the rest.
+
+        A join wants the ordinals and has nothing to do with the group's
+        representative rows, and Mojo will not let it move `codes` out from under
+        a struct that still owns `rows_at`. `deinit` says the rest is being torn
+        down, which is what makes the move legal. Same arrangement as
+        `Factorized.into_codes`.
+
+        Returns:
+            The per-row ordinals.
+        """
+        return self.codes^
+
 
 def group_ordinals(
     columns: List[AnyArray], at: List[Int], rows: Int
