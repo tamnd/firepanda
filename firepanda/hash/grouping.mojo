@@ -85,9 +85,12 @@ null is and there is no later factorize to fix it. `_factorize_any` reports what
 its route knows in a `KeyCodes` and `group_ordinals` decides from that.
 """
 
+from std.sys.info import simd_width_of
+
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.dtype.lists import ALL
+from firepanda.exec.morsel import parallel_morsels
 
 from firepanda.kernel.agg import max_of
 
@@ -178,18 +181,37 @@ def group_ordinals(
     # except their value, so a null group in the wrong place does not matter and
     # `_densify` is not called on it. The packed column carries the tuple and the
     # one factorize at the bottom is what makes the result dense and ordered.
-    var running = Array[DType.int64](rows)
-    var start = running.unsafe_ptr()
-    var seed = codes.unsafe_ptr()
-    for i in range(rows):
-        start.unsafe_offset(i).unsafe_store(
-            Int64(seed.unsafe_offset(i).unsafe_load())
-        )
-    # `seed` borrows from `codes` and nothing below reads either, so the loop
-    # above is the last use and the forty megabytes go back here rather than at
-    # the end of the function. That matters because the factorize at the bottom
-    # allocates a table sized by the tuple count. Each later key's codes are
-    # released by the iteration that made them for the same reason.
+    comptime lanes = simd_width_of[DType.int64]()
+
+    # The packing passes below are elementwise over every row, and on ten
+    # million rows each of them moves more memory than the factorize that
+    # produced their input. They run on every core, in morsels, for the same
+    # reason every other whole column loop in the engine does.
+    var running = Array[DType.int64](overwritten=rows)
+
+    def widen(begin: Int, stop: Int) raises {mut running, imm}:
+        var into = running.unsafe_ptr()
+        var from_ = codes.unsafe_ptr()
+        var i = begin
+        while i + lanes <= stop:
+            into.unsafe_offset(i).unsafe_store(
+                from_.unsafe_offset(i)
+                .unsafe_load[width=lanes]()
+                .cast[DType.int64]()
+            )
+            i += lanes
+        while i < stop:
+            into.unsafe_offset(i).unsafe_store(
+                Int64(from_.unsafe_offset(i).unsafe_load())
+            )
+            i += 1
+
+    parallel_morsels(widen, rows)
+    # Nothing below reads `codes`, so the pass above is its last use and the
+    # forty megabytes go back here rather than at the end of the function. That
+    # matters because the factorize at the bottom allocates a table sized by the
+    # tuple count. Each later key's codes are released by the iteration that
+    # made them for the same reason.
     var space = groups
 
     for k in range(1, len(at)):
@@ -217,13 +239,27 @@ def group_ordinals(
                     + " does not fit in an int64"
                 )
 
-        var right = next.unsafe_ptr()
-        var pack = running.unsafe_ptr()
-        for i in range(rows):
-            pack.unsafe_offset(i).unsafe_store(
-                pack.unsafe_offset(i).unsafe_load() * Int64(next_groups)
-                + Int64(right.unsafe_offset(i).unsafe_load())
-            )
+        def combine(begin: Int, stop: Int) raises {mut running, imm}:
+            var pack = running.unsafe_ptr()
+            var right = next.unsafe_ptr()
+            var i = begin
+            while i + lanes <= stop:
+                pack.unsafe_offset(i).unsafe_store(
+                    pack.unsafe_offset(i).unsafe_load[width=lanes]()
+                    * Int64(next_groups)
+                    + right.unsafe_offset(i)
+                    .unsafe_load[width=lanes]()
+                    .cast[DType.int64]()
+                )
+                i += lanes
+            while i < stop:
+                pack.unsafe_offset(i).unsafe_store(
+                    pack.unsafe_offset(i).unsafe_load() * Int64(next_groups)
+                    + Int64(right.unsafe_offset(i).unsafe_load())
+                )
+                i += 1
+
+        parallel_morsels(combine, rows)
         space *= next_groups
 
     # Every row of `running` was written by the loop above, so it has no nulls
@@ -271,12 +307,27 @@ def _condense(mut running: Array[DType.int64], space: Int) raises -> Int:
     var spare = List[Int]()
     found^.into_parts(codes, spare)
 
-    var from_at = codes.unsafe_ptr()
-    var to_at = running.unsafe_ptr()
-    for i in range(len(running)):
-        to_at.unsafe_offset(i).unsafe_store(
-            Int64(from_at.unsafe_offset(i).unsafe_load())
-        )
+    comptime lanes = simd_width_of[DType.int64]()
+    var rows = len(running)
+
+    def widen(begin: Int, stop: Int) raises {mut running, imm}:
+        var into = running.unsafe_ptr()
+        var from_ = codes.unsafe_ptr()
+        var i = begin
+        while i + lanes <= stop:
+            into.unsafe_offset(i).unsafe_store(
+                from_.unsafe_offset(i)
+                .unsafe_load[width=lanes]()
+                .cast[DType.int64]()
+            )
+            i += lanes
+        while i < stop:
+            into.unsafe_offset(i).unsafe_store(
+                Int64(from_.unsafe_offset(i).unsafe_load())
+            )
+            i += 1
+
+    parallel_morsels(widen, rows)
     return groups
 
 
