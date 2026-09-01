@@ -37,7 +37,7 @@ from firepanda.array.array import Array
 from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
-from firepanda.exec.parallel import parallel_for, worker_count
+from firepanda.exec import parallel_morsels
 
 
 comptime PARALLEL_TAKE_ROWS = 1 << 16
@@ -48,8 +48,19 @@ nanoseconds and the split pays off sooner than it does for a loop over
 consecutive memory. Half of `join`'s threshold, and picked the same way.
 """
 
-comptime PARALLEL_MIN_TAKE_SLICE = 1 << 14
-"""And no worker gets a slice shorter than this."""
+comptime TAKE_MORSEL_ROWS = 1 << 16
+"""Output rows a worker takes at a time once the gather is on every core.
+
+A multiple of sixty four, which is what makes the morsel boundaries land on
+validity word boundaries and is the only coupling between this number and the
+loop below.
+
+Small, because the cost of a gathered row is the cost of the cache miss it takes
+and that is not the same for every row: indices that walk a small region are hot
+and indices that walk the whole column are not, and a join or a sort produces
+both in the same call. Eight thousand rows is around ten microseconds of work,
+which is four orders of magnitude more than the atomic that hands it out.
+"""
 
 
 def take_rows[
@@ -152,26 +163,11 @@ def _take_core[
     var built = Bitmap(n, all_valid=False)
 
     # Output row `i` depends on `indices[i]` and on nothing else in the output,
-    # so the gather splits by output row. The slice boundaries are rounded up to
-    # a multiple of sixty four so that no two workers write the same validity
-    # word, which is the only thing here that is not per row.
-    var workers = 1
-    if n >= PARALLEL_TAKE_ROWS:
-        workers = worker_count()
-        var most = n // PARALLEL_MIN_TAKE_SLICE
-        if workers > most:
-            workers = most
-        if workers < 1:
-            workers = 1
-
-    var bounds = List[Int](capacity=workers + 1)
-    for w in range(workers + 1):
-        var at = (n * w // workers + 63) & ~63
-        bounds.append(at if at < n else n)
-
-    def gather(w: Int) raises {mut out, mut built, imm}:
+    # so the gather splits by output row. The morsel size is a multiple of sixty
+    # four so that no two workers write the same validity word, which is the only
+    # thing here that is not per row.
+    def gather(start: Int, stop: Int) raises {mut out, mut built, imm}:
         var target = out.unsafe_ptr()
-        var stop = bounds[w + 1]
 
         # The output positions are consecutive, so the validity bits can be
         # built in a register and stored once every sixty four rows instead of
@@ -184,7 +180,7 @@ def _take_core[
         # source that usually does not have nulls, so the two halves of that
         # condition are worth keeping apart.
         var word = UInt64(0)
-        for i in range(bounds[w], stop):
+        for i in range(start, stop):
             var at = indices[i]
             if at >= 0 and (not has_nulls or validity.get(at)):
                 target.unsafe_offset(i).unsafe_write(
@@ -195,12 +191,16 @@ def _take_core[
                 built.unsafe_set_word(i >> 6, word)
                 word = 0
 
-        # Only a slice that ends part way through a word has anything left in
-        # the register, and by construction that is the last non-empty one.
-        if stop & 63 != 0 and stop > bounds[w]:
+        # Only a morsel that ends part way through a word has anything left in
+        # the register, and since the morsel is a multiple of sixty four that is
+        # only ever the last one.
+        if stop & 63 != 0 and stop > start:
             built.unsafe_set_word(stop >> 6, word)
 
-    parallel_for(gather, workers)
+    if n < PARALLEL_TAKE_ROWS:
+        gather(0, n)
+    else:
+        parallel_morsels(gather, n, TAKE_MORSEL_ROWS)
 
     out.data.validity = built^
     return out^
