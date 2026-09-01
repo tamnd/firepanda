@@ -44,6 +44,7 @@ from firepanda.testing.rng import Rng
 from firepanda.kernel.group import (
     PRIVATE_ROWS,
     AggKind,
+    _partition_parts,
     aggregate_group,
     aggregate_group_any,
     aggregate_group_pair_any,
@@ -1454,6 +1455,76 @@ def test_the_spread_reductions_past_the_threshold_agree_with_a_serial_loop() rai
             atol=1e-9,
             msg=String("correlation of group ", g),
         )
+
+
+def test_a_group_count_too_large_to_replicate_agrees_with_a_serial_loop() raises:
+    # Past a couple of million groups a table per worker no longer fits inside
+    # `PRIVATE_BYTES`, and rather than falling back to one core the scatter cuts
+    # the group range into partitions and folds one partition at a time. That is
+    # a third loop, reached by neither the tests above nor the ones at
+    # `PRIVATE_ROWS`, so it gets its own.
+    #
+    # The codes are `i * 977 mod GROUPS`, which wraps the range about seventy
+    # times over the rows, so a group collects rows from several of the worker
+    # slices and the partitions each hold a mix. Every seventh row is null,
+    # which is what separates `size` from `count` and makes the null policy of
+    # the sum observable.
+    comptime ROWS = 300_000
+    comptime GROUPS = 2_100_000
+
+    assert_true(
+        _partition_parts[DType.int64](ROWS, GROUPS) > 0,
+        "this shape no longer reaches the partitioned route",
+    )
+
+    var values = Array[DType.int64](ROWS)
+    var codes = Array[DType.uint32](ROWS)
+    for i in range(ROWS):
+        values[i] = Int64(i % 1000) - 500
+        codes[i] = UInt32((i * 977) % GROUPS)
+    for i in range(0, ROWS, 7):
+        values.set_null(i)
+
+    var want_sum = List[Int64](length=GROUPS, fill=0)
+    var want_count = List[Int64](length=GROUPS, fill=0)
+    var want_size = List[Int64](length=GROUPS, fill=0)
+    for i in range(ROWS):
+        var g = Int(codes[i])
+        want_size[g] += 1
+        if not values.data.validity.get(i):
+            continue
+        want_count[g] += 1
+        want_sum[g] += values[i]
+
+    var total = group_sum(values, codes, GROUPS)
+    var counted = group_count(values, codes, GROUPS)
+    var sized = group_size(codes, GROUPS)
+    var averaged = group_mean(values, codes, GROUPS)
+
+    # One scan that stops at the first disagreement rather than two million
+    # assertions, because an assertion builds its message whether or not it
+    # fires and two million of those is most of the test suite's running time.
+    var wrong = -1
+    var what = String()
+    for g in range(GROUPS):
+        if Int64(total[g]) != want_sum[g]:
+            what = "sum"
+        elif counted[g] != want_count[g]:
+            what = "count"
+        elif sized[g] != want_size[g]:
+            what = "size"
+        elif want_count[g] == 0:
+            if averaged.data.validity.get(g):
+                what = "presence of the mean"
+        else:
+            var mean = Float64(want_sum[g]) / Float64(want_count[g])
+            if abs(averaged[g] - mean) > 1e-9:
+                what = "mean"
+        if what:
+            wrong = g
+            break
+
+    assert_equal(wrong, -1, String(what, " is wrong at group ", wrong))
 
 
 def main() raises:

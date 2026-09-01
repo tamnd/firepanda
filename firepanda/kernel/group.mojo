@@ -76,6 +76,7 @@ from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
+from firepanda.buffer.buffer import Buffer
 from firepanda.dtype.lists import ALL
 from firepanda.exec.parallel import parallel_for, worker_count
 from firepanda.hash.factorize import factorize_strings
@@ -162,6 +163,295 @@ def _row_bounds(rows: Int, workers: Int) -> List[Int]:
         bounds.append(rows * w // workers)
     bounds.append(rows)
     return bounds^
+
+
+comptime PARTITION_BYTES = 256 * 1024
+"""How much of an accumulator table one partition of a scatter may cover.
+
+The partitioned route is what happens when `PRIVATE_BYTES` says a table per
+worker will not fit. Instead of replicating the table it cuts the group range:
+each partition owns a run of ordinals no other partition holds, so there is one
+table rather than one per worker and there is no merge at all. What the partition
+width has to satisfy is that its slice of the table stays in a core's private
+cache while the partition is being folded, because every row of the partition is
+a random write inside that slice. A quarter of a megabyte is around the L2 on the
+machines this was measured on, which leaves the codes and the values being read
+alongside to the rest of it.
+"""
+
+comptime PARTITION_ROWS = 1 << 18
+"""Rows below which the partitioned route is not worth its two extra passes.
+
+Partitioning reads the column and writes a copy of it before the fold reads that
+copy back, so it is three passes over the data where the replicated route is one.
+It wins anyway on a high cardinality key, because the scatter it replaces misses
+cache on every single row and a miss moves a whole line in each direction. It
+does not win on a small column, where the scatter fits in cache and there was
+nothing to fix.
+"""
+
+
+def _partition_shift[dt: DType](groups: Int) -> Int:
+    """Returns how many low bits of a group ordinal one partition covers.
+
+    Args:
+        groups: How many groups there are.
+
+    Parameters:
+        dt: The accumulator dtype, which sets how wide a table entry is.
+
+    Returns:
+        The shift, so that partition `p` owns ordinals `p << shift` upwards.
+    """
+    var span = PARTITION_BYTES // size_of[dt]()
+    var shift = 0
+    while (1 << (shift + 1)) <= span and (1 << (shift + 1)) <= groups:
+        shift += 1
+    return shift
+
+
+def _partition_parts[dt: DType](rows: Int, groups: Int) -> Int:
+    """Decides whether a scatter should be partitioned, and into how many pieces.
+
+    The partitioned route is taken only where the replicated one has given up
+    entirely, which is to say where the group count is large enough that a table
+    per worker does not fit inside `PRIVATE_BYTES` even twice over. Between the
+    two there is a band where replication still fits but only for a handful of
+    workers, and which route wins there is a measurement nobody has taken, so
+    this does not guess at it.
+
+    Args:
+        rows: How many rows are being scattered.
+        groups: How many groups they land in.
+
+    Parameters:
+        dt: The accumulator dtype.
+
+    Returns:
+        The partition count, or zero to say the scatter should not be partitioned.
+    """
+    if rows < PARTITION_ROWS or groups <= 0:
+        return 0
+    if worker_count() <= 1:
+        return 0
+    if _private_workers[dt](rows, groups) > 1:
+        return 0
+
+    var shift = _partition_shift[dt](groups)
+    var parts = (groups + (1 << shift) - 1) >> shift
+    return parts if parts >= 2 else 0
+
+
+def _partition_starts(
+    codes: Array[DType.uint32],
+    validity: Bitmap,
+    skip_null: Bool,
+    bounds: List[Int],
+    workers: Int,
+    parts: Int,
+    shift: Int,
+) raises -> List[Int]:
+    """Counts each worker's rows per partition and turns them into write offsets.
+
+    The counting table is worker major, `workers * parts` entries with worker
+    `w`'s run contiguous, so that two workers counting at once are not writing
+    into one cache line. The offsets that come out of it are partition major,
+    because that is the order the rows have to end up in for a partition to be a
+    contiguous run that one task can fold.
+
+    Args:
+        codes: One group ordinal per row.
+        validity: Which rows are present.
+        skip_null: True to leave null rows out of the partitioning entirely.
+        bounds: `workers + 1` row offsets, one piece per worker.
+        workers: How many pieces the rows are cut into.
+        parts: How many partitions the groups are cut into.
+        shift: How many low bits of an ordinal one partition covers.
+
+    Returns:
+        `parts * workers + 1` offsets. Worker `w`'s run of partition `p` starts
+        at entry `p * workers + w`, and the last entry is the total row count
+        that will be placed.
+
+    Raises:
+        If one of the counting workers cannot be run.
+    """
+    var tally = Buffer(workers * parts * 8)
+
+    def count(w: Int) raises {mut tally, imm}:
+        var mine = tally.bitcast[DType.int64]().unsafe_offset(w * parts)
+        var at = codes.unsafe_ptr()
+        for i in range(bounds[w], bounds[w + 1]):
+            if skip_null and not validity.get(i):
+                continue
+            var p = Int(at.unsafe_offset(i).unsafe_load()) >> shift
+            mine.unsafe_offset(p).unsafe_store(
+                mine.unsafe_offset(p).unsafe_load() + 1
+            )
+
+    parallel_for(count, workers)
+
+    var counts = tally.bitcast[DType.int64]()
+    var starts = List[Int](capacity=parts * workers + 1)
+    var running = 0
+    for p in range(parts):
+        for w in range(workers):
+            starts.append(running)
+            running += Int(counts.unsafe_offset(w * parts + p).unsafe_load())
+    starts.append(running)
+    return starts^
+
+
+def _partitioned_sums[
+    dt: DType, //, origin: ImmOrigin
+](
+    source: Pointer[Scalar[dt], origin],
+    codes: Array[DType.uint32],
+    groups: Int,
+    parts: Int,
+) raises -> Array[accumulator(dt)]:
+    """Adds every row into its group by cutting the group range, not the table.
+
+    Three passes rather than one. The first counts how many rows each worker has
+    for each partition, the second copies the ordinals and the values into
+    partition order, and the third folds one partition at a time into the single
+    output table. The rows of a partition can only touch that partition's run of
+    the output, so the fold needs no locks, no private copies and no merge, and
+    the run is small enough to sit in a core's cache while it is being written.
+
+    Args:
+        source: The values being added.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals.
+        parts: How many partitions to cut the groups into.
+
+    Parameters:
+        dt: The column's dtype.
+        origin: The origin of the values pointer.
+
+    Returns:
+        A column of `groups` sums, every one of them present.
+
+    Raises:
+        If one of the workers cannot be run.
+    """
+    comptime acc = accumulator(dt)
+    var rows = len(codes)
+    var workers = worker_count()
+    var bounds = _row_bounds(rows, workers)
+    var shift = _partition_shift[acc](groups)
+
+    # Every row is placed, the null ones included, because this reduction adds
+    # every row and a null holds a zero. That is the same invariant the serial
+    # loop spends and it saves the placement a bitmap read per row.
+    var starts = _partition_starts(
+        codes, codes.data.validity, False, bounds, workers, parts, shift
+    )
+
+    var held = Buffer(overwritten=rows * 4)
+    var carried = Buffer(overwritten=rows * size_of[acc]())
+
+    def place(w: Int) raises {mut held, mut carried, imm}:
+        var at = codes.unsafe_ptr()
+        var ordinals = held.bitcast[DType.uint32]()
+        var values = carried.bitcast[acc]()
+        var cursor = List[Int](capacity=parts)
+        for p in range(parts):
+            cursor.append(starts[p * workers + w])
+        for i in range(bounds[w], bounds[w + 1]):
+            var g = at.unsafe_offset(i).unsafe_load()
+            var p = Int(g) >> shift
+            var slot = cursor[p]
+            ordinals.unsafe_offset(slot).unsafe_write(g)
+            values.unsafe_offset(slot).unsafe_write(
+                source.unsafe_offset(i).unsafe_load().cast[acc]()
+            )
+            cursor[p] = slot + 1
+
+    parallel_for(place, workers)
+
+    var out = Array[acc](groups)
+
+    def fold(p: Int) raises {mut out, imm}:
+        var totals = out.unsafe_ptr()
+        var ordinals = held.bitcast[DType.uint32]()
+        var values = carried.bitcast[acc]()
+        for i in range(starts[p * workers], starts[(p + 1) * workers]):
+            var g = Int(ordinals.unsafe_offset(i).unsafe_load())
+            totals.unsafe_offset(g).unsafe_store(
+                totals.unsafe_offset(g).unsafe_load()
+                + values.unsafe_offset(i).unsafe_load()
+            )
+
+    parallel_for(fold, parts)
+    return out^
+
+
+def _partitioned_tally(
+    validity: Bitmap,
+    skip_null: Bool,
+    codes: Array[DType.uint32],
+    groups: Int,
+    parts: Int,
+) raises -> Array[DType.int64]:
+    """Counts rows per group by cutting the group range, not the table.
+
+    The same three passes `_partitioned_sums` takes, without the values, because
+    a count reads none. A null row is left out of the partitioning rather than
+    skipped in the fold, so the copy is only as long as the answer needs.
+
+    Args:
+        validity: Which rows are present.
+        skip_null: True to count only the present rows.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals.
+        parts: How many partitions to cut the groups into.
+
+    Returns:
+        A column of `groups` counts, every one of them present.
+
+    Raises:
+        If one of the workers cannot be run.
+    """
+    var rows = len(codes)
+    var workers = worker_count()
+    var bounds = _row_bounds(rows, workers)
+    var shift = _partition_shift[DType.int64](groups)
+    var starts = _partition_starts(
+        codes, validity, skip_null, bounds, workers, parts, shift
+    )
+
+    var held = Buffer(overwritten=starts[parts * workers] * 4)
+
+    def place(w: Int) raises {mut held, imm}:
+        var at = codes.unsafe_ptr()
+        var ordinals = held.bitcast[DType.uint32]()
+        var cursor = List[Int](capacity=parts)
+        for p in range(parts):
+            cursor.append(starts[p * workers + w])
+        for i in range(bounds[w], bounds[w + 1]):
+            if skip_null and not validity.get(i):
+                continue
+            var g = at.unsafe_offset(i).unsafe_load()
+            var slot = cursor[Int(g) >> shift]
+            ordinals.unsafe_offset(slot).unsafe_write(g)
+            cursor[Int(g) >> shift] = slot + 1
+
+    parallel_for(place, workers)
+
+    var out = Array[DType.int64](groups)
+
+    def fold(p: Int) raises {mut out, imm}:
+        var totals = out.unsafe_ptr()
+        var ordinals = held.bitcast[DType.uint32]()
+        for i in range(starts[p * workers], starts[(p + 1) * workers]):
+            var g = Int(ordinals.unsafe_offset(i).unsafe_load())
+            totals.unsafe_offset(g).unsafe_store(
+                totals.unsafe_offset(g).unsafe_load() + 1
+            )
+
+    parallel_for(fold, parts)
+    return out^
 
 
 def _group_blocks(rows: Int, groups: Int) -> Int:
@@ -619,6 +909,10 @@ def _tally_core[
     var workers = _private_workers[DType.int64](n, groups)
 
     if workers <= 1:
+        var parts = _partition_parts[DType.int64](n, groups)
+        if parts > 0:
+            return _partitioned_tally(validity, check, codes, groups, parts)
+
         var out = Array[DType.int64](groups)
         var totals = out.unsafe_ptr()
         var at = codes.unsafe_ptr()
@@ -695,6 +989,10 @@ def _sum_core[
     var workers = _private_workers[acc](n, groups)
 
     if workers <= 1:
+        var parts = _partition_parts[acc](n, groups)
+        if parts > 0:
+            return _partitioned_sums(source, codes, groups, parts)
+
         var out = Array[acc](groups)
         var totals = out.unsafe_ptr()
         var at = codes.unsafe_ptr()
