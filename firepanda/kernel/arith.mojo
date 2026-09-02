@@ -12,11 +12,20 @@ Division is the exception to the shape. It always produces float64, whatever wen
 in, because that is what pandas does with `/` and because integer division that
 silently truncates is a bug generator. Division by zero gives an infinity or a
 NaN, not a null, which is also pandas.
+
+Each operation has a second form that takes a constant on one side instead of a
+second column. That is not a convenience wrapper over building a column of a
+repeated value: the constant is splatted into a register once, outside the loop,
+so the loop reads one operand instead of two and touches half the memory. On a
+column that does not fit in cache that is the whole difference. The constant
+forms live here rather than in a file of their own because a reader comparing
+`x + y` against `x + 5` should see both loops at once.
 """
 
 from std.sys.info import simd_width_of
 
 from firepanda.array.array import Array
+from firepanda.bitmap.bitmap import Bitmap
 
 from .mask import apply_validity, combined_validity
 
@@ -159,4 +168,121 @@ def divide[dt: DType](a: Array[dt], b: Array[dt]) -> Array[DType.float64]:
         i += width
 
     apply_validity(out, combined_validity(a.data.validity, b.data.validity))
+    return out^
+
+
+def arith_const[
+    dt: DType, op: Int
+](a: Array[dt], b: Scalar[dt], flip: Bool = False) -> Array[dt]:
+    """Applies an arithmetic operation between a column and one constant.
+
+    The four operations do not need four entry points here the way the column
+    forms do, because the caller that reaches this already holds the operation as
+    a code rather than as a name. It arrived from a plan.
+
+    `flip` puts the constant on the left, which only changes anything for
+    subtraction. The branch on it is outside the loop rather than a parameter,
+    so there is one instantiation of this per dtype rather than two, and the
+    loop the processor runs is still straight line. Compile time is a real
+    budget here: this is instantiated once per dtype in the erased dispatch, and
+    doubling that doubles the cost of a file nothing has even called yet.
+
+    Args:
+        a: The column.
+        b: The constant.
+        flip: True if the constant is the left operand.
+
+    Parameters:
+        dt: The dtype. The constant is already at it; promotion happened above.
+        op: One of `OP_ADD`, `OP_SUB` or `OP_MUL`.
+
+    Returns:
+        A column of results, null wherever the column is null. A constant is
+        never null here; a null constant makes the whole answer null and is
+        handled before any loop runs.
+    """
+    comptime width = simd_width_of[dt]()
+
+    var n = len(a)
+    var out = Array[dt](n)
+    var src = a.unsafe_ptr()
+    var dst = out.unsafe_ptr()
+    var y = SIMD[dt, width](b)
+
+    comptime if op == OP_ADD:
+        var i = 0
+        while i < n:
+            var x = src.unsafe_offset(i).unsafe_load[width=width]()
+            dst.unsafe_offset(i).unsafe_store(x + y)
+            i += width
+    elif op == OP_MUL:
+        var i = 0
+        while i < n:
+            var x = src.unsafe_offset(i).unsafe_load[width=width]()
+            dst.unsafe_offset(i).unsafe_store(x * y)
+            i += width
+    else:
+        if flip:
+            var i = 0
+            while i < n:
+                var x = src.unsafe_offset(i).unsafe_load[width=width]()
+                dst.unsafe_offset(i).unsafe_store(y - x)
+                i += width
+        else:
+            var i = 0
+            while i < n:
+                var x = src.unsafe_offset(i).unsafe_load[width=width]()
+                dst.unsafe_offset(i).unsafe_store(x - y)
+                i += width
+
+    apply_validity(out, Bitmap(copy=a.data.validity))
+    return out^
+
+
+def divide_const[
+    dt: DType
+](a: Array[dt], b: Scalar[dt], flip: Bool = False) -> Array[DType.float64]:
+    """Divides a column by a constant, or a constant by a column, in float64.
+
+    Args:
+        a: The column.
+        b: The constant.
+        flip: True if the constant is the numerator.
+
+    Parameters:
+        dt: The input dtype.
+
+    Returns:
+        A float64 column, null wherever the column is null.
+    """
+    comptime width = simd_width_of[DType.float64]()
+
+    var n = len(a)
+    var out = Array[DType.float64](n)
+    var src = a.unsafe_ptr()
+    var dst = out.unsafe_ptr()
+    var y = SIMD[DType.float64, width](b.cast[DType.float64]())
+
+    if flip:
+        var i = 0
+        while i < n:
+            var x = (
+                src.unsafe_offset(i)
+                .unsafe_load[width=width]()
+                .cast[DType.float64]()
+            )
+            dst.unsafe_offset(i).unsafe_store(y / x)
+            i += width
+    else:
+        var i = 0
+        while i < n:
+            var x = (
+                src.unsafe_offset(i)
+                .unsafe_load[width=width]()
+                .cast[DType.float64]()
+            )
+            dst.unsafe_offset(i).unsafe_store(x / y)
+            i += width
+
+    apply_validity(out, Bitmap(copy=a.data.validity))
     return out^

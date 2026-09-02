@@ -12,11 +12,18 @@ kernel reads a byte per row with no shifting as a result.
 Comparison against a null is null, not false. That is three-valued logic and it
 is what both pandas and SQL do, and it is why `filter_rows` has to decide
 separately what a null in a mask means; see `select.mojo`.
+
+There is a second form that takes a constant on the right, and it needs no flag
+for a constant on the left, because `5 < x` is `x > 5` and the caller mirrors the
+operation rather than the operands. That mirroring is exact, NaN included: both
+readings of the pair are false when either side is not a number, so nothing is
+smuggled in by rewriting one as the other.
 """
 
 from std.sys.info import simd_width_of
 
 from firepanda.array.array import Array
+from firepanda.bitmap.bitmap import Bitmap
 
 from .mask import apply_validity, combined_validity
 
@@ -183,4 +190,55 @@ def _compare[
         i += width
 
     apply_validity(out, combined_validity(a.data.validity, b.data.validity))
+    return out^
+
+
+def compare_const[
+    dt: DType, op: Int
+](a: Array[dt], b: Scalar[dt]) -> Array[DType.bool]:
+    """Compares a column against one constant.
+
+    The constant is splatted once, before the loop, so each row costs one load
+    rather than two. There is no flipped form, because a constant on the left is
+    the mirrored operation on the right and the caller does that swap.
+
+    Args:
+        a: The column.
+        b: The constant.
+
+    Parameters:
+        dt: The dtype. The constant is already at it; promotion happened above.
+        op: One of the `CMP_` codes.
+
+    Returns:
+        A bool column, null wherever the column is null. A null constant makes
+        the whole answer null and never reaches here.
+    """
+    comptime width = simd_width_of[dt]()
+
+    var n = len(a)
+    var out = Array[DType.bool](n)
+    var src = a.unsafe_ptr()
+    var dst = out.unsafe_ptr()
+    var y = SIMD[dt, width](b)
+
+    var i = 0
+    while i < n:
+        var x = src.unsafe_offset(i).unsafe_load[width=width]()
+
+        comptime if op == CMP_EQ:
+            dst.unsafe_offset(i).unsafe_store(x.eq(y))
+        elif op == CMP_NE:
+            dst.unsafe_offset(i).unsafe_store(x.ne(y))
+        elif op == CMP_LT:
+            dst.unsafe_offset(i).unsafe_store(x.lt(y))
+        elif op == CMP_LE:
+            dst.unsafe_offset(i).unsafe_store(x.le(y))
+        elif op == CMP_GT:
+            dst.unsafe_offset(i).unsafe_store(x.gt(y))
+        else:
+            dst.unsafe_offset(i).unsafe_store(x.ge(y))
+        i += width
+
+    apply_validity(out, Bitmap(copy=a.data.validity))
     return out^

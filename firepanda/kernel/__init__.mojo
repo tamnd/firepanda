@@ -39,10 +39,18 @@ from .agg import (
     sum_of,
     sum_over,
 )
-from .arith import add, divide, multiply, subtract
-from .binary import BinaryOp, binary_any, binary_type
+from .arith import add, arith_const, divide, divide_const, multiply, subtract
+from .binary import BinaryOp, binary_any, binary_type, binary_value_any
 from .cast import cast_any, cast_strings_to, cast_to, cast_to_strings
-from .compare import equal, greater, greater_equal, less, less_equal, not_equal
+from .compare import (
+    compare_const,
+    equal,
+    greater,
+    greater_equal,
+    less,
+    less_equal,
+    not_equal,
+)
 from .concat import (
     column_ref,
     concat_any,
