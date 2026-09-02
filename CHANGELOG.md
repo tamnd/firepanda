@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added
+
+- Chunk walking entry points for the elementwise kernels, in `firepanda/kernel/chunked.mojo`, and `filter`, `slice`, `cast`, `astype`, `select` and `drop` now go through them. A row's output in that family depends on that row and nothing else, so the operation is cut the same way the column is cut, the existing contiguous kernel runs once per chunk, and the pieces are kept rather than stacked. A column read from a file with sixteen row groups stays sixteen chunks through a filter and a cast and never has to exist as one contiguous array. A filter that keeps nothing leaves a column with no chunks at all, because an empty chunk in a prefix sum would let one row position name two chunks. `slice` copies the chunks it takes whole rather than cutting and rejoining them, which is what `head` and `tail` want: a hundred rows out of ten million now copies at most one chunk's worth of bytes.
+- `take` is the one in the family that does not fit, and it says so rather than pretending. Its output row `i` comes from input row `indices[i]`, which can be in any chunk, so there is no cut of it into independent per chunk calls that does not also need the pieces put back in order, and putting them back in order is another gather. It flattens a column of several chunks first, at the cost of one copy of the input, and a column of one chunk, which is every column in the tree today, skips that entirely. The selection vector work later in M2b is what fixes it properly.
+- Nothing here runs chunks in parallel with each other. The kernels underneath are already parallel inside, and the last chunk of a column is usually smaller than the rest, so a task per chunk would leave cores idle at the end of every operation.
+
 ## [0.6.30] - 2026-09-02
 
 Built against Mojo 1.0.0 (ed45d567).
