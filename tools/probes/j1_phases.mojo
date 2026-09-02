@@ -78,8 +78,8 @@ def main() raises:
             left.columns, lk, LEFT, right.columns, rk, RIGHT, JoinKind.INNER
         )
         var t1 = perf_counter_ns()
-        var got = take_any(left.columns[3], pairs.left_at)
-        var got2 = take_any(right.columns[1], pairs.right_at)
+        var got = take_any(left[3], pairs.left_at)
+        var got2 = take_any(right[1], pairs.right_at)
         var t2 = perf_counter_ns()
         pairing.append(Int(t1 - t0) // 1000000)
         two.append(Int(t2 - t1) // 1000000)
