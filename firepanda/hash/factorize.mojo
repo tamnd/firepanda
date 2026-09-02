@@ -54,6 +54,19 @@ run, `_parallel_workers` turns that into a worker count, and
 takes the same route through `_factorize_strings_parallel`, which differs only in
 that its merge compares two rows where the numeric one trusts a hash.
 
+That shape stops paying when the groups outnumber what a worker's table can hold
+in cache, because a contiguous slice of such a column contains very nearly every
+key the whole column has and so every worker builds very nearly the whole answer.
+`_crowded` is the question, and when it says yes the rows are cut by hash instead
+of by position. Partitions of a hash cannot share a key, so a partition's table
+holds only its own share of the groups and there is no merge at the end at all.
+What that costs is first-appearance order, which the slice route got out of the
+shape of its own work, and `_rank_by_first_row` buys it back by numbering the
+groups by the row that introduced them. `_factorize_hashed_partitioned` is the
+numeric one and `_factorize_strings_partitioned` is the text one, and the only
+difference between them is that a string key has to be compared, so its build is
+told which row each of its positions came from.
+
 Nulls get a group. A null is a value that rows can share, pandas with
 `dropna=False` gives it a group, and dropping it later is a filter on one ordinal
 while inventing it later would be another pass over the column. When a column has
@@ -2067,9 +2080,21 @@ def factorize_strings(
     """
     var n = len(col)
     if n >= PARALLEL_ROWS and worker_count() > 1:
-        var workers = _parallel_workers(
-            _projected_groups_strings(col, seed, n), n
-        )
+        var groups = _projected_groups_strings(col, seed, n)
+        var most = min(worker_count(), n // PARALLEL_MIN_SLICE)
+        # The same three questions the numeric route asks, in the same order and
+        # for the same reasons. A string key makes the partitioned route look
+        # better rather than worse, because what the slice route wastes is a
+        # table entry per worker per group and a string group costs a comparison
+        # to establish as well as a slot to hold.
+        if (
+            most >= 2
+            and groups >= 1
+            and _crowded(groups, most)
+            and n <= Int(UInt32.MAX)
+        ):
+            return _factorize_strings_partitioned(col, seed, most)
+        var workers = _parallel_workers(groups, n)
         if workers > 1:
             return _factorize_strings_parallel(col, seed, workers)
     return _factorize_strings_serial(col, seed)
@@ -2231,6 +2256,201 @@ def _factorize_strings_parallel(
 
     parallel_for(remap, workers)
 
+    return FactorizedStrings(codes^, firsts^, null_group)
+
+
+def _factorize_strings_partitioned(
+    col: StringArray, seed: UInt64, workers: Int
+) raises -> FactorizedStrings:
+    """Factorizes a string column by cutting the rows into disjoint partitions.
+
+    `_factorize_hashed_partitioned` for text, and the argument for it is the one
+    made there, only stronger. What the slice route wastes is a table entry per
+    worker per group, and a string group costs more than a numeric one to
+    establish, because a hash match has to be settled by comparing two rows of
+    the column. Doing that work once per worker instead of once is the thing this
+    route stops doing.
+
+    The comparison is also why the build needs the row rather than the position.
+    A partition holds rows from all over the column, so the table is told where
+    each of its positions came from and looks the column up through that. That is
+    the only difference between this and the numeric partitioned route, and it is
+    two lines of `build_strings`.
+
+    The keys are compared as bytes when they collide, so the merge this route
+    does not do is `_merge_strings` rather than `_merge_hashed`, and the saving is
+    the larger of the two.
+
+    Args:
+        col: The column.
+        seed: The per-query hash seed.
+        workers: How many slices to hash and scatter in parallel. At least two.
+
+    Returns:
+        The ordinals, a representative row per group, and which ordinal the
+        nulls got.
+    """
+    var n = len(col)
+    var has_null = col.null_count() > 0
+    var offset = 1 if has_null else 0
+
+    var bits = _merge_bits(workers)
+    var parts = 1 << bits
+    var shift = UInt64(64 - bits)
+
+    var chunks = (n + CHUNK_ROWS - 1) // CHUNK_ROWS
+    var bounds = List[Int](capacity=workers + 1)
+    for w in range(workers):
+        bounds.append(chunks * w // workers * CHUNK_ROWS)
+    bounds.append(n)
+
+    var hashes = List[Buffer](capacity=workers)
+    for w in range(workers):
+        hashes.append(Buffer(overwritten=(bounds[w + 1] - bounds[w]) * 8))
+    var counts = List[Int](length=workers * parts, fill=0)
+
+    def scan(w: Int) raises {mut hashes, mut counts, imm}:
+        var start = bounds[w]
+        var stop = bounds[w + 1]
+        hash_strings_chunk(col, start, stop - start, seed, hashes[w])
+        var hash = hashes[w].bitcast[DType.uint64]()
+        var at = w * parts
+        for k in range(stop - start):
+            if has_null and not col.is_valid(start + k):
+                continue
+            counts[at + Int(hash.unsafe_offset(k).unsafe_load() >> shift)] += 1
+
+    parallel_for(scan, workers)
+
+    # Partition major and worker minor, so each partition's rows come out in
+    # increasing row order and its groups come out in the order it first saw
+    # them.
+    var offsets = List[Int](capacity=parts + 1)
+    var running = 0
+    for p in range(parts):
+        offsets.append(running)
+        for w in range(workers):
+            var seen = counts[w * parts + p]
+            counts[w * parts + p] = running
+            running += seen
+    offsets.append(running)
+    var valid = running
+
+    var rows_at = Buffer(overwritten=valid * 4)
+    var keys = Buffer(overwritten=valid * 8)
+
+    def place(w: Int) raises {mut rows_at, mut keys, imm}:
+        var start = bounds[w]
+        var stop = bounds[w + 1]
+        var hash = hashes[w].bitcast[DType.uint64]()
+        var row = rows_at.bitcast[DType.uint32]()
+        var key = keys.bitcast[DType.uint64]()
+        var at = List[Int](capacity=parts)
+        for p in range(parts):
+            at.append(counts[w * parts + p])
+        for k in range(stop - start):
+            if has_null and not col.is_valid(start + k):
+                continue
+            var found = hash.unsafe_offset(k).unsafe_load()
+            var p = Int(found >> shift)
+            row.unsafe_offset(at[p]).unsafe_write(UInt32(start + k))
+            key.unsafe_offset(at[p]).unsafe_write(found)
+            at[p] += 1
+
+    parallel_for(place, workers)
+    # A string hash is the expensive one to produce, which is the whole reason it
+    # travelled with the row rather than being recomputed, and now that it has
+    # arrived the copy it came from is worth dropping.
+    _ = hashes^
+
+    var local = Array[DType.uint32](overwritten=valid)
+    var founds = List[List[Int]](capacity=parts)
+    for _ in range(parts):
+        founds.append(List[Int]())
+
+    def dig(p: Int) raises {mut founds, mut local, imm}:
+        var start = offsets[p]
+        var stop = offsets[p + 1]
+        var table = HashTable(0, seed)
+        var seen = List[Int]()
+        var base = start
+        while base < stop:
+            var count = min(CHUNK_ROWS, stop - base)
+            table.build_strings[True](
+                keys,
+                col,
+                False,
+                base,
+                base - start,
+                count,
+                stop - start,
+                0,
+                local,
+                seen,
+                base,
+                rows_at,
+            )
+            base += count
+        founds[p] = seen^
+
+    parallel_for(dig, parts)
+
+    var starts = List[Int](capacity=parts + 1)
+    var total = 0
+    for p in range(parts):
+        starts.append(total)
+        total += len(founds[p])
+    starts.append(total)
+
+    # The representative rows are already rows here, because the comparison made
+    # the build read them, so there is no lookup to do before the numbering. The
+    # numeric route has to translate its positions first.
+    var reps = Buffer(overwritten=total * 8)
+
+    def gather(p: Int) raises {mut reps, imm}:
+        var out = reps.bitcast[DType.int64]()
+        var at = starts[p]
+        for l in range(len(founds[p])):
+            out.unsafe_offset(at + l).unsafe_write(Int64(founds[p][l]))
+
+    parallel_for(gather, parts)
+
+    var map = Buffer(0)
+    var firsts = List[Int]()
+    _rank_by_first_row(reps, total, n, offset).into_parts(map, firsts)
+    var mapped = map.bitcast[DType.uint32]()
+
+    var codes = Array[DType.uint32](overwritten=n)
+
+    def assign(p: Int) raises {mut codes, imm}:
+        var out = codes.unsafe_ptr()
+        var row = rows_at.bitcast[DType.uint32]()
+        var code = local.unsafe_ptr()
+        var at = starts[p]
+        for e in range(offsets[p], offsets[p + 1]):
+            var to = Int(row.unsafe_offset(e).unsafe_load())
+            var entry = at + Int(code.unsafe_offset(e).unsafe_load())
+            out.unsafe_offset(to).unsafe_write(
+                mapped.unsafe_offset(entry).unsafe_load()
+            )
+
+    parallel_for(assign, parts)
+
+    # The nulls never entered a partition, so they are the rows nothing has
+    # written yet.
+    if has_null:
+
+        def blank(w: Int) raises {mut codes, imm}:
+            var out = codes.unsafe_ptr()
+            for i in range(bounds[w], bounds[w + 1]):
+                if not col.is_valid(i):
+                    out.unsafe_offset(i).unsafe_write(UInt32(0))
+
+        parallel_for(blank, workers)
+
+    var null_group = -1
+    if has_null:
+        null_group = 0
     return FactorizedStrings(codes^, firsts^, null_group)
 
 

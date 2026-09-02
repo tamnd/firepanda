@@ -41,7 +41,10 @@ from firepanda.frame.frame import DataFrame
 from firepanda.frame.groupby import AggSpec
 from firepanda.frame.series import Series
 from firepanda.hash.factorize import (
+    RANK_BLOCK,
+    FactorizedStrings,
     _factorize_strings_parallel,
+    _factorize_strings_partitioned,
     _factorize_strings_serial,
     factorize_strings,
 )
@@ -435,7 +438,41 @@ def repeating_text(n: Int, groups: Int) raises -> StringArray:
 
 
 def same_string_routes(col: StringArray, workers: Int, what: String) raises:
-    """Runs both string routes over one column and asserts they agree.
+    """Runs the slice route over one column and asserts it lands on the serial.
+
+    Args:
+        col: The column.
+        workers: How many slices to give the parallel route.
+        what: A label for the failure message.
+    """
+    var parallel = _factorize_strings_parallel(col, DEFAULT_SEED, workers)
+    lands_on_the_serial_string_route(col, parallel^, what)
+
+
+def same_partitioned_string_routes(
+    col: StringArray, workers: Int, what: String
+) raises:
+    """Runs the partitioned route over one column and asserts the same thing.
+
+    Held to the standard the slice route is held to, and it is a harder standard
+    to meet here. The slice route gets first-appearance order out of the shape of
+    its own work, because its workers hold contiguous slices in order. The
+    partitioned route cuts by hash, so no partition holds a run of the column at
+    all, and the order is put back afterwards by `_rank_by_first_row`.
+
+    Args:
+        col: The column.
+        workers: How many slices to hash and scatter in parallel.
+        what: A label for the failure message.
+    """
+    var parallel = _factorize_strings_partitioned(col, DEFAULT_SEED, workers)
+    lands_on_the_serial_string_route(col, parallel^, what)
+
+
+def lands_on_the_serial_string_route(
+    col: StringArray, var parallel: FactorizedStrings, what: String
+) raises:
+    """Asserts a factorization is the one one thread would have produced.
 
     The comparison is exact: the group count, the null group, every ordinal and
     every representative row. It scans for the first disagreement and asserts
@@ -443,12 +480,11 @@ def same_string_routes(col: StringArray, workers: Int, what: String) raises:
     a row that passes costs more than the factorization it is checking.
 
     Args:
-        col: The column.
-        workers: How many slices to give the parallel route.
+        col: The column it came from.
+        parallel: What some parallel route made of it.
         what: A label for the failure message.
     """
     var serial = _factorize_strings_serial(col, DEFAULT_SEED)
-    var parallel = _factorize_strings_parallel(col, DEFAULT_SEED, workers)
 
     assert_equal(parallel.count(), serial.count(), what)
     assert_equal(parallel.null_group, serial.null_group, what)
@@ -511,6 +547,86 @@ def test_the_parallel_string_route_agrees_when_every_row_is_null() raises:
     for _ in range(4096):
         builder.append_null()
     same_string_routes(builder^.finish(), 4, "all null")
+
+
+def test_the_partitioned_string_route_agrees_with_the_serial_one() raises:
+    same_partitioned_string_routes(
+        repeating_text(24000, 3000), 7, "partitioned"
+    )
+
+
+def test_the_partitioned_string_route_agrees_on_all_distinct_keys() raises:
+    # Long enough that the groups do not fit in one rank block, which is the
+    # case where the numbering has to merge blocks rather than sort one.
+    var rows = RANK_BLOCK + 4096
+    same_partitioned_string_routes(repeating_text(rows, rows), 8, "distinct")
+
+
+def test_the_partitioned_string_route_agrees_with_nulls_scattered() raises:
+    var builder = StringBuilder(capacity=24000)
+    for i in range(24000):
+        if i % 11 == 0:
+            builder.append_null()
+        else:
+            builder.append(String("key_", i % 400).as_bytes())
+    var col = builder^.finish()
+    same_partitioned_string_routes(col, 5, "nulls")
+
+    var found = _factorize_strings_partitioned(col, DEFAULT_SEED, 5)
+    assert_equal(found.null_group, 0)
+    assert_equal(Int(found.codes[0]), 0)
+
+
+def test_the_partitioned_string_route_agrees_when_every_row_is_null() raises:
+    var builder = StringBuilder(capacity=24000)
+    for _ in range(24000):
+        builder.append_null()
+    var col = builder^.finish()
+    same_partitioned_string_routes(col, 4, "all null")
+
+    var found = _factorize_strings_partitioned(col, DEFAULT_SEED, 4)
+    assert_equal(found.count(), 1)
+    for i in range(24000):
+        assert_equal(Int(found.codes[i]), 0)
+
+
+def test_the_partitioned_string_route_keeps_first_appearance_order() raises:
+    # Four quarters, each introducing one key nothing before it had. The hash
+    # scatters those four keys across four different partitions, so the only
+    # thing that can put them in this order is the numbering pass.
+    var quarter = 6000
+    var builder = StringBuilder(capacity=quarter * 4)
+    for q in range(4):
+        for i in range(quarter):
+            if i == 0:
+                builder.append(String("new_", q).as_bytes())
+            else:
+                builder.append(String("key_", i % 7).as_bytes())
+    var col = builder^.finish()
+
+    var found = _factorize_strings_partitioned(col, DEFAULT_SEED, 8)
+    assert_equal(found.count(), 4 + 7)
+    assert_equal(found.null_group, -1)
+    assert_equal(Int(found.codes[0]), 0)
+    for i in range(1, 8):
+        assert_equal(Int(found.codes[i]), i)
+    assert_equal(Int(found.codes[quarter]), 8)
+    assert_equal(Int(found.codes[quarter * 2]), 9)
+    assert_equal(Int(found.codes[quarter * 3]), 10)
+    assert_equal(found.firsts[8], quarter)
+    assert_equal(found.firsts[9], quarter * 2)
+    assert_equal(found.firsts[10], quarter * 3)
+
+
+def test_the_partitioned_string_route_leaves_most_partitions_empty() raises:
+    # Three keys and sixteen workers, which is sixty four partitions, so at most
+    # three of them hold anything and the rest have to come back empty without
+    # contributing an ordinal or a representative row.
+    var col = repeating_text(24000, 3)
+    same_partitioned_string_routes(col, 16, "sparse")
+
+    var found = _factorize_strings_partitioned(col, DEFAULT_SEED, 16)
+    assert_equal(found.count(), 3)
 
 
 def test_the_parallel_string_route_keeps_first_appearance_order_across_slices() raises:
