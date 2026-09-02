@@ -87,7 +87,7 @@ its route knows in a `KeyCodes` and `group_ordinals` decides from that.
 
 from std.sys.info import simd_width_of
 
-from firepanda.array.any import AnyArray
+from firepanda.array.any import AnyArray, ColumnRefs
 from firepanda.array.array import Array
 from firepanda.dtype.lists import ALL
 from firepanda.exec.morsel import parallel_morsels
@@ -142,13 +142,13 @@ struct Grouping(Movable):
         return self.codes^
 
 
-def group_ordinals(
-    columns: List[AnyArray], at: List[Int], rows: Int
-) raises -> Grouping:
+def group_ordinals[
+    o: ImmOrigin
+](columns: ColumnRefs[o], at: List[Int], rows: Int) raises -> Grouping:
     """Assigns a dense ordinal to every distinct tuple of key values.
 
     Args:
-        columns: The frame's columns.
+        columns: The frame's columns, borrowed.
         at: Which of them are keys, in the order they should be combined.
         rows: The frame's height.
 
@@ -162,7 +162,7 @@ def group_ordinals(
     if len(at) == 0:
         raise Error("group by: at least one key column is required")
 
-    var first = _factorize_any(columns[at[0]])
+    var first = _factorize_any(columns[at[0]][])
     var groups = first.groups
     var known = first.knows_rows()
     var codes = Array[DType.uint32](0)
@@ -215,7 +215,7 @@ def group_ordinals(
     var space = groups
 
     for k in range(1, len(at)):
-        var key = _factorize_any(columns[at[k]])
+        var key = _factorize_any(columns[at[k]][])
         var next_groups = key.groups
         var next = Array[DType.uint32](0)
         var spare = List[Int]()

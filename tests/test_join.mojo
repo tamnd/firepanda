@@ -253,12 +253,16 @@ def test_a_cross_join_is_the_product() raises:
 
 
 def test_a_cross_join_refuses_key_columns() raises:
+    # Bound to locals rather than called inline, because the references the
+    # call takes have to outlive the frames they point into.
+    var left = left_frame()
+    var right = right_frame()
     with assert_raises(contains="takes no key columns"):
         _ = join_indices(
-            left_frame().columns,
+            left.column_refs(),
             keys(0),
             5,
-            right_frame().columns,
+            right.column_refs(),
             keys(0),
             5,
             JoinKind.CROSS,
@@ -436,10 +440,22 @@ def test_the_pairing_matches_the_nested_twin() raises:
 
     for i in range(len(kinds)):
         var fast = join_indices(
-            left.columns, keys(0), 5, right.columns, keys(0), 5, kinds[i]
+            left.column_refs(),
+            keys(0),
+            5,
+            right.column_refs(),
+            keys(0),
+            5,
+            kinds[i],
         )
         var slow = join_nested(
-            left.columns, keys(0), 5, right.columns, keys(0), 5, kinds[i]
+            left.column_refs(),
+            keys(0),
+            5,
+            right.column_refs(),
+            keys(0),
+            5,
+            kinds[i],
         )
         assert_equal(len(fast), len(slow), String("row count for ", kinds[i]))
         for r in range(len(fast)):
@@ -456,11 +472,13 @@ def test_the_pairing_matches_the_nested_twin() raises:
 
 
 def test_an_unmatched_left_row_uses_a_negative_index() raises:
+    var left = left_frame()
+    var right = right_frame()
     var pairs = join_indices(
-        left_frame().columns,
+        left.column_refs(),
         keys(0),
         5,
-        right_frame().columns,
+        right.column_refs(),
         keys(0),
         5,
         JoinKind.LEFT,
@@ -558,7 +576,13 @@ def test_a_frame_past_the_split_pairs_what_one_loop_would() raises:
     ]
     for i in range(len(kinds)):
         var fast = join_indices(
-            left.columns, keys(0), 140_000, right.columns, keys(0), 8, kinds[i]
+            left.column_refs(),
+            keys(0),
+            140_000,
+            right.column_refs(),
+            keys(0),
+            8,
+            kinds[i],
         )
         var want = nested_pairs(left, right, kinds[i])
         assert_equal(
@@ -584,10 +608,10 @@ def test_a_null_key_past_the_split_still_matches_nothing() raises:
     var left = wide_left(140_000, 110_001)
     var right = wide_right()
     var inner = join_indices(
-        left.columns,
+        left.column_refs(),
         keys(0),
         140_000,
-        right.columns,
+        right.column_refs(),
         keys(0),
         8,
         JoinKind.INNER,
@@ -599,7 +623,13 @@ def test_a_null_key_past_the_split_still_matches_nothing() raises:
         assert_true(inner.left_at[r] != 110_001, "the null key matched")
 
     var anti = join_indices(
-        left.columns, keys(0), 140_000, right.columns, keys(0), 8, JoinKind.ANTI
+        left.column_refs(),
+        keys(0),
+        140_000,
+        right.column_refs(),
+        keys(0),
+        8,
+        JoinKind.ANTI,
     )
     var kept = False
     for r in range(len(anti)):
@@ -638,7 +668,13 @@ def test_a_unique_right_key_past_the_split_pairs_what_one_loop_would() raises:
     ]
     for i in range(len(kinds)):
         var fast = join_indices(
-            left.columns, keys(0), 140_000, right.columns, keys(0), 5, kinds[i]
+            left.column_refs(),
+            keys(0),
+            140_000,
+            right.column_refs(),
+            keys(0),
+            5,
+            kinds[i],
         )
         var want = nested_pairs(left, right, kinds[i])
         assert_equal(

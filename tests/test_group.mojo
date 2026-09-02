@@ -33,7 +33,7 @@ from std.testing import (
     assert_true,
 )
 
-from firepanda.array.any import AnyArray
+from firepanda.array.any import AnyArray, borrow_columns
 from firepanda.array.array import Array, from_list
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.groupby import AggSpec
@@ -248,7 +248,7 @@ def test_ordinals_on_one_key_are_dense() raises:
     var frame = sample_frame()
     var at = List[Int]()
     at.append(0)
-    var grouping = group_ordinals(frame.columns, at, frame.rows)
+    var grouping = group_ordinals(frame.column_refs(), at, frame.rows)
     assert_equal(grouping.groups, 4, "20, 10, 5 and the null")
     assert_equal(len(grouping.rows_at), 4)
     for i in range(frame.rows):
@@ -259,7 +259,7 @@ def test_ordinals_agree_on_equal_keys() raises:
     var frame = sample_frame()
     var at = List[Int]()
     at.append(0)
-    var grouping = group_ordinals(frame.columns, at, frame.rows)
+    var grouping = group_ordinals(frame.column_refs(), at, frame.rows)
     assert_equal(grouping.codes[0], grouping.codes[2], "both are 20")
     assert_equal(grouping.codes[1], grouping.codes[3])
     assert_equal(grouping.codes[3], grouping.codes[5])
@@ -314,7 +314,7 @@ def test_a_numeric_key_with_nulls_is_still_renumbered() raises:
     var frame = sample_frame()
     var at = List[Int]()
     at.append(0)
-    var grouping = group_ordinals(frame.columns, at, frame.rows)
+    var grouping = group_ordinals(frame.column_refs(), at, frame.rows)
     assert_equal(grouping.groups, 4)
     assert_equal(len(grouping.rows_at), 4)
     for g in range(grouping.groups):
@@ -343,7 +343,7 @@ def test_a_numeric_key_without_nulls_keeps_the_factorize_ordinals() raises:
 
     var at = List[Int]()
     at.append(0)
-    var grouping = group_ordinals(frame.columns, at, frame.rows)
+    var grouping = group_ordinals(frame.column_refs(), at, frame.rows)
     assert_equal(grouping.groups, 4)
     var want: List[Int] = [0, 1, 0, 1, 2, 1, 3]
     for i in range(len(want)):
@@ -371,7 +371,7 @@ def test_a_direct_route_key_keeps_them_too() raises:
 
     var at = List[Int]()
     at.append(0)
-    var grouping = group_ordinals(frame.columns, at, frame.rows)
+    var grouping = group_ordinals(frame.column_refs(), at, frame.rows)
     assert_equal(grouping.groups, 3)
     var want: List[Int] = [0, 1, 0, 2]
     for i in range(len(want)):
@@ -391,7 +391,7 @@ def test_a_null_key_lands_where_its_first_null_is() raises:
     var frame = sample_frame()
     var at = List[Int]()
     at.append(0)
-    var grouping = group_ordinals(frame.columns, at, frame.rows)
+    var grouping = group_ordinals(frame.column_refs(), at, frame.rows)
     assert_equal(Int(grouping.codes[4]), 2)
     assert_equal(grouping.rows_at[2], 4)
 
@@ -414,7 +414,7 @@ def test_the_packed_column_keeps_the_factorize_ordinals() raises:
     var at = List[Int]()
     at.append(0)
     at.append(1)
-    var grouping = group_ordinals(frame.columns, at, frame.rows)
+    var grouping = group_ordinals(frame.column_refs(), at, frame.rows)
     assert_equal(grouping.groups, 4)
     var want: List[Int] = [0, 1, 2, 1, 0, 3]
     for i in range(len(want)):
@@ -442,7 +442,7 @@ def test_a_null_in_the_first_of_two_keys_still_lands_in_place() raises:
     var at = List[Int]()
     at.append(0)
     at.append(1)
-    var grouping = group_ordinals(frame.columns, at, frame.rows)
+    var grouping = group_ordinals(frame.column_refs(), at, frame.rows)
     assert_equal(grouping.groups, 3)
     var want: List[Int] = [0, 1, 0, 2, 1]
     for i in range(len(want)):
@@ -463,7 +463,7 @@ def test_two_keys_do_not_merge_groups() raises:
     var at = List[Int]()
     at.append(0)
     at.append(1)
-    var grouping = group_ordinals(frame.columns, at, frame.rows)
+    var grouping = group_ordinals(frame.column_refs(), at, frame.rows)
     assert_equal(grouping.groups, 4)
 
 
@@ -477,7 +477,7 @@ def test_two_keys_collapse_when_the_pairs_repeat() raises:
     var at = List[Int]()
     at.append(0)
     at.append(1)
-    var grouping = group_ordinals(frame.columns, at, frame.rows)
+    var grouping = group_ordinals(frame.column_refs(), at, frame.rows)
     assert_equal(grouping.groups, 2)
     assert_equal(grouping.codes[0], grouping.codes[2])
     assert_equal(grouping.codes[1], grouping.codes[3])
@@ -508,7 +508,7 @@ def test_two_keys_whose_packed_space_is_wider_than_the_cache_table() raises:
     var at = List[Int]()
     at.append(0)
     at.append(1)
-    var grouping = group_ordinals(columns, at, rows)
+    var grouping = group_ordinals(borrow_columns(columns), at, rows)
     assert_equal(grouping.groups, side)
 
     # Seven and two hundred and twenty are coprime, so the second key takes all
@@ -551,7 +551,7 @@ def test_enough_keys_to_overflow_the_packed_space_still_groups() raises:
     for k in range(7):
         at.append(k)
 
-    var grouping = group_ordinals(frame.columns, at, frame.rows)
+    var grouping = group_ordinals(frame.column_refs(), at, frame.rows)
     assert_equal(grouping.groups, rows)
     var bad = -1
     for i in range(rows):
@@ -564,7 +564,7 @@ def test_enough_keys_to_overflow_the_packed_space_still_groups() raises:
 def test_no_keys_is_refused() raises:
     var frame = sample_frame()
     with assert_raises():
-        _ = group_ordinals(frame.columns, List[Int](), frame.rows)
+        _ = group_ordinals(frame.column_refs(), List[Int](), frame.rows)
 
 
 def test_group_by_produces_one_row_per_group() raises:
@@ -1332,7 +1332,7 @@ def test_three_keys_past_the_morsel_size_pack_the_same_as_one_loop() raises:
     for k in range(3):
         at.append(k)
 
-    var grouping = group_ordinals(columns, at, ROWS)
+    var grouping = group_ordinals(borrow_columns(columns), at, ROWS)
     assert_equal(grouping.groups, A * B * C)
     assert_equal(len(grouping.rows_at), A * B * C)
 

@@ -44,6 +44,23 @@ from .data import ColumnData
 from .strings import StringArray
 
 
+comptime ColumnRefs[o: ImmOrigin] = List[Pointer[AnyArray, o]]
+"""A borrowed set of columns.
+
+Anything that reads several of a frame's columns wants them borrowed. Taking a
+`List[AnyArray]` means the caller either gives up ownership or copies, and for a
+group by on six key columns of ten million rows the copy is more work than the
+group by itself. This costs a pointer a column and the caller keeps what it has.
+
+The origin is carried rather than erased, and that is not a formality. A borrow
+with an untracked origin lets the compiler destroy the frame after the argument
+is evaluated and before the callee runs, and what the callee then reads is freed
+memory that still looks like a column: `group_ordinals` on a frame built inline
+returned one group for eight rows with three distinct keys rather than crashing.
+With the origin in the type that program does not compile.
+"""
+
+
 struct AnyArray(Copyable, Movable, Sized):
     """A column whose dtype is a runtime value."""
 
@@ -321,3 +338,21 @@ struct AnyArray(Copyable, Movable, Sized):
         return self.data.values.bitcast[dt]().unsafe_origin_cast[
             origin_of(self)
         ]()
+
+
+def borrow_columns[o: ImmOrigin](ref[o] cols: List[AnyArray]) -> ColumnRefs[o]:
+    """Borrows every column in a list.
+
+    Parameters:
+        o: The origin of the list, which the references inherit.
+
+    Args:
+        cols: The columns.
+
+    Returns:
+        One reference per column, in order.
+    """
+    var out = ColumnRefs[o](capacity=len(cols))
+    for i in range(len(cols)):
+        out.append(Pointer(to=cols[i]).unsafe_origin_cast[o]())
+    return out^

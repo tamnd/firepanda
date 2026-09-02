@@ -22,7 +22,7 @@ A null key matches nothing, checked before the bits are looked at, because a nul
 holds a zero and its bits are the bits of a zero.
 """
 
-from firepanda.array.any import AnyArray
+from firepanda.array.any import AnyArray, ColumnRefs
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
 from firepanda.hash.function import key_bits
@@ -30,11 +30,13 @@ from firepanda.hash.function import key_bits
 from .pairs import JoinIndices, JoinKind
 
 
-def join_nested(
-    left_columns: List[AnyArray],
+def join_nested[
+    l: ImmOrigin, r: ImmOrigin
+](
+    left_columns: ColumnRefs[l],
     left_keys: List[Int],
     left_rows: Int,
-    right_columns: List[AnyArray],
+    right_columns: ColumnRefs[r],
     right_keys: List[Int],
     right_rows: Int,
     kind: JoinKind,
@@ -78,9 +80,9 @@ def join_nested(
             if kind != JoinKind.CROSS:
                 for k in range(len(left_keys)):
                     if not _same_key(
-                        left_columns[left_keys[k]],
+                        left_columns[left_keys[k]][],
                         i,
-                        right_columns[right_keys[k]],
+                        right_columns[right_keys[k]][],
                         r,
                     ):
                         same = False

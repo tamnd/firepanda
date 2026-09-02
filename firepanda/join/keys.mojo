@@ -65,7 +65,7 @@ the caller's null list, and giving them a code nobody reads is cheaper than
 branching to give them a better one.
 """
 
-from firepanda.array.any import AnyArray
+from firepanda.array.any import AnyArray, ColumnRefs, borrow_columns
 from firepanda.array.array import Array
 from firepanda.buffer.buffer import Buffer
 from firepanda.dtype.lists import ALL
@@ -149,11 +149,13 @@ struct KeyAlignment(Movable):
         self.has_nulls = has_nulls
 
 
-def align_keys(
-    left_columns: List[AnyArray],
+def align_keys[
+    l: ImmOrigin, r: ImmOrigin
+](
+    left_columns: ColumnRefs[l],
     left_keys: List[Int],
     left_rows: Int,
-    right_columns: List[AnyArray],
+    right_columns: ColumnRefs[r],
     right_keys: List[Int],
     right_rows: Int,
 ) raises -> KeyAlignment:
@@ -175,8 +177,8 @@ def align_keys(
             has no physical layout.
     """
     for k in range(len(left_keys)):
-        ref a = left_columns[left_keys[k]]
-        ref b = right_columns[right_keys[k]]
+        ref a = left_columns[left_keys[k]][]
+        ref b = right_columns[right_keys[k]][]
         if a.dtype() != b.dtype() or a.is_string() != b.is_string():
             raise Error(
                 "join: key columns must have the same dtype; got "
@@ -196,8 +198,8 @@ def align_keys(
     var has_nulls = len(absent) > 0
 
     if len(left_keys) == 1 and left_rows > 0 and right_rows > 0:
-        ref left = left_columns[left_keys[0]]
-        ref right = right_columns[right_keys[0]]
+        ref left = left_columns[left_keys[0]][]
+        ref right = right_columns[right_keys[0]][]
         # Before the dispatch, because uint8 is in ALL and a string column would
         # match it and align on the first byte of each view. `group_ordinals`
         # guards the same way for the same reason.
@@ -223,23 +225,28 @@ def align_keys(
     for k in range(len(left_keys)):
         merged.append(
             concat_two_any(
-                left_columns[left_keys[k]], right_columns[right_keys[k]]
+                left_columns[left_keys[k]][],
+                right_columns[right_keys[k]][],
             )
         )
     var at = List[Int](capacity=len(merged))
     for k in range(len(merged)):
         at.append(k)
 
-    var grouping = group_ordinals(merged, at, left_rows + right_rows)
+    var grouping = group_ordinals(
+        borrow_columns(merged), at, left_rows + right_rows
+    )
     var groups = grouping.groups
     return KeyAlignment(grouping^.into_codes(), groups, absent^, has_nulls)
 
 
-def _null_keys(
-    left_columns: List[AnyArray],
+def _null_keys[
+    l: ImmOrigin, r: ImmOrigin
+](
+    left_columns: ColumnRefs[l],
     left_keys: List[Int],
     left_rows: Int,
-    right_columns: List[AnyArray],
+    right_columns: ColumnRefs[r],
     right_keys: List[Int],
     right_rows: Int,
 ) raises -> List[Bool]:
@@ -267,10 +274,10 @@ def _null_keys(
     """
     var any = False
     for k in range(len(left_keys)):
-        if left_columns[left_keys[k]].null_count() > 0:
+        if left_columns[left_keys[k]][].null_count() > 0:
             any = True
             break
-        if right_columns[right_keys[k]].null_count() > 0:
+        if right_columns[right_keys[k]][].null_count() > 0:
             any = True
             break
     if not any:
@@ -280,14 +287,14 @@ def _null_keys(
     for i in range(left_rows):
         var missing = False
         for k in range(len(left_keys)):
-            if not left_columns[left_keys[k]].is_valid(i):
+            if not left_columns[left_keys[k]][].is_valid(i):
                 missing = True
                 break
         out.append(missing)
     for i in range(right_rows):
         var missing = False
         for k in range(len(right_keys)):
-            if not right_columns[right_keys[k]].is_valid(i):
+            if not right_columns[right_keys[k]][].is_valid(i):
                 missing = True
                 break
         out.append(missing)

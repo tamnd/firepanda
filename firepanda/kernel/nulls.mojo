@@ -30,7 +30,7 @@ picking one, for the same reason `concat` does.
 
 from std.sys.info import simd_width_of
 
-from firepanda.array.any import AnyArray
+from firepanda.array.any import AnyArray, ColumnRefs
 from firepanda.array.array import Array
 from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
@@ -92,7 +92,9 @@ def is_not_null_any(col: AnyArray) -> Array[DType.bool]:
     return _null_mask[wants_null=False](col.data.validity, len(col))
 
 
-def all_valid_mask(columns: List[AnyArray], rows: Int) -> Array[DType.bool]:
+def all_valid_mask[
+    o: ImmOrigin
+](columns: ColumnRefs[o], rows: Int) -> Array[DType.bool]:
     """Returns true on the rows where every column is present.
 
     The intersection is taken on the bitmaps, a word at a time, and expanded to
@@ -111,7 +113,7 @@ def all_valid_mask(columns: List[AnyArray], rows: Int) -> Array[DType.bool]:
     """
     var combined = Bitmap(rows, all_valid=True)
     for c in range(len(columns)):
-        combined.and_with(columns[c].data.validity)
+        combined.and_with(columns[c][].data.validity)
     return _null_mask[wants_null=False](combined, rows)
 
 

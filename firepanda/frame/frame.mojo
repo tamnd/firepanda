@@ -36,7 +36,7 @@ a facade over a plan, which is true from M4 onwards. At M1 the facade is the
 implementation and every method runs when it is called.
 """
 
-from firepanda.array.any import AnyArray
+from firepanda.array.any import AnyArray, ColumnRefs, borrow_columns
 from firepanda.array.array import Array
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
@@ -187,6 +187,33 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             A reference to the column.
         """
         return self.columns[i]
+
+    def column_refs[o: ImmOrigin](ref[o] self) -> ColumnRefs[o]:
+        """Borrows every column, for handing to something that reads several.
+
+        A group by, a join and the table renderer all want to look at a set of
+        the frame's columns without owning them. They used to be handed the
+        frame's own list, which worked only because the list holds the columns
+        themselves; once it holds something else, or once a caller has only a
+        borrow of the frame, that stops being possible and the alternative is a
+        copy of every column.
+
+        The origin travels with the references, so the frame cannot be destroyed
+        while they are alive. Erasing it instead compiles and is wrong: the
+        frame's last use is the argument, so it is destroyed before the callee
+        runs, and the callee reads freed memory that still looks enough like a
+        column to give an answer.
+
+        Parameters:
+            o: The frame's origin, which the references inherit.
+
+        Returns:
+            One reference per column, in schema order.
+        """
+        var refs = ColumnRefs[o](capacity=len(self.columns))
+        for i in range(len(self.columns)):
+            refs.append(Pointer(to=self.columns[i]).unsafe_origin_cast[o]())
+        return refs^
 
     def index_of(self, name: String) raises -> Int:
         """Returns the position of a named column.
@@ -737,7 +764,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                     )
             at.append(idx)
 
-        var grouping = group_ordinals(self.columns, at, self.rows)
+        var grouping = group_ordinals(self.column_refs(), at, self.rows)
 
         var fields = List[Field]()
         var columns = List[AnyArray]()
@@ -974,10 +1001,10 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             right_at.append(there)
 
         var pairs = join_indices(
-            self.columns,
+            self.column_refs(),
             left_at,
             self.rows,
-            other.columns,
+            other.column_refs(),
             right_at,
             other.rows,
             kind,
@@ -1083,16 +1110,15 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             If a named column does not exist, or if a dtype has no physical
             layout.
         """
-        var looked_at = List[AnyArray]()
+        # The mask reads validity and nothing else, so these are borrowed. They
+        # used to be deep copies, which on a frame of ten million rows meant
+        # copying every column in the frame to find out which rows to keep.
         if len(subset) == 0:
-            for c in range(self.width()):
-                looked_at.append(AnyArray(copy=self.columns[c]))
-        else:
-            for c in range(len(subset)):
-                looked_at.append(
-                    AnyArray(copy=self.columns[self.index_of(subset[c])])
-                )
-        return self.filter(all_valid_mask(looked_at, self.rows))
+            return self.filter(all_valid_mask(self.column_refs(), self.rows))
+        var picked = List[AnyArray](capacity=len(subset))
+        for c in range(len(subset)):
+            picked.append(AnyArray(copy=self.columns[self.index_of(subset[c])]))
+        return self.filter(all_valid_mask(borrow_columns(picked), self.rows))
 
     def fill_null(self, name: String, var value: Series) raises -> Self:
         """Returns the frame with one column's missing rows taken from another column.
@@ -1128,7 +1154,9 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             writer: The sink.
         """
         writer.write(
-            render_table(self.schema, self.columns, self.rows, DisplayOptions())
+            render_table(
+                self.schema, self.column_refs(), self.rows, DisplayOptions()
+            )
         )
 
     def describe(self) -> String:
