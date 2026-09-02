@@ -40,6 +40,7 @@ from .agg import (
     sum_over,
 )
 from .arith import add, divide, multiply, subtract
+from .binary import BinaryOp, binary_any, binary_type
 from .cast import cast_any, cast_strings_to, cast_to, cast_to_strings
 from .compare import equal, greater, greater_equal, less, less_equal, not_equal
 from .concat import (

@@ -22,8 +22,10 @@ from firepanda.array.chunked import ChunkedArray
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.exec import (
+    Cast,
     Chunk,
     Collect,
+    Compute,
     Filter,
     Limit,
     Materialize,
@@ -36,6 +38,7 @@ from firepanda.exec import (
     node_status,
 )
 from firepanda.frame.frame import DataFrame
+from firepanda.kernel.binary import BinaryOp
 
 
 def numbers(values: List[Int64]) raises -> AnyArray:
@@ -334,6 +337,90 @@ def test_a_sink_that_saw_nothing_still_has_the_right_shape() raises:
     assert_equal(len(out), 0, "rows")
     assert_equal(out.width(), 2, "columns")
     assert_true(out.schema[0].dtype == LogicalType.INT64, "first dtype")
+
+
+def test_a_computed_column_goes_on_the_end_with_the_name_it_was_given() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Compute(0, 0, BinaryOp.ADD, "twice")))
+    var out = pipeline^.run()
+
+    assert_equal(out.width(), 3, "the computed column was appended")
+    assert_equal(out.schema[2].name, "twice", "the name it was given")
+    assert_true(out.schema[2].dtype == LogicalType.INT64, "the result type")
+    var got = read_back(out, "twice")
+    for i in range(6):
+        assert_equal(got[i], Int64(2 * (i + 1)), "row " + String(i))
+
+
+def test_a_comparison_makes_the_mask_a_filter_then_reads() raises:
+    """This is the pair the engine exists to run: a node writes a bool column
+    and the next one filters on its position. Neither knows about the other."""
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Compute(0, 0, BinaryOp.ADD, "twice")))
+    pipeline.add(Node(Compute(2, 0, BinaryOp.GT, "big")))
+    pipeline.add(Node(Filter(3)))
+    pipeline.add(Node(Project([0])))
+    var out = pipeline^.run()
+
+    # Twice a positive number is greater than the number, so every row survives
+    # except none of them, which is the uninteresting half. The interesting half
+    # is that the mask was found at position 3 because the plan counted.
+    assert_equal(out.width(), 1, "the intermediates were projected away")
+    assert_equal(len(out), 6, "rows kept")
+
+
+def test_a_computed_column_keeps_the_chunk_boundaries() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Compute(0, 0, BinaryOp.MUL, "square")))
+    var out = pipeline^.run()
+    assert_equal(out.columns[2].num_chunks(), 3, "chunks out")
+
+
+def test_a_compute_over_a_missing_column_is_caught_when_the_plan_is_built() raises:
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="is outside a schema of 2 columns"):
+        pipeline.add(Node(Compute(0, 7, BinaryOp.ADD, "nope")))
+
+
+def test_a_compute_with_no_answer_on_those_types_is_caught_at_plan_time() raises:
+    """Column 1 is bool, and adding two bools has no answer, so the pipeline
+    refuses to be built rather than raising on the first chunk."""
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="is not defined on"):
+        pipeline.add(Node(Compute(1, 1, BinaryOp.ADD, "nope")))
+
+
+def test_a_cast_changes_a_column_in_place_and_says_so_in_the_schema() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Cast(0, LogicalType.FLOAT64)))
+    var out = pipeline^.run()
+
+    assert_equal(out.width(), 2, "the width did not change")
+    assert_equal(out.schema[0].name, "n", "the name did not change")
+    assert_true(out.schema[0].dtype == LogicalType.FLOAT64, "the new type")
+    var col = out.column("n").as_typed[DType.float64]()
+    for i in range(6):
+        assert_equal(col[i], Float64(i + 1), "row " + String(i))
+
+
+def test_a_cast_over_a_missing_column_is_caught_when_the_plan_is_built() raises:
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="is outside a schema of 2 columns"):
+        pipeline.add(Node(Cast(4, LogicalType.FLOAT64)))
+
+
+def test_none_of_the_elementwise_nodes_break_a_pipeline() raises:
+    """A breaker is where a pipeline is cut, and an operation whose output row
+    depends only on its own input row is never one."""
+    assert_false(
+        node_is_breaker(Node(Compute(0, 0, BinaryOp.ADD, "x"))), "compute"
+    )
+    assert_false(node_is_breaker(Node(Cast(0, LogicalType.FLOAT64))), "cast")
+    assert_true(
+        node_status(Node(Cast(0, LogicalType.FLOAT64)))
+        == NodeStatus.NEED_MORE_INPUT,
+        "a cast always wants more input",
+    )
 
 
 def main() raises:
