@@ -8,6 +8,21 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added
+
+- `Group`, the first pipeline breaker that is not the `Materialize` fallback. A materialised group by holds every row until the last one arrives, so the memory it needs is the size of its input. This one holds one row per group: it groups each chunk on its own, merges that chunk's answers into a running table, and throws the chunk away. A billion rows in a thousand groups is a table of a thousand rows the whole way through.
+- The merge is the same operation as the aggregation, which is why there is no accumulator kernel in this change and no second implementation of anything. Two partial answers for a group are two rows, and reducing two rows to one is what a group by does, so merging the running table with a chunk's table is a group by over their concatenation, reduced by the kind that combines partials. That kind is the kind itself except for the two counts, where merging means adding rather than counting again.
+- Eight reductions fold and the node runs those: sum, mean, minimum, maximum, count, size, first and last. A mean folds but not as a mean, so the running state is a sum and a count and the division happens once at the end, which is the only place a state column and an output column are not the same thing. The rest keep the fallback and that is the right answer rather than a gap: a median of medians is not a median and no state short of the values themselves makes it one. Asking for one on this node is an error at plan time.
+- Everything that can be wrong with a group by without looking at the data is caught when the node is added to a pipeline: a key that is not a column, a key given twice, no keys at all, a reduction that does not fold, a sum of a column of names, and two output columns that would collide. The output schema is known at the same point, so a plan can be typed before a row moves.
+- Text keys and text columns work, because the reductions that mean something over bytes are already there. A minimum over a column of names is the smallest name, and it folds like any other extreme.
+- `group/pipeline_stream` and `group/pipeline_materialize` in the benchmark suite, which ask the same query of the same chunked rows through the same driver and differ only in which operator does the grouping. On a million rows in a thousand groups on an i9-13900K the streaming node takes 5.590 ms against the fallback's 4.428 ms, so it is 1.26x slower today and the memory is what it buys.
+
+### Changed
+
+- The node deliberately does not sort and does not drop groups whose key is null, so the groups come out in first seen order with the null key among them. Both are decisions about the output rather than about the grouping, neither needs to see a row of input, and putting either inside the operator would make every query pay for it. `DataFrame.group_by` is unchanged and still defaults to both.
+- Adding a column of floats in chunks and then adding the chunk sums is a different order of additions from adding it in one pass, so a sum or a mean of floats through the node can differ from the eager path in the last bits. Every other reduction here is exact.
+- The node is not yet the faster path and the benchmark says so. A chunk at a time means a hash table per chunk instead of one, and a pipeline pushes one chunk at a time so none of it runs on more than one core, where the fallback's single group by at least has the whole column to work on. Both of those are the same fix, which is a table per worker partitioned by the key hash and merged partition wise at the end, and that is the next change on this milestone. Nothing calls the node by default until then, so no query gets slower.
+
 ## [0.6.33] - 2026-09-02
 
 Built against Mojo 1.0.0 (ed45d567).

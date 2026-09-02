@@ -50,6 +50,7 @@ from std.time import perf_counter_ns
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
+from firepanda.array.chunked import ChunkedArray
 from firepanda.array.strings import (
     StringArray,
     StringBuilder,
@@ -68,6 +69,8 @@ from firepanda.dtype.dispatch import dispatch
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.dtype.lists import NUMERIC
+from firepanda.exec import Group, GroupAgg, Materialize, Node, Pipeline
+from firepanda.exec.morsel import MORSEL_ROWS
 from firepanda.frame.display import DisplayOptions, render_column
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.groupby import AggSpec
@@ -2672,6 +2675,88 @@ def bench_group(mut harness: Harness) raises:
         keep(out.rows)
 
     harness.record("group/frame_three_aggs", "rows", rows, frame_three_aggs)
+
+    # The two rows below are the same query asked of the same rows through the
+    # same driver, and the only thing that differs is which operator does the
+    # grouping. Both pay for the copy of the input the pipeline consumes, so the
+    # gap between them is the operator and nothing else.
+    #
+    # The input is in chunks, which is what makes the comparison mean anything.
+    # A frame in one piece is the case the eager path is written for, and it is
+    # the case the streaming node has nothing to show on.
+    var key_chunks = ChunkedArray(LogicalType.INT64)
+    var value_chunks = ChunkedArray(LogicalType.INT64)
+    var begin = 0
+    while begin < rows:
+        var stop = begin + MORSEL_ROWS
+        if stop > rows:
+            stop = rows
+        key_chunks.append(df.columns[0].only().slice(begin, stop))
+        value_chunks.append(df.columns[2].only().slice(begin, stop))
+        begin = stop
+    var streamed_columns = List[ChunkedArray]()
+    streamed_columns.append(key_chunks^)
+    streamed_columns.append(value_chunks^)
+    var streamed_fields = List[Field]()
+    streamed_fields.append(Field("key", LogicalType.INT64))
+    streamed_fields.append(Field("value", LogicalType.INT64))
+    var streamed = DataFrame(Schema(streamed_fields^), streamed_columns^)
+
+    def pipeline_stream() raises {imm streamed}:
+        keep(streamed.rows)
+        var aggs = List[GroupAgg]()
+        aggs.append(GroupAgg(1, AggKind.SUM, "total"))
+        var pipeline = Pipeline(DataFrame(copy=streamed))
+        pipeline.add(Node(Group([0], aggs^)))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record("group/pipeline_stream", "rows", rows, pipeline_stream)
+
+    def pipeline_materialize() raises {imm streamed}:
+        keep(streamed.rows)
+        var fields = List[Field]()
+        fields.append(Field("key", LogicalType.INT64))
+        fields.append(Field("total", LogicalType.INT64))
+        var pipeline = Pipeline(DataFrame(copy=streamed))
+        pipeline.add(Node(Materialize(_whole_frame_group, Schema(fields^))))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record(
+        "group/pipeline_materialize", "rows", rows, pipeline_materialize
+    )
+
+
+def _whole_frame_group(var frame: DataFrame) raises -> DataFrame:
+    """The fallback's operation: stack the chunks and group the whole frame.
+
+    The stack is not overhead invented for the benchmark. `DataFrame.group_by`
+    borrows every column and a borrow is of one array, so a fallback handed a
+    chunked frame has to put it back together before it can call anything, and
+    that copy of the whole input is part of what the streaming node removes.
+
+    Args:
+        frame: The collected input. Consumed.
+
+    Returns:
+        One row per key, with the sum beside it.
+
+    Raises:
+        If the group by raises.
+    """
+    var columns = List[ChunkedArray](capacity=len(frame.schema))
+    for i in range(len(frame.schema)):
+        columns.append(
+            ChunkedArray(ChunkedArray(copy=frame.columns[i]).combine())
+        )
+    var whole = DataFrame(Schema(copy=frame.schema), columns^)
+    return whole.group_by(
+        ["key"],
+        [AggSpec("value", AggKind.SUM, "total")],
+        dropna=False,
+        sort=False,
+    )
 
 
 def bench_join(mut harness: Harness) raises:
