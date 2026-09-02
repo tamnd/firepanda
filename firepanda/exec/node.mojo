@@ -55,10 +55,16 @@ from std.utils import Variant
 
 from firepanda.array.any import AnyArray
 from firepanda.array.chunked import ChunkedArray
+from firepanda.array.value import Value
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.frame.frame import DataFrame
-from firepanda.kernel.binary import BinaryOp, binary_any, binary_type
+from firepanda.kernel.binary import (
+    BinaryOp,
+    binary_any,
+    binary_type,
+    binary_value_any,
+)
 from firepanda.kernel.cast import cast_any
 from firepanda.kernel.select import filter_any
 
@@ -324,13 +330,21 @@ struct Compute(Movable):
     position: the node that computed the mask put it at the end and the plan
     counted. A node that replaced a column would make the position of everything
     after it depend on what the expression was.
+
+    An operand is either another column or a constant, and both forms are this
+    one node rather than two, because a plan that had to pick between two node
+    types every time it walked an expression would be picking on something that
+    makes no difference to anything downstream. `x > 5` and `x > y` produce the
+    same shape of output and break a pipeline in the same way, which is not at
+    all.
     """
 
     var left: Int
-    """The position of the left operand."""
+    """The position of the left operand, or of the only one against a constant.
+    """
 
     var right: Int
-    """The position of the right operand."""
+    """The position of the right operand. Ignored when there is a constant."""
 
     var op: BinaryOp
     """The operation."""
@@ -338,8 +352,14 @@ struct Compute(Movable):
     var name: String
     """The name the appended column gets in the output schema."""
 
+    var constant: Optional[Value]
+    """The constant operand, if the other side is not a column."""
+
+    var value_on_left: Bool
+    """True for `5 - x` rather than `x - 5`. Only read with a constant."""
+
     def __init__(out self, left: Int, right: Int, op: BinaryOp, name: String):
-        """Constructs a computed column.
+        """Constructs a computed column from two columns.
 
         Args:
             left: The position of the left operand.
@@ -351,6 +371,34 @@ struct Compute(Movable):
         self.right = right
         self.op = op
         self.name = name
+        self.constant = None
+        self.value_on_left = False
+
+    def __init__(
+        out self,
+        column: Int,
+        var constant: Value,
+        op: BinaryOp,
+        name: String,
+        value_on_left: Bool = False,
+    ):
+        """Constructs a computed column from one column and a constant.
+
+        Args:
+            column: The position of the column operand.
+            constant: The constant operand. Consumed.
+            op: The operation.
+            name: The name of the appended column.
+            value_on_left: True if the constant is the left operand, which
+                changes the answer for subtraction, division and the four
+                ordered comparisons.
+        """
+        self.left = column
+        self.right = column
+        self.op = op
+        self.name = name
+        self.constant = constant^
+        self.value_on_left = value_on_left
 
     def bind(mut self, var input: Schema) raises -> Schema:
         """Reports the input schema with the computed column appended.
@@ -390,6 +438,12 @@ struct Compute(Movable):
         # Two interior references into one list cannot be alive at once, so the
         # two operand types are read one at a time.
         var a = out[self.left].dtype
+        if self.constant:
+            var k = self.constant.value().type
+            var left = a if not self.value_on_left else k
+            var right = k if not self.value_on_left else a
+            out.append(Field(self.name, binary_type(self.op, left, right)))
+            return out^
         var b = out[self.right].dtype
         out.append(Field(self.name, binary_type(self.op, a, b)))
         return out^
@@ -424,9 +478,18 @@ struct Compute(Movable):
                 + String(width)
                 + " columns"
             )
-        var made = binary_any(
-            chunk.columns[self.left], chunk.columns[self.right], self.op
-        )
+        var made: AnyArray
+        if self.constant:
+            made = binary_value_any(
+                chunk.columns[self.left],
+                self.constant.value(),
+                self.op,
+                self.value_on_left,
+            )
+        else:
+            made = binary_any(
+                chunk.columns[self.left], chunk.columns[self.right], self.op
+            )
         var rows = len(chunk)
         var columns = chunk^.into_columns()
         columns.append(made^)

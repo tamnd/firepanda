@@ -19,6 +19,7 @@ from std.testing import assert_true
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.array.chunked import ChunkedArray
+from firepanda.array.value import Value
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.exec import (
@@ -421,6 +422,53 @@ def test_none_of_the_elementwise_nodes_break_a_pipeline() raises:
         == NodeStatus.NEED_MORE_INPUT,
         "a cast always wants more input",
     )
+
+
+def test_a_constant_is_an_operand_like_a_column_is() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Compute(0, Value(Int64(10)), BinaryOp.MUL, "tens")))
+    var out = pipeline^.run()
+    assert_equal(out.width(), 3, "the computed column was appended")
+    var values = read_back(out, "tens")
+    assert_equal(values[0], Int64(10), "row 0")
+    assert_equal(values[5], Int64(60), "row 5")
+
+
+def test_the_predicate_the_engine_exists_for_runs_end_to_end() raises:
+    """`n > 3` is the shape of nearly every query anybody writes, and until the
+    constant existed it could not be spelled at all."""
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Compute(0, Value(Int64(3)), BinaryOp.GT, "big")))
+    pipeline.add(Node(Filter(2)))
+    pipeline.add(Node(Project([0])))
+    var out = pipeline^.run()
+    assert_equal(len(out), 3, "four, five and six survived")
+    var values = read_back(out, "n")
+    assert_equal(values[0], Int64(4), "the first survivor")
+
+
+def test_a_constant_on_the_left_of_a_plan_comparison_is_turned_round() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Compute(0, Value(Int64(3)), BinaryOp.GT, "small", True)))
+    pipeline.add(Node(Filter(2)))
+    pipeline.add(Node(Project([0])))
+    var out = pipeline^.run()
+    assert_equal(len(out), 2, "3 > n holds for one and two")
+
+
+def test_a_constant_computes_its_result_type_at_plan_time() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Compute(0, Value(Float64(2.0)), BinaryOp.MUL, "doubled")))
+    assert_true(
+        pipeline.schema[2].dtype == LogicalType.FLOAT64,
+        "an int64 column times a float64 constant is float64",
+    )
+
+
+def test_a_constant_with_no_answer_on_that_type_is_caught_at_plan_time() raises:
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="is not defined on"):
+        pipeline.add(Node(Compute(1, Value(True), BinaryOp.ADD, "nope")))
 
 
 def main() raises:

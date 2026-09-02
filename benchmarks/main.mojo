@@ -114,7 +114,9 @@ from firepanda.kernel import (
     argsort,
     argsort_any,
     argsort_multi,
+    arith_const,
     cast_to,
+    compare_const,
     coalesce,
     concat_any,
     concat_arrays,
@@ -141,6 +143,8 @@ from firepanda.kernel import (
     take_any,
     take_rows,
 )
+from firepanda.kernel.arith import OP_ADD
+from firepanda.kernel.compare import CMP_LT
 from firepanda.testing.rng import Rng
 from firepanda.kernel.scalar import (
     add_scalar,
@@ -941,6 +945,28 @@ def bench_kernel(mut harness: Harness) raises:
         keep(out)
 
     harness.record("kernel/less_dense", "rows", rows, compare_dense)
+
+    # Read against `kernel/add_dense` and `kernel/less_dense`. The constant
+    # forms do the same arithmetic on the same number of rows and read one
+    # column instead of two, so the gap between each pair is the second stream
+    # of memory and nothing else. A predicate against a literal is most of what
+    # a query does, which is why it is worth having its own loop rather than
+    # building a column of a repeated value and reusing the pair above.
+    var literal = Scalar[BENCH_DTYPE](7)
+
+    def add_constant() raises {imm dense, imm literal}:
+        keep(dense)
+        var out = arith_const[BENCH_DTYPE, OP_ADD](dense, literal)
+        keep(out)
+
+    harness.record("kernel/add_constant", "rows", rows, add_constant)
+
+    def compare_constant() raises {imm dense, imm literal}:
+        keep(dense)
+        var out = compare_const[BENCH_DTYPE, CMP_LT](dense, literal)
+        keep(out)
+
+    harness.record("kernel/less_constant", "rows", rows, compare_constant)
 
     def cast_widen() raises {imm dense}:
         keep(dense)

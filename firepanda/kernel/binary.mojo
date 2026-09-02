@@ -22,24 +22,50 @@ Division is not part of the arithmetic family. It always answers float64,
 whatever went in, which is what `/` does in pandas, so it promotes for the sake
 of checking that the operands are numbers and then ignores the answer.
 
-Two things are deliberately absent. There is no comparison on text, because the
-loops underneath are over fixed width registers and a string comparison is a
-byte loop against a second column's bytes, which is a kernel rather than an arm
-of a dispatch. And there is no constant on either side, so `x > 5` cannot be
-written yet, only `x > y`. Both want the same missing piece, which is a value
-type that carries its own dtype, and that piece is also what the series level
-reductions are waiting on. It is one change and it should be one change rather
-than three partial ones.
+A constant on either side goes through `binary_value_any`, which is the same
+three steps with a `Value` where the second column would be. It promotes against
+the constant's type rather than against its value, so `x + 1` on an int32 column
+stays int32 and does not widen because the literal happened to arrive as an
+int64. The column is the only thing that gets converted; the constant is read at
+the common type when the dtype is resolved, which costs nothing because it is one
+element.
+
+A null constant is answered before any loop runs. Every row of the result is
+null, whatever the operation and whatever is in the column, so the loop would be
+a pass over the column to write zeros it already holds.
+
+One thing is still deliberately absent, and that is comparison on text. The loops
+underneath are over fixed width registers and a string comparison is a byte loop,
+which is a kernel rather than an arm of a dispatch.
 """
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
+from firepanda.array.value import Value
+from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
 from firepanda.dtype.logical import LogicalType, promote
 
-from .arith import add, divide, multiply, subtract
+from .arith import (
+    OP_ADD,
+    OP_MUL,
+    OP_SUB,
+    add,
+    arith_const,
+    divide,
+    divide_const,
+    multiply,
+    subtract,
+)
 from .cast import cast_any
 from .compare import (
+    CMP_EQ,
+    CMP_GE,
+    CMP_GT,
+    CMP_LE,
+    CMP_LT,
+    CMP_NE,
+    compare_const,
     equal,
     greater,
     greater_equal,
@@ -122,6 +148,31 @@ struct BinaryOp(Equatable, ImplicitlyCopyable, Movable, Writable):
             True for the six comparisons, false for the four arithmetic ones.
         """
         return self.code >= Self.EQ.code
+
+    def mirrored(self) -> Self:
+        """Returns the operation that means the same thing with the sides swapped.
+
+        `5 < x` and `x > 5` are the same question, so a constant on the left of a
+        comparison is handled by turning it round rather than by a second set of
+        loops. The swap is exact for floats too: both readings are false when
+        either side is a NaN.
+
+        Equality and inequality are their own mirrors, and so is every
+        arithmetic operation as far as this is concerned, because subtraction and
+        division take a flag instead. Only the four ordered comparisons change.
+
+        Returns:
+            The mirrored operation.
+        """
+        if self == Self.LT:
+            return Self.GT
+        if self == Self.LE:
+            return Self.GE
+        if self == Self.GT:
+            return Self.LT
+        if self == Self.GE:
+            return Self.LE
+        return self
 
     def write_to(self, mut writer: Some[Writer]):
         """Writes the operation as the symbol it is spelled with.
@@ -282,4 +333,122 @@ def _binary_erased(
                 if op == BinaryOp.MUL:
                     return AnyArray(multiply(x, y))
                 return AnyArray(divide(x, y))
+    raise Error("binary: unsupported dtype")
+
+
+def binary_value_any(
+    a: AnyArray, b: Value, op: BinaryOp, value_on_left: Bool = False
+) raises -> AnyArray:
+    """Applies an operation elementwise between a column and one constant.
+
+    Args:
+        a: The column.
+        b: The constant.
+        op: The operation.
+        value_on_left: True for `5 - x` rather than `x - 5`.
+
+    Returns:
+        A column of `binary_type(op, a.type, b.type)` with as many rows as `a`,
+        null wherever `a` is null and null everywhere if the constant is null.
+
+    Raises:
+        If the two types have no common type, or the operation is not defined on
+        that common type.
+    """
+    var left = a.type if not value_on_left else b.type
+    var right = b.type if not value_on_left else a.type
+    var answer = binary_type(op, left, right)
+
+    if b.is_null():
+        return _all_null(answer, len(a))
+
+    var common = promote(a.type, b.type)
+    var column = AnyArray(copy=a) if a.type == common else cast_any(
+        a, common.physical
+    )
+    # The comparison with the constant on the left is turned round rather than
+    # given loops of its own. Subtraction and division cannot be turned round, so
+    # they carry the flag into the loop, where the branch on it sits outside.
+    var applied = op.mirrored() if value_on_left and op.is_comparison() else op
+    var flip = value_on_left and not op.is_comparison()
+    return _binary_const_erased(column, b, applied, common.physical, flip)
+
+
+def _all_null(type: LogicalType, rows: Int) raises -> AnyArray:
+    """Builds a column of a given type with every row missing.
+
+    The values buffer starts zeroed and a null holds a zero, so this only has to
+    install a bitmap. Running the repair pass over it would be a write of the
+    zeros that are already there.
+
+    Args:
+        type: The column's type.
+        rows: How many rows.
+
+    Returns:
+        A column of `rows` nulls.
+
+    Raises:
+        If the type has no physical layout.
+    """
+    comptime for target in ALL:
+        if type.physical == target:
+            var out = Array[target](rows)
+            out.data.validity = Bitmap(rows, all_valid=False)
+            return AnyArray(out^)
+    raise Error("binary: unsupported dtype")
+
+
+def _binary_const_erased(
+    a: AnyArray, b: Value, op: BinaryOp, dt: DType, flip: Bool
+) raises -> AnyArray:
+    """Resolves the dtype to a parameter and calls the typed constant kernel.
+
+    The column is already of `dt`. The constant is not converted before this
+    runs, because reading it at `dt` is one instruction and doing it here means
+    the conversion happens exactly where the dtype is known.
+
+    Args:
+        a: The column, of dtype `dt`.
+        b: The constant, present and convertible to `dt`.
+        op: The operation, already mirrored if the constant was on the left.
+        dt: The column's dtype.
+        flip: True if the constant is the left operand of a subtraction or a
+            division.
+
+    Returns:
+        The result column.
+
+    Raises:
+        If the dtype has no physical layout, or the operation is arithmetic on a
+        dtype the arithmetic loops do not cover.
+    """
+    comptime for target in ALL:
+        if dt == target:
+            ref x = a.as_typed_view[target]()
+            var y = b.as_scalar[target]()
+            if op == BinaryOp.EQ:
+                return AnyArray(compare_const[target, CMP_EQ](x, y))
+            if op == BinaryOp.NE:
+                return AnyArray(compare_const[target, CMP_NE](x, y))
+            if op == BinaryOp.LT:
+                return AnyArray(compare_const[target, CMP_LT](x, y))
+            if op == BinaryOp.LE:
+                return AnyArray(compare_const[target, CMP_LE](x, y))
+            if op == BinaryOp.GT:
+                return AnyArray(compare_const[target, CMP_GT](x, y))
+            if op == BinaryOp.GE:
+                return AnyArray(compare_const[target, CMP_GE](x, y))
+            comptime if target == DType.bool:
+                raise Error(
+                    "binary: " + String(op) + " is not defined on bool columns"
+                )
+            else:
+                if op == BinaryOp.ADD:
+                    return AnyArray(arith_const[target, OP_ADD](x, y))
+                if op == BinaryOp.SUB:
+                    return AnyArray(arith_const[target, OP_SUB](x, y, flip))
+                if op == BinaryOp.MUL:
+                    return AnyArray(arith_const[target, OP_MUL](x, y))
+                return AnyArray(divide_const[target](x, y, flip))
     raise Error("binary: unsupported dtype")

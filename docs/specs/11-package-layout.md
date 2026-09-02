@@ -23,6 +23,7 @@ firepanda/
   bitmap/                  validity bitmaps, the boolean ops, popcount
   array/                   Array[dt], AnyArray, ChunkedArray, as_typed, dispatch
     strview.mojo           the 16 byte view layout
+    value.mojo             Value, one element carrying its own type
   hash/                    the open addressing table, batch probe, radix partitioning
 
   kernel/                  every kernel, comptime parameterized over DType

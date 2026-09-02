@@ -37,10 +37,13 @@ from firepanda.kernel import (
     add,
     aggregate_group,
     argsort,
+    arith_const,
     cast_any,
     cast_to,
+    compare_const,
     count_of,
     divide,
+    divide_const,
     equal,
     filter_rows,
     greater,
@@ -54,11 +57,16 @@ from firepanda.kernel import (
     sum_of,
     take_rows,
 )
+from firepanda.kernel.arith import OP_ADD, OP_MUL, OP_SUB
+from firepanda.kernel.compare import CMP_GE, CMP_LT
 from firepanda.kernel.scalar import (
     add_scalar,
     argsort_scalar,
+    arith_const_scalar,
     cast_scalar,
+    compare_const_scalar,
     count_scalar,
+    divide_const_scalar,
     divide_scalar,
     equal_scalar,
     filter_scalar,
@@ -371,6 +379,70 @@ def run_one[dt: DType](mut rng: Rng, step: Int, seed: UInt64) raises:
     same_column(subtract(a, b), subtract_scalar(a, b), step, seed, "subtract")
     same_column(multiply(a, b), multiply_scalar(a, b), step, seed, "multiply")
     same_column(divide(a, b), divide_scalar(a, b), step, seed, "divide")
+
+    # The constant forms take the same path through `apply_validity` and a
+    # different path to the operand, so they are checked separately rather than
+    # assumed to follow from the two column forms agreeing. The constant is drawn
+    # from the same distribution as the columns, which keeps it away from zero
+    # and so keeps division out of the one case where a value cannot be compared
+    # against itself.
+    var k = Scalar[dt](rng.next_range(1, 60))
+    same_column(
+        arith_const[dt, OP_ADD](a, k),
+        arith_const_scalar[dt, OP_ADD](a, k),
+        step,
+        seed,
+        "arith_const add",
+    )
+    same_column(
+        arith_const[dt, OP_SUB](a, k),
+        arith_const_scalar[dt, OP_SUB](a, k),
+        step,
+        seed,
+        "arith_const subtract",
+    )
+    same_column(
+        arith_const[dt, OP_SUB](a, k, True),
+        arith_const_scalar[dt, OP_SUB](a, k, True),
+        step,
+        seed,
+        "arith_const subtract flipped",
+    )
+    same_column(
+        arith_const[dt, OP_MUL](a, k),
+        arith_const_scalar[dt, OP_MUL](a, k),
+        step,
+        seed,
+        "arith_const multiply",
+    )
+    same_column(
+        divide_const(a, k),
+        divide_const_scalar(a, k),
+        step,
+        seed,
+        "divide_const",
+    )
+    same_column(
+        divide_const(a, k, True),
+        divide_const_scalar(a, k, True),
+        step,
+        seed,
+        "divide_const flipped",
+    )
+    same_column(
+        compare_const[dt, CMP_LT](a, k),
+        compare_const_scalar[dt, CMP_LT](a, k),
+        step,
+        seed,
+        "compare_const less",
+    )
+    same_column(
+        compare_const[dt, CMP_GE](a, k),
+        compare_const_scalar[dt, CMP_GE](a, k),
+        step,
+        seed,
+        "compare_const greater or equal",
+    )
 
     same_column(equal(a, b), equal_scalar(a, b), step, seed, "equal")
     same_column(less(a, b), less_scalar(a, b), step, seed, "less")

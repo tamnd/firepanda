@@ -1,4 +1,4 @@
-"""Columns: typed, erased, chunked, and the variable width string column."""
+"""Columns: typed, erased, chunked, the string column, and one element."""
 
 from .any import AnyArray
 from .array import Array, from_list
@@ -21,3 +21,4 @@ from .strview import (
     make_long_at,
     views_equal_short,
 )
+from .value import Value

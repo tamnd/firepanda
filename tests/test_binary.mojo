@@ -18,8 +18,14 @@ from std.testing import TestSuite, assert_equal, assert_raises, assert_true
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.array.strings import strings_from_list
+from firepanda.array.value import Value
 from firepanda.dtype.logical import LogicalType
-from firepanda.kernel.binary import BinaryOp, binary_any, binary_type
+from firepanda.kernel.binary import (
+    BinaryOp,
+    binary_any,
+    binary_type,
+    binary_value_any,
+)
 
 
 def typed[dt: DType](values: List[Scalar[dt]]) raises -> AnyArray:
@@ -243,6 +249,143 @@ def test_only_the_six_comparisons_say_they_are_comparisons() raises:
     assert_true(not BinaryOp.DIV.is_comparison(), "divide")
     assert_true(BinaryOp.EQ.is_comparison(), "equal")
     assert_true(BinaryOp.GE.is_comparison(), "greater or equal")
+
+
+def test_a_constant_on_the_right_is_applied_to_every_row() raises:
+    var got = binary_value_any(
+        typed[DType.int64]([1, 2, 3]), Value(Int64(10)), BinaryOp.ADD
+    )
+    assert_true(got.type == LogicalType.INT64, "result type")
+    var values = read[DType.int64](got)
+    assert_equal(values[0], Int64(11), "row 0")
+    assert_equal(values[1], Int64(12), "row 1")
+    assert_equal(values[2], Int64(13), "row 2")
+
+
+def test_a_constant_promotes_on_its_type_not_its_value() raises:
+    """An int32 column with a constant that arrived as an int32 stays int32.
+
+    Promoting on the value would let `x + 1` widen or not depending on how the
+    literal was spelled, which would make an expression's type depend on
+    something the plan cannot see."""
+    var narrow = binary_value_any(
+        typed[DType.int32]([1, 2]), Value(Int32(1)), BinaryOp.ADD
+    )
+    assert_true(narrow.type == LogicalType.INT32, "int32 with an int32")
+    var wide = binary_value_any(
+        typed[DType.int32]([1, 2]), Value(Int64(1)), BinaryOp.ADD
+    )
+    assert_true(wide.type == LogicalType.INT64, "int32 with an int64")
+
+
+def test_a_float_constant_promotes_an_integer_column() raises:
+    var got = binary_value_any(
+        typed[DType.int32]([1, 2]), Value(Float64(0.5)), BinaryOp.MUL
+    )
+    assert_true(got.type == LogicalType.FLOAT64, "result type")
+    var values = read[DType.float64](got)
+    assert_equal(values[0], Float64(0.5), "row 0")
+    assert_equal(values[1], Float64(1.0), "row 1")
+
+
+def test_subtraction_knows_which_side_the_constant_is_on() raises:
+    """`x - 5` and `5 - x` are different answers, so the flag has to reach the
+    loop rather than being lost in the erasure."""
+    var right = binary_value_any(
+        typed[DType.int64]([1, 2]), Value(Int64(5)), BinaryOp.SUB
+    )
+    var left = binary_value_any(
+        typed[DType.int64]([1, 2]), Value(Int64(5)), BinaryOp.SUB, True
+    )
+    assert_equal(read[DType.int64](right)[0], Int64(-4), "x - 5")
+    assert_equal(read[DType.int64](left)[0], Int64(4), "5 - x")
+
+
+def test_division_knows_which_side_the_constant_is_on() raises:
+    var right = binary_value_any(
+        typed[DType.int64]([1, 2]), Value(Int64(4)), BinaryOp.DIV
+    )
+    var left = binary_value_any(
+        typed[DType.int64]([1, 2]), Value(Int64(4)), BinaryOp.DIV, True
+    )
+    assert_true(right.type == LogicalType.FLOAT64, "result type")
+    assert_equal(read[DType.float64](right)[0], Float64(0.25), "1 / 4")
+    assert_equal(read[DType.float64](left)[0], Float64(4.0), "4 / 1")
+
+
+def test_a_constant_on_the_left_of_a_comparison_is_turned_round() raises:
+    """`5 < x` is `x > 5`, and the answer has to be the first reading."""
+    var got = binary_value_any(
+        typed[DType.int64]([1, 5, 9]), Value(Int64(5)), BinaryOp.LT, True
+    )
+    assert_true(got.type == LogicalType.BOOL, "result type")
+    var values = read[DType.bool](got)
+    assert_equal(values[0], False, "5 < 1")
+    assert_equal(values[1], False, "5 < 5")
+    assert_equal(values[2], True, "5 < 9")
+
+
+def test_the_ordered_comparisons_mirror_and_the_others_do_not() raises:
+    assert_true(BinaryOp.LT.mirrored() == BinaryOp.GT, "less than")
+    assert_true(BinaryOp.LE.mirrored() == BinaryOp.GE, "less or equal")
+    assert_true(BinaryOp.GT.mirrored() == BinaryOp.LT, "greater than")
+    assert_true(BinaryOp.GE.mirrored() == BinaryOp.LE, "greater or equal")
+    assert_true(BinaryOp.EQ.mirrored() == BinaryOp.EQ, "equal")
+    assert_true(BinaryOp.NE.mirrored() == BinaryOp.NE, "not equal")
+
+
+def test_a_comparison_against_a_constant_answers_bool() raises:
+    var got = binary_value_any(
+        typed[DType.float64]([1.0, 2.5, 4.0]), Value(Float64(2.5)), BinaryOp.GE
+    )
+    var values = read[DType.bool](got)
+    assert_equal(values[0], False, "row 0")
+    assert_equal(values[1], True, "row 1")
+    assert_equal(values[2], True, "row 2")
+
+
+def test_a_null_in_the_column_stays_null_against_a_constant() raises:
+    var column = holes[DType.int64]([1, 2, 3], [True, False, True])
+    var got = binary_value_any(column, Value(Int64(10)), BinaryOp.ADD)
+    assert_true(got.is_valid(0), "row 0")
+    assert_true(not got.is_valid(1), "row 1 was null")
+    assert_true(got.is_valid(2), "row 2")
+    assert_equal(got.null_count(), 1, "nulls")
+
+
+def test_a_null_constant_makes_every_row_null() raises:
+    """The constant is missing, so every answer is missing, and the type of the
+    answer is still the type the operation would have produced."""
+    var got = binary_value_any(
+        typed[DType.int64]([1, 2, 3]),
+        Value(null=LogicalType.INT64),
+        BinaryOp.ADD,
+    )
+    assert_true(got.type == LogicalType.INT64, "result type")
+    assert_equal(len(got), 3, "rows")
+    assert_equal(got.null_count(), 3, "nulls")
+
+
+def test_a_null_constant_in_a_comparison_answers_a_bool_column_of_nulls() raises:
+    var got = binary_value_any(
+        typed[DType.int64]([1, 2]), Value(null=LogicalType.INT64), BinaryOp.LT
+    )
+    assert_true(got.type == LogicalType.BOOL, "result type")
+    assert_equal(got.null_count(), 2, "nulls")
+
+
+def test_a_text_constant_against_a_number_has_no_common_type() raises:
+    with assert_raises(contains="no common type"):
+        _ = binary_value_any(
+            typed[DType.int64]([1, 2]), Value(String("five")), BinaryOp.ADD
+        )
+
+
+def test_a_constant_cannot_be_added_to_a_bool_column() raises:
+    with assert_raises(contains="is not defined on"):
+        _ = binary_value_any(
+            typed[DType.bool]([True, False]), Value(True), BinaryOp.ADD
+        )
 
 
 def main() raises:

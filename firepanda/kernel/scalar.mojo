@@ -21,6 +21,8 @@ from firepanda.array.array import Array
 from firepanda.array.strings import StringArray
 
 from .accum import accumulator
+from .arith import OP_ADD, OP_MUL, OP_SUB
+from .compare import CMP_EQ, CMP_GE, CMP_GT, CMP_LE, CMP_LT, CMP_NE
 from .group import AggKind
 
 
@@ -274,6 +276,106 @@ def less_scalar[dt: DType](a: Array[dt], b: Array[dt]) -> Array[DType.bool]:
             out.set_valid(i, a[i] < b[i])
         else:
             out.set_null(i)
+    return out^
+
+
+def arith_const_scalar[
+    dt: DType, op: Int
+](a: Array[dt], b: Scalar[dt], flip: Bool = False) -> Array[dt]:
+    """Applies an arithmetic operation against a constant, one element at a time.
+
+    The three twins above are written out rather than shared, and this one is
+    not, because the kernel it checks takes the operation as a code too. A twin
+    that took a name would have a different shape from the thing it is checking,
+    and the fuzzer would have to know which of three functions matches which
+    code, which is exactly the sort of bookkeeping that hides a mismatch.
+
+    Args:
+        a: The column.
+        b: The constant.
+        flip: True if the constant is the left operand.
+
+    Parameters:
+        dt: The dtype.
+        op: One of `OP_ADD`, `OP_SUB` or `OP_MUL`.
+
+    Returns:
+        A column of results, null where the column is null.
+    """
+    var out = Array[dt](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+        elif op == OP_ADD:
+            out.set_valid(i, a[i] + b)
+        elif op == OP_MUL:
+            out.set_valid(i, a[i] * b)
+        elif flip:
+            out.set_valid(i, b - a[i])
+        else:
+            out.set_valid(i, a[i] - b)
+    return out^
+
+
+def divide_const_scalar[
+    dt: DType
+](a: Array[dt], b: Scalar[dt], flip: Bool = False) -> Array[DType.float64]:
+    """Divides against a constant, one element at a time.
+
+    Args:
+        a: The column.
+        b: The constant.
+        flip: True if the constant is the numerator.
+
+    Parameters:
+        dt: The input dtype.
+
+    Returns:
+        A float64 column, null where the column is null.
+    """
+    var out = Array[DType.float64](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+        elif flip:
+            out.set_valid(i, Float64(b) / Float64(a[i]))
+        else:
+            out.set_valid(i, Float64(a[i]) / Float64(b))
+    return out^
+
+
+def compare_const_scalar[
+    dt: DType, op: Int
+](a: Array[dt], b: Scalar[dt]) -> Array[DType.bool]:
+    """Compares against a constant, one element at a time.
+
+    Args:
+        a: The column.
+        b: The constant.
+
+    Parameters:
+        dt: The dtype.
+        op: One of the `CMP_` codes.
+
+    Returns:
+        A bool column, null where the column is null.
+    """
+    var out = Array[DType.bool](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+        elif op == CMP_EQ:
+            out.set_valid(i, a[i] == b)
+        elif op == CMP_NE:
+            out.set_valid(i, a[i] != b)
+        elif op == CMP_LT:
+            out.set_valid(i, a[i] < b)
+        elif op == CMP_LE:
+            out.set_valid(i, a[i] <= b)
+        elif op == CMP_GT:
+            out.set_valid(i, a[i] > b)
+        else:
+            out.set_valid(i, a[i] >= b)
     return out^
 
 
