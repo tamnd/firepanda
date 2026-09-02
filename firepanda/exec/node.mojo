@@ -33,6 +33,15 @@ branch per chunk, which at a hundred and twenty eight thousand rows a chunk is
 not a cost. A closed set is also the truth: an engine has the operators it has,
 and every one of them is in this file or in the plan.
 
+The elementwise family is `Filter`, `Project`, `Compute` and `Cast`, and what
+they have in common is that an output row depends on its own input row and
+nothing else. None of them is a breaker and none of them holds anything between
+chunks. `Compute` is the one that is more general than it looks: an expression is
+a tree and a tree is a line of these, so `(a + b) < c` is one node that appends
+`a + b` and a second that compares the appended column, with a `Project` at the
+end to drop the intermediate. That is why it appends rather than replaces, and
+why `Filter` can name its mask by position: the plan counted the appends.
+
 `Materialize` is the escape hatch and it is not temporary. It collects every
 chunk into one frame, calls a whole frame function, and gives the answer back as
 chunks. Anything with no chunked implementation goes through it, which is what
@@ -46,8 +55,11 @@ from std.utils import Variant
 
 from firepanda.array.any import AnyArray
 from firepanda.array.chunked import ChunkedArray
+from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.frame.frame import DataFrame
+from firepanda.kernel.binary import BinaryOp, binary_any, binary_type
+from firepanda.kernel.cast import cast_any
 from firepanda.kernel.select import filter_any
 
 from .chunk import Chunk
@@ -297,6 +309,220 @@ struct Limit(Movable):
         return Chunk(cut^, room)
 
 
+struct Compute(Movable):
+    """Appends a column computed from two columns of the chunk.
+
+    This is `with_column` and it is also every arithmetic and comparison
+    expression, because an expression is a tree and a tree is a line of these.
+    `(a + b) < c` is a `Compute` that appends `a + b` and a second one that
+    compares the appended column against `c`, and the intermediate is dropped by
+    a `Project` at the end rather than by anything here. Writing it that way
+    means no node has to hold an expression tree, and it means the plan can see
+    every intermediate and decide when to stop keeping it.
+
+    Appending rather than replacing is the reason `Filter` can read its mask by
+    position: the node that computed the mask put it at the end and the plan
+    counted. A node that replaced a column would make the position of everything
+    after it depend on what the expression was.
+    """
+
+    var left: Int
+    """The position of the left operand."""
+
+    var right: Int
+    """The position of the right operand."""
+
+    var op: BinaryOp
+    """The operation."""
+
+    var name: String
+    """The name the appended column gets in the output schema."""
+
+    def __init__(out self, left: Int, right: Int, op: BinaryOp, name: String):
+        """Constructs a computed column.
+
+        Args:
+            left: The position of the left operand.
+            right: The position of the right operand.
+            op: The operation.
+            name: The name of the appended column.
+        """
+        self.left = left
+        self.right = right
+        self.op = op
+        self.name = name
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Reports the input schema with the computed column appended.
+
+        The result type comes from the two operand types and the operation, so
+        it is known here, before a row moves, and a wrong operand position or an
+        operation with no answer on those types is an error at plan time rather
+        than on the first chunk.
+
+        Args:
+            input: The schema of the chunks that will arrive. Consumed.
+
+        Returns:
+            The input schema with one field on the end.
+
+        Raises:
+            If a position is outside the schema, or the operation is not defined
+            on those two types.
+        """
+        var out = input^
+        if self.left < 0 or self.left >= len(out):
+            raise Error(
+                "compute: column "
+                + String(self.left)
+                + " is outside a schema of "
+                + String(len(out))
+                + " columns"
+            )
+        if self.right < 0 or self.right >= len(out):
+            raise Error(
+                "compute: column "
+                + String(self.right)
+                + " is outside a schema of "
+                + String(len(out))
+                + " columns"
+            )
+        # Two interior references into one list cannot be alive at once, so the
+        # two operand types are read one at a time.
+        var a = out[self.left].dtype
+        var b = out[self.right].dtype
+        out.append(Field(self.name, binary_type(self.op, a, b)))
+        return out^
+
+    def process(mut self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Computes the column and puts it on the end of the chunk.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            The chunk with one more column and the same number of rows.
+
+        Raises:
+            If a position is outside the chunk, or the operation is not defined
+            on the two columns.
+        """
+        var width = chunk.width()
+        if self.left < 0 or self.left >= width:
+            raise Error(
+                "compute: column "
+                + String(self.left)
+                + " is outside a chunk of "
+                + String(width)
+                + " columns"
+            )
+        if self.right < 0 or self.right >= width:
+            raise Error(
+                "compute: column "
+                + String(self.right)
+                + " is outside a chunk of "
+                + String(width)
+                + " columns"
+            )
+        var made = binary_any(
+            chunk.columns[self.left], chunk.columns[self.right], self.op
+        )
+        var rows = len(chunk)
+        var columns = chunk^.into_columns()
+        columns.append(made^)
+        return Chunk(columns^, rows)
+
+
+struct Cast(Movable):
+    """Converts one column of the chunk to another type, in place.
+
+    In place is right here and it is wrong for `Compute`, and the difference is
+    what the operation means. A cast says this column is that type now, so the
+    position keeps its meaning and everything downstream that referred to it
+    still refers to the same thing. An expression makes a new column, and giving
+    it a position of its own is what lets the old one still be read.
+    """
+
+    var on: Int
+    """The position of the column to convert."""
+
+    var to: LogicalType
+    """The type to convert it to."""
+
+    var strict: Bool
+    """Whether text that is not a number raises rather than becoming a null."""
+
+    def __init__(out self, on: Int, to: LogicalType, strict: Bool = True):
+        """Constructs a cast.
+
+        Args:
+            on: The position of the column.
+            to: The target type.
+            strict: Whether a text value that is not a number raises rather than
+                becoming a null. Ignored for a column that is not text.
+        """
+        self.on = on
+        self.to = to
+        self.strict = strict
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Reports the input schema with one field's type changed.
+
+        Args:
+            input: The schema of the chunks that will arrive. Consumed.
+
+        Returns:
+            The same schema with the cast column's type replaced.
+
+        Raises:
+            If the position is outside the schema.
+        """
+        var out = input^
+        if self.on < 0 or self.on >= len(out):
+            raise Error(
+                "cast: column "
+                + String(self.on)
+                + " is outside a schema of "
+                + String(len(out))
+                + " columns"
+            )
+        var fields = List[Field](capacity=len(out))
+        for i in range(len(out)):
+            if i == self.on:
+                var name = out[i].name
+                var nullable = out[i].nullable
+                fields.append(Field(name, self.to, nullable))
+            else:
+                fields.append(out[i].copy())
+        return Schema(fields^)
+
+    def process(mut self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Converts the column and hands the chunk back.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            The chunk with one column converted.
+
+        Raises:
+            If the position is outside the chunk, or the conversion fails.
+        """
+        var width = chunk.width()
+        if self.on < 0 or self.on >= width:
+            raise Error(
+                "cast: column "
+                + String(self.on)
+                + " is outside a chunk of "
+                + String(width)
+                + " columns"
+            )
+        var rows = len(chunk)
+        var columns = chunk^.into_columns()
+        columns[self.on] = cast_any(columns[self.on], self.to, self.strict)
+        return Chunk(columns^, rows)
+
+
 struct Materialize(Movable):
     """Collects every chunk, calls a whole frame function, emits chunks again.
 
@@ -524,7 +750,7 @@ def _stripe(var frame: DataFrame) raises -> List[AnyArray]:
     return out^
 
 
-comptime Node = Variant[Filter, Project, Limit, Materialize]
+comptime Node = Variant[Filter, Project, Compute, Cast, Limit, Materialize]
 """One operator, as a value the pipeline can hold in a list.
 
 Mojo 1.0 can express a trait object but not a list of them, so this is a closed
@@ -552,6 +778,10 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
     """
     if node.isa[Materialize]():
         return node[Materialize].bind(input^)
+    if node.isa[Compute]():
+        return node[Compute].bind(input^)
+    if node.isa[Cast]():
+        return node[Cast].bind(input^)
     if node.isa[Project]():
         ref keep = node[Project].keep
         var fields = List[Field](capacity=len(keep))
@@ -614,6 +844,10 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Filter].process(chunk^)
     if node.isa[Project]():
         return node[Project].process(chunk^)
+    if node.isa[Compute]():
+        return node[Compute].process(chunk^)
+    if node.isa[Cast]():
+        return node[Cast].process(chunk^)
     if node.isa[Limit]():
         return node[Limit].process(chunk^)
     return node[Materialize].process(chunk^)

@@ -33,7 +33,8 @@ and nothing is read until every task has been waited on.
 
 from .chunk import Chunk
 from .morsel import MORSEL_ROWS, Morsel, MorselQueue, parallel_morsels
-from .node import Filter, Limit, Materialize, Node, NodeStatus, Project
+from .node import Cast, Compute, Filter, Limit, Materialize, Node, NodeStatus
+from .node import Project
 from .node import node_bind, node_finish, node_is_breaker, node_process
 from .node import node_status
 from .parallel import parallel_for, worker_count
