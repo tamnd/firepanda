@@ -62,10 +62,9 @@ def _numbers(cardinality: Int, seed_at: Int) raises -> AnyArray:
     return AnyArray(col^)
 
 
-def _key_codes(
-    col: AnyArray, mut groups: Int
-) raises -> Array[DType.uint32]:
-    """One key's ordinals and group count, the way `_factorize_any` gets them."""
+def _key_codes(col: AnyArray, mut groups: Int) raises -> Array[DType.uint32]:
+    """One key's ordinals and group count, the way `_factorize_any` gets them.
+    """
     if col.is_string():
         var text = factorize_strings(col.strings())
         groups = text.count()
