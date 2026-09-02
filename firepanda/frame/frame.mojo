@@ -1,9 +1,19 @@
 """The eager `DataFrame`.
 
-A frame is a `Schema` and a list of `AnyArray`, and the invariant that makes it a
-frame rather than a bag of columns is that every column has the same length and
-every name is distinct. Both are checked once, at construction, and then relied on
-everywhere else.
+A frame is a `Schema` and a list of `ChunkedArray`, and the invariant that makes
+it a frame rather than a bag of columns is that every column has the same length
+and every name is distinct. Both are checked once, at construction, and then
+relied on everywhere else.
+
+The columns are chunked because the things that produce them are. A Parquet file
+gives one array per row group and a concat gives one per input, and flattening
+those into contiguous memory costs a copy of the whole column that most of a
+workload does not need. Nothing in this file produces a column of more than one
+chunk yet, so in practice every column here has exactly one, and every method
+reaches through `only()`, which borrows that chunk and copies nothing. A column
+that does have more than one raises there rather than being silently read as its
+first chunk, and teaching the operators to loop over chunks is what removes those
+calls one at a time.
 
 The schema is not a summary of the columns, it is a separate authority. A column
 knows its physical dtype and nothing else; the schema knows the name, the logical
@@ -38,6 +48,7 @@ implementation and every method runs when it is called.
 
 from firepanda.array.any import AnyArray, ColumnRefs, borrow_columns
 from firepanda.array.array import Array
+from firepanda.array.chunked import ChunkedArray, wrap_columns
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.frame.display import DisplayOptions, render_table
@@ -64,8 +75,17 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
     var schema: Schema
     """The column names, logical types and nullability."""
 
-    var columns: List[AnyArray]
-    """The data, one entry per schema field and in the same order."""
+    var columns: List[ChunkedArray]
+    """The data, one entry per schema field and in the same order.
+
+    Chunked rather than contiguous, because a Parquet file gives one array per
+    row group and a concat gives one per input, and flattening those costs a copy
+    of the whole column for nothing. Almost every column here has exactly one
+    chunk, and every operator below the frame is written against `AnyArray`, so
+    `only()` is how they meet: it borrows the single chunk and copies nothing.
+    An operator that has not been taught about chunks calls it and raises on a
+    column that has more than one, which is the honest failure rather than a
+    silent partial answer."""
 
     var rows: Int
     """The row count. Every column has this length."""
@@ -73,7 +93,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
     def __init__(out self):
         """Constructs a frame with no columns and no rows."""
         self.schema = Schema()
-        self.columns = List[AnyArray]()
+        self.columns = List[ChunkedArray]()
         self.rows = 0
 
     def __init__(out self, var schema: Schema, var columns: List[AnyArray]):
@@ -90,7 +110,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         """
         self.rows = 0 if len(columns) == 0 else len(columns[0])
         self.schema = schema^
-        self.columns = columns^
+        self.columns = wrap_columns(columns^)
 
     def __init__(out self, *, copy: Self):
         """Deep-copies a frame.
@@ -99,9 +119,9 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             copy: The frame to copy.
         """
         self.schema = Schema(copy=copy.schema)
-        self.columns = List[AnyArray](capacity=len(copy.columns))
+        self.columns = List[ChunkedArray](capacity=len(copy.columns))
         for i in range(len(copy.columns)):
-            self.columns.append(AnyArray(copy=copy.columns[i]))
+            self.columns.append(ChunkedArray(copy=copy.columns[i]))
         self.rows = copy.rows
 
     @staticmethod
@@ -177,7 +197,9 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         """
         return (self.rows, len(self.columns))
 
-    def __getitem__(ref self, i: Int) -> ref[self.columns[i]] AnyArray:
+    def __getitem__(
+        ref self, i: Int
+    ) raises -> ref[self.columns[i].chunks[0]] AnyArray:
         """Borrows a column by position, without copying it.
 
         Args:
@@ -185,10 +207,13 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
 
         Returns:
             A reference to the column.
-        """
-        return self.columns[i]
 
-    def column_refs[o: ImmOrigin](ref[o] self) -> ColumnRefs[o]:
+        Raises:
+            If the column has more than one chunk.
+        """
+        return self.columns[i].only()
+
+    def column_refs[o: ImmOrigin](ref[o] self) raises -> ColumnRefs[o]:
         """Borrows every column, for handing to something that reads several.
 
         A group by, a join and the table renderer all want to look at a set of
@@ -209,10 +234,15 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
 
         Returns:
             One reference per column, in schema order.
+
+        Raises:
+            If any column has more than one chunk.
         """
         var refs = ColumnRefs[o](capacity=len(self.columns))
         for i in range(len(self.columns)):
-            refs.append(Pointer(to=self.columns[i]).unsafe_origin_cast[o]())
+            refs.append(
+                Pointer(to=self.columns[i].only()).unsafe_origin_cast[o]()
+            )
         return refs^
 
     def index_of(self, name: String) raises -> Int:
@@ -267,7 +297,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             If no column has that name.
         """
         var at = self.schema.index_of(name)
-        return Series(name, AnyArray(copy=self.columns[at]))
+        return Series(name, AnyArray(copy=self.columns[at].only()))
 
     def select(self, names: List[String]) raises -> Self:
         """Returns a frame with only the named columns, in the order given.
@@ -293,7 +323,9 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                         "select names a column twice: '" + names[i] + "'"
                     )
             columns.append(
-                AnyArray(copy=self.columns[self.schema.index_of(names[i])])
+                AnyArray(
+                    copy=self.columns[self.schema.index_of(names[i])].only()
+                )
             )
         var out = Self(self.schema.select(names), columns^)
         out.rows = self.rows
@@ -380,11 +412,11 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         var at = out.schema.index_of(column.name) if replacing else 0
         if replacing:
             out.schema.fields[at] = field^
-            out.columns[at] = column^.into_values()
+            out.columns[at] = ChunkedArray(column^.into_values())
             return out^
 
         out.schema.append(field^)
-        out.columns.append(column^.into_values())
+        out.columns.append(ChunkedArray(column^.into_values()))
         out.rows = len(out.columns[0])
         return out^
 
@@ -405,7 +437,10 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             column is text and strict and some value is not a number.
         """
         return self._cast(
-            name, cast_any(self.columns[self.schema.index_of(name)], to, strict)
+            name,
+            cast_any(
+                self.columns[self.schema.index_of(name)].only(), to, strict
+            ),
         )
 
     def cast(
@@ -432,7 +467,10 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             number.
         """
         return self._cast(
-            name, cast_any(self.columns[self.schema.index_of(name)], to, strict)
+            name,
+            cast_any(
+                self.columns[self.schema.index_of(name)].only(), to, strict
+            ),
         )
 
     def _cast(self, name: String, var converted: AnyArray) raises -> Self:
@@ -440,7 +478,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         var at = self.schema.index_of(name)
         var out = Self(copy=self)
         out.schema.fields[at] = Field(name, converted.type)
-        out.columns[at] = converted^
+        out.columns[at] = ChunkedArray(converted^)
         return out^
 
     def filter(self, mask: Array[DType.bool]) raises -> Self:
@@ -467,7 +505,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             )
         var columns = List[AnyArray](capacity=len(self.columns))
         for i in range(len(self.columns)):
-            columns.append(filter_any(self.columns[i], mask))
+            columns.append(filter_any(self.columns[i].only(), mask))
         return Self(Schema(copy=self.schema), columns^)
 
     def take(self, indices: List[Int]) raises -> Self:
@@ -485,7 +523,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         """
         var columns = List[AnyArray](capacity=len(self.columns))
         for i in range(len(self.columns)):
-            columns.append(take_any(self.columns[i], indices))
+            columns.append(take_any(self.columns[i].only(), indices))
         var out = Self(Schema(copy=self.schema), columns^)
         out.rows = len(indices)
         return out^
@@ -506,7 +544,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         _check_range(start, end, self.rows, "frame")
         var columns = List[AnyArray](capacity=len(self.columns))
         for i in range(len(self.columns)):
-            columns.append(self.columns[i].slice(start, end))
+            columns.append(self.columns[i].only().slice(start, end))
         var out = Self(Schema(copy=self.schema), columns^)
         out.rows = end - start
         return out^
@@ -580,7 +618,10 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         var order = identity_permutation(self.rows)
         for i in range(len(at) - 1, -1, -1):
             argsort_any_into(
-                self.columns[at[i]], order, descending[i], nulls_first[i]
+                self.columns[at[i]].only(),
+                order,
+                descending[i],
+                nulls_first[i],
             )
         return order^
 
@@ -683,15 +724,15 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                 # second implementation of the pairwise loop.
                 var codes = Array[DType.uint32](self.rows)
                 produced = aggregate_group_pair_any(
-                    self.columns[self.schema.index_of(specs[s].column)],
-                    self.columns[self.schema.index_of(specs[s].other)],
+                    self.columns[self.schema.index_of(specs[s].column)].only(),
+                    self.columns[self.schema.index_of(specs[s].other)].only(),
                     specs[s].kind,
                     codes^,
                     1,
                 )
             else:
                 produced = reduce_any(
-                    self.columns[self.schema.index_of(specs[s].column)],
+                    self.columns[self.schema.index_of(specs[s].column)].only(),
                     specs[s].kind,
                 )
             fields.append(Field(name, produced.type))
@@ -770,7 +811,9 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         var columns = List[AnyArray]()
         for k in range(len(at)):
             fields.append(Field(by[k], self.columns[at[k]].type))
-            columns.append(take_any(self.columns[at[k]], grouping.rows_at))
+            columns.append(
+                take_any(self.columns[at[k]].only(), grouping.rows_at)
+            )
 
         for s in range(len(specs)):
             var name = specs[s].output_name()
@@ -783,15 +826,15 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             var produced: AnyArray
             if specs[s].kind.reads_two_columns():
                 produced = aggregate_group_pair_any(
-                    self.columns[self.schema.index_of(specs[s].column)],
-                    self.columns[self.schema.index_of(specs[s].other)],
+                    self.columns[self.schema.index_of(specs[s].column)].only(),
+                    self.columns[self.schema.index_of(specs[s].other)].only(),
                     specs[s].kind,
                     grouping.codes,
                     grouping.groups,
                 )
             else:
                 produced = aggregate_group_any(
-                    self.columns[self.schema.index_of(specs[s].column)],
+                    self.columns[self.schema.index_of(specs[s].column)].only(),
                     specs[s].kind,
                     grouping.codes,
                     grouping.groups,
@@ -826,8 +869,10 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                 for g in range(grouping.groups):
                     var ok = True
                     for k in range(len(risky)):
-                        if not self.columns[risky[k]].is_valid(
-                            grouping.rows_at[g]
+                        if (
+                            not self.columns[risky[k]]
+                            .only()
+                            .is_valid(grouping.rows_at[g])
                         ):
                             ok = False
                             break
@@ -1028,14 +1073,14 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             if shared >= 0 and coalescing:
                 columns.append(
                     take_pair(
-                        self.columns[i],
-                        other.columns[right_at[shared]],
+                        self.columns[i].only(),
+                        other.columns[right_at[shared]].only(),
                         pairs.left_at,
                         pairs.right_at,
                     )
                 )
             else:
-                columns.append(take_any(self.columns[i], pairs.left_at))
+                columns.append(take_any(self.columns[i].only(), pairs.left_at))
             fields.append(Field(self.schema[i].name, self.schema[i].dtype))
 
         if kind.keeps_right_columns():
@@ -1059,7 +1104,9 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                             + name
                             + "'; pass a different suffix"
                         )
-                columns.append(take_any(other.columns[j], pairs.right_at))
+                columns.append(
+                    take_any(other.columns[j].only(), pairs.right_at)
+                )
                 fields.append(Field(name, other.schema[j].dtype))
 
         var out = Self(Schema(fields^), columns^)
@@ -1117,7 +1164,9 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             return self.filter(all_valid_mask(self.column_refs(), self.rows))
         var picked = List[AnyArray](capacity=len(subset))
         for c in range(len(subset)):
-            picked.append(AnyArray(copy=self.columns[self.index_of(subset[c])]))
+            picked.append(
+                AnyArray(copy=self.columns[self.index_of(subset[c])].only())
+            )
         return self.filter(all_valid_mask(borrow_columns(picked), self.rows))
 
     def fill_null(self, name: String, var value: Series) raises -> Self:
@@ -1140,7 +1189,9 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             physical layout.
         """
         var at = self.index_of(name)
-        var filled = Series(name, coalesce_any(self.columns[at], value.values))
+        var filled = Series(
+            name, coalesce_any(self.columns[at].only(), value.values)
+        )
         return self.with_column(filled^)
 
     def write_to(self, mut writer: Some[Writer]):
@@ -1153,11 +1204,19 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         Args:
             writer: The sink.
         """
-        writer.write(
-            render_table(
-                self.schema, self.column_refs(), self.rows, DisplayOptions()
+        # `Writable.write_to` cannot raise and borrowing the columns can, on a
+        # column of more than one chunk. Printing is the one place where failing
+        # is worse than saying so, because it is normally the thing you reached
+        # for to find out what went wrong, so the reason goes where the table
+        # would have been.
+        try:
+            writer.write(
+                render_table(
+                    self.schema, self.column_refs(), self.rows, DisplayOptions()
+                )
             )
-        )
+        except e:
+            writer.write("DataFrame cannot be shown: ", String(e))
 
     def describe(self) -> String:
         """Returns the shape and the schema without rendering any values.

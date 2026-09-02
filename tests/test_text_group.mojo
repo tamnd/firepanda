@@ -330,7 +330,7 @@ def test_a_text_key_with_nulls_is_renumbered_after_all() raises:
     for i in range(len(expected)):
         assert_equal(Int(grouping.codes[i]), expected[i])
     assert_equal(grouping.rows_at[2], 3)
-    assert_false(frame.columns[0].is_valid(grouping.rows_at[2]))
+    assert_false(frame[0].is_valid(grouping.rows_at[2]))
 
 
 def test_a_text_key_combines_with_a_number_key() raises:

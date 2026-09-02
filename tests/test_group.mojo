@@ -448,7 +448,7 @@ def test_a_null_in_the_first_of_two_keys_still_lands_in_place() raises:
     for i in range(len(want)):
         assert_equal(Int(grouping.codes[i]), want[i])
     assert_equal(grouping.rows_at[2], 3)
-    assert_false(frame.columns[0].is_valid(grouping.rows_at[2]))
+    assert_false(frame[0].is_valid(grouping.rows_at[2]))
 
 
 def test_two_keys_do_not_merge_groups() raises:

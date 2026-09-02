@@ -21,10 +21,17 @@ one of each rather than on int64 alone, which is where a `comptime for` that
 matched the wrong candidate would show up.
 """
 
-from std.testing import TestSuite, assert_equal, assert_false, assert_true
+from std.testing import (
+    TestSuite,
+    assert_equal,
+    assert_false,
+    assert_raises,
+    assert_true,
+)
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array, from_list
+from firepanda.array.chunked import ChunkedArray
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.lists import ALL
 from firepanda.frame.frame import DataFrame
@@ -146,6 +153,47 @@ def test_a_column_can_be_borrowed_by_position() raises:
     assert_true(df[0].dtype() == DType.int64, "first column dtype")
     assert_equal(len(df[1]), 6, "second column length")
     assert_equal(df[1].null_count(), 1, "second column nulls")
+
+
+def test_a_frame_takes_a_column_rather_than_copying_it() raises:
+    """The chunked column in front of the data must not add a copy.
+
+    A frame holds `ChunkedArray` and every constructor is handed `AnyArray`, so
+    there is a wrap on the way in, and if that wrap copied then every operation
+    would pay a full column copy for nothing. The address of the values buffer
+    before and after is the check.
+    """
+    var values = Array[DType.int64](3)
+    for i in range(3):
+        values[i] = Int64(i)
+    var series = List[Series]()
+    series.append(Series("a", AnyArray(values^)))
+    var address = Int(series[0].values.data.values.unsafe_ptr())
+
+    var df = DataFrame.from_series(series^)
+    assert_equal(df.columns[0].num_chunks(), 1, "one chunk per column")
+    assert_equal(
+        Int(df[0].data.values.unsafe_ptr()), address, "the buffer moved in"
+    )
+
+
+def test_a_column_of_several_chunks_refuses_to_be_read_as_one() raises:
+    """Nothing here builds a chunked column yet, so this builds one by hand.
+
+    The point is what happens when something does. An operator that has not been
+    taught about chunks has to fail rather than quietly answer from the first
+    chunk, because a wrong answer over the first row group of a Parquet file
+    looks exactly like a right one.
+    """
+    var df = sample_frame()
+    df.columns[0].append(AnyArray(Array[DType.int64](2)))
+    assert_equal(df.columns[0].num_chunks(), 2, "two chunks now")
+    assert_equal(len(df.columns[0]), 8, "and eight rows between them")
+
+    with assert_raises(contains="not one"):
+        _ = len(df[0])
+    with assert_raises(contains="not one"):
+        _ = df.head(2)
 
 
 def test_a_column_can_be_copied_by_name() raises:

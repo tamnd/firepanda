@@ -34,7 +34,7 @@ from .any import AnyArray
 from .data import ColumnData
 
 
-struct ChunkedArray(Movable, Sized):
+struct ChunkedArray(Copyable, Movable, Sized):
     """A logical column made of one or more physical arrays."""
 
     var chunks: List[AnyArray]
@@ -74,6 +74,19 @@ struct ChunkedArray(Movable, Sized):
         self.starts.append(len(first))
         self.chunks = List[AnyArray]()
         self.chunks.append(first^)
+
+    def __init__(out self, *, copy: Self):
+        """Deep-copies a column, chunk by chunk.
+
+        Args:
+            copy: The column to copy.
+        """
+        self.chunks = List[AnyArray](capacity=len(copy.chunks))
+        for i in range(len(copy.chunks)):
+            self.chunks.append(AnyArray(copy=copy.chunks[i]))
+        self.starts = List[Int](copy.starts)
+        self.type = copy.type
+        self.nulls = copy.nulls
 
     def __len__(self) -> Int:
         """Returns the total number of values across all chunks.
@@ -214,3 +227,31 @@ struct ChunkedArray(Movable, Sized):
             else:
                 high = mid - 1
         return (low, index - self.starts[low])
+
+
+def wrap_columns(var columns: List[AnyArray]) -> List[ChunkedArray]:
+    """Wraps each array as a column of one chunk, moving rather than copying.
+
+    Every operator in the tree still produces a `List[AnyArray]`, and the frame
+    holds `ChunkedArray`, so this is the seam between the two. It has to move: a
+    copy here would put a full copy of every column back into the cost of every
+    operation, which is the thing `only` exists to avoid.
+
+    The pop and reverse is the same trick `DataFrame.from_series` documents. A
+    loop over `columns^` binds a value with no origin and cannot give up an
+    element, so the only way to take the arrays without copying them is to pop
+    from the back, and the second loop puts them back in order.
+
+    Args:
+        columns: The arrays. Consumed.
+
+    Returns:
+        One single chunk column per array, in the same order.
+    """
+    var backwards = List[ChunkedArray](capacity=len(columns))
+    while len(columns) > 0:
+        backwards.append(ChunkedArray(columns.pop()))
+    var out = List[ChunkedArray](capacity=len(backwards))
+    while len(backwards) > 0:
+        out.append(backwards.pop())
+    return out^
