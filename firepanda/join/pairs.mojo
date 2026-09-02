@@ -84,7 +84,7 @@ treats a negative index as a null, which is exactly what an outer join needs to
 put in the columns of the side that had nothing.
 """
 
-from firepanda.array.any import AnyArray
+from firepanda.array.any import AnyArray, ColumnRefs
 from firepanda.array.array import Array
 from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
@@ -257,11 +257,13 @@ struct JoinIndices(Movable, Sized):
         return Self(right^, left^)
 
 
-def join_indices(
-    left_columns: List[AnyArray],
+def join_indices[
+    l: ImmOrigin, r: ImmOrigin
+](
+    left_columns: ColumnRefs[l],
     left_keys: List[Int],
     left_rows: Int,
-    right_columns: List[AnyArray],
+    right_columns: ColumnRefs[r],
     right_keys: List[Int],
     right_rows: Int,
     kind: JoinKind,

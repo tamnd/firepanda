@@ -27,7 +27,7 @@ is unlikely to reach on purpose and that would be hard to read if it did.
 
 from std.testing import TestSuite, assert_equal, assert_not_equal, assert_true
 
-from firepanda.array.any import AnyArray
+from firepanda.array.any import AnyArray, borrow_columns
 from firepanda.array.array import Array, from_list
 from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.join.keys import KeyAlignment, align_keys
@@ -81,6 +81,44 @@ def paired(var first: AnyArray, var second: AnyArray) -> List[AnyArray]:
     return out^
 
 
+def align_owned(
+    var left_columns: List[AnyArray],
+    left_keys: List[Int],
+    left_rows: Int,
+    var right_columns: List[AnyArray],
+    right_keys: List[Int],
+    right_rows: Int,
+) raises -> KeyAlignment:
+    """Calls `align_keys` with columns these tests own.
+
+    `align_keys` borrows its columns, so something has to hold them for the
+    length of the call. Taking them here is that something, and it keeps the
+    tests reading the way they did.
+
+    Args:
+        left_columns: The left frame's columns. Consumed.
+        left_keys: Which of them are keys.
+        left_rows: The left height.
+        right_columns: The right frame's columns. Consumed.
+        right_keys: Which of them are keys.
+        right_rows: The right height.
+
+    Returns:
+        What `align_keys` returns.
+
+    Raises:
+        Whatever `align_keys` raises.
+    """
+    return align_keys(
+        borrow_columns(left_columns),
+        left_keys,
+        left_rows,
+        borrow_columns(right_columns),
+        right_keys,
+        right_rows,
+    )
+
+
 def matched(
     got: KeyAlignment, left_rows: Int, right_rows: Int, row: Int
 ) raises -> Bool:
@@ -115,7 +153,7 @@ def align_ints(
     """Aligns two single column int64 frames."""
     var rows = len(left)
     var other = len(right)
-    return align_keys(
+    return align_owned(
         columns(AnyArray(left^)),
         one(0),
         rows,
@@ -224,7 +262,7 @@ def test_two_key_columns_align_on_the_tuple() raises:
     var left_second = AnyArray(ints([9, 8, 9]))
     var right_first = AnyArray(ints([1, 2]))
     var right_second = AnyArray(ints([8, 9]))
-    var got = align_keys(
+    var got = align_owned(
         paired(left_first^, left_second^),
         two(0, 1),
         3,
@@ -244,7 +282,7 @@ def test_two_key_columns_align_on_the_tuple() raises:
 def test_a_string_key_aligns() raises:
     var left = AnyArray(text(["red", "green", "red"]))
     var right = AnyArray(text(["green", "blue"]))
-    var got = align_keys(columns(left^), one(0), 3, columns(right^), one(0), 2)
+    var got = align_owned(columns(left^), one(0), 3, columns(right^), one(0), 2)
     assert_equal(got.codes[0], got.codes[2], "both reds")
     assert_equal(got.codes[1], got.codes[3], "green across the sides")
     assert_not_equal(got.codes[0], got.codes[1], "red against green")
@@ -253,7 +291,7 @@ def test_a_string_key_aligns() raises:
 def test_a_float_key_aligns() raises:
     var left = AnyArray(floats([1.5, 2.5]))
     var right = AnyArray(floats([2.5, 3.5]))
-    var got = align_keys(columns(left^), one(0), 2, columns(right^), one(0), 2)
+    var got = align_owned(columns(left^), one(0), 2, columns(right^), one(0), 2)
     assert_equal(got.codes[1], got.codes[2], "the shared key")
     assert_equal(Int(got.codes[0]), got.groups - 1, "the left only key")
 
@@ -262,14 +300,14 @@ def test_every_nan_is_the_same_key() raises:
     var nan = Float64("nan")
     var left = AnyArray(floats([nan, 1.0]))
     var right = AnyArray(floats([nan]))
-    var got = align_keys(columns(left^), one(0), 2, columns(right^), one(0), 1)
+    var got = align_owned(columns(left^), one(0), 2, columns(right^), one(0), 1)
     assert_equal(got.codes[0], got.codes[2], "nan against nan")
 
 
 def test_negative_zero_is_the_same_key_as_zero() raises:
     var left = AnyArray(floats([-0.0]))
     var right = AnyArray(floats([0.0]))
-    var got = align_keys(columns(left^), one(0), 1, columns(right^), one(0), 1)
+    var got = align_owned(columns(left^), one(0), 1, columns(right^), one(0), 1)
     assert_equal(got.codes[0], got.codes[1], "minus zero against zero")
 
 

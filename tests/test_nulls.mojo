@@ -21,7 +21,7 @@ the two answers differ. That is the property, not a coincidence.
 
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
-from firepanda.array.any import AnyArray
+from firepanda.array.any import AnyArray, borrow_columns
 from firepanda.array.array import Array, from_list
 from firepanda.dtype.lists import ALL
 from firepanda.frame.frame import DataFrame
@@ -309,7 +309,7 @@ def test_all_valid_mask_is_the_intersection() raises:
     var columns = List[AnyArray]()
     columns.append(AnyArray(gapped([Int64(1), 2, 3, 4], [0])))
     columns.append(AnyArray(gapped([Int64(1), 2, 3, 4], [1])))
-    var mask = all_valid_mask(columns, 4)
+    var mask = all_valid_mask(borrow_columns(columns), 4)
     assert_false(mask[0], "row 0 missing in the first")
     assert_false(mask[1], "row 1 missing in the second")
     assert_true(mask[2], "row 2 present in both")
@@ -317,7 +317,8 @@ def test_all_valid_mask_is_the_intersection() raises:
 
 
 def test_all_valid_mask_of_no_columns_is_all_true() raises:
-    var mask = all_valid_mask(List[AnyArray](), 3)
+    var none = List[AnyArray]()
+    var mask = all_valid_mask(borrow_columns(none), 3)
     for i in range(3):
         assert_true(mask[i], "row " + String(i))
 

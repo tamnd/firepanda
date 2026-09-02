@@ -295,7 +295,7 @@ def test_a_text_key_is_grouped_without_renumbering_its_ordinals() raises:
     )
     var at = List[Int]()
     at.append(0)
-    var grouping = group_ordinals(frame.columns, at, frame.rows)
+    var grouping = group_ordinals(frame.column_refs(), at, frame.rows)
 
     assert_equal(grouping.groups, 3)
     var expected: List[Int] = [0, 1, 0, 2, 1]
@@ -323,7 +323,7 @@ def test_a_text_key_with_nulls_is_renumbered_after_all() raises:
     )
     var at = List[Int]()
     at.append(0)
-    var grouping = group_ordinals(frame.columns, at, frame.rows)
+    var grouping = group_ordinals(frame.column_refs(), at, frame.rows)
 
     assert_equal(grouping.groups, 3)
     var expected: List[Int] = [0, 1, 0, 2, 1]

@@ -2525,14 +2525,14 @@ def bench_group(mut harness: Harness) raises:
 
     def ordinals_one() raises {imm df, imm one_key}:
         keep(df.rows)
-        var out = group_ordinals(df.columns, one_key, df.rows)
+        var out = group_ordinals(df.column_refs(), one_key, df.rows)
         keep(out.groups)
 
     harness.record("group/ordinals_one_key", "rows", rows, ordinals_one)
 
     def ordinals_two() raises {imm df, imm two_keys}:
         keep(df.rows)
-        var out = group_ordinals(df.columns, two_keys, df.rows)
+        var out = group_ordinals(df.column_refs(), two_keys, df.rows)
         keep(out.groups)
 
     harness.record("group/ordinals_two_keys", "rows", rows, ordinals_two)
@@ -2659,10 +2659,10 @@ def bench_join(mut harness: Harness) raises:
     def indices_only() raises {imm fact, imm dim, imm fact_keys, imm dim_keys}:
         keep(fact.rows)
         var pairs = join_indices(
-            fact.columns,
+            fact.column_refs(),
             fact_keys,
             fact.rows,
-            dim.columns,
+            dim.column_refs(),
             dim_keys,
             dim.rows,
             JoinKind.INNER,

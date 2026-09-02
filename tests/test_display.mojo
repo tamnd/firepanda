@@ -139,7 +139,7 @@ def test_the_limits_are_options_not_constants() raises:
     var df = DataFrame.from_series(columns^)
 
     var rendered = render_table(
-        df.schema, df.columns, len(df), DisplayOptions(max_rows=4)
+        df.schema, df.column_refs(), len(df), DisplayOptions(max_rows=4)
     )
     var lines = rendered.split("\n")
     # Header, two rows, the elision, two rows, a blank line and the shape.

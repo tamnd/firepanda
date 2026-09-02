@@ -37,7 +37,7 @@ This file deliberately does not import `DataFrame` or `Series`. It renders a
 what lets `frame.mojo` and `series.mojo` both call it without a cycle.
 """
 
-from firepanda.array.any import AnyArray
+from firepanda.array.any import AnyArray, ColumnRefs
 from firepanda.dtype.lists import ALL
 from firepanda.dtype.schema import Schema
 
@@ -242,9 +242,11 @@ def visible(n: Int, limit: Int) -> List[Int]:
     return out^
 
 
-def render_table(
+def render_table[
+    o: ImmOrigin
+](
     schema: Schema,
-    columns: List[AnyArray],
+    columns: ColumnRefs[o],
     rows: Int,
     options: DisplayOptions,
 ) -> String:
@@ -295,7 +297,9 @@ def render_table(
             if shown_rows[i] < 0:
                 cells.append(String(ELLIPSIS))
             else:
-                cells.append(render_value(columns[at], shown_rows[i], options))
+                cells.append(
+                    render_value(columns[at][], shown_rows[i], options)
+                )
         grid.append(cells^)
 
     var widths = List[Int]()
