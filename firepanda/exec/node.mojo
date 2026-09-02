@@ -42,6 +42,15 @@ a tree and a tree is a line of these, so `(a + b) < c` is one node that appends
 end to drop the intermediate. That is why it appends rather than replaces, and
 why `Filter` can name its mask by position: the plan counted the appends.
 
+`Group` is the first breaker that is not the fallback, and it is the one that
+shows what the interface buys. A materialised group by needs memory the size of
+its input because it holds every row until the last one arrives. This one holds
+one row per group and merges each chunk into that as the chunk goes past, which
+is the same answer at a fraction of the memory, for the reductions that can be
+folded. The rest still go through the fallback, and which ones those are is a
+list rather than a judgement: a sum of sums is a sum, a median of medians is
+not.
+
 `Materialize` is the escape hatch and it is not temporary. It collects every
 chunk into one frame, calls a whole frame function, and gives the answer back as
 chunks. Anything with no chunked implementation goes through it, which is what
@@ -53,12 +62,15 @@ and `InMemoryJoin` for the same reason and still has them.
 
 from std.utils import Variant
 
-from firepanda.array.any import AnyArray
+from firepanda.array.any import AnyArray, borrow_columns
+from firepanda.array.array import Array
 from firepanda.array.chunked import ChunkedArray
 from firepanda.array.value import Value
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.frame.frame import DataFrame
+from firepanda.hash.grouping import group_ordinals
+from firepanda.kernel.accum import accumulator
 from firepanda.kernel.binary import (
     BinaryOp,
     binary_any,
@@ -66,9 +78,12 @@ from firepanda.kernel.binary import (
     binary_value_any,
 )
 from firepanda.kernel.cast import cast_any
-from firepanda.kernel.select import filter_any
+from firepanda.kernel.concat import concat_two_any
+from firepanda.kernel.group import AggKind, aggregate_group_any
+from firepanda.kernel.select import filter_any, take_any
 
 from .chunk import Chunk
+from .morsel import MORSEL_ROWS
 
 
 struct NodeStatus(Equatable, ImplicitlyCopyable, Movable, Writable):
@@ -586,6 +601,497 @@ struct Cast(Movable):
         return Chunk(columns^, rows)
 
 
+struct GroupAgg(Copyable, Movable, Writable):
+    """One output column of a grouped aggregation."""
+
+    var column: Int
+    """The position of the column to reduce, in the node's input."""
+
+    var kind: AggKind
+    """Which reduction."""
+
+    var name: String
+    """The name the output column gets."""
+
+    def __init__(out self, column: Int, kind: AggKind, name: String):
+        """Constructs one output column.
+
+        Args:
+            column: The position of the column to reduce.
+            kind: The reduction.
+            name: The output column's name.
+        """
+        self.column = column
+        self.kind = kind
+        self.name = name
+
+    def write_to(self, mut writer: Some[Writer]):
+        """Writes the aggregate as it would be read back.
+
+        Args:
+            writer: The sink.
+        """
+        writer.write(self.kind, "(", self.column, ") as ", self.name)
+
+
+def _folds(kind: AggKind) -> Bool:
+    """Reports whether a reduction can be computed a chunk at a time.
+
+    A reduction folds when the answer over two pieces can be recovered from the
+    answers over each piece. A sum of sums is a sum and a maximum of maxima is a
+    maximum, so those two need nothing but their own running value. A median of
+    medians is not a median and no amount of state short of the values
+    themselves makes it one, so the order statistics do not fold, and neither
+    does a distinct count, whose partial answer has thrown away exactly the
+    thing the merge would need.
+
+    A mean folds, but not as a mean: the running state is a sum and a count and
+    the division happens once at the end. That is why the node keeps state
+    columns rather than output columns, and it is the only kind where the two
+    are not the same thing.
+
+    Args:
+        kind: The reduction.
+
+    Returns:
+        True if `Group` can run it, False if it belongs on `Materialize`.
+    """
+    return (
+        kind == AggKind.SUM
+        or kind == AggKind.MEAN
+        or kind == AggKind.MIN
+        or kind == AggKind.MAX
+        or kind == AggKind.COUNT
+        or kind == AggKind.SIZE
+        or kind == AggKind.FIRST
+        or kind == AggKind.LAST
+    )
+
+
+def _merge_kind(kind: AggKind) -> AggKind:
+    """Returns the reduction that combines two partial answers of a kind.
+
+    Args:
+        kind: The reduction that produced the partials.
+
+    Returns:
+        The reduction to run over the partials. A sum for the two counts,
+        because merging counts means adding them rather than counting them
+        again, and the kind itself for everything else.
+    """
+    if kind == AggKind.COUNT or kind == AggKind.SIZE:
+        return AggKind.SUM
+    return kind
+
+
+def _agg_type(kind: AggKind, input: LogicalType) -> LogicalType:
+    """Returns the logical type a reduction produces over a column.
+
+    `AggKind.result_dtype` answers this in physical dtypes, which is the right
+    answer for a kernel and not enough for a schema: a minimum over a column of
+    timestamps is a timestamp and not an int64, and the only way to keep that is
+    to hand the input type straight back for the reductions that report a value
+    the column held.
+
+    Args:
+        kind: The reduction.
+        input: The logical type of the column being reduced.
+
+    Returns:
+        The logical type of the output column.
+    """
+    if kind == AggKind.COUNT or kind == AggKind.SIZE:
+        return LogicalType.INT64
+    if kind == AggKind.MEAN:
+        return LogicalType.FLOAT64
+    if kind == AggKind.SUM:
+        var acc = accumulator(input.physical)
+        if acc == DType.float64:
+            return LogicalType.FLOAT64
+        if acc == DType.int64:
+            return LogicalType.INT64
+        return LogicalType.UINT64
+    return input
+
+
+def _mean_of(sums: AnyArray, counts: AnyArray) raises -> AnyArray:
+    """Divides a running sum by a running count, one group at a time.
+
+    A group whose count is zero saw no value that was not null, and pandas calls
+    that null rather than a division by zero, so the row is left null rather
+    than filled with a NaN that would compare unequal to itself downstream.
+
+    Args:
+        sums: One sum per group.
+        counts: One count of non-null values per group.
+
+    Returns:
+        One mean per group, float64, null where the count is zero.
+
+    Raises:
+        If the sums cannot be converted to float64.
+    """
+    var totals = cast_any(sums, DType.float64)
+    var t = totals.unsafe_ptr[DType.float64]()
+    var n = counts.unsafe_ptr[DType.int64]()
+    var out = Array[DType.float64](len(counts))
+    var dst = out.unsafe_ptr()
+    for g in range(len(out)):
+        var count = n.unsafe_offset(g).unsafe_load()
+        if count == 0:
+            out.set_null(g)
+        else:
+            dst.unsafe_offset(g).unsafe_store(
+                t.unsafe_offset(g).unsafe_load() / Float64(count)
+            )
+    return AnyArray(out^)
+
+
+struct Group(Movable):
+    """Groups rows by one or more key columns and reduces each group.
+
+    This is the first breaker that is not `Materialize`, and the difference
+    between the two is the only thing about it worth understanding. A
+    materialised group by holds every row until the last one has arrived and
+    then groups ten million rows at once, so the memory it needs is the size of
+    the input. This one holds one row per group: it groups each chunk on its
+    own, merges that chunk's answers into a running table of groups, and throws
+    the chunk away. A billion rows in a thousand groups is a table of a thousand
+    rows the whole way through, which is the difference between a query that
+    runs and one that does not.
+
+    The merge is the same operation as the aggregation. Two partial answers for
+    a group are two rows, and reducing two rows to one is what a group by does,
+    so merging the running table with a chunk's table is a group by over their
+    concatenation. That is why there is no accumulator kernel here and no
+    second implementation of anything: the running table and the chunk's table
+    are stacked, grouped by the same keys, and reduced by the kind that combines
+    partials, which is the kind itself except for the two counts, where merging
+    means adding rather than counting again.
+
+    Not every reduction survives that. `_folds` is the list that does, and the
+    rest keep the `Materialize` fallback, which is the right answer rather than a
+    gap: a median needs the values and there is no state short of the values that
+    would give it one. Asking for one here is an error at plan time.
+
+    Two things this node deliberately does not do. It does not sort, so the
+    groups come out in the order they were first seen, which is what pandas
+    calls `sort=False`; a sort over one row per group is a separate operator and
+    putting it here would make every query pay for it. It does not drop groups
+    whose key is null, which is `dropna=False`; that is a filter over the result
+    and the plan can add one. Both are decisions about the output rather than
+    about the grouping, and neither of them needs to see a row of input.
+
+    Floating point is the one place the answer can differ from the materialised
+    path. Adding a column in chunks and then adding the chunk sums is a different
+    order of additions from adding it in one pass, and floating point addition is
+    not associative, so a sum of floats can differ in the last bits. Every other
+    kind here is exact.
+    """
+
+    var keys: List[Int]
+    """The positions of the key columns, in the order the output carries them."""
+
+    var aggs: List[GroupAgg]
+    """What to compute for each group."""
+
+    var input: Schema
+    """The schema of the chunks coming in, filled in by `bind`."""
+
+    var output: Schema
+    """The schema of the rows going out, worked out by `bind`."""
+
+    var state: List[AnyArray]
+    """The running table: the key columns, then one column per state slot, one
+    row per group seen so far."""
+
+    var _source: List[Int]
+    """Per state slot, the input column it reduces."""
+
+    var _produce: List[AggKind]
+    """Per state slot, the reduction run over a chunk."""
+
+    var _merge: List[AggKind]
+    """Per state slot, the reduction that combines two partial answers."""
+
+    var _at: List[Int]
+    """Per aggregate, the state slot it starts at. A mean owns two."""
+
+    var started: Bool
+    """Whether a chunk with rows in it has arrived."""
+
+    var ran: Bool
+    """Whether `finish` has turned the running table into output chunks."""
+
+    var emit: List[AnyArray]
+    """The result, in chunks, in reverse order so `finish` can pop."""
+
+    var width: Int
+    """The number of output columns."""
+
+    def __init__(out self, var keys: List[Int], var aggs: List[GroupAgg]):
+        """Constructs a group by.
+
+        Args:
+            keys: The positions of the key columns. Consumed.
+            aggs: What to compute for each group. Consumed.
+        """
+        self.keys = keys^
+        self.aggs = aggs^
+        self.input = Schema()
+        self.output = Schema()
+        self.state = List[AnyArray]()
+        self._source = List[Int]()
+        self._produce = List[AggKind]()
+        self._merge = List[AggKind]()
+        self._at = List[Int]()
+        self.started = False
+        self.ran = False
+        self.emit = List[AnyArray]()
+        self.width = 0
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Checks the keys and the aggregates, and reports the output schema.
+
+        Everything that can be wrong with a group by that does not depend on the
+        data is wrong here: a key that is not a column, a key given twice, a
+        reduction that does not fold, a sum of a column of names, two output
+        columns with the same name. None of those needs a row to detect and all
+        of them are cheaper to report before the first one moves.
+
+        Args:
+            input: The schema of the chunks that will arrive. Consumed.
+
+        Returns:
+            The key columns in the order they were given, then one column per
+            aggregate.
+
+        Raises:
+            If a position is outside the schema, if a key is repeated, if a
+            reduction does not fold, if a reduction has no meaning on its
+            column's type, or if two output columns would have the same name.
+        """
+        self.input = input^
+        var fields = List[Field]()
+
+        if len(self.keys) == 0:
+            raise Error("group: at least one key column is required")
+        for k in range(len(self.keys)):
+            var at = self.keys[k]
+            if at < 0 or at >= len(self.input):
+                raise Error(
+                    "group: key column "
+                    + String(at)
+                    + " is outside a schema of "
+                    + String(len(self.input))
+                    + " columns"
+                )
+            for j in range(k):
+                if self.keys[j] == at:
+                    raise Error(
+                        "group: key column " + String(at) + " was given twice"
+                    )
+            fields.append(self.input[at].copy())
+
+        for a in range(len(self.aggs)):
+            var at = self.aggs[a].column
+            var kind = self.aggs[a].kind
+            if at < 0 or at >= len(self.input):
+                raise Error(
+                    "group: column "
+                    + String(at)
+                    + " is outside a schema of "
+                    + String(len(self.input))
+                    + " columns"
+                )
+            if not _folds(kind):
+                raise Error(
+                    "group: "
+                    + String(kind)
+                    + " cannot be computed a chunk at a time"
+                )
+            var source = self.input[at].dtype
+            if source.is_variable_width() and (
+                kind == AggKind.SUM or kind == AggKind.MEAN
+            ):
+                raise Error(
+                    "group: " + String(kind) + " is not defined on text"
+                )
+            var name = self.aggs[a].name
+            for f in range(len(fields)):
+                if fields[f].name == name:
+                    raise Error(
+                        "group: two output columns would both be called " + name
+                    )
+            fields.append(Field(name, _agg_type(kind, source)))
+
+            self._at.append(len(self._source))
+            if kind == AggKind.MEAN:
+                # A mean is a sum and a count until the last moment. Keeping the
+                # two apart is what lets the merge be an addition, and dividing
+                # earlier would make the running value a mean of means, which is
+                # only the mean when every group is the same size.
+                self._source.append(at)
+                self._produce.append(AggKind.SUM)
+                self._merge.append(AggKind.SUM)
+                self._source.append(at)
+                self._produce.append(AggKind.COUNT)
+                self._merge.append(AggKind.SUM)
+            else:
+                self._source.append(at)
+                self._produce.append(kind)
+                self._merge.append(_merge_kind(kind))
+
+        self.output = Schema(fields^)
+        return Schema(copy=self.output)
+
+    def update_state(self) -> NodeStatus:
+        """Reports whether the running table has been turned into output.
+
+        Returns:
+            NEED_MORE_INPUT until `finish` has run, then HAVE_OUTPUT while
+            chunks remain and FINISHED after that.
+        """
+        if not self.ran:
+            return NodeStatus.NEED_MORE_INPUT
+        if len(self.emit) > 0:
+            return NodeStatus.HAVE_OUTPUT
+        return NodeStatus.FINISHED
+
+    def process(mut self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Groups the chunk and merges its answers into the running table.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            None, always. A breaker has nothing to say until it has seen
+            everything.
+
+        Raises:
+            If the chunk is not as wide as the input schema, or if a reduction
+            fails on the chunk's data.
+        """
+        if chunk.width() != len(self.input):
+            raise Error(
+                "group: chunk has "
+                + String(chunk.width())
+                + " columns and the input schema has "
+                + String(len(self.input))
+            )
+        var rows = len(chunk)
+        if rows == 0:
+            return None
+        var columns = chunk^.into_columns()
+        var refs = borrow_columns(columns)
+        var local = group_ordinals(refs, self.keys, rows)
+        var made = List[AnyArray](capacity=len(self.keys) + len(self._source))
+        for k in range(len(self.keys)):
+            made.append(take_any(columns[self.keys[k]], local.rows_at))
+        for s in range(len(self._source)):
+            made.append(
+                aggregate_group_any(
+                    columns[self._source[s]],
+                    self._produce[s],
+                    local.codes,
+                    local.groups,
+                )
+            )
+        self._absorb(made^)
+        return None
+
+    def _absorb(mut self, var made: List[AnyArray]) raises:
+        """Merges one chunk's per group answers into the running table.
+
+        Args:
+            made: The chunk's table: key columns then state columns. Consumed.
+
+        Raises:
+            If the merge fails.
+        """
+        if not self.started:
+            self.started = True
+            self.state = made^
+            return
+
+        var stacked = List[AnyArray](capacity=len(made))
+        for i in range(len(self.state)):
+            stacked.append(concat_two_any(self.state[i], made[i]))
+        var rows = len(stacked[0])
+        var refs = borrow_columns(stacked)
+        var at = List[Int](capacity=len(self.keys))
+        for k in range(len(self.keys)):
+            at.append(k)
+        var merged = group_ordinals(refs, at, rows)
+
+        var next = List[AnyArray](capacity=len(stacked))
+        for k in range(len(self.keys)):
+            next.append(take_any(stacked[k], merged.rows_at))
+        for s in range(len(self._source)):
+            next.append(
+                aggregate_group_any(
+                    stacked[len(self.keys) + s],
+                    self._merge[s],
+                    merged.codes,
+                    merged.groups,
+                )
+            )
+        self.state = next^
+
+    def finish(mut self) raises -> Optional[Chunk]:
+        """Hands the running table back, one chunk at a time.
+
+        Returns:
+            One chunk of the result per call, in first seen group order, and
+            None when there are none left.
+
+        Raises:
+            If turning the running state into output fails.
+        """
+        if not self.ran:
+            self.ran = True
+            self._settle()
+        if len(self.emit) == 0:
+            return None
+        var row = List[AnyArray](capacity=self.width)
+        for _ in range(self.width):
+            row.append(self.emit.pop())
+        return Chunk(row^)
+
+    def _settle(mut self) raises:
+        """Turns the running state into output columns and cuts them into chunks.
+
+        Raises:
+            If a mean cannot be computed from its sum and its count.
+        """
+        self.width = len(self.keys) + len(self.aggs)
+        if not self.started:
+            return
+
+        var out = List[AnyArray](capacity=self.width)
+        for k in range(len(self.keys)):
+            out.append(AnyArray(copy=self.state[k]))
+        var base = len(self.keys)
+        for a in range(len(self.aggs)):
+            var at = base + self._at[a]
+            if self.aggs[a].kind == AggKind.MEAN:
+                out.append(_mean_of(self.state[at], self.state[at + 1]))
+            else:
+                out.append(AnyArray(copy=self.state[at]))
+        self.state = List[AnyArray]()
+
+        # Same reversed, chunk major layout `_stripe` produces, for the same
+        # reason: `finish` pops `width` arrays off the back and has one chunk in
+        # column order without copying anything.
+        var total = len(out[0])
+        var pieces = (total + MORSEL_ROWS - 1) // MORSEL_ROWS
+        for c in range(pieces - 1, -1, -1):
+            var begin = c * MORSEL_ROWS
+            var stop = min(begin + MORSEL_ROWS, total)
+            for i in range(self.width - 1, -1, -1):
+                self.emit.append(out[i].slice(begin, stop))
+
+
 struct Materialize(Movable):
     """Collects every chunk, calls a whole frame function, emits chunks again.
 
@@ -813,7 +1319,9 @@ def _stripe(var frame: DataFrame) raises -> List[AnyArray]:
     return out^
 
 
-comptime Node = Variant[Filter, Project, Compute, Cast, Limit, Materialize]
+comptime Node = Variant[
+    Filter, Project, Compute, Cast, Limit, Group, Materialize
+]
 """One operator, as a value the pipeline can hold in a list.
 
 Mojo 1.0 can express a trait object but not a list of them, so this is a closed
@@ -841,6 +1349,8 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
     """
     if node.isa[Materialize]():
         return node[Materialize].bind(input^)
+    if node.isa[Group]():
+        return node[Group].bind(input^)
     if node.isa[Compute]():
         return node[Compute].bind(input^)
     if node.isa[Cast]():
@@ -875,6 +1385,8 @@ def node_status(node: Node) -> NodeStatus:
         return node[Limit].update_state()
     if node.isa[Materialize]():
         return node[Materialize].update_state()
+    if node.isa[Group]():
+        return node[Group].update_state()
     return NodeStatus.NEED_MORE_INPUT
 
 
@@ -887,7 +1399,7 @@ def node_is_breaker(node: Node) -> Bool:
     Returns:
         True for a breaker, which is where a pipeline is cut.
     """
-    return node.isa[Materialize]()
+    return node.isa[Materialize]() or node.isa[Group]()
 
 
 def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
@@ -913,6 +1425,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Cast].process(chunk^)
     if node.isa[Limit]():
         return node[Limit].process(chunk^)
+    if node.isa[Group]():
+        return node[Group].process(chunk^)
     return node[Materialize].process(chunk^)
 
 
@@ -934,4 +1448,6 @@ def node_finish(mut node: Node) raises -> Optional[Chunk]:
     """
     if node.isa[Materialize]():
         return node[Materialize].finish()
+    if node.isa[Group]():
+        return node[Group].finish()
     return None
