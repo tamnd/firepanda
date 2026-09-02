@@ -315,6 +315,19 @@ struct ChunkedArray(Copyable, Movable, Sized):
             )
         return concat_any(held)
 
+    def into_chunks(deinit self) -> List[AnyArray]:
+        """Gives up the pieces without stacking or copying them.
+
+        `combine` is the way out of this type for anything that wants one
+        contiguous array. This is the way out for anything that wants the
+        pieces, which is what a scan wants: it hands the chunks downstream one
+        at a time and the column it took them from is gone.
+
+        Returns:
+            The chunks, in row order. Empty for a column of no rows.
+        """
+        return self.chunks^
+
     def mark_sorted(mut self, order: Sortedness):
         """Records an order the caller already knows, without checking it.
 

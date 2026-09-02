@@ -1,9 +1,18 @@
-"""Running work on more than one core.
+"""The engine: what a unit of work is, who does it, and on how many cores.
 
 Tier: unstable, documented. docs/specs/11-package-layout.md.
 
-Two ways of using the machine, and the difference between them is when the work
-is divided up.
+Three layers, and each one is useful without the one above it.
+
+`Chunk`, `Node` and `Pipeline` are the engine. A chunk is a horizontal slice of
+a frame, a node is one operator, and a pipeline is a source, a line of nodes and
+a sink, run by pushing chunks along the line. Every operator not yet written for
+chunks goes through the `Materialize` fallback, which collects, calls today's
+whole frame function and hands the answer back in chunks, so the engine can be
+filled in one operator at a time rather than all at once.
+
+Underneath that are two ways of using the machine, and the difference between
+them is when the work is divided up.
 
 `parallel_for` runs a body once per index and returns when every index has
 finished. The division happens before any work is done, so it is right when the
@@ -22,5 +31,10 @@ appear nowhere outside `morsel.mojo`, and in there they are one field of
 and nothing is read until every task has been waited on.
 """
 
+from .chunk import Chunk
 from .morsel import MORSEL_ROWS, Morsel, MorselQueue, parallel_morsels
+from .node import Filter, Limit, Materialize, Node, NodeStatus, Project
+from .node import node_bind, node_finish, node_is_breaker, node_process
+from .node import node_status
 from .parallel import parallel_for, worker_count
+from .pipeline import Collect, Pipeline, Scan

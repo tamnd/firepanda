@@ -268,6 +268,19 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             )
         return refs^
 
+    def into_columns(deinit self) -> List[ChunkedArray]:
+        """Gives up the columns without copying them, consuming the frame.
+
+        The schema is dropped, so this is for a caller that already has it or
+        does not need it. The engine is the caller: a scan is handed a frame,
+        takes the columns apart into chunks and pushes them, and the frame it
+        came from is gone by the time the first chunk moves.
+
+        Returns:
+            The columns, in schema order.
+        """
+        return self.columns^
+
     def index_of(self, name: String) raises -> Int:
         """Returns the position of a named column.
 
