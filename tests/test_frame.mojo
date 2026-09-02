@@ -34,6 +34,7 @@ from firepanda.array.array import Array, from_list
 from firepanda.array.chunked import ChunkedArray
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.lists import ALL
+from firepanda.dtype.schema import Schema
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.series import Series
 from firepanda.testing.rng import Rng
@@ -177,23 +178,113 @@ def test_a_frame_takes_a_column_rather_than_copying_it() raises:
     )
 
 
-def test_a_column_of_several_chunks_refuses_to_be_read_as_one() raises:
-    """Nothing here builds a chunked column yet, so this builds one by hand.
+def chunked_frame() raises -> DataFrame:
+    """A three column frame whose columns are cut into three uneven chunks.
 
-    The point is what happens when something does. An operator that has not been
-    taught about chunks has to fail rather than quietly answer from the first
-    chunk, because a wrong answer over the first row group of a Parquet file
-    looks exactly like a right one.
+    Nothing in the tree produces a column of more than one chunk yet, so the
+    tests for the chunk walking kernels have to build one. The lengths are 2, 5
+    and 1 rather than equal so that a slice lands inside a chunk, on a boundary
+    and past the end in the same frame.
     """
-    var df = sample_frame()
-    df.columns[0].append(AnyArray(Array[DType.int64](2)))
-    assert_equal(df.columns[0].num_chunks(), 2, "two chunks now")
-    assert_equal(len(df.columns[0]), 8, "and eight rows between them")
+    var flat = sample_frame()
+    var cut = List[ChunkedArray](capacity=flat.width())
+    for c in range(flat.width()):
+        var col = ChunkedArray(flat[c].slice(0, 2))
+        col.append(flat[c].slice(2, 5))
+        col.append(flat[c].slice(5, 6))
+        cut.append(col^)
+    return DataFrame(Schema(copy=flat.schema), cut^)
+
+
+def test_a_column_of_several_chunks_refuses_the_whole_column_borrow() raises:
+    """An operator that has not been taught about chunks has to fail loudly.
+
+    Answering from the first chunk would be a wrong answer that looks exactly
+    like a right one, which over the first row group of a Parquet file is the
+    worst possible failure. The ones that have been taught, which is the
+    elementwise family, go through the chunk walking kernels and do not touch
+    this path at all.
+    """
+    var df = chunked_frame()
+    assert_equal(df.columns[0].num_chunks(), 3, "three chunks")
+    assert_equal(len(df.columns[0]), 6, "six rows between them")
+    assert_equal(df.rows, 6, "and the frame agrees")
 
     with assert_raises(contains="not one"):
         _ = len(df[0])
-    with assert_raises(contains="not one"):
-        _ = df.head(2)
+
+
+def test_filter_and_slice_keep_the_chunk_boundaries() raises:
+    """The elementwise kernels cut the operation the way the column is cut.
+
+    A chunked frame and a flat one have to give the same answer, and the chunked
+    one has to still be chunked afterwards, because flattening on every operator
+    boundary is the thing this is all for.
+    """
+    var flat = sample_frame()
+    var cut = chunked_frame()
+
+    var mask = Array[DType.bool](6)
+    for i in range(6):
+        mask.set_valid(i, i != 2 and i != 5)
+
+    var flat_kept = flat.filter(mask)
+    var cut_kept = cut.filter(mask)
+    assert_equal(len(cut_kept), len(flat_kept), "same height")
+    assert_equal(keys_of(cut_kept), keys_of(flat_kept), "same rows")
+    # The last chunk is row 5 on its own and the mask drops it, so that chunk
+    # comes out empty and is not kept. Two chunks is the right answer here, not
+    # three: an empty chunk in the middle of a prefix sum would let a row
+    # position name two chunks.
+    assert_equal(cut_kept.columns[0].num_chunks(), 2, "still chunked")
+
+    # Rows 2 to 5 span the second chunk exactly, so this is one whole chunk and
+    # nothing else.
+    var middle = cut.slice(2, 5)
+    assert_equal(middle.columns[0].num_chunks(), 1, "one chunk for one chunk")
+    assert_equal(keys_of(middle), keys_of(flat.slice(2, 5)), "same rows")
+
+    # Rows 1 to 6 clip the first chunk and take the other two whole.
+    var tail = cut.slice(1, 6)
+    assert_equal(tail.columns[0].num_chunks(), 3, "clipped, whole, whole")
+    assert_equal(keys_of(tail), keys_of(flat.slice(1, 6)), "same rows")
+
+
+def test_a_filter_that_keeps_nothing_leaves_no_chunks() raises:
+    var cut = chunked_frame()
+    var mask = Array[DType.bool](6)
+    for i in range(6):
+        mask.set_valid(i, False)
+
+    var empty = cut.filter(mask)
+    assert_equal(len(empty), 0, "no rows")
+    assert_equal(empty.width(), 3, "but still three columns")
+    assert_equal(empty.columns[0].num_chunks(), 0, "and no chunks in them")
+
+
+def test_cast_and_take_agree_across_a_chunked_column() raises:
+    var flat = sample_frame()
+    var cut = chunked_frame()
+
+    var flat_text = flat.cast("key", LogicalType.STRING)
+    var cut_text = cut.cast("key", LogicalType.STRING)
+    assert_equal(cut_text.columns[0].num_chunks(), 3, "a cast keeps the pieces")
+    var cut_keys = cut_text.column("key")^.into_values().into_strings()
+    var flat_keys = flat_text.column("key")^.into_values().into_strings()
+    for i in range(6):
+        assert_equal(
+            String(cut_keys[i]), String(flat_keys[i]), "row " + String(i)
+        )
+
+    # A gather has to flatten, because output row i can come from any chunk, so
+    # this is the one place the answer comes back as a single chunk.
+    var order = List[Int]()
+    order.append(5)
+    order.append(0)
+    order.append(3)
+    var picked = cut.take(order)
+    assert_equal(picked.columns[0].num_chunks(), 1, "gathered into one piece")
+    assert_equal(keys_of(picked), keys_of(flat.take(order)), "same rows")
 
 
 def test_a_column_can_be_copied_by_name() raises:

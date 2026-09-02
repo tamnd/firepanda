@@ -55,6 +55,12 @@ from firepanda.frame.display import DisplayOptions, render_table
 from firepanda.hash.grouping import group_ordinals
 from firepanda.join.pairs import JoinKind, join_indices, take_pair
 from firepanda.kernel.cast import cast_any
+from firepanda.kernel.chunked import (
+    cast_chunked,
+    filter_chunked,
+    slice_chunked,
+    take_chunked,
+)
 from firepanda.kernel.group import (
     AggKind,
     aggregate_group_any,
@@ -111,6 +117,23 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         self.rows = 0 if len(columns) == 0 else len(columns[0])
         self.schema = schema^
         self.columns = wrap_columns(columns^)
+
+    def __init__(out self, var schema: Schema, var columns: List[ChunkedArray]):
+        """Constructs a frame from columns that are already chunked.
+
+        The overload above is the one nearly everything uses, because nearly
+        everything produces a `List[AnyArray]`. This one is for the operators
+        that have been taught to walk chunks and so produce chunked columns of
+        their own, and it exists so that they do not have to flatten their result
+        just to hand it over.
+
+        Args:
+            schema: The schema. Must match `columns` in length and order.
+            columns: The data. Must all be the same length.
+        """
+        self.rows = 0 if len(columns) == 0 else len(columns[0])
+        self.schema = schema^
+        self.columns = columns^
 
     def __init__(out self, *, copy: Self):
         """Deep-copies a frame.
@@ -284,8 +307,9 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
     def column(self, name: String) raises -> Series:
         """Returns a named column as a `Series`.
 
-        This copies. Use `__getitem__` with a position when the copy matters and
-        a borrow will do.
+        This copies, and it flattens: a `Series` is one contiguous array, so a
+        column in pieces is stacked on the way out. Use `__getitem__` with a
+        position when the copy matters and a borrow will do.
 
         Args:
             name: The column name.
@@ -297,7 +321,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             If no column has that name.
         """
         var at = self.schema.index_of(name)
-        return Series(name, AnyArray(copy=self.columns[at].only()))
+        return Series(name, ChunkedArray(copy=self.columns[at]).combine())
 
     def select(self, names: List[String]) raises -> Self:
         """Returns a frame with only the named columns, in the order given.
@@ -315,7 +339,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         Raises:
             If a name is missing or repeated.
         """
-        var columns = List[AnyArray](capacity=len(names))
+        var columns = List[ChunkedArray](capacity=len(names))
         for i in range(len(names)):
             for j in range(i):
                 if names[j] == names[i]:
@@ -323,9 +347,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                         "select names a column twice: '" + names[i] + "'"
                     )
             columns.append(
-                AnyArray(
-                    copy=self.columns[self.schema.index_of(names[i])].only()
-                )
+                ChunkedArray(copy=self.columns[self.schema.index_of(names[i])])
             )
         var out = Self(self.schema.select(names), columns^)
         out.rows = self.rows
@@ -438,9 +460,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         """
         return self._cast(
             name,
-            cast_any(
-                self.columns[self.schema.index_of(name)].only(), to, strict
-            ),
+            cast_chunked(self.columns[self.schema.index_of(name)], to, strict),
         )
 
     def cast(
@@ -468,17 +488,15 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         """
         return self._cast(
             name,
-            cast_any(
-                self.columns[self.schema.index_of(name)].only(), to, strict
-            ),
+            cast_chunked(self.columns[self.schema.index_of(name)], to, strict),
         )
 
-    def _cast(self, name: String, var converted: AnyArray) raises -> Self:
+    def _cast(self, name: String, var converted: ChunkedArray) raises -> Self:
         """Puts a converted column back in place of the one it came from."""
         var at = self.schema.index_of(name)
         var out = Self(copy=self)
         out.schema.fields[at] = Field(name, converted.type)
-        out.columns[at] = ChunkedArray(converted^)
+        out.columns[at] = converted^
         return out^
 
     def filter(self, mask: Array[DType.bool]) raises -> Self:
@@ -503,10 +521,15 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                 + " rows and mask has "
                 + String(len(mask))
             )
-        var columns = List[AnyArray](capacity=len(self.columns))
+        var columns = List[ChunkedArray](capacity=len(self.columns))
         for i in range(len(self.columns)):
-            columns.append(filter_any(self.columns[i].only(), mask))
-        return Self(Schema(copy=self.schema), columns^)
+            columns.append(filter_chunked(self.columns[i], mask))
+        var out = Self(Schema(copy=self.schema), columns^)
+        # A frame of no columns cannot read its height off column zero, and a
+        # filter that keeps nothing leaves every column with no chunks at all,
+        # so the height is counted here rather than inferred.
+        out.rows = 0 if len(out.columns) == 0 else len(out.columns[0])
+        return out^
 
     def take(self, indices: List[Int]) raises -> Self:
         """Returns rows gathered by position.
@@ -521,9 +544,9 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         Raises:
             If a dtype has no physical layout.
         """
-        var columns = List[AnyArray](capacity=len(self.columns))
+        var columns = List[ChunkedArray](capacity=len(self.columns))
         for i in range(len(self.columns)):
-            columns.append(take_any(self.columns[i].only(), indices))
+            columns.append(take_chunked(self.columns[i], indices))
         var out = Self(Schema(copy=self.schema), columns^)
         out.rows = len(indices)
         return out^
@@ -542,9 +565,9 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             If the range is reversed or runs past either end.
         """
         _check_range(start, end, self.rows, "frame")
-        var columns = List[AnyArray](capacity=len(self.columns))
+        var columns = List[ChunkedArray](capacity=len(self.columns))
         for i in range(len(self.columns)):
-            columns.append(self.columns[i].only().slice(start, end))
+            columns.append(slice_chunked(self.columns[i], start, end))
         var out = Self(Schema(copy=self.schema), columns^)
         out.rows = end - start
         return out^
