@@ -556,7 +556,9 @@ struct HashTable(Movable, Sized):
                     break
                 at = (at + 1) & mask
 
-    def build_strings(
+    def build_strings[
+        indirect: Bool = False
+    ](
         mut self,
         hashes: Buffer,
         col: StringArray,
@@ -568,6 +570,8 @@ struct HashTable(Movable, Sized):
         offset: Int,
         mut codes: Array[DType.uint32],
         mut firsts: List[Int],
+        hash_at: Int = 0,
+        rows_at: Buffer = Buffer(0),
     ):
         """Inserts a chunk of a string column's keys in one call.
 
@@ -594,22 +598,44 @@ struct HashTable(Movable, Sized):
         The sizing schedule is shared with `build`, so a column built by one and
         then the other would size itself correctly, though nothing does that.
 
+        A partitioned build hands this rows that are not next to each other, so
+        `indirect` splits the one index this loop had into two. The chunk's own
+        positions still say where the hash is and where the ordinal goes, and a
+        lookup says which row of the column each of those positions stands for.
+        Everything the column is asked about, which is the validity, the
+        comparison and the representative row, goes through the lookup, and
+        everything about the chunk does not. The numeric `build` needs no such
+        thing because it never looks at a row.
+
         Args:
-            hashes: Hashes for this chunk, indexed from zero, from
-                `hash_strings_chunk`.
+            hashes: Hashes for this chunk, from `hash_strings_chunk`. Indexed
+                from `hash_at`.
             col: The column, needed for the comparison. Indexed by absolute row.
             has_null: Whether the column has any nulls at all.
-            base: The absolute row index this chunk starts at.
+            base: The position this chunk starts at, which is the absolute row
+                index unless `indirect`, in which case it is where the chunk
+                starts in the partition arrays.
             rank: How many rows this table has already been given.
             count: How many rows are in this chunk.
             rows: How many rows this table will be given in total.
             offset: Added to every ordinal written to `codes`.
-            codes: Where the per-row ordinals go, indexed by absolute row.
+            codes: Where the per-row ordinals go, indexed the same way `base` is.
             firsts: Appended with the absolute row index of every key that was
                 new, in ordinal order. This build reads it as well as writing it,
                 because it is where the key to compare against lives.
+            hash_at: Where this chunk's hashes start in `hashes`. Zero for a
+                caller that hashed the chunk into a buffer of its own, which is
+                every caller that hashes as it goes.
+            rows_at: The absolute row each position stands for, as uint32. Read
+                only when `indirect`, and it is the whole partition's worth
+                rather than the chunk's, indexed the same way `base` is.
+
+        Parameters:
+            indirect: True when the positions are partition entries rather than
+                rows and `rows_at` says which row each of them is.
         """
-        var hash = hashes.bitcast[DType.uint64]()
+        var hash = hashes.bitcast[DType.uint64]().unsafe_offset(hash_at)
+        var lookup = rows_at.bitcast[DType.uint32]()
         var out = codes.unsafe_ptr()
         var slots = self._slots.bitcast[DType.uint64]()
         var mask = self._mask
@@ -658,7 +684,11 @@ struct HashTable(Movable, Sized):
                     capacity = self._capacity
                     mark = -1
 
-            if has_null and not col.is_valid(i):
+            var row = i
+            comptime if indirect:
+                row = Int(lookup.unsafe_offset(i).unsafe_load())
+
+            if has_null and not col.is_valid(row):
                 out.unsafe_offset(i).unsafe_write(UInt32(0))
                 continue
 
@@ -688,11 +718,11 @@ struct HashTable(Movable, Sized):
                         UInt64(found + 1)
                     )
                     out.unsafe_offset(i).unsafe_write(UInt32(found + offset))
-                    firsts.append(i)
+                    firsts.append(row)
                     found += 1
                     break
                 if slots.unsafe_offset(slot).unsafe_load() == wanted:
-                    if col.element_equals(i, firsts[Int(ordinal) - 1]):
+                    if col.element_equals(row, firsts[Int(ordinal) - 1]):
                         out.unsafe_offset(i).unsafe_write(
                             UInt32(Int(ordinal) - 1 + offset)
                         )
