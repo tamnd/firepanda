@@ -119,6 +119,84 @@ def test_take_gathers_text_and_a_negative_index_is_a_null() raises:
     assert_equal(taken.null_count(), 1)
 
 
+def test_a_text_take_past_the_split_gathers_only_short_values() raises:
+    # Past `PARALLEL_TAKE_ROWS` the gather runs on every core, and a column with
+    # nothing in its payload takes the arm that skips the counting pass and
+    # copies the sixteen bytes of the view straight across. This is what a group
+    # by's key gather does, since a label fits inside its own view. The length is
+    # one past a multiple of sixty four so the last worker is left holding a
+    # partial validity word it has to store on the way out.
+    var builder = StringBuilder(capacity=4096)
+    for i in range(4096):
+        builder.append(String("id", i).as_bytes())
+    var col = builder^.finish()
+    var source = Series("s", col^)
+
+    var picks = List[Int](capacity=65_601)
+    for i in range(65_601):
+        picks.append((i * 4093) % 4096)
+    picks[64] = -1
+    picks[65] = -1
+    picks[65_600] = -1
+
+    var taken = source.take(picks)
+    assert_equal(len(taken), len(picks))
+
+    var wrong = -1
+    for i in range(len(picks)):
+        var at = picks[i]
+        if at < 0:
+            if taken.is_valid(i):
+                wrong = i
+                break
+        elif taken.text(i) != String("id", at):
+            wrong = i
+            break
+    assert_equal(wrong, -1, String("a gathered value is wrong at row ", wrong))
+    assert_equal(taken.null_count(), 3)
+
+
+def test_a_text_take_past_the_split_carries_the_payload_across() raises:
+    # The other arm. Every third value is too long to live in its view, so the
+    # counting pass runs, each worker is handed a base in the output payload, and
+    # a value's bytes end up somewhere different from where they started. A
+    # worker that used the source offset rather than its own cursor would still
+    # pass on the short values and fail here.
+    var builder = StringBuilder(capacity=3000)
+    for i in range(3000):
+        if i % 3 == 0:
+            builder.append(String("value-that-is-long-", i).as_bytes())
+        else:
+            builder.append(String("s", i).as_bytes())
+    var col = builder^.finish()
+    var source = Series("s", col^)
+
+    var picks = List[Int](capacity=70_001)
+    for i in range(70_001):
+        picks.append((i * 2999) % 3000)
+    picks[128] = -1
+
+    var taken = source.take(picks)
+    assert_equal(len(taken), len(picks))
+
+    var wrong = -1
+    for i in range(len(picks)):
+        var at = picks[i]
+        if at < 0:
+            if taken.is_valid(i):
+                wrong = i
+                break
+            continue
+        var want = String("s", at)
+        if at % 3 == 0:
+            want = String("value-that-is-long-", at)
+        if taken.text(i) != want:
+            wrong = i
+            break
+    assert_equal(wrong, -1, String("a gathered value is wrong at row ", wrong))
+    assert_equal(taken.null_count(), 1)
+
+
 def test_take_past_the_end_is_an_error_rather_than_a_null() raises:
     var s = Series("s", strings_from_list(["ab"]))
     with assert_raises(contains="outside a column"):

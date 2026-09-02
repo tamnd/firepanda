@@ -32,12 +32,17 @@ deep copied every column on the way in, which on a filter is the entire cost of
 the operation paid twice.
 """
 
+from std.memory import unsafe_memcpy
+
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.array.strings import StringArray, StringBuilder
+from firepanda.array.strview import VIEW_SIZE, StringView, make_long_at
 from firepanda.bitmap.bitmap import Bitmap
+from firepanda.buffer.buffer import Buffer
 from firepanda.dtype.lists import ALL
 from firepanda.exec import parallel_morsels
+from firepanda.exec.parallel import parallel_for, worker_count
 
 
 comptime PARALLEL_TAKE_ROWS = 1 << 16
@@ -113,15 +118,40 @@ def take_any(col: AnyArray, indices: List[Int]) raises -> AnyArray:
     raise Error("take: unsupported dtype")
 
 
+def _take_bounds(rows: Int, workers: Int) -> List[Int]:
+    """Cuts a row range into pieces that share no word of the output validity.
+
+    Args:
+        rows: How many output rows there are.
+        workers: How many pieces to cut them into.
+
+    Returns:
+        `workers + 1` boundaries, each a multiple of sixty four except the last.
+    """
+    var bounds = List[Int](capacity=workers + 1)
+    for w in range(workers):
+        var cut = ((rows * w // workers) + 63) // 64 * 64
+        bounds.append(cut if cut < rows else rows)
+    bounds.append(rows)
+    return bounds^
+
+
 def _take_strings(col: StringArray, indices: List[Int]) raises -> StringArray:
     """Gathers variable width rows by position.
 
-    None of what `_take_core` does applies here. The output element is not a
-    fixed number of bytes, so it cannot be written unconditionally at a computed
-    offset, and the validity cannot be built a word at a time ahead of the
-    values. What is left is the straightforward loop, and it is still the right
-    shape: a short element is copied into its own view with no payload touched at
-    all, which is the case that a gather of a key column actually hits.
+    The output element is not a fixed number of bytes, so unlike `_take_core`
+    this cannot write every row unconditionally at a computed offset. What saves
+    it is that a gather does not change how an element is stored: a short one
+    stays short and a long one stays long and keeps its length. So an output
+    row's view is sixteen bytes wide wherever it lands, and the only thing that
+    depends on the rows before it is where its payload bytes go.
+
+    That is one number a worker needs, so the split is by output row with a
+    counting pass in front of it: each worker adds up the payload its own range
+    will copy, the totals prefix sum into a base per worker, and then each worker
+    writes its views and its payload with a cursor of its own. The counting pass
+    is skipped when the column has no payload at all, which is every column of
+    labels and is the case a group by's key gather actually hits.
 
     Args:
         col: The column to gather from.
@@ -133,20 +163,129 @@ def _take_strings(col: StringArray, indices: List[Int]) raises -> StringArray:
         A column of length `len(indices)`.
 
     Raises:
-        If an index is neither negative nor a position in the column.
+        If an index is neither negative nor a position in the column, or if one
+        of the workers the parallel route starts cannot be run.
     """
-    var builder = StringBuilder(capacity=len(indices))
-    for k in range(len(indices)):
-        var at = indices[k]
-        if at >= len(col):
-            raise Error(
-                String("take index ", at, " is outside a column of ", len(col))
+    var n = len(indices)
+    var workers = worker_count()
+    if n < PARALLEL_TAKE_ROWS or workers <= 1:
+        var builder = StringBuilder(capacity=n)
+        for k in range(n):
+            var at = indices[k]
+            if at >= len(col):
+                raise Error(
+                    String(
+                        "take index ", at, " is outside a column of ", len(col)
+                    )
+                )
+            if at < 0 or not col.is_valid(at):
+                builder.append_null()
+            else:
+                builder.append(col.unsafe_bytes(at))
+        return builder^.finish()
+
+    var most = n // PARALLEL_TAKE_ROWS
+    if workers > most:
+        workers = most
+    var bounds = _take_bounds(n, workers)
+    var height = len(col)
+    var source_views = col.views.unsafe_ptr().unsafe_bitcast[StringView]()
+    var source_bytes = col.payload.unsafe_ptr()
+
+    # A column whose payload is empty has no element longer than twelve bytes,
+    # so nothing is copied out of it and the counting pass has only one answer.
+    var carried = List[Int](length=workers + 1, fill=0)
+    if len(col.payload) > 0:
+        var totals = Buffer(workers * 8)
+
+        def measure(w: Int) raises {mut totals, imm}:
+            var wide = 0
+            for i in range(bounds[w], bounds[w + 1]):
+                var at = indices[i]
+                if at >= height:
+                    raise Error(
+                        String(
+                            "take index ",
+                            at,
+                            " is outside a column of ",
+                            height,
+                        )
+                    )
+                if at < 0 or not col.is_valid(at):
+                    continue
+                var view = source_views.unsafe_offset(at)[]
+                if not view.is_inline():
+                    wide += len(view)
+            totals.bitcast[DType.int64]().unsafe_offset(w).unsafe_store(
+                Int64(wide)
             )
-        if at < 0 or not col.is_valid(at):
-            builder.append_null()
-        else:
-            builder.append(col.unsafe_bytes(at))
-    return builder^.finish()
+
+        parallel_for(measure, workers)
+
+        var counted = totals.bitcast[DType.int64]()
+        for w in range(workers):
+            carried[w + 1] = carried[w] + Int(
+                counted.unsafe_offset(w).unsafe_load()
+            )
+
+    var views = Buffer(overwritten=n * VIEW_SIZE)
+    var payload = Buffer(overwritten=carried[workers])
+    var built = Bitmap(n, all_valid=False)
+
+    def gather(w: Int) raises {mut views, mut payload, mut built, imm}:
+        var target = views.unsafe_ptr().unsafe_bitcast[StringView]()
+        var into = payload.unsafe_ptr()
+        var cursor = carried[w]
+
+        # The output positions are consecutive, so the validity bits are built in
+        # a register and stored once every sixty four rows. The boundaries are
+        # multiples of sixty four, so no two workers write the same word.
+        var word = UInt64(0)
+        for i in range(bounds[w], bounds[w + 1]):
+            var at = indices[i]
+            if at >= height:
+                raise Error(
+                    String(
+                        "take index ", at, " is outside a column of ", height
+                    )
+                )
+            if at < 0 or not col.is_valid(at):
+                # The view of the empty string, so that reading a null's bytes
+                # gives an empty span rather than uninitialized memory, which is
+                # what `StringBuilder.append_null` writes for the same reason.
+                target.unsafe_offset(i)[] = StringView()
+            else:
+                var view = source_views.unsafe_offset(at)[]
+                if view.is_inline():
+                    # The bytes are already inside the sixteen, so the view is
+                    # the whole element and copying it is the whole gather.
+                    target.unsafe_offset(i)[] = view
+                else:
+                    var count = len(view)
+                    var from_ = source_bytes.unsafe_offset(view.offset())
+                    unsafe_memcpy(
+                        dest=into.unsafe_offset(cursor),
+                        src=from_,
+                        count=count,
+                    )
+                    target.unsafe_offset(i)[] = make_long_at(
+                        from_, count, 0, cursor
+                    )
+                    cursor += count
+                word |= UInt64(1) << UInt64(i & 63)
+            if i & 63 == 63:
+                built.unsafe_set_word(i >> 6, word)
+                word = 0
+
+        # Only a range that ends part way through a word has anything left in the
+        # register, and since the boundaries are multiples of sixty four that is
+        # only ever the last one.
+        var stop = bounds[w + 1]
+        if stop & 63 != 0 and stop > bounds[w]:
+            built.unsafe_set_word(stop >> 6, word)
+
+    parallel_for(gather, workers)
+    return StringArray(views^, payload^, built^, n)
 
 
 def _take_core[

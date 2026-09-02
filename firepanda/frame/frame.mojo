@@ -778,19 +778,37 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             # A group's key values are whatever its representative row holds, so
             # asking whether the key is null is asking about that one row rather
             # than about the gathered column.
-            var keep = Array[DType.bool](grouping.groups)
-            var dropping = False
-            for g in range(grouping.groups):
-                var ok = True
-                for k in range(len(at)):
-                    if not self.columns[at[k]].is_valid(grouping.rows_at[g]):
-                        ok = False
-                        break
-                keep.set_valid(g, ok)
-                if not ok:
-                    dropping = True
-            if dropping:
-                out = out.filter(keep)
+            #
+            # A key column with no nulls in it cannot drop anything, so ask each
+            # one that question first and walk the groups only for the ones that
+            # can answer yes. The question is a popcount over the column's
+            # validity, which is one bit a row, and the walk it saves is a bit
+            # lookup per group per key at four bytes a row of representative row
+            # indexes. On a group by whose six keys have ten million tuples
+            # between them that is sixty million bit lookups traded for six
+            # passes over a megabyte and a quarter, and the usual answer is that
+            # none of the keys have nulls and the whole thing goes away.
+            var risky = List[Int]()
+            for k in range(len(at)):
+                if self.columns[at[k]].null_count() > 0:
+                    risky.append(at[k])
+
+            if len(risky) > 0:
+                var keep = Array[DType.bool](grouping.groups)
+                var dropping = False
+                for g in range(grouping.groups):
+                    var ok = True
+                    for k in range(len(risky)):
+                        if not self.columns[risky[k]].is_valid(
+                            grouping.rows_at[g]
+                        ):
+                            ok = False
+                            break
+                    keep.set_valid(g, ok)
+                    if not ok:
+                        dropping = True
+                if dropping:
+                    out = out.filter(keep)
 
         if sort and len(out) > 1:
             var down = List[Bool]()
