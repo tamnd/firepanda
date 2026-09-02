@@ -224,6 +224,126 @@ def test_empty_chunked_column() raises:
     assert_equal(column.null_count(), 0)
 
 
+def test_chunked_locate_walks_a_column_of_many_chunks() raises:
+    # `locate` binary searches a prefix sum rather than adding lengths up again,
+    # so the shape worth testing is one where the answer differs per chunk and
+    # the boundaries land where an off by one would be visible. The chunks here
+    # have different lengths on purpose, since equal ones would let a division
+    # pass the test without the search being right.
+    var column = ChunkedArray(AnyArray(Array[DType.int64](3)))
+    var sizes = List[Int]()
+    sizes.append(1)
+    sizes.append(4)
+    sizes.append(1)
+    sizes.append(9)
+    sizes.append(2)
+    for i in range(len(sizes)):
+        column.append(AnyArray(Array[DType.int64](sizes[i])))
+    assert_equal(len(column), 20)
+    assert_equal(column.num_chunks(), 6)
+
+    # Every row, checked against a walk that adds the lengths up the slow way.
+    var chunk = 0
+    var seen = 0
+    for row in range(20):
+        while row - seen >= len(column.chunks[chunk]):
+            seen += len(column.chunks[chunk])
+            chunk += 1
+        var found = column.locate(row)
+        assert_equal(found[0], chunk, String("wrong chunk for row ", row))
+        assert_equal(found[1], row - seen, String("wrong offset for row ", row))
+
+    with assert_raises(contains="out of range"):
+        _ = column.locate(20)
+    with assert_raises(contains="out of range"):
+        _ = column.locate(-1)
+
+
+def test_chunked_drops_an_empty_chunk() raises:
+    # An empty chunk would put two equal entries in the prefix sum, and then a
+    # row position would name two chunks and the search could return the one
+    # holding nothing. It is dropped on the way in instead.
+    var column = ChunkedArray(AnyArray(Array[DType.int64](2)))
+    column.append(AnyArray(Array[DType.int64](0)))
+    column.append(AnyArray(Array[DType.int64](3)))
+    assert_equal(column.num_chunks(), 2)
+    assert_equal(len(column), 5)
+
+    var found = column.locate(2)
+    assert_equal(found[0], 1)
+    assert_equal(found[1], 0)
+
+
+def test_chunked_only_borrows_the_single_chunk() raises:
+    # `only` is what lets an operator that has not been taught about chunks read
+    # a chunked column, and it is only worth having if it copies nothing. That is
+    # one pointer comparison, the same claim `as_typed_view` asserts.
+    var typed = Array[DType.int64](4)
+    for i in range(4):
+        typed[i] = Int64(i * 3)
+    var inner = AnyArray(typed^)
+    var address = Int(inner.data.values.unsafe_ptr())
+
+    var column = ChunkedArray(inner^)
+    ref chunk = column.only()
+    assert_equal(len(chunk), 4)
+    assert_equal(chunk.as_typed_view[DType.int64]()[3], Int64(9))
+    assert_equal(Int(chunk.data.values.unsafe_ptr()), address)
+
+    column.append(AnyArray(Array[DType.int64](2)))
+    with assert_raises(contains="not one"):
+        _ = len(column.only())
+
+
+def test_chunked_combine_of_one_chunk_moves_rather_than_copies() raises:
+    var typed = Array[DType.int64](6)
+    for i in range(6):
+        typed[i] = Int64(i)
+    typed.set_null(4)
+    var inner = AnyArray(typed^)
+    var address = Int(inner.data.values.unsafe_ptr())
+
+    var column = ChunkedArray(inner^)
+    var flat = column^.combine()
+    assert_equal(len(flat), 6)
+    assert_equal(flat.null_count(), 1)
+    assert_equal(
+        Int(flat.data.values.unsafe_ptr()),
+        address,
+        "combining one chunk should hand back its own buffer",
+    )
+
+
+def test_chunked_combine_stacks_several_chunks() raises:
+    var first = Array[DType.int64](3)
+    for i in range(3):
+        first[i] = Int64(i)
+    var second = Array[DType.int64](2)
+    second[0] = Int64(10)
+    second[1] = Int64(11)
+    second.set_null(1)
+
+    var column = ChunkedArray(AnyArray(first^))
+    column.append(AnyArray(second^))
+    assert_equal(column.null_count(), 1)
+
+    var flat = column^.combine()
+    assert_equal(len(flat), 5)
+    ref view = flat.as_typed_view[DType.int64]()
+    assert_equal(view[0], Int64(0))
+    assert_equal(view[2], Int64(2))
+    assert_equal(view[3], Int64(10))
+    assert_false(view.is_valid(4))
+    assert_equal(flat.null_count(), 1)
+
+
+def test_chunked_combine_of_nothing_is_an_empty_column() raises:
+    var column = ChunkedArray(logical_for(DType.int64))
+    var flat = column^.combine()
+    assert_equal(len(flat), 0)
+    assert_equal(flat.dtype(), DType.int64)
+
+
 def test_a_typed_array_has_the_layout_of_the_storage_it_holds() raises:
     """The assumption `AnyArray.as_typed_view` reinterprets a pointer under.
 
