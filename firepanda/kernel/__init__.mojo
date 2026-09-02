@@ -106,3 +106,4 @@ from .sort import (
     sort_key,
     sort_rows,
 )
+from .text import compare_text, compare_text_const

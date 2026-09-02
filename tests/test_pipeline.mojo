@@ -19,6 +19,7 @@ from std.testing import assert_true
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.array.chunked import ChunkedArray
+from firepanda.array.strings import strings_from_list
 from firepanda.array.value import Value
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
@@ -89,6 +90,30 @@ def cut_frame() raises -> DataFrame:
     var fields = List[Field]()
     fields.append(Field("n", LogicalType.INT64))
     fields.append(Field("keep", LogicalType.BOOL))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def word_frame() raises -> DataFrame:
+    """The same six rows with two text columns beside the numbers.
+
+    `status` and `wanted` agree on rows 0, 2 and 4, so a comparison between the
+    two columns keeps three rows, and `status` holds "ok" on four of the six, so a
+    comparison against that constant keeps a different set. Two answers that
+    differ is the point: a comparison that ignored one of its operands would give
+    the same set twice.
+    """
+    var columns = List[AnyArray]()
+    columns.append(numbers([1, 2, 3, 4, 5, 6]))
+    columns.append(
+        AnyArray(strings_from_list(["ok", "fail", "ok", "ok", "fail", "ok"]))
+    )
+    columns.append(
+        AnyArray(strings_from_list(["ok", "ok", "ok", "fail", "fail", "no"]))
+    )
+    var fields = List[Field]()
+    fields.append(Field("n", LogicalType.INT64))
+    fields.append(Field("status", LogicalType.STRING))
+    fields.append(Field("wanted", LogicalType.STRING))
     return DataFrame(Schema(fields^), columns^)
 
 
@@ -469,6 +494,47 @@ def test_a_constant_with_no_answer_on_that_type_is_caught_at_plan_time() raises:
     var pipeline = Pipeline(cut_frame())
     with assert_raises(contains="is not defined on"):
         pipeline.add(Node(Compute(1, Value(True), BinaryOp.ADD, "nope")))
+
+
+def test_a_text_predicate_runs_end_to_end() raises:
+    """A filter on a label is the other half of what a query looks like, and it
+    is the last thing the elementwise operator line was waiting on."""
+    var pipeline = Pipeline(word_frame())
+    pipeline.add(Node(Compute(1, Value(String("ok")), BinaryOp.EQ, "hit")))
+    pipeline.add(Node(Filter(3)))
+    pipeline.add(Node(Project([0])))
+    var out = pipeline^.run()
+    assert_equal(len(out), 4, "four rows say ok")
+    var values = read_back(out, "n")
+    assert_equal(values[0], Int64(1), "the first survivor")
+    assert_equal(values[3], Int64(6), "the last survivor")
+
+
+def test_two_text_columns_compare_against_each_other() raises:
+    var pipeline = Pipeline(word_frame())
+    pipeline.add(Node(Compute(1, 2, BinaryOp.EQ, "agrees")))
+    pipeline.add(Node(Filter(3)))
+    pipeline.add(Node(Project([0])))
+    var out = pipeline^.run()
+    assert_equal(len(out), 3, "three rows agree")
+    var values = read_back(out, "n")
+    assert_equal(values[0], Int64(1), "the first survivor")
+    assert_equal(values[2], Int64(5), "the last survivor")
+
+
+def test_a_text_comparison_is_a_bool_column_at_plan_time() raises:
+    var pipeline = Pipeline(word_frame())
+    pipeline.add(Node(Compute(1, 2, BinaryOp.LT, "before")))
+    assert_true(
+        pipeline.schema[3].dtype == LogicalType.BOOL,
+        "a comparison on text answers bool like any other",
+    )
+
+
+def test_arithmetic_on_text_is_caught_at_plan_time() raises:
+    var pipeline = Pipeline(word_frame())
+    with assert_raises(contains="is not defined on"):
+        pipeline.add(Node(Compute(1, 2, BinaryOp.ADD, "nope")))
 
 
 def main() raises:

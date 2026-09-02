@@ -191,13 +191,23 @@ def test_text_with_a_number_has_no_common_type() raises:
         _ = binary_any(words, typed[DType.int64]([1, 2]), BinaryOp.EQ)
 
 
-def test_text_with_text_is_refused_rather_than_reinterpreted() raises:
+def test_text_with_text_compares_the_elements_not_the_bytes() raises:
     """A string column's physical dtype is uint8, so the one thing that must not
     happen is falling through to the uint8 arm and comparing first bytes."""
     var left = AnyArray(strings_from_list(["ab", "cd"]))
     var right = AnyArray(strings_from_list(["ab", "ce"]))
-    with assert_raises(contains="on text is not implemented"):
-        _ = binary_any(left, right, BinaryOp.EQ)
+    var got = binary_any(left, right, BinaryOp.EQ)
+    assert_true(got.type == LogicalType.BOOL, "result type")
+    var values = read[DType.bool](got)
+    assert_true(values[0], "same")
+    assert_true(not values[1], "differ in the last byte")
+
+
+def test_arithmetic_on_text_is_still_an_error() raises:
+    var left = AnyArray(strings_from_list(["ab", "cd"]))
+    var right = AnyArray(strings_from_list(["ab", "ce"]))
+    with assert_raises(contains="is not defined on"):
+        _ = binary_any(left, right, BinaryOp.ADD)
 
 
 def test_columns_of_different_lengths_are_refused() raises:

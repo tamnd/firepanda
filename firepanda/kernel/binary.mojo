@@ -34,9 +34,12 @@ A null constant is answered before any loop runs. Every row of the result is
 null, whatever the operation and whatever is in the column, so the loop would be
 a pass over the column to write zeros it already holds.
 
-One thing is still deliberately absent, and that is comparison on text. The loops
-underneath are over fixed width registers and a string comparison is a byte loop,
-which is a kernel rather than an arm of a dispatch.
+Comparison on text does not go through the dtype dispatch at all. A text column's
+physical dtype is uint8 and the loop over it would read a view byte as a value,
+so the variable width case is answered before the dispatch is reached, by the
+kernels in `text.mojo`. Arithmetic on text is still an error, and it is the same
+error it was: there is no common type between a string and a number, and adding
+two strings is a concatenation, which is a function rather than an operator here.
 """
 
 from firepanda.array.any import AnyArray
@@ -73,6 +76,7 @@ from .compare import (
     less_equal,
     not_equal,
 )
+from .text import compare_text, compare_text_const
 
 
 struct BinaryOp(Equatable, ImplicitlyCopyable, Movable, Writable):
@@ -227,12 +231,6 @@ def binary_type(
     """
     var common = promote(a, b)
     if op.is_comparison():
-        if common.is_variable_width():
-            raise Error(
-                "binary: "
-                + String(op)
-                + " on text is not implemented, only on numbers"
-            )
         return LogicalType.BOOL
     if not common.is_numeric():
         raise Error(
@@ -275,6 +273,9 @@ def binary_any(a: AnyArray, b: AnyArray, op: BinaryOp) raises -> AnyArray:
     # whatever they were, so converting them to float64 first would be two
     # copies of the column to reach the same answer.
     var common = promote(a.type, b.type)
+    if common.is_variable_width():
+        return _compare_text_erased(a, b, op)
+
     var left = AnyArray(copy=a) if a.type == common else cast_any(
         a, common.physical
     )
@@ -282,6 +283,43 @@ def binary_any(a: AnyArray, b: AnyArray, op: BinaryOp) raises -> AnyArray:
         b, common.physical
     )
     return _binary_erased(left, right, op, common.physical)
+
+
+def _compare_text_erased(
+    a: AnyArray, b: AnyArray, op: BinaryOp
+) raises -> AnyArray:
+    """Sends a comparison on two text columns to the byte loops.
+
+    No conversion happens first. Two variable width columns only have a common
+    type when they are the same kind already, so there is nothing to promote, and
+    the operation is known to be a comparison because arithmetic on text was
+    turned away by `binary_type`.
+
+    Args:
+        a: The left column.
+        b: The right column, of the same kind.
+        op: The operation.
+
+    Returns:
+        A bool column.
+
+    Raises:
+        If either column has a variable width type but does not carry the
+        elements, which is what an all-null column of no type looks like.
+    """
+    ref x = a.strings()
+    ref y = b.strings()
+    if op == BinaryOp.EQ:
+        return AnyArray(compare_text[CMP_EQ](x, y))
+    if op == BinaryOp.NE:
+        return AnyArray(compare_text[CMP_NE](x, y))
+    if op == BinaryOp.LT:
+        return AnyArray(compare_text[CMP_LT](x, y))
+    if op == BinaryOp.LE:
+        return AnyArray(compare_text[CMP_LE](x, y))
+    if op == BinaryOp.GT:
+        return AnyArray(compare_text[CMP_GT](x, y))
+    return AnyArray(compare_text[CMP_GE](x, y))
 
 
 def _binary_erased(
@@ -363,13 +401,16 @@ def binary_value_any(
         return _all_null(answer, len(a))
 
     var common = promote(a.type, b.type)
-    var column = AnyArray(copy=a) if a.type == common else cast_any(
-        a, common.physical
-    )
     # The comparison with the constant on the left is turned round rather than
     # given loops of its own. Subtraction and division cannot be turned round, so
     # they carry the flag into the loop, where the branch on it sits outside.
     var applied = op.mirrored() if value_on_left and op.is_comparison() else op
+    if common.is_variable_width():
+        return _compare_text_const_erased(a, b, applied)
+
+    var column = AnyArray(copy=a) if a.type == common else cast_any(
+        a, common.physical
+    )
     var flip = value_on_left and not op.is_comparison()
     return _binary_const_erased(column, b, applied, common.physical, flip)
 
@@ -397,6 +438,42 @@ def _all_null(type: LogicalType, rows: Int) raises -> AnyArray:
             out.data.validity = Bitmap(rows, all_valid=False)
             return AnyArray(out^)
     raise Error("binary: unsupported dtype")
+
+
+def _compare_text_const_erased(
+    a: AnyArray, b: Value, op: BinaryOp
+) raises -> AnyArray:
+    """Sends a comparison against a text constant to the byte loops.
+
+    The constant's bytes are borrowed from the string it is holding, so the
+    string has to outlive the call and is kept in a local rather than read out of
+    the value inside the argument list.
+
+    Args:
+        a: The column.
+        b: The constant, present and holding text.
+        op: The operation, already mirrored if the constant was on the left.
+
+    Returns:
+        A bool column.
+
+    Raises:
+        If the column does not carry elements, or the constant is not text.
+    """
+    ref x = a.strings()
+    var text = b.as_string()
+    var probe = text.as_bytes()
+    if op == BinaryOp.EQ:
+        return AnyArray(compare_text_const[CMP_EQ](x, probe))
+    if op == BinaryOp.NE:
+        return AnyArray(compare_text_const[CMP_NE](x, probe))
+    if op == BinaryOp.LT:
+        return AnyArray(compare_text_const[CMP_LT](x, probe))
+    if op == BinaryOp.LE:
+        return AnyArray(compare_text_const[CMP_LE](x, probe))
+    if op == BinaryOp.GT:
+        return AnyArray(compare_text_const[CMP_GT](x, probe))
+    return AnyArray(compare_text_const[CMP_GE](x, probe))
 
 
 def _binary_const_erased(
