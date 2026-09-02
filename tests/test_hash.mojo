@@ -36,10 +36,13 @@ from firepanda.hash.factorize import (
     DIRECT_SHARE,
     PARALLEL_MIN_SLICE,
     PARALLEL_ROWS,
+    RANK_BLOCK,
+    Factorized,
     _estimate_groups,
     _factorize_direct_parallel,
     _factorize_direct_serial,
     _factorize_hashed_parallel,
+    _factorize_hashed_partitioned,
     _factorize_hashed_serial,
     _parallel_workers,
 )
@@ -140,8 +143,54 @@ def same_routes[dt: DType](col: Array[dt], workers: Int, what: String) raises:
     Raises:
         If the two routes disagree anywhere.
     """
-    var one = _factorize_hashed_serial[dt](col, DEFAULT_SEED)
     var many = _factorize_hashed_parallel[dt](col, DEFAULT_SEED, workers)
+    lands_on_the_serial_route[dt](col, many^, what)
+
+
+def same_partitioned_routes[
+    dt: DType
+](col: Array[dt], workers: Int, what: String) raises:
+    """Asserts the partitioned hashed route lands exactly on the serial one.
+
+    Held to the standard `same_routes` holds the slice route to, and it is a
+    harder standard to meet here. The slice route gets first-appearance order
+    out of the shape of its own work, because its workers hold contiguous slices
+    in order. The partitioned route cuts by hash, so the order is recovered
+    afterwards by `_rank_by_first_row` and a test that only checked which rows
+    ended up together would pass on a route that had lost it.
+
+    Args:
+        col: The column.
+        workers: How many slices to hash and scatter in parallel.
+        what: A label for the failure message.
+
+    Parameters:
+        dt: The dtype.
+
+    Raises:
+        If the two routes disagree anywhere.
+    """
+    var many = _factorize_hashed_partitioned[dt](col, DEFAULT_SEED, workers)
+    lands_on_the_serial_route[dt](col, many^, what)
+
+
+def lands_on_the_serial_route[
+    dt: DType
+](col: Array[dt], var many: Factorized[dt], what: String) raises:
+    """Asserts a factorization is the one the serial route would have produced.
+
+    Args:
+        col: The column it came from.
+        many: What some parallel route made of it.
+        what: A label for the failure message.
+
+    Parameters:
+        dt: The dtype.
+
+    Raises:
+        If the two disagree anywhere.
+    """
+    var one = _factorize_hashed_serial[dt](col, DEFAULT_SEED)
 
     assert_equal(many.count(), one.count(), String(what, ": group count"))
     assert_equal(many.null_group, one.null_group, String(what, ": null group"))
@@ -403,6 +452,103 @@ def test_the_parallel_merge_leaves_most_of_its_buckets_empty() raises:
             bad = i
             break
     assert_equal(bad, -1, String("an empty bucket moved an ordinal at ", bad))
+
+
+def test_the_partitioned_route_agrees_with_the_serial_one() raises:
+    # Seven workers over a column that does not divide into seven, and three
+    # thousand groups spread across all sixty four partitions, so no partition
+    # sees the groups in the order the column offered them.
+    same_partitioned_routes(hashed_column(24000, 3000), 7, "partitioned 7")
+
+
+def test_the_partitioned_route_agrees_when_every_row_is_its_own_group() raises:
+    # More rows than one `RANK_BLOCK` holds, and a group per row, so the
+    # numbering has to carry a running count from the first block of rows into
+    # the second. A block off by one would renumber every group after it.
+    same_partitioned_routes(
+        hashed_column(RANK_BLOCK + 4096, RANK_BLOCK + 4096),
+        8,
+        "partitioned distinct",
+    )
+
+
+def test_the_partitioned_route_agrees_with_nulls_scattered_through_it() raises:
+    var n = 8192
+    var col = hashed_column(n, 2000)
+    for i in range(n):
+        if i % 11 == 0:
+            col.set_null(i)
+    same_partitioned_routes(col, 5, "partitioned with nulls")
+
+    var got = _factorize_hashed_partitioned(col, DEFAULT_SEED, 5)
+    assert_equal(got.null_group, 0)
+    assert_false(got.keys(col).is_valid(0))
+
+
+def test_the_partitioned_route_agrees_when_every_row_is_null() raises:
+    # Nothing reaches a partition at all, so every array the route sizes from
+    # the placed rows is empty and the ranking has no groups to number.
+    var n = 8192
+    var col = hashed_column(n, 64)
+    for i in range(n):
+        col.set_null(i)
+    same_partitioned_routes(col, 4, "partitioned all null")
+
+    var got = _factorize_hashed_partitioned(col, DEFAULT_SEED, 4)
+    assert_equal(got.count(), 1)
+    var bad = -1
+    for i in range(n):
+        if got.codes[i] != 0:
+            bad = i
+            break
+    assert_equal(bad, -1, String("null row not in group zero at ", bad))
+
+
+def test_the_partitioned_route_keeps_first_appearance_order() raises:
+    # Four groups, each introduced by its own quarter of the column, in order.
+    # Which partition each lands in is the hash's business and has nothing to do
+    # with that order, so the ordinals only come out right if the numbering is
+    # recovered from the representative rows.
+    var n = 8192
+    var col = Array[DType.int64](n)
+    var step = Int64(DIRECT_LIMIT + 17)
+    for i in range(n):
+        col[i] = Int64(i * 4 // n) * step
+
+    var got = _factorize_hashed_partitioned(col, DEFAULT_SEED, 4)
+    assert_equal(got.count(), 4)
+    var bad = -1
+    for i in range(n):
+        if got.codes[i] != UInt32(i * 4 // n):
+            bad = i
+            break
+    assert_equal(bad, -1, String("out of first appearance order at ", bad))
+    var keys = got.keys(col)
+    for g in range(4):
+        assert_equal(keys[g], Int64(g) * step)
+
+
+def test_the_partitioned_route_leaves_most_of_its_partitions_empty() raises:
+    # Three groups across sixteen workers is three of sixty four partitions
+    # holding anything at all, and one block of the ranking holding all three.
+    # An empty partition contributes nothing and must not shift what the others
+    # get.
+    var n = 8192
+    var col = Array[DType.int64](n)
+    var step = Int64(DIRECT_LIMIT + 17)
+    for i in range(n):
+        col[i] = Int64(i % 3) * step
+
+    var got = _factorize_hashed_partitioned(col, DEFAULT_SEED, 16)
+    assert_equal(got.count(), 3)
+    var bad = -1
+    for i in range(n):
+        if got.codes[i] != UInt32(i % 3):
+            bad = i
+            break
+    assert_equal(
+        bad, -1, String("an empty partition moved an ordinal at ", bad)
+    )
 
 
 def test_the_parallel_route_sizes_a_slice_past_the_late_checkpoint() raises:

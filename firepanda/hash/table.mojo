@@ -312,6 +312,7 @@ struct HashTable(Movable, Sized):
         offset: Int,
         mut codes: Array[DType.uint32],
         mut firsts: List[Int],
+        hash_at: Int = 0,
     ):
         """Inserts a chunk of a column's keys in one call.
 
@@ -370,8 +371,14 @@ struct HashTable(Movable, Sized):
             firsts: Appended with the absolute row index of every key that was
                 new, in ordinal order, so the caller can read the key values back
                 out of its own column without the table knowing what a value is.
+            hash_at: Where this chunk's hashes start in `hashes`. Zero for a
+                caller that hashed the chunk into a buffer of its own, which is
+                every caller that hashes as it goes. A partitioned build has the
+                hashes already laid out in the order it wants to insert them, in
+                one buffer as long as the column, and reads its chunks out of
+                that rather than copying each one to the front of a scratch.
         """
-        var hash = hashes.bitcast[DType.uint64]()
+        var hash = hashes.bitcast[DType.uint64]().unsafe_offset(hash_at)
         var out = codes.unsafe_ptr()
         var slots = self._slots.bitcast[DType.uint64]()
         var mask = self._mask

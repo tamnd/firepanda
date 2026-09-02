@@ -830,7 +830,21 @@ def _factorize_hashed[
     """
     var n = len(col)
     if n >= PARALLEL_ROWS and worker_count() > 1:
-        var workers = _parallel_workers(_projected_groups[dt](col, seed, n), n)
+        var groups = _projected_groups[dt](col, seed, n)
+        var most = min(worker_count(), n // PARALLEL_MIN_SLICE)
+        # A column whose tables would not fit in the shared cache is one where
+        # the slice route is paying for the same group in every worker, and that
+        # is the whole reason the partitioned route exists. Rows have to number
+        # inside a uint32 there, because the partitions carry row indices rather
+        # than the column itself.
+        if (
+            most >= 2
+            and groups >= 1
+            and _crowded(groups, most)
+            and n <= Int(UInt32.MAX)
+        ):
+            return _factorize_hashed_partitioned[dt](col, seed, most)
+        var workers = _parallel_workers(groups, n)
         if workers > 1:
             return _factorize_hashed_parallel[dt](col, seed, workers)
     return _factorize_hashed_serial[dt](col, seed)
@@ -1107,6 +1121,136 @@ def _rank_entries(
     return _Merged(map^, firsts^)
 
 
+comptime RANK_BLOCK = 1 << 16
+"""Rows per block in the pass that numbers a partitioned build's groups.
+
+That pass gives every block a scratch table with a slot per row in it, so the
+block is a quarter of a megabyte of scratch and stays in L2 while it is walked.
+Sixty five thousand rows also means a ten million row column has a hundred and
+fifty three blocks, which is enough for every core to have several and few enough
+that the empty ones cost nothing worth counting.
+"""
+
+
+def _rank_by_first_row(
+    reps: Buffer, total: Int, rows: Int, offset: Int
+) raises -> _Merged:
+    """Numbers groups by the row that introduced them, on every core.
+
+    The slice route gets first-appearance order for free: its workers hold
+    contiguous slices in order, so laying their groups end to end is already the
+    order the whole column first saw them in, and `_rank_entries` only has to
+    count. A partitioned build has no such luck. Its partitions are cut by hash,
+    so a partition's groups are in first-appearance order among themselves and
+    say nothing about any other partition's, and the numbering has to be
+    recovered from the representative rows.
+
+    That is a sort of the groups by a key that is distinct, is an index into the
+    column, and is therefore already about as bounded as a sort key gets. So it
+    is done as a bucket sort in two levels. The groups are radix partitioned by
+    which block of `RANK_BLOCK` rows their representative row falls in, which is
+    one counting pass and one placing pass over the groups. Then every block
+    sorts its own by writing each group into a scratch table indexed by the row
+    itself and reading the table back in order, which needs no comparisons at
+    all because two groups cannot share a representative row.
+
+    Blocks that no group landed in are skipped before they allocate, which is
+    what keeps a column with a handful of groups from walking a scratch table per
+    block of a column it barely touched.
+
+    Args:
+        reps: One int64 row index per group, indexed by entry.
+        total: How many groups there are.
+        rows: The column's length, which bounds the representative rows.
+        offset: Added to every final ordinal, reserving the low ones for the
+            null group.
+
+    Returns:
+        The renumbering and the representative row of each group, both in the
+        order the column first saw them.
+    """
+    if total == 0:
+        return _Merged(Buffer(0), List[Int]())
+
+    var blocks = (rows + RANK_BLOCK - 1) // RANK_BLOCK
+    var pieces = (total + MERGE_BLOCK - 1) // MERGE_BLOCK
+    var counts = List[Int](length=pieces * blocks, fill=0)
+
+    def tally(k: Int) raises {mut counts, imm}:
+        var rep = reps.bitcast[DType.int64]()
+        var at = k * blocks
+        var stop = min((k + 1) * MERGE_BLOCK, total)
+        for e in range(k * MERGE_BLOCK, stop):
+            var b = Int(rep.unsafe_offset(e).unsafe_load()) // RANK_BLOCK
+            counts[at + b] += 1
+
+    parallel_for(tally, pieces)
+
+    # Block major and piece minor, so that a block's ordinals are contiguous and
+    # start where the blocks before it ended. Rewritten in place into the write
+    # cursor each piece uses for each block.
+    var base = List[Int](length=blocks + 1, fill=0)
+    var running = 0
+    for b in range(blocks):
+        base[b] = running
+        for k in range(pieces):
+            var seen = counts[k * blocks + b]
+            counts[k * blocks + b] = running
+            running += seen
+    base[blocks] = running
+
+    var order = Buffer(overwritten=total * 4)
+
+    def place(k: Int) raises {mut order, imm}:
+        var rep = reps.bitcast[DType.int64]()
+        var slot = order.bitcast[DType.uint32]()
+        var at = List[Int](capacity=blocks)
+        for b in range(blocks):
+            at.append(counts[k * blocks + b])
+        var stop = min((k + 1) * MERGE_BLOCK, total)
+        for e in range(k * MERGE_BLOCK, stop):
+            var b = Int(rep.unsafe_offset(e).unsafe_load()) // RANK_BLOCK
+            slot.unsafe_offset(at[b]).unsafe_write(UInt32(e))
+            at[b] += 1
+
+    parallel_for(place, pieces)
+
+    var firsts = List[Int](length=total, fill=0)
+    var map = Buffer(overwritten=total * 4)
+
+    def number(b: Int) raises {mut map, mut firsts, imm}:
+        var lo = base[b]
+        var hi = base[b + 1]
+        if lo == hi:
+            return
+        var rep = reps.bitcast[DType.int64]()
+        var slot = order.bitcast[DType.uint32]()
+        var mapped = map.bitcast[DType.uint32]()
+        # Zero means no group had this row, and `Buffer` hands back zeroed
+        # memory, so the entry is stored plus one and the scratch needs no pass
+        # of its own to be ready.
+        var seat = Buffer(RANK_BLOCK * 4)
+        var seats = seat.bitcast[DType.uint32]()
+        var floor = b * RANK_BLOCK
+        for j in range(lo, hi):
+            var e = Int(slot.unsafe_offset(j).unsafe_load())
+            var r = Int(rep.unsafe_offset(e).unsafe_load()) - floor
+            seats.unsafe_offset(r).unsafe_write(UInt32(e + 1))
+        var at = lo
+        for r in range(RANK_BLOCK):
+            var held = seats.unsafe_offset(r).unsafe_load()
+            if held == 0:
+                continue
+            mapped.unsafe_offset(Int(held) - 1).unsafe_write(
+                UInt32(at + offset)
+            )
+            firsts[at] = floor + r
+            at += 1
+
+    parallel_for(number, blocks)
+    return _Merged(map^, firsts^)
+
+
 def _merge_hashed(
     found: Buffer,
     starts: List[Int],
@@ -1266,9 +1410,35 @@ def _parallel_workers(groups: Int, n: Int) -> Int:
     if most < 2 or groups < 1:
         return 1
 
-    if groups * TABLE_BYTES_PER_GROUP * most <= SHARED_CACHE_BYTES:
+    if not _crowded(groups, most):
         return most
     return max(2, most // CROWDED_SHARE)
+
+
+def _crowded(groups: Int, workers: Int) -> Bool:
+    """Reports whether a table per worker would leave the shared cache.
+
+    Every worker on the slice route builds a table that ends up holding roughly
+    all of the column's groups, so what the machine is asked to hold is the group
+    count times the worker count times the bytes a group takes up. While that
+    fits, every probe is a cache hit. Once it does not, every probe is a trip to
+    memory, and the workers are also each paying to discover groups the others
+    have already discovered and the merge is paying to fold the copies back
+    together.
+
+    Two routes read this and they read it differently. `_parallel_workers` uses
+    it to decide how many workers the slice route gets, and `_factorize_hashed`
+    uses it to decide whether to take the slice route at all. It is one statement
+    of the rule so the two cannot drift apart.
+
+    Args:
+        groups: The estimated distinct key count of the whole column.
+        workers: How many tables would be built.
+
+    Returns:
+        True when the tables together are larger than the shared cache.
+    """
+    return groups * TABLE_BYTES_PER_GROUP * workers > SHARED_CACHE_BYTES
 
 
 def _estimate_groups(seen: Int, half: Int, rows: Int, n: Int) -> Int:
@@ -1580,6 +1750,231 @@ def _factorize_hashed_parallel[
 
     parallel_for(remap, workers)
 
+    return Factorized[dt](codes^, firsts^, null_group)
+
+
+def _factorize_hashed_partitioned[
+    dt: DType
+](col: Array[dt], seed: UInt64, workers: Int) raises -> Factorized[dt]:
+    """Factorizes by cutting the rows into partitions no two workers share.
+
+    `_factorize_hashed_parallel` gives every worker a contiguous slice, which
+    means every worker sees very nearly every key the column has, so every
+    worker's table grows to hold very nearly every group. On a column with a
+    million groups and eight workers that is eight million entries built and then
+    folded back down to one million, and it is why the slice route stops scaling:
+    measured on ten million int64 rows, sixteen cores took a million group column
+    from a hundred and thirty eight milliseconds to eighty two, which is not what
+    sixteen cores are for.
+
+    So this cuts by the hash instead of by the row. Every row goes to the
+    partition its top hash bits name, no two partitions can hold the same key,
+    and a partition's table therefore holds its own share of the groups and
+    nothing else. Nothing has to be deduplicated afterwards because nothing was
+    duplicated, which deletes `_merge_hashed` from the route entirely.
+
+    What it costs is that the rows have to be moved. Three passes over the column
+    where the slice route has one: hash every row and count where it would go,
+    then write the row's number and its hash into the partition, then build. The
+    partition arrays are twelve bytes a row against the eighty a ten million row
+    int64 column already is, and the writes go to one cursor per partition rather
+    than anywhere, so the move is bandwidth rather than misses.
+
+    What it also costs is the numbering. First-appearance order is not free here
+    the way it is on the slice route, and `_rank_by_first_row` is what buys it
+    back. The ordinals come out identical to the serial route's, which is what
+    makes this a substitution rather than a second set of semantics.
+
+    Args:
+        col: The column.
+        seed: The per-query hash seed.
+        workers: How many slices to hash and scatter in parallel. At least two.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        The factorization.
+    """
+    var n = len(col)
+    var has_null = col.null_count() > 0
+    var offset = 1 if has_null else 0
+
+    # The partition count and the merge's bucket count answer the same question,
+    # so they are the same number: enough partitions that one drawing more than
+    # its share is a fraction of a core's turn rather than the tail of the phase,
+    # and small enough that the scatter has one write cursor per partition and
+    # they all stay live.
+    var bits = _merge_bits(workers)
+    var parts = 1 << bits
+    var shift = UInt64(64 - bits)
+
+    # Slices land on chunk boundaries so that the hashing is the same shape as
+    # everywhere else, with a short chunk only at the very end.
+    var chunks = (n + CHUNK_ROWS - 1) // CHUNK_ROWS
+    var bounds = List[Int](capacity=workers + 1)
+    for w in range(workers):
+        bounds.append(chunks * w // workers * CHUNK_ROWS)
+    bounds.append(n)
+
+    var hashes = List[Buffer](capacity=workers)
+    for w in range(workers):
+        hashes.append(Buffer(overwritten=(bounds[w + 1] - bounds[w]) * 8))
+    var counts = List[Int](length=workers * parts, fill=0)
+
+    def scan(w: Int) raises {mut hashes, mut counts, imm}:
+        var start = bounds[w]
+        var stop = bounds[w + 1]
+        hash_chunk(col, start, stop - start, seed, hashes[w])
+        var hash = hashes[w].bitcast[DType.uint64]()
+        var at = w * parts
+        for k in range(stop - start):
+            if has_null and not col.is_valid(start + k):
+                continue
+            counts[at + Int(hash.unsafe_offset(k).unsafe_load() >> shift)] += 1
+
+    parallel_for(scan, workers)
+
+    # Partition major and worker minor, which is what puts each partition's rows
+    # in increasing row order: worker zero's rows for a partition come before
+    # worker one's, and within a worker they are already in order. That order is
+    # what makes a partition's groups come out in the order it first saw them.
+    var offsets = List[Int](capacity=parts + 1)
+    var running = 0
+    for p in range(parts):
+        offsets.append(running)
+        for w in range(workers):
+            var seen = counts[w * parts + p]
+            counts[w * parts + p] = running
+            running += seen
+    offsets.append(running)
+    var valid = running
+
+    # The hash travels with the row rather than being looked up again from the
+    # row's number. Reading it back would be a miss per row into a buffer the
+    # size of the column; carrying it is eight more bytes written in order.
+    var rows_at = Buffer(overwritten=valid * 4)
+    var keys = Buffer(overwritten=valid * 8)
+
+    def place(w: Int) raises {mut rows_at, mut keys, imm}:
+        var start = bounds[w]
+        var stop = bounds[w + 1]
+        var hash = hashes[w].bitcast[DType.uint64]()
+        var row = rows_at.bitcast[DType.uint32]()
+        var key = keys.bitcast[DType.uint64]()
+        var at = List[Int](capacity=parts)
+        for p in range(parts):
+            at.append(counts[w * parts + p])
+        for k in range(stop - start):
+            if has_null and not col.is_valid(start + k):
+                continue
+            var found = hash.unsafe_offset(k).unsafe_load()
+            var p = Int(found >> shift)
+            row.unsafe_offset(at[p]).unsafe_write(UInt32(start + k))
+            key.unsafe_offset(at[p]).unsafe_write(found)
+            at[p] += 1
+
+    parallel_for(place, workers)
+    # The hashes are in the partitions now, and they are eight bytes a row, so
+    # the copy they were scattered out of is worth dropping before the build
+    # starts allocating tables.
+    _ = hashes^
+
+    # One ordinal per placed row, local to its partition. Indexed by where the
+    # row sits in the partition arrays rather than by the row itself, which is
+    # what lets `HashTable.build` be called here unchanged: it is being handed a
+    # run of hashes and a place to put a number per hash, and it does not care
+    # that the run is a partition rather than a slice.
+    var local = Array[DType.uint32](overwritten=valid)
+    var founds = List[List[Int]](capacity=parts)
+    for _ in range(parts):
+        founds.append(List[Int]())
+
+    def dig(p: Int) raises {mut founds, mut local, imm}:
+        var start = offsets[p]
+        var stop = offsets[p + 1]
+        var table = HashTable(0, seed)
+        var seen = List[Int]()
+        var base = start
+        while base < stop:
+            var count = min(CHUNK_ROWS, stop - base)
+            table.build(
+                keys,
+                col.data.validity,
+                False,
+                base,
+                base - start,
+                count,
+                stop - start,
+                0,
+                local,
+                seen,
+                base,
+            )
+            base += count
+        founds[p] = seen^
+
+    parallel_for(dig, parts)
+
+    var starts = List[Int](capacity=parts + 1)
+    var total = 0
+    for p in range(parts):
+        starts.append(total)
+        total += len(founds[p])
+    starts.append(total)
+
+    # `build` reports the position in the partition arrays that introduced each
+    # group, because that is what it was given as a row. The row it stands for is
+    # one load away and the numbering wants the row.
+    var reps = Buffer(overwritten=total * 8)
+
+    def gather(p: Int) raises {mut reps, imm}:
+        var out = reps.bitcast[DType.int64]()
+        var row = rows_at.bitcast[DType.uint32]()
+        var at = starts[p]
+        for l in range(len(founds[p])):
+            out.unsafe_offset(at + l).unsafe_write(
+                Int64(row.unsafe_offset(founds[p][l]).unsafe_load())
+            )
+
+    parallel_for(gather, parts)
+
+    var map = Buffer(0)
+    var firsts = List[Int]()
+    _rank_by_first_row(reps, total, n, offset).into_parts(map, firsts)
+    var mapped = map.bitcast[DType.uint32]()
+
+    var codes = Array[DType.uint32](overwritten=n)
+
+    def assign(p: Int) raises {mut codes, imm}:
+        var out = codes.unsafe_ptr()
+        var row = rows_at.bitcast[DType.uint32]()
+        var code = local.unsafe_ptr()
+        var at = starts[p]
+        for e in range(offsets[p], offsets[p + 1]):
+            var to = Int(row.unsafe_offset(e).unsafe_load())
+            var entry = at + Int(code.unsafe_offset(e).unsafe_load())
+            out.unsafe_offset(to).unsafe_write(
+                mapped.unsafe_offset(entry).unsafe_load()
+            )
+
+    parallel_for(assign, parts)
+
+    # The nulls never entered a partition, and `codes` was allocated without a
+    # pass to zero it, so they are the rows nothing has written yet.
+    if has_null:
+
+        def blank(w: Int) raises {mut codes, imm}:
+            var out = codes.unsafe_ptr()
+            for i in range(bounds[w], bounds[w + 1]):
+                if not col.is_valid(i):
+                    out.unsafe_offset(i).unsafe_write(UInt32(0))
+
+        parallel_for(blank, workers)
+
+    var null_group = -1
+    if has_null:
+        null_group = 0
     return Factorized[dt](codes^, firsts^, null_group)
 
 
