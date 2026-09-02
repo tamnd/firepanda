@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.31] - 2026-09-02
+
+Built against Mojo 1.0.0 (ed45d567).
+
+This release is the engine itself, plus the last of the foundation it needed. Nothing here changes an API, an answer or a number, because nothing in the tree calls the engine yet. That is the point of shipping it this way: the machinery lands first and correct, the operators move onto it one at a time afterwards, and each of those moves is a change small enough to have a benchmark of its own.
+
+The engine is a source, a line of nodes and a sink, with chunks pushed along the line. A node has three methods and the fallback node runs anything that has not been ported by collecting the chunks, calling today's whole frame function and handing the answer back in chunks. That fallback is what makes every later change a pull request rather than a rewrite.
+
+Under it is the sortedness flag, which is the thing a sorted group by and a merge join will read. Neither of those operators exists yet, and the flag is cheap enough that having it in place before them costs nothing and having it missing would block both.
+
 ### Added
 
 - The engine, in `firepanda/exec`: a `Chunk`, a `Node`, and a `Pipeline` that pushes chunks along a line of nodes from a source to a sink. A chunk is a horizontal slice of a frame, one array per column and a row count, and nothing else. It carries no schema, because names are a property of the plan and the plan is fixed before the first row moves. A node has three methods, `update_state`, `process` and `finish`, which is the shape Polars uses for `ComputeNode`. The driver takes a chunk from the source, hands it along the line, and puts whatever reaches the end into the sink.
@@ -1575,7 +1585,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.30...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.31...HEAD
+[0.6.31]: https://github.com/tamnd/firepanda/releases/tag/v0.6.31
 [0.6.30]: https://github.com/tamnd/firepanda/releases/tag/v0.6.30
 [0.6.29]: https://github.com/tamnd/firepanda/releases/tag/v0.6.29
 [0.6.28]: https://github.com/tamnd/firepanda/releases/tag/v0.6.28
