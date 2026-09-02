@@ -1027,3 +1027,80 @@ def is_sorted[
         have_previous = True
 
     return True
+
+
+def is_sorted_any(
+    col: AnyArray, descending: Bool = False, nulls_first: Bool = False
+) raises -> Bool:
+    """Reports whether a column of runtime dtype is already in sorted order.
+
+    The typed version above is the one that does the work for a fixed width
+    column. Text needs its own loop because a string column's order is over its
+    bytes rather than over a number, and `compare_elements` is what knows that.
+
+    Args:
+        col: The column.
+        descending: Check for largest first.
+        nulls_first: Expect the nulls at the front rather than the back.
+
+    Returns:
+        Whether the column is sorted the way the arguments describe.
+
+    Raises:
+        If the column's dtype is not one firepanda can order.
+    """
+    if col.is_string():
+        return _strings_are_sorted(col.strings(), descending, nulls_first)
+    comptime for candidate in ORDERED:
+        if col.dtype() == candidate:
+            return is_sorted(
+                col.as_typed_view[candidate](), descending, nulls_first
+            )
+    raise Error("is_sorted: unsupported dtype " + String(col.dtype()))
+
+
+def _strings_are_sorted(
+    col: StringArray, descending: Bool, nulls_first: Bool
+) -> Bool:
+    """Reports whether a text column is in sorted order.
+
+    The nulls have to be a contiguous run at whichever end the caller named, and
+    the present values in order between them, which is exactly what `argsort`
+    produces. Walking once and remembering the last present row is enough for
+    both halves of that.
+
+    Args:
+        col: The column.
+        descending: Check for largest first.
+        nulls_first: Expect the nulls at the front rather than the back.
+
+    Returns:
+        Whether the column is sorted.
+    """
+    var n = len(col)
+    if n < 2:
+        return True
+
+    var has_null = col.null_count() > 0
+    var seen_null = False
+    var previous = -1
+
+    for i in range(n):
+        if has_null and not col.validity.get(i):
+            if not nulls_first:
+                seen_null = True
+            elif previous >= 0:
+                return False
+            continue
+        if seen_null:
+            return False
+        if previous >= 0:
+            var order = col.compare_elements(previous, i)
+            if descending:
+                if order < 0:
+                    return False
+            elif order > 0:
+                return False
+        previous = i
+
+    return True

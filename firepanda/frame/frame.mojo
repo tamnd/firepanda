@@ -48,7 +48,7 @@ implementation and every method runs when it is called.
 
 from firepanda.array.any import AnyArray, ColumnRefs, borrow_columns
 from firepanda.array.array import Array
-from firepanda.array.chunked import ChunkedArray, wrap_columns
+from firepanda.array.chunked import ChunkedArray, Sortedness, wrap_columns
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.frame.display import DisplayOptions, render_table
@@ -671,9 +671,67 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         Raises:
             As `argsort` does.
         """
-        return self.take(
+        var out = self.take(
             _to_positions(self.argsort(by, descending, nulls_first))
         )
+        # The most significant key is the one that came out sorted. The rest are
+        # only sorted inside a run of equal values above them, which is not what
+        # the flag means, so they are left alone. `mark_sorted` refuses a column
+        # holding a null, which is the reason `nulls_first` is not consulted.
+        out.columns[self.schema.index_of(by[0])].mark_sorted(
+            Sortedness.DESCENDING if descending[0] else Sortedness.ASCENDING
+        )
+        return out^
+
+    def sortedness(mut self, name: String) raises -> Sortedness:
+        """Returns what is known about a column's order, scanning if it has to.
+
+        A column that a sort produced knows already and answers for free. Any
+        other column costs one pass the first time it is asked and remembers the
+        answer, including a negative one.
+
+        Args:
+            name: The column.
+
+        Returns:
+            What is now known about the order.
+
+        Raises:
+            If the name is missing or the dtype is not one firepanda can order.
+        """
+        return self.columns[self.schema.index_of(name)].prove_sorted()
+
+    def is_monotonic_increasing(mut self, name: String) raises -> Bool:
+        """Reports whether a column never decreases, as pandas does.
+
+        A column holding a null is never monotonic here. pandas says the same,
+        and the reason on this side is that the flag deliberately records nothing
+        about where a sort put the nulls.
+
+        Args:
+            name: The column.
+
+        Returns:
+            True if every value is at least the one before it.
+
+        Raises:
+            If the name is missing or the dtype is not one firepanda can order.
+        """
+        return self.sortedness(name).is_ascending()
+
+    def is_monotonic_decreasing(mut self, name: String) raises -> Bool:
+        """Reports whether a column never increases, as pandas does.
+
+        Args:
+            name: The column.
+
+        Returns:
+            True if every value is at most the one before it.
+
+        Raises:
+            If the name is missing or the dtype is not one firepanda can order.
+        """
+        return self.sortedness(name).is_descending()
 
     def sort_by(
         self,

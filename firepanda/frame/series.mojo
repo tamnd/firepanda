@@ -35,7 +35,7 @@ from firepanda.kernel.nulls import (
     is_null_any,
 )
 from firepanda.kernel.select import filter_any, take_any
-from firepanda.kernel.sort import argsort_any
+from firepanda.kernel.sort import argsort_any, is_sorted_any
 
 
 struct Series(Copyable, Movable, Sized, Writable):
@@ -370,6 +370,39 @@ struct Series(Copyable, Movable, Sized, Writable):
         """
         var order = self.argsort(descending, nulls_first)
         return self.take(_to_positions(order))
+
+    def is_monotonic_increasing(self) raises -> Bool:
+        """Reports whether the values never decrease, as pandas does.
+
+        A series is one contiguous array with no room to remember an answer, so
+        this scans every time it is asked. The frame's version of the same
+        question caches, because a column there carries a sortedness flag that a
+        sort has usually filled in already.
+
+        A series holding a null is never monotonic, which is what pandas says.
+
+        Returns:
+            True if every value is at least the one before it.
+
+        Raises:
+            If the dtype is not one firepanda can order.
+        """
+        if self.null_count() > 0:
+            return False
+        return is_sorted_any(self.values, descending=False)
+
+    def is_monotonic_decreasing(self) raises -> Bool:
+        """Reports whether the values never increase, as pandas does.
+
+        Returns:
+            True if every value is at most the one before it.
+
+        Raises:
+            If the dtype is not one firepanda can order.
+        """
+        if self.null_count() > 0:
+            return False
+        return is_sorted_any(self.values, descending=True)
 
     def is_null(self) -> Array[DType.bool]:
         """Returns a mask that is true where a row is missing.

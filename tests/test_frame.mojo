@@ -31,7 +31,7 @@ from std.testing import (
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array, from_list
-from firepanda.array.chunked import ChunkedArray
+from firepanda.array.chunked import ChunkedArray, Sortedness
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.lists import ALL
 from firepanda.dtype.schema import Schema
@@ -658,6 +658,105 @@ def test_sort_agrees_with_the_kernel_on_a_random_column() raises:
             Int(direct[i]),
             "frame and series agree at " + String(i),
         )
+
+
+def test_a_sort_leaves_its_key_marked_sorted() raises:
+    """The flag has to be free after a sort, or nothing will use it.
+
+    A group by on a key whose equal values are adjacent needs no hash table, and
+    the way it finds out that they are is this flag. If proving it took a scan
+    every time then the scan would cost more than the flag saves on the small
+    frames and the whole thing would be a wash.
+    """
+    var df = DataFrame.from_series(
+        [
+            int_series("key", [Int64(3), 1, 2, 1]),
+            int_series("val", [Int64(10), 20, 30, 40]),
+        ]
+    )
+    assert_false(df.is_monotonic_increasing("key"), "not sorted to start")
+
+    var up = df.sort_values(["key"], [False], [False])
+    assert_true(
+        up.columns[0].order == Sortedness.ASCENDING,
+        "the sort marked its key without being asked",
+    )
+    assert_true(up.is_monotonic_increasing("key"), "and it reads back")
+    assert_false(up.is_monotonic_decreasing("key"), "one direction only")
+
+    var down = df.sort_values(["key"], [True], [False])
+    assert_true(down.is_monotonic_decreasing("key"), "descending is recorded")
+
+    # Only the most significant key comes out sorted. The second is sorted
+    # inside a run of equal firsts, which is not what the flag claims.
+    var two = df.sort_values(["key", "val"], [False, False], [False, False])
+    assert_false(two.columns[1].order.is_known(), "the minor key is left alone")
+
+
+def test_proving_sortedness_scans_once_and_remembers() raises:
+    var df = DataFrame.from_series([int_series("key", [Int64(1), 1, 2, 5])])
+    assert_false(df.columns[0].order.is_known(), "nothing known to start")
+    assert_true(df.is_monotonic_increasing("key"), "the scan finds it")
+    assert_true(df.columns[0].order.is_known(), "and the answer is kept")
+
+    var flat = DataFrame.from_series([int_series("k", [Int64(7), 7, 7])])
+    assert_true(flat.is_monotonic_increasing("k"), "all equal is both ways")
+    assert_true(flat.is_monotonic_decreasing("k"), "all equal is both ways")
+
+
+def test_a_null_is_never_monotonic() raises:
+    """The flag says nothing about where a sort put the nulls, on purpose.
+
+    A merge join has to know which end they went to and a group by would rather
+    ask the null count and take the ordinary path, so recording it would add two
+    states that neither caller can use.
+    """
+    var df = sample_frame()
+    assert_true(df.columns[1].null_count() > 0, "the score column has a null")
+    assert_false(df.is_monotonic_increasing("score"), "so it is not monotonic")
+
+    var sorted = df.sort_values(["score"], [False], [False])
+    assert_false(
+        sorted.columns[1].order.is_known(),
+        "and sorting it does not change that",
+    )
+
+
+def test_sortedness_survives_a_column_in_pieces() raises:
+    """The scan checks the seams rather than flattening the column.
+
+    Flattening would copy every byte of the column to answer a question about
+    its order, which for a column that is about to be grouped is most of the cost
+    the flag exists to avoid.
+    """
+    var rising = ChunkedArray(AnyArray(from_list([Int64(1), 2])))
+    rising.append(AnyArray(from_list([Int64(3), 4])))
+    rising.append(AnyArray(from_list([Int64(9)])))
+    assert_equal(rising.prove_sorted(), Sortedness.ASCENDING, "rising")
+
+    # The seam between the second and third chunks is the only thing wrong with
+    # this one, and a per chunk check that did not look at seams would miss it.
+    var broken = ChunkedArray(AnyArray(from_list([Int64(1), 2])))
+    broken.append(AnyArray(from_list([Int64(3), 4])))
+    broken.append(AnyArray(from_list([Int64(0)])))
+    assert_equal(
+        broken.prove_sorted(), Sortedness.UNORDERED, "broken at a seam"
+    )
+
+
+def test_a_series_answers_the_monotonic_question_itself() raises:
+    assert_true(
+        int_series("a", [Int64(1), 1, 4]).is_monotonic_increasing(), "rising"
+    )
+    assert_false(
+        int_series("a", [Int64(1), 4, 1]).is_monotonic_increasing(), "not"
+    )
+    assert_true(
+        int_series("a", [Int64(4), 1, 1]).is_monotonic_decreasing(), "falling"
+    )
+    assert_true(
+        int_series("a", List[Int64]()).is_monotonic_increasing(), "empty"
+    )
 
 
 def test_a_series_reports_itself() raises:

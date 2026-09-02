@@ -28,10 +28,122 @@ the point.
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer
 from firepanda.dtype.logical import LogicalType
-from firepanda.kernel.concat import concat_any
+from firepanda.kernel.concat import concat_any, concat_two_any
+from firepanda.kernel.sort import is_sorted_any
 
 from .any import AnyArray
 from .data import ColumnData
+
+
+struct Sortedness(Equatable, ImplicitlyCopyable, Movable, Writable):
+    """What is known about the order of a column's values.
+
+    A runtime tag on the column rather than something rediscovered per query.
+    Two operators want it. A group by on a key whose equal values are adjacent
+    needs no hash table at all, it walks the column and closes a group when the
+    value changes, and that is the whole of Polars' sorted group by. A join of
+    two sorted inputs is a merge and needs no hash table either.
+
+    Null placement is deliberately not part of this. A column that has any nulls
+    is never marked, because the two ends a sort can put them at would need two
+    more states and neither operator that wants the flag can use them: a merge
+    join has to know, and a group by would rather ask `null_count` and take the
+    ordinary path. `nulls == 0` is already a field, so the check is free.
+    """
+
+    var code: UInt8
+    """Which order."""
+
+    def __init__(out self, code: UInt8):
+        """Constructs an order.
+
+        Args:
+            code: Which order.
+        """
+        self.code = code
+
+    comptime UNKNOWN = Self(0)
+    """Nothing is known. Every column starts here and returns here when written."""
+
+    comptime ASCENDING = Self(1)
+    """Values do not decrease from one row to the next, and there are no nulls."""
+
+    comptime DESCENDING = Self(2)
+    """Values do not increase from one row to the next, and there are no nulls."""
+
+    comptime CONSTANT = Self(3)
+    """Every value is the same, which is both of the above at once.
+
+    Worth a state of its own rather than picking one arbitrarily, because pandas
+    says a constant series is monotonic increasing and monotonic decreasing, and
+    a scan that answered only the first question would have to be run twice to
+    answer the second."""
+
+    comptime UNORDERED = Self(4)
+    """Checked, and in no order. Distinct from `UNKNOWN` so a scan runs once."""
+
+    def __eq__(self, other: Self) -> Bool:
+        """Compares two orders.
+
+        Args:
+            other: The order to compare against.
+
+        Returns:
+            True if they are the same.
+        """
+        return self.code == other.code
+
+    def __ne__(self, other: Self) -> Bool:
+        """Compares two orders for inequality.
+
+        Args:
+            other: The order to compare against.
+
+        Returns:
+            True if they differ.
+        """
+        return self.code != other.code
+
+    def is_known(self) -> Bool:
+        """Reports whether the question has been settled either way.
+
+        Returns:
+            True for anything but `UNKNOWN`.
+        """
+        return self.code != 0
+
+    def is_ascending(self) -> Bool:
+        """Reports whether the values never decrease.
+
+        Returns:
+            True for `ASCENDING` and for `CONSTANT`.
+        """
+        return self == Self.ASCENDING or self == Self.CONSTANT
+
+    def is_descending(self) -> Bool:
+        """Reports whether the values never increase.
+
+        Returns:
+            True for `DESCENDING` and for `CONSTANT`.
+        """
+        return self == Self.DESCENDING or self == Self.CONSTANT
+
+    def write_to(self, mut writer: Some[Writer]):
+        """Writes the name a user would recognise.
+
+        Args:
+            writer: The sink.
+        """
+        if self == Self.ASCENDING:
+            writer.write("ascending")
+        elif self == Self.DESCENDING:
+            writer.write("descending")
+        elif self == Self.CONSTANT:
+            writer.write("constant")
+        elif self == Self.UNORDERED:
+            writer.write("unordered")
+        else:
+            writer.write("unknown")
 
 
 struct ChunkedArray(Copyable, Movable, Sized):
@@ -49,6 +161,9 @@ struct ChunkedArray(Copyable, Movable, Sized):
     var nulls: Int
     """How many nulls the chunks hold between them, kept current on append."""
 
+    var order: Sortedness
+    """What is known about the order of the values. Never guessed, only set."""
+
     def __init__(out self, type: LogicalType):
         """Constructs a column with no chunks.
 
@@ -60,6 +175,7 @@ struct ChunkedArray(Copyable, Movable, Sized):
         self.starts.append(0)
         self.type = type
         self.nulls = 0
+        self.order = Sortedness.UNKNOWN
 
     def __init__(out self, var first: AnyArray):
         """Constructs a column from one chunk, taking its dtype.
@@ -74,6 +190,7 @@ struct ChunkedArray(Copyable, Movable, Sized):
         self.starts.append(len(first))
         self.chunks = List[AnyArray]()
         self.chunks.append(first^)
+        self.order = Sortedness.UNKNOWN
 
     def __init__(out self, *, copy: Self):
         """Deep-copies a column, chunk by chunk.
@@ -87,6 +204,7 @@ struct ChunkedArray(Copyable, Movable, Sized):
         self.starts = List[Int](copy.starts)
         self.type = copy.type
         self.nulls = copy.nulls
+        self.order = copy.order
 
     def __len__(self) -> Int:
         """Returns the total number of values across all chunks.
@@ -134,6 +252,11 @@ struct ChunkedArray(Copyable, Movable, Sized):
             )
         if len(chunk) == 0:
             return
+        # Appending can break an order that held over what was already here, and
+        # checking whether it did costs a comparison across the seam plus a scan
+        # of the new chunk. That is `prove_sorted`'s job and it is the caller's
+        # decision to pay for it, so the flag is dropped rather than defended.
+        self.order = Sortedness.UNKNOWN
         self.nulls += chunk.null_count()
         self.starts.append(self.starts[len(self.starts) - 1] + len(chunk))
         self.chunks.append(chunk^)
@@ -191,6 +314,84 @@ struct ChunkedArray(Copyable, Movable, Sized):
                 self.type,
             )
         return concat_any(held)
+
+    def mark_sorted(mut self, order: Sortedness):
+        """Records an order the caller already knows, without checking it.
+
+        This is what a sort calls on its own key column and what a reader calls
+        on a column a file says is sorted. It is unchecked on purpose: the caller
+        has just done the work that establishes the order and rescanning would
+        double it. A column holding a null is left alone, because the flag says
+        nothing about where nulls went.
+
+        Args:
+            order: What is known.
+        """
+        if self.nulls > 0:
+            return
+        self.order = order
+
+    def prove_sorted(mut self) raises -> Sortedness:
+        """Finds out whether the column is sorted, and remembers the answer.
+
+        One pass over the values, which is the price of turning a group by on
+        this column into a walk instead of a hash table, so it is worth paying
+        when the column is about to be grouped and not worth paying otherwise.
+        The answer is cached either way, including a negative one, so asking
+        twice costs one scan.
+
+        Returns:
+            What is now known about the order.
+
+        Raises:
+            If the column's dtype is not one firepanda can order.
+        """
+        if self.order.is_known() or self.nulls > 0:
+            return self.order
+        if len(self) < 2:
+            self.order = Sortedness.CONSTANT
+            return self.order
+        var up = self._is_sorted(descending=False)
+        var down = self._is_sorted(descending=True)
+        if up and down:
+            self.order = Sortedness.CONSTANT
+        elif up:
+            self.order = Sortedness.ASCENDING
+        elif down:
+            self.order = Sortedness.DESCENDING
+        else:
+            self.order = Sortedness.UNORDERED
+        return self.order
+
+    def _is_sorted(self, descending: Bool) raises -> Bool:
+        """Checks one direction without flattening the column.
+
+        Each chunk is checked on its own and then each seam between two chunks
+        is checked as a pair of rows, which is the whole of what a walk over the
+        flattened column would have found. Flattening first would copy every
+        byte of the column to answer a question about its order.
+
+        Args:
+            descending: Check for largest first.
+
+        Returns:
+            Whether the column is sorted that way.
+
+        Raises:
+            If the column's dtype is not one firepanda can order.
+        """
+        for c in range(len(self.chunks)):
+            if not is_sorted_any(self.chunks[c], descending):
+                return False
+        for c in range(len(self.chunks) - 1):
+            var last = len(self.chunks[c])
+            var seam = concat_two_any(
+                self.chunks[c].slice(last - 1, last),
+                self.chunks[c + 1].slice(0, 1),
+            )
+            if not is_sorted_any(seam, descending):
+                return False
+        return True
 
     def locate(self, index: Int) raises -> Tuple[Int, Int]:
         """Maps a row position to a chunk and an offset within it.
