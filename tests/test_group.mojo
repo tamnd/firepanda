@@ -615,6 +615,39 @@ def test_group_by_keeps_null_keys_when_asked() raises:
     assert_equal(nulls, 1)
 
 
+def test_dropna_on_two_keys_where_only_one_has_nulls() raises:
+    # `group_by` asks each key column whether it has any nulls before it walks
+    # the groups, so that a key with none is never looked at again. This is the
+    # shape where that could go wrong: two keys, one clean and one not, and the
+    # answer has to come from the dirty one rather than from neither.
+    var left = ints([1, 1, 2, 2, 3])
+    var right = ints([7, 8, 7, 8, 7])
+    right.set_null(3)
+    var values = ints([10, 20, 30, 40, 50])
+    var series = List[Series]()
+    series.append(Series("a", left^))
+    series.append(Series("b", right^))
+    series.append(Series("v", values^))
+    var frame = DataFrame.from_series(series^)
+
+    var by = List[String]()
+    by.append("a")
+    by.append("b")
+    var specs = List[AggSpec]()
+    specs.append(AggSpec("v", AggKind.SUM))
+
+    var kept = frame.group_by(by, specs, dropna=False, sort=False)
+    assert_equal(len(kept), 5, "every row here is its own key tuple")
+
+    var out = frame.group_by(by, specs, dropna=True, sort=False)
+    assert_equal(len(out), 4, "the tuple holding the null b is the only drop")
+    var sums = out.column("v_sum").as_typed[DType.int64]()
+    var total = Int64(0)
+    for i in range(len(out)):
+        total += sums[i]
+    assert_equal(total, 110, "10 + 20 + 30 + 50, with the 40 dropped")
+
+
 def test_group_by_unsorted_keeps_first_seen_order() raises:
     var frame = sample_frame()
     var by = List[String]()

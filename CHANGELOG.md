@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed
+
+- Gathering rows from a text column runs on every core. It was the last kernel in a group by still doing ten million random reads on one thread, and on db-benchmark q10 it was the largest single phase of the query, larger than the ordinals and twenty eight times the cost of gathering the same rows from three integer columns. A gather does not change how an element is stored, so a short value stays short and a long one keeps its length, which means an output row's view is sixteen bytes wide wherever it lands and the only thing that depends on the rows before it is where its payload bytes go. Each worker adds up the payload its own range will copy, the totals prefix sum into a base per worker, and then each worker writes its views and its payload with a cursor of its own. A column with nothing in its payload skips the counting pass entirely, which is every column of labels and is the case a group by's key gather actually hits.
+- A group by asks each key column whether it has any nulls before deciding whether `dropna` has anything to do. The check was a validity bit lookup per group per key with a random index behind it, so a group by on six keys with ten million tuples between them did sixty million of them on one thread to discover that none of the keys had a null in the first place. It is now a popcount over each key's validity, six passes over a megabyte and a quarter, and the groups are walked only for the keys that can actually answer yes.
+- db-benchmark group by at 0.5 GB on an i9-13900K, medians of five: q10, a sum and a size over ten million groups on six keys, went from 909.3 ms to 353.0 ms. That is past Polars 1.44.1 at 749.8 ms, having been well behind it, and within about one and a half times DuckDB 1.5.5 at 216.5 ms. The two changes are worth roughly 170 ms and 350 ms of that in the order they are listed above.
+
+### Added
+
+- `tools/probes/q10_phases.mojo`, which splits db-benchmark q10 into the ordinals, the key gathers and the two reductions. It is checked in because of the split it found rather than the numbers it prints: on the query's own shape the ordinals were 303 ms, the three text gathers were 467 ms and everything else together was 42 ms, which is not where the work had been going.
+
 ## [0.6.29] - 2026-09-02
 
 Built against Mojo 1.0.0 (ed45d567).
