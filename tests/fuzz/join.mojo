@@ -32,7 +32,7 @@ Usage:
 from std.sys import argv
 from std.time import perf_counter_ns
 
-from firepanda.array.any import AnyArray
+from firepanda.array.any import AnyArray, borrow_columns
 from firepanda.array.array import Array
 from firepanda.join.pairs import JoinIndices, JoinKind, join_indices
 from firepanda.join.scalar import join_nested
@@ -298,19 +298,19 @@ def main() raises:
             right_keys.append(k)
 
         var fast = join_indices(
-            left_columns,
+            borrow_columns(left_columns),
             left_keys,
             left_rows,
-            right_columns,
+            borrow_columns(right_columns),
             right_keys,
             right_rows,
             kind,
         )
         var slow = join_nested(
-            left_columns,
+            borrow_columns(left_columns),
             left_keys,
             left_rows,
-            right_columns,
+            borrow_columns(right_columns),
             right_keys,
             right_rows,
             kind,
