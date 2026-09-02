@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.33] - 2026-09-02
+
+Built against Mojo 1.0.0 (ed45d567).
+
+This release finishes the elementwise half of the streaming engine. Before it the engine could push chunks through a line of operators but the line could only be filter, select and limit, which is not enough to run a query. It can now run the shape almost every query actually has, which is a predicate over a column and a constant.
+
+Three things landed to get there. The first is `Compute` and `Cast`, the two nodes that finish the elementwise family. `Compute` appends rather than replaces, which is what lets an expression tree be a line of nodes: `(a + b) < c` is one node that appends `a + b` and a second that compares it against `c`. `Cast` replaces in place, because a cast says a column is that type now and everything downstream that named it still means it. Both bind when they are added to a pipeline rather than when the first chunk arrives, so a column position outside the schema, or an operation with no answer on those two types, is an error before a row moves.
+
+The second is `Value`, a scalar that carries its own type, and the constant kernels that go with it. A constant on either side of an expression is most of what a query contains, and until now `x > y` could be spelled and `x > 5` could not. The constant forms are their own loops rather than a column of a repeated value pushed through the pair forms, which measured 1.34x on addition at a million rows on an i9-13900K. Promotion looks at the constant's type rather than its value, so `x + 1` on an int32 column stays int32 and an expression's type stays something the plan can work out.
+
+The third is comparison on text. A filter on a label is the other half of what people write and it could not be spelled either. It is a byte loop rather than an arm of the dtype dispatch, and there was a real trap in the old arrangement: a text column's physical dtype is uint8, so falling through to the uint8 arm would have compared the first byte of each sixteen byte view as a value and answered nonsense without an error. Against a short constant it runs at 0.401 ns a row where the same question on a column of int64 runs at 0.210, so filtering on a label is within 2x of filtering on a number.
+
+The engine's elementwise operator line on the M2b checklist is now complete: filter, select, arithmetic, comparison, cast and with_column, on numbers and on text, none of them breaking a pipeline.
+
 ### Added
 
 - `Compute` and `Cast`, the two engine nodes that finish the elementwise family. `Filter` and `Project` were already there, so the line on the M2b checklist that asks for filter, select, arithmetic, comparison, cast and with_column is now four operators rather than two, and none of them is a breaker.
@@ -1634,7 +1648,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.32...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.33...HEAD
+[0.6.33]: https://github.com/tamnd/firepanda/releases/tag/v0.6.33
 [0.6.32]: https://github.com/tamnd/firepanda/releases/tag/v0.6.32
 [0.6.31]: https://github.com/tamnd/firepanda/releases/tag/v0.6.31
 [0.6.30]: https://github.com/tamnd/firepanda/releases/tag/v0.6.30
