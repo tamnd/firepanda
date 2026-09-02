@@ -379,6 +379,85 @@ def compare_const_scalar[
     return out^
 
 
+def compare_text_scalar[
+    op: Int
+](a: StringArray, b: StringArray) -> Array[DType.bool]:
+    """Compares two text columns, one element at a time, on copies of the bytes.
+
+    Each element is pulled out as a `String` and the two are compared with the
+    language's own comparison. That is what makes this a check rather than a
+    second copy of the kernel: the kernel compares packed views, and settles most
+    pairs without reading either string's bytes, so a twin that walked the views
+    the same way would agree with it about anything that arrangement got wrong.
+
+    Args:
+        a: The left column.
+        b: The right column. Must be the same length as `a`.
+
+    Parameters:
+        op: One of the `CMP_` codes.
+
+    Returns:
+        A bool column, null wherever either input is null.
+    """
+    var out = Array[DType.bool](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i) or not b.is_valid(i):
+            out.set_null(i)
+            continue
+        var left = a[i]
+        var right = b[i]
+        if op == CMP_EQ:
+            out.set_valid(i, left == right)
+        elif op == CMP_NE:
+            out.set_valid(i, left != right)
+        elif op == CMP_LT:
+            out.set_valid(i, left < right)
+        elif op == CMP_LE:
+            out.set_valid(i, left <= right)
+        elif op == CMP_GT:
+            out.set_valid(i, left > right)
+        else:
+            out.set_valid(i, left >= right)
+    return out^
+
+
+def compare_text_const_scalar[
+    op: Int
+](a: StringArray, b: String) -> Array[DType.bool]:
+    """Compares a text column against one string, one element at a time.
+
+    Args:
+        a: The column.
+        b: The constant.
+
+    Parameters:
+        op: One of the `CMP_` codes.
+
+    Returns:
+        A bool column, null where the column is null.
+    """
+    var out = Array[DType.bool](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        var left = a[i]
+        if op == CMP_EQ:
+            out.set_valid(i, left == b)
+        elif op == CMP_NE:
+            out.set_valid(i, left != b)
+        elif op == CMP_LT:
+            out.set_valid(i, left < b)
+        elif op == CMP_LE:
+            out.set_valid(i, left <= b)
+        elif op == CMP_GT:
+            out.set_valid(i, left > b)
+        else:
+            out.set_valid(i, left >= b)
+    return out^
+
+
 def cast_scalar[src: DType, dst: DType](col: Array[src]) -> Array[dst]:
     """Converts a column to another dtype, one element at a time.
 

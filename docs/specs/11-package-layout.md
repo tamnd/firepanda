@@ -31,6 +31,7 @@ firepanda/
     compare.mojo  select.mojo  agg.mojo        arith.mojo
     accum.mojo    group.mojo   reduce.mojo     concat.mojo
     mask.mojo     nulls.mojo   sort.mojo       cast.mojo
+    binary.mojo   text.mojo    the dtype as a value, and comparison on bytes
     string.mojo   regex.mojo                                              M6
     scalar.mojo            the twins, @no_inline, never called in production
 

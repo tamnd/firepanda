@@ -117,6 +117,8 @@ from firepanda.kernel import (
     arith_const,
     cast_to,
     compare_const,
+    compare_text,
+    compare_text_const,
     coalesce,
     concat_any,
     concat_arrays,
@@ -144,7 +146,7 @@ from firepanda.kernel import (
     take_rows,
 )
 from firepanda.kernel.arith import OP_ADD
-from firepanda.kernel.compare import CMP_LT
+from firepanda.kernel.compare import CMP_EQ, CMP_LT
 from firepanda.testing.rng import Rng
 from firepanda.kernel.scalar import (
     add_scalar,
@@ -2042,6 +2044,14 @@ def bench_text(mut harness: Harness) raises:
     a million int64 rows sit in a cache the full million does not, so the two
     tables disagree by a factor that is about the machine and not about the code.
 
+    The five comparison rows are the ones to read as a group. `equal_short` holds
+    elements that fit inside their views, so the answer comes out of four register
+    compares with nothing loaded, and `equal_long` holds elements that do not, so
+    every row leaves the view and reads the payload. The two constant rows are the
+    same split with the second column replaced by one string, and `equal_number`
+    is the same question asked of a column of int64, which is the floor none of
+    the text rows can reach.
+
     The sort rows and the group rows read the same three text columns and reward
     opposite shapes, which is the most useful thing in the table. A column of
     short repeated labels is the sort's best case and the group's best case for
@@ -2154,6 +2164,69 @@ def bench_text(mut harness: Harness) raises:
         keep(found)
 
     harness.record("text/is_string", "calls", 2, guard)
+
+    # Comparison on text, in the two shapes it has and against the number row
+    # that answers the same question. Every column here is built so that the
+    # answer is decided as late as possible: the two long columns hold identical
+    # elements, so equality has to read all thirty two bytes of every row before
+    # it can say yes, and the constant is the column's own first element with the
+    # prefix held fixed, so the byte loop runs to the last byte on almost every
+    # row. These are worst cases and are meant to be. The best case is a length
+    # that differs, which is one compare, and a table full of those would say
+    # nothing about the loop.
+    var long_left = _string_column(rows, 32, True)
+    var long_right = _string_column(rows, 32, True)
+    var short_left = _string_column(rows, 8, True)
+    var short_right = _string_column(rows, 8, True)
+    var flat = _string_column(rows, 32, False)
+
+    # The first element of `flat`, which every other element agrees with except
+    # in its last byte.
+    var probe = String("")
+    for j in range(32):
+        if j == 31:
+            probe += chr(97)
+        else:
+            probe += chr(97 + j % 26)
+
+    def equal_long() raises {imm long_left, imm long_right}:
+        var out = compare_text[CMP_EQ](long_left, long_right)
+        keep(out)
+
+    harness.record("text/equal_long", "rows", rows, equal_long)
+
+    def equal_short() raises {imm short_left, imm short_right}:
+        var out = compare_text[CMP_EQ](short_left, short_right)
+        keep(out)
+
+    harness.record("text/equal_short", "rows", rows, equal_short)
+
+    def equal_constant() raises {imm flat, imm probe}:
+        var out = compare_text_const[CMP_EQ](flat, probe.as_bytes())
+        keep(out)
+
+    harness.record("text/equal_constant", "rows", rows, equal_constant)
+
+    var word = String("abcdefgh")
+
+    def equal_constant_short() raises {imm short_left, imm word}:
+        var out = compare_text_const[CMP_EQ](short_left, word.as_bytes())
+        keep(out)
+
+    harness.record(
+        "text/equal_constant_short", "rows", rows, equal_constant_short
+    )
+
+    var plain = Array[BENCH_DTYPE](rows)
+    for i in range(rows):
+        plain[i] = Scalar[BENCH_DTYPE](i)
+    var literal = Scalar[BENCH_DTYPE](7)
+
+    def equal_number() raises {imm plain, imm literal}:
+        var out = compare_const[BENCH_DTYPE, CMP_EQ](plain, literal)
+        keep(out)
+
+    harness.record("text/equal_number", "rows", rows, equal_number)
 
     # The three rows to read together are the sort rows, and what separates them
     # is how much of the answer the eight byte key can give. `sort_distinct` is

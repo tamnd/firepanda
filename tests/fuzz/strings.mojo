@@ -32,8 +32,17 @@ from firepanda.hash.factorize import (
     factorize_strings,
 )
 from firepanda.hash.function import DEFAULT_SEED
+from firepanda.kernel.compare import (
+    CMP_EQ,
+    CMP_GE,
+    CMP_GT,
+    CMP_LE,
+    CMP_LT,
+    CMP_NE,
+)
 from firepanda.kernel.group import AggKind, aggregate_group_any
 from firepanda.kernel.sort import argsort_any
+from firepanda.kernel.text import compare_text, compare_text_const
 from firepanda.testing.rng import Rng
 
 comptime DEFAULT_CASES = 1_000_000
@@ -383,6 +392,182 @@ def check(
         )
 
 
+def reference_compare(pick: Int, a: String, b: String) -> Bool:
+    """Answers one of the six comparisons with the language's own operators.
+
+    Args:
+        pick: Which comparison, in the order the `CMP_` codes are numbered.
+        a: The left string.
+        b: The right string.
+
+    Returns:
+        The answer.
+    """
+    if pick == CMP_EQ:
+        return a == b
+    if pick == CMP_NE:
+        return a != b
+    if pick == CMP_LT:
+        return a < b
+    if pick == CMP_LE:
+        return a <= b
+    if pick == CMP_GT:
+        return a > b
+    return a >= b
+
+
+def check_text_compare(
+    column: StringArray,
+    values: List[String],
+    present: List[Bool],
+    mut rng: Rng,
+    step: Int,
+    seed: UInt64,
+) raises:
+    """Compares the column against a shuffle of itself and against a constant.
+
+    The second column is a gather from the first rather than a fresh build, so
+    the two agree on their bytes far more often than two independent columns
+    would. Two random strings over the alphabet this file draws from are almost
+    never equal, and a comparison that got equality wrong would still pass every
+    case if it only ever saw pairs that differ in their first byte.
+
+    The constant is drawn the same way the elements are, so it lands on both
+    sides of the inline limit and takes both branches of the constant kernel
+    across a run.
+
+    Args:
+        column: The column under test.
+        values: The reference elements.
+        present: The reference validity.
+        rng: The generator.
+        step: The case number, for the failure message.
+        seed: The seed, for the failure message.
+
+    Raises:
+        If a kernel and the reference disagree anywhere.
+    """
+    var rows = len(values)
+    var picks = List[Int](capacity=rows)
+    var other_values = List[String](capacity=rows)
+    var other_present = List[Bool](capacity=rows)
+    for _ in range(rows):
+        var i = rng.next_below(rows)
+        picks.append(i)
+        other_values.append(values[i])
+        other_present.append(present[i])
+    var other = column.take(picks)
+
+    var pick = rng.next_below(6)
+    var got: Array[DType.bool]
+    if pick == CMP_EQ:
+        got = compare_text[CMP_EQ](column, other)
+    elif pick == CMP_NE:
+        got = compare_text[CMP_NE](column, other)
+    elif pick == CMP_LT:
+        got = compare_text[CMP_LT](column, other)
+    elif pick == CMP_LE:
+        got = compare_text[CMP_LE](column, other)
+    elif pick == CMP_GT:
+        got = compare_text[CMP_GT](column, other)
+    else:
+        got = compare_text[CMP_GE](column, other)
+
+    for i in range(rows):
+        var valid = present[i] and other_present[i]
+        var want = reference_compare(pick, values[i], other_values[i])
+        if got.is_valid(i) != valid:
+            raise Error(
+                String(
+                    "step ",
+                    step,
+                    " seed ",
+                    seed,
+                    ": comparison ",
+                    pick,
+                    " row ",
+                    i,
+                    " came back ",
+                    "present" if got.is_valid(i) else "null",
+                    " where the reference has ",
+                    "a value" if valid else "nothing",
+                )
+            )
+        if valid and Bool(got[i]) != want:
+            raise Error(
+                String(
+                    "step ",
+                    step,
+                    " seed ",
+                    seed,
+                    ": comparison ",
+                    pick,
+                    " on ",
+                    values[i],
+                    " and ",
+                    other_values[i],
+                    " answered ",
+                    Bool(got[i]),
+                    " where the reference answers ",
+                    want,
+                )
+            )
+
+    var constant = random_text(rng)
+    var against: Array[DType.bool]
+    if pick == CMP_EQ:
+        against = compare_text_const[CMP_EQ](column, constant.as_bytes())
+    elif pick == CMP_NE:
+        against = compare_text_const[CMP_NE](column, constant.as_bytes())
+    elif pick == CMP_LT:
+        against = compare_text_const[CMP_LT](column, constant.as_bytes())
+    elif pick == CMP_LE:
+        against = compare_text_const[CMP_LE](column, constant.as_bytes())
+    elif pick == CMP_GT:
+        against = compare_text_const[CMP_GT](column, constant.as_bytes())
+    else:
+        against = compare_text_const[CMP_GE](column, constant.as_bytes())
+
+    for i in range(rows):
+        var want = reference_compare(pick, values[i], constant)
+        if against.is_valid(i) != present[i]:
+            raise Error(
+                String(
+                    "step ",
+                    step,
+                    " seed ",
+                    seed,
+                    ": comparison ",
+                    pick,
+                    " against a constant, row ",
+                    i,
+                    " came back ",
+                    "present" if against.is_valid(i) else "null",
+                    " where the reference has ",
+                    "a value" if present[i] else "nothing",
+                )
+            )
+        if present[i] and Bool(against[i]) != want:
+            raise Error(
+                String(
+                    "step ",
+                    step,
+                    " seed ",
+                    seed,
+                    ": comparison ",
+                    pick,
+                    " on ",
+                    values[i],
+                    " against the constant ",
+                    constant,
+                    " answered ",
+                    Bool(against[i]),
+                    " where the reference answers ",
+                    want,
+                )
+            )
+
+
 def build(
     mut rng: Rng, mut values: List[String], mut present: List[Bool]
 ) raises -> StringArray:
@@ -533,7 +718,7 @@ def main() raises:
             column = duplicate^
             check(column, values, present, step, options.seed, "copy source")
 
-        elif op < 90 and len(values) > 1:
+        elif op < 88 and len(values) > 1:
             # Every pair of a small column compared both ways, against what the
             # reference says. This is the only check that reaches the prefix
             # comparison in the view.
@@ -558,6 +743,9 @@ def main() raises:
                                 column.element_equals(i, j),
                             )
                         )
+
+        elif op < 90 and len(values) > 0:
+            check_text_compare(column, values, present, rng, step, options.seed)
 
         elif op < 95 and len(values) > 0:
             # The permutation is compared position by position rather than the
