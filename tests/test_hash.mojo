@@ -33,6 +33,7 @@ from firepanda.hash import (
 )
 from firepanda.exec import worker_count
 from firepanda.hash.factorize import (
+    DIRECT_SHARE,
     PARALLEL_MIN_SLICE,
     PARALLEL_ROWS,
     _estimate_groups,
@@ -769,6 +770,65 @@ def test_factorize_takes_the_hashed_route_over_the_limit() raises:
         col[i] = Int64((i % 500) * (DIRECT_LIMIT + 17))
     same_codes(col, "hashed route")
     assert_equal(factorize(col).count(), 500)
+
+
+def test_factorize_takes_a_table_wider_than_the_limit_on_a_long_column() raises:
+    """A span past `DIRECT_LIMIT` and inside the share, which is now direct.
+
+    The bound `factorize` offers the direct table on a long column is a slot for
+    every `DIRECT_SHARE` rows, so this column takes a table of ninety thousand
+    slots where it used to be hashed. The same groups in the same order are built
+    again far enough apart that no row count could accept them, which pins that
+    second column to the hash, and the two have to come out with identical codes.
+    """
+    var n = DIRECT_LIMIT * DIRECT_SHARE * 2
+    var near = Array[DType.int64](n)
+    var far = Array[DType.int64](n)
+    for i in range(n):
+        var value = Int64((i * 7919) % 90000)
+        near[i] = value
+        far[i] = value * Int64(1 << 20)
+
+    var direct = factorize(near)
+    var hashed = factorize(far)
+    assert_equal(direct.count(), 90000)
+    assert_equal(direct.count(), hashed.count())
+    var bad = -1
+    for i in range(n):
+        if direct.codes[i] != hashed.codes[i]:
+            bad = i
+            break
+    assert_equal(bad, -1, String("routes disagree at ", bad))
+
+
+def test_a_wide_direct_table_still_puts_the_nulls_at_ordinal_zero() raises:
+    """The null group on a span the direct route only reaches on a long column.
+
+    Nulls at ordinal zero and the keys following in first-appearance order is a
+    promise both routes make, and the direct one had never been asked to make it
+    at a span this wide because nothing sent it one.
+    """
+    var n = DIRECT_LIMIT * DIRECT_SHARE * 2
+    var near = Array[DType.int64](n)
+    var far = Array[DType.int64](n)
+    for i in range(n):
+        var value = Int64((i * 7919) % 90000)
+        near[i] = value
+        far[i] = value * Int64(1 << 20)
+        if i % 7 == 0:
+            near.set_null(i)
+            far.set_null(i)
+
+    var direct = factorize(near)
+    var hashed = factorize(far)
+    assert_equal(direct.null_group, 0)
+    assert_equal(direct.count(), hashed.count())
+    var bad = -1
+    for i in range(n):
+        if direct.codes[i] != hashed.codes[i]:
+            bad = i
+            break
+    assert_equal(bad, -1, String("routes disagree at ", bad))
 
 
 def test_the_two_routes_agree_on_the_same_data() raises:
