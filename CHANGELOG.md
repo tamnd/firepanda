@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed
+
+- `factorize` offers the direct table a slot for every four rows of a long column, where it used to refuse any table wider than sixty five thousand slots. The old bound was about a table fitting in cache and the new one is about a table being cheaper than the thing it replaces: a direct slot is four bytes against a hash table's sixteen, and the hash table needs its own set of them for every worker, so a direct table of this width is smaller than the hash even when most of it is empty. The join's build side has drawn its line in the same way all along, at a slot a row, and it takes a wider table because it has two passes to pay for it rather than one. A column of under a quarter of a million rows keeps the bound it had.
+- Measured on ten million rows of int64 on the i9-13900K, direct against hashed on the same groups, span fully occupied: a hundred thousand slots is 12 ms against 36, a million is 22 against 99, and two and a half million, which is the new ceiling, is 36 against 129. The other shape, a wide span with hardly anything in it, is what the old limit was written to decline, and there the two routes are close: a million slots holding a thousand values is 11 ms direct against 7 hashed, five million holding a hundred is 12 against 13, and a million holding a hundred thousand is 17 against 33. What the sparse cases cost the direct route is the scan and the ordinals rather than the table, since a table with few values in it only ever touches a few slots, so the penalty is a fixed few milliseconds while the gain on the dense cases grows with the span. The ceiling is set below where the direct route stops winning, because a table of one byte a row cannot be a surprise in anybody's memory budget and everything above it is already handled.
+- On db-benchmark at 0.5GB in memory, four engines in one run on the i9-13900K, this is q5 from 52 ms to 29 ms and q10 from 365 ms to 353 ms. Both group on an integer key of a hundred thousand values, which is a span the old bound declined by a factor of one and a half. q5 is now the fastest of the four by a wide margin, against 54 ms for Polars, 79 for DuckDB and 261 for pandas, and it uses less memory than any of them.
+
 ## [0.6.31] - 2026-09-02
 
 Built against Mojo 1.0.0 (ed45d567).

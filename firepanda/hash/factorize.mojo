@@ -17,14 +17,18 @@ group bys anyone actually runs. Both passes over the column are sequential.
 **The hash table.** Everything else. Floats, wide-ranging integers, anything
 where a direct table would be larger than the column it is replacing.
 
-The switch is `DIRECT_LIMIT` and it is a memory bound rather than a guess about
-cardinality: the direct table costs four bytes per possible value, so it is worth
-taking exactly when the range is small enough that the table behaves like cache.
+The switch is a memory bound rather than a guess about cardinality. A direct
+table costs four bytes per possible value and a hash slot costs sixteen, and the
+hash table needs its own set of slots for every worker, so a direct table stays
+the smaller of the two well past the point where it stops fitting in any cache.
+The rule is a slot for every four rows, which is one byte a row against the four
+that the ordinals cost, and `DIRECT_LIMIT` is the floor under it for columns too
+short for a share of their height to be much of a bound.
 
-That limit is about a range nobody vouched for. `factorize_dense` is the same
-route for a caller who built the values and can say what range they are in, and
-its bound is the table against the column rather than against the cache, because
-a constructed range comes with an idea of how much of itself is occupied.
+`factorize_dense` is the same route for a caller who built the values and can say
+what range they are in. It accepts a wider table than the scan will, because a
+constructed range comes with an idea of how much of itself is occupied, and it
+skips the scan for the same reason.
 
 Text has a third route, `factorize_strings`, and it is the hash table with the
 key comparison put back, because a string does not fit in the 64 bits the table
@@ -75,12 +79,30 @@ from .function import DEFAULT_SEED, hash_chunk, hash_strings_chunk
 from .table import HashTable
 
 comptime DIRECT_LIMIT = 1 << 16
-"""Largest integer range that skips the hash table.
+"""Smallest integer range that always skips the hash table.
 
 65536 slots is 256 KB of uint32, which is the last size that behaves like cache
-rather than like memory on the machines this targets. Above it the direct table
+rather than like memory on the machines this targets, so a table this wide is
+worth taking whatever the column costs to hash.
+
+This used to be a ceiling as well as a floor, on the argument that a wider table
 stops being a lookup and starts being the same random access the hash table was
-going to do anyway, with worse density.
+going to do anyway. The second half of that is true and the conclusion did not
+follow: the random access is the same and everything around it is cheaper, so a
+much wider direct table still beats the hash. `DIRECT_SHARE` is the bound
+`factorize` uses on a long column now, and this is what a column too short for
+that bound to mean anything gets instead.
+"""
+
+comptime DIRECT_SHARE = 4
+"""Rows per slot of the widest direct table `factorize` will accept.
+
+A slot is four bytes, so a quarter of a slot per row is one byte per row, which
+is a quarter of what the ordinals coming out of the factorize cost. A table that
+small cannot be a surprise in a query's memory, which is the point: the
+measurement in `tools/probes/direct_ceiling.mojo` says the direct route is still
+ahead a good way past this, so the number is chosen to be uncontroversial rather
+than to be the last place the route wins.
 """
 
 comptime SAFE_RANGE_BITS = 40
@@ -287,6 +309,45 @@ def factorize[
 ](col: Array[dt], seed: UInt64 = DEFAULT_SEED) raises -> Factorized[dt]:
     """Assigns a group ordinal to every row.
 
+    On a long column the direct table is offered a slot for every four rows,
+    which is far wider than `DIRECT_LIMIT`. The reason is what the table is being
+    compared against rather than what fits in cache. A direct slot is four bytes
+    and a hash slot is sixteen, and the hash table needs its own set of them for
+    every worker, so a direct table of this width is smaller than the thing it
+    replaces even when most of it is empty.
+
+    Measured on ten million rows of int64 on the i9-13900K, direct against
+    hashed, with the span fully occupied: a hundred thousand slots is 12 ms
+    against 36, a million is 22 against 99, and two and a half million, which is
+    the ceiling, is 36 against 129.
+
+    The other shape is a wide span with hardly anything in it, which is the table
+    mostly full of holes `DIRECT_LIMIT` was written to decline, and there the two
+    routes are close. A span of a million holding a thousand values is 11 ms
+    direct against 7 hashed, a span of five million holding a hundred is 12
+    against 13, and a span of a million holding a hundred thousand is 17 against
+    33. What the sparse cases cost the direct route is the scan and the ordinals,
+    not the table: a table with few values in it only ever touches a few slots
+    and they stay in cache however large it is. So the penalty is a fixed few
+    milliseconds that does not grow with the span, while the gain on the dense
+    cases does.
+
+    That argument would carry a ceiling of a slot a row. It is set at a quarter
+    of that anyway, because a table that is one byte a row cannot be a surprise
+    in anybody's memory budget, and because everything above the ceiling is
+    something the hash route is already handling correctly.
+
+    A column of fewer than four times `DIRECT_LIMIT` rows keeps the old bound,
+    which was the smaller of that limit and its own height.
+
+    What a wider bound costs is the scan. `direct_plan` stops as soon as no later
+    row could bring the span back under the ceiling, and raising the ceiling
+    moves that point later, so a column whose span lands just above the bound is
+    now scanned further before being hashed anyway. That scan is sequential and
+    the route it is deciding between costs tens of milliseconds, so it is a
+    small price for the case above, where the same scan finds a span the table
+    can take.
+
     Args:
         col: The column to group.
         seed: The per-query hash seed. Ignored on the direct route, which does
@@ -300,7 +361,10 @@ def factorize[
         nulls got.
     """
     comptime if dt.is_integral():
-        var plan = direct_plan[dt](col, min(DIRECT_LIMIT, len(col)))
+        var ceiling = len(col) // DIRECT_SHARE
+        if ceiling < DIRECT_LIMIT:
+            ceiling = min(DIRECT_LIMIT, len(col))
+        var plan = direct_plan[dt](col, ceiling)
         if plan.span >= 0:
             return _factorize_direct[dt](col, plan.span, plan.base)
     return _factorize_hashed[dt](col, seed)
@@ -374,12 +438,14 @@ def direct_plan[dt: DType](col: Array[dt], ceiling: Int) -> DirectPlan[dt]:
     scattered keys that is eight milliseconds down to under one.
 
     The widest span worth a table is the caller's to say, because it depends on
-    what the table is for. A factorize wants it small: a span far past the row
-    count is a table mostly full of holes, and the random access into it is the
-    one the hash was going to be anyway with worse density. A join's build side
-    wants it as wide as the build side is tall, because there the table replaces
-    a hash table of the same order and the alternative is hashing every probe
-    row. So the number comes in rather than being decided here.
+    what the table is for and on how many rows are going to be pushed through it.
+    Every caller today asks for some share of a slot per row of the input it is
+    building over, which is a table smaller than the hash table it replaces, but
+    they arrive at that number from different row counts and they do not agree on
+    the share. A join's build side takes a slot a row, because every probe row
+    that misses the table is a hash saved. A factorize takes a quarter of that,
+    because it has one pass to pay the table off against rather than two. So the
+    number comes in rather than being decided here.
 
     Args:
         col: The column.
