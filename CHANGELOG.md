@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.32] - 2026-09-02
+
+Built against Mojo 1.0.0 (ed45d567).
+
+This release is three changes to one kernel, the factorize, which is the thing that turns a key column into a group number and is the first step of every group by and every hash join in the tree. All three are about the same observation: the routes it had were written for columns with few distinct values in them, and the benchmark suite is full of columns with a hundred thousand or a million.
+
+The first widens the direct table. A key whose values fall in a known narrow range does not need a hash table at all, it needs an array indexed by the value, and the old rule refused any such array wider than sixty five thousand slots on the grounds that it should fit in cache. The new rule is that a direct slot is four bytes where a hash slot is sixteen and the hash table needs a set of them per worker, so a direct table of a slot per four rows is smaller than the hash it replaces even when most of it is empty. On ten million rows that is a hundred thousand values in 12 ms against 36, a million in 22 against 99, and two and a half million in 36 against 129.
+
+The second and third replace the shape of the parallel route when the groups are many. The old route cuts the rows into contiguous slices and gives each worker a table over its own slice, which is right when a slice holds a few of the groups and wrong when it holds nearly all of them, because then every worker builds nearly the whole answer and a merge folds the copies back together. The new route cuts by hash instead. Two partitions cannot share a key, so each table holds only its own share of the groups and there is no merge at the end at all. What that costs is first appearance order, which the slice route got for free from the shape of its own work, and `_rank_by_first_row` buys it back by numbering the groups by the row that introduced them, with no comparisons and a core per block. The gate between the two routes is one statement, `_crowded`, read by both so they cannot drift, and it flips where a table per worker leaves the shared cache. The numeric route landed first and the string route followed, and the argument is stronger for text, because a string group costs a byte comparison to establish rather than just a slot to hold.
+
+Taken together on db-benchmark at 0.5GB in memory on an i9-13900K, q3 goes from 79 ms to 51, q5 from 52 to 29, q7 from 85 to 54, and q10 from 365 to 225. The probe that breaks q10 apart puts the whole six key ordinals pass at 161 ms where it was 301. Against pandas 3.0.5, Polars 1.44.1 and DuckDB 1.5.5 on the same box and the same run, firepanda is now the fastest of the four on q3, q5, j4 and j5, and holds the smallest peak resident memory of the four on every query in the suite.
+
 ### Changed
 
 - `factorize` offers the direct table a slot for every four rows of a long column, where it used to refuse any table wider than sixty five thousand slots. The old bound was about a table fitting in cache and the new one is about a table being cheaper than the thing it replaces: a direct slot is four bytes against a hash table's sixteen, and the hash table needs its own set of them for every worker, so a direct table of this width is smaller than the hash even when most of it is empty. The join's build side has drawn its line in the same way all along, at a slot a row, and it takes a wider table because it has two passes to pay for it rather than one. A column of under a quarter of a million rows keeps the bound it had.
@@ -1600,7 +1612,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.31...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.32...HEAD
+[0.6.32]: https://github.com/tamnd/firepanda/releases/tag/v0.6.32
 [0.6.31]: https://github.com/tamnd/firepanda/releases/tag/v0.6.31
 [0.6.30]: https://github.com/tamnd/firepanda/releases/tag/v0.6.30
 [0.6.29]: https://github.com/tamnd/firepanda/releases/tag/v0.6.29
