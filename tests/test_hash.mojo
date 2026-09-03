@@ -11,6 +11,12 @@ routes down so that test is actually exercising both of them.
 The float tests are the ones that fail on a real dataset rather than in CI. A
 column of NaNs and a column containing negative zero both group wrongly under a
 naive `==`, and neither shows up unless somebody writes the test.
+
+The last three tests are not about answers at all, they are about where the two
+split thresholds sit relative to the chunk size, to the minimum slice and to each
+other. Nothing they check can make a wrong group, so nothing else in this file
+would catch it, and what it costs when it is wrong is several times the runtime
+of every group by a pipeline does.
 """
 
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
@@ -31,11 +37,12 @@ from firepanda.hash import (
     mix,
     radix_partition,
 )
-from firepanda.exec import worker_count
+from firepanda.exec import MORSEL_ROWS, worker_count
 from firepanda.hash.factorize import (
     DIRECT_SHARE,
     PARALLEL_MIN_SLICE,
     PARALLEL_ROWS,
+    PARALLEL_STRING_ROWS,
     RANK_BLOCK,
     Factorized,
     _estimate_groups,
@@ -1248,8 +1255,15 @@ def test_parallel_workers_stops_short_of_the_cores_it_has() raises:
 
 def test_parallel_workers_never_slices_below_the_minimum() raises:
     """The worker count is what divides the column, so it has to leave every
-    worker a slice worth waking a thread for."""
-    for rows in range(PARALLEL_ROWS, 1 << 21, 1 << 16):
+    worker a slice worth waking a thread for.
+
+    The range starts at the lower of the two thresholds and runs past the
+    higher one, so that it covers every column height either route can offer
+    this function. Written against `PARALLEL_ROWS` alone it would have gone
+    empty and passed without testing anything the moment that constant moved
+    above the end of the range.
+    """
+    for rows in range(PARALLEL_STRING_ROWS, PARALLEL_ROWS * 2, 1 << 16):
         var got = _parallel_workers(4, rows)
         assert_true(got >= 1, String("rows ", rows, " chose ", got))
         assert_true(
@@ -1269,6 +1283,94 @@ def test_parallel_workers_is_monotone_in_cardinality() raises:
         assert_true(got <= last, String("groups ", groups, " chose ", got))
         last = got
         groups *= 2
+
+
+def test_a_chunk_sized_factorize_stays_on_one_thread() raises:
+    """A column exactly one chunk tall is below both thresholds, not on one.
+
+    The streaming engine hands an operator one chunk at a time, so a chunk is
+    the size a factorize is asked for over and over in a pipeline. When the
+    threshold was `MORSEL_ROWS` those two numbers were equal and the gate is
+    `>=`, so every one of those factorizes went parallel, and it went parallel
+    on `MORSEL_ROWS // PARALLEL_MIN_SLICE` workers, which is the fewest the
+    split ever runs on and the worst point on the curve. On the i9-13900K that
+    cost 5.0x against not splitting at all.
+
+    This is written as an inequality between the constants rather than as a
+    number, because the bug was the relationship and not any one value. Moving
+    the chunk size keeps it just as much as moving a threshold does, and both
+    thresholds have to hold it, which is the part that would be easy to lose
+    the next time one of them is retuned on its own.
+    """
+    assert_true(
+        PARALLEL_ROWS > MORSEL_ROWS,
+        String(
+            "a factorize of one chunk must stay serial, but the threshold ",
+            PARALLEL_ROWS,
+            " is not above the chunk size ",
+            MORSEL_ROWS,
+        ),
+    )
+    assert_true(
+        PARALLEL_STRING_ROWS > MORSEL_ROWS,
+        String(
+            (
+                "a text factorize of one chunk must stay serial, but the"
+                " threshold "
+            ),
+            PARALLEL_STRING_ROWS,
+            " is not above the chunk size ",
+            MORSEL_ROWS,
+        ),
+    )
+
+
+def test_the_split_thresholds_leave_room_for_more_than_a_few_slices() raises:
+    """A column that splits at all splits enough ways to be worth it.
+
+    A threshold and the minimum slice are two halves of one rule, and the
+    quotient between them is the worker count the very first column over the
+    line gets. Four of them measurably lost on every route tested, so the floor
+    is eight. This is a floor and not the measured value: the numeric threshold
+    is far above it, because where that one belongs was settled by measuring the
+    crossover rather than by counting slices.
+    """
+    assert_true(
+        PARALLEL_ROWS // PARALLEL_MIN_SLICE >= 8,
+        String(
+            "the shortest column that splits gets ",
+            PARALLEL_ROWS // PARALLEL_MIN_SLICE,
+            " workers, which is too few to pay the merge back",
+        ),
+    )
+    assert_true(
+        PARALLEL_STRING_ROWS // PARALLEL_MIN_SLICE >= 8,
+        String(
+            "the shortest text column that splits gets ",
+            PARALLEL_STRING_ROWS // PARALLEL_MIN_SLICE,
+            " workers, which is too few to pay the merge back",
+        ),
+    )
+
+
+def test_text_splits_earlier_than_numbers() raises:
+    """The two thresholds are ordered, and the order is not arbitrary.
+
+    What decides where a split starts to pay is the ratio between what a row
+    costs on one thread and what the merge costs, and a string key costs around
+    thirty times what an int64 key costs. So text has to cross first. If these
+    two are ever made equal again, one of them is in the wrong place, which is
+    exactly the state this pair of constants was in before they were split.
+    """
+    assert_true(
+        PARALLEL_STRING_ROWS < PARALLEL_ROWS,
+        String(
+            "text at ",
+            PARALLEL_STRING_ROWS,
+            " must split earlier than numbers at ",
+            PARALLEL_ROWS,
+        ),
+    )
 
 
 def main() raises:

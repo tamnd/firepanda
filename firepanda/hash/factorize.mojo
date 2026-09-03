@@ -137,14 +137,64 @@ start losing the last `PROBE_LOOKAHEAD` rows of each one to a prefetch that has
 nowhere to run.
 """
 
-comptime PARALLEL_ROWS = 1 << 17
-"""Rows below which the hash route stays on one thread.
+comptime PARALLEL_ROWS = 1 << 22
+"""Rows below which a factorize of a fixed width column stays on one thread.
 
 The parallel route costs a merge over every group every worker found and a
 second pass over the column to renumber them, and neither of those exists on the
-serial one. A hundred and thirty thousand rows is where the threads start paying
-for that on the machines this targets. Below it the whole column is a few
-milliseconds anyway.
+serial one. The serial route for a number is close to one pass over memory, so
+there is a lot of column to get through before threads make that back.
+
+It used to be `1 << 17`, which happened to be exactly `MORSEL_ROWS`. A chunk is
+one morsel and the gate is `>=`, so every factorize the streaming engine did
+landed one row over the line and took the parallel route on four slices, which
+is the fewest workers it will ever run on. Measured on an idle i9-13900K,
+`group/ordinals_one_key` on a thousand groups: 131071 rows is 0.588 ns a row and
+131072 rows was 2.957, so one row past a chunk cost 5.0x.
+
+Closing that cliff turned out not to be the same question as putting the line in
+the right place. A build that never takes the parallel route, measured against
+one that always does, puts the crossover four to five doublings further out than
+where the constant was. On a thousand groups, serial against parallel in ns a
+row: 262144 is 0.598 against 2.277, a million is 0.625 against 1.611, three
+million is 1.432 against 1.685, and four million is 0.947 against 0.816. So
+serial wins by 3.8x at a quarter million and the two cross a little under four
+million. A hundred thousand groups, which goes through the hash table rather
+than the direct one, crosses in the same place: 9.112 against 11.043 at a
+quarter million and 1.237 against 1.140 at four million.
+
+That is why this is `1 << 22` rather than something near a chunk. Everything
+below it was being split into slices that could not pay for the merge, and the
+band from a quarter million to three million rows is a size real queries land on
+constantly.
+
+The number is from one machine and the shape of the answer is what carries over
+rather than the value. What decides it is the ratio between what a row costs on
+one thread and what the merge costs, so a slower core or a shorter key moves it
+in, and the honest version of this constant is a cost model over the row count
+and the group count rather than a row count alone. `PARALLEL_STRING_ROWS` is the
+same rule applied to a key that costs thirty times as much per row, and it comes
+out thirty times lower, which is the evidence that the ratio is the thing.
+"""
+
+comptime PARALLEL_STRING_ROWS = 1 << 18
+"""Rows below which a factorize of a text column stays on one thread.
+
+Text gets its own line because it is nowhere near the numeric one. A string key
+is hashed over its bytes and settled with a comparison over its bytes, which
+measures around 19 ns a row against about 0.6 for an int64, so the fixed cost of
+a split is paid back roughly thirty times sooner and the crossover sits roughly
+thirty times lower. Using one constant for both meant one of the two was always
+in the wrong place.
+
+Measured the same way on the same machine, parallel against serial in ns a row
+on `text/group_distinct`: at 131072 rows they are level at 17.4 against 17.3, at
+262144 rows parallel wins at 18.893 against 23.746, and at a million rows it
+wins at 12.698 against 24.083. `text/group_medium` runs 1.46x and then 1.79x
+over the same pair. So text wants the split almost as early as it can get it,
+and the only reason this is not lower still is the one thing the numeric
+constant also has to respect, which is that a chunk sized factorize must not be
+split. Level is not worth a fork and a join.
 """
 
 comptime PARALLEL_MIN_SLICE = 1 << 15
@@ -154,6 +204,16 @@ Two workers on a column that fits in L2 spend more time in the merge than they
 save in the build. Capping the worker count by this rather than dropping to one
 thread means a column just over `PARALLEL_ROWS` gets the few workers it can keep
 busy instead of all of them.
+
+This is a floor on the slice and the two `PARALLEL_*_ROWS` constants are floors
+on the column, and they are not the same rule. A column can clear its threshold
+and still be cut into fewer pieces than there are cores, which is what this is
+for. What it must not do is clear the threshold and be cut into pieces smaller
+than this, and since both thresholds are many multiples of it, neither can.
+
+`PARALLEL_ROWS` is 128 of these and `PARALLEL_STRING_ROWS` is 8. That gap is the
+per row cost of the key rather than anything about slicing, so it belongs to
+those two constants and not to this one, which is why this one is shared.
 """
 
 comptime TABLE_BYTES_PER_GROUP = 32
@@ -2079,7 +2139,7 @@ def factorize_strings(
         nulls got.
     """
     var n = len(col)
-    if n >= PARALLEL_ROWS and worker_count() > 1:
+    if n >= PARALLEL_STRING_ROWS and worker_count() > 1:
         var groups = _projected_groups_strings(col, seed, n)
         var most = min(worker_count(), n // PARALLEL_MIN_SLICE)
         # The same three questions the numeric route asks, in the same order and
