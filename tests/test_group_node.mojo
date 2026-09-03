@@ -19,6 +19,17 @@ things here. A null key is a group like any other. A null value is skipped by
 every reduction, which is why count and size differ. A group in which every
 value is null has a count of zero, and that is what makes a mean null rather
 than a division by zero.
+
+The node has more than one route into its running table and which one a query
+gets is decided partly by the schema and partly by the data, so the last four
+tests are about the route rather than about the answer. One key of a fixed width
+dtype with no nulls in it goes through a lookup table that outlives the chunk,
+and anything else goes through the merge that stacks the running table with the
+chunk's. The lookup table itself is an array when the keys are packed close
+together and a hash table when they are not. Every one of those has to give the
+same answer as the eager path, each handover can happen in the middle of a query,
+and the ordinals already handed out have to survive both the table growing and
+the array being given up.
 """
 
 from std.testing import TestSuite, assert_equal, assert_raises, assert_true
@@ -671,6 +682,185 @@ def test_no_aggregates_gives_the_distinct_keys() raises:
     assert_equal(len(out.schema), 1, "and nothing else")
     var keys = read_ints(out, "k")
     assert_equal(keys[0], Int64(1), "in first seen order")
+
+
+def test_a_key_that_is_new_in_every_chunk_keeps_first_seen_order() raises:
+    """Six chunks of five rows with every key distinct, so nothing is merged.
+
+    This is the shape that exercises the running table's key store rather than
+    its arithmetic. A group is introduced by one chunk and never seen again, so
+    the store ends up holding one piece per chunk, and the order those pieces
+    are stacked in is the only thing that can put a key against another group's
+    total. Thirty rows is enough for that to show and few enough to check by
+    hand if it ever fails.
+    """
+    var pieces = List[List[AnyArray]]()
+    var next = Int64(0)
+    for _ in range(6):
+        var k = List[Int64](capacity=5)
+        var v = List[Int64](capacity=5)
+        for _ in range(5):
+            k.append(next)
+            v.append(next * 3 + 1)
+            next += 1
+        var one = List[AnyArray]()
+        one.append(numbers(k))
+        one.append(numbers(v))
+        pieces.append(one^)
+    var fields = List[Field]()
+    fields.append(Field("k", LogicalType.INT64))
+    fields.append(Field("v", LogicalType.INT64))
+    var frame = cut(pieces^, fields^)
+
+    var specs = List[AggSpec]()
+    specs.append(AggSpec("v", AggKind.SUM))
+    var want = flat(frame).group_by(["k"], specs^, dropna=False, sort=False)
+
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(1, AggKind.SUM, "v_sum"))
+    var got = run_group(frame^, [0], aggs^)
+    assert_equal(len(got), 30, "one group a row")
+    same_ints(got, want, "a key that is new in every chunk")
+
+
+def test_a_null_key_arriving_late_still_groups_where_it_first_appeared() raises:
+    """Three chunks, and the first null key is in the last of them.
+
+    Nothing in a schema says whether a key column has a null in it, so the node
+    starts on the assumption that it does not and changes route when one turns
+    up. What has to survive that is the group order, which is the order the
+    groups were first seen, and the null group's place in it is wherever its
+    first null row was rather than the front.
+
+    The keys are chosen so that the null is neither the first group nor the
+    last: 7 and 8 arrive before it and 9 does too, so a run that put the null
+    group at the front and a run that put it at the back would both be wrong and
+    would be wrong differently.
+    """
+    var pieces = List[List[AnyArray]]()
+    var one = List[AnyArray]()
+    one.append(numbers([7, 8]))
+    one.append(numbers([1, 2]))
+    pieces.append(one^)
+    var two = List[AnyArray]()
+    two.append(numbers([8, 9]))
+    two.append(numbers([3, 4]))
+    pieces.append(two^)
+    var three = List[AnyArray]()
+    three.append(maybe([0, 7, 0], [False, True, False]))
+    three.append(numbers([5, 6, 7]))
+    pieces.append(three^)
+    var fields = List[Field]()
+    fields.append(Field("k", LogicalType.INT64))
+    fields.append(Field("v", LogicalType.INT64))
+    var frame = cut(pieces^, fields^)
+
+    var specs = List[AggSpec]()
+    specs.append(AggSpec("v", AggKind.SUM))
+    var want = flat(frame).group_by(["k"], specs^, dropna=False, sort=False)
+
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(1, AggKind.SUM, "v_sum"))
+    var got = run_group(frame^, [0], aggs^)
+    assert_equal(len(got), 4, "7, 8, 9 and the null")
+    same_ints(got, want, "a null key arriving late")
+
+
+def test_the_lookup_table_keeps_its_ordinals_when_it_outgrows_itself() raises:
+    """Fifteen hundred rows in ten chunks over about five hundred keys.
+
+    The lookup table starts at sixteen slots and doubles as groups arrive, and a
+    growth rehashes every slot it holds. The ordinal a group was given has to
+    come back from that unchanged, because the state columns are indexed by it
+    and nothing renumbers them.
+
+    What this needs is the doublings, not the rows, so the key set is wide and
+    the frame is short: five hundred keys take the table through six growths and
+    most of them happen while groups are also being merged, which is the pair of
+    things at once that the small frames do not reach. A minimum is asked for
+    beside the sum because a sum survives a scrambled ordinal by luck more often
+    than a minimum does.
+    """
+    var rng = Rng(20260903)
+    var pieces = List[List[AnyArray]]()
+    for _ in range(10):
+        var k = List[Int64](capacity=150)
+        var v = List[Int64](capacity=150)
+        for _ in range(150):
+            k.append(Int64(rng.next_below(500)))
+            v.append(Int64(rng.next_below(100000)))
+        var one = List[AnyArray]()
+        one.append(numbers(k))
+        one.append(numbers(v))
+        pieces.append(one^)
+    var fields = List[Field]()
+    fields.append(Field("k", LogicalType.INT64))
+    fields.append(Field("v", LogicalType.INT64))
+    var frame = cut(pieces^, fields^)
+
+    var specs = List[AggSpec]()
+    specs.append(AggSpec("v", AggKind.SUM))
+    specs.append(AggSpec("v", AggKind.MIN))
+    var want = flat(frame).group_by(["k"], specs^, dropna=False, sort=False)
+
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(1, AggKind.SUM, "v_sum"))
+    aggs.append(GroupAgg(1, AggKind.MIN, "v_min"))
+    var got = run_group(frame^, [0], aggs^)
+    assert_true(len(got) > 400, "enough keys to grow the table several times")
+    same_ints(got, want, "a table that outgrew itself")
+
+
+def test_a_key_that_walks_out_of_the_direct_window_keeps_its_ordinals() raises:
+    """Four chunks whose keys march away from where the first chunk left them.
+
+    The lookup table is an array indexed by the key when the first chunk's keys
+    are packed close enough together, and that array covers the range the first
+    chunk showed and nothing else. Data arriving in key order walks out of it,
+    which is the shape this is: chunk one is 0 to 9, chunk two is 1000 to 1009,
+    and neither of the two after that comes back.
+
+    What happens then is that the array is given up and a hash table is built
+    from the keys already collected, and the point of the test is that the
+    ordinals survive it. Every group in the first chunk has a slot in the state
+    columns by the time the handover happens, so a rebuild that numbered the
+    keys differently would leave those slots attached to the wrong keys, and the
+    keys that came before the handover are exactly the ones a sum would still
+    look right on if only the later chunks were checked. Half the keys repeat
+    across chunks for that reason.
+    """
+    var pieces = List[List[AnyArray]]()
+    for c in range(4):
+        var k = List[Int64](capacity=10)
+        var v = List[Int64](capacity=10)
+        for i in range(10):
+            # The first half of every chunk is the keys chunk zero introduced,
+            # so the groups that live across the handover are checked too.
+            if i < 5:
+                k.append(Int64(i))
+            else:
+                k.append(Int64(c * 1000 + i))
+            v.append(Int64(c * 10 + i))
+        var one = List[AnyArray]()
+        one.append(numbers(k))
+        one.append(numbers(v))
+        pieces.append(one^)
+    var fields = List[Field]()
+    fields.append(Field("k", LogicalType.INT64))
+    fields.append(Field("v", LogicalType.INT64))
+    var frame = cut(pieces^, fields^)
+
+    var specs = List[AggSpec]()
+    specs.append(AggSpec("v", AggKind.SUM))
+    specs.append(AggSpec("v", AggKind.MIN))
+    var want = flat(frame).group_by(["k"], specs^, dropna=False, sort=False)
+
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(1, AggKind.SUM, "v_sum"))
+    aggs.append(GroupAgg(1, AggKind.MIN, "v_min"))
+    var got = run_group(frame^, [0], aggs^)
+    assert_equal(len(got), 25, "five shared keys and five new ones a chunk")
+    same_ints(got, want, "a key that walked out of the direct window")
 
 
 def main() raises:

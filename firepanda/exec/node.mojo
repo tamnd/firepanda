@@ -70,6 +70,7 @@ from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.frame.frame import DataFrame
 from firepanda.hash.grouping import group_ordinals
+from firepanda.hash.lasting import LastingKeys
 from firepanda.kernel.accum import accumulator
 from firepanda.kernel.binary import (
     BinaryOp,
@@ -80,6 +81,12 @@ from firepanda.kernel.binary import (
 from firepanda.kernel.cast import cast_any
 from firepanda.kernel.concat import concat_two_any
 from firepanda.kernel.group import AggKind, aggregate_group_any
+from firepanda.kernel.running import (
+    accumulate_any,
+    settle_any,
+    state_capacity,
+    widen_any,
+)
 from firepanda.kernel.select import filter_any, take_any
 
 from .chunk import Chunk
@@ -763,11 +770,67 @@ struct Group(Movable):
     The merge is the same operation as the aggregation. Two partial answers for
     a group are two rows, and reducing two rows to one is what a group by does,
     so merging the running table with a chunk's table is a group by over their
-    concatenation. That is why there is no accumulator kernel here and no
-    second implementation of anything: the running table and the chunk's table
-    are stacked, grouped by the same keys, and reduced by the kind that combines
-    partials, which is the kind itself except for the two counts, where merging
-    means adding rather than counting again.
+    concatenation, reduced by the kind that combines partials, which is the kind
+    itself except for the two counts, where merging means adding rather than
+    counting again. That is `_absorb`, it needs no kernel of its own, and it is
+    what this node was built on.
+
+    ## Why that is not the whole story
+
+    Stacking the running table with a chunk's table and grouping the result
+    costs the height of the running table on every chunk. The running table is
+    as tall as the number of groups seen so far, so the work that is not
+    proportional to the input grows as the number of chunks times the number of
+    groups, and the number of chunks grows with the input. On a thousand groups
+    that term is invisible. On a hundred thousand it is the whole cost:
+    `group/pipeline_stream_wide` against `group/pipeline_materialize_wide`
+    measured 4.3x slower at a million rows and 12.7x at four million, and the
+    per row cost sat flat at sixty five nanoseconds while the materialised
+    fallback's fell, which is what a term of that shape looks like from the
+    outside.
+
+    The fix is to stop rediscovering which group each row belongs to. A chunk's
+    keys are looked up in a map that outlives the chunk, so a group keeps the
+    same ordinal from the moment it is first seen until the end of the query,
+    and a chunk is absorbed by adding its rows to the slots those ordinals name.
+    `_push` is that route and `LastingKeys` is that map. Nothing in it is
+    proportional to the number of groups: a chunk costs a lookup and a fold per
+    row, which is what the materialised fallback pays over the same rows, and
+    the running table's height is not read at all. The kernels that do the
+    folding are `firepanda/kernel/running.mojo`, and they are the accumulator
+    this node was written without.
+
+    Two things keep `_absorb` alive rather than deleting it. The map is either
+    an array indexed by the key or a table of 64 bit hashes, and the hash is a
+    bijection on the key bits, so both are exact for a fixed width key and
+    neither is for text, where two names longer than eight bytes can land on one
+    hash. A key tuple of several columns has no single hash that is exact
+    either, for the same reason. A running slot is a number in an array as well,
+    so a minimum over a column of names has nowhere to live and falls back too.
+    So `_push` takes one fixed width key with fixed width values and `_absorb`
+    takes everything else. A null key falls back as well, because the map
+    reserves no ordinal for one and the group order the result promises is the
+    order the groups were first seen, which a reserved ordinal would not give.
+    `_demote` is the handover, and it can happen in the middle of a query,
+    because whether a key column has a null is not known until the chunk holding
+    it arrives.
+
+    What that is worth, on an i9-13900K with the same query over the same rows
+    through the same driver, in nanoseconds a row: at a hundred thousand groups
+    and sixteen million rows the operator went from 64.054 to 3.199, and the
+    materialised fallback it is now measured against takes 5.157. At a thousand
+    groups it went from 6.223 to 2.593 against the fallback's 4.315. So the
+    breaker is no longer a trade of speed for memory. It holds one row per group
+    instead of every row and it is also 1.6x faster than holding every row, at
+    both ends of the group count.
+
+    One shape is slower than it was and is meant to be. A single chunk of more
+    than four million rows used to go through a factorize that splits across
+    workers at that size, and the lasting map is one thread. That is
+    `group/pipeline_stream_one_chunk`, 2.409 before and 2.925 after, and the
+    engine does not make chunks of four million rows: `MORSEL_ROWS` is a hundred
+    and twenty eight thousand, which is where `group/pipeline_stream` sits and
+    where the operator is 2.4x faster than it was.
 
     Not every reduction survives that. `_folds` is the list that does, and the
     rest keep the `Materialize` fallback, which is the right answer rather than a
@@ -829,6 +892,22 @@ struct Group(Movable):
     var width: Int
     """The number of output columns."""
 
+    var _map: LastingKeys
+    """The key to ordinal map that outlives the chunk, and the keys it has been
+    given. Empty unless `_fast`."""
+
+    var _fast: Bool
+    """Whether chunks are still going through `_push` rather than `_absorb`."""
+
+    var _values: List[AnyArray]
+    """The running table's state columns on the `_push` route, without the key
+    beside them. `_gather` puts the two back together into `state`."""
+
+    var _room: Int
+    """How many slots each of `_values` holds, which is at least `_groups` and
+    grows by doubling, so that a table which gains a few groups on every chunk is
+    copied a logarithmic number of times rather than every chunk."""
+
     def __init__(out self, var keys: List[Int], var aggs: List[GroupAgg]):
         """Constructs a group by.
 
@@ -849,6 +928,10 @@ struct Group(Movable):
         self.ran = False
         self.emit = List[AnyArray]()
         self.width = 0
+        self._map = LastingKeys()
+        self._fast = False
+        self._values = List[AnyArray]()
+        self._room = 0
 
     def bind(mut self, var input: Schema) raises -> Schema:
         """Checks the keys and the aggregates, and reports the output schema.
@@ -942,6 +1025,19 @@ struct Group(Movable):
                 self._produce.append(kind)
                 self._merge.append(_merge_kind(kind))
 
+        # One fixed width key is the shape the persistent table is exact for,
+        # and a fixed width value is the shape a running slot can accumulate.
+        # Everything else keeps the stacking merge. This is the schema half of
+        # the question; the data half is the null check in `process`, which
+        # cannot be asked until a chunk arrives.
+        self._fast = (
+            len(self.keys) == 1
+            and not self.input[self.keys[0]].dtype.is_variable_width()
+        )
+        for s in range(len(self._source)):
+            if self.input[self._source[s]].dtype.is_variable_width():
+                self._fast = False
+
         self.output = Schema(fields^)
         return Schema(copy=self.output)
 
@@ -983,6 +1079,16 @@ struct Group(Movable):
         if rows == 0:
             return None
         var columns = chunk^.into_columns()
+
+        if self._fast:
+            if columns[self.keys[0]].null_count() == 0:
+                self._push(columns, rows)
+                return None
+            # A null arrived. Hand what the table has built to the running
+            # table and let this chunk and every one after it take the route
+            # that puts a null group where its first null was.
+            self._demote()
+
         var refs = borrow_columns(columns)
         var local = group_ordinals(refs, self.keys, rows)
         var made = List[AnyArray](capacity=len(self.keys) + len(self._source))
@@ -999,6 +1105,120 @@ struct Group(Movable):
             )
         self._absorb(made^)
         return None
+
+    def _push(mut self, columns: List[AnyArray], rows: Int) raises:
+        """Adds one chunk to the running table through the persistent map.
+
+        Every row's key goes into a map that survives the chunk, so the
+        ordinal a group is given the first time it is seen is the ordinal it
+        keeps. That makes merging the chunk a reduction over ordinals both sides
+        already agree on rather than a group by that has to work out which rows
+        of the running table the chunk's rows belong to, and it is the whole
+        difference between this and `_absorb`.
+
+        The chunk's keys are looked up rather than grouped, so there is no per
+        chunk grouping pass, and its rows are folded into slots rather than
+        reduced into a second table, so there is no per chunk table either. What
+        is left is a hash, a probe and a fold per row, which is what the
+        materialised fallback pays over the same rows once, so this route does
+        the fallback's work and holds one row per group while doing it.
+
+        Args:
+            columns: The chunk's columns, borrowed.
+            rows: The chunk's height.
+
+        Raises:
+            If the key dtype has no physical layout, or if a reduction fails.
+        """
+        ref key = columns[self.keys[0]]
+        var before = self._map.groups
+        var codes = Array[DType.uint32](rows)
+        self._map.ordinals(key, rows, codes)
+        var after = self._map.groups
+
+        if before == 0:
+            # The first chunk gets its state from the ordinary kernel, which is
+            # what settles the dtype each slot accumulates in without this
+            # having to work it out. `widen_any` then turns that answer into an
+            # accumulator, which is not quite the same thing: a group whose rows
+            # were all null comes back holding a zero, and a running minimum has
+            # to hold the identity instead or the next chunk compares against a
+            # zero that is not a value the column ever had.
+            self._room = state_capacity(after, 0)
+            for s in range(len(self._source)):
+                var made = aggregate_group_any(
+                    columns[self._source[s]], self._produce[s], codes, after
+                )
+                widen_any(made, self._room, self._produce[s])
+                self._values.append(made^)
+            self.started = True
+            return
+
+        if after > self._room:
+            var room = state_capacity(after, self._room)
+            for s in range(len(self._values)):
+                widen_any(self._values[s], room, self._produce[s])
+            self._room = room
+
+        # The rows go straight into the slots their groups already own. Nothing
+        # here is proportional to the number of groups, which is the whole point
+        # of the route: what a chunk costs is a pass over the chunk, the same as
+        # the materialised fallback pays over the same rows, and the running
+        # table's height is never read at all.
+        for s in range(len(self._source)):
+            accumulate_any(
+                self._values[s],
+                columns[self._source[s]],
+                self._produce[s],
+                codes,
+                rows,
+            )
+
+    def _gather(mut self) raises:
+        """Puts the key column back beside the state columns.
+
+        The `_push` route keeps the keys in one piece per chunk that introduced
+        a group, and the state in accumulator columns of its own that are longer
+        than the group count and hold an identity where a group was never
+        reached. Everything downstream wants the `state` layout, which is the
+        keys and then the state slots at exactly the group count, so this is
+        where the pieces are stacked, the accumulators are cut down and the
+        identities become the nulls they stand for.
+
+        Raises:
+            If the key pieces cannot be stacked.
+        """
+        if self._map.groups == 0:
+            return
+        var out = List[AnyArray](capacity=1 + len(self._values))
+        out.append(self._map.take_keys())
+        for s in range(len(self._values)):
+            out.append(
+                settle_any(
+                    AnyArray(copy=self._values[s]),
+                    self._produce[s],
+                    self._map.groups,
+                )
+            )
+        self._values = List[AnyArray]()
+        self._room = 0
+        self.state = out^
+
+    def _demote(mut self) raises:
+        """Gives up the persistent map and goes back to the stacking merge.
+
+        Called when a chunk turns up with a null key, which is the one thing
+        about the data that decides the route and that no amount of looking at
+        the schema will tell you in advance. Whatever the map has built is a
+        valid running table, so handing it over and carrying on costs the
+        query nothing beyond the route it loses.
+
+        Raises:
+            If the key pieces cannot be stacked.
+        """
+        self._fast = False
+        self._gather()
+        self._map = LastingKeys()
 
     def _absorb(mut self, var made: List[AnyArray]) raises:
         """Merges one chunk's per group answers into the running table.
@@ -1065,6 +1285,9 @@ struct Group(Movable):
             If a mean cannot be computed from its sum and its count.
         """
         self.width = len(self.keys) + len(self.aggs)
+        if self._fast:
+            self._fast = False
+            self._gather()
         if not self.started:
             return
 

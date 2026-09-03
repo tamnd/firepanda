@@ -8,6 +8,21 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added
+
+- `firepanda/hash/lasting.mojo`, a key to ordinal map that outlives the chunk it was given. A group keeps the ordinal it was handed the first time it was seen for the whole query, so a chunk is absorbed by looking its rows up and folding them into the slots those ordinals name rather than by working out how the chunk's groups line up with the running table's. It holds one of two maps, an array indexed by the key when the first chunk's keys are packed close enough together and a hash table when they are not, which is the same choice `factorize` makes per column and for the same reason: the array lookup is a subtraction and a load and the hash is a multiply, a mask, a load, a comparison and a cache miss.
+- `firepanda/kernel/running.mojo`, the accumulator kernels. Every other aggregation kernel takes a column and gives back one row per group; these take a column and a table that already has a row per group, and add the one to the other. A slot no row has reached holds the reduction's identity so the inner loops have no branch on whether a group has been seen, and the extremes and the edges carry the reached flags in the validity bitmap they had to maintain anyway.
+- `group/pipeline_stream_wide` and `group/pipeline_materialize_wide` in the benchmark suite, the same pair as the existing streaming and materialised group by benchmarks at a hundred thousand groups instead of a thousand. The pair at one group count says nothing about a cost that grows with the group count, which is what the change below is about.
+
+### Changed
+
+- The streaming group by no longer stacks its running table with each chunk's table and regroups the result. That merge costs the height of the running table on every chunk, so the work that is not proportional to the input grows as the number of chunks times the number of groups, and the number of chunks grows with the input. At a thousand groups the term is invisible. At a hundred thousand it was the whole cost of the operator.
+- On an idle i9-13900K, in nanoseconds a row, at a hundred thousand groups: a million rows went from 61.392 to 6.008, four million from 66.455 to 3.847, and sixteen million from 64.054 to 3.199. The per row cost used to sit flat while the materialised fallback's fell, which is what a term of that shape looks like from the outside, and it now falls with the input the way the fallback's does.
+- At a thousand groups over chunks the size the engine makes, a million rows went from 5.578 to 2.378, four million from 5.296 to 2.567, and sixteen million from 6.223 to 2.593.
+- The breaker is no longer a trade of speed for memory. It holds one row per group instead of every row and it is now 1.6x faster than the materialised path that holds every row, at both ends of the group count: 2.593 against 4.315 at a thousand groups and 3.199 against 5.157 at a hundred thousand, both at sixteen million rows.
+- One shape is slower and is meant to be. A single chunk of more than four million rows used to go through a factorize that splits across workers at that size and the lasting map is one thread, so `group/pipeline_stream_one_chunk` went from 2.409 to 2.925. The engine does not make chunks of four million rows, `MORSEL_ROWS` is a hundred and twenty eight thousand, and that is where the 2.4x above was measured.
+- Text keys, key tuples of several columns, text value columns and a key column with a null in it all keep the older merge. The map is exact for a fixed width key because the hash is a bijection on the key bits and it is not exact for text, a running slot is a number in an array so a minimum over names has nowhere to live, and a null key would take an ordinal the map does not reserve, which would put the null group somewhere other than where its first null row was. The handover for the null case happens in the middle of a query, because whether a key column has a null is not known until the chunk holding it arrives.
+
 ## [0.6.34] - 2026-09-03
 
 Built against Mojo 1.0.0 (ed45d567).
