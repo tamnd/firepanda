@@ -1166,17 +1166,35 @@ def _extreme_core[
     per-row branch on whether the group has been seen yet. Which groups were seen
     is carried in the output's validity bitmap, which had to be maintained
     anyway, so the seen flags cost nothing beyond the bit that was already there.
+
+    The identity being neutral is also what makes the merge cheap. A worker that
+    never reached a group left the identity in its slot, and folding the identity
+    in changes nothing, so the merge does not have to ask which groups a worker
+    saw before it takes that worker's table. It is then the same vectorized walk
+    of two contiguous arrays that `_merge_sums` is, with a comparison and a
+    select where the sums have an add. It used to be a scalar loop carrying a
+    branch and a bitmap read modify write per group per worker, which on a
+    hundred thousand groups over thirty two workers is three million of them and
+    was most of what a grouped min or max cost on a wide key.
     """
     comptime identity = highest[dt]() if want_min else lowest[dt]()
+    comptime width = simd_width_of[dt]()
 
     var n = len(codes)
     var workers = _private_workers[dt](n, groups)
 
-    var out = Array[dt](groups)
+    # Every slot is written by the identity fill below, so the zero fill the
+    # plain constructor does is a pass over the output for nothing.
+    var out = Array[dt](overwritten=groups)
     var best = out.unsafe_ptr()
     out.data.validity.clear_all()
-    for g in range(groups):
-        best.unsafe_offset(g).unsafe_store(identity)
+    var head = 0
+    while head + width <= groups:
+        best.unsafe_offset(head).unsafe_store(SIMD[dt, width](identity))
+        head += width
+    while head < groups:
+        best.unsafe_offset(head).unsafe_store(identity)
+        head += 1
 
     if workers <= 1:
         var at = codes.unsafe_ptr()
@@ -1195,10 +1213,16 @@ def _extreme_core[
             out.data.validity.set(g, True)
     else:
         var bounds = _row_bounds(n, workers)
-        var partials = Array[dt](groups * workers)
+        var slots = groups * workers
+        var partials = Array[dt](overwritten=slots)
         var start = partials.unsafe_ptr()
-        for i in range(groups * workers):
-            start.unsafe_offset(i).unsafe_store(identity)
+        var filled = 0
+        while filled + width <= slots:
+            start.unsafe_offset(filled).unsafe_store(SIMD[dt, width](identity))
+            filled += width
+        while filled < slots:
+            start.unsafe_offset(filled).unsafe_store(identity)
+            filled += 1
 
         # Which groups a worker saw is a byte per group rather than a bit,
         # because a bitmap packs sixty four groups into one word and two workers
@@ -1227,22 +1251,58 @@ def _extreme_core[
 
         parallel_for(one, workers)
 
+        comptime bytes = simd_width_of[DType.uint8]()
         var tables = partials.unsafe_ptr()
         var hits = seen.unsafe_ptr()
         for w in range(workers):
             var table = tables.unsafe_offset(w * groups)
-            var hit = hits.unsafe_offset(w * groups)
-            for g in range(groups):
-                if hit.unsafe_offset(g).unsafe_load() == 0:
-                    continue
-                var value = table.unsafe_offset(g).unsafe_load()
+            var g = 0
+            while g + width <= groups:
+                var current = best.unsafe_offset(g).unsafe_load[width=width]()
+                var value = table.unsafe_offset(g).unsafe_load[width=width]()
+                # `min` and `max` rather than a comparison and a select, and
+                # they differ only on a NaN, which cannot be here. The scatter
+                # above stores a value only when it compares below or above what
+                # the slot holds, and every comparison against a NaN is false, so
+                # no NaN is ever written into a table and none can be read out of
+                # one.
+                comptime if want_min:
+                    best.unsafe_offset(g).unsafe_store(min(value, current))
+                else:
+                    best.unsafe_offset(g).unsafe_store(max(value, current))
+                g += width
+            while g < groups:
                 var current = best.unsafe_offset(g).unsafe_load()
+                var value = table.unsafe_offset(g).unsafe_load()
                 comptime if want_min:
                     if value < current:
                         best.unsafe_offset(g).unsafe_store(value)
                 else:
                     if value > current:
                         best.unsafe_offset(g).unsafe_store(value)
+                g += 1
+
+            # The seen flags fold the same way and into the first worker's row,
+            # a byte at a time so that thirty two groups settle per instruction.
+            # A group is present if any worker reached it, which is an or.
+            if w > 0:
+                var hit = hits.unsafe_offset(w * groups)
+                var b = 0
+                while b + bytes <= groups:
+                    hits.unsafe_offset(b).unsafe_store(
+                        hits.unsafe_offset(b).unsafe_load[width=bytes]()
+                        | hit.unsafe_offset(b).unsafe_load[width=bytes]()
+                    )
+                    b += bytes
+                while b < groups:
+                    hits.unsafe_offset(b).unsafe_store(
+                        hits.unsafe_offset(b).unsafe_load()
+                        | hit.unsafe_offset(b).unsafe_load()
+                    )
+                    b += 1
+
+        for g in range(groups):
+            if hits.unsafe_offset(g).unsafe_load() != 0:
                 out.data.validity.set(g, True)
 
     # A group that was never seen still holds the identity, which is a real value
