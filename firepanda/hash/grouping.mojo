@@ -206,13 +206,18 @@ def group_ordinals[
             )
             i += 1
 
-    parallel_morsels(widen, rows)
-    # Nothing below reads `codes`, so the pass above is its last use and the
-    # forty megabytes go back here rather than at the end of the function. That
-    # matters because the factorize at the bottom allocates a table sized by the
-    # tuple count. Each later key's codes are released by the iteration that
-    # made them for the same reason.
+    # The widening is not a pass of its own. The first key's ordinals are read
+    # by the first packing step and by nothing else, and that step is already
+    # reading a column and writing `running`, so it can widen as it goes: the
+    # multiply takes the first key's ordinal straight from the uint32 and the
+    # int64 is only ever written. Doing it separately reads the ordinals, writes
+    # eighty megabytes, then reads those eighty megabytes back, which on ten
+    # million rows is a hundred and sixty megabytes moved to arrange numbers the
+    # next loop was about to load anyway. `widen` stays because the overflow
+    # route below needs `running` populated before it can renumber it, and that
+    # route cannot be reached without more rows than a uint32 ordinal can name.
     var space = groups
+    var packed = False
 
     for k in range(1, len(at)):
         var key = _factorize_any(columns[at[k]][])
@@ -229,6 +234,9 @@ def group_ordinals[
             next_groups = _densify(next, spare)
 
         if next_groups > 0 and space > Int(Int64.MAX) // next_groups:
+            if not packed:
+                parallel_morsels(widen, rows)
+                packed = True
             space = _condense(running, space)
             if space > Int(Int64.MAX) // next_groups:
                 raise Error(
@@ -259,7 +267,35 @@ def group_ordinals[
                 )
                 i += 1
 
-        parallel_morsels(combine, rows)
+        def start(begin: Int, stop: Int) raises {mut running, imm}:
+            var pack = running.unsafe_ptr()
+            var left = codes.unsafe_ptr()
+            var right = next.unsafe_ptr()
+            var i = begin
+            while i + lanes <= stop:
+                pack.unsafe_offset(i).unsafe_store(
+                    left.unsafe_offset(i)
+                    .unsafe_load[width=lanes]()
+                    .cast[DType.int64]()
+                    * Int64(next_groups)
+                    + right.unsafe_offset(i)
+                    .unsafe_load[width=lanes]()
+                    .cast[DType.int64]()
+                )
+                i += lanes
+            while i < stop:
+                pack.unsafe_offset(i).unsafe_store(
+                    Int64(left.unsafe_offset(i).unsafe_load())
+                    * Int64(next_groups)
+                    + Int64(right.unsafe_offset(i).unsafe_load())
+                )
+                i += 1
+
+        if packed:
+            parallel_morsels(combine, rows)
+        else:
+            parallel_morsels(start, rows)
+            packed = True
         space *= next_groups
 
     # Every row of `running` was written by the loop above, so it has no nulls
