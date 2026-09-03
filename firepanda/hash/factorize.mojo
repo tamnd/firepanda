@@ -1657,7 +1657,9 @@ def _factorize_hashed_serial[
 
     var has_null = col.null_count() > 0
     var offset = 1 if has_null else 0
-    var codes = Array[DType.uint32](n)
+    # Every row below is written, the null ones with a zero, so the array does
+    # not need the pass that zeroes it first.
+    var codes = Array[DType.uint32](overwritten=n)
     var null_group = -1
     if has_null:
         null_group = 0
@@ -1741,7 +1743,12 @@ def _factorize_hashed_parallel[
     var n = len(col)
     var has_null = col.null_count() > 0
     var offset = 1 if has_null else 0
-    var codes = Array[DType.uint32](n)
+    # The slices below cover the column between them and the build writes every
+    # row of the one it is given, the null ones with a zero, so the array does
+    # not need the pass that zeroes it first. That pass is one thread writing
+    # forty megabytes on ten million rows, in front of a section that is on
+    # every core, which is the worst place in the routine to put it.
+    var codes = Array[DType.uint32](overwritten=n)
 
     # Slices land on chunk boundaries so that every worker's inner loop is the
     # same shape as the serial one's, with a short chunk only at the very end.
@@ -2240,7 +2247,12 @@ def _factorize_strings_parallel(
     var n = len(col)
     var has_null = col.null_count() > 0
     var offset = 1 if has_null else 0
-    var codes = Array[DType.uint32](n)
+    # The slices below cover the column between them and the build writes every
+    # row of the one it is given, the null ones with a zero, so the array does
+    # not need the pass that zeroes it first. That pass is one thread writing
+    # forty megabytes on ten million rows, in front of a section that is on
+    # every core, which is the worst place in the routine to put it.
+    var codes = Array[DType.uint32](overwritten=n)
     var null_group = -1
     if has_null:
         null_group = 0
@@ -2530,7 +2542,9 @@ def _factorize_strings_serial(
     var n = len(col)
     var has_null = col.null_count() > 0
     var offset = 1 if has_null else 0
-    var codes = Array[DType.uint32](n)
+    # Every row below is written, the null ones with a zero, so the array does
+    # not need the pass that zeroes it first.
+    var codes = Array[DType.uint32](overwritten=n)
     var null_group = -1
     if has_null:
         null_group = 0
