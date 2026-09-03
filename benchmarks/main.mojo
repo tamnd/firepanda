@@ -2467,6 +2467,7 @@ def bench_group(mut harness: Harness) raises:
     var many = Array[DType.uint32](rows)
     var key = Array[DType.int64](rows)
     var spread = Array[DType.int64](rows)
+    var spread_values = Array[DType.int64](rows)
     var other = Array[DType.int64](rows)
     var wide = 100_000 if rows >= 100_000 else rows
     if wide < 1:
@@ -2480,6 +2481,7 @@ def bench_group(mut harness: Harness) raises:
         many[i] = UInt32(draw % UInt64(wide))
         key[i] = Int64(draw % UInt64(GROUPS))
         spread[i] = Int64(draw % UInt64(wide))
+        spread_values[i] = Int64(draw % 1000)
         other[i] = Int64((draw >> 20) % 8)
         if draw & 7 == 0:
             sparse.set_null(i)
@@ -2643,6 +2645,7 @@ def bench_group(mut harness: Harness) raises:
     # part that grows with the cardinality rather than with the height.
     var wide_columns = List[Series]()
     wide_columns.append(Series("key", spread^))
+    wide_columns.append(Series("value", spread_values^))
     var wide_df = DataFrame.from_series(wide_columns^)
 
     def ordinals_one_wide() raises {imm wide_df, imm one_key}:
@@ -2713,9 +2716,9 @@ def bench_group(mut harness: Harness) raises:
     # more, a kernel dispatch that finds one morsel instead of eight. The one
     # chunk row is the streaming operator handed the case the eager path is
     # written for, which is the floor the other two are measured against.
-    var streamed = _in_chunks(df, MORSEL_ROWS)
-    var small = _in_chunks(df, 16 * 1024)
-    var whole = _in_chunks(df, rows if rows > 0 else 1)
+    var streamed = _in_chunks(df, MORSEL_ROWS, 0, 2)
+    var small = _in_chunks(df, 16 * 1024, 0, 2)
+    var whole = _in_chunks(df, rows if rows > 0 else 1, 0, 2)
 
     def pipeline_stream_small() raises {imm small}:
         keep(small.rows)
@@ -2768,14 +2771,66 @@ def bench_group(mut harness: Harness) raises:
         "group/pipeline_materialize", "rows", rows, pipeline_materialize
     )
 
+    # The same pair again on a key with a hundred thousand values rather than a
+    # thousand, which is the case the streaming node's running table is least
+    # suited to. Merging a chunk's answers into the table is a group by over the
+    # two stacked, so it costs the height of the table every time a chunk
+    # arrives, and the table is as tall as the number of groups seen so far.
+    # At a thousand groups that is nothing. At a hundred thousand it is a
+    # re-group of a hundred thousand rows per chunk, and the number of chunks
+    # grows with the input, so the part of the work that is not the input grows
+    # with the product of the two. The fallback beside it does one group by over
+    # everything and does not have that term at all, which is what makes this
+    # pair the measurement that says whether the running table needs replacing
+    # with per worker partitioned tables or merely tuning.
+    var wide_streamed = _in_chunks(wide_df, MORSEL_ROWS, 0, 1)
 
-def _in_chunks(df: DataFrame, chunk_rows: Int) raises -> DataFrame:
-    """Cuts the group benchmark's key and value columns into chunks of a size.
+    def pipeline_stream_wide() raises {imm wide_streamed}:
+        keep(wide_streamed.rows)
+        var aggs = List[GroupAgg]()
+        aggs.append(GroupAgg(1, AggKind.SUM, "total"))
+        var pipeline = Pipeline(DataFrame(copy=wide_streamed))
+        pipeline.add(Node(Group([0], aggs^)))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record(
+        "group/pipeline_stream_wide", "rows", rows, pipeline_stream_wide
+    )
+
+    def pipeline_materialize_wide() raises {imm wide_streamed}:
+        keep(wide_streamed.rows)
+        var fields = List[Field]()
+        fields.append(Field("key", LogicalType.INT64))
+        fields.append(Field("total", LogicalType.INT64))
+        var pipeline = Pipeline(DataFrame(copy=wide_streamed))
+        pipeline.add(Node(Materialize(_whole_frame_group, Schema(fields^))))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record(
+        "group/pipeline_materialize_wide",
+        "rows",
+        rows,
+        pipeline_materialize_wide,
+    )
+
+
+def _in_chunks(
+    df: DataFrame, chunk_rows: Int, key_at: Int, value_at: Int
+) raises -> DataFrame:
+    """Cuts a key column and a value column into chunks of a size.
+
+    The two positions are arguments rather than fixed because the group
+    benchmarks build two frames with different shapes, the thousand group one
+    carrying a second key in between and the hundred thousand group one not, and
+    the whole point of the wide frame is to ask the same question of it.
 
     Args:
-        df: The frame the group benchmarks build, whose columns are the key, a
-            second key nothing here uses, and the value.
+        df: The frame to cut up.
         chunk_rows: How many rows go in a chunk.
+        key_at: The position of the key column.
+        value_at: The position of the value column.
 
     Returns:
         A frame of the key and the value, chunked that way.
@@ -2791,8 +2846,8 @@ def _in_chunks(df: DataFrame, chunk_rows: Int) raises -> DataFrame:
         var stop = begin + chunk_rows
         if stop > rows:
             stop = rows
-        key_chunks.append(df.columns[0].only().slice(begin, stop))
-        value_chunks.append(df.columns[2].only().slice(begin, stop))
+        key_chunks.append(df.columns[key_at].only().slice(begin, stop))
+        value_chunks.append(df.columns[value_at].only().slice(begin, stop))
         begin = stop
     var columns = List[ChunkedArray]()
     columns.append(key_chunks^)
