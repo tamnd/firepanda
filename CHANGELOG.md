@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.35] - 2026-09-03
+
+Built against Mojo 1.0.0 (ed45d567).
+
+This release is one fix, to the operator the last release shipped, and it is the fix that turns the streaming group by from a trade into a win.
+
+The operator merged each chunk by stacking its running table with the chunk's own table and grouping the two together. That reads the whole running table, so it costs the number of groups seen so far on every chunk, and the number of chunks grows with the input. The work that is not proportional to the input therefore grew as chunks times groups. At a thousand groups that is invisible, which is why it shipped. At a hundred thousand it was the entire cost of the operator, and the shape of it was there to read in the numbers: a flat sixty five nanoseconds a row at one million, four million and sixteen million rows, while the materialised fallback the operator exists to replace fell from 14.3 to 4.8 over the same range. A cost that will not move while the comparison's falls is what a term of that shape looks like from the outside.
+
+A group now keeps the ordinal it was handed the first time it was seen, for the whole query, in a map that outlives the chunk. Absorbing a chunk is then looking its rows up and folding them into the slots those ordinals name, which is a lookup and a fold per row and nothing at all proportional to the group count. The map is an array indexed by the key when the keys are packed close enough together and a hash table when they are not, which is the same choice `factorize` makes per column, and having both matters more here than there: at a thousand groups the array is around two and a half nanoseconds a row against the hash's six and a half, so a map that only knew how to hash would have made every query with few groups slower even while it made the wide ones ten times faster.
+
+At sixteen million rows on an idle i9-13900K, one build against the other in a single run, in nanoseconds a row: a hundred thousand groups went from 64.054 to 3.199 against a fallback at 5.157, and a thousand groups over chunks the size the engine makes went from 6.223 to 2.593 against a fallback at 4.315. So the breaker is no longer a trade of speed for memory. It holds one row per group instead of every row and it is 1.6x faster than holding every row, at both ends of the group count.
+
+One shape is slower and is meant to be. A single chunk of more than four million rows used to go through a factorize that splits across workers at that size and the lasting map is one thread, so that benchmark went from 2.409 to 2.925. The engine does not make chunks of four million rows, and making the map's lookup parallel belongs with the rest of the operator's parallelism rather than with this.
+
 ### Added
 
 - `firepanda/hash/lasting.mojo`, a key to ordinal map that outlives the chunk it was given. A group keeps the ordinal it was handed the first time it was seen for the whole query, so a chunk is absorbed by looking its rows up and folding them into the slots those ordinals name rather than by working out how the chunk's groups line up with the running table's. It holds one of two maps, an array indexed by the key when the first chunk's keys are packed close enough together and a hash table when they are not, which is the same choice `factorize` makes per column and for the same reason: the array lookup is a subtraction and a load and the hash is a multiply, a mask, a load, a comparison and a cache miss.
