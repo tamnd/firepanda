@@ -1605,6 +1605,12 @@ def group_nunique[
 
 def _slab_bounds(counts: Array[DType.int64], groups: Int) -> List[Int]:
     """Turns per group counts into `groups + 1` slab offsets."""
+    # A dependent add per group, and it stays that way. The blocked parallel scan
+    # was written and measured and it is not faster here: the chain is one add
+    # deep and the counts are already streaming out of memory, so what bounds the
+    # loop is the read rather than the latency, and a version that reads the
+    # counts twice to get a second core onto them reads twice as much for it. At
+    # six and a half million groups the two were within the run to run spread.
     var bounds = List[Int](capacity=groups + 1)
     var n = counts.unsafe_ptr()
     var running = 0
@@ -1818,7 +1824,9 @@ def _quantile_core[
     """Sorts each group's values and reads the position `q` falls at."""
     var counts = _count_core(validity, has_null, codes, groups)
     var bounds = _slab_bounds(counts, groups)
-    var slab = Array[dt](bounds[groups])
+    # Every element of the slab is a present row and the fill writes all of them,
+    # so zeroing it first is a pass over the column for nothing.
+    var slab = Array[dt](overwritten=bounds[groups])
     _fill_slab(source, validity, has_null, codes, groups, bounds, slab)
 
     var out = Array[DType.float64](groups)
@@ -1891,7 +1899,9 @@ def _nunique_core[
     """
     var counts = _count_core(validity, has_null, codes, groups)
     var bounds = _slab_bounds(counts, groups)
-    var slab = Array[dt](bounds[groups])
+    # Every element of the slab is a present row and the fill writes all of them,
+    # so zeroing it first is a pass over the column for nothing.
+    var slab = Array[dt](overwritten=bounds[groups])
     _fill_slab(source, validity, has_null, codes, groups, bounds, slab)
 
     var out = Array[DType.int64](groups)
