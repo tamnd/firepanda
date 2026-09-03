@@ -38,8 +38,8 @@ from firepanda.array.array import Array, from_list
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.groupby import AggSpec
 from firepanda.frame.series import Series
-from firepanda.hash.factorize import factorize
-from firepanda.hash.grouping import group_ordinals
+from firepanda.hash.factorize import DIRECT_LIMIT, factorize
+from firepanda.hash.grouping import Grouping, group_ordinals
 from firepanda.testing.rng import Rng
 from firepanda.kernel.group import (
     PARTITION_ROWS,
@@ -425,6 +425,98 @@ def test_the_packed_column_keeps_the_factorize_ordinals() raises:
     var rows: List[Int] = [0, 1, 2, 5]
     for g in range(len(rows)):
         assert_equal(grouping.rows_at[g], rows[g])
+
+
+def _pair_grouping[
+    dt: DType
+](var left: Array[DType.int64], var right: Array[dt]) raises -> Grouping:
+    """Groups a frame of two key columns and gives back the grouping."""
+    var series = List[Series]()
+    series.append(Series("a", left^))
+    series.append(Series("b", right^))
+    var frame = DataFrame.from_series(series^)
+    var at: List[Int] = [0, 1]
+    return group_ordinals(frame.column_refs(), at, frame.rows)
+
+
+def _same_grouping(left: Grouping, right: Grouping, rows: Int) raises:
+    """Asserts two groupings are the same one."""
+    assert_equal(left.groups, right.groups)
+    assert_equal(len(left.rows_at), len(right.rows_at))
+    for i in range(rows):
+        assert_equal(left.codes[i], right.codes[i])
+    for g in range(len(left.rows_at)):
+        assert_equal(left.rows_at[g], right.rows_at[g])
+
+
+def test_the_fused_tuple_pack_agrees_with_the_route_it_replaces() raises:
+    """A dense integer pair skips the per key factorize; a spread one cannot.
+
+    Two narrow integer keys pack straight out of the columns, because a value
+    minus its column's minimum is already an ordinal and nothing in a group by
+    on several keys reads a key's ordinals for anything but their value.
+    Multiplying both columns by a stride wide enough that a table over the range
+    would be declined sends the identical tuples down the older route through
+    `factorize`. Which rows share a tuple is the same either way, so the
+    ordinals and the representative rows have to come back identical.
+
+    The negative minimums are in the sweep on purpose. The packing subtracts
+    each column's own minimum, and a minimum below zero is where a subtraction
+    written as a mask, or one that widened before it subtracted rather than
+    after, would show itself.
+    """
+    comptime stride = Int64(DIRECT_LIMIT) + 1
+    var rng = Rng(UInt64(0x7C0DE))
+    for _ in range(60):
+        var n = 1 + rng.next_below(400)
+        var wide = 1 + rng.next_below(30)
+        var tall = 1 + rng.next_below(30)
+        var shift = Int64(rng.next_below(40)) - 20
+
+        var a = Array[DType.int64](n)
+        var b = Array[DType.int64](n)
+        var far_a = Array[DType.int64](n)
+        var far_b = Array[DType.int64](n)
+        for i in range(n):
+            var x = Int64(rng.next_below(wide)) + shift
+            var y = Int64(rng.next_below(tall)) - shift
+            a[i] = x
+            b[i] = y
+            far_a[i] = x * stride
+            far_b[i] = y * stride
+
+        var dense = _pair_grouping(a^, b^)
+        var spread = _pair_grouping(far_a^, far_b^)
+        _same_grouping(dense, spread, n)
+
+
+def test_a_key_pair_of_two_dtypes_groups_the_same_as_one_dtype() raises:
+    """The fused pack wants one dtype across the keys, and this is the other arm.
+
+    The packing loop reads every key in one pass, so an instantiation on each
+    key's own dtype would be twelve copies of it per key rather than twelve in
+    total. A pair whose dtypes disagree keeps the older route and factorizes
+    each key on its own. The same small numbers held in an int32 column and in
+    an int64 one are the same tuples, so both routes owe the same answer.
+    """
+    var rng = Rng(UInt64(0x3D7E5))
+    for _ in range(40):
+        var n = 1 + rng.next_below(300)
+        var wide = 1 + rng.next_below(20)
+
+        var a = Array[DType.int64](n)
+        var same = Array[DType.int64](n)
+        var narrow = Array[DType.int32](n)
+        for i in range(n):
+            var x = Int64(rng.next_below(wide)) - 5
+            var y = Int64(rng.next_below(wide)) - 5
+            a[i] = x
+            same[i] = y
+            narrow[i] = Int32(y)
+
+        var uniform = _pair_grouping(Array[DType.int64](copy=a), same^)
+        var mixed = _pair_grouping(a^, narrow^)
+        _same_grouping(uniform, mixed, n)
 
 
 def test_a_null_in_the_first_of_two_keys_still_lands_in_place() raises:

@@ -45,39 +45,6 @@ hashes once instead of three times, and a fused tuple hash would hash all of
 them. Which of those wins is a measurement, and the benchmark that settles it is
 `group/ordinals_two_keys` against `group/ordinals_one_key`.
 
-## Skipping the per key factorize
-
-That measurement was taken. On ten million rows, one key costs 8.4 milliseconds
-and two cost 23.8, so a second key of eight values costs nearly twice what the
-first key of a thousand did. Nothing about the second key is expensive. What is
-expensive is that the composition insists on giving every key its own dense
-ordinals first, and each of those is a scan for the range, a pass to assign, and
-a forty megabyte column of ordinals for the packing pass to read back.
-
-None of that is needed when the key is an integer in a narrow range, and the
-paragraphs above say why: only a key's group count and its ordinals as values are
-read here, never their order and never their density. So the value itself will
-do. Subtract the column's minimum and the key is already an ordinal in
-`[0, high - low + 1)`, which is a range that is at worst as wide as the one
-`factorize` would have produced and is usually the same one. That is a plan, not
-a pass, and `direct_plan` already computes it in the scan `factorize` was going
-to do anyway.
-
-`_tuple_plan` asks that of every key. If all of them answer, and the product of
-their ranges is a space a table can be laid over, then one pass over the raw key
-columns writes the packed value directly and the per key factorizes never
-happen. `n` scans plus one pass plus one factorize, rather than `n` scans plus
-`n` passes plus `n - 1` packing passes plus one factorize.
-
-The route is declined for a key that is not an integer, for a key whose values
-are spread too far apart for the subtraction to be a dense ordinal, for a mix of
-dtypes, and for a key with a null in it. The first three are the same questions
-`factorize` asks. The null is a narrower rule than it has to be: a null holds no
-value, so it has no place in a range, and reserving it a slot the way
-`_factorize_direct` does is a thing this could learn. Until a group by on a
-nullable key pair shows up in a measurement it is a case the general route
-already handles correctly.
-
 ## The representative row
 
 An aggregation produces one row per group and those rows need their key values
@@ -127,31 +94,7 @@ from firepanda.exec.morsel import parallel_morsels
 
 from firepanda.kernel.agg import max_of
 
-from .factorize import (
-    DIRECT_LIMIT,
-    direct_plan,
-    factorize,
-    factorize_dense,
-    factorize_strings,
-)
-
-
-@fieldwise_init
-struct TuplePlan[dt: DType](Movable):
-    """Where each key of a fused tuple pack sits inside the packed integer."""
-
-    var bases: List[Scalar[Self.dt]]
-    """Per key, the value that packs to zero, which is that key's minimum."""
-
-    var steps: List[Int]
-    """Per key, what its distance from that minimum is multiplied by. The last
-    key's step is one and each earlier key's is the product of the ranges to its
-    right, which is the same positional numbering the packing loop builds one
-    key at a time."""
-
-    var space: Int
-    """The width of the packed range, or -1 when the fused route does not
-    apply."""
+from .factorize import factorize, factorize_dense, factorize_strings
 
 
 struct Grouping(Movable):
@@ -218,32 +161,6 @@ def group_ordinals[
     """
     if len(at) == 0:
         raise Error("group by: at least one key column is required")
-
-    # Every key an integer of the same dtype in a range narrow enough to index,
-    # and the tuple packs straight out of the raw columns with no per key
-    # factorize at all. The dtypes have to agree because the packing loop reads
-    # all of the keys in one pass and a loop instantiated on each key's own dtype
-    # would be twelve copies of it per key. They nearly always do agree, because
-    # the keys of a group by are columns of one table.
-    if len(at) > 1:
-        var uniform = not columns[at[0]][].is_string()
-        for k in range(1, len(at)):
-            if (
-                columns[at[k]][].is_string()
-                or columns[at[k]][].dtype() != columns[at[0]][].dtype()
-            ):
-                uniform = False
-        if uniform:
-            var kind = columns[at[0]][].dtype()
-            comptime for dt in ALL:
-                comptime if dt.is_integral():
-                    if kind == dt:
-                        var plan = _tuple_plan[dt](columns, at, rows)
-                        if plan.space > 0:
-                            var packed = _tuple_pack[dt](
-                                columns, at, rows, plan
-                            )
-                            return _packed_grouping(packed, plan.space)
 
     var first = _factorize_any(columns[at[0]][])
     var groups = first.groups
@@ -390,28 +307,7 @@ def group_ordinals[
     # `space` is passed along because it is exactly the range the packing put the
     # values in, and knowing it is what lets a group by whose key space is dense
     # index a table instead of hashing.
-    return _packed_grouping(running, space)
-
-
-def _packed_grouping[
-    pt: DType
-](packed: Array[pt], space: Int) raises -> Grouping:
-    """Turns a packed tuple key into the grouping it describes.
-
-    Args:
-        packed: One packed key per row, every value in `[0, space)`.
-        space: The width of that range.
-
-    Parameters:
-        pt: The packed column's dtype.
-
-    Returns:
-        The dense ordinals, the group count and a representative row per group.
-
-    Raises:
-        If the factorize raises.
-    """
-    var combined = factorize_dense(packed, space)
+    var combined = factorize_dense(running, space)
     var combined_groups = combined.count()
     var combined_firsts = List[Int]()
     var out = Array[DType.uint32](0)
@@ -421,144 +317,6 @@ def _packed_grouping[
     var out_rows = List[Int]()
     var out_groups = _densify(out, out_rows)
     return Grouping(out^, out_groups, out_rows^)
-
-
-def _tuple_plan[
-    dt: DType, o: ImmOrigin
-](columns: ColumnRefs[o], at: List[Int], rows: Int) raises -> TuplePlan[dt]:
-    """Works out whether the keys can be packed without factorizing them first.
-
-    A key qualifies when it has no nulls and `direct_plan` gives it a range, and
-    the tuple qualifies when the product of those ranges is a space the factorize
-    at the bottom will lay a table over rather than hash. That bound is the wider
-    of `DIRECT_LIMIT` and the row count, which is `factorize_dense`'s own rule,
-    capped at what a uint32 can hold so the packed column is four bytes a row
-    rather than eight.
-
-    The scans are the cost of asking, and they are wasted on a key list that
-    turns out not to qualify, so the asking is arranged to be cheap when the
-    answer is no. What each key is allowed to spend is not the fixed ceiling
-    `factorize` uses but what the tuple has left, `bound` divided by the product
-    so far, and `direct_plan` returns the moment a key passes the ceiling it was
-    given. So a second key wide enough to put the tuple out of reach is declined
-    within a few thousand rows rather than after a pass over all of them, and
-    the same holds for every key after it. Only the first key can cost a full
-    scan for nothing, whatever the key count.
-
-    Args:
-        columns: The frame's columns, borrowed.
-        at: Which of them are keys.
-        rows: The frame's height.
-
-    Parameters:
-        dt: The dtype all of the keys share.
-        o: The origin the columns are borrowed from.
-
-    Returns:
-        The plan, whose space is -1 when the fused route does not apply.
-
-    Raises:
-        If a column cannot be viewed at `dt`.
-    """
-    var bound = rows if rows > DIRECT_LIMIT else DIRECT_LIMIT
-    if bound > Int(UInt32.MAX):
-        bound = Int(UInt32.MAX)
-
-    var bases = List[Scalar[dt]]()
-    var spans = List[Int]()
-    var space = 1
-    for k in range(len(at)):
-        ref col = columns[at[k]][].as_typed_view[dt]()
-        if col.null_count() > 0:
-            return TuplePlan[dt](List[Scalar[dt]](), List[Int](), -1)
-        # The division rather than a multiply, because the product is what would
-        # overflow and there is nothing to test it with afterwards. It is also
-        # the ceiling the scan is given, so the scan stops itself.
-        var plan = direct_plan[dt](col, bound // space)
-        if plan.span < 1 or plan.span > bound // space:
-            return TuplePlan[dt](List[Scalar[dt]](), List[Int](), -1)
-        bases.append(plan.base)
-        spans.append(plan.span)
-        space *= plan.span
-
-    var steps = List[Int]()
-    for _ in range(len(at)):
-        steps.append(0)
-    var step = 1
-    for k in range(len(at) - 1, -1, -1):
-        steps[k] = step
-        step *= spans[k]
-    return TuplePlan[dt](bases^, steps^, space)
-
-
-def _tuple_pack[
-    dt: DType, o: ImmOrigin
-](
-    columns: ColumnRefs[o], at: List[Int], rows: Int, plan: TuplePlan[dt]
-) raises -> Array[DType.uint32]:
-    """Packs every key tuple into one integer in a single pass over the columns.
-
-    Args:
-        columns: The frame's columns, borrowed.
-        at: Which of them are keys.
-        rows: The frame's height.
-        plan: What to subtract from each key and what to multiply it by.
-
-    Parameters:
-        dt: The dtype all of the keys share.
-        o: The origin the columns are borrowed from.
-
-    Returns:
-        One packed key per row, every value in `[0, plan.space)`.
-
-    Raises:
-        If a column cannot be viewed at `dt`.
-    """
-    comptime lanes = simd_width_of[DType.int64]()
-
-    # The pointers are collected once rather than viewed per morsel, and they are
-    # cast to the origin the columns were borrowed from, which is the one they
-    # all really live in.
-    var keys = List[Pointer[Scalar[dt], o]]()
-    for k in range(len(at)):
-        ref col = columns[at[k]][].as_typed_view[dt]()
-        keys.append(col.unsafe_ptr().unsafe_origin_cast[o]())
-
-    # Every row is written by the loop below and the packed value is a number in
-    # a range, never absent, so the zero fill would be a pass for nothing.
-    var packed = Array[DType.uint32](overwritten=rows)
-
-    def body(begin: Int, stop: Int) raises {mut packed, imm}:
-        var into = packed.unsafe_ptr()
-        var i = begin
-        while i + lanes <= stop:
-            # int64 rather than the key's own dtype, because the distance from
-            # the minimum can leave a narrow dtype's range and the product with
-            # the step certainly can. `direct_plan` will not hand back a range
-            # whose ends are past forty bits, so the accumulator cannot overflow.
-            var acc = SIMD[DType.int64, lanes](0)
-            for k in range(len(keys)):
-                acc += (
-                    keys[k]
-                    .unsafe_offset(i)
-                    .unsafe_load[width=lanes]()
-                    .cast[DType.int64]()
-                    - plan.bases[k].cast[DType.int64]()
-                ) * Int64(plan.steps[k])
-            into.unsafe_offset(i).unsafe_store(acc.cast[DType.uint32]())
-            i += lanes
-        while i < stop:
-            var acc = Int64(0)
-            for k in range(len(keys)):
-                acc += (
-                    keys[k].unsafe_offset(i).unsafe_load().cast[DType.int64]()
-                    - plan.bases[k].cast[DType.int64]()
-                ) * Int64(plan.steps[k])
-            into.unsafe_offset(i).unsafe_store(acc.cast[DType.uint32]())
-            i += 1
-
-    parallel_morsels(body, rows)
-    return packed^
 
 
 def _condense(mut running: Array[DType.int64], space: Int) raises -> Int:
