@@ -42,9 +42,12 @@ from firepanda.hash.factorize import factorize
 from firepanda.hash.grouping import group_ordinals
 from firepanda.testing.rng import Rng
 from firepanda.kernel.group import (
+    PARTITION_ROWS,
     PRIVATE_ROWS,
+    SLAB_SERIAL_GROUPS,
     AggKind,
     _partition_parts,
+    _slab_shift,
     aggregate_group,
     aggregate_group_any,
     aggregate_group_pair_any,
@@ -1553,6 +1556,59 @@ def test_a_group_count_too_large_to_replicate_agrees_with_a_serial_loop() raises
             var mean = Float64(want_sum[g]) / Float64(want_count[g])
             if abs(averaged[g] - mean) > 1e-9:
                 what = "mean"
+        if what:
+            wrong = g
+            break
+
+    assert_equal(wrong, -1, String(what, " is wrong at group ", wrong))
+
+
+def test_a_slab_too_wide_to_fill_on_one_core_agrees_with_a_hand_answer() raises:
+    # Past a few thousand groups the pass that lays a group's values out next to
+    # each other stops fitting in a core's cache, and rather than staying on one
+    # core it copies the rows into partition order first and fills one partition
+    # per worker. That is a different loop from the serial one every other test
+    # in this file reaches, and it is the loop where a group's values could go
+    # to the wrong run without anything crashing.
+    #
+    # Every group gets the same fifteen values, offset by a hundred times its
+    # own ordinal, in an order that walks the group's rows in steps of seven so
+    # that no group's slab run arrives sorted. Then the last value of every
+    # group is nulled, which takes the value eight out of each of them, so the
+    # fourteen that are left are nought to fourteen without the eight and their
+    # median is the mean of the sixth and the seventh, which is six and a half.
+    comptime GROUPS = 20_000
+    comptime PER_GROUP = 15
+    comptime ROWS = GROUPS * PER_GROUP
+
+    var shift = _slab_shift[DType.int64](ROWS, GROUPS)
+    var parts = (GROUPS + (1 << shift) - 1) >> shift
+    assert_true(
+        ROWS >= PARTITION_ROWS and GROUPS > SLAB_SERIAL_GROUPS and parts >= 2,
+        "this shape no longer reaches the partitioned slab fill",
+    )
+
+    var values = Array[DType.int64](ROWS)
+    var codes = Array[DType.uint32](ROWS)
+    for i in range(ROWS):
+        var g = i % GROUPS
+        codes[i] = UInt32(g)
+        values[i] = Int64(g * 100 + ((i // GROUPS) * 7) % PER_GROUP)
+    for i in range((PER_GROUP - 1) * GROUPS, ROWS):
+        values.set_null(i)
+
+    var middles = group_median(values, codes, GROUPS)
+    var distinct = group_nunique(values, codes, GROUPS)
+
+    var wrong = -1
+    var what = String()
+    for g in range(GROUPS):
+        if not middles.data.validity.get(g):
+            what = "presence of the median"
+        elif abs(middles[g] - (Float64(g) * 100.0 + 6.5)) > 1e-9:
+            what = "median"
+        elif distinct[g] != Int64(PER_GROUP - 1):
+            what = "distinct count"
         if what:
             wrong = g
             break

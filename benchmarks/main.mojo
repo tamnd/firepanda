@@ -2442,6 +2442,12 @@ def bench_group(mut harness: Harness) raises:
     accumulators the scatter is writing into. Ten fits in a cache line and a
     hundred thousand does not, so the pair measures the random write directly.
 
+    The four `group/median_cardinality_*` rows ask the same question of a
+    reduction that has to lay its values out before it can do anything. Ten
+    groups, a thousand, a hundred thousand and two thirds of the rows. The sorts
+    get shorter with every step, so a cost per row that rises across the four is
+    a cost in the layout rather than in the reduction.
+
     How much of a real group by is the grouping rather than the reduction.
     `group/ordinals_one_key` is the factorize and renumber pass on its own, and
     `group/frame_one_key` is the whole operation, so the reduction is what is left
@@ -2469,9 +2475,16 @@ def bench_group(mut harness: Harness) raises:
     var spread = Array[DType.int64](rows)
     var spread_values = Array[DType.int64](rows)
     var other = Array[DType.int64](rows)
+    var own = Array[DType.uint32](rows)
     var wide = 100_000 if rows >= 100_000 else rows
     if wide < 1:
         wide = 1
+    # Two thirds of the row count, which is roughly where db-benchmark q6 lands:
+    # ten million rows over six and a third million groups, so most groups hold
+    # one value and the reduction inside a group costs nothing.
+    var nearly = rows * 2 // 3
+    if nearly < 1:
+        nearly = 1
     for i in range(rows):
         var draw = rng.next_u64()
         values[i] = Int64(draw % 1000)
@@ -2483,6 +2496,7 @@ def bench_group(mut harness: Harness) raises:
         spread[i] = Int64(draw % UInt64(wide))
         spread_values[i] = Int64(draw % 1000)
         other[i] = Int64((draw >> 20) % 8)
+        own[i] = UInt32(draw % UInt64(nearly))
         if draw & 7 == 0:
             sparse.set_null(i)
 
@@ -2592,6 +2606,30 @@ def bench_group(mut harness: Harness) raises:
 
     harness.record(
         "group/median_cardinality_10", "rows", rows, median_low_cardinality
+    )
+
+    # The other end of the same axis. Ten groups, a thousand groups, a hundred
+    # thousand and then two thirds of the rows, over one column and one kernel,
+    # so what the number does across the four says whether a median is paid for
+    # by its sorts or by the pass that lays the values out for them. The sorts
+    # get shorter as the groups get more numerous, so a cost that rises across
+    # the row is not the sorting.
+    def median_high_cardinality() raises {imm values, imm many, imm wide}:
+        keep(values)
+        var out = group_median(values, many, wide)
+        keep(out[0])
+
+    harness.record(
+        "group/median_cardinality_100k", "rows", rows, median_high_cardinality
+    )
+
+    def median_own_group() raises {imm values, imm own, imm nearly}:
+        keep(values)
+        var out = group_median(values, own, nearly)
+        keep(out[0])
+
+    harness.record(
+        "group/median_cardinality_rows", "rows", rows, median_own_group
     )
 
     def nunique_grouped() raises {imm values, imm codes}:
