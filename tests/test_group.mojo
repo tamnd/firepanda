@@ -1106,9 +1106,10 @@ def test_a_covariance_of_a_column_with_itself_is_its_variance() raises:
 
 
 def test_the_pair_reductions_agree_through_their_erased_spelling() raises:
-    # The erased path casts both columns to float64 and calls one instantiation,
-    # so this is checking the cast as much as the reduction: the inputs are
-    # int64 here and the typed call reads them as int64 without a copy.
+    # Both columns are int64, so this takes the matching dtype arm, which reads
+    # them as int64 and converts a value at a time. The typed call below does the
+    # same thing by hand, so agreement here says the dispatch picked the right
+    # instantiation.
     var x = ints([1, 2, 3, 4])
     var y = ints([2, 4, 5, 9])
     var codes = codes_of([0, 0, 0, 0])
@@ -1121,6 +1122,33 @@ def test_the_pair_reductions_agree_through_their_erased_spelling() raises:
         1,
     ).as_typed[DType.float64]()
     assert_almost_equal(through[0], direct[0], atol=1e-12)
+
+
+def test_the_pair_reductions_agree_when_the_two_dtypes_differ() raises:
+    # One int64 column and one float64 column, which is the arm that still casts
+    # both to float64 rather than instantiating on the pair. Same numbers as the
+    # matching case above, so the two arms have to produce the same answer.
+    var codes = codes_of([0, 0, 0, 0])
+    var direct = group_corr(
+        ints([1, 2, 3, 4]), floats([2.0, 4.0, 5.0, 9.0]), codes, 1
+    )
+    var through = aggregate_group_pair_any(
+        AnyArray(ints([1, 2, 3, 4])),
+        AnyArray(floats([2.0, 4.0, 5.0, 9.0])),
+        AggKind.CORR,
+        codes,
+        1,
+    ).as_typed[DType.float64]()
+    assert_almost_equal(through[0], direct[0], atol=1e-12)
+
+    var matching = aggregate_group_pair_any(
+        AnyArray(ints([1, 2, 3, 4])),
+        AnyArray(ints([2, 4, 5, 9])),
+        AggKind.CORR,
+        codes,
+        1,
+    ).as_typed[DType.float64]()
+    assert_almost_equal(through[0], matching[0], atol=1e-12)
 
 
 def test_a_pair_reduction_over_columns_of_different_lengths_is_refused() raises:
