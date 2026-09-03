@@ -8,6 +8,15 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed
+
+- The pass that lays a group's values out next to each other, which is what a grouped median, quantile and distinct count all need before they can start, is now partitioned and parallel above a few thousand groups. It was one core walking the rows and writing each into its group's run, which is a random write per row, and on a high cardinality key that was the entire cost of the reduction rather than a part of it. It now copies the rows into partition order first, where a partition is a run of group ordinals, and then fills one partition per worker into a slice of the slab small enough to stay in that core's cache. Three passes instead of one and none of them missing. On ten million int64 rows on an i9-13900K, nanoseconds a row: a median over a hundred thousand groups went from 12.739 to 1.748, and over six and a half million groups from 17.678 to 3.088. A median over a thousand groups is unchanged, because below the threshold the old loop had a handful of write streams and there was nothing there to fix.
+- db-benchmark q6, which is a median and a standard deviation over six and a third million groups, went from 0.681 s to 0.267 s at 0.5GB on the same machine. Measured in the same invocation as the other three engines, that is now ahead of all of them: Polars 0.325 s, DuckDB 0.478 s, pandas 1.214 s, and firepanda on the lowest peak memory of the four at 1.35 GB against DuckDB's 3.17 GB.
+
+### Added
+
+- Four `group/median_cardinality_*` benchmarks over one column and one kernel at ten groups, a thousand, a hundred thousand and two thirds of the row count. The sorts a median pays for get shorter at every step, so a cost per row that rises across the four is a cost in the layout rather than in the reduction, which is how the pass above was found.
+
 ## [0.6.35] - 2026-09-03
 
 Built against Mojo 1.0.0 (ed45d567).

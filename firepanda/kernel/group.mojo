@@ -1615,7 +1615,46 @@ def _slab_bounds(counts: Array[DType.int64], groups: Int) -> List[Int]:
     return bounds^
 
 
-def _fill_slab[
+comptime SLAB_SERIAL_GROUPS = PARTITION_BYTES // 72
+"""Groups below which the slab fill stays on one core.
+
+The fill holds a write cursor per group, eight bytes, and it has an open cache
+line at the head of every group's run of the slab, sixty four more. While those
+two fit in a core's private cache the fill is a sequential read and a manageable
+set of write streams and there is nothing here to fix. Above it every row costs
+two misses, and that is where partitioning starts to pay for the extra pass it
+takes.
+"""
+
+
+def _slab_shift[dt: DType](rows: Int, groups: Int) -> Int:
+    """Returns how many low bits of a group ordinal one slab partition covers.
+
+    Args:
+        rows: How many rows are being laid out.
+        groups: How many groups they land in.
+
+    Parameters:
+        dt: The slab's dtype.
+
+    Returns:
+        The shift, so that partition `p` owns ordinals `p << shift` upwards.
+    """
+    # What a partition touches is its cursor, eight bytes a group, and its run of
+    # the slab, which is as many values as its groups hold between them. So the
+    # width is set by how many rows a group holds on average and not by the group
+    # count alone, and that is the whole difference between this and
+    # `_partition_shift`. A slab partition over a key with a hundred rows to the
+    # group has to be a hundred times narrower than one over a key with one.
+    var per_group = 8 + (size_of[dt]() * rows) // groups
+    var span = PARTITION_BYTES // per_group
+    var shift = 0
+    while (1 << (shift + 1)) <= span and (1 << (shift + 1)) <= groups:
+        shift += 1
+    return shift
+
+
+def _fill_slab_serial[
     dt: DType, //, origin: ImmOrigin
 ](
     source: Pointer[Scalar[dt], origin],
@@ -1626,17 +1665,7 @@ def _fill_slab[
     bounds: List[Int],
     mut slab: Array[dt],
 ):
-    """Gathers each group's non-null values into its own run of the slab.
-
-    The three reductions below all need a group's values next to each other, and
-    two of them need them sorted. Sorting the whole column by group and then by
-    value would do it in one radix pass, but the sort kernel here argsorts into a
-    permutation and applying that is another pass over the column plus an
-    indirection per row. Scattering into per group runs is the same single pass
-    and leaves each run short enough that sorting it is cheap: the runs sum to
-    the row count, so sorting all of them is n log(n over groups) rather than
-    n log n, and on the thousand group shape that is a third of the comparisons.
-    """
+    """Walks the rows once, writing each into its group's run."""
     var cursor = List[Int](capacity=groups)
     for g in range(groups):
         cursor.append(bounds[g])
@@ -1651,6 +1680,129 @@ def _fill_slab[
             source.unsafe_offset(i).unsafe_load()
         )
         cursor[g] = cursor[g] + 1
+
+
+def _fill_slab[
+    dt: DType, //, origin: ImmOrigin
+](
+    source: Pointer[Scalar[dt], origin],
+    validity: Bitmap,
+    has_null: Bool,
+    codes: Array[DType.uint32],
+    groups: Int,
+    bounds: List[Int],
+    mut slab: Array[dt],
+) raises:
+    """Gathers each group's non-null values into its own run of the slab.
+
+    The three reductions below all need a group's values next to each other, and
+    two of them need them sorted. Sorting the whole column by group and then by
+    value would do it in one radix pass, but the sort kernel here argsorts into a
+    permutation and applying that is another pass over the column plus an
+    indirection per row. Scattering into per group runs is the same single pass
+    and leaves each run short enough that sorting it is cheap: the runs sum to
+    the row count, so sorting all of them is n log(n over groups) rather than
+    n log n, and on the thousand group shape that is a third of the comparisons.
+
+    That single pass is a random write per row, and on a high cardinality key it
+    is the whole cost of the reduction. Measured on ten million rows on an
+    i9-13900K, a median over a thousand groups was three nanoseconds a row and
+    the same median over six and a half million groups was seventeen, while the
+    sorts it was paying for got shorter at every step. So the pass is cut the
+    same way `_partitioned_sums` cuts its fold: the rows are copied once into
+    partition order, where a partition is a run of ordinals, and then each
+    partition is filled by one worker into a slice of the slab small enough to
+    stay in that core's cache. Three passes instead of one, all of them parallel,
+    and none of them missing.
+
+    A group's values stay in row order either way. The copy lays the workers out
+    in order inside a partition and each worker reads its rows forwards, so the
+    order a group's values end up in is the order they were in the column. The
+    two callers sort, so nothing depends on that, and it costs nothing to keep.
+
+    Args:
+        source: The values being laid out.
+        validity: Which rows are present.
+        has_null: False to skip the presence check per row.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals.
+        bounds: `groups + 1` slab offsets, from `_slab_bounds`.
+        slab: Filled with every present value, grouped.
+
+    Parameters:
+        dt: The column's dtype.
+        origin: The origin of the values pointer.
+
+    Raises:
+        If one of the workers the partitioned route starts cannot be run. The
+        serial route cannot fail.
+    """
+    var rows = len(codes)
+    var workers = worker_count()
+    if rows < PARTITION_ROWS or groups <= SLAB_SERIAL_GROUPS or workers <= 1:
+        _fill_slab_serial(
+            source, validity, has_null, codes, groups, bounds, slab
+        )
+        return
+
+    var shift = _slab_shift[dt](rows, groups)
+    var parts = (groups + (1 << shift) - 1) >> shift
+    if parts < 2:
+        _fill_slab_serial(
+            source, validity, has_null, codes, groups, bounds, slab
+        )
+        return
+
+    var blocks = _row_bounds(rows, workers)
+    var starts = _partition_starts(
+        codes, validity, has_null, blocks, workers, parts, shift
+    )
+
+    # A null row is left out of the partitioning, so these hold the present rows
+    # and the tail of each is never read. Sizing them by the row count rather
+    # than by the present count saves a pass and costs nothing that is touched.
+    var held = Buffer(overwritten=rows * 4)
+    var carried = Buffer(overwritten=rows * size_of[dt]())
+
+    def place(w: Int) raises {mut held, mut carried, imm}:
+        var at = codes.unsafe_ptr()
+        var ordinals = held.bitcast[DType.uint32]()
+        var values = carried.bitcast[dt]()
+        var cursor = List[Int](capacity=parts)
+        for p in range(parts):
+            cursor.append(starts[p * workers + w])
+        for i in range(blocks[w], blocks[w + 1]):
+            if has_null and not validity.get(i):
+                continue
+            var g = at.unsafe_offset(i).unsafe_load()
+            var p = Int(g) >> shift
+            var slot = cursor[p]
+            ordinals.unsafe_offset(slot).unsafe_write(g)
+            values.unsafe_offset(slot).unsafe_write(
+                source.unsafe_offset(i).unsafe_load()
+            )
+            cursor[p] = slot + 1
+
+    parallel_for(place, workers)
+
+    def settle(p: Int) raises {mut slab, imm}:
+        var into = slab.unsafe_ptr()
+        var ordinals = held.bitcast[DType.uint32]()
+        var values = carried.bitcast[dt]()
+        var low = p << shift
+        var high = min(groups, low + (1 << shift))
+        var cursor = List[Int](capacity=high - low)
+        for g in range(low, high):
+            cursor.append(bounds[g])
+        for i in range(starts[p * workers], starts[(p + 1) * workers]):
+            var g = Int(ordinals.unsafe_offset(i).unsafe_load()) - low
+            var slot = cursor[g]
+            into.unsafe_offset(slot).unsafe_store(
+                values.unsafe_offset(i).unsafe_load()
+            )
+            cursor[g] = slot + 1
+
+    parallel_for(settle, parts)
 
 
 def _quantile_core[
