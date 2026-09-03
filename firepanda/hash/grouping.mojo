@@ -78,6 +78,50 @@ value, so it has no place in a range, and reserving it a slot the way
 nullable key pair shows up in a measurement it is a case the general route
 already handles correctly.
 
+## Packing the codes in one pass
+
+That route is declined by every group by in db-benchmark, because three of the
+six key columns there are text and every multi key query in the suite uses one
+of them. A text key has to be factorized, there is no arithmetic that turns a
+string into an ordinal, so for those the `n` factorize passes are not something
+to remove. The `n - 1` packing passes are.
+
+They exist because the packing was written as a fold: take the running value,
+multiply it by the next key's group count, add the next key's ordinal, and go
+round again. Each turn of that reads the running column, reads a key's ordinals
+and writes the running column back, and the running column is int64 because the
+product it accumulates has no bound. Six keys is five turns and a gigabyte of
+traffic on ten million rows.
+
+Nothing forces it to be a fold. The number the fold arrives at is
+`c0 * g1 * g2 * ... + c1 * g2 * ... + ... + cn`, which is positional notation,
+and every one of those multipliers is known before the first row is read: the
+last key's is one and each earlier key's is the product of the group counts to
+its right. So the whole thing is one weighted sum per row over ordinals that are
+all sitting in memory already, and one pass computes it.
+
+The width falls out too. A fold has to be int64 because it cannot know where the
+product stops, but a pass that has all the counts in hand can check first, and
+where the product fits a uint32 the packed column is four bytes a row rather
+than eight and the vector is twice as wide. Two low cardinality keys is the
+common shape and it always fits.
+
+What it costs is that all `n` ordinal columns have to be alive at once, where the
+fold used to hold two and its running column however many keys there were. Four
+bytes a row a key against the fold's flat sixteen is a saving on two keys, a wash
+on three and a cost above that: six keys packed into an int64 is thirty two bytes
+a row. Three hundred and twenty megabytes on ten million rows, to take nine
+hundred and sixty out of the traffic.
+
+The fold pays that too, because the factorizes all happen before either route is
+chosen and the choice needs every group count to have been made. It could be
+arranged not to, and it is not worth arranging: what sends a group by to the fold
+is a product that leaves an int64, which needs six keys of a thousand values or
+twenty six of a hundred and does not happen to a real table. The fold is kept
+because renumbering partway through is what `_condense` does and a single pass
+has no partway, and the check is on the product rather than on the key count, so
+nothing has to predict which tables are real.
+
 ## The representative row
 
 An aggregation produces one row per group and those rows need their key values
@@ -260,10 +304,65 @@ def group_ordinals[
             groups = _densify(codes, rows_at)
         return Grouping(codes^, groups, rows_at^)
 
-    # Two or more. Nothing about the first key's ordinals is read from here on
-    # except their value, so a null group in the wrong place does not matter and
-    # `_densify` is not called on it. The packed column carries the tuple and the
-    # one factorize at the bottom is what makes the result dense and ordered.
+    # Two or more. Nothing about any key's ordinals is read from here on except
+    # their value, so a null group in the wrong place does not matter and
+    # `_densify` is called only on a route that cannot say how many groups it
+    # made. The packed column carries the tuple and the one factorize at the
+    # bottom is what makes the result dense and ordered.
+    #
+    # Every key is factorized here rather than inside the packing loop, because
+    # the fused pass below needs all of the ordinals at once and the fold needs
+    # to know they exist either way. The counts come with them, and the counts
+    # are what decides which of the two runs.
+    var stacked = List[Array[DType.uint32]]()
+    var counts = List[Int]()
+    stacked.append(codes^)
+    counts.append(groups)
+    for k in range(1, len(at)):
+        var key = _factorize_any(columns[at[k]][])
+        var next_groups = key.groups
+        var next = Array[DType.uint32](0)
+        var spare = List[Int]()
+        key^.into_parts(next, spare)
+        if next_groups < 0:
+            # Only the count matters here, not the order and not the rows, for
+            # the same reason the first key's order does not matter. A key that
+            # knows how many groups it has can skip the pass even when it cannot
+            # say which row each one is on.
+            spare = List[Int]()
+            next_groups = _densify(next, spare)
+        stacked.append(next^)
+        counts.append(next_groups)
+
+    # The multipliers of the positional notation the fold would have arrived at,
+    # rightmost first, alongside the product they end at. The test is a division
+    # rather than a multiply because the product is the thing that would
+    # overflow, and there is nothing to test it with afterwards.
+    var steps = List[Int]()
+    for _ in range(len(counts)):
+        steps.append(0)
+    var fused = True
+    var product = 1
+    for k in range(len(counts) - 1, -1, -1):
+        steps[k] = product
+        if counts[k] < 1 or product > Int(Int64.MAX) // counts[k]:
+            fused = False
+            break
+        product *= counts[k]
+
+    # Four bytes a row when the product fits and eight when it does not, which
+    # is the same choice the fold does not get to make. Anything that overflows
+    # an int64 keeps the fold, because renumbering partway through is what
+    # `_condense` is for and a single pass has no partway.
+    if fused:
+        if product <= Int(UInt32.MAX):
+            return _packed_grouping(
+                _code_pack[DType.uint32](stacked, steps, rows), product
+            )
+        return _packed_grouping(
+            _code_pack[DType.int64](stacked, steps, rows), product
+        )
+
     comptime lanes = simd_width_of[DType.int64]()
 
     # The packing passes below are elementwise over every row, and on ten
@@ -274,7 +373,7 @@ def group_ordinals[
 
     def widen(begin: Int, stop: Int) raises {mut running, imm}:
         var into = running.unsafe_ptr()
-        var from_ = codes.unsafe_ptr()
+        var from_ = stacked[0].unsafe_ptr()
         var i = begin
         while i + lanes <= stop:
             into.unsafe_offset(i).unsafe_store(
@@ -299,22 +398,11 @@ def group_ordinals[
     # next loop was about to load anyway. `widen` stays because the overflow
     # route below needs `running` populated before it can renumber it, and that
     # route cannot be reached without more rows than a uint32 ordinal can name.
-    var space = groups
+    var space = counts[0]
     var packed = False
 
     for k in range(1, len(at)):
-        var key = _factorize_any(columns[at[k]][])
-        var next_groups = key.groups
-        var next = Array[DType.uint32](0)
-        var spare = List[Int]()
-        key^.into_parts(next, spare)
-        if next_groups < 0:
-            # Only the count matters here, not the order and not the rows, for
-            # the same reason the first key's order does not matter. A key that
-            # knows how many groups it has can skip the pass even when it cannot
-            # say which row each one is on.
-            spare = List[Int]()
-            next_groups = _densify(next, spare)
+        var next_groups = counts[k]
 
         if next_groups > 0 and space > Int(Int64.MAX) // next_groups:
             if not packed:
@@ -332,7 +420,7 @@ def group_ordinals[
 
         def combine(begin: Int, stop: Int) raises {mut running, imm}:
             var pack = running.unsafe_ptr()
-            var right = next.unsafe_ptr()
+            var right = stacked[k].unsafe_ptr()
             var i = begin
             while i + lanes <= stop:
                 pack.unsafe_offset(i).unsafe_store(
@@ -352,8 +440,8 @@ def group_ordinals[
 
         def start(begin: Int, stop: Int) raises {mut running, imm}:
             var pack = running.unsafe_ptr()
-            var left = codes.unsafe_ptr()
-            var right = next.unsafe_ptr()
+            var left = stacked[0].unsafe_ptr()
+            var right = stacked[k].unsafe_ptr()
             var i = begin
             while i + lanes <= stop:
                 pack.unsafe_offset(i).unsafe_store(
@@ -421,6 +509,69 @@ def _packed_grouping[
     var out_rows = List[Int]()
     var out_groups = _densify(out, out_rows)
     return Grouping(out^, out_groups, out_rows^)
+
+
+def _code_pack[
+    pt: DType, o: ImmOrigin
+](
+    ref[o] stacked: List[Array[DType.uint32]], steps: List[Int], rows: Int
+) raises -> Array[pt]:
+    """Packs every key tuple into one integer in a single pass over the ordinals.
+
+    The weighted sum this computes is the number the fold arrives at, written out
+    rather than accumulated, so the two routes produce the same packed value for
+    the same row and the tests can hold one against the other.
+
+    Args:
+        stacked: One column of ordinals per key, all of them `rows` long.
+        steps: What each key's ordinal is multiplied by, rightmost step one.
+        rows: The frame's height.
+
+    Parameters:
+        pt: What to pack into, which the caller picks from the product.
+        o: The origin the ordinal columns are borrowed from.
+
+    Returns:
+        One packed key per row, every value below the product of the counts.
+    """
+    comptime lanes = simd_width_of[pt]()
+
+    # The pointers are collected once rather than indexed per morsel, and they
+    # are cast to the origin the list was borrowed from, which is where they all
+    # really live.
+    var keys = List[Pointer[UInt32, o]]()
+    for k in range(len(stacked)):
+        keys.append(stacked[k].unsafe_ptr().unsafe_origin_cast[o]())
+
+    # Every row is written by the loop below and the packed value is a number in
+    # a range, never absent, so the zero fill would be a pass for nothing.
+    var packed = Array[pt](overwritten=rows)
+
+    def body(begin: Int, stop: Int) raises {mut packed, imm}:
+        var into = packed.unsafe_ptr()
+        var i = begin
+        while i + lanes <= stop:
+            # The accumulator is the packed column's own dtype, and the caller
+            # chose that from the product every partial sum stays below, so
+            # nothing here can overflow.
+            var acc = SIMD[pt, lanes](0)
+            for k in range(len(keys)):
+                acc += keys[k].unsafe_offset(i).unsafe_load[width=lanes]().cast[
+                    pt
+                ]() * Scalar[pt](steps[k])
+            into.unsafe_offset(i).unsafe_store(acc)
+            i += lanes
+        while i < stop:
+            var acc = Scalar[pt](0)
+            for k in range(len(keys)):
+                acc += keys[k].unsafe_offset(i).unsafe_load().cast[
+                    pt
+                ]() * Scalar[pt](steps[k])
+            into.unsafe_offset(i).unsafe_store(acc)
+            i += 1
+
+    parallel_morsels(body, rows)
+    return packed^
 
 
 def _tuple_plan[

@@ -2461,6 +2461,15 @@ def bench_group(mut harness: Harness) raises:
     what the fused route saves when it applies, and against the same row before
     the route existed it says what asking costs when the answer is no.
 
+    The three `group/ordinals_*_text_*` and `group/ordinals_six_keys` rows are
+    the shapes db-benchmark actually groups on, over a table built to look like
+    its own: three text key columns and the same three values again as integers.
+    A text key cannot take any of the arithmetic routes, so the one key row says
+    what the hash of the bytes and the probe per row cost, the two key row says
+    what a second factorize and the packing add, and the six key row is the
+    widest group by in the suite and the one where the packing is most of what
+    is left after the factorizes.
+
     Args:
         harness: The harness.
 
@@ -2739,6 +2748,64 @@ def bench_group(mut harness: Harness) raises:
         rows,
         ordinals_two_declined,
     )
+
+    # The db-benchmark group by table, near enough: two text keys of a hundred
+    # values, one text key of a row per hundred, and the same three again as
+    # integers. Every multi key query in that suite groups on some prefix of it,
+    # so the three rows below are the one key, two key and six key shapes it
+    # actually asks for rather than the ones that are convenient to build.
+    var high = rows // 100 if rows >= 100 else 1
+    var t1 = List[String](capacity=rows)
+    var t2 = List[String](capacity=rows)
+    var t3 = List[String](capacity=rows)
+    var n4 = Array[DType.int32](rows)
+    var n5 = Array[DType.int32](rows)
+    var n6 = Array[DType.int32](rows)
+    for i in range(rows):
+        var draw = rng.next_u64()
+        var a = Int(draw % 100) + 1
+        var b = Int((draw >> 20) % 100) + 1
+        var c = Int((draw >> 40) % UInt64(high)) + 1
+        t1.append(String("id", a))
+        t2.append(String("id", b))
+        t3.append(String("id", c))
+        n4[i] = Int32(a)
+        n5[i] = Int32(b)
+        n6[i] = Int32(c)
+    var text_columns = List[Series]()
+    text_columns.append(Series("id1", strings_from_list(t1)))
+    text_columns.append(Series("id2", strings_from_list(t2)))
+    text_columns.append(Series("id3", strings_from_list(t3)))
+    text_columns.append(Series("id4", n4^))
+    text_columns.append(Series("id5", n5^))
+    text_columns.append(Series("id6", n6^))
+    var text_df = DataFrame.from_series(text_columns^)
+    var six_keys: List[Int] = [0, 1, 2, 3, 4, 5]
+
+    def ordinals_one_text() raises {imm text_df, imm one_key}:
+        keep(text_df.rows)
+        var out = group_ordinals(text_df.column_refs(), one_key, text_df.rows)
+        keep(out.groups)
+
+    harness.record(
+        "group/ordinals_one_text_key", "rows", rows, ordinals_one_text
+    )
+
+    def ordinals_two_text() raises {imm text_df, imm two_keys}:
+        keep(text_df.rows)
+        var out = group_ordinals(text_df.column_refs(), two_keys, text_df.rows)
+        keep(out.groups)
+
+    harness.record(
+        "group/ordinals_two_text_keys", "rows", rows, ordinals_two_text
+    )
+
+    def ordinals_six() raises {imm text_df, imm six_keys}:
+        keep(text_df.rows)
+        var out = group_ordinals(text_df.column_refs(), six_keys, text_df.rows)
+        keep(out.groups)
+
+    harness.record("group/ordinals_six_keys", "rows", rows, ordinals_six)
 
     def frame_one() raises {imm df}:
         keep(df.rows)

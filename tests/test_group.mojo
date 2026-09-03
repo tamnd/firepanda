@@ -519,6 +519,98 @@ def test_a_key_pair_of_two_dtypes_groups_the_same_as_one_dtype() raises:
         _same_grouping(uniform, mixed, n)
 
 
+def test_both_packing_routes_give_first_appearance_order() raises:
+    """Holds the fused pass and the fold it replaces against the same oracle.
+
+    The two keys here are spread far enough apart that the raw column route is
+    declined and both keys really are factorized, which is the case the packing
+    is for. Which packing runs then comes down to the product of the two group
+    counts against the bound, and the sweep is wide enough that some trials fuse
+    and some fold, so one run covers both.
+
+    The answer is not taken from either of them. A group by owes first appearance
+    order over the tuples and that is short enough to write out directly here,
+    a table over the pair space carrying the ordinal each pair was given the
+    first time it was seen, so a change that made both routes agree on the wrong
+    thing would still be caught.
+    """
+    var rng = Rng(UInt64(0xC0DEBA5E))
+    comptime stride = Int64(DIRECT_LIMIT) + 1
+    for _ in range(60):
+        var n = 1 + rng.next_below(600)
+        var wide = 1 + rng.next_below(400)
+        var tall = 1 + rng.next_below(400)
+
+        var a = Array[DType.int64](n)
+        var b = Array[DType.int64](n)
+        var left_at = List[Int]()
+        var right_at = List[Int]()
+        for i in range(n):
+            var x = rng.next_below(wide)
+            var y = rng.next_below(tall)
+            left_at.append(x)
+            right_at.append(y)
+            a[i] = Int64(x) * stride
+            b[i] = Int64(y) * stride
+
+        var seen = List[Int]()
+        for _ in range(wide * tall):
+            seen.append(-1)
+        var want_codes = List[Int]()
+        var want_rows = List[Int]()
+        for i in range(n):
+            var slot = left_at[i] * tall + right_at[i]
+            if seen[slot] < 0:
+                seen[slot] = len(want_rows)
+                want_rows.append(i)
+            want_codes.append(seen[slot])
+
+        var got = _pair_grouping(a^, b^)
+        assert_equal(got.groups, len(want_rows))
+        assert_equal(len(got.rows_at), len(want_rows))
+        for i in range(n):
+            assert_equal(got.codes[i], UInt32(want_codes[i]))
+        for g in range(len(want_rows)):
+            assert_equal(got.rows_at[g], want_rows[g])
+
+
+def test_a_key_space_too_wide_for_a_uint32_still_packs_in_one_pass() raises:
+    """The other arm of the packed column's width.
+
+    Three keys of two thousand values each is a space of eight billion, which is
+    past what a uint32 holds and well short of what an int64 does, so the single
+    pass still runs and only the column it writes is wider. The keys are chosen
+    so the answer needs no oracle: the first key is the row number capped at two
+    thousand, so every triple up to there is distinct and the row after the cap
+    repeats the first one.
+    """
+    comptime span = 2000
+    var n = span + 1
+    var a = Array[DType.int64](n)
+    var b = Array[DType.int64](n)
+    var c = Array[DType.int64](n)
+    for i in range(n):
+        var j = i if i < span else 0
+        a[i] = Int64(j)
+        b[i] = Int64((j * 3) % span)
+        c[i] = Int64((j * 7) % span)
+
+    var series = List[Series]()
+    series.append(Series("a", a^))
+    series.append(Series("b", b^))
+    series.append(Series("c", c^))
+    var frame = DataFrame.from_series(series^)
+    var at: List[Int] = [0, 1, 2]
+    var got = group_ordinals(frame.column_refs(), at, frame.rows)
+
+    assert_equal(got.groups, span)
+    assert_equal(len(got.rows_at), span)
+    for i in range(span):
+        assert_equal(got.codes[i], UInt32(i))
+        assert_equal(got.rows_at[i], i)
+    assert_equal(got.codes[span], UInt32(0))
+
+
 def test_a_null_in_the_first_of_two_keys_still_lands_in_place() raises:
     """The packed column has no nulls even when the key it came from does.
 
