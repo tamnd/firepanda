@@ -15,10 +15,13 @@ without hashing anything again.
 That argument covers every fixed width dtype and does not cover text, because
 sixteen bytes of name do not fit in eight bytes of hash and no function can make
 them. `build_strings` is the same probe with the comparison put back: on a hash
-match it compares the row against the row that first produced that ordinal, and
-keeps probing if they differ. The two builds are otherwise the same loop, kept
-apart rather than merged behind a flag so that the fixed width one stays a loop
-with nothing in it.
+match it compares the row against the key that first produced that ordinal, and
+keeps probing if they differ. It compares against a view the caller kept rather
+than against the row that view came from, because reaching back into a views
+buffer of sixteen bytes a row by group ordinal is one scattered line per row of
+something far too large to cache, and the views of the groups alone are small.
+The two builds are otherwise the same loop, kept apart rather than merged behind
+a flag so that the fixed width one stays a loop with nothing in it.
 
 Layout is one flat buffer of 16-byte slots, the hash in the first eight bytes and
 the ordinal in the second eight. Two parallel buffers would be the obvious
@@ -47,6 +50,7 @@ from std.sys.intrinsics import PrefetchOptions, prefetch
 
 from firepanda.array.array import Array
 from firepanda.array.strings import StringArray
+from firepanda.array.strview import StringView
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer
 
@@ -371,6 +375,10 @@ struct HashTable(Movable, Sized):
             firsts: Appended with the absolute row index of every key that was
                 new, in ordinal order, so the caller can read the key values back
                 out of its own column without the table knowing what a value is.
+            reps: Appended with the view of every key that was new, in the same
+                ordinal order, and read back to settle a hash match. It is what
+                `firsts` would be dereferenced to, kept so that it does not have
+                to be. Pass the same list across the chunks of one build.
             hash_at: Where this chunk's hashes start in `hashes`. Zero for a
                 caller that hashed the chunk into a buffer of its own, which is
                 every caller that hashes as it goes. A partitioned build has the
@@ -570,6 +578,7 @@ struct HashTable(Movable, Sized):
         offset: Int,
         mut codes: Array[DType.uint32],
         mut firsts: List[Int],
+        mut reps: List[StringView],
         hash_at: Int = 0,
         rows_at: Buffer = Buffer(0),
     ):
@@ -719,10 +728,11 @@ struct HashTable(Movable, Sized):
                     )
                     out.unsafe_offset(i).unsafe_write(UInt32(found + offset))
                     firsts.append(row)
+                    reps.append(col.view(row))
                     found += 1
                     break
                 if slots.unsafe_offset(slot).unsafe_load() == wanted:
-                    if col.element_equals(row, firsts[Int(ordinal) - 1]):
+                    if col.element_equals_view(row, reps[Int(ordinal) - 1]):
                         out.unsafe_offset(i).unsafe_write(
                             UInt32(Int(ordinal) - 1 + offset)
                         )

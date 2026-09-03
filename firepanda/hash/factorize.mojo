@@ -82,6 +82,7 @@ from std.sys.info import simd_width_of, size_of
 
 from firepanda.array.array import Array
 from firepanda.array.strings import StringArray
+from firepanda.array.strview import StringView
 from firepanda.buffer.buffer import Buffer
 from firepanda.exec import parallel_for, worker_count
 from firepanda.kernel.accum import highest, lowest
@@ -2188,6 +2189,7 @@ def _projected_groups_strings(col: StringArray, seed: UInt64, n: Int) -> Int:
     var has_null = col.null_count() > 0
     var codes = Array[DType.uint32](sample)
     var firsts = List[Int]()
+    var keyviews = List[StringView]()
     var hashes = Buffer(CHUNK_ROWS * 8)
     var table = HashTable(0, seed)
 
@@ -2208,6 +2210,7 @@ def _projected_groups_strings(col: StringArray, seed: UInt64, n: Int) -> Int:
             0,
             codes,
             firsts,
+            keyviews,
         )
         base += count
         if not measured and base * 2 >= sample:
@@ -2265,11 +2268,15 @@ def _factorize_strings_parallel(
 
     var tables = List[HashTable](capacity=workers)
     var founds = List[List[Int]](capacity=workers)
+    var keyviews = List[List[StringView]](capacity=workers)
     for _ in range(workers):
         tables.append(HashTable(0, seed))
         founds.append(List[Int]())
+        keyviews.append(List[StringView]())
 
-    def one(w: Int) raises {mut tables, mut founds, mut codes, imm}:
+    def one(
+        w: Int,
+    ) raises {mut tables, mut founds, mut keyviews, mut codes, imm}:
         var start = bounds[w]
         var stop = bounds[w + 1]
         var hashes = Buffer(CHUNK_ROWS * 8)
@@ -2288,6 +2295,7 @@ def _factorize_strings_parallel(
                 0,
                 codes,
                 founds[w],
+                keyviews[w],
             )
             base += count
 
@@ -2445,6 +2453,7 @@ def _factorize_strings_partitioned(
         var stop = offsets[p + 1]
         var table = HashTable(0, seed)
         var seen = List[Int]()
+        var keyviews = List[StringView]()
         var base = start
         while base < stop:
             var count = min(CHUNK_ROWS, stop - base)
@@ -2459,6 +2468,7 @@ def _factorize_strings_partitioned(
                 0,
                 local,
                 seen,
+                keyviews,
                 base,
                 rows_at,
             )
@@ -2554,6 +2564,7 @@ def _factorize_strings_serial(
     # prefetch and the chunk earns more than it does there.
     var hashes = Buffer(CHUNK_ROWS * 8)
     var firsts = List[Int]()
+    var keyviews = List[StringView]()
     var table = HashTable(0, seed)
 
     var base = 0
@@ -2561,7 +2572,17 @@ def _factorize_strings_serial(
         var count = min(CHUNK_ROWS, n - base)
         hash_strings_chunk(col, base, count, seed, hashes)
         table.build_strings(
-            hashes, col, has_null, base, base, count, n, offset, codes, firsts
+            hashes,
+            col,
+            has_null,
+            base,
+            base,
+            count,
+            n,
+            offset,
+            codes,
+            firsts,
+            keyviews,
         )
         base += count
 

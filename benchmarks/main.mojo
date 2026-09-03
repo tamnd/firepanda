@@ -2470,6 +2470,14 @@ def bench_group(mut harness: Harness) raises:
     widest group by in the suite and the one where the packing is most of what
     is left after the factorizes.
 
+    `group/ordinals_one_wide_text_key` is the one key row again over `id3`,
+    which holds a row per hundred rather than a hundred values in all. That is
+    the shape q3 and q5 group on and it is a different problem from the narrow
+    one, because the table stops fitting in cache and the routing sends it down
+    the partitioned route instead of the sliced one. A change to what a probe
+    costs shows up here and not on the narrow row, where a hundred groups sit in
+    L1 whatever the probe does.
+
     Args:
         harness: The harness.
 
@@ -2789,6 +2797,19 @@ def bench_group(mut harness: Harness) raises:
 
     harness.record(
         "group/ordinals_one_text_key", "rows", rows, ordinals_one_text
+    )
+
+    var wide_text_key: List[Int] = [2]
+
+    def ordinals_wide_text() raises {imm text_df, imm wide_text_key}:
+        keep(text_df.rows)
+        var out = group_ordinals(
+            text_df.column_refs(), wide_text_key, text_df.rows
+        )
+        keep(out.groups)
+
+    harness.record(
+        "group/ordinals_one_wide_text_key", "rows", rows, ordinals_wide_text
     )
 
     def ordinals_two_text() raises {imm text_df, imm two_keys}:

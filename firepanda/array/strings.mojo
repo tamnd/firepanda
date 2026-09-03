@@ -277,6 +277,46 @@ struct StringArray(Copyable, Movable, Sized):
             return views_equal_short(left, right)
         return _bytes_equal(self.unsafe_bytes(i), self.unsafe_bytes(j))
 
+    def element_equals_view(self, i: Int, other: StringView) -> Bool:
+        """Compares one element against a view of another held by the caller.
+
+        `element_equals` takes two indices and reads both views out of the
+        column. A caller that kept one of them when it first saw it does not
+        need the second read, and not needing it is the point. The views buffer
+        is sixteen bytes a row, a hundred and sixty megabytes on ten million,
+        and a hash table that reaches into it by group ordinal touches one
+        scattered line per row of a buffer far larger than any cache. Handing
+        the view back in costs the caller sixteen bytes a group, which for a
+        hundred thousand groups is 1.6 megabytes and stays resident.
+
+        The view has to have come from this same column. A long one carries a
+        payload offset, and an offset into another column's payload is not
+        wrong in a way that can be detected here.
+
+        Args:
+            i: The element index.
+            other: A view of an element of this column.
+
+        Returns:
+            True if the element is present and byte-identical to the view's.
+        """
+        if not self.is_valid(i):
+            return False
+        var mine = self.view(i)
+        if len(mine) != len(other) or mine.prefix() != other.prefix():
+            return False
+        if mine.is_inline():
+            return views_equal_short(mine, other)
+        return _bytes_equal(
+            self.unsafe_bytes(i),
+            Span[UInt8, origin_of(self)](
+                unsafe_ptr=self.payload.unsafe_ptr()
+                .unsafe_offset(other.offset())
+                .unsafe_origin_cast[origin_of(self)](),
+                length=len(other),
+            ),
+        )
+
     def sort_prefix(self, i: Int) -> UInt64:
         """Returns the first eight bytes of an element as a comparable integer.
 
