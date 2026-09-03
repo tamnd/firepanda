@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.36] - 2026-09-04
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Four changes to the grouped reductions, all of them found by asking why one query cost more than another query that does the same amount of work. None of them changes an answer or an interface.
+
+Two of them are memory that was moved for nothing. A grouped median, quantile and distinct count all begin by laying each group's values out next to each other, and that slab was zeroed before it was filled even though the fill covers every element of it, which is eighty megabytes written and thrown away on ten million rows. A grouped correlation cast both of its input columns to float64 before it started, which is two more full copies, and it did that because dispatching on two runtime dtypes is a hundred and forty four instantiations. Dispatching only on the case where the two dtypes agree is twelve, and it covers nearly every call, because the two columns of a correlation are two measurements out of one table.
+
+The other two are loops that were not using the machine. The merge that folds the thread local tables at the end of a grouped min or max was a scalar loop with a branch and a bitmap read modify write per group per worker, three million of them at a hundred thousand groups over thirty two workers, where the sums have a vectorized walk of two arrays. The identity is neutral for a min the same way zero is for a sum, so a worker that never reached a group can be folded in unconditionally and the merge is now that same walk. And packing several keys into one integer no longer widens the first key's ordinals in a pass of their own, because the first packing step was already reading a column and writing the accumulator they were being widened into.
+
+On the i9-13900K at 0.5GB, each measured with the two builds alternated at load average under one: db-benchmark q9 went from 0.050 s to 0.036, q7 from 0.056 to 0.048, q6 from 0.681 to 0.267, and q2 from 0.043 to 0.041. q6 and q7 are now level with or ahead of every other engine measured in the same invocation.
+
 ### Changed
 
 - The merge at the end of a grouped min or max is vectorized. Each worker builds a private table and those tables are then folded into one, and that fold was a scalar loop carrying a branch and a bitmap read modify write per group per worker, which on a hundred thousand groups over thirty two workers is three million of them and was most of what a grouped extreme cost on a wide key. A worker that never reached a group left the reduction's identity in its slot and folding the identity in changes nothing, so the fold does not have to ask which groups a worker saw. It is now the same vectorized walk of two contiguous arrays that the sums have, with a comparison where they have an add, and the seen flags fold beside it a byte at a time. The two identity fills are vectorized with it and no longer zero the tables first. db-benchmark q7, a max minus a min over a hundred thousand groups, went from 0.056 s to 0.048 s at 0.5GB on an i9-13900K, with q3 and q5 over the same key unchanged as controls.
