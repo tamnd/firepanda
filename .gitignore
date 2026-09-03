@@ -48,3 +48,9 @@ leak-*
 
 # Throwaway timing programs. They are written for one measurement and deleted.
 tools/probes/
+
+# A before and after measurement needs the old copy of a source file sitting in
+# the tree, because the benchmark machines are handed a tarball rather than a
+# clone and cannot check one out for themselves. They are scratch and one of
+# them has already been committed by accident.
+old*.txt
