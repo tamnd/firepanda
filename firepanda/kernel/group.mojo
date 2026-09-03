@@ -2203,9 +2203,17 @@ def aggregate_group_pair_any(
     The single column reductions dispatch on the dtype and instantiate one loop
     per dtype. A two column reduction would have to dispatch on both, which is a
     hundred and forty four instantiations of a loop that reads its inputs as
-    float64 in either case. So this casts instead: the erased path converts both
-    columns once and calls one instantiation, and the typed spellings above stay
-    generic for callers who know their dtypes and want no copy.
+    float64 in either case.
+
+    A hundred and forty four is only the count if the two dtypes are allowed to
+    differ, and in nearly every call they do not, because the two columns are two
+    measurements out of the same table. So the matching case is dispatched on,
+    twelve instantiations, and it converts nothing: `_pair_core` reads a value
+    and casts it to float64 in the same expression, so an instantiation on the
+    column's own dtype does the conversion in a register as it goes. The mixed
+    case still casts both columns to float64 and calls the one instantiation,
+    which is two passes over the input and two allocations the size of it, and is
+    the price of not compiling the other hundred and thirty two.
 
     Args:
         x: The first column.
@@ -2231,6 +2239,28 @@ def aggregate_group_pair_any(
         )
     if x.is_string() or y.is_string():
         raise Error("group by: a two column reduction needs numeric columns")
+
+    # The two columns are the same dtype in nearly every call, because they are
+    # two measurements out of the same table, and that case can be answered
+    # without converting either of them. `_pair_core` reads a value and casts it
+    # to float64 in the same expression, so an instantiation on the column's own
+    # dtype does the conversion in a register as it goes, one instruction per
+    # value, instead of materialising two float64 copies of the input first.
+    # Twelve instantiations rather than a hundred and forty four, which is what
+    # made the cast worth taking in the first place.
+    if x.dtype() == y.dtype():
+        comptime for dt in ALL:
+            if x.dtype() == dt:
+                ref a = x.as_typed_view[dt]()
+                ref b = y.as_typed_view[dt]()
+                if kind == AggKind.CORR:
+                    return AnyArray(group_corr(a, b, codes, groups))
+                if kind == AggKind.COV:
+                    return AnyArray(
+                        group_cov(a, b, codes, groups, Int(kind.param))
+                    )
+                raise Error("group by: unsupported two column aggregation")
+
     var a = cast_any(x, DType.float64).into_typed[DType.float64]()
     var b = cast_any(y, DType.float64).into_typed[DType.float64]()
     if kind == AggKind.CORR:
