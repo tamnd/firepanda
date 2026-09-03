@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.34] - 2026-09-03
+
+Built against Mojo 1.0.0 (ed45d567).
+
+This release is the first pipeline breaker that is not the materialised fallback, and the discovery, while measuring it, that the engine had been leaving most of its group by speed on the floor for a reason that had nothing to do with the operator.
+
+`Group` is the breaker. A materialised group by holds every row until the last one arrives, so the memory it needs is the size of its input. This one holds one row per group: it groups each chunk on its own, merges that chunk's answers into a running table, and throws the chunk away. A billion rows in a thousand groups is a table of a thousand rows the whole way through. The merge is the same operation as the aggregation, so there is no accumulator kernel here and no second implementation of anything, which is also why the eight reductions that fold are exactly the eight that have a partial state a group by can reduce. The ones that do not fold keep the fallback and say so at plan time rather than quietly answering a median of medians.
+
+The second half is a constant. `PARALLEL_ROWS` decides whether a factorize runs on one thread or several, and it was `1 << 17`, which is exactly `MORSEL_ROWS`. The gate is `>=`, so a chunk sized factorize was always one row over the line, and the worker count is the height divided by the minimum slice, so a column that just clears the line gets the fewest workers the split ever runs on. Every factorize a pipeline did landed on the worst point of the curve, at 5.0x the cost of not splitting at all, and the eager path paid the same tax anywhere a column landed just past the line.
+
+Measuring a build that never splits against one that always does then showed the threshold was four to five doublings too low regardless of the collision, and that text wanted the opposite, because a string key costs around thirty times what an int64 key costs per row and pays a split back that much sooner. One constant was serving two routes thirty times apart. It is now two, `1 << 22` for fixed width keys and `1 << 18` for text, both above the chunk size. One build against the other in a single run, that is 6.4x on the key factorize at a quarter million rows, 2.2x on a whole frame group by, and up to 1.46x on the streaming pipeline, with nothing measured slower.
+
+Both thresholds are from one machine and what carries over is the shape rather than the numbers, since what decides a crossover is the ratio between what a row costs on one thread and what the merge costs. The honest version of either is a cost model over the row count and the group count, and that is written up on the constants.
+
 ### Added
 
 - `Group`, the first pipeline breaker that is not the `Materialize` fallback. A materialised group by holds every row until the last one arrives, so the memory it needs is the size of its input. This one holds one row per group: it groups each chunk on its own, merges that chunk's answers into a running table, and throws the chunk away. A billion rows in a thousand groups is a table of a thousand rows the whole way through.
