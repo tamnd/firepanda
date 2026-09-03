@@ -2445,7 +2445,9 @@ def bench_group(mut harness: Harness) raises:
     How much of a real group by is the grouping rather than the reduction.
     `group/ordinals_one_key` is the factorize and renumber pass on its own, and
     `group/frame_one_key` is the whole operation, so the reduction is what is left
-    over. The two key rows say what the second factorize and the repacking add.
+    over. The two key rows say what the second factorize and the repacking add,
+    and `group/ordinals_one_key_wide` asks the one key question again of a key
+    with a hundred thousand values rather than a thousand.
 
     Args:
         harness: The harness.
@@ -2464,6 +2466,7 @@ def bench_group(mut harness: Harness) raises:
     var few = Array[DType.uint32](rows)
     var many = Array[DType.uint32](rows)
     var key = Array[DType.int64](rows)
+    var spread = Array[DType.int64](rows)
     var other = Array[DType.int64](rows)
     var wide = 100_000 if rows >= 100_000 else rows
     if wide < 1:
@@ -2476,6 +2479,7 @@ def bench_group(mut harness: Harness) raises:
         few[i] = UInt32(draw % 10)
         many[i] = UInt32(draw % UInt64(wide))
         key[i] = Int64(draw % UInt64(GROUPS))
+        spread[i] = Int64(draw % UInt64(wide))
         other[i] = Int64((draw >> 20) % 8)
         if draw & 7 == 0:
             sparse.set_null(i)
@@ -2632,6 +2636,24 @@ def bench_group(mut harness: Harness) raises:
 
     harness.record("group/ordinals_one_key", "rows", rows, ordinals_one)
 
+    # The same pass over a key with a hundred thousand values in it rather than
+    # a thousand. Which side of the parallel threshold a factorize should be on
+    # is not a question about the row count alone, because what the parallel
+    # route adds is a merge over every group every worker found, and that is the
+    # part that grows with the cardinality rather than with the height.
+    var wide_columns = List[Series]()
+    wide_columns.append(Series("key", spread^))
+    var wide_df = DataFrame.from_series(wide_columns^)
+
+    def ordinals_one_wide() raises {imm wide_df, imm one_key}:
+        keep(wide_df.rows)
+        var out = group_ordinals(wide_df.column_refs(), one_key, wide_df.rows)
+        keep(out.groups)
+
+    harness.record(
+        "group/ordinals_one_key_wide", "rows", rows, ordinals_one_wide
+    )
+
     def ordinals_two() raises {imm df, imm two_keys}:
         keep(df.rows)
         var out = group_ordinals(df.column_refs(), two_keys, df.rows)
@@ -2684,23 +2706,42 @@ def bench_group(mut harness: Harness) raises:
     # The input is in chunks, which is what makes the comparison mean anything.
     # A frame in one piece is the case the eager path is written for, and it is
     # the case the streaming node has nothing to show on.
-    var key_chunks = ChunkedArray(LogicalType.INT64)
-    var value_chunks = ChunkedArray(LogicalType.INT64)
-    var begin = 0
-    while begin < rows:
-        var stop = begin + MORSEL_ROWS
-        if stop > rows:
-            stop = rows
-        key_chunks.append(df.columns[0].only().slice(begin, stop))
-        value_chunks.append(df.columns[2].only().slice(begin, stop))
-        begin = stop
-    var streamed_columns = List[ChunkedArray]()
-    streamed_columns.append(key_chunks^)
-    streamed_columns.append(value_chunks^)
-    var streamed_fields = List[Field]()
-    streamed_fields.append(Field("key", LogicalType.INT64))
-    streamed_fields.append(Field("value", LogicalType.INT64))
-    var streamed = DataFrame(Schema(streamed_fields^), streamed_columns^)
+    #
+    # The three chunk sizes are the measurement that says where the streaming
+    # node's time goes. Every one of them does the same total per row work, so
+    # anything that changes between them is per chunk: a hash table built once
+    # more, a kernel dispatch that finds one morsel instead of eight. The one
+    # chunk row is the streaming operator handed the case the eager path is
+    # written for, which is the floor the other two are measured against.
+    var streamed = _in_chunks(df, MORSEL_ROWS)
+    var small = _in_chunks(df, 16 * 1024)
+    var whole = _in_chunks(df, rows if rows > 0 else 1)
+
+    def pipeline_stream_small() raises {imm small}:
+        keep(small.rows)
+        var aggs = List[GroupAgg]()
+        aggs.append(GroupAgg(1, AggKind.SUM, "total"))
+        var pipeline = Pipeline(DataFrame(copy=small))
+        pipeline.add(Node(Group([0], aggs^)))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record(
+        "group/pipeline_stream_16k", "rows", rows, pipeline_stream_small
+    )
+
+    def pipeline_stream_whole() raises {imm whole}:
+        keep(whole.rows)
+        var aggs = List[GroupAgg]()
+        aggs.append(GroupAgg(1, AggKind.SUM, "total"))
+        var pipeline = Pipeline(DataFrame(copy=whole))
+        pipeline.add(Node(Group([0], aggs^)))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record(
+        "group/pipeline_stream_one_chunk", "rows", rows, pipeline_stream_whole
+    )
 
     def pipeline_stream() raises {imm streamed}:
         keep(streamed.rows)
@@ -2726,6 +2767,40 @@ def bench_group(mut harness: Harness) raises:
     harness.record(
         "group/pipeline_materialize", "rows", rows, pipeline_materialize
     )
+
+
+def _in_chunks(df: DataFrame, chunk_rows: Int) raises -> DataFrame:
+    """Cuts the group benchmark's key and value columns into chunks of a size.
+
+    Args:
+        df: The frame the group benchmarks build, whose columns are the key, a
+            second key nothing here uses, and the value.
+        chunk_rows: How many rows go in a chunk.
+
+    Returns:
+        A frame of the key and the value, chunked that way.
+
+    Raises:
+        If either column is in more than one piece already.
+    """
+    var rows = df.rows
+    var key_chunks = ChunkedArray(LogicalType.INT64)
+    var value_chunks = ChunkedArray(LogicalType.INT64)
+    var begin = 0
+    while begin < rows:
+        var stop = begin + chunk_rows
+        if stop > rows:
+            stop = rows
+        key_chunks.append(df.columns[0].only().slice(begin, stop))
+        value_chunks.append(df.columns[2].only().slice(begin, stop))
+        begin = stop
+    var columns = List[ChunkedArray]()
+    columns.append(key_chunks^)
+    columns.append(value_chunks^)
+    var fields = List[Field]()
+    fields.append(Field("key", LogicalType.INT64))
+    fields.append(Field("value", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
 
 
 def _whole_frame_group(var frame: DataFrame) raises -> DataFrame:
