@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.37] - 2026-09-04
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Three changes to how a group by turns keys into ordinals, and all three are work that was being done and then thrown away.
+
+Grouping on several integer keys no longer factorizes each one first. A group by reads only a key's group count and its ordinals as values, never their order and never their density, so a value minus its column's minimum will do as the ordinal, and the scan that finds that minimum is one the factorize was going to do anyway. What used to be a pass per key and a forty megabyte column per key is now a plan and a single walk over the raw columns. The packing that follows was also written as a fold, one pass per key over a column already in memory, and it is not a fold: the number it arrives at is positional notation and every multiplier in it is known before the first row is read, so it is one weighted sum per row. Six keys on ten million rows was five passes and about nine hundred and sixty megabytes of traffic and is now one pass and three hundred and twenty.
+
+A factorize no longer zeroes the ordinals it is about to write. Four of its routes allocated the output with the constructor that memsets, and the build writes an ordinal for every row it is given, so the memset was a full pass thrown away. It is worse than a wasted pass, because it is one thread writing forty megabytes immediately in front of a section that runs on every core.
+
+And a string factorize no longer reaches back into the column to settle a hash match. It was reading the representative key's view out of a buffer sixteen bytes a row wide, indexed by group ordinal, which is a cache miss per match into something far larger than any cache. Keeping the views as the ordinals are handed out makes that sixteen bytes a group instead. On the i9 at ten million rows the sliced route, which is the one every chunk of the streaming engine takes, is twenty percent faster on a hundred distinct keys and thirty percent on a hundred thousand.
+
 ### Changed
 
 - Grouping on several keys no longer factorizes each key first when they are all integers of one dtype in ranges narrow enough to index. The composition gives every key its own dense ordinals and then packs those ordinals into one integer, and each of those factorizes is a scan for the range, a pass to assign, and a forty megabyte column of ordinals for the packing pass to read back. None of it is needed, because a group by on several keys reads only a key's group count and its ordinals as values, never their order and never their density, so a value minus its column's minimum will do as the ordinal. `direct_plan` already works that minimum out in the scan the factorize was going to do anyway, so what is left is a plan rather than a pass, and one walk over the raw key columns writes the packed value. On ten million rows, `group/ordinals_two_keys` went from 24.2 ms to 16.8 on an i9-13900K with the two builds alternated twice, and `group/ordinals_one_key` was unchanged as a control.
