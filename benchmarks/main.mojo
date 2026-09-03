@@ -2455,6 +2455,12 @@ def bench_group(mut harness: Harness) raises:
     and `group/ordinals_one_key_wide` asks the one key question again of a key
     with a hundred thousand values rather than a thousand.
 
+    `group/ordinals_two_keys_declined` is the same two key pass over a pair the
+    fused tuple pack cannot take, because each key alone would fit a table and
+    the product of the two will not. Against `group/ordinals_two_keys` it says
+    what the fused route saves when it applies, and against the same row before
+    the route existed it says what asking costs when the answer is no.
+
     Args:
         harness: The harness.
 
@@ -2701,6 +2707,38 @@ def bench_group(mut harness: Harness) raises:
         keep(out.groups)
 
     harness.record("group/ordinals_two_keys", "rows", rows, ordinals_two)
+
+    # The two key pass when the fused pack is declined, which is what the fused
+    # pack costs when it does not apply. Both keys are integers of one dtype, so
+    # the route is asked, and each holds a hundred thousand values, so each on
+    # its own would be packed and the product of the two is what puts the tuple
+    # out of reach. The first key pays a full scan for an answer nothing uses
+    # and the second stops as soon as its range passes what is left, which is
+    # the worst case there is: one wasted scan whatever the key count.
+    var wide_a = Array[DType.int64](rows)
+    var wide_b = Array[DType.int64](rows)
+    for i in range(rows):
+        var draw = rng.next_u64()
+        wide_a[i] = Int64(draw % UInt64(wide))
+        wide_b[i] = Int64((draw >> 32) % UInt64(wide))
+    var declined_columns = List[Series]()
+    declined_columns.append(Series("a", wide_a^))
+    declined_columns.append(Series("b", wide_b^))
+    var declined_df = DataFrame.from_series(declined_columns^)
+
+    def ordinals_two_declined() raises {imm declined_df, imm two_keys}:
+        keep(declined_df.rows)
+        var out = group_ordinals(
+            declined_df.column_refs(), two_keys, declined_df.rows
+        )
+        keep(out.groups)
+
+    harness.record(
+        "group/ordinals_two_keys_declined",
+        "rows",
+        rows,
+        ordinals_two_declined,
+    )
 
     def frame_one() raises {imm df}:
         keep(df.rows)

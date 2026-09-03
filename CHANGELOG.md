@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed
+
+- Grouping on several keys no longer factorizes each key first when they are all integers of one dtype in ranges narrow enough to index. The composition gives every key its own dense ordinals and then packs those ordinals into one integer, and each of those factorizes is a scan for the range, a pass to assign, and a forty megabyte column of ordinals for the packing pass to read back. None of it is needed, because a group by on several keys reads only a key's group count and its ordinals as values, never their order and never their density, so a value minus its column's minimum will do as the ordinal. `direct_plan` already works that minimum out in the scan the factorize was going to do anyway, so what is left is a plan rather than a pass, and one walk over the raw key columns writes the packed value. On ten million rows, `group/ordinals_two_keys` went from 24.2 ms to 16.8 on an i9-13900K with the two builds alternated twice, and `group/ordinals_one_key` was unchanged as a control.
+- The route is declined for a key that is not an integer, for a mix of dtypes, for a key with a null in it, and for a tuple whose combined range is too wide to lay a table over. Declining costs a scan, so each key is given only what the tuple has left to spend as its ceiling and `direct_plan` returns as soon as a key passes it, which means only the first key can ever cost a full scan for nothing whatever the key count. The new `group/ordinals_two_keys_declined` measures that: two keys of a hundred thousand values each, where either alone would pack and the pair cannot, went from 105 ms to 108, which is the one scan and 2.3 percent of a pass that shape costs anyway.
+- No db-benchmark query moves on this. All of its multi-key group bys include one of `id1`, `id2` or `id3`, which are text columns there as they are in the published suite, so the route is correctly declined for every one of them. The gain is on integer key tuples, and closing the same gap for text keys is a separate piece of work.
+
+### Added
+
+- `group/ordinals_two_keys_declined`, the two key grouping pass over a pair the fused tuple pack cannot take. A route that is a win when it applies is not free when it does not, and this is the row that says by how much.
+
 ## [0.6.36] - 2026-09-04
 
 Built against Mojo 1.0.0 (ed45d567).
