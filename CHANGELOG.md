@@ -8,6 +8,17 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed
+
+- A cast runs on every core and no longer zeroes the column it is about to fill. It was a serial loop, one SIMD register at a time, over an output allocated with the constructor that memsets, and neither of those is needed. The loop has no carried state and no cross row dependency at all, so it splits over morsels the same way the other kernels do, and it writes an element for every row including the null ones, so the memset in front of it was a full pass thrown away. Casting ten million int64 to float64 on an i9-13900K went from 7.194 and 7.226 ms to 3.171 and 3.178, and to int16 from 4.131 and 4.245 to 1.275 and 1.301.
+- The two halves are worth separating because they are not the same size. A third build with only the allocation changed, still serial, measured 5.742 and 5.858 ms on the float64 row and 3.673 and 3.844 on the int16 one, so dropping the memset is a fifth of the float64 cast and a tenth of the int16 one, and the rest is the parallel loop. Each half was measured twice with the three builds alternated in order on a machine at a load average under 2.5, and no reading of one build overlapped any reading of another.
+- The change is in `_cast_erased` as well as in `cast_to`, and that is the one that matters. `cast_to` is the typed entry point and only tests and benchmarks name it; a cast on a frame goes through `cast_any`, which dispatches on the runtime dtype into `_cast_erased`, and that function carried its own copy of the same serial zero filled loop. `frame/cast_one` went from 19.5 and 20.2 ms to 15.8 and 16.5, which is smaller in proportion because that row also builds the frame around the column.
+- Splitting the loop is safe on the boundaries without a scalar tail, and there is now a test that says so rather than a comment. A morsel is 131072 rows and the widest register in play is 64 int8 lanes, so every interior boundary is a multiple of the step and no worker can write into the rows of the next one. Only the last morsel steps past the logical end, into the padding the buffer already guarantees, which is what the serial loop did too. The test casts 393241 rows, a prime past three morsels which leaves the last one short and off every register boundary at once, and checks every row against the scalar answer.
+
+### Added
+
+- `test_a_cast_past_the_split_converts_every_row` in the kernel tests, covering the morsel boundaries of a parallel cast at a length that is not a multiple of anything.
+
 ## [0.6.37] - 2026-09-04
 
 Built against Mojo 1.0.0 (ed45d567).

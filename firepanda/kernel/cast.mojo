@@ -39,6 +39,7 @@ from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL, INTEGER, contains
 from firepanda.dtype.logical import LogicalType, TypeKind
+from firepanda.exec import parallel_morsels
 
 # `firepanda.io.parse` imports nothing from firepanda. It is text to scalar and
 # nothing else, and it lives under io because that is where it was needed first,
@@ -48,7 +49,7 @@ from firepanda.dtype.logical import LogicalType, TypeKind
 from firepanda.io.parse import parse_bool, parse_float, parse_int
 
 
-def cast_to[src: DType, dst: DType](col: Array[src]) -> Array[dst]:
+def cast_to[src: DType, dst: DType](col: Array[src]) raises -> Array[dst]:
     """Converts a column to another dtype.
 
     Args:
@@ -60,6 +61,11 @@ def cast_to[src: DType, dst: DType](col: Array[src]) -> Array[dst]:
 
     Returns:
         A column of the target dtype, null in the same places as the input.
+
+    Raises:
+        Error: Only what the morsel runtime raises. The conversion itself
+            cannot fail, which is what the module docstring means by saying
+            this kernel does not range check.
     """
     # The narrower of the two register widths. int8 to int64 reads four bytes and
     # writes a full register; int64 to int8 does the reverse. Stepping by the
@@ -68,16 +74,21 @@ def cast_to[src: DType, dst: DType](col: Array[src]) -> Array[dst]:
     comptime width = min(simd_width_of[src](), simd_width_of[dst]())
 
     var n = len(col)
-    var out = Array[dst](n)
-    var source = col.unsafe_ptr()
-    var target = out.unsafe_ptr()
+    # Every element is written by the loop below, so the allocation does not
+    # need the pass that zeroes it first.
+    var out = Array[dst](overwritten=n)
 
-    var i = 0
-    while i < n:
-        target.unsafe_offset(i).unsafe_store(
-            source.unsafe_offset(i).unsafe_load[width=width]().cast[dst]()
-        )
-        i += width
+    def convert(start: Int, stop: Int) raises {mut out, imm}:
+        var source = col.unsafe_ptr()
+        var target = out.unsafe_ptr()
+        var i = start
+        while i < stop:
+            target.unsafe_offset(i).unsafe_store(
+                source.unsafe_offset(i).unsafe_load[width=width]().cast[dst]()
+            )
+            i += width
+
+    parallel_morsels(convert, n)
 
     out.data.validity = Bitmap(copy=col.data.validity)
     return out^
@@ -280,18 +291,23 @@ def _cast_erased[dst: DType](col: AnyArray) raises -> Array[dst]:
         if col.dtype() == source:
             comptime width = min(simd_width_of[source](), simd_width_of[dst]())
             var n = len(col)
-            var out = Array[dst](n)
-            var values = col.unsafe_ptr[source]()
-            var target = out.unsafe_ptr()
+            # Every element is written below, so the allocation does not need
+            # the pass that zeroes it first.
+            var out = Array[dst](overwritten=n)
 
-            var i = 0
-            while i < n:
-                target.unsafe_offset(i).unsafe_store(
-                    values.unsafe_offset(i)
-                    .unsafe_load[width=width]()
-                    .cast[dst]()
-                )
-                i += width
+            def convert(start: Int, stop: Int) raises {mut out, imm}:
+                var values = col.unsafe_ptr[source]()
+                var target = out.unsafe_ptr()
+                var i = start
+                while i < stop:
+                    target.unsafe_offset(i).unsafe_store(
+                        values.unsafe_offset(i)
+                        .unsafe_load[width=width]()
+                        .cast[dst]()
+                    )
+                    i += width
+
+            parallel_morsels(convert, n)
 
             out.data.validity = Bitmap(copy=col.data.validity)
             return out^
