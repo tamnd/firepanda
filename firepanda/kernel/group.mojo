@@ -613,10 +613,11 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             code: Which reduction.
 
         Returns:
-            One for the two dispersions and the covariance, a half for the two
-            order statistics, and zero for the rest.
+            One for the two dispersions, the standard error and the
+            covariance, a half for the two order statistics, and zero for the
+            rest.
         """
-        if code == 8 or code == 9 or code == 14:
+        if code == 8 or code == 9 or code == 14 or code == 15:
             return 1.0
         if code == 10 or code == 11:
             return 0.5
@@ -645,6 +646,20 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             The kind.
         """
         return Self(9, Float64(ddof))
+
+    @staticmethod
+    def sem_with(ddof: Int) -> Self:
+        """Returns a standard error with an explicit delta degrees of freedom.
+
+        Args:
+            ddof: Subtracted from the count to give the variance divisor. The
+                count under the square root is not adjusted, which is what
+                pandas does.
+
+        Returns:
+            The kind.
+        """
+        return Self(15, Float64(ddof))
 
     @staticmethod
     def cov_with(ddof: Int) -> Self:
@@ -717,6 +732,15 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
     """The covariance of two columns, dividing by the pairwise count minus
     `param`."""
 
+    comptime SEM = Self(15)
+    """The standard error of the mean: `STD` with the same divisor, over the
+    square root of the non-null count."""
+
+    comptime SKEW = Self(16)
+    """The sample skewness of the non-null values, the adjusted Fisher Pearson
+    coefficient pandas uses. Null for a group of fewer than three, and zero
+    rather than null for a group whose values are all the same."""
+
     def __eq__(self, other: Self) -> Bool:
         """Compares two kinds, by reduction and not by parameter.
 
@@ -774,6 +798,8 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             self == Self.MEAN
             or self == Self.VAR
             or self == Self.STD
+            or self == Self.SEM
+            or self == Self.SKEW
             or self == Self.MEDIAN
             or self == Self.QUANTILE
             or self == Self.CORR
@@ -810,6 +836,10 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("var")
         elif self == Self.STD:
             writer.write("std")
+        elif self == Self.SEM:
+            writer.write("sem")
+        elif self == Self.SKEW:
+            writer.write("skew")
         elif self == Self.MEDIAN:
             writer.write("median")
         elif self == Self.QUANTILE:
@@ -1498,6 +1528,77 @@ def group_std[
     )
 
 
+def group_sem[
+    dt: DType
+](
+    values: Array[dt],
+    codes: Array[DType.uint32],
+    groups: Int,
+    ddof: Int = 1,
+) raises -> Array[DType.float64]:
+    """Returns the standard error of the mean of each group.
+
+    Args:
+        values: The column being aggregated.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals.
+        ddof: Subtracted from the count to give the variance divisor. The count
+            under the root is the plain one and is not corrected by it.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        A column of `groups` standard errors, null on the same groups
+        `group_std` reports null on.
+
+    Raises:
+        If one of the workers the parallel route starts cannot be run. A
+        reduction small enough to stay on one core cannot fail.
+    """
+    return _sem_core(
+        values.unsafe_ptr(),
+        values.data.validity,
+        values.null_count() > 0,
+        codes,
+        groups,
+        ddof,
+    )
+
+
+def group_skew[
+    dt: DType
+](values: Array[dt], codes: Array[DType.uint32], groups: Int) raises -> Array[
+    DType.float64
+]:
+    """Returns the sample skewness of the non-null values in each group.
+
+    Args:
+        values: The column being aggregated.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        A column of `groups` skewnesses, null where a group has fewer than three
+        non-null values, which is the case pandas reports as NaN. A group whose
+        values are all equal is zero rather than null.
+
+    Raises:
+        If one of the workers the parallel route starts cannot be run. A
+        reduction small enough to stay on one core cannot fail.
+    """
+    return _skew_core(
+        values.unsafe_ptr(),
+        values.data.validity,
+        values.null_count() > 0,
+        codes,
+        groups,
+    )
+
+
 def _var_core[
     dt: DType, //, want_std: Bool, origin: ImmOrigin
 ](
@@ -1567,6 +1668,154 @@ def _var_core[
         comptime if want_std:
             value = sqrt(value)
         target.unsafe_offset(g).unsafe_store(value)
+    return out^
+
+
+def _sem_core[
+    dt: DType, //, origin: ImmOrigin
+](
+    source: Pointer[Scalar[dt], origin],
+    validity: Bitmap,
+    has_null: Bool,
+    codes: Array[DType.uint32],
+    groups: Int,
+    ddof: Int,
+) raises -> Array[DType.float64]:
+    """Divides each group's standard deviation by the root of its count.
+
+    Built on `_var_core` rather than beside it, because the standard error is
+    the standard deviation and one division and there is no numerical reason for
+    a second traversal of the column. The count under the root is the plain non
+    null count and is not adjusted by `ddof`, which is what pandas does: the
+    degrees of freedom correction belongs to the variance and applying it twice
+    would be a different statistic.
+
+    Args:
+        source: The values.
+        validity: Which of them are present.
+        has_null: Whether any are absent.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals.
+        ddof: Subtracted from each group's count to give the variance divisor.
+
+    Returns:
+        A column of `groups` standard errors, null where the variance was null,
+        which is where a group had `ddof` or fewer values.
+
+    Raises:
+        If one of the workers the parallel route starts cannot be run.
+    """
+    var out = _var_core[want_std=True](
+        source, validity, has_null, codes, groups, ddof
+    )
+    var counts = _count_core(validity, has_null, codes, groups)
+    var target = out.unsafe_ptr()
+    var n = counts.unsafe_ptr()
+    for g in range(groups):
+        if not out.data.validity.get(g):
+            continue
+        var present = Int(n.unsafe_offset(g).unsafe_load())
+        target.unsafe_offset(g).unsafe_store(
+            target.unsafe_offset(g).unsafe_load() / sqrt(Float64(present))
+        )
+    return out^
+
+
+def _skew_core[
+    dt: DType, //, origin: ImmOrigin
+](
+    source: Pointer[Scalar[dt], origin],
+    validity: Bitmap,
+    has_null: Bool,
+    codes: Array[DType.uint32],
+    groups: Int,
+) raises -> Array[DType.float64]:
+    """Sums the squared and cubed deviations from each group's own mean.
+
+    Two passes, and for the reason `_var_core` gives at length: the one pass
+    arrangement accumulates the raw moments and subtracts at the end, and the
+    cancellation that costs a variance its significant digits costs a skewness
+    more, because the third moment is the difference of larger quantities still.
+
+    The coefficient is the one pandas reports, the adjusted Fisher Pearson
+    standardized moment, which is the plain moment ratio scaled by
+    `sqrt(n * (n - 1)) / (n - 2)` so that it is unbiased for a normal sample.
+    Two edges come with it and both are pandas' answers rather than choices made
+    here. A group of fewer than three has no skewness, because the adjustment
+    divides by `n - 2`. A group whose values are all the same has a skewness of
+    zero rather than a null, because the shape of a constant is not undefined,
+    it is symmetric.
+
+    Args:
+        source: The values.
+        validity: Which of them are present.
+        has_null: Whether any are absent.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals.
+
+    Returns:
+        A column of `groups` skewnesses, null where a group has fewer than three
+        non-null values.
+
+    Raises:
+        If one of the workers the parallel route starts cannot be run.
+    """
+    var means = _mean_core(source, validity, has_null, codes, groups)
+    var counts = _count_core(validity, has_null, codes, groups)
+
+    var rows = len(codes)
+    var workers = _private_workers[DType.float64](rows, groups)
+    var centre = means.unsafe_ptr()
+    var at = codes.unsafe_ptr()
+
+    var squares = Array[DType.float64](groups * workers)
+    var cubes = Array[DType.float64](groups * workers)
+    var bounds = _row_bounds(rows, workers)
+
+    def one(w: Int) raises {mut squares, mut cubes, imm}:
+        var second = squares.unsafe_ptr().unsafe_offset(w * groups)
+        var third = cubes.unsafe_ptr().unsafe_offset(w * groups)
+        for i in range(bounds[w], bounds[w + 1]):
+            if has_null and not validity.get(i):
+                continue
+            var g = Int(at.unsafe_offset(i).unsafe_load())
+            var delta = (
+                source.unsafe_offset(i).unsafe_load().cast[DType.float64]()
+                - centre.unsafe_offset(g).unsafe_load()
+            )
+            var squared = delta * delta
+            second.unsafe_offset(g).unsafe_store(
+                second.unsafe_offset(g).unsafe_load() + squared
+            )
+            third.unsafe_offset(g).unsafe_store(
+                third.unsafe_offset(g).unsafe_load() + squared * delta
+            )
+
+    parallel_for(one, workers)
+
+    if workers > 1:
+        squares = _merge_sums(squares, groups, workers)
+        cubes = _merge_sums(cubes, groups, workers)
+    var out = squares^
+    var target = out.unsafe_ptr()
+    var third_total = cubes.unsafe_ptr()
+    var n = counts.unsafe_ptr()
+    for g in range(groups):
+        var present = Int(n.unsafe_offset(g).unsafe_load())
+        if present < 3:
+            out.data.validity.set(g, False)
+            target.unsafe_offset(g).unsafe_store(0.0)
+            continue
+        var size = Float64(present)
+        var second_moment = target.unsafe_offset(g).unsafe_load() / size
+        if second_moment == 0.0:
+            target.unsafe_offset(g).unsafe_store(0.0)
+            continue
+        var third_moment = third_total.unsafe_offset(g).unsafe_load() / size
+        var adjust = sqrt(size * (size - 1.0)) / (size - 2.0)
+        target.unsafe_offset(g).unsafe_store(
+            adjust * third_moment / (second_moment * sqrt(second_moment))
+        )
     return out^
 
 
@@ -2430,6 +2679,14 @@ def _dispatch_core[
                 source, validity, has_null, codes, groups, Int(kind.param)
             )
         )
+    if kind == AggKind.SEM:
+        return AnyArray(
+            _sem_core(
+                source, validity, has_null, codes, groups, Int(kind.param)
+            )
+        )
+    if kind == AggKind.SKEW:
+        return AnyArray(_skew_core(source, validity, has_null, codes, groups))
     if kind == AggKind.MEDIAN or kind == AggKind.QUANTILE:
         if not (kind.param >= 0.0 and kind.param <= 1.0):
             raise Error(

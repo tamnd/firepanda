@@ -62,7 +62,9 @@ from firepanda.kernel.group import (
     group_min,
     group_nunique,
     group_quantile,
+    group_sem,
     group_size,
+    group_skew,
     group_std,
     group_sum,
     group_var,
@@ -1085,6 +1087,82 @@ def test_standard_deviation_is_the_root_of_the_variance() raises:
     assert_false(out.is_valid(2))
 
 
+def test_the_standard_error_is_the_deviation_over_the_root_of_the_count() raises:
+    var out = group_sem(sample_values(), sample_codes(), 3)
+    assert_almost_equal(out[0], 10.0, atol=1e-9)
+    assert_almost_equal(out[1], 20.0, atol=1e-9)
+    assert_false(
+        out.is_valid(2), "one value and ddof of 1 has no error to give"
+    )
+
+
+def test_the_standard_error_divides_by_the_plain_count_not_the_divisor() raises:
+    # Group 0 holds two values with a population deviation of 10. Putting the
+    # ddof under the root as well would give 10 over root 1, which is 10. pandas
+    # gives 10 over root 2.
+    var out = group_sem(sample_values(), sample_codes(), 3, ddof=0)
+    assert_almost_equal(out[0], 7.0710678118654755, atol=1e-9)
+    assert_almost_equal(out[1], 14.142135623730951, atol=1e-9)
+    assert_almost_equal(out[2], 0.0, atol=1e-9)
+
+
+def test_the_standard_error_matches_pandas_on_a_spread_column() raises:
+    var col = ints([1, 2, 4, 8, 16])
+    var out = group_sem(col, codes_of([0, 0, 0, 0, 0]), 1)
+    assert_almost_equal(out[0], 2.727636339397171, atol=1e-9)
+
+
+def test_the_standard_error_of_an_all_null_group_is_null() raises:
+    var out = group_sem(all_null_group(), codes_of([0, 1, 0, 1]), 2)
+    assert_false(out.is_valid(1))
+
+
+def test_skewness_matches_pandas_on_a_right_leaning_column() raises:
+    var col = ints([1, 2, 4, 8, 16])
+    var out = group_skew(col, codes_of([0, 0, 0, 0, 0]), 1)
+    assert_almost_equal(out[0], 1.3253147098134048, atol=1e-9)
+
+
+def test_skewness_carries_the_adjustment_pandas_applies() raises:
+    # Without the sqrt(n * (n - 1)) / (n - 2) factor this group comes back as
+    # 0.5400617248673217, which is the plain moment ratio and is what a library
+    # that reports the population skewness gives.
+    var col = floats([1.0, 2.0, 4.0])
+    var out = group_skew(col, codes_of([0, 0, 0]), 1)
+    assert_almost_equal(out[0], 0.9352195295828247, atol=1e-9)
+
+
+def test_skewness_of_a_constant_group_is_zero_rather_than_null() raises:
+    var col = floats([5.0, 5.0, 5.0])
+    var out = group_skew(col, codes_of([0, 0, 0]), 1)
+    assert_true(out.is_valid(0), "a constant is symmetric, not undefined")
+    assert_almost_equal(out[0], 0.0, atol=1e-9)
+
+
+def test_skewness_of_a_symmetric_group_is_zero() raises:
+    var col = floats([1.0, 2.0, 3.0, 4.0, 5.0])
+    var out = group_skew(col, codes_of([0, 0, 0, 0, 0]), 1)
+    assert_almost_equal(out[0], 0.0, atol=1e-9)
+
+
+def test_skewness_needs_three_values() raises:
+    # The adjustment divides by n minus two, so a pair has no answer. pandas
+    # reports NaN here rather than zero.
+    var col = floats([1.0, 2.0, 7.0, 7.0, 7.0])
+    var out = group_skew(col, codes_of([0, 0, 1, 1, 1]), 2)
+    assert_false(out.is_valid(0))
+    assert_true(out.is_valid(1))
+
+
+def test_skewness_skips_nulls_rather_than_counting_them_as_zero() raises:
+    # Group 1 holds 20, null and 60. Counting the null as a value would make it
+    # three values and give an answer where pandas gives NaN.
+    var out = group_skew(sample_values(), sample_codes(), 3)
+    assert_false(out.is_valid(0), "two values")
+    assert_false(out.is_valid(1), "two present values and one null")
+    assert_false(out.is_valid(2), "one value")
+
+
 def test_variance_keeps_its_digits_on_large_values() raises:
     # Five timestamps a second apart. The one pass formula computes this as the
     # difference of two numbers near 1.4e19 and comes back with garbage, or with
@@ -1168,6 +1246,8 @@ def test_the_new_reductions_agree_with_their_erased_spelling() raises:
     kinds.append(AggKind.MEDIAN)
     kinds.append(AggKind.QUANTILE)
     kinds.append(AggKind.NUNIQUE)
+    kinds.append(AggKind.SEM)
+    kinds.append(AggKind.SKEW)
     for k in range(len(kinds)):
         var erased = AnyArray(sample_values())
         var through = aggregate_group_any(erased, kinds[k], sample_codes(), 3)
@@ -1189,6 +1269,8 @@ def test_a_bare_code_carries_the_reduction_default() raises:
     assert_almost_equal(AggKind(UInt8(9)).param, 1.0, atol=1e-12)
     assert_almost_equal(AggKind(UInt8(10)).param, 0.5, atol=1e-12)
     assert_almost_equal(AggKind(UInt8(11)).param, 0.5, atol=1e-12)
+    assert_almost_equal(AggKind(UInt8(15)).param, 1.0, atol=1e-12)
+    assert_almost_equal(AggKind(UInt8(16)).param, 0.0, atol=1e-12)
     assert_almost_equal(AggKind(UInt8(0)).param, 0.0, atol=1e-12)
 
 
@@ -1199,6 +1281,7 @@ def test_two_kinds_are_equal_by_reduction_and_not_by_parameter() raises:
     )
     assert_true(AggKind.var_with(0) == AggKind.VAR)
     assert_true(AggKind.std_with(0) == AggKind.STD)
+    assert_true(AggKind.sem_with(0) == AggKind.SEM)
     assert_true(AggKind.VAR != AggKind.STD)
 
 
@@ -1210,6 +1293,8 @@ def test_the_new_reductions_name_themselves() raises:
     assert_equal(String(AggKind.NUNIQUE), "nunique")
     assert_equal(String(AggKind.CORR), "corr")
     assert_equal(String(AggKind.COV), "cov")
+    assert_equal(String(AggKind.SEM), "sem")
+    assert_equal(String(AggKind.SKEW), "skew")
 
 
 def floats(values: List[Scalar[DType.float64]]) -> Array[DType.float64]:
@@ -1434,6 +1519,29 @@ def test_a_frame_wide_variance_keeps_its_degrees_of_freedom() raises:
     # Key 10 holds 20 and 60. With ddof 0 that is a population standard
     # deviation of 20, where the default would give 28.28.
     assert_almost_equal(spread[1], 20.0, atol=1e-9)
+
+
+def test_a_frame_groups_by_the_standard_error() raises:
+    var out = sample_frame().group_agg(["k"], AggKind.SEM)
+    var error = out.column("v").as_typed[DType.float64]()
+    # Keys 5, 10 and 20 in sorted order. Key 10 holds 20, null and 60, so its
+    # deviation is 28.28 over two values and its standard error is 20.
+    assert_equal(len(out), 3)
+    assert_false(error.is_valid(0), "key 5 has one value")
+    assert_almost_equal(error[1], 20.0, atol=1e-9)
+    assert_almost_equal(error[2], 10.0, atol=1e-9)
+
+
+def test_a_frame_groups_by_the_skewness() raises:
+    var keys = ints([1, 1, 1, 1, 2, 2])
+    var values = ints([1, 2, 4, 8, 3, 3])
+    var series = List[Series]()
+    series.append(Series("k", keys^))
+    series.append(Series("v", values^))
+    var out = DataFrame.from_series(series^).group_agg(["k"], AggKind.SKEW)
+    var lean = out.column("v").as_typed[DType.float64]()
+    assert_almost_equal(lean[0], 1.1376243669576884, atol=1e-9)
+    assert_false(lean.is_valid(1), "two values have no skewness")
 
 
 def test_two_quantiles_of_one_column_need_explicit_names() raises:
