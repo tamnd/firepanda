@@ -8,6 +8,19 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed
+
+- Whole column reductions run on every core. `sum_over` and `extreme_over` were the last kernels reading a whole column on one thread, and everything built on them was too: `sum_of`, `min_of`, `max_of`, `mean_of` and `mean_over`. A reduction does not split the way an elementwise kernel splits, because there is one answer rather than one answer per row, so each morsel now reduces its own rows into a slot of its own and a serial loop combines the slots afterwards. The combine runs over the number of morsels and not the number of rows, which is seventy six slots at ten million rows, so it costs nothing next to the pass it replaces.
+- A minimum needs a second slot per morsel saying whether that morsel saw a value at all. A morsel that is entirely null has no value that could stand for it, and handing the identity to the combine would be a wrong answer if every morsel were like that, so the flags are what let the combine skip the empty ones and report an invalid result when there were no values anywhere. A sum needs no such flag, because a sum over nothing is a valid zero.
+- Measured on an i9-13900K at ten million rows with the two builds alternated twice. `kernel/sum_dense` went from 2.775 and 2.924 ms to 0.522 and 0.546, `kernel/sum_sparse` from 2.710 and 2.758 to 0.538 and 0.546, `kernel/min_dense` from 3.216 and 3.666 to 0.593, `kernel/min_sparse` from 5.153 and 5.246 to 0.672, and `kernel/mean_sparse` from 2.771 and 2.840 to 0.670. The first of the two new halves picked up load from another process on the machine and only its sum rows are reported from it. Three rows stayed flat as controls and are meant to: `kernel/sum_twin` is the hand written serial reference the benchmark keeps for comparison and read 5.117, 5.124 and 5.096, `kernel/add_dense` read 3.982, 3.985 and 3.990, and `kernel/take_scattered` read 7.366, 7.609 and 7.650.
+- Eighty megabytes of int64 in half a millisecond is faster than this machine can read from memory, and it is not a mistake. Thirty six megabytes of the column stay resident in L3 across the repeated timing runs, so a little under half of each pass never reaches DRAM and the part that does works out to about eighty four gigabytes a second, which is inside what dual channel DDR5 delivers here.
+- The order the additions happen in has changed, which is only visible in floating point. A sum was already not adding left to right, because the vector unit keeps one running total per lane, and now the lane totals are per morsel as well. The combine runs in morsel order rather than in whichever order the workers finished, so the answer is the same on every run for the same input. It is not bit identical to what a single scalar loop would produce, and neither was the version before this one.
+- `sum_of`, `min_of`, `max_of`, `mean_of`, `mean_over` and `_densify` in the grouping code now raise, for the same reason the elementwise kernels started to: the morsel runtime does. Nothing in them can fail on its own.
+
+### Added
+
+- Two tests that reach the parallel branch. Every reduction test until now ran at three hundred and one rows, which is well under the morsel size, so nothing had ever exercised the split. One runs at 393241 rows with a whole morsel in the middle blanked, so at least one worker comes back with nothing and the combine has to skip it, and checks the sum, the minimum and the maximum against a single threaded loop over the same column. The other runs at 262144 rows of nothing but nulls and checks that the minimum, the maximum and the mean come back invalid while the sum comes back as a valid zero.
+
 ## [0.6.38] - 2026-09-04
 
 Built against Mojo 1.0.0 (ed45d567).
