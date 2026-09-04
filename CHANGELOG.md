@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.41] - 2026-09-05
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Three changes to the join, and between them they are the largest step this library has taken on a benchmark. On db-benchmark at 0.5GB on an i9-13900K, holding the driver fixed and alternating two builds of the library, j1 goes from 44.1 ms to 21.3 and j4 from 83.3 to 60.5. Against the current pandas 3.0.5, polars 1.44.1 and duckdb 1.5.5, all four engines run in one session and all four agreeing on the checksum for every query, firepanda is ahead of polars on fourteen of the fifteen queries and ahead of duckdb on nine, two of those nine by a margin small enough to call level. It was 2.1x to 3.3x behind duckdb on j1, j2 and j3 before this.
+
+The one worth understanding is the smallest. `take` allocated its output with the zeroing constructor and then wrote every element of it anyway, so a memset ran in front of every gather. The memset itself is a pass over eighty megabytes, but the bigger cost was that it runs on one thread and is the pass that faults the output's pages in, so the gather that followed had thirty two cores writing into memory that belonged to one of them. Writing the zero inside the gather instead is worth 26 to 48 percent on every take and join row in the microbenchmark.
+
+The other two are about doing less. A join takes the list of output columns it is wanted to build, so a column the query is going to drop is never gathered, and since three quarters of a join is building the output rather than deciding which rows go together, that is most of the query rather than a tidy-up at the end. And the build side of a join is a value now rather than a phase inside one function, which changes nothing today and is what a streaming join needs, because a streaming join builds once and probes with every chunk that arrives.
+
+There is also a note on measurement in here that cost more than any of the code did. Three separate A/B runs said a change cost between three and eight percent when it cost nothing, because each ran the old variant then the new one in each pair while the machine drifted slower over the hour. Building both binaries up front and alternating them old, new, new, old is what makes a linear drift cancel, and it is how everything above was measured.
+
 ### A gather no longer zeroes the column it is about to fill
 
 `take` allocated its output with the zeroing constructor and then wrote every element of it, including a zero where the index says null. So there was a memset of the whole output column in front of the gather. It cost what a memset of eighty megabytes costs, which is not nothing, but that was the smaller half of it. The memset runs on one thread, and it is the pass that faults the output's pages in, so every page of the output arrived on whichever core ran the allocation. The gather that followed then ran on thirty two cores writing into memory that all belonged to one of them. Allocating with `overwritten` and writing the zero inside the loop puts the first touch on the worker that is about to fill the page.
