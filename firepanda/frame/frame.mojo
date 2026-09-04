@@ -73,7 +73,7 @@ from firepanda.kernel.sort import argsort_any_into, identity_permutation
 from firepanda.kernel.topn import group_top_rows_any
 
 from .groupby import AggSpec
-from .series import Series, _check_range, _clamp, _to_positions
+from .series import Series, _check_range, _head_end, _tail_start, _to_positions
 
 
 struct DataFrame(Copyable, Movable, Sized, Writable):
@@ -590,23 +590,25 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         """Returns the first rows.
 
         Args:
-            n: How many, clamped to the height.
+            n: How many, clamped to the height. A negative `n` means all but the
+                last `n` of them, as in pandas and as in `s[:-2]`.
 
         Returns:
             A frame of at most `n` rows.
         """
-        return self.slice(0, _clamp(n, self.rows))
+        return self.slice(0, _head_end(n, self.rows))
 
     def tail(self, n: Int = 5) raises -> Self:
         """Returns the last rows.
 
         Args:
-            n: How many, clamped to the height.
+            n: How many, clamped to the height. A negative `n` means all but the
+                first `n` of them, as in pandas and as in `s[2:]`.
 
         Returns:
             A frame of at most `n` rows.
         """
-        return self.slice(self.rows - _clamp(n, self.rows), self.rows)
+        return self.slice(_tail_start(n, self.rows), self.rows)
 
     def argsort(
         self,

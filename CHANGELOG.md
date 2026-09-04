@@ -36,6 +36,12 @@ The rest of the package already answered this the other way. `take` with no indi
 
 A test asserted the old behaviour, as an observation rather than as a claim it was right. It asserts the new contract now, and it also asserts that the empty column can be borrowed, which is the property that was actually broken.
 
+#### A negative head or tail counts from the other end
+
+`head(-2)` in pandas means every row but the last two, and `tail(-2)` means every row but the first two. Both of them returned nothing here, on frames and on series alike, because the count was clamped into the valid range before being used and a negative count clamped to zero. On a ten thousand row frame the conformance suite asked for `head(-2)` and got zero rows where pandas gives 9998, which is not an edge case anybody would notice from the type signature and is exactly the kind of thing a conformance run is for.
+
+The clamp is replaced by two functions that know which end they are working from. `_head_end` turns a count into the row to stop at, and `_tail_start` turns one into the row to start at, and both of them handle a negative count by counting from the other end and then clamping. A negative count larger than the frame still gives nothing, which is also what pandas does. The positive path is unchanged, including the clamp that keeps `head(10)` on a three row frame from raising.
+
 ## [0.6.41] - 2026-09-05
 
 Built against Mojo 1.0.0 (ed45d567).

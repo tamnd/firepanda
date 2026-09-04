@@ -322,7 +322,7 @@ struct Series(Copyable, Movable, Sized, Writable):
         Returns:
             A series of at most `n` rows.
         """
-        return self.slice(0, _clamp(n, len(self)))
+        return self.slice(0, _head_end(n, len(self)))
 
     def tail(self, n: Int = 5) raises -> Self:
         """Returns the last rows.
@@ -334,7 +334,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             A series of at most `n` rows.
         """
         var length = len(self)
-        return self.slice(length - _clamp(n, length), length)
+        return self.slice(_tail_start(n, length), length)
 
     def argsort(
         self, descending: Bool = False, nulls_first: Bool = False
@@ -510,13 +510,43 @@ struct Series(Copyable, Movable, Sized, Writable):
         writer.write(render_column(self.name, self.values, DisplayOptions()))
 
 
-def _clamp(n: Int, length: Int) -> Int:
-    """Bounds a row count to `[0, length]`."""
+def _head_end(n: Int, length: Int) -> Int:
+    """Where `head(n)` stops.
+
+    A negative `n` means all but the last `n` of them, which is the pandas answer
+    and the Python slicing one, `s[:-2]`. It used to mean nothing at all here: the
+    count was clamped to zero and `head(-2)` returned an empty frame, which is not a
+    reading anybody would defend, it is a bound written for a positive number and
+    then handed a negative one.
+
+    Args:
+        n: How many rows, or how many to leave off the end when negative.
+        length: The height.
+
+    Returns:
+        The exclusive end of the range, inside `[0, length]`.
+    """
     if n < 0:
-        return 0
-    if n > length:
-        return length
-    return n
+        return length + n if length + n > 0 else 0
+    return n if n < length else length
+
+
+def _tail_start(n: Int, length: Int) -> Int:
+    """Where `tail(n)` starts.
+
+    A negative `n` means all but the first `n` of them, `s[2:]`, which is the mirror
+    of `_head_end` and is also what pandas does.
+
+    Args:
+        n: How many rows, or how many to skip from the front when negative.
+        length: The height.
+
+    Returns:
+        The inclusive start of the range, inside `[0, length]`.
+    """
+    if n < 0:
+        return -n if -n < length else length
+    return length - n if n < length else 0
 
 
 def _check_range(start: Int, end: Int, length: Int, what: String) raises:

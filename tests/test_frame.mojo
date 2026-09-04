@@ -526,8 +526,35 @@ def test_head_and_tail_clamp_rather_than_raise() raises:
     var df = sample_frame()
     assert_equal(len(df.head(100)), 6, "head past the end")
     assert_equal(len(df.tail(100)), 6, "tail past the end")
-    assert_equal(len(df.head(-1)), 0, "a negative count gives nothing")
-    assert_equal(len(df.tail(-1)), 0, "in both directions")
+
+
+def test_a_negative_head_or_tail_counts_from_the_other_end() raises:
+    """`head(-2)` is all but the last two, which is pandas and Python slicing.
+
+    This used to return nothing at all, because the row count was clamped into
+    `[0, length]` by a function written for a positive number and then handed a
+    negative one. Nobody would defend zero as a reading of `head(-2)`, and the
+    conformance suite reported it as `0 rows, expected 9998`.
+    """
+    var df = sample_frame()
+    assert_equal(len(df.head(-1)), 5, "all but the last")
+    assert_equal(len(df.tail(-1)), 5, "all but the first")
+    assert_equal(keys_of(df.head(-1)), keys_of(df.slice(0, 5)), "the same rows")
+    assert_equal(keys_of(df.tail(-1)), keys_of(df.slice(1, 6)), "and here")
+
+    # Past the height in the negative direction there is nothing left to keep,
+    # which is the one thing the old clamp got right.
+    assert_equal(len(df.head(-100)), 0, "nothing left")
+    assert_equal(len(df.tail(-100)), 0, "nor here")
+
+
+def test_a_series_takes_a_negative_head_or_tail_too() raises:
+    """The same rule on the series, since the frame is not the only spelling."""
+    var column = sample_frame().column("key")
+    assert_equal(len(column.head(-2)), 4, "all but the last two")
+    assert_equal(len(column.tail(-2)), 4, "all but the first two")
+    assert_equal(len(column.head(-100)), 0, "nothing left")
+    assert_equal(len(column.tail(-100)), 0, "nor here")
 
 
 def test_slice_out_of_range_raises() raises:
