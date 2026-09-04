@@ -8,6 +8,24 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed
+
+The first two bugs the pandas conformance suite found. There is now a Mojo driver in firepanda-compat that runs a case against this library and hands the answer back as Arrow, so the suite compares firepanda to pandas rather than pandas to itself, and the first thing it did was produce twenty four failures on the `basics` section alone. These are two of them, and they are the two that are unambiguously wrong rather than a difference of opinion about semantics.
+
+#### A mean is no longer computed from a wrapped sum
+
+`Series.mean`, `DataFrame.agg` and `groupby.mean` over an integer column added the values up in int64 and divided that. An int64 sum wraps, which is the right answer for a sum because numpy wraps there too, but pandas converts to float64 before dividing and so the mean of a column of large integers came out as whatever the wrap happened to leave behind. On the conformance corpus the mean of the int64 column was 2040395725.875 where pandas gives -4.611686016386992e+18, which is not a rounding difference, it is eighteen orders of magnitude and the wrong sign.
+
+The accumulator is a parameter now, in both the whole column path and the grouped one, defaulting to the natural widening. `sum` keeps that default and keeps wrapping. `mean` asks for float64 and divides that. Nothing else changed and no other reduction moved.
+
+#### A filter or a slice that keeps no rows produces a usable frame
+
+A column of no rows was a column of no chunks, and `only()` raises on that shape, which is the borrow every kernel written against `AnyArray` reaches through. So `df.filter(mask)` where the mask happened to match nothing, or `df.head(0)`, or `df.slice(3, 3)`, produced a frame that could not be written to Arrow, aggregated or printed. It raised with a message about a column having zero chunks, which points at the writer rather than at the filter that made it.
+
+The rest of the package already answered this the other way. `take` with no indices, the Arrow reader on a file with no record batches, and `ChunkedArray.combine` with nothing to combine all produce one empty chunk. `filter_chunked` and `slice_chunked` were the two that did not, and they do now. The empty chunk is made by slicing an existing chunk to nothing rather than by building an array, which is what keeps it correct for a type with children: an empty string column is not an empty buffer, it has an offsets buffer and a data buffer of its own, and the way to get an empty one of the right shape is to ask a full one for none of its rows.
+
+A test asserted the old behaviour, as an observation rather than as a claim it was right. It asserts the new contract now, and it also asserts that the empty column can be borrowed, which is the property that was actually broken.
+
 ## [0.6.41] - 2026-09-05
 
 Built against Mojo 1.0.0 (ed45d567).

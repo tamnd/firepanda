@@ -159,6 +159,27 @@ def test_mean_divides_by_the_present_count() raises:
     assert_almost_equal(out[2], 50.0)
 
 
+def test_a_grouped_mean_is_not_computed_from_a_wrapped_sum() raises:
+    """The same wrap as the whole column mean, in the path people actually use.
+
+    Two groups of two copies of 2 to the 63 minus one apiece. Added in int64 each
+    pair wraps to minus two, so the mean divided out of that is minus one, and the
+    answer pandas gives is 2 to the 63 minus one. `group_sum` is left wrapping
+    because pandas wraps there as well.
+    """
+    var big = Int64.MAX
+    var values = ints([big, big, big, big])
+    var codes = codes_of([0, 0, 1, 1])
+
+    var summed = group_sum(values, codes, 2)
+    assert_equal(summed[0], -2, "a grouped sum wraps, as pandas does")
+    assert_equal(summed[1], -2)
+
+    var averaged = group_mean(values, codes, 2)
+    assert_equal(averaged[0], 9.223372036854776e18)
+    assert_equal(averaged[1], 9.223372036854776e18)
+
+
 def test_mean_of_an_all_null_group_is_null() raises:
     var out = group_mean(all_null_group(), codes_of([0, 1, 0, 1]), 2)
     assert_true(out.is_valid(0))

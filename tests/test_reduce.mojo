@@ -145,6 +145,32 @@ def test_mean_agrees_with_the_group_by() raises:
     agreed(AggKind.MEAN)
 
 
+def test_a_mean_is_not_computed_from_a_wrapped_sum() raises:
+    """The mean of four copies of 2 to the 62, whose int64 sum is zero.
+
+    Four of them add up to exactly 2 to the 64, so an int64 accumulator lands on
+    zero and a mean divided out of that is zero. The answer is 2 to the 62, which
+    is what pandas gives, because pandas converts to float64 before dividing.
+    This is not a rounding difference and it is not close: it was off by eighteen
+    orders of magnitude on the pandas conformance corpus.
+
+    The sum is checked on the same line because the fix must not touch it. numpy
+    wraps an int64 sum too, so zero is the right answer there, and a mean that
+    was fixed by widening the sum would have broken the sum to do it.
+    """
+    var big = Int64(1) << 62
+    var values = ints([big, big, big, big])
+    var column = AnyArray(values^)
+
+    var summed = reduce_any(column, AggKind.SUM)
+    assert_true(summed.dtype() == DType.int64, "a sum stays an int64")
+    assert_equal(as_float(summed, 0), 0.0, "and wraps, as pandas does")
+
+    var averaged = reduce_any(column, AggKind.MEAN)
+    assert_true(averaged.dtype() == DType.float64)
+    assert_equal(as_float(averaged, 0), 4.611686018427388e18)
+
+
 def test_min_agrees_with_the_group_by() raises:
     agreed(AggKind.MIN)
 

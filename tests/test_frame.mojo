@@ -250,7 +250,18 @@ def test_filter_and_slice_keep_the_chunk_boundaries() raises:
     assert_equal(keys_of(tail), keys_of(flat.slice(1, 6)), "same rows")
 
 
-def test_a_filter_that_keeps_nothing_leaves_no_chunks() raises:
+def test_a_filter_that_keeps_nothing_leaves_one_empty_chunk() raises:
+    """A column of no rows is one empty chunk and never no chunks at all.
+
+    This test used to assert the opposite, and it asserted it as an observation
+    rather than as a claim that no chunks was right. It is not right. A column of
+    no chunks raises in `only()`, which is the borrow every kernel written
+    against `AnyArray` reaches through, so a predicate that happened to select
+    nothing today produced a frame that could not be written, aggregated or
+    printed. The rest of the package already answered the other way: `take` with
+    no indices, the Arrow reader on a file with no record batches, and
+    `ChunkedArray.combine` with nothing to combine all produce one empty chunk.
+    """
     var cut = chunked_frame()
     var mask = Array[DType.bool](6)
     for i in range(6):
@@ -259,7 +270,26 @@ def test_a_filter_that_keeps_nothing_leaves_no_chunks() raises:
     var empty = cut.filter(mask)
     assert_equal(len(empty), 0, "no rows")
     assert_equal(empty.width(), 3, "but still three columns")
-    assert_equal(empty.columns[0].num_chunks(), 0, "and no chunks in them")
+    assert_equal(empty.columns[0].num_chunks(), 1, "one chunk to be empty in")
+    # The point of the chunk being there, rather than a number anybody cares
+    # about on its own.
+    assert_equal(len(empty.columns[0].only()), 0, "and it can be borrowed")
+
+
+def test_a_slice_of_no_rows_leaves_one_empty_chunk() raises:
+    """The other producer that used to disagree, for the same reason.
+
+    `head` and `tail` are slices, so an empty frame is the first thing anybody
+    types at a prompt that hits this.
+    """
+    var cut = chunked_frame()
+    var empty = cut.slice(3, 3)
+    assert_equal(len(empty), 0, "no rows")
+    assert_equal(empty.columns[0].num_chunks(), 1, "one chunk to be empty in")
+    assert_equal(len(empty.columns[0].only()), 0, "and it can be borrowed")
+
+    var nothing = cut.head(0)
+    assert_equal(len(nothing.columns[0].only()), 0, "head(0) too")
 
 
 def test_cast_and_take_agree_across_a_chunked_column() raises:

@@ -303,13 +303,13 @@ def _partition_starts(
 
 
 def _partitioned_sums[
-    dt: DType, //, origin: ImmOrigin
+    dt: DType, //, origin: ImmOrigin, acc: DType = accumulator(dt)
 ](
     source: Pointer[Scalar[dt], origin],
     codes: Array[DType.uint32],
     groups: Int,
     parts: Int,
-) raises -> Array[accumulator(dt)]:
+) raises -> Array[acc]:
     """Adds every row into its group by cutting the group range, not the table.
 
     Three passes rather than one. The first counts how many rows each worker has
@@ -328,6 +328,7 @@ def _partitioned_sums[
     Parameters:
         dt: The column's dtype.
         origin: The origin of the values pointer.
+        acc: What to accumulate in. Defaults to int64, uint64 or float64.
 
     Returns:
         A column of `groups` sums, every one of them present.
@@ -335,7 +336,6 @@ def _partitioned_sums[
     Raises:
         If one of the workers cannot be run.
     """
-    comptime acc = accumulator(dt)
     var rows = len(codes)
     var workers = worker_count()
     var bounds = _row_bounds(rows, workers)
@@ -977,21 +977,27 @@ def group_sum[
 
 
 def _sum_core[
-    dt: DType, //, origin: ImmOrigin
+    dt: DType, //, origin: ImmOrigin, acc: DType = accumulator(dt)
 ](
     source: Pointer[Scalar[dt], origin],
     codes: Array[DType.uint32],
     groups: Int,
-) raises -> Array[accumulator(dt)]:
-    """Accumulates every row into its group, validity ignored on purpose."""
-    comptime acc = accumulator(dt)
+) raises -> Array[acc]:
+    """Accumulates every row into its group, validity ignored on purpose.
+
+    The accumulator is a parameter with the natural widening as its default,
+    because a grouped sum and a grouped mean want different ones. A sum over
+    int64 accumulates in int64 and wraps, which is what pandas does. A mean must
+    not be computed from that wrapped total, so `_mean_core` asks for float64
+    here and divides that.
+    """
     var n = len(codes)
     var workers = _private_workers[acc](n, groups)
 
     if workers <= 1:
         var parts = _partition_parts[acc](n, groups)
         if parts > 0:
-            return _partitioned_sums(source, codes, groups, parts)
+            return _partitioned_sums[acc=acc](source, codes, groups, parts)
 
         var out = Array[acc](groups)
         var totals = out.unsafe_ptr()
@@ -1066,8 +1072,15 @@ def _mean_core[
     codes: Array[DType.uint32],
     groups: Int,
 ) raises -> Array[DType.float64]:
-    """Divides a grouped sum by a grouped count, one group at a time."""
-    var sums = _sum_core(source, codes, groups)
+    """Divides a grouped sum by a grouped count, one group at a time.
+
+    The sum is taken in float64 and not in the natural accumulator, which for an
+    integer column is the difference between an answer and a wrapped one. pandas
+    converts to float64 before dividing, so the mean of a group of large int64
+    values is a large float rather than whatever the int64 wrap happened to leave
+    behind. `group_sum` still wraps, because there pandas wraps too.
+    """
+    var sums = _sum_core[acc=DType.float64](source, codes, groups)
     var counts = _count_core(validity, has_null, codes, groups)
 
     var out = Array[DType.float64](groups)
@@ -1080,8 +1093,7 @@ def _mean_core[
             out.data.validity.set(g, False)
             continue
         target.unsafe_offset(g).unsafe_store(
-            total.unsafe_offset(g).unsafe_load().cast[DType.float64]()
-            / Float64(count)
+            total.unsafe_offset(g).unsafe_load() / Float64(count)
         )
     return out^
 
