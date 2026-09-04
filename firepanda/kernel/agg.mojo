@@ -135,15 +135,21 @@ def sum_of[dt: DType](col: Array[dt]) raises -> AggResult[accumulator(dt)]:
 
 
 def sum_over[
-    dt: DType, //, origin: ImmOrigin
-](source: Pointer[Scalar[dt], origin], n: Int) raises -> AggResult[
-    accumulator(dt)
-]:
+    dt: DType, //, origin: ImmOrigin, acc: DType = accumulator(dt)
+](source: Pointer[Scalar[dt], origin], n: Int) raises -> AggResult[acc]:
     """Adds up `n` values, nulls included, because a null holds a zero.
 
     Past one morsel this runs on every core. Each morsel adds up its own rows
     into a slot of its own and the totals are added together afterwards, in
     order, on one thread.
+
+    The accumulator is a parameter with the natural widening as its default, and
+    it is a parameter because the mean needs a different one. A sum over int64
+    accumulates in int64 and wraps, which is what pandas does and is therefore
+    the answer. A mean must not be computed from that wrapped total: pandas
+    converts to float64 first and divides, so the mean of a column of large
+    int64 values is a large float rather than whatever the wrap happened to
+    leave behind. See `mean_over`.
 
     Args:
         source: The values.
@@ -152,16 +158,16 @@ def sum_over[
     Parameters:
         dt: The value dtype.
         origin: Where the values live.
+        acc: What to accumulate in. Defaults to int64, uint64 or float64.
 
     Returns:
-        The total, widened to int64, uint64 or float64.
+        The total, in the accumulator type.
 
     Raises:
         Error: Only what the morsel runtime raises.
     """
-    comptime acc = accumulator(dt)
     if n <= MORSEL_ROWS:
-        return AggResult[acc](_sum_range(source, 0, n), True)
+        return AggResult[acc](_sum_range[acc=acc](source, 0, n), True)
 
     var count = (n + MORSEL_ROWS - 1) // MORSEL_ROWS
     var partials = Array[acc](count)
@@ -173,7 +179,7 @@ def sum_over[
     # here. Every other kernel in this package captures the column the same way.
     def add_up(start: Int, stop: Int) {mut partials, imm}:
         partials.unsafe_ptr().unsafe_offset(start // MORSEL_ROWS).unsafe_write(
-            _sum_range(source, start, stop)
+            _sum_range[acc=acc](source, start, stop)
         )
 
     parallel_morsels(add_up, n)
@@ -191,10 +197,8 @@ def sum_over[
 
 
 def _sum_range[
-    dt: DType, //, origin: ImmOrigin
-](source: Pointer[Scalar[dt], origin], start: Int, stop: Int) -> Scalar[
-    accumulator(dt)
-]:
+    dt: DType, //, origin: ImmOrigin, acc: DType = accumulator(dt)
+](source: Pointer[Scalar[dt], origin], start: Int, stop: Int) -> Scalar[acc]:
     """Adds up one range of values, on one thread.
 
     Args:
@@ -205,11 +209,11 @@ def _sum_range[
     Parameters:
         dt: The value dtype.
         origin: Where the values live.
+        acc: What to accumulate in.
 
     Returns:
         The total over the range.
     """
-    comptime acc = accumulator(dt)
     comptime width = simd_width_of[dt]()
 
     var ptr = source
@@ -499,7 +503,12 @@ def mean_over[
     """
     if present == 0:
         return AggResult[DType.float64].none()
-    var total = sum_over(source, n)
-    return AggResult[DType.float64](
-        Float64(total.value) / Float64(present), True
-    )
+    # Summed in float64 and not in the natural accumulator, which for an integer
+    # column is the difference between an answer and a wrapped one. A sum over
+    # int64 wraps, and that is the right answer for a sum because pandas wraps
+    # there too, but pandas computes a mean by converting to float64 first. Off
+    # the corpus column of large int64 values the two differ by ten orders of
+    # magnitude: 2040395725.875 out of the wrapped total against -4.6e18, which
+    # is the mean of the values that are actually in the column.
+    var total = sum_over[acc=DType.float64](source, n)
+    return AggResult[DType.float64](total.value / Float64(present), True)

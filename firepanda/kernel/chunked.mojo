@@ -37,6 +37,47 @@ from .cast import cast_any
 from .select import filter_any, take_any
 
 
+def _one_empty_chunk(
+    var out: ChunkedArray, source: ChunkedArray
+) raises -> ChunkedArray:
+    """Gives a column that came out empty one empty chunk to be empty in.
+
+    A column of no rows is either no chunks at all or one chunk of no rows, and
+    the difference is invisible until something calls `only()`, which is the
+    borrow every kernel written against `AnyArray` reaches through. A column of
+    no chunks raises there. So a filter that matches nothing produces a frame
+    that cannot be written, aggregated or printed, and it does it on the most
+    ordinary line anybody writes, which is a predicate that happens to select
+    nothing today.
+
+    The rest of the package already answers this the other way. `take` with no
+    indices returns one empty chunk, the Arrow reader gives one empty chunk to a
+    file with no record batches, and `ChunkedArray.combine` builds one when it
+    has none. This brings the two producers that did not agree into line rather
+    than teaching a hundred call sites to expect either.
+
+    Slicing an existing chunk to nothing rather than building an array from
+    scratch is what keeps this correct for a type with children. An empty string
+    view column is not an empty buffer, it has an offsets buffer and a data
+    buffer of its own, and the way to get an empty one of exactly the right
+    shape is to ask a full one for none of its rows.
+
+    Args:
+        out: The column that was built. Consumed.
+        source: The column it was built from, for a chunk to take the shape of.
+
+    Returns:
+        `out` when it has any rows or when the source had no chunks to copy the
+        shape of, and a column of one empty chunk otherwise.
+
+    Raises:
+        Error: If the source chunk cannot be sliced.
+    """
+    if out.num_chunks() > 0 or source.num_chunks() == 0:
+        return out^
+    return ChunkedArray(source.chunks[0].slice(0, 0))
+
+
 def filter_chunked(
     col: ChunkedArray, mask: Array[DType.bool]
 ) raises -> ChunkedArray:
@@ -44,8 +85,11 @@ def filter_chunked(
 
     Each chunk gets the slice of the mask that covers it and the result keeps
     the same number of chunks, minus the ones that nothing survived, because
-    `append` drops an empty chunk. A column that filters down to nothing is
-    therefore a column of no chunks and zero length, which is what it is.
+    `append` drops an empty chunk. A column that nothing survived at all would
+    therefore be a column of no chunks, and that shape raises in `only()`, so a
+    filter matching nothing produced a frame that could not be written or
+    aggregated. It gets one empty chunk instead, which is what `take` and the
+    Arrow reader already give a column of no rows.
 
     Args:
         col: The column to filter.
@@ -70,7 +114,7 @@ def filter_chunked(
         var start = col.starts[c]
         var end = col.starts[c + 1]
         out.append(filter_any(col.chunks[c], mask.slice(start, end)))
-    return out^
+    return _one_empty_chunk(out^, col)
 
 
 def slice_chunked(
@@ -114,7 +158,7 @@ def slice_chunked(
         var lo = start - at if start > at else 0
         var hi = end - at if end < stop else stop - at
         out.append(col.chunks[c].slice(lo, hi))
-    return out^
+    return _one_empty_chunk(out^, col)
 
 
 def cast_chunked(
