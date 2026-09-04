@@ -24,9 +24,15 @@ views. That is the shape a filter on a status column or a country code has, and
 it is the case worth being fast.
 
 Comparison against a null is null, exactly as it is for numbers, and it is
-handled the same way: the loop writes whatever falls out and `apply_validity`
-clears the rows where either side was missing. The value under a null is false
-either way, so nothing depends on which branch the loop took there.
+handled the same way: the loop writes whatever falls out and the repair at the
+end of each morsel clears the rows where either side was missing. The value
+under a null is false either way, so nothing depends on which branch the loop
+took there.
+
+Both forms run on every core. A row's cost here depends on its own bytes and on
+nothing else, so the column splits over morsels with no more care than a numeric
+kernel needs, and the only thing that had to move is the constant's view, which
+is now built once above the split rather than once per worker.
 """
 
 from std.collections.span import Span
@@ -40,12 +46,15 @@ from firepanda.array.strview import (
     views_equal_short,
 )
 from firepanda.bitmap.bitmap import Bitmap
+from firepanda.exec import parallel_morsels
 
 from .compare import CMP_EQ, CMP_GE, CMP_GT, CMP_LE, CMP_LT, CMP_NE
-from .mask import apply_validity, combined_validity
+from .mask import combined_validity, repair_range
 
 
-def compare_text[op: Int](a: StringArray, b: StringArray) -> Array[DType.bool]:
+def compare_text[
+    op: Int
+](a: StringArray, b: StringArray) raises -> Array[DType.bool]:
     """Compares two text columns elementwise.
 
     Args:
@@ -57,44 +66,60 @@ def compare_text[op: Int](a: StringArray, b: StringArray) -> Array[DType.bool]:
 
     Returns:
         A bool column, null wherever either input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     var n = len(a)
-    var out = Array[DType.bool](n)
-    var dst = out.unsafe_ptr()
+    # Every row is written below, so the zeroing allocation is a wasted pass.
+    var out = Array[DType.bool](overwritten=n)
+    var validity = combined_validity(a.validity, b.validity)
 
-    comptime if op == CMP_EQ or op == CMP_NE:
-        for i in range(n):
-            # `equals` answers False for a null on the left, and the bytes of a
-            # null on the right are empty, so a null row can come out either way
-            # here. The repair pass below settles it.
-            var same = a.equals(i, b.unsafe_bytes(i))
-            comptime if op == CMP_EQ:
-                dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](same))
-            else:
-                dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](not same))
-    else:
-        for i in range(n):
-            var order = a.compare(i, b.unsafe_bytes(i))
-            comptime if op == CMP_LT:
-                dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](order < 0))
-            elif op == CMP_LE:
-                dst.unsafe_offset(i).unsafe_write(
-                    Scalar[DType.bool](order <= 0)
-                )
-            elif op == CMP_GT:
-                dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](order > 0))
-            else:
-                dst.unsafe_offset(i).unsafe_write(
-                    Scalar[DType.bool](order >= 0)
-                )
+    def compute(start: Int, stop: Int) {mut out, imm}:
+        var dst = out.unsafe_ptr()
+        comptime if op == CMP_EQ or op == CMP_NE:
+            for i in range(start, stop):
+                # `equals` answers False for a null on the left, and the bytes
+                # of a null on the right are empty, so a null row can come out
+                # either way here. The repair pass below settles it.
+                var same = a.equals(i, b.unsafe_bytes(i))
+                comptime if op == CMP_EQ:
+                    dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](same))
+                else:
+                    dst.unsafe_offset(i).unsafe_write(
+                        Scalar[DType.bool](not same)
+                    )
+        else:
+            for i in range(start, stop):
+                var order = a.compare(i, b.unsafe_bytes(i))
+                comptime if op == CMP_LT:
+                    dst.unsafe_offset(i).unsafe_write(
+                        Scalar[DType.bool](order < 0)
+                    )
+                elif op == CMP_LE:
+                    dst.unsafe_offset(i).unsafe_write(
+                        Scalar[DType.bool](order <= 0)
+                    )
+                elif op == CMP_GT:
+                    dst.unsafe_offset(i).unsafe_write(
+                        Scalar[DType.bool](order > 0)
+                    )
+                else:
+                    dst.unsafe_offset(i).unsafe_write(
+                        Scalar[DType.bool](order >= 0)
+                    )
 
-    apply_validity(out, combined_validity(a.validity, b.validity))
+        repair_range(out, validity, start, stop)
+
+    parallel_morsels(compute, n)
+
+    out.data.validity = validity^
     return out^
 
 
 def compare_text_const[
     op: Int
-](a: StringArray, b: Span[UInt8, _]) -> Array[DType.bool]:
+](a: StringArray, b: Span[UInt8, _]) raises -> Array[DType.bool]:
     """Compares a text column against one run of bytes.
 
     There is no flipped form. A constant on the left is the mirrored operation
@@ -112,44 +137,63 @@ def compare_text_const[
     Returns:
         A bool column, null wherever the column is null. A null constant makes
         the whole answer null and never reaches here.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     var n = len(a)
-    var out = Array[DType.bool](n)
-    var dst = out.unsafe_ptr()
+    # Every row is written below, so the zeroing allocation is a wasted pass.
+    var out = Array[DType.bool](overwritten=n)
+    var validity = Bitmap(copy=a.validity)
 
+    # A short constant becomes a view once, before any row is read and before
+    # the split, so the workers share it rather than each making their own. A
+    # long one cannot: the view for a long string points into a payload this
+    # constant does not live in, so those rows go to the byte loop.
+    var short = len(b) <= INLINE_CAPACITY
+    var probe = StringView()
     comptime if op == CMP_EQ or op == CMP_NE:
-        # A short constant becomes a view once. A long one cannot: the view for a
-        # long string points into a payload this constant does not live in, so
-        # those rows go to the byte loop.
-        var short = len(b) <= INLINE_CAPACITY
-        var probe = StringView()
         if short:
             probe = make_inline(b)
-        for i in range(n):
-            var same: Bool
-            if short:
-                same = views_equal_short(a.view(i), probe)
-            else:
-                same = a.equals(i, b)
-            comptime if op == CMP_EQ:
-                dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](same))
-            else:
-                dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](not same))
-    else:
-        for i in range(n):
-            var order = a.compare(i, b)
-            comptime if op == CMP_LT:
-                dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](order < 0))
-            elif op == CMP_LE:
-                dst.unsafe_offset(i).unsafe_write(
-                    Scalar[DType.bool](order <= 0)
-                )
-            elif op == CMP_GT:
-                dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](order > 0))
-            else:
-                dst.unsafe_offset(i).unsafe_write(
-                    Scalar[DType.bool](order >= 0)
-                )
 
-    apply_validity(out, Bitmap(copy=a.validity))
+    def compute(start: Int, stop: Int) {mut out, imm}:
+        var dst = out.unsafe_ptr()
+        comptime if op == CMP_EQ or op == CMP_NE:
+            for i in range(start, stop):
+                var same: Bool
+                if short:
+                    same = views_equal_short(a.view(i), probe)
+                else:
+                    same = a.equals(i, b)
+                comptime if op == CMP_EQ:
+                    dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](same))
+                else:
+                    dst.unsafe_offset(i).unsafe_write(
+                        Scalar[DType.bool](not same)
+                    )
+        else:
+            for i in range(start, stop):
+                var order = a.compare(i, b)
+                comptime if op == CMP_LT:
+                    dst.unsafe_offset(i).unsafe_write(
+                        Scalar[DType.bool](order < 0)
+                    )
+                elif op == CMP_LE:
+                    dst.unsafe_offset(i).unsafe_write(
+                        Scalar[DType.bool](order <= 0)
+                    )
+                elif op == CMP_GT:
+                    dst.unsafe_offset(i).unsafe_write(
+                        Scalar[DType.bool](order > 0)
+                    )
+                else:
+                    dst.unsafe_offset(i).unsafe_write(
+                        Scalar[DType.bool](order >= 0)
+                    )
+
+        repair_range(out, validity, start, stop)
+
+    parallel_morsels(compute, n)
+
+    out.data.validity = validity^
     return out^

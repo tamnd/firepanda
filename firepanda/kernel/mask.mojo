@@ -13,6 +13,19 @@ touches individual elements in the words that are mixed.
 
 The cost is proportional to the nulls, not to the length. On a column with no
 nulls it is one comparison per sixty four rows.
+
+The repair is not a pass of its own. A kernel that runs on every core repairs
+each morsel inside the worker that just computed it, through `repair_range`, so
+the rows are still in that core's cache and there is no second walk over the
+column and no second parallel region. That is why `repair_range` takes a row
+range rather than the kernel calling `apply_validity` at the end: a separate
+parallel pass over the whole column measured slower than the serial one on a
+column with no nulls, because the work it was splitting was already down to one
+comparison per sixty four rows and the split cost more than it saved.
+
+A morsel boundary is a multiple of sixty four rows, so the ranges fall between
+words and no two workers ever touch the same one. `apply_validity` is the whole
+column spelling, for the callers that are not splitting anything.
 """
 
 from std.sys.info import simd_width_of
@@ -36,11 +49,39 @@ def apply_validity[dt: DType](mut col: Array[dt], var validity: Bitmap):
     Parameters:
         dt: The column's dtype.
     """
+    repair_range(col, validity, 0, len(col))
+    col.data.validity = validity^
+
+
+def repair_range[
+    dt: DType
+](mut col: Array[dt], validity: Bitmap, start: Int, stop: Int):
+    """Zeroes the values under the nulls, over one range of rows.
+
+    The bitmap is borrowed and not installed, because a caller that is splitting
+    the column calls this once per morsel and can only hand the bitmap over once
+    the last of them is done.
+
+    Args:
+        col: The column to repair. Its length must match the bitmap's.
+        validity: The validity the column will end up with.
+        start: The first row to repair. Must be a multiple of 64, which every
+            morsel boundary is.
+        stop: One past the last row to repair.
+
+    Parameters:
+        dt: The column's dtype.
+    """
     comptime width = simd_width_of[dt]()
     var ptr = col.unsafe_ptr()
     var n = len(col)
 
-    for w in range(validity.word_count()):
+    # Rounding the end up is what picks up the last partial word of the column;
+    # `last` below is what keeps the writes inside the length.
+    var first = start // 64
+    var limit = min((stop + 63) // 64, validity.word_count())
+
+    for w in range(first, limit):
         var word = validity.unsafe_word(w)
         if word == UInt64.MAX:
             continue
@@ -63,8 +104,6 @@ def apply_validity[dt: DType](mut col: Array[dt], var validity: Bitmap):
         for i in range(base, last):
             if (word >> UInt64(i - base)) & 1 == 0:
                 ptr.unsafe_offset(i).unsafe_write(Scalar[dt](0))
-
-    col.data.validity = validity^
 
 
 def combined_validity(a: Bitmap, b: Bitmap) -> Bitmap:

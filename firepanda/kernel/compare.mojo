@@ -26,7 +26,7 @@ from firepanda.array.array import Array
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.exec import parallel_morsels
 
-from .mask import apply_validity, combined_validity
+from .mask import combined_validity, repair_range
 
 comptime CMP_EQ = 0
 """Operation code for equality."""
@@ -189,9 +189,11 @@ def _compare[
     comptime width = simd_width_of[dt]()
 
     var n = len(a)
-    # Every row is written below, the null ones included, and `apply_validity`
-    # blanks those afterwards. The zeroing constructor would be a wasted pass.
+    # Every row is written below, the null ones included, and the repair at the
+    # end of each morsel blanks those. The zeroing constructor would be a
+    # wasted pass.
     var out = Array[DType.bool](overwritten=n)
+    var validity = combined_validity(a.data.validity, b.data.validity)
 
     def compute(start: Int, stop: Int) {mut out, imm}:
         var lhs = a.unsafe_ptr()
@@ -220,9 +222,13 @@ def _compare[
                 dst.unsafe_offset(i).unsafe_store(x.ge(y))
             i += width
 
+        # These rows are in this core's cache right now, so the repair is
+        # nearly free here and is a second walk over the column anywhere else.
+        repair_range(out, validity, start, stop)
+
     parallel_morsels(compute, n)
 
-    apply_validity(out, combined_validity(a.data.validity, b.data.validity))
+    out.data.validity = validity^
     return out^
 
 
@@ -255,6 +261,7 @@ def compare_const[
     var n = len(a)
     # Every row is written below, so the zeroing allocation is a wasted pass.
     var out = Array[DType.bool](overwritten=n)
+    var validity = Bitmap(copy=a.data.validity)
     var y = SIMD[dt, width](b)
 
     def compute(start: Int, stop: Int) {mut out, imm}:
@@ -278,7 +285,9 @@ def compare_const[
                 dst.unsafe_offset(i).unsafe_store(x.ge(y))
             i += width
 
+        repair_range(out, validity, start, stop)
+
     parallel_morsels(compute, n)
 
-    apply_validity(out, Bitmap(copy=a.data.validity))
+    out.data.validity = validity^
     return out^
