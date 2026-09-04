@@ -1620,6 +1620,19 @@ def _var_core[
     a sum of squares near 3e18, and the subtraction that is supposed to leave the
     variance is cancelling seventeen digits away. Timestamps in a group by are
     not a corner case, so this takes the second pass.
+
+    The second pass is not quite enough on its own either. The centre it
+    subtracts is a rounded sum divided by a count, so it is near the mean but it
+    is not the mean, and the squared deviations are therefore measured from
+    slightly the wrong place. That error does not cancel, it accumulates, and it
+    grows with the magnitude of the values: on five values sitting at 4.5e15
+    whose true variance is 37.2 the uncorrected form answers 37.25. So this also
+    accumulates the plain deviations, which sum to zero when the centre is exact
+    and to the size of the miss when it is not, and subtracts the square of that
+    residual at the end. The identity is the same one the single pass form uses,
+    but applied to numbers that are already small, so there is nothing left to
+    cancel. It costs one add per row and makes the answer independent of how
+    accurate the mean was.
     """
     var means = _mean_core(source, validity, has_null, codes, groups)
     var counts = _count_core(validity, has_null, codes, groups)
@@ -1634,10 +1647,12 @@ def _var_core[
     # parallel for a while; the second one was still a serial scatter, so a
     # standard deviation cost more than the mean it is built on and used one
     # core to do it.
+    var deltas = Array[DType.float64](groups * workers)
     var partials = Array[DType.float64](groups * workers)
     var bounds = _row_bounds(rows, workers)
 
-    def one(w: Int) raises {mut partials, imm}:
+    def one(w: Int) raises {mut deltas, mut partials, imm}:
+        var plain = deltas.unsafe_ptr().unsafe_offset(w * groups)
         var totals = partials.unsafe_ptr().unsafe_offset(w * groups)
         for i in range(bounds[w], bounds[w + 1]):
             if has_null and not validity.get(i):
@@ -1647,6 +1662,9 @@ def _var_core[
                 source.unsafe_offset(i).unsafe_load().cast[DType.float64]()
                 - centre.unsafe_offset(g).unsafe_load()
             )
+            plain.unsafe_offset(g).unsafe_store(
+                plain.unsafe_offset(g).unsafe_load() + delta
+            )
             totals.unsafe_offset(g).unsafe_store(
                 totals.unsafe_offset(g).unsafe_load() + delta * delta
             )
@@ -1654,17 +1672,30 @@ def _var_core[
     parallel_for(one, workers)
 
     if workers > 1:
+        deltas = _merge_sums(deltas, groups, workers)
         partials = _merge_sums(partials, groups, workers)
     var out = partials^
     var target = out.unsafe_ptr()
+    var missed = deltas.unsafe_ptr()
     var n = counts.unsafe_ptr()
     for g in range(groups):
-        var divisor = Int(n.unsafe_offset(g).unsafe_load()) - ddof
+        var present = Int(n.unsafe_offset(g).unsafe_load())
+        var divisor = present - ddof
         if divisor <= 0:
             out.data.validity.set(g, False)
             target.unsafe_offset(g).unsafe_store(0.0)
             continue
-        var value = target.unsafe_offset(g).unsafe_load() / Float64(divisor)
+        var residual = missed.unsafe_offset(g).unsafe_load()
+        var squares = target.unsafe_offset(
+            g
+        ).unsafe_load() - residual * residual / Float64(present)
+        # The correction is a subtraction and a subtraction can overshoot, so a
+        # group whose values are all the same can land a rounding error below
+        # zero rather than on it. A negative variance is not a number this
+        # returns.
+        if squares < 0.0:
+            squares = 0.0
+        var value = squares / Float64(divisor)
         comptime if want_std:
             value = sqrt(value)
         target.unsafe_offset(g).unsafe_store(value)
@@ -1730,12 +1761,25 @@ def _skew_core[
     codes: Array[DType.uint32],
     groups: Int,
 ) raises -> Array[DType.float64]:
-    """Sums the squared and cubed deviations from each group's own mean.
+    """Sums the deviations from each group's own mean, squared and cubed.
 
     Two passes, and for the reason `_var_core` gives at length: the one pass
     arrangement accumulates the raw moments and subtracts at the end, and the
     cancellation that costs a variance its significant digits costs a skewness
     more, because the third moment is the difference of larger quantities still.
+
+    Two passes is not enough on its own, which is the difference between this
+    and `_var_core`. The centre is a rounded sum divided by a count, so it is
+    not the mean, and the deviations are taken from something slightly off. A
+    variance barely notices, because the error enters squared. A skewness
+    notices a great deal, because the correction to the third moment is
+    proportional to the second, and the second is very much larger than the
+    third whenever the data is anywhere near symmetric. So the sum of the
+    deviations is accumulated as well, which is zero in exact arithmetic and is
+    the amount the centre missed by in this one, and both moments are corrected
+    by it with the shifted data identity. Three multiplications per group, and
+    on a column sitting at 4.6e18 with a spread of 4.2e9 it is the difference
+    between five correct digits and eight.
 
     The coefficient is the one pandas reports, the adjusted Fisher Pearson
     standardized moment, which is the plain moment ratio scaled by
@@ -1768,11 +1812,13 @@ def _skew_core[
     var centre = means.unsafe_ptr()
     var at = codes.unsafe_ptr()
 
+    var deltas = Array[DType.float64](groups * workers)
     var squares = Array[DType.float64](groups * workers)
     var cubes = Array[DType.float64](groups * workers)
     var bounds = _row_bounds(rows, workers)
 
-    def one(w: Int) raises {mut squares, mut cubes, imm}:
+    def one(w: Int) raises {mut deltas, mut squares, mut cubes, imm}:
+        var first = deltas.unsafe_ptr().unsafe_offset(w * groups)
         var second = squares.unsafe_ptr().unsafe_offset(w * groups)
         var third = cubes.unsafe_ptr().unsafe_offset(w * groups)
         for i in range(bounds[w], bounds[w + 1]):
@@ -1784,6 +1830,9 @@ def _skew_core[
                 - centre.unsafe_offset(g).unsafe_load()
             )
             var squared = delta * delta
+            first.unsafe_offset(g).unsafe_store(
+                first.unsafe_offset(g).unsafe_load() + delta
+            )
             second.unsafe_offset(g).unsafe_store(
                 second.unsafe_offset(g).unsafe_load() + squared
             )
@@ -1794,10 +1843,12 @@ def _skew_core[
     parallel_for(one, workers)
 
     if workers > 1:
+        deltas = _merge_sums(deltas, groups, workers)
         squares = _merge_sums(squares, groups, workers)
         cubes = _merge_sums(cubes, groups, workers)
     var out = squares^
     var target = out.unsafe_ptr()
+    var first_total = deltas.unsafe_ptr()
     var third_total = cubes.unsafe_ptr()
     var n = counts.unsafe_ptr()
     for g in range(groups):
@@ -1807,11 +1858,34 @@ def _skew_core[
             target.unsafe_offset(g).unsafe_store(0.0)
             continue
         var size = Float64(present)
-        var second_moment = target.unsafe_offset(g).unsafe_load() / size
-        if second_moment == 0.0:
+        # The three sums are taken about the mean, so in exact arithmetic the
+        # first of them is zero and the other two are the moments. It is not
+        # zero, because the mean is itself a rounded sum, and every value here
+        # is a rounded difference from it. Correcting the moments by the amount
+        # the centre missed by is the standard shifted data identity and it costs
+        # three multiplications per group. It matters because the correction is
+        # proportional to the second moment and the third moment is much smaller
+        # than the second whenever the data is anywhere near symmetric, so an
+        # error too small to see in a variance is the leading term in a skewness.
+        # On a column at 4.6e18 with a spread of 4.2e9 this is the difference
+        # between five correct digits and eight.
+        var residual = first_total.unsafe_offset(g).unsafe_load() / size
+        var second_moment = (
+            target.unsafe_offset(g).unsafe_load() / size - residual * residual
+        )
+        if second_moment <= 0.0:
+            # Every value in the group is the same, up to the rounding above.
+            # The shape of a constant is symmetric rather than undefined, which
+            # is the answer pandas gives, and the comparison is against zero
+            # rather than equal to it because the correction can leave a
+            # negative the size of a rounding error behind.
             target.unsafe_offset(g).unsafe_store(0.0)
             continue
-        var third_moment = third_total.unsafe_offset(g).unsafe_load() / size
+        var third_moment = (
+            third_total.unsafe_offset(g).unsafe_load() / size
+            - 3.0 * residual * target.unsafe_offset(g).unsafe_load() / size
+            + 2.0 * residual * residual * residual
+        )
         var adjust = sqrt(size * (size - 1.0)) / (size - 2.0)
         target.unsafe_offset(g).unsafe_store(
             adjust * third_moment / (second_moment * sqrt(second_moment))

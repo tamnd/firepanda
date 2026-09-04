@@ -1173,6 +1173,41 @@ def test_variance_keeps_its_digits_on_large_values() raises:
     assert_almost_equal(out[0], 2.5, atol=1e-9)
 
 
+def test_the_spread_of_a_column_does_not_change_when_the_column_is_shifted() raises:
+    # The same five values as the test above, once near zero and once at two to
+    # the fifty second, which is where the spacing between neighbouring float64
+    # values is exactly one. Every value here is exact, so the only thing that
+    # can go wrong is the centre, and the centre is a sum of five numbers near
+    # 4.5e15 divided by five, which lands a fifth of a unit away from the mean.
+    # Squaring deviations measured from the wrong place gives 37.25 where the
+    # answer is 37.2, and a variance that moves when you add a constant to the
+    # column is not a variance. pandas answers 37.25 here.
+    var base = Int64(4_503_599_627_370_496)
+    var near = ints([1, 2, 4, 8, 16])
+    var far = ints([base + 1, base + 2, base + 4, base + 8, base + 16])
+    var flat = codes_of([0, 0, 0, 0, 0])
+    assert_almost_equal(group_var(near, flat, 1)[0], 37.2, atol=1e-12)
+    assert_almost_equal(group_var(far, flat, 1)[0], 37.2, atol=1e-12)
+    assert_almost_equal(
+        group_std(far, flat, 1)[0], 6.099180272790763, atol=1e-12
+    )
+    assert_almost_equal(
+        group_sem(far, flat, 1)[0], 2.727636339397171, atol=1e-12
+    )
+
+
+def test_the_skewness_of_a_column_does_not_change_when_the_column_is_shifted() raises:
+    # Same column, same shift, and a worse miss than the variance takes, because
+    # the third moment is cubed rather than squared and the error in the centre
+    # goes up with it. Uncorrected this group answers 1.4863469519931585 against
+    # a true 1.3253147098134046, which is twelve percent out. pandas answers
+    # 1.4863469519931585 too.
+    var base = Int64(4_503_599_627_370_496)
+    var far = ints([base + 1, base + 2, base + 4, base + 8, base + 16])
+    var out = group_skew(far, codes_of([0, 0, 0, 0, 0]), 1)
+    assert_almost_equal(out[0], 1.3253147098134046, atol=1e-12)
+
+
 def test_median_interpolates_between_two_middle_values() raises:
     var out = group_median(sample_values(), sample_codes(), 3)
     assert_almost_equal(out[0], 20.0, atol=1e-9)
