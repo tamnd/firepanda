@@ -54,3 +54,8 @@ tools/probes/
 # clone and cannot check one out for themselves. They are scratch and one of
 # them has already been committed by accident.
 old*.txt
+
+# Written by hand when firepanda-bench is pointed at a copy of this tree that
+# has no git metadata, so its harness can still attribute a number to a commit.
+# It is a local scratch file and a checked in one would be stale immediately.
+GIT_REF
