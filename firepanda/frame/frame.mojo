@@ -1192,6 +1192,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         on: List[String],
         kind: JoinKind = JoinKind.INNER,
         suffix: String = "_right",
+        columns: List[String] = List[String](),
     ) raises -> Self:
         """Joins two frames on columns that have the same name in both.
 
@@ -1205,6 +1206,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             on: The key columns. Must exist in both frames with the same dtype.
             kind: Which rows to keep.
             suffix: Appended to a right column whose name collides.
+            columns: Which output columns to build, or empty for all of them.
 
         Returns:
             The joined frame.
@@ -1212,7 +1214,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         Raises:
             As `join_on` does.
         """
-        return self.join_on(other, on, on, kind, suffix)
+        return self.join_on(other, on, on, kind, suffix, columns)
 
     def join_on(
         self,
@@ -1221,6 +1223,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         right_on: List[String],
         kind: JoinKind = JoinKind.INNER,
         suffix: String = "_right",
+        columns: List[String] = List[String](),
     ) raises -> Self:
         """Joins two frames on keys that are named differently on each side.
 
@@ -1234,12 +1237,25 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         have no left row at all, and getting it wrong would put a null in the
         column the row was matched on.
 
+        `columns` is the projection, and it is here rather than left to a `select`
+        afterwards because of what a join costs. Pairing ten million rows against
+        a thousand takes eight milliseconds and gathering the columns takes
+        twenty four, so a column the caller is going to drop is not a small waste
+        at the end of the query, it is most of the query. Naming the wanted
+        columns skips their gathers entirely, and it also saves the caller
+        narrowing the input first, which is a copy of a whole side to avoid a
+        gather of part of it. The names are the output's names, worked out exactly
+        as they would be without a projection, so asking for a column does not
+        change what it is called.
+
         Args:
             other: The right frame.
             left_on: The left key columns, most significant first.
             right_on: The right key columns, matched positionally.
             kind: Which rows to keep.
             suffix: Appended to a right column whose name collides.
+            columns: Which output columns to build, in the order wanted, or
+                empty for all of them in their natural order.
 
         Returns:
             The joined frame.
@@ -1247,7 +1263,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         Raises:
             If the key lists disagree in length, if a name is missing or
             repeated, if a key pair has different dtypes, if a right column name
-            still collides after the suffix, or if a dtype involved has no
+            still collides after the suffix, if a projected name is not one the
+            result has or is asked for twice, or if a dtype involved has no
             physical layout.
         """
         if len(left_on) != len(right_on):
@@ -1292,8 +1309,15 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         # instead of one pass with a branch per row.
         var coalescing = kind == JoinKind.RIGHT or kind == JoinKind.OUTER
 
-        var fields = List[Field](capacity=len(self.columns))
-        var columns = List[AnyArray](capacity=len(self.columns))
+        # The whole output is worked out before any of it is built. The names
+        # have to be settled first because a projection names the result and the
+        # result's names are not known until the suffixing has been decided, and
+        # planning first is also what makes a dropped column free rather than
+        # built and then thrown away.
+        var fields = List[Field]()
+        var from_right = List[Bool]()
+        var source_at = List[Int]()
+        var pair_with = List[Int]()
 
         for i in range(len(self.columns)):
             var shared = -1
@@ -1301,18 +1325,12 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                 if left_at[k] == i and left_on[k] == right_on[k]:
                     shared = k
                     break
-            if shared >= 0 and coalescing:
-                columns.append(
-                    take_pair(
-                        self.columns[i].only(),
-                        other.columns[right_at[shared]].only(),
-                        pairs.left_at,
-                        pairs.right_at,
-                    )
-                )
-            else:
-                columns.append(take_any(self.columns[i].only(), pairs.left_at))
             fields.append(Field(self.schema[i].name, self.schema[i].dtype))
+            from_right.append(False)
+            source_at.append(i)
+            pair_with.append(
+                right_at[shared] if shared >= 0 and coalescing else -1
+            )
 
         if kind.keeps_right_columns():
             for j in range(len(other.columns)):
@@ -1335,12 +1353,61 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                             + name
                             + "'; pass a different suffix"
                         )
-                columns.append(
-                    take_any(other.columns[j].only(), pairs.right_at)
-                )
                 fields.append(Field(name, other.schema[j].dtype))
+                from_right.append(True)
+                source_at.append(j)
+                pair_with.append(-1)
 
-        var out = Self(Schema(fields^), columns^)
+        var wanted = List[Int]()
+        if len(columns) == 0:
+            for i in range(len(fields)):
+                wanted.append(i)
+        else:
+            for c in range(len(columns)):
+                var found = -1
+                for i in range(len(fields)):
+                    if fields[i].name == columns[c]:
+                        found = i
+                        break
+                if found < 0:
+                    raise Error(
+                        "join: the result has no column '"
+                        + columns[c]
+                        + "' to keep"
+                    )
+                for w in range(len(wanted)):
+                    if wanted[w] == found:
+                        raise Error(
+                            "join: column '"
+                            + columns[c]
+                            + "' was asked for twice"
+                        )
+                wanted.append(found)
+
+        var kept = List[Field](capacity=len(wanted))
+        var built = List[AnyArray](capacity=len(wanted))
+        for w in range(len(wanted)):
+            var i = wanted[w]
+            if from_right[i]:
+                built.append(
+                    take_any(other.columns[source_at[i]].only(), pairs.right_at)
+                )
+            elif pair_with[i] >= 0:
+                built.append(
+                    take_pair(
+                        self.columns[source_at[i]].only(),
+                        other.columns[pair_with[i]].only(),
+                        pairs.left_at,
+                        pairs.right_at,
+                    )
+                )
+            else:
+                built.append(
+                    take_any(self.columns[source_at[i]].only(), pairs.left_at)
+                )
+            kept.append(Field(fields[i].name, fields[i].dtype))
+
+        var out = Self(Schema(kept^), built^)
         out.rows = len(pairs)
         return out^
 

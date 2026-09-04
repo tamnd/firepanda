@@ -3084,12 +3084,18 @@ def bench_join(mut harness: Harness) raises:
     it is also the case where a bad implementation looks fine, because the output
     is the same height as the input and nothing is being duplicated.
 
-    Four questions.
+    Five questions.
 
     What does the pairing cost on its own. `join/indices_1000` is
     `join_indices` with no columns gathered afterwards, and `join/inner_1000` is
     the whole operation, so the difference is what building the output costs. On a
     two column frame that difference is two gathers and it should dominate.
+
+    What does a column nobody reads cost. `join/inner_projected` is the same join
+    as `join/inner_1000` keeping two of the four output columns, so the gap
+    between them is half the gather. A real query almost never wants every column
+    of both sides, and until there is an optimizer to notice that, this is the
+    row that says what noticing is worth.
 
     What does dimension size cost. `join/inner_1000` and `join/inner_100k` join
     the same fact rows, using the same thousand keys, against dimensions a
@@ -3177,6 +3183,17 @@ def bench_join(mut harness: Harness) raises:
         keep(out.rows)
 
     harness.record("join/inner_1000", "rows", rows, inner_small)
+
+    var projected = List[String]()
+    projected.append("value")
+    projected.append("label")
+
+    def inner_projected() raises {imm fact, imm dim, imm one, imm projected}:
+        keep(fact.rows)
+        var out = fact.join(dim, one, JoinKind.INNER, "_right", projected)
+        keep(out.rows)
+
+    harness.record("join/inner_projected", "rows", rows, inner_projected)
 
     def left_small() raises {imm fact, imm dim, imm one}:
         keep(fact.rows)
