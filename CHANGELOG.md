@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.38] - 2026-09-04
+
+Built against Mojo 1.0.0 (ed45d567).
+
+The elementwise kernels now run on every core and no longer ask the allocator to zero memory they are about to fill. Three changes, and they are all the same two problems found in three places.
+
+A kernel that writes one result per row has no carried state and no cross row dependency, so there was never a reason for it to run on one thread. Casts, the four column arithmetic operations, the constant forms of arithmetic, the six comparisons in both their column and constant forms, and both text comparisons all moved onto the morsel scheduler. Each of them also allocated its output with the constructor that memsets and then wrote every element of it, including the elements under the nulls, so the memset in front of the loop was a full pass thrown away every time. On an i9-13900K at ten million rows a cast to float64 went from 7.19 ms to 3.17, an addition of two columns from 8.76 to 4.00, a comparison against a constant from 4.20 to 1.11, and a text equality against a long constant from 10.9 to 1.90.
+
+The null repair moved too, and it moved differently than expected. These kernels compute over the whole values buffer and then zero the values under the nulls afterwards, which used to be a walk over the finished column on one thread. Making that walk parallel in its own right measured slower on a column with no nulls, because there the walk is one comparison per sixty four rows and starting a parallel region over it costs more than the work inside it. Fusing it into the end of each morsel, in the worker that just wrote those rows, is what worked: a quarter null column went from 8.26 ms to 5.11 and the dense columns came down slightly as well rather than regressing.
+
 ### Changed
 
 - The null repair happens in the worker that computed the rows, instead of in a pass of its own after all of them are done. An elementwise kernel computes over the whole values buffer and then has to zero the values under the nulls, and until now that was `apply_validity` walking the entire column on one thread once the workers had finished. It is now `repair_range`, called as the last statement inside each morsel, so the rows it touches are the ones that core has just written and are still in its cache. `kernel/add_sparse` went from 8.261 and 7.931 ms to 5.106 and 5.103 on an i9-13900K at ten million rows, about one and a half times, and the dense rows moved a little too because the repair no longer has to reread anything: `kernel/add_dense` 4.046 and 4.034 to 4.000 and 3.999, `kernel/multiply_dense` 4.000 and 4.000 to 3.948 and 3.953, `kernel/divide_dense` 4.021 and 4.022 to 3.975 and 3.966, `kernel/less_dense` 2.779 and 2.764 to 2.695 and 2.711, `kernel/add_constant` 2.686 and 2.677 to 2.636 and 2.633, `kernel/less_constant` 1.157 and 1.157 to 1.114 and 1.116. `kernel/take_scattered` read 7.913, 7.660, 7.636 and 7.651 across the four halves as a control.
