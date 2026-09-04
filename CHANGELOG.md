@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.39] - 2026-09-04
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Two releases ago every elementwise kernel started running on all thirty two cores. This one finishes the job on the kernels that were left, which were the ones that did not have the shape of an elementwise kernel and so could not be handed to the scheduler unchanged.
+
+The whole column reductions were the larger of the two. A sum or a minimum produces one answer and not one answer per row, so it does not split the way an addition splits. Each morsel now reduces its own rows into a slot of its own and a serial loop combines the slots at the end, over the number of morsels rather than the number of rows, and a minimum carries a second slot per morsel saying whether that morsel saw a value at all so that a morsel of nothing but nulls can be skipped instead of contributing the identity. At ten million rows on an i9-13900K a sum went from 2.775 ms to 0.522 and a minimum over a column that is one in seven null from 5.153 to 0.672.
+
+The null kernels were the smaller one. `is_null`, `is_not_null` and `coalesce` split cleanly and had simply not been done yet, and `coalesce` was also walking the column twice, once to copy and once to look for the gaps. It now does both over the rows one worker was handed. `is_null` went from 419 microseconds to 88 and `coalesce` over a sparse column from 19.947 ms to 4.463.
+
+The reductions came with a correctness problem worth naming, because it was not found by a test failing. Every reduction test in the suite ran at three hundred and one rows, which is under the morsel size, so the parallel branch had never been executed by anything. The measurement is what gave it away: half a millisecond for eighty megabytes looked faster than the machine can read from memory, which turned out to be explainable by L3 residency but was worth an afternoon of doubt. Four tests across the two changes now run past the split and check every row against a single threaded reference.
+
+The directional fills stay on one thread and are not an oversight. Row `i` takes the nearest present value before it, a dependency reaching back an unbounded distance, and splitting that needs a different algorithm rather than a different loop.
+
 ### Changed
 
 - Whole column reductions run on every core. `sum_over` and `extreme_over` were the last kernels reading a whole column on one thread, and everything built on them was too: `sum_of`, `min_of`, `max_of`, `mean_of` and `mean_over`. A reduction does not split the way an elementwise kernel splits, because there is one answer rather than one answer per row, so each morsel now reduces its own rows into a slot of its own and a serial loop combines the slots afterwards. The combine runs over the number of morsels and not the number of rows, which is seventy six slots at ten million rows, so it costs nothing next to the pass it replaces.
