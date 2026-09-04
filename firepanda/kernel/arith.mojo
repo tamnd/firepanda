@@ -28,7 +28,7 @@ from firepanda.array.array import Array
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.exec import parallel_morsels
 
-from .mask import apply_validity, combined_validity
+from .mask import combined_validity, repair_range
 
 comptime OP_ADD = 0
 """Operation code for addition."""
@@ -128,6 +128,7 @@ def _arith[dt: DType, op: Int](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
     # which is the whole point of computing first and repairing afterwards. So
     # the allocation does not need the pass that zeroes it.
     var out = Array[dt](overwritten=n)
+    var validity = combined_validity(a.data.validity, b.data.validity)
 
     def compute(start: Int, stop: Int) {mut out, imm}:
         var lhs = a.unsafe_ptr()
@@ -146,9 +147,13 @@ def _arith[dt: DType, op: Int](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
                 dst.unsafe_offset(i).unsafe_store(x * y)
             i += width
 
+        # These rows are in this core's cache right now, so the repair is
+        # nearly free here and is a second walk over the column anywhere else.
+        repair_range(out, validity, start, stop)
+
     parallel_morsels(compute, n)
 
-    apply_validity(out, combined_validity(a.data.validity, b.data.validity))
+    out.data.validity = validity^
     return out^
 
 
@@ -177,6 +182,7 @@ def divide[
     # Every row is written below, nulls included, so the zeroing constructor
     # would be a pass thrown away.
     var out = Array[DType.float64](overwritten=n)
+    var validity = combined_validity(a.data.validity, b.data.validity)
 
     def compute(start: Int, stop: Int) {mut out, imm}:
         var lhs = a.unsafe_ptr()
@@ -197,9 +203,11 @@ def divide[
             dst.unsafe_offset(i).unsafe_store(x / y)
             i += width
 
+        repair_range(out, validity, start, stop)
+
     parallel_morsels(compute, n)
 
-    apply_validity(out, combined_validity(a.data.validity, b.data.validity))
+    out.data.validity = validity^
     return out^
 
 
@@ -241,6 +249,7 @@ def arith_const[
     var n = len(a)
     # Every row is written below, so the zeroing allocation is a wasted pass.
     var out = Array[dt](overwritten=n)
+    var validity = Bitmap(copy=a.data.validity)
     var y = SIMD[dt, width](b)
 
     # The branch on `flip` stays outside the inner loop, one test per morsel
@@ -275,9 +284,11 @@ def arith_const[
                     dst.unsafe_offset(i).unsafe_store(x - y)
                     i += width
 
+        repair_range(out, validity, start, stop)
+
     parallel_morsels(compute, n)
 
-    apply_validity(out, Bitmap(copy=a.data.validity))
+    out.data.validity = validity^
     return out^
 
 
@@ -307,6 +318,7 @@ def divide_const[
     var n = len(a)
     # Every row is written below, so the zeroing allocation is a wasted pass.
     var out = Array[DType.float64](overwritten=n)
+    var validity = Bitmap(copy=a.data.validity)
     var y = SIMD[DType.float64, width](b.cast[DType.float64]())
 
     def compute(start: Int, stop: Int) {mut out, imm}:
@@ -333,7 +345,9 @@ def divide_const[
                 dst.unsafe_offset(i).unsafe_store(x / y)
                 i += width
 
+        repair_range(out, validity, start, stop)
+
     parallel_morsels(compute, n)
 
-    apply_validity(out, Bitmap(copy=a.data.validity))
+    out.data.validity = validity^
     return out^
