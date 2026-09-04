@@ -25,6 +25,24 @@ whole column and the reduction was supposed to be one pass over it. `reduce.mojo
 is the caller that needed the second spelling. The loop lives in the `_over` one
 and the `_of` one is three lines that unpack the column.
 
+A reduction longer than one morsel runs on every core. It is not a split the way
+an elementwise kernel is a split, because there is one answer and not one answer
+per row, so each morsel reduces its own rows into a slot of its own and a serial
+loop combines the slots afterwards. The combine is over the number of morsels
+rather than the number of rows, which is seventy six slots for ten million rows,
+so it costs nothing next to the pass it replaces. A minimum needs a second slot
+per morsel saying whether that morsel saw a value at all, because a morsel that
+is entirely null has no value that could stand for it and the identity would be
+a wrong answer if every morsel were like that.
+
+The one thing this changes about the answers is the order the additions happen
+in, which is only visible in floating point. A sum was already not adding left to
+right, because the vector unit keeps one running total per lane, and now the lane
+totals are per morsel as well. The combine runs in morsel order rather than in
+whichever order the workers finished, so the answer is at least the same on every
+run for the same input. It is not bit identical to what a single scalar loop
+would produce, and neither was the vectorized version.
+
 Every function here has a twin in `scalar.mojo` and the fuzz harness runs them
 against each other. See the note on the null-is-zero invariant in `__init__.mojo`.
 """
@@ -33,6 +51,7 @@ from std.sys.info import simd_width_of
 
 from firepanda.array.array import Array
 from firepanda.bitmap.bitmap import Bitmap
+from firepanda.exec import MORSEL_ROWS, parallel_morsels
 
 from .accum import accumulator, highest, lowest
 
@@ -89,7 +108,7 @@ def count_of[dt: DType](col: Array[dt]) -> Int:
     return col.data.validity.count_ones()
 
 
-def sum_of[dt: DType](col: Array[dt]) -> AggResult[accumulator(dt)]:
+def sum_of[dt: DType](col: Array[dt]) raises -> AggResult[accumulator(dt)]:
     """Adds up the non-null values of a column.
 
     The nulls are added too. They are zero, so it makes no difference to the
@@ -108,14 +127,23 @@ def sum_of[dt: DType](col: Array[dt]) -> AggResult[accumulator(dt)]:
 
     Returns:
         The total, widened to int64, uint64 or float64.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     return sum_over(col.unsafe_ptr(), len(col))
 
 
 def sum_over[
     dt: DType, //, origin: ImmOrigin
-](source: Pointer[Scalar[dt], origin], n: Int) -> AggResult[accumulator(dt)]:
+](source: Pointer[Scalar[dt], origin], n: Int) raises -> AggResult[
+    accumulator(dt)
+]:
     """Adds up `n` values, nulls included, because a null holds a zero.
+
+    Past one morsel this runs on every core. Each morsel adds up its own rows
+    into a slot of its own and the totals are added together afterwards, in
+    order, on one thread.
 
     Args:
         source: The values.
@@ -127,25 +155,78 @@ def sum_over[
 
     Returns:
         The total, widened to int64, uint64 or float64.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    comptime acc = accumulator(dt)
+    if n <= MORSEL_ROWS:
+        return AggResult[acc](_sum_range(source, 0, n), True)
+
+    var count = (n + MORSEL_ROWS - 1) // MORSEL_ROWS
+    var partials = Array[acc](count)
+
+    # The closure captures the column and takes the pointer inside itself, which
+    # is not a preference. Hoisting the pointer out and capturing that instead
+    # makes the compiler emit invalid code for the call into the morsel runtime,
+    # and it fails in the backend rather than at the call, so it is worth naming
+    # here. Every other kernel in this package captures the column the same way.
+    def add_up(start: Int, stop: Int) {mut partials, imm}:
+        partials.unsafe_ptr().unsafe_offset(start // MORSEL_ROWS).unsafe_write(
+            _sum_range(source, start, stop)
+        )
+
+    parallel_morsels(add_up, n)
+
+    var slots = partials.unsafe_ptr()
+
+    # Added back in morsel order rather than in whatever order the workers
+    # happened to finish, so the answer does not depend on the scheduling. It
+    # still is not the order a single loop would have used, which is the note in
+    # the module docstring about floating point.
+    var total = Scalar[acc](0)
+    for i in range(count):
+        total += slots.unsafe_offset(i).unsafe_load()
+    return AggResult[acc](total, True)
+
+
+def _sum_range[
+    dt: DType, //, origin: ImmOrigin
+](source: Pointer[Scalar[dt], origin], start: Int, stop: Int) -> Scalar[
+    accumulator(dt)
+]:
+    """Adds up one range of values, on one thread.
+
+    Args:
+        source: The values.
+        start: The first row to add.
+        stop: One past the last row to add.
+
+    Parameters:
+        dt: The value dtype.
+        origin: Where the values live.
+
+    Returns:
+        The total over the range.
     """
     comptime acc = accumulator(dt)
     comptime width = simd_width_of[dt]()
 
     var ptr = source
     var lanes = SIMD[acc, width](0)
-    var i = 0
-    while i + width <= n:
+    var i = start
+    while i + width <= stop:
         lanes += ptr.unsafe_offset(i).unsafe_load[width=width]().cast[acc]()
         i += width
 
     var total = lanes.reduce_add()
-    while i < n:
+    while i < stop:
         total += Scalar[acc](ptr.unsafe_offset(i).unsafe_load())
         i += 1
-    return AggResult[acc](total, True)
+    return total
 
 
-def min_of[dt: DType](col: Array[dt]) -> AggResult[dt]:
+def min_of[dt: DType](col: Array[dt]) raises -> AggResult[dt]:
     """Returns the smallest non-null value in a column.
 
     Args:
@@ -156,13 +237,16 @@ def min_of[dt: DType](col: Array[dt]) -> AggResult[dt]:
 
     Returns:
         The minimum, or an invalid result if every value is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     return extreme_over[want_min=True](
         col.unsafe_ptr(), col.data.validity, len(col)
     )
 
 
-def max_of[dt: DType](col: Array[dt]) -> AggResult[dt]:
+def max_of[dt: DType](col: Array[dt]) raises -> AggResult[dt]:
     """Returns the largest non-null value in a column.
 
     Args:
@@ -173,6 +257,9 @@ def max_of[dt: DType](col: Array[dt]) -> AggResult[dt]:
 
     Returns:
         The maximum, or an invalid result if every value is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     return extreme_over[want_min=False](
         col.unsafe_ptr(), col.data.validity, len(col)
@@ -181,14 +268,18 @@ def max_of[dt: DType](col: Array[dt]) -> AggResult[dt]:
 
 def extreme_over[
     dt: DType, //, origin: ImmOrigin, want_min: Bool
-](source: Pointer[Scalar[dt], origin], validity: Bitmap, n: Int) -> AggResult[
-    dt
-]:
+](
+    source: Pointer[Scalar[dt], origin], validity: Bitmap, n: Int
+) raises -> AggResult[dt]:
     """Reduces `n` values to the smallest or largest non-null one.
 
     Min and max differ by one comparison and nothing else, so they share a body
     parameterized on which one it is. `want_min` is a parameter rather than an
     argument so the branch is gone before the loop exists.
+
+    Past one morsel this runs on every core. Each morsel reduces its own rows
+    into a slot of its own, and a morsel that saw nothing but nulls says so in a
+    second slot, because there is no value that could stand for it.
 
     Args:
         source: The values.
@@ -202,6 +293,70 @@ def extreme_over[
 
     Returns:
         The extreme value, or an invalid result if every value is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    if n <= MORSEL_ROWS:
+        return _extreme_range[want_min=want_min](source, validity, 0, n)
+
+    var count = (n + MORSEL_ROWS - 1) // MORSEL_ROWS
+    var values = Array[dt](count)
+    var flags = Array[DType.uint8](count)
+
+    def reduce_one(start: Int, stop: Int) {mut values, mut flags, imm}:
+        var found = _extreme_range[want_min=want_min](
+            source, validity, start, stop
+        )
+        var at = start // MORSEL_ROWS
+        values.unsafe_ptr().unsafe_offset(at).unsafe_write(found.value)
+        flags.unsafe_ptr().unsafe_offset(at).unsafe_write(
+            UInt8(1) if found.valid else UInt8(0)
+        )
+
+    parallel_morsels(reduce_one, n)
+
+    var value_slots = values.unsafe_ptr()
+    var flag_slots = flags.unsafe_ptr()
+
+    comptime identity = highest[dt]() if want_min else lowest[dt]()
+    var best = identity
+    var seen = False
+    for i in range(count):
+        if flag_slots.unsafe_offset(i).unsafe_load() == 0:
+            continue
+        seen = True
+        best = _better[dt, want_min](
+            best, value_slots.unsafe_offset(i).unsafe_load()
+        )
+
+    if not seen:
+        return AggResult[dt].none()
+    return AggResult[dt](best, True)
+
+
+def _extreme_range[
+    dt: DType, //, origin: ImmOrigin, want_min: Bool
+](
+    source: Pointer[Scalar[dt], origin], validity: Bitmap, start: Int, stop: Int
+) -> AggResult[dt]:
+    """Reduces one range of values to the smallest or largest non-null one.
+
+    Args:
+        source: The values.
+        validity: Which of them are present.
+        start: The first row to read. Must be a multiple of 64, which every
+            morsel boundary is.
+        stop: One past the last row to read.
+
+    Parameters:
+        dt: The value dtype.
+        origin: Where the values live.
+        want_min: True for a minimum, False for a maximum.
+
+    Returns:
+        The extreme value over the range, or an invalid result if every value in
+        it is null.
     """
     comptime width = simd_width_of[dt]()
     comptime identity = highest[dt]() if want_min else lowest[dt]()
@@ -214,15 +369,17 @@ def extreme_over[
     # local would be a copy, and `Bitmap` owns an allocation, so binding it here
     # would allocate and memcpy the whole validity of the column before the loop
     # that is supposed to be reading it cheaply had started.
-    for w in range(validity.word_count()):
+    var first = start // BLOCK
+    var limit = min((stop + BLOCK - 1) // BLOCK, validity.word_count())
+    for w in range(first, limit):
         var word = validity.unsafe_word(w)
         if word == 0:
             continue
 
         var base = w * BLOCK
         var last = base + BLOCK
-        if last > n:
-            last = n
+        if last > stop:
+            last = stop
 
         if word == UInt64.MAX and last == base + BLOCK:
             # The whole block is present, so the values can go through the vector
@@ -291,7 +448,7 @@ def _better[
     return a if a > b else b
 
 
-def mean_of[dt: DType](col: Array[dt]) -> AggResult[DType.float64]:
+def mean_of[dt: DType](col: Array[dt]) raises -> AggResult[DType.float64]:
     """Returns the arithmetic mean of the non-null values.
 
     The divisor is the non-null count, not the length, which is what pandas does
@@ -306,15 +463,18 @@ def mean_of[dt: DType](col: Array[dt]) -> AggResult[DType.float64]:
 
     Returns:
         The mean, or an invalid result if every value is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     return mean_over(col.unsafe_ptr(), col.data.validity.count_ones(), len(col))
 
 
 def mean_over[
     dt: DType, //, origin: ImmOrigin
-](source: Pointer[Scalar[dt], origin], present: Int, n: Int) -> AggResult[
-    DType.float64
-]:
+](
+    source: Pointer[Scalar[dt], origin], present: Int, n: Int
+) raises -> AggResult[DType.float64]:
     """Returns the mean of the values that are present.
 
     The count comes in as an argument rather than being derived here, because
@@ -333,6 +493,9 @@ def mean_over[
 
     Returns:
         The mean, or an invalid result if every value is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     if present == 0:
         return AggResult[DType.float64].none()

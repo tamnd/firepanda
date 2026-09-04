@@ -323,6 +323,68 @@ def test_comparison_against_a_null_is_null() raises:
     assert_false(eq[1])
 
 
+def test_reductions_past_the_split_agree_with_one_thread() raises:
+    # A reduction does not split the way an elementwise kernel splits, because
+    # there is one answer rather than one per row, so the morsel boundaries are
+    # worth their own test. The length is a prime past three morsels, which
+    # leaves the last one short. The interesting rows are the nulls: a minimum
+    # carries a flag per morsel saying whether that morsel saw a value at all,
+    # and a morsel that is entirely null has to leave the identity out of the
+    # answer rather than reporting it.
+    comptime rows = 393_241
+    var col = build[DType.int64](rows, 9)
+
+    # One whole morsel in the middle blanked, so at least one worker comes back
+    # with nothing and the combine has to skip it. The first morsel is left
+    # alone so the answer is still valid.
+    for i in range(131_072, 262_144):
+        col.set_null(i)
+
+    var expected_sum = Scalar[accumulator(DType.int64)](0)
+    var expected_min = Int64(0)
+    var expected_max = Int64(0)
+    var seen = False
+    for i in range(rows):
+        expected_sum += Scalar[accumulator(DType.int64)](col[i])
+        if not col.is_valid(i):
+            continue
+        if not seen:
+            seen = True
+            expected_min = col[i]
+            expected_max = col[i]
+            continue
+        if col[i] < expected_min:
+            expected_min = col[i]
+        if col[i] > expected_max:
+            expected_max = col[i]
+
+    var total = sum_of(col)
+    assert_true(total.valid)
+    assert_equal(total.value, expected_sum)
+
+    var low = min_of(col)
+    assert_true(low.valid)
+    assert_equal(low.value, expected_min)
+
+    var high = max_of(col)
+    assert_true(high.valid)
+    assert_equal(high.value, expected_max)
+
+
+def test_a_reduction_over_nothing_but_nulls_past_the_split_is_invalid() raises:
+    # Every morsel comes back empty, so the combine never sees a value and has to
+    # say so rather than returning the identity it started with. A sum is the one
+    # that disagrees, because a sum over nothing is zero and valid.
+    comptime rows = 262_144
+    var col = build[DType.int64](rows, 1)
+
+    assert_false(min_of(col).valid)
+    assert_false(max_of(col).valid)
+    assert_false(mean_of(col).valid)
+    assert_true(sum_of(col).valid)
+    assert_equal(sum_of(col).value, 0)
+
+
 def test_arithmetic_and_comparison_past_the_split_are_right_everywhere() raises:
     # Same boundary question the cast test asks, and the answer has to hold for
     # these too because they split over morsels the same way. The extra thing

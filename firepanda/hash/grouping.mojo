@@ -884,7 +884,9 @@ def _factorize_any(col: AnyArray) raises -> KeyCodes:
     raise Error("group by: unsupported key dtype")
 
 
-def _densify(mut codes: Array[DType.uint32], mut rows_at: List[Int]) -> Int:
+def _densify(
+    mut codes: Array[DType.uint32], mut rows_at: List[Int]
+) raises -> Int:
     """Renumbers ordinals into first-seen order and collects a row for each.
 
     This was written because `factorize` did not promise that every ordinal it
@@ -909,6 +911,9 @@ def _densify(mut codes: Array[DType.uint32], mut rows_at: List[Int]) -> Int:
 
     Returns:
         The number of ordinals that at least one row carries.
+
+    Raises:
+        Error: Only what the morsel runtime raises, through `max_of`.
     """
     var at = codes.unsafe_ptr()
     var n = len(codes)
