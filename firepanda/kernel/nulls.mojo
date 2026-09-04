@@ -5,11 +5,10 @@ Four operations live here and they split cleanly in two.
 `is_null` and `is_not_null` never touch the values buffer. Whether a row is
 missing is entirely a fact about the validity bitmap, so both of them are a
 bitmap copy and, for `is_not_null`, an invert. That is also why neither needs the
-dtype: the erased spelling takes an `AnyArray` and does not raise, which is the
-only kernel in this package that manages it. The result itself is never null,
-because "is this row missing" has an answer on every row including the missing
-ones. pandas agrees, and it is one of the few places where a three-valued logic
-argument does not come up.
+dtype: the erased spelling takes an `AnyArray` and never has to ask what is in
+it. The result itself is never null, because "is this row missing" has an answer
+on every row including the missing ones. pandas agrees, and it is one of the few
+places where a three-valued logic argument does not come up.
 
 `coalesce` and the two directional fills do touch the values, and both of them
 answer the same question: what should stand in for a missing value. `coalesce`
@@ -18,6 +17,16 @@ filling with a scalar the same operation as filling from a column. The fills say
 the nearest present value in a direction, which is only meaningful when the rows
 are in an order that means something, so unlike everything else in this package
 they are order-dependent by construction.
+
+The expansion and the pick both run on every core. Neither carries anything from
+one row to the next, so the column splits over morsels the way an elementwise
+kernel does, and a morsel boundary is a multiple of sixty four rows, so the
+validity words fall on one side or the other and no two workers share one. That
+is what makes it safe for `coalesce` to clear a bit in the output's validity from
+inside a worker. The fills are the exception and stay on one thread: the value
+that stands in for a null is the nearest present one before it, which is a
+dependency reaching back an unbounded distance, and splitting that needs a
+different algorithm rather than a different loop.
 
 `limit` on the fills is the longest run of nulls that will be filled, and zero
 means no limit. pandas spells the no-limit case `None` and cannot then take an
@@ -35,9 +44,10 @@ from firepanda.array.array import Array
 from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
+from firepanda.exec import parallel_morsels
 
 
-def is_null[dt: DType](col: Array[dt]) -> Array[DType.bool]:
+def is_null[dt: DType](col: Array[dt]) raises -> Array[DType.bool]:
     """Returns true where a row is missing.
 
     Args:
@@ -48,24 +58,30 @@ def is_null[dt: DType](col: Array[dt]) -> Array[DType.bool]:
 
     Returns:
         A bool column with no nulls of its own.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     return _null_mask[wants_null=True](col.data.validity, len(col))
 
 
-def is_null_any(col: AnyArray) -> Array[DType.bool]:
+def is_null_any(col: AnyArray) raises -> Array[DType.bool]:
     """Returns true where a row is missing, for a column whose dtype is a runtime value.
 
     Args:
         col: The column to look at. Its values are not read, so the dtype never
-            comes into it and this cannot fail.
+            comes into it.
 
     Returns:
         A bool column with no nulls of its own.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     return _null_mask[wants_null=True](col.data.validity, len(col))
 
 
-def is_not_null[dt: DType](col: Array[dt]) -> Array[DType.bool]:
+def is_not_null[dt: DType](col: Array[dt]) raises -> Array[DType.bool]:
     """Returns true where a row is present.
 
     Args:
@@ -76,11 +92,14 @@ def is_not_null[dt: DType](col: Array[dt]) -> Array[DType.bool]:
 
     Returns:
         A bool column with no nulls of its own.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     return _null_mask[wants_null=False](col.data.validity, len(col))
 
 
-def is_not_null_any(col: AnyArray) -> Array[DType.bool]:
+def is_not_null_any(col: AnyArray) raises -> Array[DType.bool]:
     """Returns true where a row is present, for a column whose dtype is a runtime value.
 
     Args:
@@ -88,13 +107,16 @@ def is_not_null_any(col: AnyArray) -> Array[DType.bool]:
 
     Returns:
         A bool column with no nulls of its own.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     return _null_mask[wants_null=False](col.data.validity, len(col))
 
 
 def all_valid_mask[
     o: ImmOrigin
-](columns: ColumnRefs[o], rows: Int) -> Array[DType.bool]:
+](columns: ColumnRefs[o], rows: Int) raises -> Array[DType.bool]:
     """Returns true on the rows where every column is present.
 
     The intersection is taken on the bitmaps, a word at a time, and expanded to
@@ -110,6 +132,9 @@ def all_valid_mask[
 
     Returns:
         A bool column with no nulls of its own.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     var combined = Bitmap(rows, all_valid=True)
     for c in range(len(columns)):
@@ -117,13 +142,20 @@ def all_valid_mask[
     return _null_mask[wants_null=False](combined, rows)
 
 
-def _null_mask[wants_null: Bool](valid: Bitmap, rows: Int) -> Array[DType.bool]:
+def _null_mask[
+    wants_null: Bool
+](valid: Bitmap, rows: Int) raises -> Array[DType.bool]:
     """Turns a validity bitmap into a bool column.
 
     A bool `Array` stores one byte per row where the bitmap stores one bit, so
     this is an expansion rather than a copy and the loop is per row. The word at
     a time shortcut still pays: an all-present or all-null word is a run of
     sixty four identical bytes and the vector unit writes those.
+
+    The row range a worker is handed starts and ends on a word, so the word loop
+    is derived from it rather than the other way round. Words past the end of the
+    bitmap read as zero, which is to say as null, so a bitmap shorter than the
+    column still leaves every row written.
 
     Args:
         valid: The validity to read.
@@ -135,39 +167,48 @@ def _null_mask[wants_null: Bool](valid: Bitmap, rows: Int) -> Array[DType.bool]:
 
     Returns:
         The mask, with every row present.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     comptime width = simd_width_of[DType.bool]()
-    var out = Array[DType.bool](rows)
-    var target = out.unsafe_ptr()
+    # Every row is written below, so the zeroing allocation is a wasted pass.
+    var out = Array[DType.bool](overwritten=rows)
 
-    for w in range(valid.word_count()):
-        var word = valid.unsafe_word(w)
-        var base = w * 64
-        var last = base + 64
-        if last > rows:
-            last = rows
+    def expand(start: Int, stop: Int) {mut out, imm valid, imm}:
+        var target = out.unsafe_ptr()
+        for w in range(start // 64, (stop + 63) // 64):
+            var word = valid.unsafe_word(w)
+            var base = w * 64
+            var last = base + 64
+            if last > stop:
+                last = stop
 
-        if word == UInt64.MAX or word == 0:
-            var present = word == UInt64.MAX
-            var answer = Bool(present != wants_null)
-            var i = base
-            while i + width <= last:
+            if word == UInt64.MAX or word == 0:
+                var present = word == UInt64.MAX
+                var answer = Bool(present != wants_null)
+                var i = base
+                while i + width <= last:
+                    target.unsafe_offset(i).unsafe_store(
+                        SIMD[DType.bool, width](fill=answer)
+                    )
+                    i += width
+                while i < last:
+                    target.unsafe_offset(i).unsafe_store(answer)
+                    i += 1
+                continue
+
+            for i in range(base, last):
+                var present = ((word >> UInt64(i - base)) & 1) == 1
                 target.unsafe_offset(i).unsafe_store(
-                    SIMD[DType.bool, width](fill=answer)
+                    Bool(present != wants_null)
                 )
-                i += width
-            while i < last:
-                target.unsafe_offset(i).unsafe_store(answer)
-                i += 1
-            continue
 
-        for i in range(base, last):
-            var present = ((word >> UInt64(i - base)) & 1) == 1
-            target.unsafe_offset(i).unsafe_store(Bool(present != wants_null))
+    parallel_morsels(expand, rows)
     return out^
 
 
-def coalesce[dt: DType](a: Array[dt], b: Array[dt]) -> Array[dt]:
+def coalesce[dt: DType](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
     """Returns the first column's value where it is present and the second's otherwise.
 
     Args:
@@ -180,6 +221,9 @@ def coalesce[dt: DType](a: Array[dt], b: Array[dt]) -> Array[dt]:
 
     Returns:
         A column as tall as `a`, null only where both inputs were.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     return _coalesce_core(
         a.unsafe_ptr(),
@@ -203,7 +247,8 @@ def coalesce_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
 
     Raises:
         If the dtypes differ, if `b` is neither the same height nor one row, or
-        if the dtype has no physical layout.
+        if the dtype has no physical layout, or whatever the morsel runtime
+        raises.
     """
     if a.dtype() != b.dtype():
         raise Error(
@@ -278,50 +323,68 @@ def _coalesce_core[
     b: Pointer[Scalar[dt], second],
     b_valid: Bitmap,
     b_len: Int,
-) -> Array[dt]:
+) raises -> Array[dt]:
     """The pick loop, over pointers and bitmaps rather than columns.
 
     The values from `a` go across in blocks first, all of them, and only the rows
     where `a` was missing are revisited. That is the same shape the elementwise
     kernels use: compute over everything, repair the exceptions. On a column with
     no nulls the repair pass is one word comparison per sixty four rows.
+
+    Both halves happen inside the same worker, over the rows that worker was
+    handed, so the rows it revisits are the ones it has just written and they are
+    still in its cache. Clearing a bit of the output's validity from a worker is
+    safe for the same reason the repair in `mask.mojo` is: the range starts and
+    ends on a word.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     comptime width = simd_width_of[dt]()
-    var out = Array[dt](a_len)
-    var target = out.unsafe_ptr()
+    # Every row is written by the copy below, so the zeroing allocation is a
+    # wasted pass.
+    var out = Array[dt](overwritten=a_len)
 
-    var i = 0
-    while i + width <= a_len:
-        target.unsafe_offset(i).unsafe_store(
-            a.unsafe_offset(i).unsafe_load[width=width]()
-        )
-        i += width
-    while i < a_len:
-        target.unsafe_offset(i).unsafe_store(a.unsafe_offset(i).unsafe_load())
-        i += 1
-
-    if a_valid.all_valid():
-        return out^
-
+    var repairing = not a_valid.all_valid()
     var broadcast = b_len == 1
-    for w in range(a_valid.word_count()):
-        var word = a_valid.unsafe_word(w)
-        if word == UInt64.MAX:
-            continue
-        var base = w * 64
-        var last = base + 64
-        if last > a_len:
-            last = a_len
-        for r in range(base, last):
-            if ((word >> UInt64(r - base)) & 1) == 1:
+
+    def pick(start: Int, stop: Int) {mut out, imm a_valid, imm b_valid, imm}:
+        var target = out.unsafe_ptr()
+        var i = start
+        while i + width <= stop:
+            target.unsafe_offset(i).unsafe_store(
+                a.unsafe_offset(i).unsafe_load[width=width]()
+            )
+            i += width
+        while i < stop:
+            target.unsafe_offset(i).unsafe_store(
+                a.unsafe_offset(i).unsafe_load()
+            )
+            i += 1
+
+        if not repairing:
+            return
+
+        for w in range(start // 64, (stop + 63) // 64):
+            var word = a_valid.unsafe_word(w)
+            if word == UInt64.MAX:
                 continue
-            var at = 0 if broadcast else r
-            if at < b_len and b_valid.get(at):
-                target.unsafe_offset(r).unsafe_store(
-                    b.unsafe_offset(at).unsafe_load()
-                )
-            else:
-                out.data.validity.set(r, False)
+            var base = w * 64
+            var last = base + 64
+            if last > stop:
+                last = stop
+            for r in range(base, last):
+                if ((word >> UInt64(r - base)) & 1) == 1:
+                    continue
+                var at = 0 if broadcast else r
+                if at < b_len and b_valid.get(at):
+                    target.unsafe_offset(r).unsafe_store(
+                        b.unsafe_offset(at).unsafe_load()
+                    )
+                else:
+                    out.data.validity.set(r, False)
+
+    parallel_morsels(pick, a_len)
     return out^
 
 

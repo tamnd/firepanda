@@ -132,6 +132,38 @@ def test_is_null_on_a_column_with_no_nulls() raises:
         assert_false(mask[i], "row " + String(i))
 
 
+def test_is_null_past_the_split_reports_every_row() raises:
+    # The expansion runs on every core and each worker derives its word loop
+    # from the rows it was handed, so the boundaries are worth a test of their
+    # own. The length is a prime past three morsels, which leaves the last one
+    # short, and the nulls are placed so that one run is exactly a word wide and
+    # sits at a morsel boundary while another straddles one.
+    comptime rows = 393_241
+    var col = Array[DType.int64](rows)
+    for i in range(rows):
+        col.set_valid(i, Int64(i))
+    for i in range(131_072, 131_136):
+        col.set_null(i)
+    for i in range(262_100, 262_180):
+        col.set_null(i)
+    col.set_null(rows - 1)
+
+    var missing = is_null(col)
+    var present = is_not_null(col)
+    assert_equal(len(missing), rows, "mask length")
+    assert_equal(missing.null_count(), 0, "the mask has no nulls of its own")
+
+    # Counted rather than asserted per row, because building a message for four
+    # hundred thousand rows costs more than the kernel does.
+    var wrong = 0
+    for i in range(rows):
+        if missing[i] != (not col.is_valid(i)):
+            wrong += 1
+        if present[i] != col.is_valid(i):
+            wrong += 1
+    assert_equal(wrong, 0, "rows the mask disagrees with the bitmap on")
+
+
 def test_is_null_erased_matches_the_typed_one() raises:
     comptime for candidate in ALL:
         var col = Array[candidate](4)
@@ -171,6 +203,40 @@ def test_coalesce_broadcasts_a_single_row() raises:
     assert_equal(out[0], 99, "row 0 filled")
     assert_equal(out[1], 2, "row 1 kept")
     assert_equal(out[2], 99, "row 2 filled")
+
+
+def test_coalesce_past_the_split_picks_the_right_side() raises:
+    # The pick runs on every core and each worker clears the validity bits of
+    # its own rows, so this is as much a test that no worker has trodden on
+    # another's word as it is a test of the picking. Every third row of the
+    # preferred column is missing and every seventh row of the fallback is,
+    # which leaves a row missing from both about once in twenty one and so puts
+    # several of them inside every morsel.
+    comptime rows = 393_241
+    var first = Array[DType.int64](rows)
+    var second = Array[DType.int64](rows)
+    for i in range(rows):
+        first.set_valid(i, Int64(i))
+        second.set_valid(i, Int64(-i))
+    for i in range(0, rows, 3):
+        first.set_null(i)
+    for i in range(0, rows, 7):
+        second.set_null(i)
+
+    var picked = coalesce(first, second)
+    assert_equal(len(picked), rows, "the pick is as tall as the first column")
+
+    var wrong = 0
+    for i in range(rows):
+        if first.is_valid(i):
+            if not picked.is_valid(i) or picked[i] != first[i]:
+                wrong += 1
+        elif second.is_valid(i):
+            if not picked.is_valid(i) or picked[i] != second[i]:
+                wrong += 1
+        elif picked.is_valid(i):
+            wrong += 1
+    assert_equal(wrong, 0, "rows the pick got wrong")
 
 
 def test_coalesce_refuses_a_length_that_is_neither() raises:
