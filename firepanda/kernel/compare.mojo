@@ -24,6 +24,7 @@ from std.sys.info import simd_width_of
 
 from firepanda.array.array import Array
 from firepanda.bitmap.bitmap import Bitmap
+from firepanda.exec import parallel_morsels
 
 from .mask import apply_validity, combined_validity
 
@@ -46,7 +47,7 @@ comptime CMP_GE = 5
 """Operation code for greater-than-or-equal."""
 
 
-def equal[dt: DType](a: Array[dt], b: Array[dt]) -> Array[DType.bool]:
+def equal[dt: DType](a: Array[dt], b: Array[dt]) raises -> Array[DType.bool]:
     """Compares two columns for equality.
 
     Args:
@@ -58,11 +59,16 @@ def equal[dt: DType](a: Array[dt], b: Array[dt]) -> Array[DType.bool]:
 
     Returns:
         A bool column, null wherever either input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     return _compare[dt, CMP_EQ](a, b)
 
 
-def not_equal[dt: DType](a: Array[dt], b: Array[dt]) -> Array[DType.bool]:
+def not_equal[
+    dt: DType
+](a: Array[dt], b: Array[dt]) raises -> Array[DType.bool]:
     """Compares two columns for inequality.
 
     Args:
@@ -74,11 +80,14 @@ def not_equal[dt: DType](a: Array[dt], b: Array[dt]) -> Array[DType.bool]:
 
     Returns:
         A bool column, null wherever either input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     return _compare[dt, CMP_NE](a, b)
 
 
-def less[dt: DType](a: Array[dt], b: Array[dt]) -> Array[DType.bool]:
+def less[dt: DType](a: Array[dt], b: Array[dt]) raises -> Array[DType.bool]:
     """Reports elementwise whether the left column is smaller.
 
     Args:
@@ -90,11 +99,16 @@ def less[dt: DType](a: Array[dt], b: Array[dt]) -> Array[DType.bool]:
 
     Returns:
         A bool column, null wherever either input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     return _compare[dt, CMP_LT](a, b)
 
 
-def less_equal[dt: DType](a: Array[dt], b: Array[dt]) -> Array[DType.bool]:
+def less_equal[
+    dt: DType
+](a: Array[dt], b: Array[dt]) raises -> Array[DType.bool]:
     """Reports elementwise whether the left column is smaller or equal.
 
     Args:
@@ -106,11 +120,14 @@ def less_equal[dt: DType](a: Array[dt], b: Array[dt]) -> Array[DType.bool]:
 
     Returns:
         A bool column, null wherever either input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     return _compare[dt, CMP_LE](a, b)
 
 
-def greater[dt: DType](a: Array[dt], b: Array[dt]) -> Array[DType.bool]:
+def greater[dt: DType](a: Array[dt], b: Array[dt]) raises -> Array[DType.bool]:
     """Reports elementwise whether the left column is larger.
 
     Args:
@@ -122,11 +139,16 @@ def greater[dt: DType](a: Array[dt], b: Array[dt]) -> Array[DType.bool]:
 
     Returns:
         A bool column, null wherever either input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     return _compare[dt, CMP_GT](a, b)
 
 
-def greater_equal[dt: DType](a: Array[dt], b: Array[dt]) -> Array[DType.bool]:
+def greater_equal[
+    dt: DType
+](a: Array[dt], b: Array[dt]) raises -> Array[DType.bool]:
     """Reports elementwise whether the left column is larger or equal.
 
     Args:
@@ -138,13 +160,16 @@ def greater_equal[dt: DType](a: Array[dt], b: Array[dt]) -> Array[DType.bool]:
 
     Returns:
         A bool column, null wherever either input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     return _compare[dt, CMP_GE](a, b)
 
 
 def _compare[
     dt: DType, op: Int
-](a: Array[dt], b: Array[dt]) -> Array[DType.bool]:
+](a: Array[dt], b: Array[dt]) raises -> Array[DType.bool]:
     """Applies a comparison elementwise.
 
     Args:
@@ -157,37 +182,45 @@ def _compare[
 
     Returns:
         A bool column, null wherever either input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     comptime width = simd_width_of[dt]()
 
     var n = len(a)
-    var out = Array[DType.bool](n)
-    var lhs = a.unsafe_ptr()
-    var rhs = b.unsafe_ptr()
-    var dst = out.unsafe_ptr()
+    # Every row is written below, the null ones included, and `apply_validity`
+    # blanks those afterwards. The zeroing constructor would be a wasted pass.
+    var out = Array[DType.bool](overwritten=n)
 
-    var i = 0
-    while i < n:
-        var x = lhs.unsafe_offset(i).unsafe_load[width=width]()
-        var y = rhs.unsafe_offset(i).unsafe_load[width=width]()
+    def compute(start: Int, stop: Int) {mut out, imm}:
+        var lhs = a.unsafe_ptr()
+        var rhs = b.unsafe_ptr()
+        var dst = out.unsafe_ptr()
+        var i = start
+        while i < stop:
+            var x = lhs.unsafe_offset(i).unsafe_load[width=width]()
+            var y = rhs.unsafe_offset(i).unsafe_load[width=width]()
 
-        # `x < y` on a register does not mean what it looks like it means. The
-        # operators on `SIMD` are constrained to width one, because a whole-vector
-        # `<` would have to answer with a single Bool and there is no honest
-        # answer. The lanewise forms are the named methods.
-        comptime if op == CMP_EQ:
-            dst.unsafe_offset(i).unsafe_store(x.eq(y))
-        elif op == CMP_NE:
-            dst.unsafe_offset(i).unsafe_store(x.ne(y))
-        elif op == CMP_LT:
-            dst.unsafe_offset(i).unsafe_store(x.lt(y))
-        elif op == CMP_LE:
-            dst.unsafe_offset(i).unsafe_store(x.le(y))
-        elif op == CMP_GT:
-            dst.unsafe_offset(i).unsafe_store(x.gt(y))
-        else:
-            dst.unsafe_offset(i).unsafe_store(x.ge(y))
-        i += width
+            # `x < y` on a register does not mean what it looks like it means.
+            # The operators on `SIMD` are constrained to width one, because a
+            # whole-vector `<` would have to answer with a single Bool and there
+            # is no honest answer. The lanewise forms are the named methods.
+            comptime if op == CMP_EQ:
+                dst.unsafe_offset(i).unsafe_store(x.eq(y))
+            elif op == CMP_NE:
+                dst.unsafe_offset(i).unsafe_store(x.ne(y))
+            elif op == CMP_LT:
+                dst.unsafe_offset(i).unsafe_store(x.lt(y))
+            elif op == CMP_LE:
+                dst.unsafe_offset(i).unsafe_store(x.le(y))
+            elif op == CMP_GT:
+                dst.unsafe_offset(i).unsafe_store(x.gt(y))
+            else:
+                dst.unsafe_offset(i).unsafe_store(x.ge(y))
+            i += width
+
+    parallel_morsels(compute, n)
 
     apply_validity(out, combined_validity(a.data.validity, b.data.validity))
     return out^
@@ -195,7 +228,7 @@ def _compare[
 
 def compare_const[
     dt: DType, op: Int
-](a: Array[dt], b: Scalar[dt]) -> Array[DType.bool]:
+](a: Array[dt], b: Scalar[dt]) raises -> Array[DType.bool]:
     """Compares a column against one constant.
 
     The constant is splatted once, before the loop, so each row costs one load
@@ -213,32 +246,39 @@ def compare_const[
     Returns:
         A bool column, null wherever the column is null. A null constant makes
         the whole answer null and never reaches here.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     comptime width = simd_width_of[dt]()
 
     var n = len(a)
-    var out = Array[DType.bool](n)
-    var src = a.unsafe_ptr()
-    var dst = out.unsafe_ptr()
+    # Every row is written below, so the zeroing allocation is a wasted pass.
+    var out = Array[DType.bool](overwritten=n)
     var y = SIMD[dt, width](b)
 
-    var i = 0
-    while i < n:
-        var x = src.unsafe_offset(i).unsafe_load[width=width]()
+    def compute(start: Int, stop: Int) {mut out, imm}:
+        var src = a.unsafe_ptr()
+        var dst = out.unsafe_ptr()
+        var i = start
+        while i < stop:
+            var x = src.unsafe_offset(i).unsafe_load[width=width]()
 
-        comptime if op == CMP_EQ:
-            dst.unsafe_offset(i).unsafe_store(x.eq(y))
-        elif op == CMP_NE:
-            dst.unsafe_offset(i).unsafe_store(x.ne(y))
-        elif op == CMP_LT:
-            dst.unsafe_offset(i).unsafe_store(x.lt(y))
-        elif op == CMP_LE:
-            dst.unsafe_offset(i).unsafe_store(x.le(y))
-        elif op == CMP_GT:
-            dst.unsafe_offset(i).unsafe_store(x.gt(y))
-        else:
-            dst.unsafe_offset(i).unsafe_store(x.ge(y))
-        i += width
+            comptime if op == CMP_EQ:
+                dst.unsafe_offset(i).unsafe_store(x.eq(y))
+            elif op == CMP_NE:
+                dst.unsafe_offset(i).unsafe_store(x.ne(y))
+            elif op == CMP_LT:
+                dst.unsafe_offset(i).unsafe_store(x.lt(y))
+            elif op == CMP_LE:
+                dst.unsafe_offset(i).unsafe_store(x.le(y))
+            elif op == CMP_GT:
+                dst.unsafe_offset(i).unsafe_store(x.gt(y))
+            else:
+                dst.unsafe_offset(i).unsafe_store(x.ge(y))
+            i += width
+
+    parallel_morsels(compute, n)
 
     apply_validity(out, Bitmap(copy=a.data.validity))
     return out^
