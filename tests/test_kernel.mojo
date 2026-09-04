@@ -42,6 +42,7 @@ from firepanda.kernel import (
     take_rows,
 )
 from firepanda.kernel.accum import accumulator
+from firepanda.kernel.arith import OP_ADD, arith_const
 from firepanda.kernel.scalar import (
     add_scalar,
     cast_scalar,
@@ -320,6 +321,44 @@ def test_comparison_against_a_null_is_null() raises:
     # Null, not false. The value under it is false because that is what the
     # invariant requires, which is exactly why the validity bit is the answer.
     assert_false(eq[1])
+
+
+def test_arithmetic_and_comparison_past_the_split_are_right_everywhere() raises:
+    # Same boundary question the cast test asks, and the answer has to hold for
+    # these too because they split over morsels the same way. The extra thing
+    # here is the nulls: the loop computes over them and `apply_validity` blanks
+    # them afterwards, and that repair walks the whole column on one thread
+    # after the workers are done, so a row the workers got wrong under a null
+    # would be hidden. The check is against the scalar answer at the present
+    # rows and against zero at the absent ones.
+    comptime rows = 393_241
+    var a = build[DType.int64](rows, 7)
+    var b = build[DType.int64](rows, 11)
+
+    var sums = add(a, b)
+    var lt = less(a, b)
+    var shifted = arith_const[DType.int64, OP_ADD](a, 3)
+
+    var wrong = -1
+    for i in range(rows):
+        var present = a.is_valid(i) and b.is_valid(i)
+        if sums.is_valid(i) != present or lt.is_valid(i) != present:
+            wrong = i
+            break
+        if present:
+            if sums[i] != a[i] + b[i] or Bool(lt[i]) != (a[i] < b[i]):
+                wrong = i
+                break
+        elif sums[i] != 0 or Bool(lt[i]):
+            wrong = i
+            break
+        if shifted.is_valid(i) != a.is_valid(i):
+            wrong = i
+            break
+        if a.is_valid(i) and shifted[i] != a[i] + 3:
+            wrong = i
+            break
+    assert_equal(wrong, -1, "a row past the morsel split is wrong")
 
 
 def test_cast_matches_the_twin_and_keeps_the_nulls() raises:

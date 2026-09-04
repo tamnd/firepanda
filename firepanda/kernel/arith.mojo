@@ -26,6 +26,7 @@ from std.sys.info import simd_width_of
 
 from firepanda.array.array import Array
 from firepanda.bitmap.bitmap import Bitmap
+from firepanda.exec import parallel_morsels
 
 from .mask import apply_validity, combined_validity
 
@@ -39,7 +40,7 @@ comptime OP_MUL = 2
 """Operation code for multiplication."""
 
 
-def add[dt: DType](a: Array[dt], b: Array[dt]) -> Array[dt]:
+def add[dt: DType](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
     """Adds two columns elementwise.
 
     Args:
@@ -51,11 +52,14 @@ def add[dt: DType](a: Array[dt], b: Array[dt]) -> Array[dt]:
 
     Returns:
         A column of sums, null wherever either input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     return _arith[dt, OP_ADD](a, b)
 
 
-def subtract[dt: DType](a: Array[dt], b: Array[dt]) -> Array[dt]:
+def subtract[dt: DType](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
     """Subtracts one column from another elementwise.
 
     Args:
@@ -67,11 +71,14 @@ def subtract[dt: DType](a: Array[dt], b: Array[dt]) -> Array[dt]:
 
     Returns:
         A column of differences, null wherever either input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     return _arith[dt, OP_SUB](a, b)
 
 
-def multiply[dt: DType](a: Array[dt], b: Array[dt]) -> Array[dt]:
+def multiply[dt: DType](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
     """Multiplies two columns elementwise.
 
     Args:
@@ -83,11 +90,14 @@ def multiply[dt: DType](a: Array[dt], b: Array[dt]) -> Array[dt]:
 
     Returns:
         A column of products, null wherever either input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     return _arith[dt, OP_MUL](a, b)
 
 
-def _arith[dt: DType, op: Int](a: Array[dt], b: Array[dt]) -> Array[dt]:
+def _arith[dt: DType, op: Int](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
     """Applies an arithmetic operation elementwise.
 
     The tail past the last full register is handled by loading a full register
@@ -105,33 +115,46 @@ def _arith[dt: DType, op: Int](a: Array[dt], b: Array[dt]) -> Array[dt]:
 
     Returns:
         A column of results, null wherever either input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises. The arithmetic itself
+            cannot fail; a division by zero is an infinity and lives in
+            `divide` anyway.
     """
     comptime width = simd_width_of[dt]()
 
     var n = len(a)
-    var out = Array[dt](n)
-    var lhs = a.unsafe_ptr()
-    var rhs = b.unsafe_ptr()
-    var dst = out.unsafe_ptr()
+    # The loop below writes a result for every row, the null ones included,
+    # which is the whole point of computing first and repairing afterwards. So
+    # the allocation does not need the pass that zeroes it.
+    var out = Array[dt](overwritten=n)
 
-    var i = 0
-    while i < n:
-        var x = lhs.unsafe_offset(i).unsafe_load[width=width]()
-        var y = rhs.unsafe_offset(i).unsafe_load[width=width]()
+    def compute(start: Int, stop: Int) {mut out, imm}:
+        var lhs = a.unsafe_ptr()
+        var rhs = b.unsafe_ptr()
+        var dst = out.unsafe_ptr()
+        var i = start
+        while i < stop:
+            var x = lhs.unsafe_offset(i).unsafe_load[width=width]()
+            var y = rhs.unsafe_offset(i).unsafe_load[width=width]()
 
-        comptime if op == OP_ADD:
-            dst.unsafe_offset(i).unsafe_store(x + y)
-        elif op == OP_SUB:
-            dst.unsafe_offset(i).unsafe_store(x - y)
-        else:
-            dst.unsafe_offset(i).unsafe_store(x * y)
-        i += width
+            comptime if op == OP_ADD:
+                dst.unsafe_offset(i).unsafe_store(x + y)
+            elif op == OP_SUB:
+                dst.unsafe_offset(i).unsafe_store(x - y)
+            else:
+                dst.unsafe_offset(i).unsafe_store(x * y)
+            i += width
+
+    parallel_morsels(compute, n)
 
     apply_validity(out, combined_validity(a.data.validity, b.data.validity))
     return out^
 
 
-def divide[dt: DType](a: Array[dt], b: Array[dt]) -> Array[DType.float64]:
+def divide[
+    dt: DType
+](a: Array[dt], b: Array[dt]) raises -> Array[DType.float64]:
     """Divides two columns elementwise, in float64.
 
     Args:
@@ -143,29 +166,38 @@ def divide[dt: DType](a: Array[dt], b: Array[dt]) -> Array[DType.float64]:
 
     Returns:
         A float64 column, null wherever either input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises. Dividing by zero here is an
+            infinity or a NaN rather than an error.
     """
     comptime width = simd_width_of[DType.float64]()
 
     var n = len(a)
-    var out = Array[DType.float64](n)
-    var lhs = a.unsafe_ptr()
-    var rhs = b.unsafe_ptr()
-    var dst = out.unsafe_ptr()
+    # Every row is written below, nulls included, so the zeroing constructor
+    # would be a pass thrown away.
+    var out = Array[DType.float64](overwritten=n)
 
-    var i = 0
-    while i < n:
-        var x = (
-            lhs.unsafe_offset(i)
-            .unsafe_load[width=width]()
-            .cast[DType.float64]()
-        )
-        var y = (
-            rhs.unsafe_offset(i)
-            .unsafe_load[width=width]()
-            .cast[DType.float64]()
-        )
-        dst.unsafe_offset(i).unsafe_store(x / y)
-        i += width
+    def compute(start: Int, stop: Int) {mut out, imm}:
+        var lhs = a.unsafe_ptr()
+        var rhs = b.unsafe_ptr()
+        var dst = out.unsafe_ptr()
+        var i = start
+        while i < stop:
+            var x = (
+                lhs.unsafe_offset(i)
+                .unsafe_load[width=width]()
+                .cast[DType.float64]()
+            )
+            var y = (
+                rhs.unsafe_offset(i)
+                .unsafe_load[width=width]()
+                .cast[DType.float64]()
+            )
+            dst.unsafe_offset(i).unsafe_store(x / y)
+            i += width
+
+    parallel_morsels(compute, n)
 
     apply_validity(out, combined_validity(a.data.validity, b.data.validity))
     return out^
@@ -173,7 +205,7 @@ def divide[dt: DType](a: Array[dt], b: Array[dt]) -> Array[DType.float64]:
 
 def arith_const[
     dt: DType, op: Int
-](a: Array[dt], b: Scalar[dt], flip: Bool = False) -> Array[dt]:
+](a: Array[dt], b: Scalar[dt], flip: Bool = False) raises -> Array[dt]:
     """Applies an arithmetic operation between a column and one constant.
 
     The four operations do not need four entry points here the way the column
@@ -200,40 +232,50 @@ def arith_const[
         A column of results, null wherever the column is null. A constant is
         never null here; a null constant makes the whole answer null and is
         handled before any loop runs.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     comptime width = simd_width_of[dt]()
 
     var n = len(a)
-    var out = Array[dt](n)
-    var src = a.unsafe_ptr()
-    var dst = out.unsafe_ptr()
+    # Every row is written below, so the zeroing allocation is a wasted pass.
+    var out = Array[dt](overwritten=n)
     var y = SIMD[dt, width](b)
 
-    comptime if op == OP_ADD:
-        var i = 0
-        while i < n:
-            var x = src.unsafe_offset(i).unsafe_load[width=width]()
-            dst.unsafe_offset(i).unsafe_store(x + y)
-            i += width
-    elif op == OP_MUL:
-        var i = 0
-        while i < n:
-            var x = src.unsafe_offset(i).unsafe_load[width=width]()
-            dst.unsafe_offset(i).unsafe_store(x * y)
-            i += width
-    else:
-        if flip:
-            var i = 0
-            while i < n:
+    # The branch on `flip` stays outside the inner loop, one test per morsel
+    # rather than one per register, which is what it was when there was a
+    # single loop over the whole column.
+    def compute(start: Int, stop: Int) {mut out, imm}:
+        var src = a.unsafe_ptr()
+        var dst = out.unsafe_ptr()
+        comptime if op == OP_ADD:
+            var i = start
+            while i < stop:
                 var x = src.unsafe_offset(i).unsafe_load[width=width]()
-                dst.unsafe_offset(i).unsafe_store(y - x)
+                dst.unsafe_offset(i).unsafe_store(x + y)
+                i += width
+        elif op == OP_MUL:
+            var i = start
+            while i < stop:
+                var x = src.unsafe_offset(i).unsafe_load[width=width]()
+                dst.unsafe_offset(i).unsafe_store(x * y)
                 i += width
         else:
-            var i = 0
-            while i < n:
-                var x = src.unsafe_offset(i).unsafe_load[width=width]()
-                dst.unsafe_offset(i).unsafe_store(x - y)
-                i += width
+            if flip:
+                var i = start
+                while i < stop:
+                    var x = src.unsafe_offset(i).unsafe_load[width=width]()
+                    dst.unsafe_offset(i).unsafe_store(y - x)
+                    i += width
+            else:
+                var i = start
+                while i < stop:
+                    var x = src.unsafe_offset(i).unsafe_load[width=width]()
+                    dst.unsafe_offset(i).unsafe_store(x - y)
+                    i += width
+
+    parallel_morsels(compute, n)
 
     apply_validity(out, Bitmap(copy=a.data.validity))
     return out^
@@ -241,7 +283,9 @@ def arith_const[
 
 def divide_const[
     dt: DType
-](a: Array[dt], b: Scalar[dt], flip: Bool = False) -> Array[DType.float64]:
+](a: Array[dt], b: Scalar[dt], flip: Bool = False) raises -> Array[
+    DType.float64
+]:
     """Divides a column by a constant, or a constant by a column, in float64.
 
     Args:
@@ -254,35 +298,42 @@ def divide_const[
 
     Returns:
         A float64 column, null wherever the column is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     comptime width = simd_width_of[DType.float64]()
 
     var n = len(a)
-    var out = Array[DType.float64](n)
-    var src = a.unsafe_ptr()
-    var dst = out.unsafe_ptr()
+    # Every row is written below, so the zeroing allocation is a wasted pass.
+    var out = Array[DType.float64](overwritten=n)
     var y = SIMD[DType.float64, width](b.cast[DType.float64]())
 
-    if flip:
-        var i = 0
-        while i < n:
-            var x = (
-                src.unsafe_offset(i)
-                .unsafe_load[width=width]()
-                .cast[DType.float64]()
-            )
-            dst.unsafe_offset(i).unsafe_store(y / x)
-            i += width
-    else:
-        var i = 0
-        while i < n:
-            var x = (
-                src.unsafe_offset(i)
-                .unsafe_load[width=width]()
-                .cast[DType.float64]()
-            )
-            dst.unsafe_offset(i).unsafe_store(x / y)
-            i += width
+    def compute(start: Int, stop: Int) {mut out, imm}:
+        var src = a.unsafe_ptr()
+        var dst = out.unsafe_ptr()
+        if flip:
+            var i = start
+            while i < stop:
+                var x = (
+                    src.unsafe_offset(i)
+                    .unsafe_load[width=width]()
+                    .cast[DType.float64]()
+                )
+                dst.unsafe_offset(i).unsafe_store(y / x)
+                i += width
+        else:
+            var i = start
+            while i < stop:
+                var x = (
+                    src.unsafe_offset(i)
+                    .unsafe_load[width=width]()
+                    .cast[DType.float64]()
+                )
+                dst.unsafe_offset(i).unsafe_store(x / y)
+                i += width
+
+    parallel_morsels(compute, n)
 
     apply_validity(out, Bitmap(copy=a.data.validity))
     return out^
