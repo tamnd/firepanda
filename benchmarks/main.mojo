@@ -138,6 +138,7 @@ from firepanda.kernel import (
     group_size,
     group_std,
     group_sum,
+    group_top_rows,
     group_var,
     less,
     mean_of,
@@ -2585,6 +2586,27 @@ def bench_group(mut harness: Harness) raises:
         keep(out[0])
 
     harness.record("group/size", "rows", rows, size_grouped)
+
+    # Top-n per group, which is a selection rather than a reduction: it keeps two
+    # rows out of every group and reports where they were. The pair says what the
+    # group count costs it. A thousand groups is ten thousand rows a group, so
+    # almost every row is turned away by one comparison against the group's
+    # current second best, and a hundred thousand groups is a hundred rows a
+    # group, where the slots are still being filled often enough that the insert
+    # is a real part of the loop and the private tables no longer fit in cache.
+    def top_two() raises {imm values, imm codes}:
+        keep(values)
+        var out = group_top_rows(values, codes, GROUPS, 2, True)
+        keep(out.rows_at[0])
+
+    harness.record("group/top2", "rows", rows, top_two)
+
+    def top_two_many() raises {imm values, imm many, imm wide}:
+        keep(values)
+        var out = group_top_rows(values, many, wide, 2, True)
+        keep(out.rows_at[0])
+
+    harness.record("group/top2_cardinality_100k", "rows", rows, top_two_many)
 
     # The five that landed after the first eight. `var` is two passes over the
     # column where `mean` is one, and the three below it build a slab of the

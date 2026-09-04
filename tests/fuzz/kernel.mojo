@@ -47,6 +47,7 @@ from firepanda.kernel import (
     equal,
     filter_rows,
     greater,
+    group_top_rows,
     less,
     max_of,
     mean_of,
@@ -71,6 +72,7 @@ from firepanda.kernel.scalar import (
     equal_scalar,
     filter_scalar,
     group_scalar,
+    group_top_scalar,
     less_scalar,
     max_scalar,
     mean_scalar,
@@ -541,6 +543,46 @@ def run_one[dt: DType](mut rng: Rng, step: Int, seed: UInt64) raises:
                         kind,
                     ),
                 )
+
+    # Top-n per group, against the twin that scans the column once per slot.
+    # The same drawn codes, because the interesting shape here is a crowded group
+    # where several rows are competing for the last slot, and `n` alternates so a
+    # run covers the single slot case as well as the crowded one.
+    var slots = 1 + (step % 3)
+    var wants_largest = (step // 3) % 2 == 0
+    var top = group_top_rows(a, codes, groups, slots, wants_largest)
+    var top_twin = group_top_scalar(a, codes, groups, slots, wants_largest)
+    var cursor = 0
+    for g in range(groups):
+        var expected = 0
+        for k in range(slots):
+            if top_twin[g * slots + k] >= 0:
+                expected += 1
+        if top.counts[g] != expected:
+            fail(
+                step,
+                seed,
+                "group_top_rows",
+                String("group ", g, " kept ", top.counts[g], " not ", expected),
+            )
+        for k in range(top.counts[g]):
+            if top.rows_at[cursor + k] != top_twin[g * slots + k]:
+                fail(
+                    step,
+                    seed,
+                    "group_top_rows",
+                    String(
+                        "group ",
+                        g,
+                        " slot ",
+                        k,
+                        " is row ",
+                        top.rows_at[cursor + k],
+                        " but twin has ",
+                        top_twin[g * slots + k],
+                    ),
+                )
+        cursor += top.counts[g]
 
     if length > 1:
         var start = rng.next_below(length)

@@ -949,3 +949,73 @@ def group_text_scalar(
         valid.append(seen)
 
     return (values^, valid^)
+
+
+def group_top_scalar[
+    dt: DType
+](
+    col: Array[dt],
+    codes: Array[DType.uint32],
+    groups: Int,
+    n: Int,
+    largest: Bool,
+) raises -> List[Int]:
+    """Picks each group's best rows by scanning the column once per slot.
+
+    The definition of a top-n made literal. For each group, and then for each of
+    its `n` slots, walk every row and keep the best one that belongs to the group
+    and has not already been taken. That is `groups * n * rows` work and it is
+    exactly what the phrase means, which is the whole point of a twin.
+
+    Args:
+        col: The column being ranked.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals.
+        n: How many rows to keep per group.
+        largest: True to keep the high values, False to keep the low ones.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        `groups * n` row numbers, group major and best first, with `-1` in a slot
+        the group had no value for.
+
+    Raises:
+        If the column and the ordinals are different lengths.
+    """
+    if len(col) != len(codes):
+        raise Error("group top twin: the column and the ordinals disagree")
+
+    var picked = List[Int](length=groups * n, fill=-1)
+    for g in range(groups):
+        for k in range(n):
+            var best = -1
+            for i in range(len(codes)):
+                if Int(codes[i]) != g or not col.is_valid(i):
+                    continue
+                var value = col[i]
+                if value != value:
+                    continue
+
+                var taken = False
+                for j in range(k):
+                    if picked[g * n + j] == i:
+                        taken = True
+                        break
+                if taken:
+                    continue
+
+                if best < 0:
+                    best = i
+                    continue
+                var against = col[best]
+                if largest:
+                    if value > against:
+                        best = i
+                elif value < against:
+                    best = i
+            picked[g * n + k] = best
+            if best < 0:
+                break
+    return picked^

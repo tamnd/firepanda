@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added
+
+- A per group top-n kernel, `group_top_rows`, and the two frame spellings on top of it, `DataFrame.group_nlargest` and `DataFrame.group_nsmallest`. It keeps `n` slots per group and compares each row against the worst thing currently in its group's slots rather than sorting the frame, so a row that loses is never touched again. Ties are broken by row number, which makes the answer the same whichever way the rows were split across cores and the same answer pandas gives. Nulls and NaN are never candidates.
+
 ## [0.6.39] - 2026-09-04
 
 Built against Mojo 1.0.0 (ed45d567).
