@@ -404,7 +404,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             return False
         return is_sorted_any(self.values, descending=True)
 
-    def is_null(self) -> Array[DType.bool]:
+    def is_null(self) raises -> Array[DType.bool]:
         """Returns a mask that is true where a row is missing.
 
         The mask is a bare `Array` rather than a `Series`, because that is what
@@ -413,14 +413,20 @@ struct Series(Copyable, Movable, Sized, Writable):
 
         Returns:
             A bool column, with no nulls of its own, as tall as the series.
+
+        Raises:
+            Error: Only what the morsel runtime raises.
         """
         return is_null_any(self.values)
 
-    def is_not_null(self) -> Array[DType.bool]:
+    def is_not_null(self) raises -> Array[DType.bool]:
         """Returns a mask that is true where a row is present.
 
         Returns:
             A bool column, with no nulls of its own, as tall as the series.
+
+        Raises:
+            Error: Only what the morsel runtime raises.
         """
         return is_not_null_any(self.values)
 
