@@ -8,6 +8,24 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.40] - 2026-09-04
+
+Built against Mojo 1.0.0 (ed45d567).
+
+One feature, and it closes the last gap in db-benchmark. q8 asks for the two largest `v3` in each `id6`, and it was the one query in that suite firepanda skipped, because answering it needs a top n per group and there was no kernel for that. There is one now, `group_top_rows`, with `DataFrame.group_nlargest` and `DataFrame.group_nsmallest` on top of it, which is also the pandas spelling and has been on the parity list since M6.
+
+It does not sort. The obvious implementation sorts the frame by the value column and walks each group taking the rows it sees first, which costs a full sort of every row, a permutation of the column and a pass to undo it, to answer a question about two rows in a hundred. This keeps a small table instead: `n` slots per group, with the worst value currently in those slots held in an array beside them, so the common path for a row is one load and one compare and a row that loses is never touched again. The slots themselves are only read when a row is going to be kept.
+
+Ties break by row number rather than by whichever core saw the row first. That makes the comparison a total order over distinct rows, which is what lets the answer be the same whether the column was scanned by one core or by thirty two, and it is also the row pandas keeps. Nulls are not candidates and neither is NaN, because a NaN loses every comparison it is in and one left sitting in a slot would hold a real value out.
+
+Each worker fills a private table over a contiguous stretch of rows and a parallel fold over blocks of groups merges the others into the first, reusing the same insert the scan uses, so the merge is correct for the same reason the scan is rather than for a second reason that would need its own argument. The worker count is capped against a 64 MB budget for those tables, and below 65536 rows the whole thing takes one worker and skips the fold.
+
+Ten million rows and a hundred thousand groups on an i9-13900K is 12.82 ms. The version of this that zeroed its buffers up front, the way an ordinary `Buffer` does, was 14.83. None of the four buffers is read before it is written, so none of them needs the memset, and the per group counts and thresholds are prepared by the worker that owns them rather than by one thread in advance. At a thousand groups the buffers are small enough that this was never the cost and the two numbers are the same.
+
+The end to end number is the one that matters. On db-benchmark q8 at 0.5GB, memory mode, ten runs on a quiet machine and repeated twice with the two runs agreeing, firepanda is 0.037 s against DuckDB's 0.071, Polars' 0.205 and pandas' 2.759. Peak resident set is 0.95 GB against 2.34, 1.34 and 1.65. All four engines return 200,000 rows and all four checksum identically, which is the bench harness's cross engine agreement check confirming that a new kernel is not quietly keeping the wrong row on a tie.
+
+Half of that end to end number turned out not to be in the kernel at all. The driver first narrowed to the two columns the query reads and then took the rows, which is what pandas does, and `select` copies the columns it keeps, so narrowing first copied twenty million values to answer a question about two hundred thousand. Narrowing after the take was 37 ms against 75 for the same answer. That is a bench repository change rather than a library one, but it is the kind of thing worth knowing about a library whose `select` copies.
+
 ### Added
 
 - A per group top-n kernel, `group_top_rows`, and the two frame spellings on top of it, `DataFrame.group_nlargest` and `DataFrame.group_nsmallest`. It keeps `n` slots per group and compares each row against the worst thing currently in its group's slots rather than sorting the frame, so a row that loses is never touched again. Ties are broken by row number, which makes the answer the same whichever way the rows were split across cores and the same answer pandas gives. Nulls and NaN are never candidates.
