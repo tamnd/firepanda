@@ -203,6 +203,14 @@ def test_std_agrees_with_the_group_by() raises:
     agreed(AggKind.STD)
 
 
+def test_sem_agrees_with_the_group_by() raises:
+    agreed(AggKind.SEM)
+
+
+def test_skew_agrees_with_the_group_by() raises:
+    agreed(AggKind.SKEW)
+
+
 def test_median_agrees_with_the_group_by() raises:
     agreed(AggKind.MEDIAN)
 

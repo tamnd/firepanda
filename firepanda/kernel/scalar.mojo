@@ -642,7 +642,7 @@ def group_scalar[
         One value per group and one validity flag per group.
 
     Raises:
-        If the reduction is not one of the eight.
+        If the reduction is not one of the single column kinds.
     """
     var values = List[Float64](capacity=groups)
     var valid = List[Bool](capacity=groups)
@@ -707,7 +707,7 @@ def group_scalar[
                 var at = 0 if kind == AggKind.FIRST else len(present) - 1
                 values.append(present[at])
                 valid.append(True)
-        elif kind == AggKind.VAR or kind == AggKind.STD:
+        elif kind == AggKind.VAR or kind == AggKind.STD or kind == AggKind.SEM:
             var divisor = len(present) - Int(kind.param)
             if divisor <= 0:
                 values.append(Float64(0))
@@ -721,9 +721,41 @@ def group_scalar[
                 for k in range(len(present)):
                     squares += (present[k] - centre) * (present[k] - centre)
                 var spread = squares / Float64(divisor)
-                if kind == AggKind.STD:
+                if kind != AggKind.VAR:
                     spread = sqrt(spread)
+                # The count under this root is the plain one and not the
+                # corrected divisor. The degrees of freedom belong to the
+                # variance, and applying the correction twice is a different
+                # statistic from the one pandas reports.
+                if kind == AggKind.SEM:
+                    spread = spread / sqrt(Float64(len(present)))
                 values.append(spread)
+                valid.append(True)
+        elif kind == AggKind.SKEW:
+            if len(present) < 3:
+                values.append(Float64(0))
+                valid.append(False)
+            else:
+                var total = Float64(0)
+                for k in range(len(present)):
+                    total += present[k]
+                var size = Float64(len(present))
+                var centre = total / size
+                var second = Float64(0)
+                var third = Float64(0)
+                for k in range(len(present)):
+                    var delta = present[k] - centre
+                    second += delta * delta
+                    third += delta * delta * delta
+                second = second / size
+                third = third / size
+                if second == 0.0:
+                    # A group whose values are all the same is symmetric, not
+                    # undefined, and pandas reports zero for it.
+                    values.append(Float64(0))
+                else:
+                    var adjust = sqrt(size * (size - 1.0)) / (size - 2.0)
+                    values.append(adjust * third / (second * sqrt(second)))
                 valid.append(True)
         elif kind == AggKind.MEDIAN or kind == AggKind.QUANTILE:
             if len(present) == 0:

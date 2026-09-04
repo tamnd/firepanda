@@ -492,15 +492,36 @@ def run_one[dt: DType](mut rng: Rng, step: Int, seed: UInt64) raises:
     var codes = Array[DType.uint32](length)
     for i in range(length):
         codes[i] = UInt32(rng.next_below(groups))
-    # Thirteen reductions, one per case, so every one of them sees every column
-    # shape the generator makes rather than a thirteenth of them. `QUANTILE` gets
-    # a different position each time it comes round, because a quantile that only
-    # ever runs at the median is a median with extra arithmetic and the
-    # interpolation between two values is the part worth checking.
-    var kind = AggKind(UInt8((step // 4) % 13))
+    # One reduction per case, so every one of them sees every column shape the
+    # generator makes rather than a fifteenth of them. The list is written out
+    # rather than counted from zero, because the codes of the single column
+    # kinds are no longer contiguous: `CORR` and `COV` sit between `NUNIQUE` and
+    # `SEM` and they read a second column, so a rotation over the raw codes would
+    # hand this one a pair kind. `QUANTILE` gets a different position each time
+    # it comes round, because a quantile that only ever runs at the median is a
+    # median with extra arithmetic and the interpolation between two values is
+    # the part worth checking.
+    var single = [
+        AggKind.SUM,
+        AggKind.MEAN,
+        AggKind.MIN,
+        AggKind.MAX,
+        AggKind.COUNT,
+        AggKind.FIRST,
+        AggKind.LAST,
+        AggKind.SIZE,
+        AggKind.VAR,
+        AggKind.STD,
+        AggKind.MEDIAN,
+        AggKind.QUANTILE,
+        AggKind.NUNIQUE,
+        AggKind.SEM,
+        AggKind.SKEW,
+    ]
+    var kind = single[(step // 4) % len(single)]
     if kind == AggKind.QUANTILE:
         kind = AggKind.quantile_at(Float64(rng.next_below(101)) / 100.0)
-    elif kind == AggKind.VAR or kind == AggKind.STD:
+    elif kind == AggKind.VAR or kind == AggKind.STD or kind == AggKind.SEM:
         kind = AggKind(kind.code, Float64(rng.next_below(3)))
     var reduced = cast_any(
         aggregate_group(a, kind, codes, groups), DType.float64
