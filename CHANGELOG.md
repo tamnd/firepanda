@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A join builds the columns it was asked for and no others
+
+`DataFrame.join` and `DataFrame.join_on` take an optional list of output column names, and a column not on the list is never gathered.
+
+The reason this is worth an argument is what a join costs. Pairing ten million fact rows against a thousand dimension rows takes 7.9 ms on an i9-13900K, and the whole join takes 31.4, so three quarters of a join is not deciding which rows go together, it is building the output. A column the caller is going to drop is therefore not a small waste at the end of the query, it is most of the query, and there is no optimizer to notice that until M4.
+
+The alternative available before this was to narrow the inputs first, which works and which the benchmark driver did, but `select` copies the columns it keeps, so avoiding three gathers of ten million rows cost a copy of two columns of ten million rows. Naming the wanted columns costs nothing at all.
+
+Ten million fact rows against a thousand dimension rows on an i9-13900K, keeping two of the four output columns, is 18.44 ms against 30.17 for the same join keeping all four. Pairing is 7.75 ms of both, so the gather went from 22.4 ms to 10.7, which is half the columns costing half the gather. The other eight rows of the join benchmark are unchanged to within a percent, which is the check that the restructure this needed, planning the whole output before building any of it, costs nothing when there is no projection.
+
+The names are the output's names and they are worked out exactly as they would be without a projection, including the suffix a colliding right column gets, so asking for a column does not change what it is called. They are also built in the order they were asked for. A name the result does not have, or one asked for twice, is an error rather than a silent difference in shape.
+
 ## [0.6.40] - 2026-09-04
 
 Built against Mojo 1.0.0 (ed45d567).

@@ -694,5 +694,136 @@ def test_a_unique_right_key_past_the_split_pairs_what_one_loop_would() raises:
         assert_equal(bad, -1, String("pair ", bad, " for ", kinds[i]))
 
 
+def wanted(first: String, second: String) -> List[String]:
+    """Builds a two element projection list."""
+    var out = List[String]()
+    out.append(first)
+    out.append(second)
+    return out^
+
+
+def test_a_projection_keeps_only_the_named_columns() raises:
+    var out = left_frame().join(
+        right_frame(), on("k"), JoinKind.INNER, "_right", on("b")
+    )
+    assert_equal(out.width(), 1)
+    assert_equal(len(out), 4)
+    assert_equal(out.schema[0].name, "b")
+
+
+def test_a_projection_keeps_them_in_the_order_they_were_asked_for() raises:
+    var out = left_frame().join(
+        right_frame(), on("k"), JoinKind.INNER, "_right", wanted("b", "a")
+    )
+    assert_equal(out.width(), 2)
+    assert_equal(out.schema[0].name, "b")
+    assert_equal(out.schema[1].name, "a")
+    var b = out.column("b").as_typed[DType.int64]()
+    var a = out.column("a").as_typed[DType.int64]()
+    assert_equal(b[0], 200)
+    assert_equal(a[0], 20)
+
+
+def test_a_projection_changes_nothing_but_which_columns_are_built() raises:
+    # The whole point of the projection is that it is free of consequences: the
+    # rows, their order and their values have to be what the join produced
+    # without it. Every kind, because the pairing differs between them and a
+    # projection that quietly dropped the coalescing would only show on two.
+    var kinds = List[JoinKind]()
+    kinds.append(JoinKind.INNER)
+    kinds.append(JoinKind.LEFT)
+    kinds.append(JoinKind.RIGHT)
+    kinds.append(JoinKind.OUTER)
+    var labels = List[String]()
+    labels.append("inner")
+    labels.append("left")
+    labels.append("right")
+    labels.append("outer")
+
+    for i in range(len(kinds)):
+        var full = left_frame().join(right_frame(), on("k"), kinds[i])
+        var thin = left_frame().join(
+            right_frame(), on("k"), kinds[i], "_right", wanted("k", "b")
+        )
+        assert_equal(len(thin), len(full), labels[i])
+        assert_equal(thin.width(), 2, labels[i])
+
+        var full_k = full.column("k").as_typed[DType.int64]()
+        var thin_k = thin.column("k").as_typed[DType.int64]()
+        var full_b = full.column("b").as_typed[DType.int64]()
+        var thin_b = thin.column("b").as_typed[DType.int64]()
+        var bad = -1
+        for r in range(len(full)):
+            if full_k.is_valid(r) != thin_k.is_valid(r):
+                bad = r
+                break
+            if full_k.is_valid(r) and full_k[r] != thin_k[r]:
+                bad = r
+                break
+            if full_b.is_valid(r) != thin_b.is_valid(r):
+                bad = r
+                break
+            if full_b.is_valid(r) and full_b[r] != thin_b[r]:
+                bad = r
+                break
+        assert_equal(bad, -1, String("row ", bad, " of ", labels[i]))
+
+
+def test_a_projected_key_of_an_outer_join_still_comes_from_both_sides() raises:
+    # The key of a row that only the right side has cannot be read from the
+    # left, and the coalescing that handles it lives on the branch a projection
+    # has to keep choosing.
+    var out = left_frame().join(
+        right_frame(), on("k"), JoinKind.OUTER, "_right", on("k")
+    )
+    var k = out.column("k").as_typed[DType.int64]()
+    var seen = False
+    for r in range(len(out)):
+        if k.is_valid(r) and k[r] == 4:
+            seen = True
+            break
+    assert_true(seen, "the right only key 4 is missing from the output")
+
+
+def test_an_empty_projection_keeps_every_column() raises:
+    var out = left_frame().join(
+        right_frame(), on("k"), JoinKind.INNER, "_right", List[String]()
+    )
+    assert_equal(out.width(), 3)
+
+
+def test_a_projected_name_the_result_does_not_have_is_refused() raises:
+    with assert_raises(contains="no column 'nope'"):
+        _ = left_frame().join(
+            right_frame(), on("k"), JoinKind.INNER, "_right", on("nope")
+        )
+
+
+def test_a_projected_name_asked_for_twice_is_refused() raises:
+    with assert_raises(contains="asked for twice"):
+        _ = left_frame().join(
+            right_frame(), on("k"), JoinKind.INNER, "_right", wanted("a", "a")
+        )
+
+
+def test_a_projection_can_name_a_suffixed_column() raises:
+    # `join_on` with keys named differently on each side keeps both, and a right
+    # column that collides is renamed. The projection names the result, so what
+    # it takes is the name after the suffix and not the one before it.
+    var left = pair_frame(
+        Series("k", ints([1, 2])), Series("v", ints([10, 20]))
+    )
+    var right = pair_frame(
+        Series("j", ints([1, 2])), Series("v", ints([100, 200]))
+    )
+    var out = left.join_on(
+        right, on("k"), on("j"), JoinKind.INNER, "_right", on("v_right")
+    )
+    assert_equal(out.width(), 1)
+    var v = out.column("v_right").as_typed[DType.int64]()
+    assert_equal(v[0], 100)
+    assert_equal(v[1], 200)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
