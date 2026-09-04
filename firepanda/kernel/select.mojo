@@ -298,7 +298,15 @@ def _take_core[
 ) raises -> Array[dt]:
     """The gather loop, over a pointer and a bitmap rather than a column."""
     var n = len(indices)
-    var out = Array[dt](n)
+
+    # Not the zeroing constructor. The gather writes every output element,
+    # including a zero where the index says null, so a memset in front of it is
+    # a second pass over the output. It is also a pass on one thread, and it is
+    # the pass that faults the output's pages in, so the whole column arrives on
+    # whichever core happened to run the allocation. Writing the zero in the
+    # loop instead hands each morsel's pages to the worker that is about to fill
+    # them.
+    var out = Array[dt](overwritten=n)
     var built = Bitmap(n, all_valid=False)
 
     # Output row `i` depends on `indices[i]` and on nothing else in the output,
@@ -326,6 +334,8 @@ def _take_core[
                     source.unsafe_offset(at).unsafe_load()
                 )
                 word |= UInt64(1) << UInt64(i & 63)
+            else:
+                target.unsafe_offset(i).unsafe_write(Scalar[dt]())
             if i & 63 == 63:
                 built.unsafe_set_word(i >> 6, word)
                 word = 0
@@ -465,7 +475,12 @@ def _filter_core[
         if Bool(mask_values.unsafe_offset(i).unsafe_load()):
             kept += 1
 
-    var out = Array[dt](kept)
+    # Every one of the kept positions is written below, on both routes, so this
+    # does not need the zeroing constructor either. The branchless loop writes
+    # the row before it decides whether to keep it, which means it writes every
+    # output slot at least once and the last write to a slot is the row that
+    # belongs there.
+    var out = Array[dt](overwritten=kept)
     var target = out.unsafe_ptr()
 
     if not has_null:

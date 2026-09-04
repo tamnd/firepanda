@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A gather no longer zeroes the column it is about to fill
+
+`take` allocated its output with the zeroing constructor and then wrote every element of it, including a zero where the index says null. So there was a memset of the whole output column in front of the gather. It cost what a memset of eighty megabytes costs, which is not nothing, but that was the smaller half of it. The memset runs on one thread, and it is the pass that faults the output's pages in, so every page of the output arrived on whichever core ran the allocation. The gather that followed then ran on thirty two cores writing into memory that all belonged to one of them. Allocating with `overwritten` and writing the zero inside the loop puts the first touch on the worker that is about to fill the page.
+
+On an i9-13900K at a million rows, medians over twelve runs of two prebuilt binaries alternating old, new, new, old. `kernel/take_scattered` 686 us to 505, `frame/take` 2.46 ms to 1.67, `join/inner_1000` 5.74 ms to 3.00, `join/inner_100k` 7.04 to 3.72, `join/left_1000` 6.88 to 3.56, `join/inner_projected` 2.56 to 1.78, `join/outer` 15.69 to 12.42, `join/two_keys` 7.20 to 5.25, `join/semi` and `join/anti` both 2.53 to 2.12. Every old run of every one of those rows is slower than every new run of it.
+
+The control rows are the ones that say this is the gather and not the weather. `join/indices_1000` does the pairing and none of the gathering and moves 0.3 percent. `strings/take` and `text/take_text` go through the string builder rather than through this loop and move under three percent.
+
+End to end on db-benchmark at 0.5GB, memory mode, ten runs, the same alternation: j1 from 44.1 ms to 21.3 and j4 from 83.3 to 60.5, with the checksums unchanged. The parallelism the harness records for j1 goes from 9.9 to 21.6, which is the same statement from the other side.
+
+It also explains something that had no explanation. A j1 that kept two output columns was slower than the same j1 keeping three, 42.2 ms against 25.9, which is not a thing a serial loop over the output columns can do. The two column output has two eighty megabyte float64 outputs and the three column one has those plus a forty megabyte int32, and where those memsets land relative to each other decides how much of the gather runs against pages owned by another core. With the memsets gone the two are 21.3 ms and 21.1, which is the ordering the work says they should have.
+
+`filter` had the same shape and gets the same treatment, though less of it, because the compaction loop is serial and only the memset itself is saved. `kernel/filter` 1.54 ms to 1.34, `kernel/filter_sparse` 2.28 to 2.16, `frame/filter` 4.53 to 4.35. `kernel/filter_twin` is a different kernel and does not move.
+
+Two rows moved that this cannot have touched. `strings/filter` and `text/filter_text` both go through the string compaction, which is untouched code, and both are about ten percent slower, consistently across every run. That is code layout, and it is recorded here rather than explained.
+
 ### A join builds the columns it was asked for and no others
 
 `DataFrame.join` and `DataFrame.join_on` take an optional list of output column names, and a column not on the list is never gathered.
