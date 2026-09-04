@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### The join's ordinal list is not zeroed either
+
+The same thing as the gather, one layer up. A join gives both sides one list of ordinals, one entry per row of the left side followed by one per row of the right, and it allocated that list zeroed. Nothing reads a zero out of it: the build side writes its own stretch and the probe side writes the rest, between them every slot. So the zeroing was a pass over both sides that only cost, and since the probe half is written by every core at once, it was also the pass that put most of the list on one core before the others wrote to it.
+
+The one slot the build did not write is a build row whose key is null, on the grounds that nothing reads it. It is written now, because a slot nobody writes holds whatever the allocator last left there, and one store on a rare path is cheaper than that being true.
+
+`join/indices_1000`, which pairs ten million rows against a thousand and gathers nothing, goes from 1.18 ms to 0.57. That row is almost entirely the ordinal list, which is why it halves. `join/inner_1000` 3.59 ms to 3.08 and `join/inner_100k` 3.76 to 3.56. On db-benchmark at 0.5GB, j1 20.6 ms to 19.4, j2 20.6 to 19.5, j4 56.6 to 54.5, with the checksums unchanged.
+
+`join/inner_projected` went the other way, 1.77 ms to 1.93, consistently rather than on the median. It allocates the same list as the rows that gained and there is no reason it should differ, so it is recorded rather than explained, in the same box as the two string rows that moved in 0.6.41 without being touched.
+
 ### Fixed
 
 The first two bugs the pandas conformance suite found. There is now a Mojo driver in firepanda-compat that runs a case against this library and hands the answer back as Arrow, so the suite compares firepanda to pandas rather than pandas to itself, and the first thing it did was produce twenty four failures on the `basics` section alone. These are two of them, and they are the two that are unambiguously wrong rather than a difference of opinion about semantics.

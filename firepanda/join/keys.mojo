@@ -206,7 +206,17 @@ def align_keys[
         if not left.is_string():
             comptime for candidate in ALL:
                 if left.dtype() == candidate:
-                    var codes = Array[DType.uint32](left_rows + right_rows)
+                    # Not the zeroing constructor. Between them the build and
+                    # the probe write every slot of this, the build side its
+                    # own stretch and the probe side the rest, so the zeroing
+                    # pass is a pass over both sides that nothing reads. It is
+                    # also the pass that faults these pages in, and the probe
+                    # half of them is filled by every core at once, so leaving
+                    # the memset in hands most of this list to one core before
+                    # thirty two of them write to it.
+                    var codes = Array[DType.uint32](
+                        overwritten=left_rows + right_rows
+                    )
                     # Views and not copies. A join key column is as large as the
                     # side it belongs to, and copying both of them before
                     # looking at either was the same waste a group by used to
@@ -513,8 +523,13 @@ def _build_direct[
     var found = 0
     for i in range(build_rows):
         if build_nulls and not build.data.validity.get(i):
-            # Whatever is here is never read: every read of a build side code is
-            # behind the caller's null list, and this row is in it.
+            # Nothing reads this: every read of a build side code is behind the
+            # caller's null list and this row is in it. It is written anyway,
+            # because the list is no longer zeroed on the way in and a slot
+            # nobody writes holds whatever the allocator last left there, which
+            # is a worse thing to leave lying around than one store on the rare
+            # path costs.
+            out.unsafe_offset(build_at + i).unsafe_write(UInt32(0))
             continue
         var at = Int(values.unsafe_offset(i).unsafe_load()) - Int(base)
         var stored = table.unsafe_offset(at).unsafe_load()
