@@ -338,20 +338,40 @@ struct Series(Copyable, Movable, Sized, Writable):
 
     def argsort(
         self, descending: Bool = False, nulls_first: Bool = False
-    ) raises -> Array[DType.uint32]:
-        """Returns the row order that sorts the series.
+    ) raises -> Array[DType.int64]:
+        """Returns the row order that sorts the series, as pandas spells it.
+
+        The permutation the sort produces is uint32, because it is one value per
+        row and the sort rewrites all of it on every pass, so the width of it is
+        where a sort's memory goes. pandas returns int64 here, because numpy's
+        `argsort` returns the platform index type and pandas uses a negative
+        position as the sentinel for a row that does not exist. firepanda has no
+        such sentinel, since a null is placed by `nulls_first` rather than
+        removed and marked, so the sign is unused and the extra four bytes buy
+        nothing internally.
+
+        They are still worth paying for at this one boundary. Somebody who
+        writes `s.argsort()` and hands the answer to something expecting a
+        signed index has been given a difference they did not ask for and cannot
+        see until it bites, and the cast is a single pass over a result the sort
+        has already been over many times. So the kernel keeps uint32 and the
+        method that carries the pandas name widens on the way out. Every
+        internal caller, this file's `sort_values` included, goes to
+        `argsort_any` and never pays it.
 
         Args:
             descending: Largest first.
             nulls_first: Put the nulls at the front rather than the back.
 
         Returns:
-            A permutation of `[0, len(self))`.
+            A permutation of `[0, len(self))`, as int64.
 
         Raises:
             If the dtype is not sortable.
         """
-        return argsort_any(self.values, descending, nulls_first)
+        return _widen_positions(
+            argsort_any(self.values, descending, nulls_first)
+        )
 
     def sort_values(
         self, descending: Bool = False, nulls_first: Bool = False
@@ -368,7 +388,7 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             If the dtype is not sortable.
         """
-        var order = self.argsort(descending, nulls_first)
+        var order = argsort_any(self.values, descending, nulls_first)
         return self.take(_to_positions(order))
 
     def is_monotonic_increasing(self) raises -> Bool:
@@ -563,6 +583,23 @@ def _check_range(start: Int, end: Int, length: Int, what: String) raises:
             + String(length)
             + " rows"
         )
+
+
+def _widen_positions(order: Array[DType.uint32]) -> Array[DType.int64]:
+    """Widens a permutation into the signed column pandas hands back.
+
+    A permutation holds no nulls, so the validity bitmap the new array is born
+    with is already right and nothing here touches it.
+    """
+    var n = len(order)
+    var out = Array[DType.int64](overwritten=n)
+    var source = order.unsafe_ptr()
+    var target = out.unsafe_ptr()
+    for i in range(n):
+        target.unsafe_offset(i).unsafe_store(
+            Int64(source.unsafe_offset(i).unsafe_load())
+        )
+    return out^
 
 
 def _to_positions(order: Array[DType.uint32]) -> List[Int]:

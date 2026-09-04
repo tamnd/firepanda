@@ -717,6 +717,27 @@ def test_sort_agrees_with_the_kernel_on_a_random_column() raises:
         )
 
 
+def test_the_series_argsort_hands_back_the_signed_width_pandas_uses() raises:
+    # The conformance suite reported `dtype uint32, expected int64` on this, and
+    # the values were right both times, so the whole difference was the width.
+    # The annotation is the test: the kernel permutation is uint32 and this will
+    # not compile if the method stops widening it. The values are checked too,
+    # because a cast that reordered anything would be worse than the dtype.
+    var col = Array[DType.int64](4)
+    col.set_valid(0, 30)
+    col.set_valid(1, 10)
+    col.set_valid(2, 40)
+    col.set_valid(3, 20)
+
+    var order: Array[DType.int64] = Series("v", col^).argsort()
+
+    assert_equal(len(order), 4, "permutation length")
+    assert_equal(Int(order[0]), 1, "smallest is at 1")
+    assert_equal(Int(order[1]), 3, "next is at 3")
+    assert_equal(Int(order[2]), 0, "next is at 0")
+    assert_equal(Int(order[3]), 2, "largest is at 2")
+
+
 def test_a_sort_leaves_its_key_marked_sorted() raises:
     """The flag has to be free after a sort, or nothing will use it.
 
