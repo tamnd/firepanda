@@ -26,7 +26,7 @@ Nothing about a join changes with this. It is the shape of the code that changes
 
 The key alignment used to build a table over the smaller side and probe it with the larger side in one function, which is right for a whole frame join, because such a join builds once, probes once and throws the table away. A streaming join cannot work that way. It builds once and then probes with every chunk that arrives, so the table has to outlive the pass that filled it. `_build` now returns the table and `_probe_into` reads it, and the whole frame join is those two called one after the other.
 
-Both routes, the one indexed by the key value and the one indexed by its hash, get a probe function each. Putting them in one loop behind a flag was tried first and it was not free, so they are separate.
+Both routes, the one indexed by the key value and the one indexed by its hash, get a probe function each. One loop behind a flag was tried first and it measured slower, but that measurement did not survive the protocol described below, so the two shapes have not actually been told apart. They are kept separate because that is the shape the hot loop wants, not because there is a number saying so.
 
 Measured on an i9-13900K at ten million rows, twelve runs of two prebuilt binaries alternating in an old, new, new, old order so that a machine drifting over the session cancels out rather than landing on whichever variant ran second. Pairing is 8.35 ms before and 8.27 after, the full inner join 31.69 and 31.75, the projected one 19.43 and 19.59. That is a wash on every row, which is the whole claim.
 

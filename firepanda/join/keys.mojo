@@ -609,13 +609,13 @@ def _probe_into[
     per chunk with the same built side.
 
     The two routes get a function each and the choice is made here, rather than
-    one loop that reads `built.direct` per morsel. That was tried and it cost
-    between three and eight percent on the join microbenchmarks, measured over
-    three alternating pairs on a quiet machine, which is more than a branch
-    taken once per sixty five thousand rows can explain. What it costs is the
-    hot loop: a body holding both routes reads its constants off a struct and
-    carries the other route's frame, and the direct probe is four instructions a
-    row, so anything the optimizer gives up on shows.
+    one loop that reads `built.direct` per morsel. One loop was tried first and
+    it measured slower, but the measurement was later found to be an artifact of
+    the machine drifting slower over the session, so the honest statement is
+    that the two shapes have not been told apart. The split is kept anyway
+    because it is the shape the hot loop wants: the direct probe is about four
+    instructions a row, and a body holding both routes has to read its constants
+    off a struct and carry the other route's frame through the closure.
 
     Args:
         built: The table the build side filled.
