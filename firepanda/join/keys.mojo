@@ -333,6 +333,73 @@ def _probe_route[
     return _build_and_probe[dt](left, 0, right, left_rows, codes)
 
 
+struct _Built[dt: DType](Movable):
+    """The build side's keys in a table, ready to be asked about a probe side.
+
+    A whole frame join builds this, probes it once with the other frame and
+    throws it away, which is why the two used to be one function. A streaming
+    join cannot: it builds once and then probes with every chunk that arrives,
+    so the table has to be a thing that outlives the pass that filled it. That
+    is all this is, the state the probe reads, kept.
+
+    Both routes live in one struct rather than two, because a `List` of trait
+    objects is not expressible in Mojo 1.0 and a `Variant` here would be two
+    branches in the probe either way. The unused route costs one empty `Buffer`
+    or one empty `HashTable`, which is a 64-byte block and a few words.
+    """
+
+    var direct: Bool
+    """Whether the key value indexes the table, rather than its hash."""
+
+    var seats: Buffer
+    """The direct route's slots, four bytes each, or an empty buffer.
+
+    Holds the ordinal plus one, so a zero left by the allocation means the slot
+    was never filled and no initializing pass is needed.
+    """
+
+    var span: Int
+    """How many slots `seats` has, or zero."""
+
+    var base: Scalar[Self.dt]
+    """The key value that indexes slot zero, or zero."""
+
+    var table: HashTable
+    """The hashed route's table, or an empty one."""
+
+    var miss: UInt32
+    """The ordinal a probe row that matched nothing is given.
+
+    One past the last real one, so the ordinal count is this plus one.
+    """
+
+    def __init__(
+        out self,
+        direct: Bool,
+        var seats: Buffer,
+        span: Int,
+        base: Scalar[Self.dt],
+        var table: HashTable,
+        miss: UInt32,
+    ):
+        """Constructs a built side.
+
+        Args:
+            direct: Whether the direct route was taken.
+            seats: The direct route's slots, or an empty buffer.
+            span: How many slots there are.
+            base: The value indexing slot zero.
+            table: The hashed route's table, or an empty one.
+            miss: The ordinal for a row that matches nothing.
+        """
+        self.direct = direct
+        self.seats = seats^
+        self.span = span
+        self.base = base
+        self.table = table^
+        self.miss = miss
+
+
 def _build_and_probe[
     dt: DType
 ](
@@ -342,16 +409,7 @@ def _build_and_probe[
     probe_at: Int,
     mut codes: Array[DType.uint32],
 ) raises -> Int:
-    """Picks the table the build side wants and runs both passes through it.
-
-    An integer key whose values sit in a narrow enough range gets a table indexed
-    by the value itself, which hashes nothing on either side and turns the probe
-    into one load. The width worth accepting here is the build side's own height
-    rather than `DIRECT_LIMIT`, because this table is standing in for a hash
-    table over the same keys and costs four bytes a slot against sixteen, so a
-    span near the row count is a table that is smaller than the one it replaces
-    even when it is half empty. `factorize_dense` draws the line in the same
-    place and says why at length.
+    """Builds the smaller side's table and asks it about every larger side row.
 
     Args:
         build: The smaller side's key column.
@@ -369,48 +427,79 @@ def _build_and_probe[
     Raises:
         Error: If the parallel probe raises.
     """
+    var built = _build[dt](build, build_at, codes)
+    _probe_into[dt](built, probe, probe_at, codes)
+    return Int(built.miss) + 1
+
+
+def _build[
+    dt: DType
+](
+    build: Array[dt], build_at: Int, mut codes: Array[DType.uint32]
+) raises -> _Built[dt]:
+    """Picks the table the build side wants and fills it and its own codes.
+
+    An integer key whose values sit in a narrow enough range gets a table indexed
+    by the value itself, which hashes nothing on either side and turns the probe
+    into one load. The width worth accepting here is the build side's own height
+    rather than `DIRECT_LIMIT`, because this table is standing in for a hash
+    table over the same keys and costs four bytes a slot against sixteen, so a
+    span near the row count is a table that is smaller than the one it replaces
+    even when it is half empty. `factorize_dense` draws the line in the same
+    place and says why at length.
+
+    Args:
+        build: The smaller side's key column.
+        build_at: Where its codes start.
+        codes: The build side's stretch is filled with its ordinals.
+
+    Parameters:
+        dt: The key dtype.
+
+    Returns:
+        The table, ready to probe.
+
+    Raises:
+        Error: If the build raises.
+    """
     comptime if dt.is_integral():
         var ceiling = len(build)
         if ceiling < DIRECT_LIMIT:
             ceiling = DIRECT_LIMIT
         var plan = direct_plan[dt](build, ceiling)
         if plan.span >= 0:
-            return _direct_route[dt](
-                build, build_at, probe, probe_at, plan.span, plan.base, codes
+            return _build_direct[dt](
+                build, build_at, plan.span, plan.base, codes
             )
-    return _hashed_route[dt](build, build_at, probe, probe_at, codes)
+    return _build_hashed[dt](build, build_at, codes)
 
 
-def _direct_route[
+def _build_direct[
     dt: DType
 ](
     build: Array[dt],
     build_at: Int,
-    probe: Array[dt],
-    probe_at: Int,
     span: Int,
     base: Scalar[dt],
     mut codes: Array[DType.uint32],
-) raises -> Int:
-    """Aligns through a table indexed by the key value.
+) raises -> _Built[dt]:
+    """Fills a table indexed by the key value.
 
     Args:
         build: The smaller side's key column.
         build_at: Where its codes start.
-        probe: The larger side's key column.
-        probe_at: Where its codes start.
         span: How many slots the table needs.
         base: The value that indexes slot zero.
-        codes: Filled with one ordinal per row of both sides.
+        codes: The build side's stretch is filled with its ordinals.
 
     Parameters:
         dt: The key dtype.
 
     Returns:
-        The ordinal count, counting the miss ordinal.
+        The table, ready to probe.
 
     Raises:
-        Error: If the parallel probe raises.
+        Error: If a read raises, which it does not.
     """
     # Zero means unseen, so the ordinal is stored plus one and the table needs no
     # initialization pass. `Buffer` already handed back zeroed memory.
@@ -436,49 +525,17 @@ def _direct_route[
         else:
             out.unsafe_offset(build_at + i).unsafe_write(stored - 1)
 
-    var miss = UInt32(found)
-    var probe_rows = len(probe)
-    var probe_nulls = probe.null_count() > 0
-
-    def look(start: Int, stop: Int) raises {mut codes, imm}:
-        var into = codes.unsafe_ptr()
-        var reads = probe.unsafe_ptr()
-        var slots = seats.bitcast[DType.uint32]()
-        for i in range(start, stop):
-            var to = probe_at + i
-            if probe_nulls and not probe.data.validity.get(i):
-                into.unsafe_offset(to).unsafe_write(miss)
-                continue
-            var at = Int(reads.unsafe_offset(i).unsafe_load()) - Int(base)
-            if at < 0 or at >= span:
-                # A key outside the build side's range, which the table has no
-                # slot for and which nothing on the other side can match.
-                into.unsafe_offset(to).unsafe_write(miss)
-                continue
-            var stored = slots.unsafe_offset(at).unsafe_load()
-            into.unsafe_offset(to).unsafe_write(
-                miss if stored == 0 else stored - 1
-            )
-
-    if probe_rows >= PARALLEL_PROBE_ROWS:
-        parallel_morsels(look, probe_rows, PROBE_MORSEL_ROWS)
-    else:
-        look(0, probe_rows)
-
-    _ = seats^
-    return found + 1
+    return _Built[dt](
+        True, seats^, span, base, HashTable(0, DEFAULT_SEED), UInt32(found)
+    )
 
 
-def _hashed_route[
+def _build_hashed[
     dt: DType
 ](
-    build: Array[dt],
-    build_at: Int,
-    probe: Array[dt],
-    probe_at: Int,
-    mut codes: Array[DType.uint32],
-) raises -> Int:
-    """Aligns through the hash table.
+    build: Array[dt], build_at: Int, mut codes: Array[DType.uint32]
+) raises -> _Built[dt]:
+    """Fills the hash table.
 
     The build writes into a list of its own and the result is copied across,
     because `HashTable.build` indexes the output by the same row number it
@@ -490,18 +547,16 @@ def _hashed_route[
     Args:
         build: The smaller side's key column.
         build_at: Where its codes start.
-        probe: The larger side's key column.
-        probe_at: Where its codes start.
-        codes: Filled with one ordinal per row of both sides.
+        codes: The build side's stretch is filled with its ordinals.
 
     Parameters:
         dt: The key dtype.
 
     Returns:
-        The ordinal count, counting the miss ordinal.
+        The table, ready to probe.
 
     Raises:
-        Error: If the parallel probe raises.
+        Error: If the build raises.
     """
     var build_rows = len(build)
     var build_nulls = build.null_count() > 0
@@ -536,6 +591,141 @@ def _hashed_route[
         )
 
     var miss = UInt32(len(table))
+    return _Built[dt](False, Buffer(0), 0, Scalar[dt](), table^, miss)
+
+
+def _probe_into[
+    dt: DType
+](
+    built: _Built[dt],
+    probe: Array[dt],
+    probe_at: Int,
+    mut codes: Array[DType.uint32],
+) raises:
+    """Asks the built side about every row of a probe side.
+
+    Reads the table and writes nothing to it, which is what lets every core do
+    this at once, and it is also what will let a streaming join call this once
+    per chunk with the same built side.
+
+    The two routes get a function each and the choice is made here, rather than
+    one loop that reads `built.direct` per morsel. That was tried and it cost
+    between three and eight percent on the join microbenchmarks, measured over
+    three alternating pairs on a quiet machine, which is more than a branch
+    taken once per sixty five thousand rows can explain. What it costs is the
+    hot loop: a body holding both routes reads its constants off a struct and
+    carries the other route's frame, and the direct probe is four instructions a
+    row, so anything the optimizer gives up on shows.
+
+    Args:
+        built: The table the build side filled.
+        probe: The probe side's key column.
+        probe_at: Where its codes start.
+        codes: The probe side's stretch is filled with its ordinals.
+
+    Parameters:
+        dt: The key dtype.
+
+    Raises:
+        Error: If the parallel probe raises.
+    """
+    if len(probe) == 0:
+        return
+    if built.direct:
+        _probe_direct[dt](
+            built.seats,
+            built.span,
+            built.base,
+            built.miss,
+            probe,
+            probe_at,
+            codes,
+        )
+    else:
+        _probe_hashed[dt](built.table, built.miss, probe, probe_at, codes)
+
+
+def _probe_direct[
+    dt: DType
+](
+    seats: Buffer,
+    span: Int,
+    base: Scalar[dt],
+    miss: UInt32,
+    probe: Array[dt],
+    probe_at: Int,
+    mut codes: Array[DType.uint32],
+) raises:
+    """Reads a table indexed by the key value, once per probe row.
+
+    Args:
+        seats: The table's slots.
+        span: How many slots it has.
+        base: The value that indexes slot zero.
+        miss: The ordinal for a row that matches nothing.
+        probe: The probe side's key column.
+        probe_at: Where its codes start.
+        codes: The probe side's stretch is filled with its ordinals.
+
+    Parameters:
+        dt: The key dtype.
+
+    Raises:
+        Error: If the parallel probe raises.
+    """
+    var probe_rows = len(probe)
+    var probe_nulls = probe.null_count() > 0
+
+    def look(start: Int, stop: Int) raises {mut codes, imm}:
+        var into = codes.unsafe_ptr()
+        var reads = probe.unsafe_ptr()
+        var slots = seats.bitcast[DType.uint32]()
+        for i in range(start, stop):
+            var to = probe_at + i
+            if probe_nulls and not probe.data.validity.get(i):
+                into.unsafe_offset(to).unsafe_write(miss)
+                continue
+            var at = Int(reads.unsafe_offset(i).unsafe_load()) - Int(base)
+            if at < 0 or at >= span:
+                # A key outside the build side's range, which the table has no
+                # slot for and which nothing on the other side can match.
+                into.unsafe_offset(to).unsafe_write(miss)
+                continue
+            var stored = slots.unsafe_offset(at).unsafe_load()
+            into.unsafe_offset(to).unsafe_write(
+                miss if stored == 0 else stored - 1
+            )
+
+    if probe_rows >= PARALLEL_PROBE_ROWS:
+        parallel_morsels(look, probe_rows, PROBE_MORSEL_ROWS)
+    else:
+        look(0, probe_rows)
+
+
+def _probe_hashed[
+    dt: DType
+](
+    table: HashTable,
+    miss: UInt32,
+    probe: Array[dt],
+    probe_at: Int,
+    mut codes: Array[DType.uint32],
+) raises:
+    """Reads the hash table, a chunk of probe rows at a time.
+
+    Args:
+        table: The table the build side filled.
+        miss: The ordinal for a row that matches nothing.
+        probe: The probe side's key column.
+        probe_at: Where its codes start.
+        codes: The probe side's stretch is filled with its ordinals.
+
+    Parameters:
+        dt: The key dtype.
+
+    Raises:
+        Error: If the parallel probe raises.
+    """
     var probe_rows = len(probe)
     var probe_nulls = probe.null_count() > 0
 
@@ -565,5 +755,3 @@ def _hashed_route[
         parallel_morsels(look, probe_rows, PROBE_MORSEL_ROWS)
     else:
         look(0, probe_rows)
-
-    return Int(miss) + 1

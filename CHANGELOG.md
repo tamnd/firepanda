@@ -20,6 +20,18 @@ Ten million fact rows against a thousand dimension rows on an i9-13900K, keeping
 
 The names are the output's names and they are worked out exactly as they would be without a projection, including the suffix a colliding right column gets, so asking for a column does not change what it is called. They are also built in the order they were asked for. A name the result does not have, or one asked for twice, is an error rather than a silent difference in shape.
 
+### The join's build side is a thing now, instead of a phase
+
+Nothing about a join changes with this. It is the shape of the code that changes, and it is groundwork for the streaming join in M2b.
+
+The key alignment used to build a table over the smaller side and probe it with the larger side in one function, which is right for a whole frame join, because such a join builds once, probes once and throws the table away. A streaming join cannot work that way. It builds once and then probes with every chunk that arrives, so the table has to outlive the pass that filled it. `_build` now returns the table and `_probe_into` reads it, and the whole frame join is those two called one after the other.
+
+Both routes, the one indexed by the key value and the one indexed by its hash, get a probe function each. Putting them in one loop behind a flag was tried first and it was not free, so they are separate.
+
+Measured on an i9-13900K at ten million rows, twelve runs of two prebuilt binaries alternating in an old, new, new, old order so that a machine drifting over the session cancels out rather than landing on whichever variant ran second. Pairing is 8.35 ms before and 8.27 after, the full inner join 31.69 and 31.75, the projected one 19.43 and 19.59. That is a wash on every row, which is the whole claim.
+
+The protocol is worth writing down because the first three attempts at this measurement said the change cost between three and eight percent, and it does not. Each of those ran old then new in each pair, rebuilding in between, and the machine was getting slower over the hour, so the later half of every pair was penalised. The alternation above is what makes the drift cancel, and building both binaries up front is what stops a rebuild sitting between the two things being compared.
+
 ## [0.6.40] - 2026-09-04
 
 Built against Mojo 1.0.0 (ed45d567).
