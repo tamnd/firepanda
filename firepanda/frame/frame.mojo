@@ -70,6 +70,7 @@ from firepanda.kernel.nulls import all_valid_mask, coalesce_any
 from firepanda.kernel.reduce import reduce_any
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.sort import argsort_any_into, identity_permutation
+from firepanda.kernel.topn import group_top_rows_any
 
 from .groupby import AggSpec
 from .series import Series, _check_range, _clamp, _to_positions
@@ -985,6 +986,142 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             out = out.sort_values(by, down, front)
 
         return out^
+
+    def _group_top(
+        self,
+        by: List[String],
+        column: String,
+        n: Int,
+        largest: Bool,
+        dropna: Bool,
+    ) raises -> Self:
+        """The body behind `group_nlargest` and `group_nsmallest`.
+
+        Args:
+            by: The key columns.
+            column: The column being ranked.
+            n: How many rows to keep per group.
+            largest: True to keep the highest values, False the lowest.
+            dropna: Drop the groups whose key contains a null.
+
+        Returns:
+            The kept rows of every column.
+
+        Raises:
+            As `group_nlargest` does.
+        """
+        var at = List[Int](capacity=len(by))
+        for i in range(len(by)):
+            var idx = self.schema.index_of(by[i])
+            for j in range(len(at)):
+                if at[j] == idx:
+                    raise Error(
+                        "group top: key column " + by[i] + " was given twice"
+                    )
+            at.append(idx)
+
+        var grouping = group_ordinals(self.column_refs(), at, self.rows)
+        var top = group_top_rows_any(
+            self.columns[self.schema.index_of(column)].only(),
+            grouping.codes,
+            grouping.groups,
+            n,
+            largest,
+        )
+
+        # A group's key values are whatever its representative row holds, so
+        # dropping the null keys is a question about that one row. Ask each key
+        # column whether it has any nulls at all first, the way `group_by` does,
+        # because the usual answer is no and then the walk goes away entirely.
+        var risky = List[Int]()
+        if dropna:
+            for k in range(len(at)):
+                if self.columns[at[k]].null_count() > 0:
+                    risky.append(at[k])
+
+        if len(risky) == 0:
+            return self.take(top.rows_at)
+
+        var wanted = List[Int](capacity=len(top.rows_at))
+        var cursor = 0
+        for g in range(grouping.groups):
+            var ok = True
+            for k in range(len(risky)):
+                if (
+                    not self.columns[risky[k]]
+                    .only()
+                    .is_valid(grouping.rows_at[g])
+                ):
+                    ok = False
+                    break
+            if ok:
+                for j in range(top.counts[g]):
+                    wanted.append(top.rows_at[cursor + j])
+            cursor += top.counts[g]
+        return self.take(wanted)
+
+    def group_nlargest(
+        self,
+        by: List[String],
+        column: String,
+        n: Int,
+        dropna: Bool = True,
+    ) raises -> Self:
+        """Keeps each group's `n` rows with the largest values in one column.
+
+        This is `df.groupby(by)[column].nlargest(n)` with the rest of the frame
+        carried along, which is what a query wanting the top few rows of every
+        group actually needs. The result keeps every column and every one of the
+        input's dtypes, because it is a selection of rows and not a reduction.
+
+        The groups come back in first-seen order and the rows inside a group come
+        back best first. A row with a null or a NaN in the ranked column is never
+        kept, so a group with fewer than `n` present values contributes fewer
+        than `n` rows. Two rows with the same value are separated by their
+        position, the earlier one winning, which is what pandas does and is what
+        makes the answer independent of how the work was split across cores.
+
+        Args:
+            by: The key columns. At least one, no repeats.
+            column: The column to rank by. Must be a numeric one.
+            n: How many rows to keep per group. At least one.
+            dropna: Drop the groups whose key contains a null, as pandas does.
+
+        Returns:
+            A frame of the kept rows, with the same columns as the input.
+
+        Raises:
+            If a name is missing or repeated, if the ranked column is not
+            numeric, if `n` is not positive, or if a key dtype has no physical
+            layout.
+        """
+        return self._group_top(by, column, n, True, dropna)
+
+    def group_nsmallest(
+        self,
+        by: List[String],
+        column: String,
+        n: Int,
+        dropna: Bool = True,
+    ) raises -> Self:
+        """Keeps each group's `n` rows with the smallest values in one column.
+
+        `group_nlargest` read the other way round, and the same in every other
+        respect, ties included: the earlier row still wins.
+
+        Args:
+            by: The key columns. At least one, no repeats.
+            column: The column to rank by. Must be a numeric one.
+            n: How many rows to keep per group. At least one.
+            dropna: Drop the groups whose key contains a null, as pandas does.
+
+        Returns:
+            A frame of the kept rows, with the same columns as the input.
+
+        Raises:
+            As `group_nlargest` does.
+        """
+        return self._group_top(by, column, n, False, dropna)
 
     def group_agg(
         self,
