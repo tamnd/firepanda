@@ -336,6 +336,30 @@ def test_cast_matches_the_twin_and_keeps_the_nulls() raises:
         assert_almost_equal(widened[i], Float64(col[i]))
 
 
+def test_a_cast_past_the_split_converts_every_row() raises:
+    # The cast runs inline in one morsel and on every core past that, and the
+    # loop steps a SIMD register at a time, so a worker whose morsel does not
+    # end on a register boundary would write into the next worker's rows. A
+    # morsel is a hundred and twenty eight thousand rows and the widest register
+    # here is sixty four int8 lanes, so the boundaries divide; this is the test
+    # that says so rather than the comment. The length is a prime past three
+    # morsels, which puts the last one short and off every boundary at once.
+    comptime rows = 393_241
+    var col = build[DType.int64](rows, 7)
+
+    var narrowed = cast_to[DType.int64, DType.int8](col)
+    var widened = cast_to[DType.int64, DType.float64](col)
+    assert_equal(len(narrowed), rows)
+    assert_equal(len(widened), rows)
+
+    var wrong = -1
+    for i in range(rows):
+        if narrowed[i] != Int8(col[i]) or widened[i] != Float64(col[i]):
+            wrong = i
+            break
+    assert_equal(wrong, -1, "a converted row past the morsel split is wrong")
+
+
 def test_take_matches_the_twin() raises:
     var col = build[DType.int64](64, 5)
     var picks = List[Int]()
