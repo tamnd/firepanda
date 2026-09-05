@@ -18,8 +18,10 @@ from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array, from_list
 from firepanda.frame.frame import DataFrame
+from firepanda.frame.groupby import AggSpec
 from firepanda.frame.index import Index
 from firepanda.frame.series import Series
+from firepanda.kernel.group import AggKind
 
 
 def unnamed() -> Optional[String]:
@@ -261,6 +263,31 @@ def test_labels_survive_two_operations_in_a_row() raises:
     assert_equal(len(built), 3, "three rows")
     for i in range(3):
         assert_equal(label_at(built, i), 4 + i, "label " + String(i))
+
+
+def test_a_grouped_result_gets_fresh_labels() raises:
+    """A group is not a row of the input, so it does not inherit a row's label.
+
+    The sort at the end of a group by permutes the result, and before this was
+    pinned the permutation of the group ordinals came out as the row labels, so
+    grouping a frame gave back rows labelled by where a group happened to land in
+    the hash table. That is not a fact about the data. It went unnoticed in the
+    library and was caught by the conformance suite, where it turned fifty passing
+    cases red at once.
+    """
+    var columns = List[Series]()
+    columns.append(
+        Series("k", from_list[DType.int64]([Int64(30), 10, 20, 10, 30]))
+    )
+    columns.append(Series("v", from_list[DType.int64]([Int64(1), 2, 3, 4, 5])))
+    var df = DataFrame.from_series(columns^)
+    var specs = List[AggSpec]()
+    specs.append(AggSpec("v", AggKind.SUM))
+    var grouped = df.group_by(["k"], specs^, True, True)
+    assert_equal(len(grouped), 3, "three distinct keys")
+    assert_true(
+        grouped.index.is_default(), "a group by hands back the default labels"
+    )
 
 
 def main() raises:

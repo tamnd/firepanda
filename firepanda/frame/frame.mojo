@@ -1005,6 +1005,16 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                 front.append(False)
             out = out.sort_values(by, down, front)
 
+        # A grouped result gets fresh labels, because its rows are groups and not
+        # rows of the input. Without this it would keep whatever the dropna filter
+        # and the sort above left behind, which is the permutation of the group
+        # ordinals and is not a fact about anything: grouping a frame and getting
+        # back rows labelled 9, 3 and 218 says only which group happened to hash
+        # where. pandas labels these by the key instead, which is the second stage
+        # in https://github.com/tamnd/firepanda/issues/191 and is what will replace
+        # this line. Until then the default is the honest answer and it is also the
+        # one `as_index=False` asks for.
+        out.index = Index(len(out))
         return out^
 
     def _group_top(
