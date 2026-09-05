@@ -79,6 +79,33 @@ def _docstring(text: str, indent: str) -> list[str]:
     return [f'{indent}"""{lines[0]}'] + [indent + line for line in lines[1:]] + [f'{indent}"""']
 
 
+def _guarded(statement: str, indent: str) -> list[str]:
+    """Wraps one delegating statement in the error translation.
+
+    Every generated member gets this and none of them gets to opt out, because
+    the one that opts out is the one that hands a user a bare `Exception` with a
+    `firepanda:column:` prefix still on the front of it.
+
+    `from None` rather than `from error`. The error being suppressed is the
+    binding layer's own untyped wrapper around a message this library wrote, so
+    a chained traceback would show the same sentence twice and call the second
+    one the direct cause of the first.
+
+    Args:
+        statement: The `return ...` line to guard.
+        indent: The indent of the method body.
+
+    Returns:
+        The lines to emit.
+    """
+    return [
+        f"{indent}try:",
+        f"{indent}    {statement}",
+        f"{indent}except Exception as error:",
+        f"{indent}    raise translate(error) from None",
+    ]
+
+
 @dataclass(frozen=True)
 class Binding:
     """One callable on the extension side.
@@ -279,6 +306,17 @@ FUNCTIONS = (
         returns="DataFrame",
         py_params=(("filepath_or_buffer", "str"),),
     ),
+    # Not a user entry point. Every row of the error table in
+    # `python/firepanda/errors.py` has to be exercised from Python, and five
+    # bound methods cannot reach most of them, so the Mojo side offers a way to
+    # raise one of each on request. It is registered under a leading underscore
+    # and it is the only thing in the extension that is here for the tests.
+    Binding(
+        mojo="raise_for_test",
+        name="_raise_for_test",
+        doc="Raises one classified error of the given kind. For tests only.",
+        params=(("kind", "str"),),
+    ),
 )
 
 TYPES: tuple[Exposed, ...] = (FRAME,)
@@ -296,6 +334,47 @@ BANNER_PY = (
     "# Run `python tools/bindings.py` after changing the table in that file.\n"
     "# CI runs it with --check and fails if this file is out of date.\n"
 )
+
+
+MOJO_COLUMNS = 80
+
+
+def _register_call(opener: str, name: str, doc: str) -> list[str]:
+    """Writes one registration call the way `mojo format` would have written it.
+
+    The generated file is checked by `tools/format_check.sh` like any other Mojo
+    source, so emitting a call that is merely valid is not enough, it has to be
+    the exact text the formatter produces. The formatter keeps the name and the
+    docstring on one line while they fit in eighty columns and splits them onto
+    their own lines when they do not, and getting that wrong shows up as a
+    format failure on a generated file, which is a confusing thing to be handed.
+
+    Args:
+        opener: The call up to and including the open bracket.
+        name: The name to register under.
+        doc: The docstring for it.
+
+    Returns:
+        The lines of the call, including the closing bracket.
+    """
+    short = f'        "{name}", docstring="{doc}"'
+    if len(short) <= MOJO_COLUMNS:
+        return [opener, short, "    )"]
+    if len(doc) + 14 > MOJO_COLUMNS:
+        raise SystemExit(
+            f"the docstring for {name} is too long for the generator to lay out"
+            " the way mojo format wants, which needs it to fit on one line at an"
+            f" indent of twelve. Shorten it to {MOJO_COLUMNS - 14} characters or"
+            f" fewer, it is currently {len(doc)}."
+        )
+    return [
+        opener,
+        f'        "{name}",',
+        "        docstring=(",
+        f'            "{doc}"',
+        "        ),",
+        "    )",
+    ]
 
 
 def registration() -> str:
@@ -325,9 +404,7 @@ def registration() -> str:
     out.append('    """')
 
     for fn in FUNCTIONS:
-        out.append(f"    module.def_function[{fn.mojo}](")
-        out.append(f'        "{fn.name}", docstring="{fn.doc}"')
-        out.append("    )")
+        out.extend(_register_call(f"    module.def_function[{fn.mojo}](", fn.name, fn.doc))
 
     for t in TYPES:
         out.append("")
@@ -335,9 +412,9 @@ def registration() -> str:
         if t.init:
             out.append(f"    _ = {t.name.lower()}.def_py_init[{t.init}]()")
         for b in t.bindings:
-            out.append(f"    _ = {t.name.lower()}.def_method[{b.mojo}](")
-            out.append(f'        "{b.name}", docstring="{b.doc}"')
-            out.append("    )")
+            out.extend(
+                _register_call(f"    _ = {t.name.lower()}.def_method[{b.mojo}](", b.name, b.doc)
+            )
     return "\n".join(out) + "\n"
 
 
@@ -362,8 +439,8 @@ def stubs() -> str:
         out.append(f"    def {b.name}(self{args}) -> {b.returns}:")
         out.append(f'        """{b.doc}"""')
         out.append("        ...")
-    out.append("")
     for fn in FUNCTIONS:
+        out.append("")
         args = ", ".join(f"{name}: {kind}" for name, kind in fn.params)
         out.append(f"def {fn.name}({args}) -> {fn.returns}:")
         out.append(f'    """{fn.doc}"""')
@@ -388,9 +465,14 @@ def wrapper() -> str:
     out.append("it is not the extension object itself is document 13: a bound Mojo type")
     out.append("cannot carry a property, an operator or a dunder, cannot be subclassed and")
     out.append("has no __dict__, so 28 percent of pandas is unreachable from there.")
+    out.append("")
+    out.append("Every delegation is wrapped, because a Mojo error arrives as a bare")
+    out.append("Exception and `errors.translate` is what puts the class back. The try costs")
+    out.append("nothing when nothing raises, which is measured in document 14.")
     out.append('"""\n')
     out.append("from __future__ import annotations\n")
     out.append("from . import _firepanda")
+    out.append("from .errors import translate")
 
     out.append("")
     out.append("__all__ = [" + ", ".join(f'"{t.py}"' for t in TYPES) + "]")
@@ -417,19 +499,20 @@ def wrapper() -> str:
                 out.append(f"    def {m.name}(self{sig}) -> {m.returns}:")
             out.append(f'        """{m.doc}"""')
             body = f"{t.py}({m.body})" if m.wraps else m.body
-            out.append(f"        return {body}")
+            out.extend(_guarded(f"return {body}", "        "))
 
-    out.append("")
     for fn in FUNCTIONS:
         params = fn.py_params or fn.params
         args = ", ".join(f"{name}: {kind}" for name, kind in params)
         passed = ", ".join(name for name, _ in params)
         out.append("")
+        out.append("")
         out.append(f"def {fn.name}({args}) -> {fn.returns}:")
         out.append(f'    """{fn.doc}"""')
         wrap = fn.returns if fn.returns in {t.py for t in TYPES} else ""
         call = f"_firepanda.{fn.name}({passed})"
-        out.append(f"    return {wrap}({call})" if wrap else f"    return {call}")
+        body = f"return {wrap}({call})" if wrap else f"return {call}"
+        out.extend(_guarded(body, "    "))
     return "\n".join(out) + "\n"
 
 

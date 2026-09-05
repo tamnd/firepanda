@@ -22,6 +22,46 @@ from std.python.bindings import check_arguments_arity
 
 from firepanda.frame import DataFrame
 from firepanda.io.read import read_csv
+from firepanda.py.errors import (
+    CANCELLED,
+    COLUMN,
+    DTYPE,
+    IO,
+    UNSUPPORTED,
+    VALUE,
+    retagged,
+    tagged,
+)
+
+
+def _int(value: PythonObject, name: String) raises -> Int:
+    """Reads a Python integer, and says which argument was wrong if it is not one.
+
+    `Int(py=value)` raises `invalid literal for int() with base 10: 'x'`, which
+    is the right complaint and names neither the argument nor the function. A
+    user with three integer arguments cannot tell from it which one they got
+    wrong.
+
+    Args:
+        value: What Python passed.
+        name: The parameter name, for the message.
+
+    Returns:
+        The integer.
+    """
+    try:
+        return Int(py=value)
+    except:
+        raise tagged(
+            DTYPE,
+            String(
+                name,
+                " must be an integer, got ",
+                Python.type(value).__name__,
+                " ",
+                value.__repr__(),
+            ),
+        )
 
 
 @fieldwise_init
@@ -48,10 +88,13 @@ struct PyDataFrame(Movable, Writable):
             kwargs: Keyword arguments, of which none are accepted.
         """
         check_arguments_arity(0, args, "DataFrame")
-        raise Error(
-            "construct a frame with firepanda.read_csv or"
-            " firepanda.read_parquet; building one from columns is not wired up"
-            " yet"
+        raise tagged(
+            UNSUPPORTED,
+            (
+                "construct a frame with firepanda.read_csv or"
+                " firepanda.read_parquet; building one from columns is not"
+                " wired up yet"
+            ),
         )
 
     @staticmethod
@@ -124,7 +167,7 @@ struct PyDataFrame(Movable, Writable):
             A new frame.
         """
         return PythonObject(
-            alloc=Self(Self._frame(py_self)[].frame.head(Int(py=n)))
+            alloc=Self(Self._frame(py_self)[].frame.head(_int(n, "n")))
         )
 
     @staticmethod
@@ -139,7 +182,7 @@ struct PyDataFrame(Movable, Writable):
             A new frame.
         """
         return PythonObject(
-            alloc=Self(Self._frame(py_self)[].frame.tail(Int(py=n)))
+            alloc=Self(Self._frame(py_self)[].frame.tail(_int(n, "n")))
         )
 
     def write_to(self, mut writer: Some[Writer]):
@@ -167,10 +210,57 @@ struct PyDataFrame(Movable, Writable):
 def open_csv(path: PythonObject) raises -> PythonObject:
     """Reads a CSV file into a frame.
 
+    The reader's own message is kept, because it says which file and what the
+    operating system said about it, which is more than this function knows. All
+    that is added is the classification, which this function knows and the
+    reader does not: everything that goes wrong reading a file is an `OSError`
+    to a Python caller.
+
     Args:
         path: The path to read.
 
     Returns:
         A new frame.
     """
-    return PythonObject(alloc=PyDataFrame(read_csv(String(path))))
+    try:
+        return PythonObject(alloc=PyDataFrame(read_csv(String(path))))
+    except cause:
+        raise retagged(IO, cause)
+
+
+def raise_for_test(kind: PythonObject) raises -> PythonObject:
+    """Raises one classified error of each kind, so the table can be tested.
+
+    Every row of the mapping in `python/firepanda/errors.py` has to be exercised
+    from Python, and the bound surface is five methods, none of which can reach
+    most of the rows. This is the way in. It is registered as `_raise_for_test`
+    and it is the one entry point in the extension that exists for the tests
+    rather than for a user.
+
+    The alternative was to test the mapping against messages written in the test
+    file, which would have tested the Python half against itself and left the
+    thing that actually matters, that the two halves agree on the wire format,
+    unchecked.
+
+    Args:
+        kind: The bare kind, such as `column`.
+
+    Returns:
+        Never. It always raises.
+    """
+    var which = String(kind)
+    if which == "column":
+        raise tagged(COLUMN, "no such column 'regoin'")
+    if which == "dtype":
+        raise tagged(DTYPE, "cannot add int64 and float64")
+    if which == "value":
+        raise tagged(VALUE, "n must not be negative")
+    if which == "io":
+        raise tagged(IO, "no such file '/nowhere'")
+    if which == "unsupported":
+        raise tagged(UNSUPPORTED, "object dtype is not supported")
+    if which == "cancelled":
+        raise tagged(CANCELLED, "interrupted")
+    if which == "untagged":
+        raise Error("something went wrong a long way down")
+    raise tagged(VALUE, String("no such kind ", kind.__repr__()))

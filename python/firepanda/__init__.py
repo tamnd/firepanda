@@ -19,6 +19,12 @@ Both halves are generated from the table in `tools/bindings.py`, because they ar
 the two files in this project most likely to drift apart and they sit on opposite
 sides of a language boundary where nothing would notice.
 
+`errors` is the other thing that has to live here rather than in Mojo. A bound
+function can raise exactly one Python exception class and it is `Exception`, so
+`except KeyError` around a column lookup would never fire. The class is carried
+across as a prefix on the message and put back on this side, which is document
+14.
+
 The import of `_firepanda` below is deliberately at module level and
 deliberately not guarded. A firepanda install with no extension in it is not a
 degraded install, it is a broken one, and an ImportError naming the missing
@@ -28,10 +34,10 @@ whichever function they called first.
 
 from __future__ import annotations
 
-from . import _firepanda
+from . import _firepanda, errors
 from ._frame import DataFrame, read_csv
 
-__all__ = ["DataFrame", "__version__", "read_csv"]
+__all__ = ["DataFrame", "__version__", "errors", "read_csv"]
 
 __version__: str = _firepanda.version()
 """The version, asked of the extension rather than written down here.
