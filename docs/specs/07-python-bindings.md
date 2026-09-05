@@ -117,6 +117,8 @@ The binding layer maps our error taxonomy onto CPython exception classes:
 
 This table is tested. An error class that changes between versions breaks user code as surely as a signature does, so it is part of the public API and it is in the compatibility policy.
 
+It is also built, and document 14 is how. The short version is that no part of the mechanism this section assumed exists: a bound Mojo function can raise exactly one Python class and it is `Exception`, so the class is carried across as a prefix on the message and put back on the Python side, and each row gets a named subclass of the builtin it promises so that a traceback reads `DTypeError` while `except TypeError` still catches it.
+
 The message text keeps the structure from document 04 section 8: the column, the dtypes, the suggestion, the plan position.
 
 ## 6. The GIL, threads and Ctrl-C

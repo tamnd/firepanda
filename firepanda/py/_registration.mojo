@@ -12,7 +12,7 @@ a loop.
 from std.python import PythonObject
 from std.python.bindings import PythonModuleBuilder
 
-from firepanda.py.frame import PyDataFrame, open_csv
+from firepanda.py.frame import PyDataFrame, open_csv, raise_for_test
 
 
 def register(mut module: PythonModuleBuilder) raises:
@@ -23,6 +23,12 @@ def register(mut module: PythonModuleBuilder) raises:
     """
     module.def_function[open_csv](
         "read_csv", docstring="Reads a CSV file into a frame."
+    )
+    module.def_function[raise_for_test](
+        "_raise_for_test",
+        docstring=(
+            "Raises one classified error of the given kind. For tests only."
+        ),
     )
 
     ref dataframe = module.add_type[PyDataFrame]("DataFrame")

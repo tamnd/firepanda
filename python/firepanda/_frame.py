@@ -9,11 +9,16 @@ Every class here holds an extension object and delegates to it. The reason
 it is not the extension object itself is document 13: a bound Mojo type
 cannot carry a property, an operator or a dunder, cannot be subclassed and
 has no __dict__, so 28 percent of pandas is unreachable from there.
+
+Every delegation is wrapped, because a Mojo error arrives as a bare
+Exception and `errors.translate` is what puts the class back. The try costs
+nothing when nothing raises, which is measured in document 14.
 """
 
 from __future__ import annotations
 
 from . import _firepanda
+from .errors import translate
 
 __all__ = ["DataFrame"]
 
@@ -31,35 +36,67 @@ class DataFrame:
 
     def __len__(self) -> int:
         """The number of rows, so that len(df) works."""
-        return self._inner.length()
+        try:
+            return self._inner.length()
+        except Exception as error:
+            raise translate(error) from None
 
     def __repr__(self) -> str:
         """The frame, rendered."""
-        return repr(self._inner)
+        try:
+            return repr(self._inner)
+        except Exception as error:
+            raise translate(error) from None
 
     def __str__(self) -> str:
         """The frame, rendered. Same as repr, which is what pandas does."""
-        return repr(self._inner)
+        try:
+            return repr(self._inner)
+        except Exception as error:
+            raise translate(error) from None
 
     @property
     def columns(self) -> list[str]:
         """The column labels of the frame."""
-        return self._inner.names()
+        try:
+            return self._inner.names()
+        except Exception as error:
+            raise translate(error) from None
 
     @property
     def shape(self) -> tuple[int, int]:
         """A tuple of the number of rows and the number of columns."""
-        return (self._inner.length(), self._inner.width())
+        try:
+            return (self._inner.length(), self._inner.width())
+        except Exception as error:
+            raise translate(error) from None
 
     def head(self, n: int = 5) -> DataFrame:
         """The first n rows."""
-        return DataFrame(self._inner.head(n))
+        try:
+            return DataFrame(self._inner.head(n))
+        except Exception as error:
+            raise translate(error) from None
 
     def tail(self, n: int = 5) -> DataFrame:
         """The last n rows."""
-        return DataFrame(self._inner.tail(n))
+        try:
+            return DataFrame(self._inner.tail(n))
+        except Exception as error:
+            raise translate(error) from None
 
 
 def read_csv(filepath_or_buffer: str) -> DataFrame:
     """Reads a CSV file into a frame."""
-    return DataFrame(_firepanda.read_csv(filepath_or_buffer))
+    try:
+        return DataFrame(_firepanda.read_csv(filepath_or_buffer))
+    except Exception as error:
+        raise translate(error) from None
+
+
+def _raise_for_test(kind: str) -> object:
+    """Raises one classified error of the given kind. For tests only."""
+    try:
+        return _firepanda._raise_for_test(kind)
+    except Exception as error:
+        raise translate(error) from None

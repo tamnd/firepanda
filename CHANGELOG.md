@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### `except KeyError` works again
+
+Document 07 has had a table since the beginning saying which Python exception each kind of firepanda error becomes, and document 12 then measured that a bound Mojo function can raise exactly one Python class and it is `Exception`. So the table was a promise with no mechanism under it, and a `try: ... except KeyError:` around a column lookup, which is code that predates this project by fifteen years, would not have fired.
+
+It fires now. The class is carried across the boundary as a prefix on the message, `firepanda:column: `, put on by the binding on the way out and read off by `python/firepanda/errors.py` on the way in. Each kind gets a named class that subclasses the builtin its row promised, so a traceback says `DTypeError: cannot add int64 and float64` while `except TypeError` still catches it. The two errors that arrive already broken are handled too: an arity mistake, which the binding layer reports as an `Exception` with the word `TypeError` at the front of its message, becomes an actual `TypeError`, and so does anything raised from a constructor, which the toolchain turns into a `ValueError` instead.
+
+The tag goes on at the boundary rather than at the raise. There are 292 `raise Error(` sites in the core and almost none of them know what they mean to a Python caller, because a bounds check inside a kernel cannot tell a bad argument from a bad plan by the time it runs. The bindings do know, so `read_csv` classifies everything the reader failed at as an `OSError` without touching what the reader said about which file, and the cost is that an unclassified error becomes a `RuntimeError`, which is the last row of the table and the honest answer.
+
+Every generated method is wrapped, with no way to write one that forgets, because the wrapping is generated from the same table as the method. That is only defensible if it is free, so it was measured rather than assumed: interleaved over 25 rounds to get under this machine's 28 nanosecond drift, a guarded call is 100.1 nanoseconds against 99.8 unguarded. `python/tests/test_errors.py` asks the Mojo side to raise one of each kind and checks what arrives, and separately parses the prefixes back out of the Mojo source to assert the two halves know the same set of kinds, because the failure this design is exposed to is drift. `docs/specs/14-errors-across-the-boundary.md` is the whole of it, including the three things that are not done.
+
 ### The merge that folds the workers' tables stops waking thirty two threads for three thousand entries
 
 A parallel factorize gives every worker its own hash table, and a slice drawn from anywhere in a column sees the keys the whole column has, so each of those tables ends up holding roughly the column's whole cardinality. Folding them into one numbering afterwards is the merge, and it runs on every core because on a column of a million distinct keys it has a million entries to dedupe.

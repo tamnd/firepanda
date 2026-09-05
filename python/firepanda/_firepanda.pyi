@@ -29,6 +29,10 @@ def read_csv(path: str) -> DataFrame:
     """Reads a CSV file into a frame."""
     ...
 
+def _raise_for_test(kind: str) -> object:
+    """Raises one classified error of the given kind. For tests only."""
+    ...
+
 def version() -> str:
     """The version the extension was built from."""
     ...
