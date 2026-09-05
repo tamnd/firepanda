@@ -17,11 +17,13 @@ nothing when nothing raises, which is measured in document 14.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from . import _firepanda
-from ._pandas import DataFrameMixin, SeriesMixin
+from ._pandas import DataFrameMixin, IndexMixin, SeriesMixin
 from .errors import translate
 
-__all__ = ["DataFrame", "Series"]
+__all__ = ["DataFrame", "Index", "Series"]
 
 
 class DataFrame(DataFrameMixin):
@@ -77,6 +79,14 @@ class DataFrame(DataFrameMixin):
         """A tuple of the number of rows and the number of columns."""
         try:
             return (self._inner.length(), self._inner.width())
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def index(self) -> Index:
+        """The row labels of the frame."""
+        try:
+            return Index._wrap(self._inner.labels())
         except Exception as error:
             raise translate(error) from None
 
@@ -186,6 +196,14 @@ class Series(SeriesMixin):
         except Exception as error:
             raise translate(error) from None
 
+    @property
+    def index(self) -> Index:
+        """The row labels of the series."""
+        try:
+            return Index._wrap(self._inner.labels())
+        except Exception as error:
+            raise translate(error) from None
+
     def head(self, n: int = 5) -> Series:
         """The first n rows."""
         try:
@@ -231,6 +249,235 @@ class Series(SeriesMixin):
 
     def __arrow_c_array__(self, requested_schema: object | None = None) -> tuple[object, ...]:
         """The column's Arrow data, as an arrow_schema and an arrow_array PyCapsule."""
+        try:
+            return tuple(self._inner.arrow_c_array(requested_schema))
+        except Exception as error:
+            raise translate(error) from None
+
+
+class Index(IndexMixin):
+    """The labels of the rows, which is what pandas addresses a row by."""
+
+    __slots__ = ()
+
+    @classmethod
+    def _wrap(cls, inner: _firepanda.Index) -> Index:
+        """Puts the wrapper around an extension object.
+
+        Not a public entry point. It allocates without going through
+        __init__ because __init__ is the pandas constructor, which takes
+        data rather than an extension object.
+        """
+        self = object.__new__(cls)
+        self._inner = inner
+        return self
+
+    def __len__(self) -> int:
+        """The number of labels, so that len(index) works."""
+        try:
+            return self._inner.length()
+        except Exception as error:
+            raise translate(error) from None
+
+    def __repr__(self) -> str:
+        """The index, rendered."""
+        try:
+            return repr(self._inner)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __str__(self) -> str:
+        """The index, rendered. Same as repr, which is what pandas does."""
+        try:
+            return repr(self._inner)
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def name(self) -> str | None:
+        """The name of the level, or None when it does not have one."""
+        try:
+            return self._inner.label()
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def dtype(self) -> str:
+        """The type of the labels, as a string rather than a numpy dtype."""
+        try:
+            return self._inner.dtype()
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def inferred_type(self) -> str:
+        """What pandas calls the kind of the labels, such as integer or string."""
+        try:
+            return self._inner.inferred_type()
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def size(self) -> int:
+        """The number of labels."""
+        try:
+            return self._inner.length()
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def shape(self) -> tuple[int]:
+        """A tuple of the number of labels, which for a flat index is one long."""
+        try:
+            return (self._inner.length(),)
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def ndim(self) -> int:
+        """The number of dimensions, which is one for every index that is not a MultiIndex."""
+        try:
+            return 1
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def nlevels(self) -> int:
+        """The number of levels, which is one until MultiIndex exists."""
+        try:
+            return 1
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def empty(self) -> bool:
+        """Whether the index has no labels at all."""
+        try:
+            return self._inner.length() == 0
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def nbytes(self) -> int:
+        """The bytes the labels occupy, which is zero for a range that stores none."""
+        try:
+            return self._inner.nbytes()
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def hasnans(self) -> bool:
+        """Whether any label is missing."""
+        try:
+            return self._inner.null_count() > 0
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def values(self) -> list[object]:
+        """The labels as a Python list, where pandas hands back a numpy array."""
+        try:
+            return list(self._inner.to_list())
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def is_unique(self) -> bool:
+        """Whether every label appears exactly once."""
+        try:
+            return self._inner.is_unique()
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def has_duplicates(self) -> bool:
+        """Whether any label appears more than once."""
+        try:
+            return not self._inner.is_unique()
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def is_monotonic_increasing(self) -> bool:
+        """Whether the labels never decrease, which is False if any is missing."""
+        try:
+            return self._inner.is_monotonic_increasing()
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def is_monotonic_decreasing(self) -> bool:
+        """Whether the labels never increase, which is False if any is missing."""
+        try:
+            return self._inner.is_monotonic_decreasing()
+        except Exception as error:
+            raise translate(error) from None
+
+    def tolist(self) -> list[object]:
+        """The labels as a Python list, with None where a label is missing."""
+        try:
+            return list(self._inner.to_list())
+        except Exception as error:
+            raise translate(error) from None
+
+    def to_list(self) -> list[object]:
+        """The labels as a Python list. The pandas spelling with an underscore."""
+        try:
+            return list(self._inner.to_list())
+        except Exception as error:
+            raise translate(error) from None
+
+    def unique(self) -> Index:
+        """The index with each label kept once, in first seen order."""
+        try:
+            return Index._wrap(self._inner.unique())
+        except Exception as error:
+            raise translate(error) from None
+
+    def rename(self, name: str | None) -> Index:
+        """The index under a different level name."""
+        try:
+            return Index._wrap(self._inner.renamed(name))
+        except Exception as error:
+            raise translate(error) from None
+
+    def take(self, indices: Sequence[int]) -> Index:
+        """The labels at a set of positions, in the order given."""
+        try:
+            return Index._wrap(self._inner.take(list(indices)))
+        except Exception as error:
+            raise translate(error) from None
+
+    def insert(self, loc: int, item: object) -> Index:
+        """The index with one label put in at a position."""
+        try:
+            return Index._wrap(self._inner.insert(loc, item))
+        except Exception as error:
+            raise translate(error) from None
+
+    def get_slice_bound(self, label: object, side: str) -> int:
+        """The position a label maps to when the index is read in order."""
+        try:
+            return self._inner.get_slice_bound(label, side)
+        except Exception as error:
+            raise translate(error) from None
+
+    def slice_locs(self, start: object = None, end: object = None) -> tuple[int, ...]:
+        """The half open row range a pair of labels describes, both ends inclusive."""
+        try:
+            return tuple(self._inner.slice_locs(start, end))
+        except Exception as error:
+            raise translate(error) from None
+
+    def __arrow_c_schema__(self) -> object:
+        """The labels' Arrow schema, as an arrow_schema PyCapsule."""
+        try:
+            return self._inner.arrow_c_schema()
+        except Exception as error:
+            raise translate(error) from None
+
+    def __arrow_c_array__(self, requested_schema: object | None = None) -> tuple[object, ...]:
+        """The labels' Arrow data, as an arrow_schema and an arrow_array PyCapsule."""
         try:
             return tuple(self._inner.arrow_c_array(requested_schema))
         except Exception as error:

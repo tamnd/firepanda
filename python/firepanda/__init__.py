@@ -35,10 +35,11 @@ whichever function they called first.
 from __future__ import annotations
 
 from . import _firepanda, errors
-from ._frame import DataFrame, Series, from_arrow, read_csv
+from ._frame import DataFrame, Index, Series, from_arrow, read_csv
 
 __all__ = [
     "DataFrame",
+    "Index",
     "Series",
     "__version__",
     "errors",

@@ -42,6 +42,13 @@ comptime DTYPE = "firepanda:dtype: "
 """A dtype mismatch, a bad cast, an argument of the wrong type. Becomes
 `TypeError`."""
 
+comptime POSITION = "firepanda:position: "
+"""A row number outside the thing it was addressing. Becomes `IndexError`.
+
+Separate from `value` because Python separates them, and because `except
+IndexError` around an indexing expression is the idiom this exists to keep
+working. It is `value` narrowed to one shape rather than a new idea."""
+
 comptime VALUE = "firepanda:value: "
 """An argument of the right type and the wrong value, or something unparseable.
 Becomes `ValueError`."""

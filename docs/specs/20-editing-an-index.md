@@ -62,4 +62,4 @@ A range asked for the bound of a label that is not an int64, or of a label that 
 
 `asof_locs` needs a bound and a mask together and belongs with the time series work rather than with this. The level accessors, `get_level_values` and `nlevels` and `names`, belong with `MultiIndex` in issue #155, because on a flat index every one of them has a trivial answer that would have to be rewritten the moment there were two levels.
 
-None of the eight is reachable from Python. That is the same statement document 19 ends on and it stays true until the Python facing `Index` lands.
+All eight are reachable from Python. That is the one statement document 19 and this document both ended on that is no longer true, and document 21 is the work that changed it.

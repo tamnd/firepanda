@@ -201,6 +201,26 @@ def empty_column(count: Int) raises -> AnyArray:
 
 
 def column_from(name: String, values: PythonObject) raises -> Series:
+    """Builds one named column out of a Python sequence.
+
+    This is `array_from` with a name put on it. The two are separate because an
+    index has labels and no column name, and inferring the dtype twice by two
+    routes is exactly the drift this file exists to prevent.
+
+    Args:
+        name: The column name.
+        values: The values.
+
+    Returns:
+        The column, as a series.
+
+    Raises:
+        Error: Whatever `array_from` raises.
+    """
+    return Series(name, array_from(name, values))
+
+
+def array_from(name: String, values: PythonObject) raises -> AnyArray:
     """Builds one column out of a Python sequence.
 
     The sequence goes through `list` first, so a tuple, a `range` and a generator
@@ -210,11 +230,12 @@ def column_from(name: String, values: PythonObject) raises -> Series:
     its characters is never what anybody meant.
 
     Args:
-        name: The column name.
+        name: What to call this in a message. A column name, or the word labels
+            when the caller is an index and there is no column.
         values: The values.
 
     Returns:
-        The column, as a series.
+        The column.
 
     Raises:
         Error: If the values are not a sequence, or hold a type that is not one
@@ -277,15 +298,15 @@ def column_from(name: String, values: PythonObject) raises -> Series:
     var text = (seen & (1 << _TEXT)) != 0
 
     if not (boolean or integer or floating or text):
-        return Series(name, empty_column(count))
+        return empty_column(count)
     if boolean and not (integer or floating or text):
-        return Series(name, _bools(items, count))
+        return _bools(items, count)
     if text and not (boolean or integer or floating):
-        return Series(name, _text(items, count))
+        return _text(items, count)
     if floating and not (boolean or text):
-        return Series(name, _floats(items, count))
+        return _floats(items, count)
     if integer and not (boolean or text):
-        return Series(name, _ints(name, items, count))
+        return _ints(name, items, count)
     raise tagged(
         DTYPE,
         String(

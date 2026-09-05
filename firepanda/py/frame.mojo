@@ -23,6 +23,7 @@ from std.python.bindings import check_arguments_arity
 from firepanda.array.any import AnyArray
 from firepanda.dtype.logical import LogicalType
 from firepanda.frame import DataFrame
+from firepanda.frame.index import Index
 from firepanda.io.arrow_c import (
     ArrowArray,
     ArrowArrayStream,
@@ -36,6 +37,7 @@ from firepanda.io.arrow_stream import (
     import_stream,
 )
 from firepanda.io.read import read_csv
+from firepanda.py.args import whole
 from firepanda.py.build import frame_from
 from firepanda.py.convert import (
     array_capsule,
@@ -50,42 +52,14 @@ from firepanda.py.errors import (
     COLUMN,
     DTYPE,
     IO,
+    POSITION,
     UNSUPPORTED,
     VALUE,
     retagged,
     tagged,
 )
+from firepanda.py.index import PyIndex
 from firepanda.py.series import PySeries
-
-
-def _int(value: PythonObject, name: String) raises -> Int:
-    """Reads a Python integer, and says which argument was wrong if it is not one.
-
-    `Int(py=value)` raises `invalid literal for int() with base 10: 'x'`, which
-    is the right complaint and names neither the argument nor the function. A
-    user with three integer arguments cannot tell from it which one they got
-    wrong.
-
-    Args:
-        value: What Python passed.
-        name: The parameter name, for the message.
-
-    Returns:
-        The integer.
-    """
-    try:
-        return Int(py=value)
-    except:
-        raise tagged(
-            DTYPE,
-            String(
-                name,
-                " must be an integer, got ",
-                Python.type(value).__name__,
-                " ",
-                value.__repr__(),
-            ),
-        )
 
 
 @fieldwise_init
@@ -196,7 +170,7 @@ struct PyDataFrame(Movable, Writable):
         """
         return PythonObject(
             alloc=Self(
-                ArcPointer(Self._frame(py_self)[].frame[].head(_int(n, "n")))
+                ArcPointer(Self._frame(py_self)[].frame[].head(whole(n, "n")))
             )
         )
 
@@ -213,7 +187,7 @@ struct PyDataFrame(Movable, Writable):
         """
         return PythonObject(
             alloc=Self(
-                ArcPointer(Self._frame(py_self)[].frame[].tail(_int(n, "n")))
+                ArcPointer(Self._frame(py_self)[].frame[].tail(whole(n, "n")))
             )
         )
 
@@ -249,6 +223,32 @@ struct PyDataFrame(Movable, Writable):
             )
         except:
             raise tagged(COLUMN, String("no such column ", name.__repr__()))
+
+    @staticmethod
+    def labels(py_self: PythonObject) raises -> PythonObject:
+        """Hands out the row labels, as an index.
+
+        This is what `df.index` reaches, and it is the reason the `Index` type is
+        bound at all: every question the core index can answer had no way of
+        being asked from a program before this existed.
+
+        It copies, the way `column` copies, and for a default index that copy is
+        two integers and no memory. A frame that has been gathered, filtered or
+        sorted carries real labels and the copy is a column, which is the same
+        trade `df["a"]` makes and the same argument in document 13 about why a
+        borrowing version is not a small change.
+
+        Args:
+            py_self: The frame.
+
+        Returns:
+            A new index carrying the frame's labels.
+        """
+        return PythonObject(
+            alloc=PyIndex(
+                ArcPointer(Index(copy=Self._frame(py_self)[].frame[].index))
+            )
+        )
 
     @staticmethod
     def select(
@@ -650,6 +650,8 @@ def raise_for_test(kind: PythonObject) raises -> PythonObject:
         raise tagged(DTYPE, "cannot add int64 and float64")
     if which == "value":
         raise tagged(VALUE, "n must not be negative")
+    if which == "position":
+        raise tagged(POSITION, "index 5 is out of bounds for an index of 2")
     if which == "io":
         raise tagged(IO, "no such file '/nowhere'")
     if which == "unsupported":

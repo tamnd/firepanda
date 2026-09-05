@@ -283,6 +283,12 @@ FRAME = Exposed(
             returns="DataFrame",
         ),
         Binding(
+            mojo="PyDataFrame.labels",
+            name="labels",
+            doc="The row labels, as an index.",
+            returns="Index",
+        ),
+        Binding(
             mojo="PyDataFrame.arrow_c_schema",
             name="arrow_c_schema",
             doc="The frame's Arrow schema, in a capsule.",
@@ -338,6 +344,14 @@ FRAME = Exposed(
             body="(self._inner.length(), self._inner.width())",
             doc="A tuple of the number of rows and the number of columns.",
             returns="tuple[int, int]",
+        ),
+        Member(
+            name="index",
+            kind="property",
+            body="self._inner.labels()",
+            doc="The row labels of the frame.",
+            returns="Index",
+            wraps="Index",
         ),
         Member(
             name="head",
@@ -439,6 +453,12 @@ SERIES = Exposed(
             returns="list[object]",
         ),
         Binding(
+            mojo="PySeries.labels",
+            name="labels",
+            doc="The row labels, as an index.",
+            returns="Index",
+        ),
+        Binding(
             mojo="PySeries.arrow_c_schema",
             name="arrow_c_schema",
             doc="The column's Arrow schema, in a capsule.",
@@ -503,6 +523,14 @@ SERIES = Exposed(
             returns="tuple[int]",
         ),
         Member(
+            name="index",
+            kind="property",
+            body="self._inner.labels()",
+            doc="The row labels of the series.",
+            returns="Index",
+            wraps="Index",
+        ),
+        Member(
             name="head",
             kind="method",
             signature="n: int = 5",
@@ -560,6 +588,478 @@ SERIES = Exposed(
 )
 
 
+INDEX = Exposed(
+    mojo="PyIndex",
+    name="Index",
+    py="Index",
+    doc="The labels of the rows, which is what pandas addresses a row by.",
+    init="PyIndex.py_init",
+    module="firepanda.py.index",
+    mixin="IndexMixin",
+    constructed=True,
+    init_params=(("data", "object"), ("name", "object")),
+    bindings=(
+        Binding(
+            mojo="PyIndex.length",
+            name="length",
+            doc="The number of labels.",
+            returns="int",
+        ),
+        Binding(
+            mojo="PyIndex.label",
+            name="label",
+            doc="The level name, or None.",
+            returns="str | None",
+        ),
+        Binding(
+            mojo="PyIndex.dtype",
+            name="dtype",
+            doc="The type of the labels, as firepanda spells it.",
+            returns="str",
+        ),
+        Binding(
+            mojo="PyIndex.inferred_type",
+            name="inferred_type",
+            doc="What pandas calls the kind of the labels.",
+            returns="str",
+        ),
+        Binding(
+            mojo="PyIndex.is_range",
+            name="is_range",
+            doc="Whether the labels are still an arithmetic range.",
+            returns="bool",
+        ),
+        Binding(
+            mojo="PyIndex.start",
+            name="start",
+            doc="The first label of a range.",
+            returns="int",
+        ),
+        Binding(
+            mojo="PyIndex.nbytes",
+            name="nbytes",
+            doc="The bytes the labels occupy.",
+            returns="int",
+        ),
+        Binding(
+            mojo="PyIndex.null_count",
+            name="null_count",
+            doc="How many labels are missing.",
+            returns="int",
+        ),
+        Binding(
+            mojo="PyIndex.at",
+            name="at",
+            doc="One label, as a Python value.",
+            params=(("i", "int"),),
+            returns="object",
+        ),
+        Binding(
+            mojo="PyIndex.to_list",
+            name="to_list",
+            doc="Every label, copied into a Python list.",
+            returns="list[object]",
+        ),
+        Binding(
+            mojo="PyIndex.slice_rows",
+            name="slice_rows",
+            doc="A half open range of rows.",
+            params=(("start", "int"), ("end", "int")),
+            returns="Index",
+        ),
+        Binding(
+            mojo="PyIndex.take",
+            name="take",
+            doc="Labels gathered by position.",
+            params=(("positions", "list[int]"),),
+            returns="Index",
+        ),
+        Binding(
+            mojo="PyIndex.is_unique",
+            name="is_unique",
+            doc="Whether every label appears once.",
+            returns="bool",
+        ),
+        Binding(
+            mojo="PyIndex.is_monotonic_increasing",
+            name="is_monotonic_increasing",
+            doc="Whether the labels never decrease.",
+            returns="bool",
+        ),
+        Binding(
+            mojo="PyIndex.is_monotonic_decreasing",
+            name="is_monotonic_decreasing",
+            doc="Whether the labels never increase.",
+            returns="bool",
+        ),
+        Binding(
+            mojo="PyIndex.get_loc",
+            name="get_loc",
+            doc="Every position one label sits at.",
+            params=(("label", "object"),),
+            returns="list[int]",
+        ),
+        Binding(
+            mojo="PyIndex.get_indexer",
+            name="get_indexer",
+            doc="Where each of a set of labels sits, with -1 for the missing.",
+            params=(("target", "object"),),
+            returns="list[int]",
+        ),
+        Binding(
+            mojo="PyIndex.contains",
+            name="contains",
+            doc="Whether a label is in the index.",
+            params=(("label", "object"),),
+            returns="bool",
+        ),
+        Binding(
+            mojo="PyIndex.equals",
+            name="equals",
+            doc="Whether two indexes hold the same labels.",
+            params=(("other", "object"),),
+            returns="bool",
+        ),
+        Binding(
+            mojo="PyIndex.identical",
+            name="identical",
+            doc="Whether the labels and the name both match.",
+            params=(("other", "object"),),
+            returns="bool",
+        ),
+        Binding(
+            mojo="PyIndex.same_as",
+            name="same_as",
+            doc="Whether two indexes are the same object underneath.",
+            params=(("other", "object"),),
+            returns="bool",
+        ),
+        Binding(
+            mojo="PyIndex.unique",
+            name="unique",
+            doc="The first of each label.",
+            returns="Index",
+        ),
+        Binding(
+            mojo="PyIndex.renamed",
+            name="renamed",
+            doc="The index under a different level name.",
+            params=(("name", "str | None"),),
+            returns="Index",
+        ),
+        Binding(
+            mojo="PyIndex.union",
+            name="union",
+            doc="Every label either side has.",
+            params=(("other", "object"), ("sort", "bool")),
+            returns="Index",
+        ),
+        Binding(
+            mojo="PyIndex.intersection",
+            name="intersection",
+            doc="Every label both sides have.",
+            params=(("other", "object"), ("sort", "bool")),
+            returns="Index",
+        ),
+        Binding(
+            mojo="PyIndex.difference",
+            name="difference",
+            doc="Every label this index has and the other does not.",
+            params=(("other", "object"), ("sort", "bool")),
+            returns="Index",
+        ),
+        Binding(
+            mojo="PyIndex.symmetric_difference",
+            name="symmetric_difference",
+            doc="Every label exactly one side has.",
+            params=(
+                ("other", "object"),
+                ("sort", "bool"),
+                ("result_name", "str | None"),
+            ),
+            returns="Index",
+        ),
+        Binding(
+            mojo="PyIndex.append",
+            name="append",
+            doc="One or several indexes put on the end of this one.",
+            params=(("others", "list[object]"),),
+            returns="Index",
+        ),
+        Binding(
+            mojo="PyIndex.delete",
+            name="delete",
+            doc="The index without the labels at a set of positions.",
+            params=(("positions", "list[int]"),),
+            returns="Index",
+        ),
+        Binding(
+            mojo="PyIndex.insert",
+            name="insert",
+            doc="The index with one label put in at a position.",
+            params=(("position", "int"), ("label", "object")),
+            returns="Index",
+        ),
+        Binding(
+            mojo="PyIndex.drop",
+            name="drop",
+            doc="The index without every row carrying one of a set of labels.",
+            params=(("labels", "object"), ("errors", "str")),
+            returns="Index",
+        ),
+        Binding(
+            mojo="PyIndex.putmask",
+            name="putmask",
+            doc="The index with the labels a mask picks out replaced.",
+            params=(("mask", "list[bool]"), ("value", "object")),
+            returns="Index",
+        ),
+        Binding(
+            mojo="PyIndex.get_slice_bound",
+            name="get_slice_bound",
+            doc="Where a label sits when the index is read in order.",
+            params=(("label", "object"), ("side", "str")),
+            returns="int",
+        ),
+        Binding(
+            mojo="PyIndex.slice_locs",
+            name="slice_locs",
+            doc="The half open row range a pair of labels describes.",
+            params=(("start", "object"), ("end", "object")),
+            returns="list[int]",
+        ),
+        Binding(
+            mojo="PyIndex.slice_indexer",
+            name="slice_indexer",
+            doc="The same range with the step carried through.",
+            params=(("start", "object"), ("end", "object"), ("step", "int")),
+            returns="list[int]",
+        ),
+        Binding(
+            mojo="PyIndex.arrow_c_schema",
+            name="arrow_c_schema",
+            doc="The labels' Arrow schema, in a capsule.",
+            returns="object",
+        ),
+        Binding(
+            mojo="PyIndex.arrow_c_array",
+            name="arrow_c_array",
+            doc="The labels' Arrow schema and data, in two capsules.",
+            params=(("requested_schema", "object | None"),),
+            returns="list[object]",
+        ),
+    ),
+    members=(
+        Member(
+            name="__len__",
+            kind="dunder",
+            body="self._inner.length()",
+            doc="The number of labels, so that len(index) works.",
+            returns="int",
+        ),
+        Member(
+            name="__repr__",
+            kind="dunder",
+            body="repr(self._inner)",
+            doc="The index, rendered.",
+            returns="str",
+        ),
+        Member(
+            name="__str__",
+            kind="dunder",
+            body="repr(self._inner)",
+            doc="The index, rendered. Same as repr, which is what pandas does.",
+            returns="str",
+        ),
+        Member(
+            name="name",
+            kind="property",
+            body="self._inner.label()",
+            doc="The name of the level, or None when it does not have one.",
+            returns="str | None",
+        ),
+        Member(
+            name="dtype",
+            kind="property",
+            body="self._inner.dtype()",
+            doc="The type of the labels, as a string rather than a numpy dtype.",
+            returns="str",
+        ),
+        Member(
+            name="inferred_type",
+            kind="property",
+            body="self._inner.inferred_type()",
+            doc="What pandas calls the kind of the labels, such as integer or string.",
+            returns="str",
+        ),
+        Member(
+            name="size",
+            kind="property",
+            body="self._inner.length()",
+            doc="The number of labels.",
+            returns="int",
+        ),
+        Member(
+            name="shape",
+            kind="property",
+            body="(self._inner.length(),)",
+            doc="A tuple of the number of labels, which for a flat index is one long.",
+            returns="tuple[int]",
+        ),
+        Member(
+            name="ndim",
+            kind="property",
+            body="1",
+            doc="The number of dimensions, which is one for every index that is not a MultiIndex.",
+            returns="int",
+        ),
+        Member(
+            name="nlevels",
+            kind="property",
+            body="1",
+            doc="The number of levels, which is one until MultiIndex exists.",
+            returns="int",
+        ),
+        Member(
+            name="empty",
+            kind="property",
+            body="self._inner.length() == 0",
+            doc="Whether the index has no labels at all.",
+            returns="bool",
+        ),
+        Member(
+            name="nbytes",
+            kind="property",
+            body="self._inner.nbytes()",
+            doc="The bytes the labels occupy, which is zero for a range that stores none.",
+            returns="int",
+        ),
+        Member(
+            name="hasnans",
+            kind="property",
+            body="self._inner.null_count() > 0",
+            doc="Whether any label is missing.",
+            returns="bool",
+        ),
+        Member(
+            name="values",
+            kind="property",
+            body="list(self._inner.to_list())",
+            doc="The labels as a Python list, where pandas hands back a numpy array.",
+            returns="list[object]",
+        ),
+        Member(
+            name="is_unique",
+            kind="property",
+            body="self._inner.is_unique()",
+            doc="Whether every label appears exactly once.",
+            returns="bool",
+        ),
+        Member(
+            name="has_duplicates",
+            kind="property",
+            body="not self._inner.is_unique()",
+            doc="Whether any label appears more than once.",
+            returns="bool",
+        ),
+        Member(
+            name="is_monotonic_increasing",
+            kind="property",
+            body="self._inner.is_monotonic_increasing()",
+            doc="Whether the labels never decrease, which is False if any is missing.",
+            returns="bool",
+        ),
+        Member(
+            name="is_monotonic_decreasing",
+            kind="property",
+            body="self._inner.is_monotonic_decreasing()",
+            doc="Whether the labels never increase, which is False if any is missing.",
+            returns="bool",
+        ),
+        Member(
+            name="tolist",
+            kind="method",
+            body="list(self._inner.to_list())",
+            doc="The labels as a Python list, with None where a label is missing.",
+            returns="list[object]",
+        ),
+        Member(
+            name="to_list",
+            kind="method",
+            body="list(self._inner.to_list())",
+            doc="The labels as a Python list. The pandas spelling with an underscore.",
+            returns="list[object]",
+        ),
+        Member(
+            name="unique",
+            kind="method",
+            body="self._inner.unique()",
+            doc="The index with each label kept once, in first seen order.",
+            returns="Index",
+            wraps="Index",
+        ),
+        Member(
+            name="rename",
+            kind="method",
+            signature="name: str | None",
+            body="self._inner.renamed(name)",
+            doc="The index under a different level name.",
+            returns="Index",
+            wraps="Index",
+        ),
+        Member(
+            name="take",
+            kind="method",
+            signature="indices: Sequence[int]",
+            body="self._inner.take(list(indices))",
+            doc="The labels at a set of positions, in the order given.",
+            returns="Index",
+            wraps="Index",
+        ),
+        Member(
+            name="insert",
+            kind="method",
+            signature="loc: int, item: object",
+            body="self._inner.insert(loc, item)",
+            doc="The index with one label put in at a position.",
+            returns="Index",
+            wraps="Index",
+        ),
+        Member(
+            name="get_slice_bound",
+            kind="method",
+            signature="label: object, side: str",
+            body="self._inner.get_slice_bound(label, side)",
+            doc="The position a label maps to when the index is read in order.",
+            returns="int",
+        ),
+        Member(
+            name="slice_locs",
+            kind="method",
+            signature="start: object = None, end: object = None",
+            body="tuple(self._inner.slice_locs(start, end))",
+            doc="The half open row range a pair of labels describes, both ends inclusive.",
+            returns="tuple[int, ...]",
+        ),
+        Member(
+            name="__arrow_c_schema__",
+            kind="dunder",
+            body="self._inner.arrow_c_schema()",
+            doc="The labels' Arrow schema, as an arrow_schema PyCapsule.",
+            returns="object",
+        ),
+        Member(
+            name="__arrow_c_array__",
+            kind="dunder",
+            signature="requested_schema: object | None = None",
+            body="tuple(self._inner.arrow_c_array(requested_schema))",
+            doc="The labels' Arrow data, as an arrow_schema and an arrow_array PyCapsule.",
+            returns="tuple[object, ...]",
+        ),
+    ),
+)
+
+
 FUNCTIONS = (
     Binding(
         mojo="open_csv",
@@ -589,7 +1089,7 @@ FUNCTIONS = (
     ),
 )
 
-TYPES: tuple[Exposed, ...] = (FRAME, SERIES)
+TYPES: tuple[Exposed, ...] = (FRAME, SERIES, INDEX)
 
 BANNER_MOJO = (
     "# Generated by tools/bindings.py. Do not edit.\n"
@@ -786,6 +1286,10 @@ def wrapper() -> str:
     out.append("nothing when nothing raises, which is measured in document 14.")
     out.append('"""\n')
     out.append("from __future__ import annotations\n")
+    # Only emitted when something in the table actually asks for it, since an
+    # import nothing uses is a lint failure rather than a harmless extra line.
+    if any("Sequence[" in (m.signature or "") for t in TYPES for m in t.members):
+        out.append("from collections.abc import Sequence\n")
     out.append("from . import _firepanda")
     mixins = sorted({t.mixin for t in TYPES if t.mixin})
     if mixins:
@@ -793,7 +1297,7 @@ def wrapper() -> str:
     out.append("from .errors import translate")
 
     out.append("")
-    out.append("__all__ = [" + ", ".join(f'"{t.py}"' for t in TYPES) + "]")
+    out.append("__all__ = [" + ", ".join(f'"{n}"' for n in sorted(t.py for t in TYPES)) + "]")
 
     for t in TYPES:
         out.append("")

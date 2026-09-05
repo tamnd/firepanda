@@ -134,7 +134,8 @@ from std.collections import Optional
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.dtype.lists import ALL, ORDERED
-from firepanda.frame.display import DisplayOptions, render_value
+from firepanda.dtype.logical import LogicalType, logical_for
+from firepanda.frame.display import DisplayOptions, render_value, visible
 from firepanda.hash.function import key_bits
 from firepanda.hash.grouping import KeyCodes, factorize_any
 from firepanda.kernel.concat import concat_two_any
@@ -561,7 +562,7 @@ def _searched(
     return lo
 
 
-struct Index(Copyable, Movable, Sized):
+struct Index(Copyable, Movable, Sized, Writable):
     """The labels of a frame's rows, as a range or as an array."""
 
     var name: Optional[String]
@@ -1783,3 +1784,67 @@ struct Index(Copyable, Movable, Sized):
         """
         var found = self.slice_locs(start, end)
         return (found[0], found[1], step)
+
+    def logical(self) -> LogicalType:
+        """The type of the labels, without building a range out to find out.
+
+        A range is int64 because that is what `materialize` produces, so the
+        answer is the same either way and only one of the two routes allocates.
+
+        Returns:
+            The label type.
+        """
+        if self.labels:
+            return self.labels.value().type
+        return logical_for(DType.int64)
+
+    def write_to(self, mut writer: Some[Writer]):
+        """Writes the index the way pandas prints one.
+
+        pandas has two spellings and so does this, because the difference is the
+        thing the type is built around: a range prints its arithmetic and an
+        array prints its labels, and a reader who sees `RangeIndex` knows without
+        being told that nothing was materialized.
+
+        Long indexes elide the middle and print a length, which is what pandas
+        does, and the elision is `visible` in the display module so that the
+        rule about how many rows survive is written in one place. pandas wraps
+        the surviving labels across several lines and this does not; the
+        information is the same and the layout is not, which is a divergence
+        `docs/specs/21-the-index-you-can-hold.md` records rather than hides.
+
+        Args:
+            writer: The sink.
+        """
+        if self.is_range():
+            writer.write(
+                "RangeIndex(start=",
+                self.start,
+                ", stop=",
+                self.start + self.length,
+                ", step=1",
+            )
+            if self.name:
+                writer.write(", name='", self.name.value(), "'")
+            writer.write(")")
+            return
+
+        ref values = self.labels.value()
+        var options = DisplayOptions()
+        var picks = visible(self.length, options.max_rows)
+        writer.write("Index([")
+        for i in range(len(picks)):
+            if i > 0:
+                writer.write(", ")
+            if picks[i] < 0:
+                writer.write("...")
+            elif values.is_string() and values.is_valid(picks[i]):
+                writer.write("'", render_value(values, picks[i], options), "'")
+            else:
+                writer.write(render_value(values, picks[i], options))
+        writer.write("], dtype='", values.type, "'")
+        if self.name:
+            writer.write(", name='", self.name.value(), "'")
+        if len(picks) != self.length:
+            writer.write(", length=", self.length)
+        writer.write(")")
