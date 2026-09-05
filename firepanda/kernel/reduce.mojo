@@ -29,6 +29,8 @@ rules are the same rules the group by uses, which they have to be: a sum over an
 int32 column widens to int64 whether or not anybody grouped it.
 """
 
+from std.math import nan
+
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.bitmap.bitmap import Bitmap
@@ -146,6 +148,9 @@ def _reduce_core[
     if kind == AggKind.MEAN:
         var averaged = Array[DType.float64](1)
         var mean = mean_over(source, present, n)
+        # A mean always answers in float64, so this one is always the NaN branch
+        # of `_place`. The two extremes below keep the column's own dtype and get
+        # whichever branch that dtype has.
         _place(averaged, Float64(mean.value), mean.valid)
         return AnyArray(averaged^)
 
@@ -165,12 +170,18 @@ def _reduce_core[
 
 
 def _place[dt: DType](mut out: Array[dt], value: Scalar[dt], valid: Bool):
-    """Writes the one row of a result, or marks it missing.
+    """Writes the one row of a result, or says it found nothing.
 
-    A missing row still holds a zero rather than whatever the reduction was
-    carrying when it gave up, because every null in the package holds a zero and
-    a minimum that left negative infinity behind the validity bit would be the
-    one exception.
+    How it says so depends on the dtype, because pandas has two spellings and
+    only one of them is available in each. A float column takes a NaN and stays
+    valid, since that is the only missing a pandas float column has. Every other
+    dtype takes a zero behind a cleared validity bit, since there is no NaN to
+    write. See #170.
+
+    A missing row of the second kind still holds a zero rather than whatever the
+    reduction was carrying when it gave up, because every null in the package
+    holds a zero and a minimum that left negative infinity behind the validity
+    bit would be the one exception.
 
     Args:
         out: The one row column.
@@ -179,6 +190,9 @@ def _place[dt: DType](mut out: Array[dt], value: Scalar[dt], valid: Bool):
     """
     if valid:
         out[0] = value
+        return
+    comptime if dt.is_floating_point():
+        out[0] = nan[dt]()
         return
     out[0] = Scalar[dt](0)
     out.data.validity.set(0, False)

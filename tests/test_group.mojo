@@ -4,12 +4,16 @@ Three layers get exercised here and each one can be wrong in its own way.
 
 The kernel is checked against hand-computed answers rather than against the twin,
 because the twin is what `tests/fuzz` uses and a test that repeats the fuzz
-comparison on eight rows adds nothing. What these check instead is the null
+comparison on eight rows adds nothing. What these check instead is the missing
 policy, which is the part of a grouped reduction that has an actual decision in
-it: a group whose values are all null gives zero from `sum` and `count`, null
-from `mean`, `min`, `max`, `first` and `last`, and its true row count from `size`.
-That is pandas' answer and it is deliberate rather than incidental, so it is
-pinned down one reduction at a time.
+it: a group whose values are all null gives zero from `sum` and `count`, its true
+row count from `size`, and a null from `min`, `max`, `first` and `last`, which
+keep the column's own dtype. The reductions that answer in float64 say it with a
+NaN in a row that stays valid instead, because that is how a pandas float column
+carries a missing value and firepanda used to differ from it here. That is #170
+and it covers `mean`, `var`, `std`, `sem`, `skew`, `median`, `quantile`, `corr`
+and `cov`. All of it is pandas' answer and deliberate rather than incidental, so
+it is pinned down one reduction at a time.
 
 The ordinal machinery is checked separately, because combining several keys is
 where a group by silently produces wrong answers rather than crashing. Two keys
@@ -23,7 +27,7 @@ and that an output name collision is refused rather than silently taking the las
 one.
 """
 
-from std.math import sqrt
+from std.math import isnan, sqrt
 from std.testing import (
     TestSuite,
     assert_almost_equal,
@@ -79,6 +83,21 @@ def codes_of(values: List[Scalar[DType.uint32]]) -> Array[DType.uint32]:
 def ints(values: List[Scalar[DType.int64]]) -> Array[DType.int64]:
     """Builds an int64 column."""
     return from_list(values)
+
+
+def assert_missing(
+    got: Array[DType.float64], group: Int, message: String
+) raises:
+    """Asserts that a float reduction reported nothing to report, pandas style.
+
+    Both halves matter and each one alone would let the wrong answer through. The
+    row has to be valid, because a null here is the old spelling and the point of
+    #170 is that a pandas float column does not use it. The value has to be NaN,
+    because a valid row holding the zero the slot was born with is what the code
+    does if somebody deletes the store and leaves the `continue`.
+    """
+    assert_true(got.is_valid(group), message + ": should not be null")
+    assert_true(isnan(got[group]), message + ": should be NaN")
 
 
 def sample_codes() -> Array[DType.uint32]:
@@ -182,10 +201,10 @@ def test_a_grouped_mean_is_not_computed_from_a_wrapped_sum() raises:
     assert_equal(averaged[1], 9.223372036854776e18)
 
 
-def test_mean_of_an_all_null_group_is_null() raises:
+def test_mean_of_an_all_null_group_is_nan() raises:
     var out = group_mean(all_null_group(), codes_of([0, 1, 0, 1]), 2)
     assert_true(out.is_valid(0))
-    assert_false(out.is_valid(1))
+    assert_missing(out, 1, "an all null group has no mean")
 
 
 def test_min_and_max_ignore_nulls() raises:
@@ -207,6 +226,42 @@ def test_min_and_max_of_an_all_null_group_are_null() raises:
     assert_false(high.is_valid(1))
     assert_equal(low[1], 0, "a null holds a zero, not the seed identity")
     assert_equal(high[1], 0)
+
+
+def test_min_and_max_of_an_all_null_float_group_are_nan() raises:
+    # The same question one dtype over, and the answer is the other one. These
+    # two keep the column's own dtype rather than widening to float64, so which
+    # spelling of missing they use is decided by the column and not by the
+    # reduction: int64 above has no NaN to write and this one does. Nothing
+    # covered this before #170 and the float path was wrong for it.
+    var col = floats([7.0, 0.0, 9.0, 0.0])
+    col.set_null(1)
+    col.set_null(3)
+    var codes = codes_of([0, 1, 0, 1])
+
+    var low = group_min(col.copy(), codes, 2)
+    var high = group_max(col^, codes, 2)
+    assert_almost_equal(low[0], 7.0, atol=1e-9)
+    assert_almost_equal(high[0], 9.0, atol=1e-9)
+    assert_missing(low, 1, "an all null float group has no minimum")
+    assert_missing(high, 1, "an all null float group has no maximum")
+
+
+def test_first_and_last_of_an_all_null_float_group_are_nan() raises:
+    # `_edge_core` stops walking the moment every group is filled, so the group
+    # that never fills is only reached by the pass after the loop, and a column
+    # where one group fills and another never does is the shape that runs it.
+    var col = floats([7.0, 0.0, 9.0, 0.0])
+    col.set_null(1)
+    col.set_null(3)
+    var codes = codes_of([0, 1, 0, 1])
+
+    var early = group_first(col.copy(), codes, 2)
+    var late = group_last(col^, codes, 2)
+    assert_almost_equal(early[0], 7.0, atol=1e-9)
+    assert_almost_equal(late[0], 9.0, atol=1e-9)
+    assert_missing(early, 1, "an all null float group has no first value")
+    assert_missing(late, 1, "an all null float group has no last value")
 
 
 def test_first_and_last_skip_nulls() raises:
@@ -1053,11 +1108,10 @@ def test_variance_uses_a_sample_divisor_by_default() raises:
     assert_almost_equal(out[1], 800.0, atol=1e-9)
 
 
-def test_variance_of_a_single_value_is_null_at_the_default_ddof() raises:
+def test_variance_of_a_single_value_is_nan_at_the_default_ddof() raises:
     var out = group_var(sample_values(), sample_codes(), 3)
-    assert_false(
-        out.is_valid(2),
-        "one value and ddof of 1 divides by zero; pandas reports NaN here",
+    assert_missing(
+        out, 2, "one value and ddof of 1 divides by zero, as pandas does"
     )
 
 
@@ -1075,25 +1129,23 @@ def test_variance_skips_nulls_rather_than_counting_them_as_zero() raises:
     assert_almost_equal(out[1], 800.0, atol=1e-9)
 
 
-def test_variance_of_an_all_null_group_is_null() raises:
+def test_variance_of_an_all_null_group_is_nan() raises:
     var out = group_var(all_null_group(), codes_of([0, 1, 0, 1]), 2)
-    assert_false(out.is_valid(1))
+    assert_missing(out, 1, "an all null group has no variance")
 
 
 def test_standard_deviation_is_the_root_of_the_variance() raises:
     var out = group_std(sample_values(), sample_codes(), 3)
     assert_almost_equal(out[0], 14.142135623730951, atol=1e-9)
     assert_almost_equal(out[1], 28.284271247461902, atol=1e-9)
-    assert_false(out.is_valid(2))
+    assert_missing(out, 2, "one value has no deviation")
 
 
 def test_the_standard_error_is_the_deviation_over_the_root_of_the_count() raises:
     var out = group_sem(sample_values(), sample_codes(), 3)
     assert_almost_equal(out[0], 10.0, atol=1e-9)
     assert_almost_equal(out[1], 20.0, atol=1e-9)
-    assert_false(
-        out.is_valid(2), "one value and ddof of 1 has no error to give"
-    )
+    assert_missing(out, 2, "one value and ddof of 1 has no error to give")
 
 
 def test_the_standard_error_divides_by_the_plain_count_not_the_divisor() raises:
@@ -1112,9 +1164,9 @@ def test_the_standard_error_matches_pandas_on_a_spread_column() raises:
     assert_almost_equal(out[0], 2.727636339397171, atol=1e-9)
 
 
-def test_the_standard_error_of_an_all_null_group_is_null() raises:
+def test_the_standard_error_of_an_all_null_group_is_nan() raises:
     var out = group_sem(all_null_group(), codes_of([0, 1, 0, 1]), 2)
-    assert_false(out.is_valid(1))
+    assert_missing(out, 1, "an all null group has no standard error")
 
 
 def test_skewness_matches_pandas_on_a_right_leaning_column() raises:
@@ -1150,17 +1202,18 @@ def test_skewness_needs_three_values() raises:
     # reports NaN here rather than zero.
     var col = floats([1.0, 2.0, 7.0, 7.0, 7.0])
     var out = group_skew(col, codes_of([0, 0, 1, 1, 1]), 2)
-    assert_false(out.is_valid(0))
+    assert_missing(out, 0, "a pair has no skewness")
     assert_true(out.is_valid(1))
+    assert_false(isnan(out[1]), "three values do have one")
 
 
 def test_skewness_skips_nulls_rather_than_counting_them_as_zero() raises:
     # Group 1 holds 20, null and 60. Counting the null as a value would make it
     # three values and give an answer where pandas gives NaN.
     var out = group_skew(sample_values(), sample_codes(), 3)
-    assert_false(out.is_valid(0), "two values")
-    assert_false(out.is_valid(1), "two present values and one null")
-    assert_false(out.is_valid(2), "one value")
+    assert_missing(out, 0, "two values")
+    assert_missing(out, 1, "two present values and one null")
+    assert_missing(out, 2, "one value")
 
 
 def test_variance_keeps_its_digits_on_large_values() raises:
@@ -1220,9 +1273,9 @@ def test_median_of_an_even_count_of_integers_can_be_a_half() raises:
     assert_almost_equal(out[0], 2.5, atol=1e-9)
 
 
-def test_median_of_an_all_null_group_is_null() raises:
+def test_median_of_an_all_null_group_is_nan() raises:
     var out = group_median(all_null_group(), codes_of([0, 1, 0, 1]), 2)
-    assert_false(out.is_valid(1))
+    assert_missing(out, 1, "an all null group has no median")
     assert_almost_equal(out[0], 8.0, atol=1e-9)
 
 
@@ -1358,22 +1411,23 @@ def test_a_correlation_matches_the_value_computed_by_hand() raises:
     assert_almost_equal(out[0], 11.0 / (130.0**0.5), atol=1e-12)
 
 
-def test_a_correlation_of_a_column_that_does_not_vary_is_null() raises:
+def test_a_correlation_of_a_column_that_does_not_vary_is_nan() raises:
     # Every x in group 0 is the same, so the denominator is a zero and the
     # answer is not a number rather than an infinity. pandas gives NaN here.
     var x = floats([7.0, 7.0, 7.0, 1.0, 2.0, 3.0])
     var y = floats([1.0, 5.0, 9.0, 1.0, 2.0, 3.0])
     var out = group_corr(x, y, codes_of([0, 0, 0, 1, 1, 1]), 2)
-    assert_false(out.is_valid(0), "a flat column has no correlation")
+    assert_missing(out, 0, "a flat column has no correlation")
     assert_true(out.is_valid(1))
+    assert_false(isnan(out[1]), "a column that moves does have one")
 
 
-def test_a_correlation_of_fewer_than_two_pairs_is_null() raises:
+def test_a_correlation_of_fewer_than_two_pairs_is_nan() raises:
     var x = floats([1.0, 5.0])
     var y = floats([2.0, 9.0])
     var out = group_corr(x, y, codes_of([0, 1]), 2)
-    assert_false(out.is_valid(0), "one pair does not make a correlation")
-    assert_false(out.is_valid(1))
+    assert_missing(out, 0, "one pair does not make a correlation")
+    assert_missing(out, 1, "and neither does the other one")
 
 
 def test_a_correlation_drops_a_row_where_either_value_is_null() raises:
@@ -1414,12 +1468,12 @@ def test_a_covariance_divides_by_the_count_it_was_asked_for() raises:
     assert_almost_equal(population[0], 11.0 / 4.0, atol=1e-12)
 
 
-def test_a_covariance_of_one_pair_is_null_at_the_default_divisor() raises:
+def test_a_covariance_of_one_pair_is_nan_at_the_default_divisor() raises:
     var x = floats([1.0, 5.0])
     var y = floats([2.0, 9.0])
     var out = group_cov(x, y, codes_of([0, 1]), 2)
-    assert_false(out.is_valid(0))
-    assert_false(out.is_valid(1))
+    assert_missing(out, 0, "one pair and ddof of 1 divides by zero")
+    assert_missing(out, 1, "and so does the other one")
 
 
 def test_a_covariance_of_a_column_with_itself_is_its_variance() raises:
@@ -1562,7 +1616,7 @@ def test_a_frame_groups_by_the_standard_error() raises:
     # Keys 5, 10 and 20 in sorted order. Key 10 holds 20, null and 60, so its
     # deviation is 28.28 over two values and its standard error is 20.
     assert_equal(len(out), 3)
-    assert_false(error.is_valid(0), "key 5 has one value")
+    assert_missing(error, 0, "key 5 has one value")
     assert_almost_equal(error[1], 20.0, atol=1e-9)
     assert_almost_equal(error[2], 10.0, atol=1e-9)
 
@@ -1576,7 +1630,7 @@ def test_a_frame_groups_by_the_skewness() raises:
     var out = DataFrame.from_series(series^).group_agg(["k"], AggKind.SKEW)
     var lean = out.column("v").as_typed[DType.float64]()
     assert_almost_equal(lean[0], 1.1376243669576884, atol=1e-9)
-    assert_false(lean.is_valid(1), "two values have no skewness")
+    assert_missing(lean, 1, "two values have no skewness")
 
 
 def test_two_quantiles_of_one_column_need_explicit_names() raises:
@@ -1656,13 +1710,15 @@ def test_a_group_by_past_the_parallel_threshold_agrees_with_a_serial_loop() rais
         assert_equal(counted[g], want_count[g])
         assert_equal(sized[g], want_size[g])
         if not want_seen[g]:
-            # A group nothing was seen for reads null and holds a zero, the way
-            # every other null in the package does.
+            # A group nothing was seen for reads null and holds a zero on the two
+            # that keep the column's own dtype, the way every other null in the
+            # package does. The mean is a float64 and says it with a NaN instead,
+            # because that is how a pandas float column carries a missing value.
             assert_false(smallest.data.validity.get(g))
             assert_false(largest.data.validity.get(g))
-            assert_false(averaged.data.validity.get(g))
             assert_equal(smallest[g], 0)
             assert_equal(largest[g], 0)
+            assert_missing(averaged, g, "no rows to average")
             continue
         assert_true(smallest.data.validity.get(g))
         assert_true(largest.data.validity.get(g))
@@ -1746,16 +1802,19 @@ def test_the_spread_reductions_past_the_threshold_agree_with_a_serial_loop() rai
     # still running on one core, and each of them now splits differently. The
     # first two build a private table per worker and merge them afterwards. The
     # third cuts the group range into pieces and lets each piece sort its own
-    # groups' runs of the slab, which needs the cut to fall on a byte of the
-    # output validity so that two workers clearing presence bits do not clear
-    # each other's.
+    # groups' runs of the slab. That cut used to need to fall on a byte of the
+    # output validity, so that two workers clearing presence bits did not clear
+    # each other's. It no longer does, because an empty group now writes a NaN
+    # into its own float64 slot and touches no bitmap at all, and this test is
+    # the one that would have caught it when the requirement was real.
     #
     # Nine hundred and seventy seven groups, prime and one past a multiple of
     # eight, so the pieces do not line up with the row split either. Every
     # eleventh row is null, and every group whose ordinal is a multiple of a
-    # hundred and thirty is null in all of its rows, which puts an empty group
-    # in several pieces and makes their writers clear a bit in a byte a
-    # neighbouring group also lives in.
+    # hundred and thirty is null in all of its rows, which puts an empty group in
+    # several pieces and next to neighbours in the same byte. The shape is kept
+    # even though the hazard it was built for is gone, because it is still the
+    # only place the empty group path runs on more than one worker.
     comptime ROWS = PRIVATE_ROWS + 10_000
     comptime GROUPS = 977
 
@@ -1792,18 +1851,15 @@ def test_the_spread_reductions_past_the_threshold_agree_with_a_serial_loop() rai
     for g in range(GROUPS):
         var n = len(held[g])
         if n == 0:
-            assert_false(
-                median.data.validity.get(g),
-                String("group ", g, " has a median"),
+            assert_missing(median, g, String("group ", g, " has a median"))
+            assert_missing(
+                deviation, g, String("group ", g, " has a deviation")
             )
-            assert_false(
-                deviation.data.validity.get(g),
-                String("group ", g, " has a deviation"),
+            assert_missing(
+                correlation, g, String("group ", g, " has a correlation")
             )
-            assert_false(
-                correlation.data.validity.get(g),
-                String("group ", g, " has a correlation"),
-            )
+            # A distinct count is a count, and pandas counts nothing as zero
+            # rather than as missing, so this one keeps its answer.
             assert_equal(distinct[g], 0, String("group ", g, " counted values"))
             continue
 
@@ -1926,8 +1982,12 @@ def test_a_group_count_too_large_to_replicate_agrees_with_a_serial_loop() raises
         elif sized[g] != want_size[g]:
             what = "size"
         elif want_count[g] == 0:
-            if averaged.data.validity.get(g):
+            # A group with nothing in it answers NaN and stays valid, so both
+            # halves are checked. A null here is the spelling #170 replaced.
+            if not averaged.data.validity.get(g):
                 what = "presence of the mean"
+            elif not isnan(averaged[g]):
+                what = "the empty mean"
         else:
             var mean = Float64(want_sum[g]) / Float64(want_count[g])
             if abs(averaged[g] - mean) > 1e-9:

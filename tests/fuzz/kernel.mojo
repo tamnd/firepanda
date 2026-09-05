@@ -28,6 +28,7 @@ Usage:
     mojo run -I . tests/fuzz/kernel.mojo [--cases=N] [--seed=N] [--max-total-time=SECONDS]
 """
 
+from std.math import isnan
 from std.sys import argv
 from std.time import perf_counter_ns
 
@@ -536,6 +537,30 @@ def run_one[dt: DType](mut rng: Rng, step: Int, seed: UInt64) raises:
                 String("group ", g, " validity under ", kind),
             )
         if reduced.is_valid(g):
+            # NaN is an answer here and not an error, because a float valued
+            # reduction with nothing to reduce reports one rather than a null.
+            # It has to be checked before the subtraction rather than after,
+            # since NaN minus anything is NaN and NaN fails every comparison, so
+            # a difference of one NaN against a real number would slide through
+            # the tolerance below without ever firing. See #170.
+            if isnan(reduced[g]) or isnan(twin[0][g]):
+                if isnan(reduced[g]) != isnan(twin[0][g]):
+                    fail(
+                        step,
+                        seed,
+                        "aggregate_group",
+                        String(
+                            "group ",
+                            g,
+                            " is ",
+                            reduced[g],
+                            " but twin has ",
+                            twin[0][g],
+                            " under ",
+                            kind,
+                        ),
+                    )
+                continue
             var delta = reduced[g] - twin[0][g]
             if delta < 0.0:
                 delta = -delta
