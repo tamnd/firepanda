@@ -917,6 +917,12 @@ def _factorize_direct_parallel[
     projects itself back down onto a single table indexed by value, and the
     second pass reads that table and writes each row once.
 
+    On a narrow key it is closer to one pass than two, because the first one
+    stops as soon as its table is full. That is only true of a direct table: it
+    has a slot for every value in the range by construction, so a full table
+    means there is nothing left in the range to find, which a hash table can
+    never know about itself.
+
     Args:
         col: The column.
         span: The table width, from `direct_plan`.
@@ -963,6 +969,21 @@ def _factorize_direct_parallel[
             if slots.unsafe_offset(at).unsafe_load() == 0:
                 seen.append(i)
                 slots.unsafe_offset(at).unsafe_write(UInt32(len(seen)))
+                # The table has a slot for every value the column can hold, so
+                # once all of them are taken there is nothing left in this slice
+                # to discover and the rest of it is read for nothing. A key of a
+                # hundred values over a hundred million rows fills its table in
+                # the first few hundred and then reads four hundred megabytes to
+                # find out what it already knows.
+                #
+                # The check is one comparison per group and not per row, because
+                # it only runs where a group was just introduced, and a slice can
+                # introduce at most `span` of them. Stopping changes nothing
+                # about the answer: every row after this holds a value the table
+                # already has, and the only thing a repeat would do is not be
+                # recorded, which is what happens to it anyway.
+                if len(seen) == span:
+                    break
         founds[w] = seen^
 
     parallel_for(discover, workers)
