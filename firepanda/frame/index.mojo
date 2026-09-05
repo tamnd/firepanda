@@ -93,9 +93,22 @@ A range does not do any of that. The position of a label in a range starting at 
 is `label - start`, so a lookup against the index that most frames have is arithmetic
 and touches no memory, which is the same argument the representation was chosen for.
 
-What this still does not do is align. There is no `union`, no `reindex` and no `loc`,
-and the four set operations are the other half of
-https://github.com/tamnd/firepanda/issues/154. What is here is what those are made of.
+The four set operations came next and they are the same machine with a different rule
+about which rows survive. Concatenate, factorize, count each ordinal on each side, and
+then a union keeps each label the larger of the two counts times, an intersection keeps
+the ones with a count on both sides, a difference keeps the ones with none on the right
+and a symmetric difference keeps the ones with none on the other. Every expected answer
+in their tests was read off a running pandas 3.0.5 rather than off its documentation,
+which is wrong about `intersection` and duplicates, and the three parts that look
+arbitrary are arbitrary in pandas too: `union` sorts by default while `intersection` and
+`difference` keep the left side's order, `union` is the only one that keeps duplicates,
+and a union with an empty index or with itself returns unsorted because it takes an
+early return before the sort.
+
+What this still does not do is align. There is no `reindex` and no `loc`, and the
+remaining names on https://github.com/tamnd/firepanda/issues/154 are `append`, `delete`,
+`drop`, `putmask`, the slice locators and the level accessors. What is here is what
+those are made of.
 """
 
 from std.collections import Optional
@@ -112,7 +125,7 @@ from firepanda.kernel.select import (
     take_any,
     take_range,
 )
-from firepanda.kernel.sort import is_sorted_any
+from firepanda.kernel.sort import argsort_any, is_sorted_any
 
 
 comptime NOT_FOUND = Int64(-1)
@@ -141,6 +154,20 @@ struct Matches(Movable):
 
     var missing: Array[DType.int64]
     """Which rows of the target matched nothing, as positions in the target."""
+
+    def take_positions(deinit self) -> Array[DType.int64]:
+        """Gives up the positions and throws the rest away.
+
+        For a caller that asked a question the misses do not answer, which is
+        `get_indexer_for` and nothing else so far. It consumes the pair because a
+        field cannot be moved out of a struct that still has to be destroyed, and
+        copying an array the size of the answer to avoid saying so would be a
+        strange trade.
+
+        Returns:
+            The positions.
+        """
+        return self.positions^
 
     def __init__(
         out self,
@@ -240,6 +267,153 @@ def _filled(length: Int, value: Int64) -> Array[DType.int64]:
     for i in range(length):
         out[i] = value
     return out^
+
+
+struct Joined(Movable):
+    """Two label sets laid end to end and factorized together.
+
+    Every lookup and every set operation on an index is a pass over this. Two
+    rows carry the same ordinal exactly when they carry the same label, so a
+    question about whether a label appears on both sides becomes a question about
+    a number, and the labels themselves are only read again at the end when the
+    surviving rows are gathered out of them.
+
+    Keeping the concatenated column rather than throwing it away is what lets the
+    set operations answer with labels instead of with positions. A lookup does not
+    need it and pays nothing for it, since the concatenation had to be built to be
+    factorized in the first place.
+    """
+
+    var labels: AnyArray
+    """This index's labels, then the other side's."""
+
+    var found: KeyCodes
+    """What the factorize returned, held whole rather than taken apart, because a
+    field cannot be moved out of it without leaving the rest undestroyable."""
+
+    var space: Int
+    """How many ordinals there may be, so a table indexed by one can be sized."""
+
+    var rows: Int
+    """Where the other side starts, which is this index's length."""
+
+    def __init__(
+        out self,
+        var labels: AnyArray,
+        var found: KeyCodes,
+        space: Int,
+        rows: Int,
+    ):
+        """Holds a factorized concatenation.
+
+        Args:
+            labels: The two label sets, this index's first.
+            found: The ordinals.
+            space: An upper bound on the ordinals.
+            rows: Where the second set starts.
+        """
+        self.labels = labels^
+        self.found = found^
+        self.space = space
+        self.rows = rows
+
+    def ordinal(self, i: Int) -> Int:
+        """The ordinal of row `i`, as something a table can be indexed by.
+
+        Args:
+            i: A row of the concatenation.
+
+        Returns:
+            Its ordinal.
+        """
+        return Int(self.found.codes[i])
+
+    def total(self) -> Int:
+        """How many rows there are in both sides together.
+
+        Returns:
+            The length of the concatenation.
+        """
+        return len(self.found.codes)
+
+
+def _side_counts(
+    joined: Joined, first: Int, last: Int
+) raises -> Array[DType.int64]:
+    """How many rows in `[first, last)` carry each ordinal.
+
+    Counting the two sides separately is what makes the duplicate rules fall out.
+    A label is in the intersection when both counts are above zero, in the
+    difference when the second is zero, and appears in the union the larger of
+    the two counts times, which is what pandas does and is not what a set would
+    do.
+
+    Args:
+        joined: The factorized concatenation.
+        first: The first row of the side.
+        last: One past the last row of the side.
+
+    Returns:
+        One count per ordinal.
+    """
+    var out = _filled(joined.space, Int64(0))
+    for i in range(first, last):
+        var at = joined.ordinal(i)
+        out[at] = out[at] + 1
+    return out^
+
+
+def _shared_name(a: Optional[String], b: Optional[String]) -> Optional[String]:
+    """The name a result of two indexes carries.
+
+    pandas keeps the name when both sides agree and drops it when they do not,
+    on the reasoning that a label set drawn from two differently named levels is
+    not either of them. Two unnamed indexes agree, and the answer is unnamed.
+
+    Args:
+        a: One name.
+        b: The other.
+
+    Returns:
+        The common name, or `None`.
+    """
+    if not a or not b:
+        return Optional[String]()
+    if a.value() != b.value():
+        return Optional[String]()
+    return Optional[String](a.value())
+
+
+def _gathered(
+    labels: AnyArray,
+    picks: List[Int],
+    var name: Optional[String],
+    sort: Bool,
+) raises -> Index:
+    """Builds the index a set operation decided on, sorted or in picked order.
+
+    Args:
+        labels: The concatenation the positions point into.
+        picks: The rows to keep, in the order to keep them.
+        name: What to call the result.
+        sort: Whether to order by label rather than by the order picked.
+
+    Returns:
+        The index.
+
+    Raises:
+        Error: If the labels cannot be gathered or sorted.
+    """
+    var out = take_any(labels, picks)
+    if not sort:
+        return Index(out^, name^)
+    # `argsort_any` puts nulls last, which is where pandas puts them in a sorted
+    # set operation, so there is nothing to say about them here.
+    var order = argsort_any(out)
+    var by = List[Int](capacity=len(order))
+    for i in range(len(order)):
+        by.append(Int(order[i]))
+    return Index(take_any(out, by), name^)
 
 
 struct Index(Copyable, Movable, Sized):
@@ -551,7 +725,7 @@ struct Index(Copyable, Movable, Sized):
                 out[i] = label - base
         return out^
 
-    def _ordinals(self, target: AnyArray) raises -> KeyCodes:
+    def _join_with(self, target: AnyArray) raises -> Joined:
         """Puts this index's labels and a target's into one ordinal space.
 
         Two rows hold the same ordinal exactly when they hold the same label,
@@ -563,8 +737,8 @@ struct Index(Copyable, Movable, Sized):
             target: The labels to look for.
 
         Returns:
-            One ordinal per row of the concatenation, this index's rows first,
-            with the ordinal count beside them.
+            The concatenated labels, one ordinal per row, and where the target's
+            rows start.
 
         Raises:
             Error: If the dtypes differ or cannot be factorized.
@@ -585,7 +759,10 @@ struct Index(Copyable, Movable, Sized):
                     ),
                 )
             )
-        return factorize_any(concat_two_any(mine, target))
+        var labels = concat_two_any(mine, target)
+        var found = factorize_any(labels)
+        var space = _space_of(found)
+        return Joined(labels^, found^, space, self.length)
 
     def get_indexer(self, target: AnyArray) raises -> Array[DType.int64]:
         """Where each of a set of labels sits in this index.
@@ -618,12 +795,12 @@ struct Index(Copyable, Movable, Sized):
             return self._range_indexer(target)
 
         var rows = self.length
-        var found = self._ordinals(target)
-        ref codes = found.codes
+        var found = self._join_with(target)
+        ref codes = found.found.codes
         var out = _filled(len(target), NOT_FOUND)
         # One position per ordinal is enough because the index is unique, so the
         # first pass never writes the same slot twice.
-        var at = _filled(_space_of(found), NOT_FOUND)
+        var at = _filled(found.space, NOT_FOUND)
         for i in range(rows):
             at[Int(codes[i])] = Int64(i)
         for j in range(len(target)):
@@ -649,9 +826,9 @@ struct Index(Copyable, Movable, Sized):
             Error: If the dtypes differ or cannot be factorized.
         """
         var rows = self.length
-        var grouped = self._ordinals(target)
-        ref codes = grouped.codes
-        var space = _space_of(grouped)
+        var grouped = self._join_with(target)
+        ref codes = grouped.found.codes
+        var space = grouped.space
 
         # A counting sort over the ordinals, so that the positions holding one
         # label end up next to each other and in index order. Three passes over
@@ -804,3 +981,237 @@ struct Index(Copyable, Movable, Sized):
         if self.name and self.name.value() != other.name.value():
             return False
         return self.equals(other)
+
+    def get_indexer_for(self, target: AnyArray) raises -> Array[DType.int64]:
+        """Where a set of labels sits, whether or not the index is unique.
+
+        `get_indexer` refuses a repeated label and `get_indexer_non_unique`
+        answers with a variable number of rows, so code that does not know which
+        kind of index it holds cannot call either. This picks, which is what
+        pandas does under the same name and is what most of pandas calls
+        internally.
+
+        The answer has one row per target label only when the index is unique. A
+        caller that needs that guarantee should be calling `get_indexer` and
+        letting it refuse.
+
+        Args:
+            target: The labels to look for.
+
+        Returns:
+            The positions, `NOT_FOUND` for a label found nowhere.
+
+        Raises:
+            Error: If the dtypes differ or cannot be factorized.
+        """
+        if self.is_unique():
+            return self.get_indexer(target)
+        var found = self.get_indexer_non_unique(target)
+        return found^.take_positions()
+
+    def unique(self) raises -> Self:
+        """The labels, each kept once, in the order they first appear.
+
+        First appearance rather than sorted, because that is what pandas does and
+        because a caller that wanted them sorted would rather say so than have it
+        done twice.
+
+        Returns:
+            An index of the distinct labels, with this one's name.
+
+        Raises:
+            Error: If the labels cannot be factorized.
+        """
+        var name = self.name
+        if self.is_range():
+            return Self(copy=self)
+        var labels = self.materialize()
+        var found = factorize_any(labels)
+        var picks = List[Int]()
+        var taken = _filled(_space_of(found), Int64(0))
+        for i in range(self.length):
+            var at = Int(found.codes[i])
+            if taken[at] != 0:
+                continue
+            taken[at] = 1
+            picks.append(i)
+        return Self(take_any(labels, picks), name^)
+
+    def union(self, other: Self, sort: Bool = True) raises -> Self:
+        """Every label in either index.
+
+        The duplicate rule is the one that surprises people. A label appears the
+        larger of the two counts times rather than once and rather than the sum,
+        so `[1, 1, 2, 3]` union `[1, 2, 2, 4]` is `[1, 1, 2, 2, 3, 4]`. That is
+        what pandas does and the reasoning is that a union of two label sets
+        should be able to label at least as many rows as either of them could.
+
+        Three short circuits are observable rather than internal. An index unioned
+        with itself, with an empty index, or an empty index unioned with one, all
+        return in the original order without sorting, so `Index([3, 1, 2])` union
+        an empty index is `[3, 1, 2]` and not `[1, 2, 3]`. pandas returns the same
+        thing for the same reason, which is that it takes an early return before
+        the sort, and an implementation that always sorted would quietly disagree
+        with it on the two most common calls there are.
+
+        Args:
+            other: The other index.
+            sort: Order the result by label. False keeps this index's order
+                followed by the labels only the other side has, in the order it
+                has them.
+
+        Returns:
+            The union, named what both sides agree on.
+
+        Raises:
+            Error: If the label dtypes differ, which pandas answers by promoting
+                both sides and firepanda does not do yet.
+        """
+        var name = _shared_name(self.name, other.name)
+        if other.length == 0 or self.equals(other):
+            return self.renamed(name^)
+        if self.length == 0:
+            return other.renamed(name^)
+
+        var joined = self._join_with(other.materialize())
+        var mine = _side_counts(joined, 0, joined.rows)
+        var theirs = _side_counts(joined, joined.rows, joined.total())
+        var picks = List[Int]()
+        var taken = _filled(joined.space, Int64(0))
+        for i in range(joined.total()):
+            var at = joined.ordinal(i)
+            if taken[at] != 0:
+                continue
+            taken[at] = 1
+            var copies = mine[at]
+            if theirs[at] > copies:
+                copies = theirs[at]
+            # The same row gathered several times, which is how one label becomes
+            # the several copies of it the rule asks for.
+            for _ in range(Int(copies)):
+                picks.append(i)
+        return _gathered(joined.labels, picks, name^, sort)
+
+    def intersection(self, other: Self, sort: Bool = False) raises -> Self:
+        """Every label in both indexes, each once.
+
+        The result is unique even when both inputs are not, which the pandas
+        docstring still describes as keeping the smaller of the two counts and
+        which pandas has not done for some versions now. Checked against a running
+        3.0.5 rather than read off the page.
+
+        The default order is this index's rather than sorted, which is the
+        opposite of `union`. That asymmetry is pandas' and it is not arbitrary: an
+        intersection is a filter of the left side and a union is not a filter of
+        anything, so one has an order to inherit and the other has to invent one.
+
+        Args:
+            other: The other index.
+            sort: Order the result by label rather than by this index's order.
+
+        Returns:
+            The intersection, named what both sides agree on.
+
+        Raises:
+            Error: If the label dtypes differ.
+        """
+        var name = _shared_name(self.name, other.name)
+        if self.equals(other):
+            if self.is_unique():
+                return self.renamed(name^)
+            return self.unique().renamed(name^)
+
+        var joined = self._join_with(other.materialize())
+        var theirs = _side_counts(joined, joined.rows, joined.total())
+        var picks = List[Int]()
+        var taken = _filled(joined.space, Int64(0))
+        for i in range(joined.rows):
+            var at = joined.ordinal(i)
+            if taken[at] != 0 or theirs[at] == 0:
+                continue
+            taken[at] = 1
+            picks.append(i)
+        return _gathered(joined.labels, picks, name^, sort)
+
+    def difference(self, other: Self, sort: Bool = True) raises -> Self:
+        """Every label in this index and not in the other, each once.
+
+        Unique output, like `intersection` and unlike `union`, and sorted by
+        default, like `union` and unlike `intersection`. Those two defaults are
+        not a pattern and there is no rule to derive them from; they are what
+        pandas does, and a difference that came back in a different order would
+        break code that indexes into the result.
+
+        Args:
+            other: The labels to remove.
+            sort: Order the result by label rather than by this index's order.
+
+        Returns:
+            The difference, named what both sides agree on.
+
+        Raises:
+            Error: If the label dtypes differ.
+        """
+        var name = _shared_name(self.name, other.name)
+        var joined = self._join_with(other.materialize())
+        var theirs = _side_counts(joined, joined.rows, joined.total())
+        var picks = List[Int]()
+        var taken = _filled(joined.space, Int64(0))
+        for i in range(joined.rows):
+            var at = joined.ordinal(i)
+            if taken[at] != 0 or theirs[at] != 0:
+                continue
+            taken[at] = 1
+            picks.append(i)
+        return _gathered(joined.labels, picks, name^, sort)
+
+    def symmetric_difference(
+        self,
+        other: Self,
+        var result_name: Optional[String] = Optional[String](),
+        sort: Bool = True,
+    ) raises -> Self:
+        """Every label in exactly one of the two indexes, each once.
+
+        Unsorted, it is this index's leftovers followed by the other's, which is
+        the order the two passes below produce and the order pandas produces for
+        the same reason.
+
+        `result_name` is the one place in the four where the caller can override
+        the name rule, and it exists in pandas because a symmetric difference is
+        the operation where neither side has a better claim to the name than the
+        other.
+
+        Args:
+            other: The other index.
+            result_name: What to call the result, overriding the usual rule.
+            sort: Order the result by label rather than by side.
+
+        Returns:
+            The symmetric difference.
+
+        Raises:
+            Error: If the label dtypes differ.
+        """
+        var name = _shared_name(self.name, other.name)
+        if result_name:
+            name = result_name^
+
+        var joined = self._join_with(other.materialize())
+        var mine = _side_counts(joined, 0, joined.rows)
+        var theirs = _side_counts(joined, joined.rows, joined.total())
+        var picks = List[Int]()
+        var taken = _filled(joined.space, Int64(0))
+        for i in range(joined.rows):
+            var at = joined.ordinal(i)
+            if taken[at] != 0 or theirs[at] != 0:
+                continue
+            taken[at] = 1
+            picks.append(i)
+        for i in range(joined.rows, joined.total()):
+            var at = joined.ordinal(i)
+            if taken[at] != 0 or mine[at] != 0:
+                continue
+            taken[at] = 1
+            picks.append(i)
+        return _gathered(joined.labels, picks, name^, sort)

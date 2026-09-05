@@ -193,7 +193,7 @@ def test_text_labels_are_found_too() raises:
 
 
 def test_get_indexer_refuses_a_repeated_label() raises:
-    """pandas refuses too, because there is no single position to report."""
+    """The pandas answer is a refusal too, for the same reason we refuse."""
     with assert_raises(contains="unique"):
         _ = labels([Int64(10), 10]).get_indexer(ints([Int64(10)]))
 

@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Two indexes can be combined
+
+`Index` gained `union`, `intersection`, `difference` and `symmetric_difference`, plus `unique` and `get_indexer_for`. With the lookups from the previous entry that is what `align` is made of, and `align` is what every binary operation between two frames is made of.
+
+They are the same machine as the lookups with a different rule about which rows survive. Concatenate the two label sets, factorize once, count each ordinal on each side, and then a union keeps each label the larger of the two counts times, an intersection keeps the labels with a count on both sides, a difference keeps the ones with none on the right, and a symmetric difference keeps the ones with none on the other side.
+
+Every expected answer in the tests was read off a running pandas 3.0.5 rather than off its documentation, which is wrong about at least one of them: `intersection` is still described as keeping the smaller of two duplicate counts and has not done that for several versions. Three things that look arbitrary are arbitrary in pandas too and are matched deliberately. `union` sorts by default while `intersection` and `difference` keep the left side's order, because an intersection is a filter of the left side and has an order to inherit while a union is not a filter of anything. `union` is the only one of the four that keeps duplicates. And a union with an empty index, or with itself, comes back unsorted, because pandas takes an early return before the sort and an implementation that always sorted would quietly reorder the two most common calls there are.
+
+A null is an ordinary label. It matches a null and it sorts last, so `[1, null, 3]` union `[null, 3, 5]` is `[1, 3, 5, null]`. Neither half of that is written in the index: matching comes from the factorize putting every null in one group and the order comes from `argsort_any` defaulting to nulls last, which is why both are asserted rather than assumed.
+
+Two frames labelled the same align without building anything, because `equals` compares the label sets and stops, and that short circuit is worth about nineteen times the general path. Two default ranges do not even compare labels, since a range compares by start and length.
+
+`sort` is a `Bool` here and pandas' third state is not represented: pandas uses `sort=None` to mean sort unless the values cannot be compared, and every dtype firepanda has is comparable. Cross dtype promotion is still absent, so `Index([1, 2]).union(Index([2.0, 3.0]))` raises where pandas answers with a float index. That is the same missing promotion `equals` and `get_indexer` already record and it will be fixed in one place for all of them.
+
 ### An index can say where a label is
 
 `Index` gained the lookups that everything built on an index calls: `is_unique`, `has_duplicates`, `is_monotonic_increasing`, `is_monotonic_decreasing`, `get_indexer`, `get_indexer_non_unique`, `get_loc`, `equals` and `identical`. `loc` is `get_loc`, `reindex` is `get_indexer`, a merge on an index is `get_indexer_non_unique`, and `align` is `equals` followed by `get_indexer`, so writing any of those four before this existed meant writing a lookup inside each of them and then deleting three.
