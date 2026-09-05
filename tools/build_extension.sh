@@ -28,14 +28,25 @@ case "$(uname -s)" in
   Darwin) suffix="dylib" ;;
   Linux)
     suffix="so"
-    # Not in the base image on most CI runners and not pulled in by pixi, and
-    # the failure without it is `patchelf: command not found` from inside a
-    # function, several steps after the build succeeded.
+    # Both of these are checked up front rather than where they are used. Not
+    # having patchelf fails as `command not found` from inside a function several
+    # steps after the build succeeded, and not having ldconfig is worse than
+    # that: the system library test below would answer no every time and the
+    # script would cheerfully vendor libc.
     command -v patchelf > /dev/null || {
       echo "patchelf is needed to relocate the runtime libraries on Linux" >&2
       echo "install it with: apt-get install -y patchelf" >&2
       exit 1
     }
+    # `/sbin` is on root's path and not always on everyone else's, so look there
+    # by hand rather than trusting PATH.
+    ldconfig_bin="$(command -v ldconfig || echo /sbin/ldconfig)"
+    [ -x "$ldconfig_bin" ] || {
+      echo "ldconfig is needed to tell a system library from a Mojo one" >&2
+      exit 1
+    }
+    # Once, rather than once per candidate library. This is a few thousand lines.
+    system_libraries="$("$ldconfig_bin" -p)"
     ;;
   *) echo "unsupported platform: $(uname -s)" >&2; exit 1 ;;
 esac
@@ -64,7 +75,11 @@ needed() {
       ;;
     Linux)
       objdump -p "$1" | awk '/NEEDED/ {print $2}' | while read -r name; do
-        ldconfig -p 2>/dev/null | grep -q " $name " || echo "$name"
+        # `ldconfig -p` prints one indented `name (flags) => path` per line, so
+        # anchoring on the leading whitespace and the trailing space is what
+        # keeps `libc.so.6` from matching `libcrypto.so.6`.
+        printf '%s\n' "$system_libraries" \
+          | grep -qE "^[[:space:]]+$name " || echo "$name"
       done
       ;;
   esac
