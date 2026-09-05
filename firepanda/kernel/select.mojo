@@ -531,3 +531,110 @@ def _filter_core[
 
     out.data.validity = built^
     return out^
+
+
+def take_range(start: Int, indices: List[Int]) raises -> Array[DType.int64]:
+    """Gathers rows out of the arithmetic range `start`, `start + 1`, and so on.
+
+    A row label is `start + at` and depends on nothing that has to exist first,
+    so this never builds the range it gathers from. That is the whole reason it
+    is a separate entry point: the obvious route, materializing the range into a
+    column and handing it to `take_rows`, costs an allocation and a pass
+    proportional to the height going in rather than the height coming out, and on
+    a million rows it cost more than the gather it was decorating.
+
+    Everything else here is `_take_core` with the random read taken out. The
+    output is written unconditionally, the validity is built a word at a time in
+    a register rather than a bit at a time through the bitmap, and the loop goes
+    on every core above the same threshold, which matters more than it looks like
+    it should: this is the pass that faults in the output's pages, and a serial
+    one hangs the whole column off whichever core ran the allocation while the
+    columns beside it are being gathered in parallel.
+
+    Args:
+        start: The first label of the range.
+        indices: The positions to gather. Each is either a position in the range
+            or negative, which produces a null.
+
+    Returns:
+        The gathered labels, of length `len(indices)`.
+
+    Raises:
+        Error: If the output cannot be allocated.
+    """
+    var n = len(indices)
+    var out = Array[DType.int64](overwritten=n)
+    var built = Bitmap(n, all_valid=False)
+    var base = Int64(start)
+
+    def gather(begin: Int, stop: Int) raises {mut out, mut built, imm}:
+        var target = out.unsafe_ptr()
+        var word = UInt64(0)
+        for i in range(begin, stop):
+            var at = indices[i]
+            if at >= 0:
+                target.unsafe_offset(i).unsafe_write(base + Int64(at))
+                word |= UInt64(1) << UInt64(i & 63)
+            else:
+                target.unsafe_offset(i).unsafe_write(Int64(0))
+            if i & 63 == 63:
+                built.unsafe_set_word(i >> 6, word)
+                word = 0
+
+        if stop & 63 != 0 and stop > begin:
+            built.unsafe_set_word(stop >> 6, word)
+
+    if n < PARALLEL_TAKE_ROWS:
+        gather(0, n)
+    else:
+        parallel_morsels(gather, n, TAKE_MORSEL_ROWS)
+
+    out.data.validity = built^
+    return out^
+
+
+def filter_range(start: Int, mask: Array[DType.bool]) -> Array[DType.int64]:
+    """Keeps the labels of the rows a mask keeps, out of an arithmetic range.
+
+    The counterpart of `take_range` and separate for the same reason. It is
+    `_filter_core`'s no-null route with the read replaced by arithmetic, and it
+    is always that route rather than sometimes the other one, because a range has
+    no missing label to carry: the label of row `i` is `start + i` for every row
+    there is. So there is no validity to build and the copy loop has no branch in
+    it, the label is written at the output cursor and the cursor advances by the
+    mask bit, and a row that is dropped is simply overwritten by the next one.
+
+    A null in the mask drops the row, which is the rule `filter_rows` follows and
+    is not the same as the label being null.
+
+    Args:
+        start: The first label of the range.
+        mask: The mask. Must be as long as the range.
+
+    Returns:
+        The labels of the kept rows, in their original order.
+    """
+    var n = len(mask)
+    var mask_values = mask.unsafe_ptr()
+
+    var kept = 0
+    for i in range(n):
+        if not mask.data.validity.get(i):
+            continue
+        if Bool(mask_values.unsafe_offset(i).unsafe_load()):
+            kept += 1
+
+    var out = Array[DType.int64](overwritten=kept)
+    var target = out.unsafe_ptr()
+    var base = Int64(start)
+
+    var written = 0
+    var i = 0
+    while written < kept:
+        var present = mask.data.validity.get(i)
+        var truthy = Bool(mask_values.unsafe_offset(i).unsafe_load())
+        target.unsafe_offset(written).unsafe_write(base + Int64(i))
+        written += Int(present and truthy)
+        i += 1
+
+    return out^

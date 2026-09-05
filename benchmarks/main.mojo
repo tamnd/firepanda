@@ -132,6 +132,7 @@ from firepanda.kernel import (
     divide,
     fill_forward,
     filter_any,
+    filter_range,
     filter_rows,
     group_count,
     group_first,
@@ -152,6 +153,7 @@ from firepanda.kernel import (
     multiply,
     sum_of,
     take_any,
+    take_range,
     take_rows,
 )
 from firepanda.kernel.arith import OP_ADD
@@ -1083,6 +1085,30 @@ def bench_kernel(mut harness: Harness) raises:
         keep(out)
 
     harness.record("kernel/filter_twin", "rows", rows, filter_twin)
+
+    # The two range forms, each next to the general one it stands in for. An index
+    # that is still an arithmetic range produces `start + at` rather than reading a
+    # column, and the two rows say what that is worth in the two shapes. A gather
+    # is a random read a row, so dropping it is most of the operation and
+    # `kernel/take_range` runs at about a third of `kernel/take_scattered`, 0.794 ms
+    # against 2.459. A compaction is sequential on both sides and the read it drops
+    # was already being prefetched, so `kernel/filter_range` lands level with
+    # `kernel/filter` instead, 1.708 ms against 1.768, and the arithmetic is free
+    # rather than a saving. That gap between the two ratios is the whole reason
+    # carrying labels through a filter is visible at the frame level and carrying
+    # them through a take is not. The pair is here rather than under `frame/` so a
+    # change gets attributed to the loop and not to the three columns beside it.
+    def take_range_bench() raises {imm scattered}:
+        var out = take_range(0, scattered)
+        keep(out)
+
+    harness.record("kernel/take_range", "rows", rows, take_range_bench)
+
+    def filter_range_bench() raises {imm mask}:
+        var out = filter_range(0, mask)
+        keep(out)
+
+    harness.record("kernel/filter_range", "rows", rows, filter_range_bench)
 
 
 def bench_sort(mut harness: Harness) raises:

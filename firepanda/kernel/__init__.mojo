@@ -101,7 +101,14 @@ from .nulls import (
     present_bitmap_any,
 )
 from .reduce import reduce_any
-from .select import filter_any, filter_rows, take_any, take_rows
+from .select import (
+    filter_any,
+    filter_range,
+    filter_rows,
+    take_any,
+    take_range,
+    take_rows,
+)
 from .sort import (
     argsort,
     argsort_any,
