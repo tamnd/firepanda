@@ -239,6 +239,19 @@ FRAME = Exposed(
             params=(("n", "int"),),
             returns="DataFrame",
         ),
+        Binding(
+            mojo="PyDataFrame.arrow_c_schema",
+            name="arrow_c_schema",
+            doc="The frame's Arrow schema, in a capsule.",
+            returns="object",
+        ),
+        Binding(
+            mojo="PyDataFrame.arrow_c_array",
+            name="arrow_c_array",
+            doc="The frame's Arrow schema and data, in two capsules.",
+            params=(("requested_schema", "object | None"),),
+            returns="list[object]",
+        ),
     ),
     members=(
         Member(
@@ -294,6 +307,21 @@ FRAME = Exposed(
             returns="DataFrame",
             wraps=True,
         ),
+        Member(
+            name="__arrow_c_schema__",
+            kind="dunder",
+            body="self._inner.arrow_c_schema()",
+            doc="The frame's Arrow schema, as an arrow_schema PyCapsule.",
+            returns="object",
+        ),
+        Member(
+            name="__arrow_c_array__",
+            kind="dunder",
+            signature="requested_schema: object | None = None",
+            body="tuple(self._inner.arrow_c_array(requested_schema))",
+            doc="The frame's Arrow data, as an arrow_schema and an arrow_array PyCapsule.",
+            returns="tuple[object, ...]",
+        ),
     ),
 )
 
@@ -344,10 +372,14 @@ def _register_call(opener: str, name: str, doc: str) -> list[str]:
 
     The generated file is checked by `tools/format_check.sh` like any other Mojo
     source, so emitting a call that is merely valid is not enough, it has to be
-    the exact text the formatter produces. The formatter keeps the name and the
-    docstring on one line while they fit in eighty columns and splits them onto
-    their own lines when they do not, and getting that wrong shows up as a
+    the exact text the formatter produces, and getting that wrong shows up as a
     format failure on a generated file, which is a confusing thing to be handed.
+
+    The formatter has three layouts and takes the first that fits in eighty
+    columns: the name and the docstring on one line, then each on its own line,
+    then the docstring in brackets on a line of its own at an indent of twelve.
+    All three are reproduced here, because each of the three has turned up as
+    soon as a docstring crossed the length that provokes it.
 
     Args:
         opener: The call up to and including the open bracket.
@@ -360,6 +392,9 @@ def _register_call(opener: str, name: str, doc: str) -> list[str]:
     short = f'        "{name}", docstring="{doc}"'
     if len(short) <= MOJO_COLUMNS:
         return [opener, short, "    )"]
+    own_line = f'        docstring="{doc}",'
+    if len(own_line) <= MOJO_COLUMNS:
+        return [opener, f'        "{name}",', own_line, "    )"]
     if len(doc) + 14 > MOJO_COLUMNS:
         raise SystemExit(
             f"the docstring for {name} is too long for the generator to lay out"

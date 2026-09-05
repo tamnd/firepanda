@@ -16,12 +16,16 @@ look like pandas.
 """
 
 from std.os import abort
-from std.memory import Pointer
+from std.memory import ArcPointer, Pointer
 from std.python import Python, PythonObject
 from std.python.bindings import check_arguments_arity
 
+from firepanda.array.any import AnyArray
+from firepanda.dtype.logical import LogicalType
 from firepanda.frame import DataFrame
+from firepanda.io.arrow_export import export_frame_array, export_frame_schema
 from firepanda.io.read import read_csv
+from firepanda.py.convert import array_capsule, schema_capsule
 from firepanda.py.errors import (
     CANCELLED,
     COLUMN,
@@ -68,8 +72,17 @@ def _int(value: PythonObject, name: String) raises -> Int:
 struct PyDataFrame(Movable, Writable):
     """A firepanda `DataFrame` with a CPython object wrapped around it."""
 
-    var frame: DataFrame
-    """The frame itself. Owned by the Python object that holds this value."""
+    var frame: ArcPointer[DataFrame]
+    """The frame itself, shared rather than owned.
+
+    The Python object holding this value is one holder of the frame and an
+    exported Arrow array is another, which is what makes `__arrow_c_array__` zero
+    copy: the consumer gets pointers into this frame rather than into a copy of
+    it, and the frame stays alive until both have let go. See document 15.
+
+    Nothing else about the binding cares. Every method here reads through the
+    share exactly as it would have read through the value.
+    """
 
     @staticmethod
     def py_init(
@@ -126,7 +139,7 @@ struct PyDataFrame(Movable, Writable):
         Returns:
             The number of rows.
         """
-        return PythonObject(len(Self._frame(py_self)[].frame))
+        return PythonObject(len(Self._frame(py_self)[].frame[]))
 
     @staticmethod
     def width(py_self: PythonObject) raises -> PythonObject:
@@ -138,7 +151,7 @@ struct PyDataFrame(Movable, Writable):
         Returns:
             The number of columns.
         """
-        return PythonObject(Self._frame(py_self)[].frame.width())
+        return PythonObject(Self._frame(py_self)[].frame[].width())
 
     @staticmethod
     def names(py_self: PythonObject) raises -> PythonObject:
@@ -151,7 +164,7 @@ struct PyDataFrame(Movable, Writable):
             A list of strings.
         """
         var out = Python.list()
-        for name in Self._frame(py_self)[].frame.names():
+        for name in Self._frame(py_self)[].frame[].names():
             out.append(PythonObject(name))
         return out
 
@@ -167,7 +180,9 @@ struct PyDataFrame(Movable, Writable):
             A new frame.
         """
         return PythonObject(
-            alloc=Self(Self._frame(py_self)[].frame.head(_int(n, "n")))
+            alloc=Self(
+                ArcPointer(Self._frame(py_self)[].frame[].head(_int(n, "n")))
+            )
         )
 
     @staticmethod
@@ -182,8 +197,119 @@ struct PyDataFrame(Movable, Writable):
             A new frame.
         """
         return PythonObject(
-            alloc=Self(Self._frame(py_self)[].frame.tail(_int(n, "n")))
+            alloc=Self(
+                ArcPointer(Self._frame(py_self)[].frame[].tail(_int(n, "n")))
+            )
         )
+
+    @staticmethod
+    def _borrowed(
+        py_self: PythonObject,
+    ) raises -> List[Pointer[AnyArray, MutAnyOrigin]]:
+        """Points at every column of the frame, without copying any of them.
+
+        A column with more than one chunk has no single Arrow array to be, which
+        is what `__arrow_c_stream__` is for and this is not. The refusal happens
+        here rather than half way through an export, so nothing has been
+        allocated by the time it is raised.
+
+        Args:
+            py_self: The frame.
+
+        Returns:
+            One pointer per column, in schema order, each pointing into the
+            frame rather than at a copy of it.
+        """
+        ref frame = Self._frame(py_self)[].frame[]
+        var columns = List[Pointer[AnyArray, MutAnyOrigin]](
+            capacity=frame.width()
+        )
+        for i in range(frame.width()):
+            try:
+                columns.append(
+                    Pointer(to=frame.columns[i].only()).unsafe_origin_cast[
+                        MutAnyOrigin
+                    ]()
+                )
+            except:
+                raise tagged(
+                    UNSUPPORTED,
+                    String(
+                        "column '",
+                        frame.names()[i],
+                        "'",
+                        (
+                            " is stored in more than one chunk, which the Arrow"
+                            " array protocol cannot express; use the stream"
+                            " protocol instead"
+                        ),
+                    ),
+                )
+        return columns^
+
+    @staticmethod
+    def arrow_c_schema(py_self: PythonObject) raises -> PythonObject:
+        """Describes the frame as an Arrow schema capsule.
+
+        This is the Mojo half of `__arrow_c_schema__`. A frame is a struct in
+        Arrow's type system, with one child per column, so what comes back is one
+        capsule and not one per column.
+
+        Args:
+            py_self: The frame.
+
+        Returns:
+            A `PyCapsule` named `arrow_schema`.
+        """
+        ref frame = Self._frame(py_self)[].frame[]
+        var types = List[LogicalType](capacity=frame.width())
+        for i in range(frame.width()):
+            types.append(frame.columns[i].type)
+        try:
+            return schema_capsule(export_frame_schema(types, frame.names()))
+        except cause:
+            raise retagged(UNSUPPORTED, cause)
+
+    @staticmethod
+    def arrow_c_array(
+        py_self: PythonObject, requested_schema: PythonObject
+    ) raises -> PythonObject:
+        """Hands the frame's columns out as an Arrow array capsule, without copying.
+
+        This is the Mojo half of `__arrow_c_array__`. The buffers in the exported
+        array are the frame's own, and the export holds a share of the frame, so
+        the consumer can outlive the Python object it came from and still be
+        reading live memory rather than freed memory.
+
+        Args:
+            py_self: The frame.
+            requested_schema: A schema capsule the consumer would rather have, or
+                `None`. Anything other than `None` is refused, because converting
+                on the way out is not written and a consumer is entitled to
+                assume that what it asked for is what it got.
+
+        Returns:
+            A list of two capsules, the schema and the array, which the Python
+            layer hands back as the tuple the protocol asks for.
+        """
+        if requested_schema is not Python.none():
+            raise tagged(
+                UNSUPPORTED,
+                (
+                    "requested_schema is not supported yet; pass None and cast"
+                    " the result instead"
+                ),
+            )
+        var columns = Self._borrowed(py_self)
+        var keep = Self._frame(py_self)[].frame
+        var rows = len(Self._frame(py_self)[].frame[])
+        var pair = Python.list()
+        pair.append(Self.arrow_c_schema(py_self))
+        try:
+            pair.append(array_capsule(export_frame_array(columns, rows, keep^)))
+        except cause:
+            raise retagged(UNSUPPORTED, cause)
+        return pair
 
     def write_to(self, mut writer: Some[Writer]):
         """Writes the frame the way `describe` does.
@@ -196,7 +322,7 @@ struct PyDataFrame(Movable, Writable):
         Args:
             writer: Where to write.
         """
-        writer.write(self.frame.describe())
+        writer.write(self.frame[].describe())
 
     def write_repr_to(self, mut writer: Some[Writer]):
         """Writes the frame. This is what Python sees for both `str` and `repr`.
@@ -204,7 +330,7 @@ struct PyDataFrame(Movable, Writable):
         Args:
             writer: Where to write.
         """
-        writer.write(self.frame.describe())
+        writer.write(self.frame[].describe())
 
 
 def open_csv(path: PythonObject) raises -> PythonObject:
@@ -223,7 +349,9 @@ def open_csv(path: PythonObject) raises -> PythonObject:
         A new frame.
     """
     try:
-        return PythonObject(alloc=PyDataFrame(read_csv(String(path))))
+        return PythonObject(
+            alloc=PyDataFrame(ArcPointer(read_csv(String(path))))
+        )
     except cause:
         raise retagged(IO, cause)
 

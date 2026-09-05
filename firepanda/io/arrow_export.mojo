@@ -62,6 +62,20 @@ a kernel wants to load, and Arrow stores it as a bit, so exporting one is a pack
 pass. It shrinks by a factor of eight on the way, which is why the cost of it
 hardly shows, and the packed buffer lives in the box like everything else.
 
+### A whole frame, which is a struct
+
+A frame is not a list of arrays to Arrow, it is one array of struct type with one
+child per column, which is why `__arrow_c_array__` on a table like object hands
+back a single pair rather than a pair per column. `export_frame_schema` and
+`export_frame_array` build that, and the only new idea in them is that a parent
+owns its children: the box behind `private_data` holds the child structs by
+value, the `children` field points at an array of pointers into that box, and the
+parent's release callback releases every child before freeing itself.
+
+Nothing extra is copied. The children are the same exports a column would have
+produced on its own, and the struct on top of them is one null buffer and a list
+of pointers.
+
 ### What is still not here
 
 The null type, which firepanda has as a `LogicalType` but not as a column anything
@@ -85,8 +99,13 @@ from .arrow_c import (
     VoidPtr,
     array_release_callback,
     format_for,
+    release_array,
+    release_schema,
     schema_release_callback,
 )
+
+comptime STRUCT_FORMAT = "+s"
+"""The Arrow format string for a struct, which is what a frame is."""
 
 
 struct _SchemaBox(Movable):
@@ -298,32 +317,19 @@ def export_schema(
     return schema^
 
 
-def export_array(var column: AnyArray) raises -> ArrowArray:
-    """Hands a firepanda column to a C consumer without copying its values.
+def _check_exportable(column: AnyArray) raises:
+    """Refuses the two columns that cannot be exported.
 
-    The column is moved into a box that lives until the returned array is
-    released. Nothing is copied for any type except bool: `buffers[1]` is the
-    column's own values pointer, or its own views pointer for a string column,
-    and `buffers[0]` is its own validity pointer.
-
-    The validity buffer is null when the column has no nulls, which Arrow allows
-    and consumers use to skip a branch per value. A column that has nulls hands
-    out its bitmap as it stands, because firepanda's bitmap and Arrow's are the
-    same bytes in the same order with the same meaning.
-
-    Two buffers for a fixed width or bool column, four for a string or binary
-    one: validity, the views, the single payload block, and the block's length.
+    Called before anything is allocated, so a refusal leaks nothing.
 
     Args:
-        column: The column, consumed.
-
-    Returns:
-        An array the caller owns and must release exactly once.
+        column: The column about to be exported.
 
     Raises:
         Error: If the column is of the null type, which nothing constructs, or
             is a string column with no text storage, which nothing constructs
-            either but which would be read as a column of garbage views.
+            either but which would be read as a column of garbage views, or is
+            of any other type that has no Arrow format string.
     """
     var type = column.type
     if type == LogicalType.NULL:
@@ -336,15 +342,94 @@ def export_array(var column: AnyArray) raises -> ArrowArray:
         raise Error(
             "arrow: a string column with no text storage cannot be exported"
         )
-    # Raises for anything else that has no format string, before the box exists
-    # and there is something to leak.
     _ = format_for(type)
 
+
+def _fill_buffers(
+    column: Pointer[AnyArray, MutAnyOrigin],
+    mut buffers: List[NullableVoidPtr],
+    mut packed: Optional[Bitmap],
+    mut sizes: List[Int64],
+) raises -> Int:
+    """Points a box's buffer array at a column's own memory.
+
+    This is the whole of the zero copy, and it is shared by both export paths
+    because the answer does not depend on who owns the column afterwards. The
+    three lists it fills live in the box, so every pointer it writes stays valid
+    for as long as the exported array does.
+
+    The validity buffer is null when the column has no nulls, which Arrow allows
+    and consumers use to skip a branch per value. A column that has nulls hands
+    out its bitmap as it stands, because firepanda's bitmap and Arrow's are the
+    same bytes in the same order with the same meaning.
+
+    Args:
+        column: The column to read. It has to outlive the exported array, which
+            is the caller's problem and is the only real difference between the
+            two paths.
+        buffers: The box's buffer array, filled in Arrow's order.
+        packed: The box's slot for a bool column's bit packed values, set here
+            rather than passed in because the packed buffer has to live in the
+            box like every other one.
+        sizes: The box's slot for a view column's payload length.
+
+    Returns:
+        How many buffers the array has, which is two for a fixed width or a bool
+        column and four for a view one.
+    """
+    var type = column[].type
+    if column[].data.validity.null_count() == 0:
+        buffers.append(None)
+    else:
+        buffers.append(_as_void(column[].data.validity.unsafe_ptr()))
+
+    if type == LogicalType.BOOL:
+        packed = pack_bools(column[])
+        buffers.append(_as_void(packed.value().unsafe_ptr()))
+        return 2
+
+    if type == LogicalType.STRING or type == LogicalType.BINARY:
+        ref text = column[].text.value()
+        sizes.append(Int64(len(text.payload)))
+        buffers.append(_as_void(text.views.unsafe_ptr()))
+        buffers.append(_as_void(text.payload.unsafe_ptr()))
+        buffers.append(
+            sizes.unsafe_ptr()
+            .unsafe_origin_cast[MutUntrackedOrigin]()
+            .unsafe_bitcast[NoneType]()
+        )
+        return 4
+
+    buffers.append(_as_void(column[].data.values.unsafe_ptr()))
+    return 2
+
+
+def export_array(var column: AnyArray) raises -> ArrowArray:
+    """Hands a firepanda column to a C consumer without copying its values.
+
+    The column is moved into a box that lives until the returned array is
+    released. Nothing is copied for any type except bool: `buffers[1]` is the
+    column's own values pointer, or its own views pointer for a string column,
+    and `buffers[0]` is its own validity pointer.
+
+    Two buffers for a fixed width or bool column, four for a string or binary
+    one: validity, the views, the single payload block, and the block's length.
+
+    This is the path for a column nobody else wants. A column that is still in a
+    frame the caller keeps goes through `export_array_borrowed` instead.
+
+    Args:
+        column: The column, consumed.
+
+    Returns:
+        An array the caller owns and must release exactly once.
+
+    Raises:
+        Error: If the column cannot be exported. See `_check_exportable`.
+    """
+    _check_exportable(column)
     var length = len(column)
     var null_count = column.data.validity.null_count()
-    var packed = Optional[Bitmap](None)
-    if type == LogicalType.BOOL:
-        packed = pack_bools(column)
 
     var box = external_call["malloc", Pointer[_ArrayBox, MutUntrackedOrigin]](
         size_of[_ArrayBox]()
@@ -353,35 +438,19 @@ def export_array(var column: AnyArray) raises -> ArrowArray:
         _ArrayBox(
             column^,
             List[NullableVoidPtr](capacity=4),
-            packed^,
+            Optional[Bitmap](None),
             List[Int64](capacity=1),
         )
     )
 
     # Filled after the move, so the pointers are the box's copy of the column
     # rather than a local that is about to go away.
-    if null_count == 0:
-        box[].buffers.append(None)
-    else:
-        box[].buffers.append(_as_void(box[].column.data.validity.unsafe_ptr()))
-
-    var n_buffers = 2
-    if type == LogicalType.BOOL:
-        box[].buffers.append(_as_void(box[].packed.value().unsafe_ptr()))
-    elif is_view:
-        n_buffers = 4
-        ref text = box[].column.text.value()
-        box[].sizes.append(Int64(len(text.payload)))
-        box[].buffers.append(_as_void(text.views.unsafe_ptr()))
-        box[].buffers.append(_as_void(text.payload.unsafe_ptr()))
-        box[].buffers.append(
-            box[]
-            .sizes.unsafe_ptr()
-            .unsafe_origin_cast[MutUntrackedOrigin]()
-            .unsafe_bitcast[NoneType]()
-        )
-    else:
-        box[].buffers.append(_as_void(box[].column.data.values.unsafe_ptr()))
+    var n_buffers = _fill_buffers(
+        Pointer(to=box[].column).unsafe_origin_cast[MutAnyOrigin](),
+        box[].buffers,
+        box[].packed,
+        box[].sizes,
+    )
 
     var array = ArrowArray()
     array.length = Int64(length)
@@ -394,4 +463,409 @@ def export_array(var column: AnyArray) raises -> ArrowArray:
     )
     array.private_data = box.unsafe_bitcast[NoneType]()
     array.release = array_release_callback(_release_exported_array)
+    return array^
+
+
+struct _BorrowedArrayBox[K: Copyable & Deinitable](Movable):
+    """What a borrowed array's `private_data` points at.
+
+    The same three working lists as `_ArrayBox` and, instead of the column, a
+    keep alive. The keep alive is whatever the caller decided is the thing that
+    owns the memory the buffers point at, held by value so that the exported
+    array is what keeps it from being destroyed.
+
+    That is what makes a zero copy export of a frame Python is still holding
+    possible at all. firepanda columns are deep copied rather than refcounted, so
+    a box that held a column would be holding a copy, and the export would no
+    longer be pointing at the frame the user has. A box that holds a shared
+    pointer to the frame points at the real thing and costs one atomic increment.
+    """
+
+    var keep: Self.K
+    var buffers: List[NullableVoidPtr]
+    var packed: Optional[Bitmap]
+    var sizes: List[Int64]
+
+    def __init__(
+        out self,
+        var keep: Self.K,
+        var buffers: List[NullableVoidPtr],
+        var packed: Optional[Bitmap],
+        var sizes: List[Int64],
+    ):
+        """Constructs the box.
+
+        Args:
+            keep: What owns the memory the buffers point at.
+            buffers: The pointers, in Arrow's order.
+            packed: The bit packed values of a bool column, empty otherwise.
+            sizes: The lengths of the variadic data buffers, for a view column.
+        """
+        self.keep = keep^
+        self.buffers = buffers^
+        self.packed = packed^
+        self.sizes = sizes^
+
+
+def _release_borrowed_array[
+    K: Copyable & Deinitable
+](array: ArrayPtr) abi("C") -> None:
+    """Frees a borrowed array. Installed as `ArrowArray.release`.
+
+    Destroying the box drops the keep alive, which is the point: for a shared
+    pointer that is an atomic decrement, and the frame goes away with the last
+    consumer rather than with the Mojo scope that exported it.
+
+    Parameters:
+        K: The keep alive's type, which has to be the same one the matching
+            `export_array_borrowed` used or the box is read as the wrong type.
+    """
+    if not array[].release:
+        return
+    if array[].private_data:
+        var box = (
+            array[].private_data.value().unsafe_bitcast[_BorrowedArrayBox[K]]()
+        )
+        box.unsafe_deinit_pointee()
+        external_call["free", NoneType](box)
+        array[].private_data = None
+    array[].buffers = None
+    array[].release = None
+
+
+def export_array_borrowed[
+    K: Copyable & Deinitable
+](column: Pointer[AnyArray, MutAnyOrigin], var keep: K) raises -> ArrowArray:
+    """Hands out a column that something else owns, without copying it.
+
+    The difference from `export_array` is who is holding the column afterwards.
+    There the array owns it, here the array owns a share of whatever does, and in
+    both cases the buffers are the column's own memory and the consumer decides
+    when it is finished by calling release.
+
+    Parameters:
+        K: The keep alive's type.
+
+    Args:
+        column: The column. It must be reachable through `keep`, because that is
+            the only thing this export keeps alive.
+        keep: A share of whatever owns the column.
+
+    Returns:
+        An array the caller owns and must release exactly once.
+
+    Raises:
+        Error: If the column cannot be exported. See `_check_exportable`.
+    """
+    _check_exportable(column[])
+    var length = len(column[])
+    var null_count = column[].data.validity.null_count()
+
+    var box = external_call[
+        "malloc", Pointer[_BorrowedArrayBox[K], MutUntrackedOrigin]
+    ](size_of[_BorrowedArrayBox[K]]())
+    box.unsafe_write(
+        _BorrowedArrayBox[K](
+            keep^,
+            List[NullableVoidPtr](capacity=4),
+            Optional[Bitmap](None),
+            List[Int64](capacity=1),
+        )
+    )
+
+    var n_buffers = _fill_buffers(
+        column, box[].buffers, box[].packed, box[].sizes
+    )
+
+    var array = ArrowArray()
+    array.length = Int64(length)
+    array.null_count = Int64(null_count)
+    array.offset = 0
+    array.n_buffers = Int64(n_buffers)
+    array.n_children = 0
+    array.buffers = (
+        box[].buffers.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+    )
+    array.private_data = box.unsafe_bitcast[NoneType]()
+    array.release = array_release_callback(_release_borrowed_array[K])
+    return array^
+
+
+struct _StructSchemaBox(Movable):
+    """What an exported struct schema's `private_data` points at.
+
+    Three things that all have to outlive the parent and none of which can be a
+    local. The format string, which is `+s` and is the same two bytes every time
+    but still has to be null terminated storage somebody owns. The child schemas
+    themselves, by value, because the parent's `children` field is an array of
+    pointers and something has to be at the other end of them. And the array of
+    pointers, because `children` points at it rather than owning it.
+
+    The children are held before the pointers are taken, and the pointers are
+    filled in after the box has been moved into its allocation, so that every one
+    of them names the box's own copy rather than a list that is about to be moved
+    out from under them.
+    """
+
+    var format: List[UInt8]
+    var children: List[ArrowSchema]
+    var pointers: List[SchemaPtr]
+
+    def __init__(
+        out self,
+        var format: List[UInt8],
+        var children: List[ArrowSchema],
+        var pointers: List[SchemaPtr],
+    ):
+        """Constructs the box.
+
+        Args:
+            format: The null terminated `+s`.
+            children: The child schemas, moved in.
+            pointers: An empty list with room for one pointer per child, filled
+                in by the caller after this has been moved into place.
+        """
+        self.format = format^
+        self.children = children^
+        self.pointers = pointers^
+
+
+struct _StructArrayBox(Movable):
+    """What an exported struct array's `private_data` points at.
+
+    The same shape as `_StructSchemaBox`, plus the one buffer slot a struct array
+    has. Arrow says a struct array has exactly one buffer, its validity, and a
+    frame has no row level validity, so the slot is there and is null.
+    """
+
+    var buffers: List[NullableVoidPtr]
+    var children: List[ArrowArray]
+    var pointers: List[ArrayPtr]
+
+    def __init__(
+        out self,
+        var buffers: List[NullableVoidPtr],
+        var children: List[ArrowArray],
+        var pointers: List[ArrayPtr],
+    ):
+        """Constructs the box.
+
+        Args:
+            buffers: The one element buffer array, holding null.
+            children: The child arrays, moved in.
+            pointers: An empty list with room for one pointer per child.
+        """
+        self.buffers = buffers^
+        self.children = children^
+        self.pointers = pointers^
+
+
+def _release_struct_schema(schema: SchemaPtr) abi("C") -> None:
+    """Frees an exported struct schema. Installed as `ArrowSchema.release`.
+
+    The parent releases its children before freeing the box that holds them,
+    which is what the C Data Interface requires of a parent and is also simply
+    what has to happen: each child owns a box of its own and nothing else is
+    going to release it.
+    """
+    if not schema[].release:
+        return
+    if schema[].private_data:
+        var box = (
+            schema[].private_data.value().unsafe_bitcast[_StructSchemaBox]()
+        )
+        for i in range(len(box[].children)):
+            release_schema(box[].children[i])
+        box.unsafe_deinit_pointee()
+        external_call["free", NoneType](box)
+        schema[].private_data = None
+    schema[].format = None
+    schema[].name = None
+    schema[].children = None
+    schema[].n_children = 0
+    schema[].release = None
+
+
+def _release_struct_array(array: ArrayPtr) abi("C") -> None:
+    """Frees an exported struct array. Installed as `ArrowArray.release`."""
+    if not array[].release:
+        return
+    if array[].private_data:
+        var box = array[].private_data.value().unsafe_bitcast[_StructArrayBox]()
+        for i in range(len(box[].children)):
+            release_array(box[].children[i])
+        box.unsafe_deinit_pointee()
+        external_call["free", NoneType](box)
+        array[].private_data = None
+    array[].buffers = None
+    array[].children = None
+    array[].n_children = 0
+    array[].release = None
+
+
+def export_frame_schema(
+    types: List[LogicalType], names: List[String]
+) raises -> ArrowSchema:
+    """Describes a frame as a struct schema with one child per column.
+
+    A frame is a struct in Arrow's type system, which is why `__arrow_c_array__`
+    on a table like object hands back one array rather than a list of them. The
+    format string is `+s` and the field names live on the children, so this is
+    where a frame's column names cross the boundary.
+
+    Args:
+        types: The column types, in order.
+        names: The column names, in the same order.
+
+    Returns:
+        A schema the caller owns and must release exactly once, which releases
+        every child with it.
+
+    Raises:
+        Error: If the two lists are different lengths, or if any column type has
+            no Arrow format string.
+    """
+    if len(types) != len(names):
+        raise Error(
+            String(
+                "arrow: ",
+                len(types),
+                " column types but ",
+                len(names),
+                " column names",
+            )
+        )
+    var children = List[ArrowSchema](capacity=len(types))
+    for i in range(len(types)):
+        children.append(export_schema(types[i], names[i]))
+
+    var box = external_call[
+        "malloc", Pointer[_StructSchemaBox, MutUntrackedOrigin]
+    ](size_of[_StructSchemaBox]())
+    box.unsafe_write(
+        _StructSchemaBox(
+            _c_string(STRUCT_FORMAT),
+            children^,
+            List[SchemaPtr](capacity=len(types)),
+        )
+    )
+    # After the move, so every pointer names the box's own child rather than a
+    # list that has just been moved out from under it.
+    for i in range(len(box[].children)):
+        box[].pointers.append(
+            Pointer(to=box[].children[i]).unsafe_origin_cast[
+                MutUntrackedOrigin
+            ]()
+        )
+
+    var schema = ArrowSchema()
+    schema.format = (
+        box[]
+        .format.unsafe_ptr()
+        .unsafe_origin_cast[MutUntrackedOrigin]()
+        .unsafe_bitcast[c_char]()
+    )
+    schema.flags = ARROW_FLAG_NULLABLE
+    schema.n_children = Int64(len(box[].children))
+    schema.children = (
+        box[].pointers.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+    )
+    schema.private_data = box.unsafe_bitcast[NoneType]()
+    schema.release = schema_release_callback(_release_struct_schema)
+    return schema^
+
+
+def export_frame_array[
+    K: Copyable & Deinitable
+](
+    columns: List[Pointer[AnyArray, MutAnyOrigin]], length: Int, var keep: K
+) raises -> ArrowArray:
+    """Hands a whole frame to a C consumer as a struct array.
+
+    Nothing is copied that a single column export would not have copied, which is
+    to say nothing at all except a bool column's bit packing. The struct on top
+    is one null buffer and a list of pointers.
+
+    A struct array carries no validity of its own here, because a frame has no
+    concept of a null row. Arrow requires the buffer slot to exist and allows it
+    to be null, which is what a consumer reads as every row present.
+
+    Every child gets its own share of the keep alive rather than relying on the
+    parent's. A consumer is allowed to move a child out and release the parent,
+    and a child whose lifetime depended on its parent's box would then be reading
+    memory nobody was holding.
+
+    Parameters:
+        K: The keep alive's type.
+
+    Args:
+        columns: One pointer per column, in schema order. Each must be reachable
+            through `keep`, and each must have exactly the length given, which is
+            Arrow's requirement for a struct rather than firepanda's.
+        length: The row count.
+        keep: A share of whatever owns the columns.
+
+    Returns:
+        An array the caller owns and must release exactly once, which releases
+        every child with it.
+
+    Raises:
+        Error: If any column is a length other than `length`, or if any column
+            cannot be exported.
+    """
+    for i in range(len(columns)):
+        if len(columns[i][]) != length:
+            raise Error(
+                String(
+                    "arrow: column ",
+                    i,
+                    " has ",
+                    len(columns[i][]),
+                    " rows but the frame has ",
+                    length,
+                )
+            )
+
+    var children = List[ArrowArray](capacity=len(columns))
+    # A failure part way through leaves the children already built with nobody
+    # to release them, so they are released here before the error goes up.
+    try:
+        for i in range(len(columns)):
+            children.append(export_array_borrowed(columns[i], keep.copy()))
+    except cause:
+        for i in range(len(children)):
+            release_array(children[i])
+        raise cause
+
+    var box = external_call[
+        "malloc", Pointer[_StructArrayBox, MutUntrackedOrigin]
+    ](size_of[_StructArrayBox]())
+    var buffers = List[NullableVoidPtr](capacity=1)
+    buffers.append(None)
+    box.unsafe_write(
+        _StructArrayBox(
+            buffers^, children^, List[ArrayPtr](capacity=len(columns))
+        )
+    )
+    for i in range(len(box[].children)):
+        box[].pointers.append(
+            Pointer(to=box[].children[i]).unsafe_origin_cast[
+                MutUntrackedOrigin
+            ]()
+        )
+
+    var array = ArrowArray()
+    array.length = Int64(length)
+    array.null_count = 0
+    array.offset = 0
+    array.n_buffers = 1
+    array.n_children = Int64(len(box[].children))
+    array.buffers = (
+        box[].buffers.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+    )
+    array.children = (
+        box[].pointers.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+    )
+    array.private_data = box.unsafe_bitcast[NoneType]()
+    array.release = array_release_callback(_release_struct_array)
     return array^

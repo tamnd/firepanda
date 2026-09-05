@@ -99,6 +99,8 @@ Verification is by pointer identity, not by eye. A test asserts that the buffer 
 
 The reverse direction is the same protocol: anything exposing `__arrow_c_stream__` is constructible into a firepanda frame without a copy, which means pandas, Polars and DuckDB results all arrive for free.
 
+The outward half of that is built, and document 15 is how. The short version is that a frame crosses as one struct array with a child per column, and that the interesting part turned out to be ownership rather than layout: a frame Python is still holding cannot be consumed by the export and must not be copied by it, so the binding holds the frame as a share and every exported array holds one too.
+
 ## 5. Error mapping
 
 Mojo has one `Error` type carrying a string. Python users write `except KeyError`.

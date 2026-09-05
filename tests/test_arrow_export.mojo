@@ -15,10 +15,12 @@ consumer sees.
 """
 
 from std.ffi import c_char
+from std.memory import ArcPointer
 from std.testing import (
     TestSuite,
     assert_equal,
     assert_false,
+    assert_raises,
     assert_true,
 )
 
@@ -26,6 +28,8 @@ from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.array.strings import StringBuilder, strings_from_list
 from firepanda.dtype.logical import LogicalType
+from firepanda.frame.frame import DataFrame
+from firepanda.frame.series import Series
 from firepanda.io.arrow_c import (
     ARROW_FLAG_NULLABLE,
     ArrowArray,
@@ -33,7 +37,12 @@ from firepanda.io.arrow_c import (
     release_array,
     release_schema,
 )
-from firepanda.io.arrow_export import export_array, export_schema
+from firepanda.io.arrow_export import (
+    export_array,
+    export_frame_array,
+    export_frame_schema,
+    export_schema,
+)
 
 
 def _numbers(count: Int) raises -> Array[DType.int64]:
@@ -314,6 +323,123 @@ def test_the_format_string_of_a_string_column_is_the_view_one() raises:
     var schema = export_schema(LogicalType.STRING, "label")
     assert_equal(_c_string_at(schema.format.value()), "vu")
     release_schema(schema)
+
+
+def _frame() raises -> DataFrame:
+    """Builds a two column frame of int64 and string, with one null."""
+    var qty = Array[DType.int64](3)
+    qty.set_valid(0, Int64(4))
+    qty.set_null(1)
+    qty.set_valid(2, Int64(25))
+    var series = List[Series](capacity=2)
+    series.append(Series("qty", AnyArray(qty^)))
+    series.append(
+        Series("name", AnyArray(strings_from_list(["rivet", "bolt", "nut"])))
+    )
+    return DataFrame.from_series(series^)
+
+
+def _borrow(
+    frame: ArcPointer[DataFrame],
+) raises -> List[Pointer[AnyArray, MutAnyOrigin]]:
+    """Points at every column of a shared frame, the way the binding does."""
+    var columns = List[Pointer[AnyArray, MutAnyOrigin]](
+        capacity=frame[].width()
+    )
+    for i in range(frame[].width()):
+        columns.append(
+            Pointer(to=frame[].columns[i].only()).unsafe_origin_cast[
+                MutAnyOrigin
+            ]()
+        )
+    return columns^
+
+
+def test_a_frame_is_a_struct_with_one_child_per_column() raises:
+    # Arrow has no table type at this level. A frame is an array of struct type,
+    # which is why the protocol hands back one array and not one per column.
+    var schema = export_frame_schema(
+        [LogicalType.INT64, LogicalType.STRING], ["qty", "name"]
+    )
+    assert_equal(_c_string_at(schema.format.value()), "+s")
+    assert_equal(schema.n_children, 2)
+    var children = schema.children.value()
+    assert_equal(
+        _c_string_at(children.unsafe_offset(0)[][].name.value()),
+        "qty",
+    )
+    assert_equal(
+        _c_string_at(children.unsafe_offset(1)[][].format.value()),
+        "vu",
+    )
+    release_schema(schema)
+
+
+def test_a_schema_with_the_wrong_number_of_names_is_refused() raises:
+    with assert_raises(contains="2 column types but 1 column names"):
+        _ = export_frame_schema(
+            [LogicalType.INT64, LogicalType.STRING], ["qty"]
+        )
+
+
+def test_a_frames_columns_are_not_copied_on_the_way_out() raises:
+    # The whole point. The child's values buffer is the frame's own memory, so a
+    # consumer holding it is reading the frame rather than a copy of it.
+    var frame = ArcPointer(_frame())
+    var values = Int(frame[].columns[0].only().data.values.unsafe_ptr())
+    var array = export_frame_array(_borrow(frame), 3, frame)
+    var child = array.children.value().unsafe_offset(0)[]
+    assert_equal(Int(_buffer_at(child[], 1).value()), values)
+    release_array(array)
+
+
+def test_the_export_keeps_the_frame_alive_after_the_last_other_holder_goes() raises:
+    # The ownership question zero copy creates. The frame is destroyed inside the
+    # block, the consumer keeps reading, and the values it reads are freed memory
+    # if the share in the box is not doing its job.
+    var array: ArrowArray
+
+    def build() raises -> ArrowArray:
+        var frame = ArcPointer(_frame())
+        return export_frame_array(_borrow(frame), 3, frame)
+
+    array = build()
+    var child = array.children.value().unsafe_offset(0)[]
+    var values = _buffer_at(child[], 1).value().unsafe_bitcast[Int64]()
+    assert_equal(values.unsafe_offset(0).unsafe_load(), Int64(4))
+    assert_equal(values.unsafe_offset(2).unsafe_load(), Int64(25))
+    release_array(array)
+
+
+def test_a_struct_array_has_one_null_buffer_and_no_nulls() raises:
+    # Arrow says a struct array has exactly one buffer, its validity. A frame has
+    # no concept of a null row, so the slot is there and holds null, which is what
+    # a consumer reads as every row present.
+    var frame = ArcPointer(_frame())
+    var array = export_frame_array(_borrow(frame), 3, frame)
+    assert_equal(array.n_buffers, 1)
+    assert_equal(array.null_count, 0)
+    assert_false(Bool(_buffer_at(array, 0)))
+    release_array(array)
+
+
+def test_a_column_of_the_wrong_length_is_refused() raises:
+    # Arrow requires every child of a struct to be the struct's length. This is
+    # firepanda's own frame invariant too, but the export is where a consumer
+    # would find out, and it finds out as an error rather than as short reads.
+    var frame = ArcPointer(_frame())
+    with assert_raises(contains="has 3 rows but the frame has 2"):
+        _ = export_frame_array(_borrow(frame), 2, frame)
+
+
+def test_releasing_a_struct_twice_is_a_no_op() raises:
+    # The children are released with the parent, so a second call has to notice
+    # that rather than walk a freed list of them.
+    var frame = ArcPointer(_frame())
+    var array = export_frame_array(_borrow(frame), 3, frame)
+    release_array(array)
+    release_array(array)
+    assert_equal(array.n_children, 0)
 
 
 def main() raises:

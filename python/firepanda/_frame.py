@@ -85,6 +85,20 @@ class DataFrame:
         except Exception as error:
             raise translate(error) from None
 
+    def __arrow_c_schema__(self) -> object:
+        """The frame's Arrow schema, as an arrow_schema PyCapsule."""
+        try:
+            return self._inner.arrow_c_schema()
+        except Exception as error:
+            raise translate(error) from None
+
+    def __arrow_c_array__(self, requested_schema: object | None = None) -> tuple[object, ...]:
+        """The frame's Arrow data, as an arrow_schema and an arrow_array PyCapsule."""
+        try:
+            return tuple(self._inner.arrow_c_array(requested_schema))
+        except Exception as error:
+            raise translate(error) from None
+
 
 def read_csv(filepath_or_buffer: str) -> DataFrame:
     """Reads a CSV file into a frame."""
