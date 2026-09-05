@@ -26,6 +26,7 @@ from firepanda.array.array import Array
 from firepanda.array.strings import StringArray
 from firepanda.dtype.logical import LogicalType
 from firepanda.frame.display import DisplayOptions, render_column
+from firepanda.frame.index import Index
 from firepanda.kernel.cast import cast_any
 from firepanda.kernel.nulls import (
     coalesce_any,
@@ -48,6 +49,10 @@ struct Series(Copyable, Movable, Sized, Writable):
     var values: AnyArray
     """The data, with the dtype carried as a field."""
 
+    var index: Index
+    """The row labels, defaulting to the range zero to n minus one, which is two
+    integers and no memory. See `firepanda/frame/index.mojo`."""
+
     def __init__(out self, name: String, var values: AnyArray):
         """Constructs a series over a column the caller already built.
 
@@ -57,6 +62,7 @@ struct Series(Copyable, Movable, Sized, Writable):
         """
         self.name = name
         self.values = values^
+        self.index = Index(len(self.values))
 
     def __init__[dt: DType](out self, name: String, var values: Array[dt]):
         """Constructs a series from a typed column.
@@ -70,6 +76,7 @@ struct Series(Copyable, Movable, Sized, Writable):
         """
         self.name = name
         self.values = AnyArray(values^)
+        self.index = Index(len(self.values))
 
     def __init__(out self, name: String, var values: StringArray):
         """Constructs a series from a string column.
@@ -80,6 +87,7 @@ struct Series(Copyable, Movable, Sized, Writable):
         """
         self.name = name
         self.values = AnyArray(values^)
+        self.index = Index(len(self.values))
 
     def __init__(out self, *, copy: Self):
         """Deep-copies a series.
@@ -89,6 +97,7 @@ struct Series(Copyable, Movable, Sized, Writable):
         """
         self.name = copy.name
         self.values = AnyArray(copy=copy.values)
+        self.index = Index(copy=copy.index)
 
     def into_values(deinit self) -> AnyArray:
         """Gives up the column without copying it, dropping the name.
@@ -278,7 +287,9 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             If the dtype has no physical layout.
         """
-        return Self(self.name, take_any(self.values, indices))
+        var out = Self(self.name, take_any(self.values, indices))
+        out.index = self.index.take(indices)
+        return out^
 
     def filter(self, mask: Array[DType.bool]) raises -> Self:
         """Returns the rows where the mask is true.
@@ -303,7 +314,9 @@ struct Series(Copyable, Movable, Sized, Writable):
                 + " rows and mask has "
                 + String(len(mask))
             )
-        return Self(self.name, filter_any(self.values, mask))
+        var out = Self(self.name, filter_any(self.values, mask))
+        out.index = self.index.filter(mask)
+        return out^
 
     def slice(self, start: Int, end: Int) raises -> Self:
         """Returns a half-open range of rows.
@@ -319,7 +332,9 @@ struct Series(Copyable, Movable, Sized, Writable):
             If the range is reversed or runs past either end of the series.
         """
         _check_range(start, end, len(self), "series")
-        return Self(self.name, self.values.slice(start, end))
+        var out = Self(self.name, self.values.slice(start, end))
+        out.index = self.index.slice(start, end)
+        return out^
 
     def head(self, n: Int = 5) raises -> Self:
         """Returns the first rows.

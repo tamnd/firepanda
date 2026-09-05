@@ -46,6 +46,7 @@ from firepanda.kernel import (
     divide,
     divide_const,
     equal,
+    filter_range,
     filter_rows,
     greater,
     group_top_rows,
@@ -57,6 +58,7 @@ from firepanda.kernel import (
     not_equal,
     subtract,
     sum_of,
+    take_range,
     take_rows,
 )
 from firepanda.kernel.arith import OP_ADD, OP_MUL, OP_SUB
@@ -770,6 +772,31 @@ def run_one[dt: DType](mut rng: Rng, step: Int, seed: UInt64) raises:
     var mask = greater(a, b)
     same_column(
         filter_rows(a, mask), filter_scalar(a, mask), step, seed, "filter_rows"
+    )
+
+    # The range forms against the general ones. `take_range` and `filter_range`
+    # exist to avoid building the range they read from, so the only way to know
+    # the shortcut agrees with the long way round is to build the range and put
+    # it through the kernel that is already fuzzed. The start is drawn rather
+    # than left at zero, because zero is the one value where using it wrongly
+    # cannot be seen.
+    var start = Int(rng.next_below(1000))
+    var line = Array[DType.int64](overwritten=length)
+    for i in range(length):
+        line.store[1](i, Int64(start + i))
+    same_column(
+        take_range(start, picks),
+        take_rows(line, picks),
+        step,
+        seed,
+        "take_range",
+    )
+    same_column(
+        filter_range(start, mask),
+        filter_rows(line, mask),
+        step,
+        seed,
+        "filter_range",
     )
 
     # Grouped reductions, one kind per case so that a run covers all eight. The

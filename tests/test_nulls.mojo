@@ -20,7 +20,6 @@ the two answers differ. That is the property, not a coincidence.
 """
 
 from std.math import isnan, nan
-from std.math import isnan, nan
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from firepanda.array.any import AnyArray, borrow_columns

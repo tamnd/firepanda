@@ -21,11 +21,15 @@ type and whether nulls are allowed. Keeping both means the two can disagree, so
 the constructor checks that they do not, and every operation that changes one
 changes the other in the same expression.
 
-There is no index. `docs/specs/04-python-dx.md` lists that as the first
-deliberate divergence from pandas and this is where it shows up: rows are
-identified by position, `filter` and `take` are the only ways to address them, and
-nothing aligns on labels because there are no labels to align on. The second
-divergence is that nothing mutates. Every method returns a new frame.
+There are row labels but nothing aligns on them. A frame carries an `Index`, and
+every operation that chooses rows carries the labels of the rows it chose, so
+`tail` and `sort_values` and `drop_nulls` report which rows they kept the way
+pandas does. What is still missing is the other half: nothing looks a row up by
+its label, `loc` does not exist, and two frames put together do not match their
+indexes first, so rows are still addressed by position and `filter` and `take`
+are still the only ways to address them. That half is the `Index` API in
+https://github.com/tamnd/firepanda/issues/154. The second divergence is that
+nothing mutates. Every method returns a new frame.
 
 The third thing worth knowing is what a copy costs. `select` copies the columns it
 keeps, `filter` and `take` copy by construction because they build new columns
@@ -52,6 +56,7 @@ from firepanda.array.chunked import ChunkedArray, Sortedness, wrap_columns
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.frame.display import DisplayOptions, render_table
+from firepanda.frame.index import Index
 from firepanda.hash.grouping import group_ordinals
 from firepanda.join.pairs import JoinKind, join_indices, take_pair
 from firepanda.kernel.cast import cast_any
@@ -97,11 +102,18 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
     var rows: Int
     """The row count. Every column has this length."""
 
+    var index: Index
+    """The row labels. A frame that has not been gathered, filtered or sliced
+    from anywhere but the front carries the default range, which is two integers
+    and no memory, so the field costs nothing on the path that does not use it.
+    See `firepanda/frame/index.mojo`."""
+
     def __init__(out self):
         """Constructs a frame with no columns and no rows."""
         self.schema = Schema()
         self.columns = List[ChunkedArray]()
         self.rows = 0
+        self.index = Index(0)
 
     def __init__(out self, var schema: Schema, var columns: List[AnyArray]):
         """Constructs a frame from parts that have already been checked.
@@ -118,6 +130,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         self.rows = 0 if len(columns) == 0 else len(columns[0])
         self.schema = schema^
         self.columns = wrap_columns(columns^)
+        self.index = Index(self.rows)
 
     def __init__(out self, var schema: Schema, var columns: List[ChunkedArray]):
         """Constructs a frame from columns that are already chunked.
@@ -135,6 +148,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         self.rows = 0 if len(columns) == 0 else len(columns[0])
         self.schema = schema^
         self.columns = columns^
+        self.index = Index(self.rows)
 
     def __init__(out self, *, copy: Self):
         """Deep-copies a frame.
@@ -147,6 +161,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         for i in range(len(copy.columns)):
             self.columns.append(ChunkedArray(copy=copy.columns[i]))
         self.rows = copy.rows
+        self.index = Index(copy=copy.index)
 
     @staticmethod
     def from_series(var series: List[Series]) raises -> Self:
@@ -543,6 +558,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         # filter that keeps nothing leaves every column with no chunks at all,
         # so the height is counted here rather than inferred.
         out.rows = 0 if len(out.columns) == 0 else len(out.columns[0])
+        out.index = self.index.filter(mask)
         return out^
 
     def take(self, indices: List[Int]) raises -> Self:
@@ -563,6 +579,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             columns.append(take_chunked(self.columns[i], indices))
         var out = Self(Schema(copy=self.schema), columns^)
         out.rows = len(indices)
+        out.index = self.index.take(indices)
         return out^
 
     def slice(self, start: Int, end: Int) raises -> Self:
@@ -584,6 +601,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             columns.append(slice_chunked(self.columns[i], start, end))
         var out = Self(Schema(copy=self.schema), columns^)
         out.rows = end - start
+        out.index = self.index.slice(start, end)
         return out^
 
     def head(self, n: Int = 5) raises -> Self:
@@ -987,6 +1005,16 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                 front.append(False)
             out = out.sort_values(by, down, front)
 
+        # A grouped result gets fresh labels, because its rows are groups and not
+        # rows of the input. Without this it would keep whatever the dropna filter
+        # and the sort above left behind, which is the permutation of the group
+        # ordinals and is not a fact about anything: grouping a frame and getting
+        # back rows labelled 9, 3 and 218 says only which group happened to hash
+        # where. pandas labels these by the key instead, which is the second stage
+        # in https://github.com/tamnd/firepanda/issues/191 and is what will replace
+        # this line. Until then the default is the honest answer and it is also the
+        # one `as_index=False` asks for.
+        out.index = Index(len(out))
         return out^
 
     def _group_top(
