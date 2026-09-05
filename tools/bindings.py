@@ -407,6 +407,19 @@ SERIES = Exposed(
             doc="Every value, copied into a Python list.",
             returns="list[object]",
         ),
+        Binding(
+            mojo="PySeries.arrow_c_schema",
+            name="arrow_c_schema",
+            doc="The column's Arrow schema, in a capsule.",
+            returns="object",
+        ),
+        Binding(
+            mojo="PySeries.arrow_c_array",
+            name="arrow_c_array",
+            doc="The column's Arrow schema and data, in two capsules.",
+            params=(("requested_schema", "object | None"),),
+            returns="list[object]",
+        ),
     ),
     members=(
         Member(
@@ -496,6 +509,21 @@ SERIES = Exposed(
             body="self._inner.null_count() > 0",
             doc="Whether any value is missing.",
             returns="bool",
+        ),
+        Member(
+            name="__arrow_c_schema__",
+            kind="dunder",
+            body="self._inner.arrow_c_schema()",
+            doc="The column's Arrow schema, as an arrow_schema PyCapsule.",
+            returns="object",
+        ),
+        Member(
+            name="__arrow_c_array__",
+            kind="dunder",
+            signature="requested_schema: object | None = None",
+            body="tuple(self._inner.arrow_c_array(requested_schema))",
+            doc="The column's Arrow data, as an arrow_schema and an arrow_array PyCapsule.",
+            returns="tuple[object, ...]",
         ),
     ),
 )

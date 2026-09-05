@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A column exports itself
+
+`Series` answers `__arrow_c_schema__` and `__arrow_c_array__`, so `pa.array(df["qty"])` and `pl.Series(df["qty"])` hand back the column with no copy and no per element Python object. The exported field carries the series name, which is what Polars picks up as its own. Unlike the frame's export there is nothing to refuse here, since taking a column out of a frame flattens it and there is exactly one array by construction.
+
 ### `df["a"]` works, and gives back a `Series`
 
 The most written expression in pandas had no answer until now. The bound frame could report its shape, print itself and hand its memory to pyarrow, and the one thing it could not do was give you a column, which makes it a demonstration rather than something anybody can port code to.
