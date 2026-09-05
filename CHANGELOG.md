@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A narrow integer key stops being read twice
+
+Factorizing an integer column whose values fall in a small range takes the direct route, which allocates a table with a slot for every value in the range and indexes it by the value rather than by a hash. That route makes two passes: one to discover which values are actually there, and one to write the ordinal for each row. The discovery pass ran to the end of the column every time.
+
+It did not need to. A direct table has a slot for every value in the range by construction, so once every slot is taken there is nothing left in the range to find. A key of a hundred distinct values over a hundred million rows fills its table inside the first few hundred rows and then reads four hundred megabytes of memory to learn what it already knows. The fix is one comparison, and it costs one comparison per new group rather than one per row, because it only runs on the branch that just introduced a group and a worker can introduce at most as many as its table has slots.
+
+This is true of a direct table and of nothing else. A hash table cannot know it has seen everything, because a value it has not met yet is exactly what it has no slot for, so the same early exit on the hash route would be wrong.
+
+Measured on an i9-13900K in three ABBA blocks. At forty million rows, taking the ordinals of one integer key went from 17.8 to 19.6 milliseconds down to 13.4 to 14.7, and of two keys from 33.1 to 56.4 down to 28.2 to 32.4, both with every new run below every old run. Six keys gained 4 per cent, since five of the six are wide or text. The controls did not move: a wide integer key, whose table never fills, came out at 0.99x, and the three text keys, which never take this route at all, between 0.91x and 1.02x.
+
+On db-benchmark at a hundred million rows, two ABBA blocks of three runs, q4 went from 0.0667 to 0.0828 seconds down to 0.0605 to 0.0613, q2 from 0.2056 to 0.2286 down to 0.1920 to 0.1999 and q9 from 0.2395 to 0.2538 down to 0.2220 to 0.2364, all three with every new run under every old one. The five join queries are the control and came out between 0.99x and 1.01x, and so is q3, which groups by a single text key of a million values and came out at 0.98x.
+
+q2 and q9 are worth a word, because they group by text keys and the route this touches is the integer one. A group by on more than one key factorizes each key and then packs the ordinals into a single integer, and it is that packed key which gets factorized again to produce the grouping. Two keys of a hundred values each pack into a range of ten thousand, which is well inside the direct route's limit, so the second factorize is exactly the case that now stops early.
+
 ### `df["a"]` works, and gives back a `Series`
 
 The most written expression in pandas had no answer until now. The bound frame could report its shape, print itself and hand its memory to pyarrow, and the one thing it could not do was give you a column, which makes it a demonstration rather than something anybody can port code to.
