@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A grouped mean reads its column once instead of twice
+
+`_mean_core` asked for a grouped sum and then asked for a grouped count, and the two walked the same column and the same ordinals separately. On a float column it was worse than that, because a NaN is not a value, so the count had to build a presence bitmap over the whole column before it could count anything. A mean over ten million floats into a hundred groups read eighty megabytes of values twice and forty megabytes of ordinals three times, to produce two arrays of a hundred entries.
+
+`_sum_and_count` does the two in one scatter. Each worker holds a table of sums and a table of counts side by side and writes both from the same read of the value, so the count costs an increment rather than a second pass. The rule about what counts is now decided once in the loop rather than reached independently by `_addend` and `_count_core`, which is the same answer arrived at more directly.
+
+Only the private table route is fused. The serial route and the partitioned route keep the shapes they had and still ask for the sum and the count one at a time, because a partitioned scatter counts its rows into partitions before it reads a value and carrying a second accumulator through it is a different change.
+
+The variance, the standard deviation and the skewness all take their counts from the same call now. Each of those used to call `_mean_core`, which computed a count internally, and then call `_count_core` again for the same numbers, so a standard deviation was four passes over the column where two will do.
+
+Measured on an i9-13900K at 0.5GB of db-benchmark, three ABBA blocks of seven runs. q4, which is three means over ten million rows into a hundred groups, went from 0.015 s on every one of six runs to 0.012 or 0.013 on every one of six. q3, a sum and a mean into a hundred thousand groups, went from 0.047 to 0.049 down to 0.045 to 0.046. q6, a median and a standard deviation, went from 0.279 to 0.289 down to 0.273 to 0.286, which overlaps and is not claimed. q1, q5, q7 and q9 do not use a mean and did not move.
+
+Against the rivals at the same size on the same machine, q4 goes from 0.015 s to 0.012 against polars at 0.012 and DuckDB at 0.011, so it is level rather than behind, and q3 is 0.045 against polars at 0.121 and DuckDB at 0.069.
+
 ### A join node running on a worker no longer asks for workers of its own
 
 Three kernels inside a join hand themselves out in morsels once the row count is high enough: the probe at a hundred and thirty one thousand rows, the pairing at the same, and the gather at sixty five thousand. A pipeline chunk is a hundred and twenty eight thousand rows, so a `Join` node running inside a worker was starting a second layer of tasks inside the task it was already in, three times per chunk.
