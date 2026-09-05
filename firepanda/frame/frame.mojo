@@ -70,7 +70,7 @@ from firepanda.kernel.chunked import (
 )
 from firepanda.kernel.group import (
     AggKind,
-    aggregate_group_any,
+    aggregate_group_many,
     aggregate_group_pair_any,
 )
 from firepanda.kernel.nulls import all_valid_mask, coalesce_any
@@ -966,6 +966,10 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                 take_any(self.columns[at[k]].only(), grouping.rows_at)
             )
 
+        # The names are settled before anything is reduced, because the
+        # reductions no longer happen one at a time and there is nowhere in the
+        # middle of them to raise from.
+        var names = List[String]()
         for s in range(len(specs)):
             var name = specs[s].output_name()
             for f in range(len(fields)):
@@ -974,6 +978,35 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                         "group by: two output columns would both be called "
                         + name
                     )
+            for f in range(len(names)):
+                if names[f] == name:
+                    raise Error(
+                        "group by: two output columns would both be called "
+                        + name
+                    )
+            names.append(name)
+
+        # Every reduction that reads one column goes to `aggregate_group_many`,
+        # which runs as many of them as it can in a single pass over the
+        # ordinals rather than one pass each. A reduction that reads two columns
+        # is not one of those and is run where it stands.
+        var single_at = List[Int]()
+        var single_kinds = List[AggKind]()
+        for s in range(len(specs)):
+            if specs[s].kind.reads_two_columns():
+                continue
+            single_at.append(self.schema.index_of(specs[s].column))
+            single_kinds.append(specs[s].kind)
+
+        var reduced = aggregate_group_many(
+            self.column_refs(),
+            single_at,
+            single_kinds,
+            grouping.codes,
+            grouping.groups,
+        )
+
+        for s in range(len(specs)):
             var produced: AnyArray
             if specs[s].kind.reads_two_columns():
                 produced = aggregate_group_pair_any(
@@ -984,14 +1017,8 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                     grouping.groups,
                 )
             else:
-                produced = aggregate_group_any(
-                    self.columns[self.schema.index_of(specs[s].column)].only(),
-                    specs[s].kind,
-                    grouping.codes,
-                    grouping.groups,
-                    trusted=True,
-                )
-            fields.append(Field(name, produced.type))
+                produced = reduced.pop(0)
+            fields.append(Field(names[s], produced.type))
             columns.append(produced^)
 
         var out = Self(Schema(fields^), columns^)

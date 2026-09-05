@@ -3236,6 +3236,24 @@ def bench_group(mut harness: Harness) raises:
 
     harness.record("group/frame_three_aggs", "rows", rows, frame_three_aggs)
 
+    # The row above asks for a sum, a minimum and a maximum, and only the sum
+    # can share a pass with anything, so it is what the fused route looks like
+    # when it declines. This one asks for three means of one grouping, which is
+    # db-benchmark q4 and the case the fused route exists for.
+    def frame_three_means() raises {imm df}:
+        keep(df.rows)
+        var out = df.group_by(
+            ["key"],
+            [
+                AggSpec("value", AggKind.MEAN),
+                AggSpec("value", AggKind.MEAN, "mean_two"),
+                AggSpec("value", AggKind.MEAN, "mean_three"),
+            ],
+        )
+        keep(out.rows)
+
+    harness.record("group/frame_three_means", "rows", rows, frame_three_means)
+
     # The two rows below are the same query asked of the same rows through the
     # same driver, and the only thing that differs is which operator does the
     # grouping. Both pay for the copy of the input the pipeline consumes, so the

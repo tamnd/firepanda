@@ -107,7 +107,7 @@ from std.collections.span import Span
 from std.math import isnan, nan, sqrt
 from std.sys.info import simd_width_of, size_of
 
-from firepanda.array.any import AnyArray
+from firepanda.array.any import AnyArray, ColumnRefs
 from firepanda.array.array import Array
 from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
@@ -552,6 +552,10 @@ def _merge_sums[
     against the `rows` the scatter did, which is why `PRIVATE_BYTES` is the
     thing that decides whether any of this was worth doing.
 
+    The loop itself is `_merge_tables`, which takes an offset so that several
+    reductions sharing one allocation can each fold their own stretch of it. A
+    reduction with an allocation to itself starts at zero, which is this.
+
     Args:
         partials: One table per worker, laid end to end.
         groups: How wide one table is.
@@ -563,27 +567,7 @@ def _merge_sums[
     Returns:
         A column of `groups` totals, every one of them present.
     """
-    comptime width = simd_width_of[dt]()
-
-    var out = Array[dt](groups)
-    var totals = out.unsafe_ptr()
-    var tables = partials.unsafe_ptr()
-    for w in range(workers):
-        var table = tables.unsafe_offset(w * groups)
-        var g = 0
-        while g + width <= groups:
-            totals.unsafe_offset(g).unsafe_store(
-                totals.unsafe_offset(g).unsafe_load[width=width]()
-                + table.unsafe_offset(g).unsafe_load[width=width]()
-            )
-            g += width
-        while g < groups:
-            totals.unsafe_offset(g).unsafe_store(
-                totals.unsafe_offset(g).unsafe_load()
-                + table.unsafe_offset(g).unsafe_load()
-            )
-            g += 1
-    return out^
+    return _merge_tables[dt](partials, 0, groups, workers)
 
 
 struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
@@ -3111,6 +3095,527 @@ def _dispatch_core[
             _nunique_core(source, validity, has_null, codes, groups)
         )
     raise Error("group by: unsupported aggregation")
+
+
+comptime FUSE_BLOCK = 1 << 15
+"""How many rows every reduction of a fused group by covers before moving on.
+
+Thirty two thousand ordinals are a hundred and twenty eight kilobytes, and one
+column's values over the same rows are at most another two hundred and fifty six.
+Two or three of those fit in a core's private cache alongside the accumulator
+tables, which is the whole point: the first reduction of a block pulls the
+ordinals in from memory and the ones after it find them already there.
+
+Larger blocks would amortize the loop setup over more rows and start missing
+again, smaller ones would not. Anything between about eight and sixty four
+thousand measured the same on the reference machine, so this is the middle of a
+flat region rather than a tuned number.
+"""
+
+comptime _FUSE_SUM = 0
+"""A fused reduction that accumulates the values of each group."""
+
+comptime _FUSE_MEAN = 1
+"""A fused reduction that accumulates the values and counts the rows behind
+them."""
+
+comptime _FUSE_COUNT = 2
+"""A fused reduction that only counts the rows of each group that hold a
+value."""
+
+
+def _fuse_mode(kind: AggKind) -> Int:
+    """Maps a reduction onto the three loop shapes the fused route has.
+
+    Args:
+        kind: Which reduction.
+
+    Returns:
+        One of the three mode constants, or -1 for a reduction the fused route
+        does not implement.
+    """
+    if kind == AggKind.SUM:
+        return _FUSE_SUM
+    if kind == AggKind.MEAN:
+        return _FUSE_MEAN
+    if kind == AggKind.COUNT:
+        return _FUSE_COUNT
+    return -1
+
+
+def _fuses(col: AnyArray, kind: AggKind) -> Bool:
+    """Reports whether a reduction of this column can join a fused pass.
+
+    Three things have to hold. The reduction is one of the three the fused loops
+    cover, the column is numbers rather than text, and its accumulator is one of
+    the two the shared tables are made of. That last one leaves out the unsigned
+    dtypes, whose sums accumulate in uint64, because a third table for them would
+    be carried by every fused group by to serve a case db-benchmark and pandas
+    both spell as a signed column. They take the unfused route and get exactly
+    what they got before.
+
+    Args:
+        col: The column being aggregated.
+        kind: Which reduction.
+
+    Returns:
+        True if this reduction can be run in the same pass as the others.
+    """
+    if _fuse_mode(kind) < 0 or col.is_string():
+        return False
+    var acc = accumulator(col.dtype())
+    return acc == DType.int64 or acc == DType.float64
+
+
+def _fuse_run[
+    dt: DType, //, mode: Int, check: Bool, origin: ImmOrigin
+](
+    source: Pointer[Scalar[dt], origin],
+    validity: Bitmap,
+    codes: Array[DType.uint32],
+    begin: Int,
+    end: Int,
+    mut sums: Array[DType.float64],
+    mut tally: Array[DType.int64],
+    at: Int,
+):
+    """Scatters one reduction over one block of rows into one worker's tables.
+
+    Which of the two tables it writes is decided here and not by the caller. A
+    mean uses both, a count uses only the integer one, and a sum uses whichever
+    one its accumulator is, so an int64 sum shares a table shape with the counts
+    and a float64 sum shares one with the mean's numerators. The caller hands
+    over both and this picks, which is what keeps the dispatch above from having
+    to know what an accumulator is.
+
+    Args:
+        source: The values.
+        validity: Which of them are present. Read only when `check`.
+        codes: One group ordinal per row.
+        begin: The first row of the block.
+        end: One past the last row of the block.
+        sums: The float64 tables, one stretch per worker per reduction.
+        tally: The int64 tables, laid out the same way.
+        at: Where this worker's table for this reduction starts in both.
+
+    Parameters:
+        dt: The column's dtype.
+        mode: Which of the three loop shapes to run.
+        check: True to read the validity, False when the column has no nulls.
+        origin: Where the values are borrowed from.
+    """
+    comptime acc = accumulator(dt)
+    var group_of = codes.unsafe_ptr()
+
+    comptime if mode == _FUSE_SUM:
+        comptime if acc == DType.float64:
+            var totals = sums.unsafe_ptr().unsafe_offset(at)
+            for i in range(begin, end):
+                var g = Int(group_of.unsafe_offset(i).unsafe_load())
+                totals.unsafe_offset(g).unsafe_store(
+                    totals.unsafe_offset(g).unsafe_load()
+                    + _addend[acc=DType.float64](source, i)
+                )
+        else:
+            # As in `_sum_core`, no bitmap is read on either branch. A null holds
+            # a zero and `_addend` turns a NaN into one, so both spellings of
+            # missing add nothing without being looked up.
+            var totals = tally.unsafe_ptr().unsafe_offset(at)
+            for i in range(begin, end):
+                var g = Int(group_of.unsafe_offset(i).unsafe_load())
+                totals.unsafe_offset(g).unsafe_store(
+                    totals.unsafe_offset(g).unsafe_load()
+                    + _addend[acc=DType.int64](source, i)
+                )
+        return
+
+    comptime if mode == _FUSE_COUNT:
+        var seen = tally.unsafe_ptr().unsafe_offset(at)
+        for i in range(begin, end):
+            if not _there(source, validity, check, i):
+                continue
+            var g = Int(group_of.unsafe_offset(i).unsafe_load())
+            seen.unsafe_offset(g).unsafe_store(
+                seen.unsafe_offset(g).unsafe_load() + 1
+            )
+        return
+
+    # The mean, which is `_fused_sum_count` over a block rather than over a whole
+    # slice. The sum is taken in float64 and not in the natural accumulator for
+    # the reason `_mean_core` gives: pandas converts before dividing, so the mean
+    # of a group of large int64 values must not come out of a wrapped total.
+    var totals = sums.unsafe_ptr().unsafe_offset(at)
+    var seen = tally.unsafe_ptr().unsafe_offset(at)
+    for i in range(begin, end):
+        var g = Int(group_of.unsafe_offset(i).unsafe_load())
+        var value = source.unsafe_offset(i).unsafe_load().cast[DType.float64]()
+        var here = True
+        comptime if dt.is_floating_point():
+            if isnan(value):
+                value = 0
+                here = False
+        comptime if check:
+            if not validity.get(i):
+                value = 0
+                here = False
+        totals.unsafe_offset(g).unsafe_store(
+            totals.unsafe_offset(g).unsafe_load() + value
+        )
+        if here:
+            seen.unsafe_offset(g).unsafe_store(
+                seen.unsafe_offset(g).unsafe_load() + 1
+            )
+
+
+def _fuse_dispatch(
+    col: AnyArray,
+    kind: AggKind,
+    codes: Array[DType.uint32],
+    has_null: Bool,
+    begin: Int,
+    end: Int,
+    mut sums: Array[DType.float64],
+    mut tally: Array[DType.int64],
+    at: Int,
+) raises:
+    """Picks the dtype and the loop shape for one reduction over one block.
+
+    Six branches over the dtype and three over the mode, all of them resolved
+    once for thirty two thousand rows, which is why the loops above can stay
+    typed without the fused pass needing a table of function pointers.
+
+    Args:
+        col: The column being aggregated.
+        kind: Which reduction.
+        codes: One group ordinal per row.
+        has_null: Whether the column has any nulls, worked out once by the
+            caller. Asking the column would be a scan of its whole validity
+            bitmap, and this runs once per block.
+        begin: The first row of the block.
+        end: One past the last row of the block.
+        sums: The float64 tables.
+        tally: The int64 tables.
+        at: Where this worker's table for this reduction starts in both.
+
+    Raises:
+        If the column's dtype is not one this route was told it handles, which
+        would mean `_fuses` and this disagree.
+    """
+    var mode = _fuse_mode(kind)
+    comptime for candidate in ALL:
+        if col.dtype() == candidate:
+            comptime if (
+                accumulator(candidate) == DType.int64
+                or accumulator(candidate) == DType.float64
+            ):
+                var source = col.unsafe_ptr[candidate]()
+                if mode == _FUSE_SUM:
+                    _fuse_run[mode=_FUSE_SUM, check=False](
+                        source,
+                        col.data.validity,
+                        codes,
+                        begin,
+                        end,
+                        sums,
+                        tally,
+                        at,
+                    )
+                elif mode == _FUSE_COUNT:
+                    if has_null:
+                        _fuse_run[mode=_FUSE_COUNT, check=True](
+                            source,
+                            col.data.validity,
+                            codes,
+                            begin,
+                            end,
+                            sums,
+                            tally,
+                            at,
+                        )
+                    else:
+                        _fuse_run[mode=_FUSE_COUNT, check=False](
+                            source,
+                            col.data.validity,
+                            codes,
+                            begin,
+                            end,
+                            sums,
+                            tally,
+                            at,
+                        )
+                elif has_null:
+                    _fuse_run[mode=_FUSE_MEAN, check=True](
+                        source,
+                        col.data.validity,
+                        codes,
+                        begin,
+                        end,
+                        sums,
+                        tally,
+                        at,
+                    )
+                else:
+                    _fuse_run[mode=_FUSE_MEAN, check=False](
+                        source,
+                        col.data.validity,
+                        codes,
+                        begin,
+                        end,
+                        sums,
+                        tally,
+                        at,
+                    )
+                return
+    raise Error("group by: unsupported dtype")
+
+
+def _fuse_result(
+    col: AnyArray,
+    kind: AggKind,
+    sums: Array[DType.float64],
+    tally: Array[DType.int64],
+    groups: Int,
+    workers: Int,
+    at: Int,
+) raises -> AnyArray:
+    """Folds one reduction's private tables together and gives back its column.
+
+    Args:
+        col: The column that was aggregated, which is what says the dtype a sum
+            comes back in.
+        kind: Which reduction.
+        sums: The float64 tables.
+        tally: The int64 tables.
+        groups: How wide one table is.
+        workers: How many tables there are.
+        at: Where this reduction's first table starts in both.
+
+    Returns:
+        A column of `groups` values.
+
+    Raises:
+        If the column's dtype is not one this route was told it handles.
+    """
+    var mode = _fuse_mode(kind)
+    if mode == _FUSE_COUNT:
+        return AnyArray(_merge_tables[DType.int64](tally, at, groups, workers))
+    if mode == _FUSE_MEAN:
+        return AnyArray(
+            _divide_sums(
+                _merge_tables[DType.float64](sums, at, groups, workers),
+                _merge_tables[DType.int64](tally, at, groups, workers),
+                groups,
+            )
+        )
+
+    # A sum keeps the widened dtype of the column it summed, so which table it
+    # came out of is the same question as which dtype it answers in.
+    comptime for candidate in ALL:
+        if col.dtype() == candidate:
+            comptime if accumulator(candidate) == DType.float64:
+                return AnyArray(
+                    _merge_tables[DType.float64](sums, at, groups, workers)
+                )
+            elif accumulator(candidate) == DType.int64:
+                return AnyArray(
+                    _merge_tables[DType.int64](tally, at, groups, workers)
+                )
+    raise Error("group by: unsupported dtype")
+
+
+def _merge_tables[
+    dt: DType
+](slab: Array[dt], at: Int, groups: Int, workers: Int) -> Array[dt]:
+    """Adds one reduction's private tables together out of a shared slab.
+
+    `_merge_sums` with an offset, so that several reductions can share one
+    allocation instead of each taking its own.
+
+    Args:
+        slab: Every reduction's tables, laid end to end.
+        at: Where this reduction's first table starts.
+        groups: How wide one table is.
+        workers: How many tables this reduction has.
+
+    Parameters:
+        dt: The accumulator dtype.
+
+    Returns:
+        A column of `groups` totals, every one of them present.
+    """
+    comptime width = simd_width_of[dt]()
+
+    var out = Array[dt](groups)
+    var totals = out.unsafe_ptr()
+    var tables = slab.unsafe_ptr().unsafe_offset(at)
+    for w in range(workers):
+        var table = tables.unsafe_offset(w * groups)
+        var g = 0
+        while g + width <= groups:
+            totals.unsafe_offset(g).unsafe_store(
+                totals.unsafe_offset(g).unsafe_load[width=width]()
+                + table.unsafe_offset(g).unsafe_load[width=width]()
+            )
+            g += width
+        while g < groups:
+            totals.unsafe_offset(g).unsafe_store(
+                totals.unsafe_offset(g).unsafe_load()
+                + table.unsafe_offset(g).unsafe_load()
+            )
+            g += 1
+    return out^
+
+
+def aggregate_group_many[
+    o: ImmOrigin
+](
+    columns: ColumnRefs[o],
+    at: List[Int],
+    kinds: List[AggKind],
+    codes: Array[DType.uint32],
+    groups: Int,
+) raises -> List[AnyArray]:
+    """Runs several grouped reductions of one grouping in a single pass.
+
+    A group by asking for three means of one grouping used to be three calls to
+    `aggregate_group_any`, and each of them read the ordinals from memory. The
+    ordinals are four bytes a row, so on a hundred million rows that is four
+    hundred megabytes read three times to answer a question whose real work is a
+    pass over the key and a pass over each value. It was a fifth of db-benchmark
+    q4.
+
+    The fix is not to hoist the ordinals into a register, which is impossible,
+    but to shorten the distance between the reads. The reductions share a worker
+    and a block of rows: each worker takes its slice, cuts it into blocks of
+    `FUSE_BLOCK` rows, and runs every reduction over a block before moving to the
+    next one. The first reduction of a block pulls the ordinals in from memory
+    and the rest find them in cache, so the ordinals cross the memory bus once
+    per group by rather than once per reduction.
+
+    The blocks are inside the worker's slice and not a queue of their own,
+    because the split is still `_row_bounds` and every row of a scatter costs the
+    same. Nothing about the arithmetic changes: each reduction accumulates into
+    its own private table per worker exactly as it did, and the tables are folded
+    at the end exactly as they were, so a fused sum and an unfused sum add the
+    same numbers in the same order.
+
+    Reductions the fused loops do not cover, and pair reductions, and columns of
+    text, all fall through to `aggregate_group_any` one at a time. A group by
+    mixing a mean with a median therefore fuses the mean with whatever else can
+    join it and runs the median on its own, rather than giving up on all of them.
+
+    Args:
+        columns: The frame's columns, borrowed. They are borrowed rather than
+            handed over because a reduction reads a column and does not keep it,
+            and copying one to pass it here would cost more than the whole
+            reduction.
+        at: Which column each reduction reads, as an index into `columns`.
+        kinds: Which reduction to run over each of them.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals, which the caller has already
+            established every ordinal is inside.
+
+    Parameters:
+        o: Where the columns are borrowed from.
+
+    Returns:
+        One column per reduction, in the order they were asked for.
+
+    Raises:
+        If the two lists are different lengths, or if one of the reductions
+        cannot be run over the column it was given.
+    """
+    if len(at) != len(kinds):
+        raise Error(
+            "group by: there are "
+            + String(len(at))
+            + " columns and "
+            + String(len(kinds))
+            + " reductions"
+        )
+
+    var out = List[AnyArray]()
+    var fused = List[Int]()
+    for s in range(len(at)):
+        if _fuses(columns[at[s]][], kinds[s]):
+            fused.append(s)
+
+    # One reduction fused with nothing is the unfused route with an allocation in
+    # front of it, and the ordinals it reads are the only ones there are.
+    var workers = 0
+    if len(fused) > 1:
+        # Two tables per reduction, so the budget is asked the same question in
+        # bytes that `_sum_and_count` asks it.
+        workers = _private_workers[DType.float64](
+            len(codes), groups * 2 * len(fused)
+        )
+
+    if workers <= 1:
+        for s in range(len(at)):
+            out.append(
+                aggregate_group_any(
+                    columns[at[s]][], kinds[s], codes, groups, trusted=True
+                )
+            )
+        return out^
+
+    # Whether a column has nulls is a scan of its validity bitmap, so it is
+    # asked once here rather than once per block per reduction inside the loop
+    # below, where it was measured at ten times the cost of the reductions.
+    var nulls = List[Bool]()
+    for f in range(len(fused)):
+        nulls.append(columns[at[fused[f]]][].null_count() > 0)
+
+    var bounds = _row_bounds(len(codes), workers)
+    var sums = Array[DType.float64](groups * workers * len(fused))
+    var tally = Array[DType.int64](groups * workers * len(fused))
+
+    def one(w: Int) raises {mut sums, mut tally, imm}:
+        var begin = bounds[w]
+        var stop = bounds[w + 1]
+        while begin < stop:
+            var end = begin + FUSE_BLOCK
+            if end > stop:
+                end = stop
+            for f in range(len(fused)):
+                var s = fused[f]
+                _fuse_dispatch(
+                    columns[at[s]][],
+                    kinds[s],
+                    codes,
+                    nulls[f],
+                    begin,
+                    end,
+                    sums,
+                    tally,
+                    (f * workers + w) * groups,
+                )
+            begin = end
+
+    parallel_for(one, workers)
+
+    var next_fused = 0
+    for s in range(len(at)):
+        if next_fused < len(fused) and fused[next_fused] == s:
+            out.append(
+                _fuse_result(
+                    columns[at[s]][],
+                    kinds[s],
+                    sums,
+                    tally,
+                    groups,
+                    workers,
+                    next_fused * workers * groups,
+                )
+            )
+            next_fused += 1
+            continue
+        out.append(
+            aggregate_group_any(
+                columns[at[s]][], kinds[s], codes, groups, trusted=True
+            )
+        )
+    return out^
 
 
 def aggregate_group_any(

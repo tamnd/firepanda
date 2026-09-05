@@ -54,6 +54,7 @@ from firepanda.kernel.group import (
     _slab_shift,
     aggregate_group,
     aggregate_group_any,
+    aggregate_group_many,
     aggregate_group_pair_any,
     group_corr,
     group_count,
@@ -309,6 +310,172 @@ def test_a_code_out_of_range_is_refused() raises:
     with assert_raises():
         _ = aggregate_group_any(
             AnyArray(ints([1, 2])), AggKind.SUM, codes_of([0, 5]), 2
+        )
+
+
+def fused_frame(rows: Int) raises -> Grouping:
+    """A grouping wide enough that the fused route actually takes its parallel
+    shape, which is what the tests below are about.
+
+    Under `PRIVATE_ROWS` every reduction stays on one thread and the fused pass
+    hands the whole thing back to `aggregate_group_any`, which is the case that
+    would pass no matter what the fused loops did.
+    """
+    var key = Array[DType.int64](rows)
+    for i in range(rows):
+        key[i] = Int64(i % 37)
+    var series = List[Series]()
+    series.append(Series("k", key^))
+    var frame = DataFrame.from_series(series^)
+    var at = List[Int]()
+    at.append(0)
+    return group_ordinals(frame.column_refs(), at, rows)
+
+
+def fused_int_column(rows: Int) raises -> Array[DType.int64]:
+    """An int64 column with a null every eleventh row."""
+    var col = Array[DType.int64](rows)
+    for i in range(rows):
+        col[i] = Int64(i % 91) - 40
+    for i in range(rows):
+        if i % 11 == 0:
+            col.set_null(i)
+    return col^
+
+
+def fused_float_column(rows: Int) raises -> Array[DType.float64]:
+    """A float64 column carrying both spellings of missing, a null and a NaN."""
+    var col = Array[DType.float64](rows)
+    for i in range(rows):
+        col[i] = Float64(i % 53) * 0.25 - 3.0
+    for i in range(rows):
+        if i % 17 == 0:
+            col[i] = nan[DType.float64]()
+        elif i % 23 == 0:
+            col.set_null(i)
+    return col^
+
+
+def assert_same_column(left: AnyArray, right: AnyArray, what: String) raises:
+    """Asserts two erased columns hold the same thing, whatever dtype that is.
+    """
+    assert_equal(left.dtype(), right.dtype(), what + ": dtype")
+    assert_equal(len(left), len(right), what + ": length")
+    for g in range(len(left)):
+        assert_equal(left.is_valid(g), right.is_valid(g), what + ": validity")
+        if not left.is_valid(g):
+            continue
+        if left.dtype() == DType.float64:
+            var a = left.as_typed[DType.float64]()[g]
+            var b = right.as_typed[DType.float64]()[g]
+            if isnan(a) or isnan(b):
+                assert_true(isnan(a) and isnan(b), what + ": NaN")
+                continue
+            assert_almost_equal(a, b, msg=what + ": value")
+        else:
+            assert_equal(
+                left.as_typed[DType.int64]()[g],
+                right.as_typed[DType.int64]()[g],
+                what + ": value",
+            )
+
+
+def assert_fused_matches(
+    cols: List[AnyArray], kinds: List[AggKind], grouping: Grouping
+) raises:
+    """Runs the reductions together and one at a time and compares them."""
+    var at = List[Int]()
+    for s in range(len(cols)):
+        at.append(s)
+    var together = aggregate_group_many(
+        borrow_columns(cols), at, kinds, grouping.codes, grouping.groups
+    )
+    assert_equal(len(together), len(cols))
+    for s in range(len(cols)):
+        var alone = aggregate_group_any(
+            cols[s], kinds[s], grouping.codes, grouping.groups
+        )
+        assert_same_column(alone, together[s], "reduction " + String(s))
+
+
+def test_fused_reductions_agree_with_one_at_a_time() raises:
+    """Three reductions run in one pass answer what three passes answered.
+
+    The row count is over `PRIVATE_ROWS` so that the fused route takes its
+    parallel shape, and it is not a multiple of the block size, so the last block
+    of every worker's slice is short and a loop that walked a whole block anyway
+    would read past its own slice into the next worker's rows.
+    """
+    var rows = PRIVATE_ROWS * 3 + 517
+    var grouping = fused_frame(rows)
+    var ints_col = AnyArray(fused_int_column(rows))
+    var floats_col = AnyArray(fused_float_column(rows))
+    var cols = List[AnyArray]()
+    var kinds = List[AggKind]()
+    for k in [AggKind.SUM, AggKind.MEAN, AggKind.COUNT]:
+        cols.append(AnyArray(copy=ints_col))
+        kinds.append(k)
+        cols.append(AnyArray(copy=floats_col))
+        kinds.append(k)
+    assert_fused_matches(cols, kinds, grouping)
+
+
+def test_a_fused_pass_carries_the_ones_it_cannot_fuse() raises:
+    """A reduction the fused loops do not cover still comes back in its place.
+
+    The interesting part is the order rather than the values. The fused results
+    are collected in one list and the others in another, and they have to be
+    woven back into the order the caller asked for, so a median between two means
+    is where an off by one in the weave shows up.
+    """
+    var rows = PRIVATE_ROWS * 2 + 13
+    var grouping = fused_frame(rows)
+    var ints_col = AnyArray(fused_int_column(rows))
+    var floats_col = AnyArray(fused_float_column(rows))
+    var cols = List[AnyArray]()
+    cols.append(AnyArray(copy=ints_col))
+    cols.append(AnyArray(copy=floats_col))
+    cols.append(AnyArray(copy=ints_col))
+    cols.append(AnyArray(copy=floats_col))
+    cols.append(AnyArray(copy=ints_col))
+    var kinds = List[AggKind]()
+    kinds.append(AggKind.MEAN)
+    kinds.append(AggKind.MEDIAN)
+    kinds.append(AggKind.SUM)
+    kinds.append(AggKind.NUNIQUE)
+    kinds.append(AggKind.MIN)
+    assert_fused_matches(cols, kinds, grouping)
+
+
+def test_a_fused_pass_of_one_is_the_route_it_replaces() raises:
+    """One reduction has nothing to share a pass with, and the two lists have to
+    be the same length whatever the fused route decided to do with them.
+    """
+    var rows = PRIVATE_ROWS + 1
+    var grouping = fused_frame(rows)
+    var cols = List[AnyArray]()
+    cols.append(AnyArray(fused_float_column(rows)))
+    var kinds = List[AggKind]()
+    kinds.append(AggKind.MEAN)
+    assert_fused_matches(cols, kinds, grouping)
+
+
+def test_a_fused_pass_refuses_mismatched_lists() raises:
+    """Two columns and three reductions is a caller bug and is said so."""
+    var grouping = fused_frame(64)
+    var cols = List[AnyArray]()
+    cols.append(AnyArray(ints([1, 2])))
+    cols.append(AnyArray(ints([3, 4])))
+    var kinds = List[AggKind]()
+    kinds.append(AggKind.SUM)
+    kinds.append(AggKind.MEAN)
+    kinds.append(AggKind.COUNT)
+    var at = List[Int]()
+    at.append(0)
+    at.append(1)
+    with assert_raises(contains="3 reductions"):
+        _ = aggregate_group_many(
+            borrow_columns(cols), at, kinds, grouping.codes, grouping.groups
         )
 
 
