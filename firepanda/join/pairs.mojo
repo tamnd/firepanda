@@ -566,6 +566,7 @@ def pair_probe(
     has_nulls: Bool,
     kind: JoinKind,
     mut matched: Bitmap,
+    spread: Bool = True,
 ) raises -> JoinIndices:
     """Walks one side against a built table and emits the pairs.
 
@@ -585,6 +586,10 @@ def pair_probe(
         kind: Which rows to keep.
         matched: For an outer join, every built side row that paired is set.
             Sized to the built side's height, or empty for any other kind.
+        spread: Whether this pairing may use more than one core. False when the
+            caller is already running on a worker, because a second layer of
+            tasks inside the first one is thirty two times the tasks and none of
+            the parallelism.
 
     Returns:
         One entry per output row, in probe row order.
@@ -604,7 +609,9 @@ def pair_probe(
     # pairs in `matched`, and setting a bit is a read modify write of a word that
     # eight neighbouring rows share, so two workers doing it at once would drop
     # marks and invent unmatched rows. No other kind touches anything shared.
-    var parallel = probe_rows >= PARALLEL_LEFT_ROWS and not wants_right
+    var parallel = (
+        spread and probe_rows >= PARALLEL_LEFT_ROWS and not wants_right
+    )
     var chunk = LEFT_MORSEL_ROWS if parallel else max(probe_rows, 1)
     var pieces = (probe_rows + chunk - 1) // chunk
     if pieces == 0:

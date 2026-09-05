@@ -71,6 +71,13 @@ def pair_frame(var first: Series, var second: Series) raises -> DataFrame:
     return DataFrame.from_series(columns^)
 
 
+def one_column(var only: Series) raises -> DataFrame:
+    """Builds a one column frame."""
+    var columns = List[Series]()
+    columns.append(only^)
+    return DataFrame.from_series(columns^)
+
+
 def left_frame() raises -> DataFrame:
     """The left side of most of these tests.
 
@@ -1001,6 +1008,71 @@ def test_a_piece_of_no_rows_pairs_with_nothing() raises:
         left_frame(), right_frame(), 0, JoinKind.INNER
     )
     assert_same_pairs(pieces^, whole^, "an empty first piece")
+
+
+def test_pairing_on_one_core_gives_what_pairing_on_all_of_them_gives() raises:
+    """The two routes through `spread` emit the same pairs in the same order.
+
+    Above `PARALLEL_LEFT_ROWS` the pairing counts and emits in morsels, and a
+    caller already running on a worker passes False to stop it. Both routes
+    count first and emit into the slots the counts settled, so they are supposed
+    to produce the same list and not merely the same set, and this asserts the
+    stronger of the two.
+    """
+    var rows = (1 << 17) + 11
+    var probe = List[Scalar[DType.int64]](capacity=rows)
+    for i in range(rows):
+        probe.append(Int64(i % 9))
+    var left = one_column(Series("k", ints(probe)))
+    var right = one_column(Series("k", ints([1, 3, 3, 5])))
+
+    var aligned = align_keys(
+        left.column_refs(), keys(0), rows, right.column_refs(), keys(0), 4
+    )
+    var table = bucket_side(
+        aligned.codes,
+        rows,
+        4,
+        aligned.absent,
+        rows,
+        aligned.has_nulls,
+        aligned.groups,
+    )
+    var nothing = Bitmap(0, all_valid=False)
+    var spread = pair_probe(
+        table,
+        aligned.codes,
+        0,
+        rows,
+        aligned.absent,
+        0,
+        aligned.has_nulls,
+        JoinKind.INNER,
+        nothing,
+    )
+    var alone = pair_probe(
+        table,
+        aligned.codes,
+        0,
+        rows,
+        aligned.absent,
+        0,
+        aligned.has_nulls,
+        JoinKind.INNER,
+        nothing,
+        False,
+    )
+
+    assert_equal(len(alone), len(spread), "the same number of pairs")
+    var bad = -1
+    for r in range(len(spread)):
+        if (
+            spread.left_at[r] != alone.left_at[r]
+            or spread.right_at[r] != alone.right_at[r]
+        ):
+            bad = r
+            break
+    assert_equal(bad, -1, String("pair ", bad))
 
 
 def main() raises:

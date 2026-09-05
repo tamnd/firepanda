@@ -89,13 +89,19 @@ def take_rows[
     )
 
 
-def take_any(col: AnyArray, indices: List[Int]) raises -> AnyArray:
+def take_any(
+    col: AnyArray, indices: List[Int], spread: Bool = True
+) raises -> AnyArray:
     """Gathers rows by position from a column whose dtype is a runtime value.
 
     Args:
         col: The column to gather from.
         indices: The positions to gather, negative meaning null, as in
             `take_rows`.
+        spread: Whether this gather may use more than one core. False when
+            the caller is already running on a worker, because a second layer of
+            tasks inside the first one is thirty two times the tasks and none of
+            the parallelism.
 
     Returns:
         A column of length `len(indices)` with the same dtype as the input.
@@ -104,7 +110,7 @@ def take_any(col: AnyArray, indices: List[Int]) raises -> AnyArray:
         If the column's dtype is not one firepanda has a physical layout for.
     """
     if col.is_string():
-        return AnyArray(_take_strings(col.strings(), indices))
+        return AnyArray(_take_strings(col.strings(), indices, spread))
     comptime for candidate in ALL:
         if col.dtype() == candidate:
             return AnyArray(
@@ -113,6 +119,7 @@ def take_any(col: AnyArray, indices: List[Int]) raises -> AnyArray:
                     col.data.validity,
                     col.null_count() > 0,
                     indices,
+                    spread,
                 )
             )
     raise Error("take: unsupported dtype")
@@ -136,7 +143,9 @@ def _take_bounds(rows: Int, workers: Int) -> List[Int]:
     return bounds^
 
 
-def _take_strings(col: StringArray, indices: List[Int]) raises -> StringArray:
+def _take_strings(
+    col: StringArray, indices: List[Int], spread: Bool = True
+) raises -> StringArray:
     """Gathers variable width rows by position.
 
     The output element is not a fixed number of bytes, so unlike `_take_core`
@@ -158,6 +167,10 @@ def _take_strings(col: StringArray, indices: List[Int]) raises -> StringArray:
         indices: The positions to gather. A negative index produces a null, as
             in `take_rows`, because that is how a left join reports a row that
             was not there.
+        spread: Whether this gather may use more than one core. False when
+            the caller is already running on a worker, because a second layer of
+            tasks inside the first one is thirty two times the tasks and none of
+            the parallelism.
 
     Returns:
         A column of length `len(indices)`.
@@ -168,7 +181,7 @@ def _take_strings(col: StringArray, indices: List[Int]) raises -> StringArray:
     """
     var n = len(indices)
     var workers = worker_count()
-    if n < PARALLEL_TAKE_ROWS or workers <= 1:
+    if n < PARALLEL_TAKE_ROWS or workers <= 1 or not spread:
         var builder = StringBuilder(capacity=n)
         for k in range(n):
             var at = indices[k]
@@ -295,6 +308,7 @@ def _take_core[
     validity: Bitmap,
     has_nulls: Bool,
     indices: List[Int],
+    spread: Bool = True,
 ) raises -> Array[dt]:
     """The gather loop, over a pointer and a bitmap rather than a column."""
     var n = len(indices)
@@ -346,7 +360,7 @@ def _take_core[
         if stop & 63 != 0 and stop > start:
             built.unsafe_set_word(stop >> 6, word)
 
-    if n < PARALLEL_TAKE_ROWS:
+    if n < PARALLEL_TAKE_ROWS or not spread:
         gather(0, n)
     else:
         parallel_morsels(gather, n, TAKE_MORSEL_ROWS)

@@ -8,6 +8,15 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A join node running on a worker no longer asks for workers of its own
+
+Three kernels inside a join hand themselves out in morsels once the row count is high enough: the probe at a hundred and thirty one thousand rows, the pairing at the same, and the gather at sixty five thousand. A pipeline chunk is a hundred and twenty eight thousand rows, so a `Join` node running inside a worker was starting a second layer of tasks inside the task it was already in, three times per chunk.
+
+`take_any`, `probe_side` and `pair_probe` now take a `spread` flag, defaulting to true so every existing caller is unchanged, and `node_apply` passes false because it is the entry point the workers share. `Join.process` threads it down to all three.
+
+This was measured on an i9-13900K at ten million rows joined against ten thousand and it moved nothing, in either direction, at chunk sizes of thirty two thousand, a hundred and thirty one thousand and five hundred and twelve thousand. The reason is that the morsel scheduler starts one task per worker rather than one per morsel, and a task that finds no free worker runs on the thread that made it, so the inner layer collapsed back onto the caller. It is recorded here as a change that costs nothing and is not visible today, kept because asking for thirty two times the tasks is only free while the queue is saturated, and the queue stops being saturated the moment a pipeline is narrower than the machine.
+
+Two tests were added, one per kernel, that run the same probe and the same pairing both ways at a row count above the threshold and compare the ordinals element by element.
 ### The Python front door, measured rather than argued for
 
 `docs/specs/07-python-bindings.md` was written before any of it existed and it asks the reader to check it against the installed toolchain. `docs/specs/12-the-python-front-door-measured.md` is that check, run against Mojo 1.0.0 on macOS arm64, and every number in it came out of a command.

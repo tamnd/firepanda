@@ -679,6 +679,7 @@ def probe_side[
     probe: Array[dt],
     probe_at: Int,
     mut codes: Array[DType.uint32],
+    spread: Bool = True,
 ) raises:
     """Asks the built side about every row of a probe side.
 
@@ -701,6 +702,10 @@ def probe_side[
         probe: The probe side's key column.
         probe_at: Where its codes start.
         codes: The probe side's stretch is filled with its ordinals.
+        spread: Whether this probe may use more than one core. False when the
+            caller is already running on a worker, because a second layer of
+            tasks inside the first one is thirty two times the tasks and none of
+            the parallelism.
 
     Parameters:
         dt: The key dtype.
@@ -727,9 +732,12 @@ def probe_side[
             probe,
             probe_at,
             codes,
+            spread,
         )
     else:
-        _probe_hashed[dt](built.table, built.miss, probe, probe_at, codes)
+        _probe_hashed[dt](
+            built.table, built.miss, probe, probe_at, codes, spread
+        )
 
 
 def _probe_direct[
@@ -742,6 +750,7 @@ def _probe_direct[
     probe: Array[dt],
     probe_at: Int,
     mut codes: Array[DType.uint32],
+    spread: Bool = True,
 ) raises:
     """Reads a table indexed by the key value, once per probe row.
 
@@ -753,6 +762,10 @@ def _probe_direct[
         probe: The probe side's key column.
         probe_at: Where its codes start.
         codes: The probe side's stretch is filled with its ordinals.
+        spread: Whether this probe may use more than one core. False when the
+            caller is already running on a worker, because a second layer of
+            tasks inside the first one is thirty two times the tasks and none of
+            the parallelism.
 
     Parameters:
         dt: The key dtype.
@@ -783,7 +796,7 @@ def _probe_direct[
                 miss if stored == 0 else stored - 1
             )
 
-    if probe_rows >= PARALLEL_PROBE_ROWS:
+    if spread and probe_rows >= PARALLEL_PROBE_ROWS:
         parallel_morsels(look, probe_rows, PROBE_MORSEL_ROWS)
     else:
         look(0, probe_rows)
@@ -797,6 +810,7 @@ def _probe_hashed[
     probe: Array[dt],
     probe_at: Int,
     mut codes: Array[DType.uint32],
+    spread: Bool = True,
 ) raises:
     """Reads the hash table, a chunk of probe rows at a time.
 
@@ -806,6 +820,10 @@ def _probe_hashed[
         probe: The probe side's key column.
         probe_at: Where its codes start.
         codes: The probe side's stretch is filled with its ordinals.
+        spread: Whether this probe may use more than one core. False when the
+            caller is already running on a worker, because a second layer of
+            tasks inside the first one is thirty two times the tasks and none of
+            the parallelism.
 
     Parameters:
         dt: The key dtype.
@@ -838,7 +856,7 @@ def _probe_hashed[
             here += count
         _ = scratch^
 
-    if probe_rows >= PARALLEL_PROBE_ROWS:
+    if spread and probe_rows >= PARALLEL_PROBE_ROWS:
         parallel_morsels(look, probe_rows, PROBE_MORSEL_ROWS)
     else:
         look(0, probe_rows)
