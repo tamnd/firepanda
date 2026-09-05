@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### The scan that decides whether an integer key gets a table stops doing it on one core
+
+`direct_plan` is the pass in front of every integer factorize. It reads the column, finds the smallest and largest value, and says whether the range is narrow enough that ordinals can come out of a table indexed by the value rather than out of a hash. It exists to be given up on: a column of scattered keys passes the widest range worth a table inside its first few thousand rows, and nothing later can bring it back, so the scan returns as soon as the answer is settled and the rest of the column is never read.
+
+A column that qualifies is a different story. That one is read to the end, on the thread that called, in front of two passes that run on every core. On ten million rows it is forty megabytes on one core; on a hundred million it is four hundred, and db-benchmark q4 at that size was spending about a third of the whole query in it while thirty one cores waited.
+
+It could not simply be handed out, because a task that has already been dealt to a worker cannot be called off and the early return is half of what the scan is for. So it does both. The first `PLAN_PREFIX_ROWS`, sixty five thousand, are read where the scan stands, which is enough for a column with a wide range to have given up and is a quarter of a millisecond to one that is going to qualify. Only what is left after that goes out to the cores, one morsel each, and each of those gives up on its own bounds for the same reason the serial scan gives up on its running ones: bounds only widen, so a range too wide over some of the rows is too wide over all of them.
+
+Measured on an i9-13900K at ten million rows, three ABBA blocks. Factorizing one integer key went from 8.4 to 16.0 milliseconds down to 4.4 to 7.6, and two integer keys went from 16.6 to 25.4 down to 9.2 to 13.9, with every new run below every old run in both. A wider integer key went from 13.0 to 18.0 down to 8.4 to 12.5, also clean. The four text cases moved between one and four per cent, which is noise on a machine that drifted this much during the run, and they are the control: a string key never asks for a table indexed by its value, so nothing in its path changed.
+
+On db-benchmark at 0.5GB, five runs a block and three blocks, q4 went from 0.0176 to 0.0179 seconds down to 0.0147 to 0.0161 and q9 from 0.0496 to 0.0527 down to 0.0452 to 0.0480, both with every new run below every old run. q5 improved 12 per cent, q10 7 and j4 7, with the ranges overlapping. Nothing regressed outside its own spread.
+
 ### pyarrow and Polars read a firepanda frame with no copy
 
 `pyarrow.record_batch(df)` and `polars.DataFrame(df)` now work, on a frame that Python is still holding, without copying a byte of it. There is no firepanda specific code on their side and none on ours: the frame answers `__arrow_c_schema__` and `__arrow_c_array__`, which is the interface pandas, Polars, DuckDB and pyarrow have all agreed on, and every library that speaks it gets the same answer.

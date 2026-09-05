@@ -84,7 +84,12 @@ from firepanda.array.array import Array
 from firepanda.array.strings import StringArray
 from firepanda.array.strview import StringView
 from firepanda.buffer.buffer import Buffer
-from firepanda.exec import parallel_for, worker_count
+from firepanda.exec import (
+    MORSEL_ROWS,
+    parallel_for,
+    parallel_morsels,
+    worker_count,
+)
 from firepanda.kernel.accum import highest, lowest
 from firepanda.kernel.agg import BLOCK
 from firepanda.kernel.select import take_rows
@@ -496,7 +501,25 @@ struct DirectPlan[dt: DType](Copyable, Movable):
     """The value that indexes slot zero, which is the column's minimum."""
 
 
-def direct_plan[dt: DType](col: Array[dt], ceiling: Int) -> DirectPlan[dt]:
+comptime PLAN_PREFIX_ROWS = 1 << 16
+"""Rows the scan for a direct table's range reads before it splits up.
+
+The scan exists to be given up on. A column of scattered keys passes the widest
+span a table is worth inside its first few thousand rows and nothing later can
+bring it back, so the useful case runs for a moment and returns, and handing that
+out to thirty two cores would cost more than it. A column that is going to
+qualify runs to the end instead, and on ten million rows that is forty megabytes
+read on one core in front of two passes that are on all of them.
+
+So the scan does both. It reads this many rows where it stands, which is enough
+for the wide case to have finished, and only a column still inside the ceiling
+after them is worth waking anybody for.
+"""
+
+
+def direct_plan[
+    dt: DType
+](col: Array[dt], ceiling: Int) raises -> DirectPlan[dt]:
     """Decides whether the direct route applies, in one pass that can stop early.
 
     This used to be a `min_of` and a `max_of` and then a test on the two answers,
@@ -521,6 +544,30 @@ def direct_plan[dt: DType](col: Array[dt], ceiling: Int) -> DirectPlan[dt]:
     because it has one pass to pay the table off against rather than two. So the
     number comes in rather than being decided here.
 
+    ## Splitting the scan
+
+    A column that qualifies is scanned to the end, and that is a read of the
+    whole column on one thread in front of two passes that run on every core. On
+    ten million rows it is a third of what the direct route costs and on a
+    hundred million it is a third of what a whole group by costs, which is a
+    strange place to leave a single core working alone.
+
+    It cannot simply be handed to the cores, because the early return is the
+    other half of what this is for and a task that has already been dealt out
+    cannot be called off. So the scan reads `PLAN_PREFIX_ROWS` where it stands
+    first. That is enough for a column with a wide range to have given up, which
+    is the case the early return was written for, and it costs a column that is
+    going to qualify a quarter of a millisecond it was going to spend anyway.
+    Only what is left after that goes out to the cores.
+
+    Each of those reads its own rows and gives up on its own bounds, which is
+    allowed for the reason the serial scan gives up on its running ones: bounds
+    only widen, so a range that is too wide over some of the rows is too wide
+    over all of them. A worker giving up does not stop the others, and it does
+    not need to, because a column that looked narrow for sixty five thousand
+    rows and widens later is rare enough that finishing the scan on it is not
+    worth a flag every worker has to read.
+
     Args:
         col: The column.
         ceiling: The widest span to accept. A wider one returns the hash plan.
@@ -531,11 +578,131 @@ def direct_plan[dt: DType](col: Array[dt], ceiling: Int) -> DirectPlan[dt]:
 
     Returns:
         The plan, whose span is -1 when the column should be hashed instead.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
     """
     var n = len(col)
     if n == 0:
         return DirectPlan[dt](-1, Scalar[dt](0))
 
+    var prefix = min(n, PLAN_PREFIX_ROWS)
+    var head = _plan_range[dt](col, 0, prefix, ceiling)
+    if head.gave_up:
+        return DirectPlan[dt](-1, Scalar[dt](0))
+
+    var low = head.low
+    var high = head.high
+    var seen = head.seen
+
+    var rest = n - prefix
+    if rest > MORSEL_ROWS:
+        var count = (rest + MORSEL_ROWS - 1) // MORSEL_ROWS
+        var lows = Array[dt](overwritten=count)
+        var highs = Array[dt](overwritten=count)
+        var marks = Array[DType.uint8](count)
+
+        def scan(begin: Int, stop: Int) {mut lows, mut highs, mut marks, imm}:
+            var part = _plan_range[dt](
+                col, prefix + begin, prefix + stop, ceiling
+            )
+            var at = begin // MORSEL_ROWS
+            lows.unsafe_ptr().unsafe_offset(at).unsafe_write(part.low)
+            highs.unsafe_ptr().unsafe_offset(at).unsafe_write(part.high)
+            var mark = UInt8(0)
+            if part.gave_up:
+                mark = UInt8(2)
+            elif part.seen:
+                mark = UInt8(1)
+            marks.unsafe_ptr().unsafe_offset(at).unsafe_write(mark)
+
+        parallel_morsels(scan, rest)
+
+        var low_slots = lows.unsafe_ptr()
+        var high_slots = highs.unsafe_ptr()
+        var mark_slots = marks.unsafe_ptr()
+        for i in range(count):
+            var mark = mark_slots.unsafe_offset(i).unsafe_load()
+            if mark == 2:
+                return DirectPlan[dt](-1, Scalar[dt](0))
+            if mark == 0:
+                continue
+            seen = True
+            var part_low = low_slots.unsafe_offset(i).unsafe_load()
+            var part_high = high_slots.unsafe_offset(i).unsafe_load()
+            if part_low < low:
+                low = part_low
+            if part_high > high:
+                high = part_high
+    elif rest > 0:
+        var tail = _plan_range[dt](col, prefix, n, ceiling)
+        if tail.gave_up:
+            return DirectPlan[dt](-1, Scalar[dt](0))
+        if tail.seen:
+            seen = True
+            if tail.low < low:
+                low = tail.low
+            if tail.high > high:
+                high = tail.high
+
+    if not seen:
+        # Every row is null. One group, no keys to spread out, and the direct
+        # route allocates a single slot it never reads.
+        return DirectPlan[dt](1, Scalar[dt](0))
+
+    comptime safe = Scalar[dt](1 << SAFE_RANGE_BITS)
+    comptime if size_of[dt]() > 4:
+        if high > safe:
+            return DirectPlan[dt](-1, Scalar[dt](0))
+        comptime if dt.is_signed():
+            if low < -safe:
+                return DirectPlan[dt](-1, Scalar[dt](0))
+    if Int(high) - Int(low) + 1 > ceiling:
+        return DirectPlan[dt](-1, Scalar[dt](0))
+
+    return DirectPlan[dt](Int(high) - Int(low) + 1, low)
+
+
+@fieldwise_init
+struct _ScanRange[dt: DType](Copyable, Movable):
+    """What one run of rows says about a direct table's range."""
+
+    var low: Scalar[Self.dt]
+    """The smallest value present, or the dtype's largest if none is."""
+
+    var high: Scalar[Self.dt]
+    """The largest value present, or the dtype's smallest if none is."""
+
+    var seen: Bool
+    """Whether any row in the run held a value at all."""
+
+    var gave_up: Bool
+    """Whether these rows alone already put the range past the ceiling."""
+
+
+def _plan_range[
+    dt: DType
+](col: Array[dt], start: Int, stop: Int, ceiling: Int) -> _ScanRange[dt]:
+    """Scans one run of rows for the bounds a direct table would need.
+
+    The body `direct_plan` used to be, over a range rather than over the whole
+    column, so that the prefix and each of the workers can be the same code. The
+    range starts on a validity word boundary, which every caller arranges,
+    because the loop is over words and a word that begins before `start` would
+    read rows that are somebody else's.
+
+    Args:
+        col: The column.
+        start: The first row, a multiple of the validity word width.
+        stop: One past the last row.
+        ceiling: The widest span to accept.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        The bounds, whether anything was found, and whether the run gave up.
+    """
     comptime width = simd_width_of[dt]()
     comptime safe = Scalar[dt](1 << SAFE_RANGE_BITS)
 
@@ -544,21 +711,22 @@ def direct_plan[dt: DType](col: Array[dt], ceiling: Int) -> DirectPlan[dt]:
     var high = lowest[dt]()
     var seen = False
 
-    for w in range(col.data.validity.word_count()):
+    var words = min((stop + BLOCK - 1) // BLOCK, col.data.validity.word_count())
+    for w in range(start // BLOCK, words):
         var word = col.data.validity.unsafe_word(w)
         if word == 0:
             continue
 
-        var start = w * BLOCK
-        var last = start + BLOCK
-        if last > n:
-            last = n
+        var begin = w * BLOCK
+        var last = begin + BLOCK
+        if last > stop:
+            last = stop
 
-        if word == UInt64.MAX and last == start + BLOCK:
+        if word == UInt64.MAX and last == begin + BLOCK:
             seen = True
             var mins = SIMD[dt, width](highest[dt]())
             var maxes = SIMD[dt, width](lowest[dt]())
-            var i = start
+            var i = begin
             while i + width <= last:
                 var chunk = ptr.unsafe_offset(i).unsafe_load[width=width]()
                 mins = min(mins, chunk)
@@ -578,8 +746,8 @@ def direct_plan[dt: DType](col: Array[dt], ceiling: Int) -> DirectPlan[dt]:
             if block_high > high:
                 high = block_high
         else:
-            for i in range(start, last):
-                if (word >> UInt64(i - start)) & 1 == 0:
+            for i in range(begin, last):
+                if (word >> UInt64(i - begin)) & 1 == 0:
                     continue
                 seen = True
                 var value = ptr.unsafe_offset(i).unsafe_load()
@@ -591,19 +759,14 @@ def direct_plan[dt: DType](col: Array[dt], ceiling: Int) -> DirectPlan[dt]:
         if seen:
             comptime if size_of[dt]() > 4:
                 if high > safe:
-                    return DirectPlan[dt](-1, Scalar[dt](0))
+                    return _ScanRange[dt](low, high, True, True)
                 comptime if dt.is_signed():
                     if low < -safe:
-                        return DirectPlan[dt](-1, Scalar[dt](0))
+                        return _ScanRange[dt](low, high, True, True)
             if Int(high) - Int(low) + 1 > ceiling:
-                return DirectPlan[dt](-1, Scalar[dt](0))
+                return _ScanRange[dt](low, high, True, True)
 
-    if not seen:
-        # Every row is null. One group, no keys to spread out, and the direct
-        # route allocates a single slot it never reads.
-        return DirectPlan[dt](1, Scalar[dt](0))
-
-    return DirectPlan[dt](Int(high) - Int(low) + 1, low)
+    return _ScanRange[dt](low, high, seen, False)
 
 
 comptime DIRECT_MERGE_BYTES = 256 * 1024
