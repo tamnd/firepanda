@@ -94,9 +94,39 @@ def present_bitmap[dt: DType](col: Array[dt]) raises -> Bitmap:
     Raises:
         Error: Only what the morsel runtime raises.
     """
+    return present_bitmap_of(col.unsafe_ptr(), col.data.validity, len(col))
+
+
+def present_bitmap_of[
+    dt: DType, //, origin: ImmOrigin
+](
+    source: Pointer[Scalar[dt], origin], valid: Bitmap, rows: Int
+) raises -> Bitmap:
+    """The same as `present_bitmap`, for a caller holding a pointer.
+
+    The grouped reductions work over a values pointer and a bitmap rather than
+    over a column, because one instantiation of a core serves both the typed
+    entry point and the erased one, so they cannot call the column form. See
+    #170.
+
+    Args:
+        source: The values.
+        valid: The validity to start from.
+        rows: The height.
+
+    Parameters:
+        dt: The value dtype.
+        origin: Where the values live.
+
+    Returns:
+        A new bitmap, set where a row is present.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
     comptime if not dt.is_floating_point():
-        return Bitmap(copy=col.data.validity)
-    return _drop_nans(col.unsafe_ptr(), col.data.validity, len(col))
+        return Bitmap(copy=valid)
+    return _drop_nans(source, valid, rows)
 
 
 def present_bitmap_any(col: AnyArray) raises -> Bitmap:

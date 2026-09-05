@@ -691,7 +691,12 @@ def group_scalar[
             rows += 1
             if kind.counts_rows():
                 continue
-            if col.is_valid(i):
+            # `_is_there` and not `is_valid`, so a NaN is left out of the group
+            # the way a null is. The kernel asks the same question inside its
+            # own loops with `_there`; this asks it a row at a time, which is
+            # what makes the two agreeing worth something. `SIZE` is above this
+            # line because it counts rows and not values. See #170.
+            if _is_there(col, i):
                 present.append(Float64(col[i]))
 
         if kind == AggKind.SIZE:

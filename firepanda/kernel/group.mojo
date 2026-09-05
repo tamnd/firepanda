@@ -75,6 +75,24 @@ bitmap at all: adding the nulls in adds zero. Count, min, max, first and last do
 read it, because for those a null is not a neutral element. That is the same
 split as in `agg.mojo` and for the same reason.
 
+## A NaN is missing here too, and where the test for it sits
+
+pandas has no presence bitmap on a float column, so a NaN is the only missing it
+has there, and every reduction in this file has to step over one the way it steps
+over a null. Where that test goes was decided by measuring rather than by taste.
+The tidy arrangement is to build a corrected bitmap in front of the reduction and
+leave the loops alone, and it costs a pass over the values: a grouped minimum on
+a million float rows went from 321 to 491 microseconds built that way, because
+the extra pass is two thirds as much memory traffic as the reduction it is
+helping. So the test sits in the loop instead, in `_there`, which every core
+already about to load the value calls for one compare and no extra traffic.
+
+`_sum_core` does not call it, because it reads no bitmap at all and would have to
+start; `_addend` turns a NaN into a zero there instead, which is the same trick
+the nulls already get. `_count_core` does not call it either, and is the one
+place that does pay for a bitmap, because a count reads no values and so has
+nothing to reuse a load from. See #170.
+
 ## Two spellings, one body
 
 Same arrangement as `select.mojo` and for the same reason. A `DataFrame`
@@ -86,7 +104,7 @@ covers both.
 """
 
 from std.collections.span import Span
-from std.math import nan, sqrt
+from std.math import isnan, nan, sqrt
 from std.sys.info import simd_width_of, size_of
 
 from firepanda.array.any import AnyArray
@@ -100,6 +118,7 @@ from firepanda.hash.factorize import factorize_strings
 from firepanda.kernel.accum import accumulator, highest, lowest
 from firepanda.kernel.agg import max_of
 from firepanda.kernel.cast import cast_any
+from firepanda.kernel.nulls import present_bitmap_of
 
 comptime PRIVATE_BYTES = 32 * 1024 * 1024
 """How much memory the private accumulator tables may take, in total.
@@ -360,7 +379,9 @@ def _partitioned_sums[
 
     # Every row is placed, the null ones included, because this reduction adds
     # every row and a null holds a zero. That is the same invariant the serial
-    # loop spends and it saves the placement a bitmap read per row.
+    # loop spends and it saves the placement a bitmap read per row. A NaN is
+    # placed too and `_addend` turns it into a zero as it is copied, which is why
+    # the counting pass above does not have to know a thing about it.
     var starts = _partition_starts(
         codes, codes.data.validity, False, bounds, workers, parts, shift
     )
@@ -380,9 +401,7 @@ def _partitioned_sums[
             var p = Int(g) >> shift
             var slot = cursor[p]
             ordinals.unsafe_offset(slot).unsafe_write(g)
-            values.unsafe_offset(slot).unsafe_write(
-                source.unsafe_offset(i).unsafe_load().cast[acc]()
-            )
+            values.unsafe_offset(slot).unsafe_write(_addend[acc=acc](source, i))
             cursor[p] = slot + 1
 
     parallel_for(place, workers)
@@ -869,6 +888,35 @@ struct AggKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("nunique")
 
 
+def _there[
+    dt: DType, //, origin: ImmOrigin
+](
+    source: Pointer[Scalar[dt], origin],
+    validity: Bitmap,
+    has_null: Bool,
+    i: Int,
+) -> Bool:
+    """Says whether row `i` holds a value a grouped reduction should read.
+
+    Its validity bit has to be set, and on a float dtype the value must not be a
+    NaN, because pandas steps over a NaN exactly as it steps over a value that
+    was never there.
+
+    Every caller loads the value a line or two later for its own reasons, so the
+    load here is the same load and the whole rule costs one compare. That is why
+    it is here rather than in a corrected bitmap built before the loop, which
+    reads the values a second time and is measured in the module docstring above.
+    On any dtype that is not floating point there is nothing to test and the test
+    is compiled away, leaving the bitmap read that was always there. See #170.
+    """
+    if has_null and not validity.get(i):
+        return False
+    comptime if dt.is_floating_point():
+        if isnan(source.unsafe_offset(i).unsafe_load()):
+            return False
+    return True
+
+
 def group_size(
     codes: Array[DType.uint32], groups: Int
 ) raises -> Array[DType.int64]:
@@ -918,17 +966,47 @@ def group_count[
         reduction small enough to stay on one core cannot fail.
     """
     return _count_core(
-        values.data.validity, values.null_count() > 0, codes, groups
+        values.unsafe_ptr(),
+        values.data.validity,
+        values.null_count() > 0,
+        codes,
+        groups,
     )
 
 
-def _count_core(
+def _count_core[
+    dt: DType, //, origin: ImmOrigin
+](
+    source: Pointer[Scalar[dt], origin],
     validity: Bitmap,
     has_null: Bool,
     codes: Array[DType.uint32],
     groups: Int,
 ) raises -> Array[DType.int64]:
-    """Counts the present rows per group. Needs no dtype and reads no values."""
+    """Counts the rows per group that hold a value, NaN not being one.
+
+    The one place in this file that pays for a corrected bitmap rather than
+    testing inside a loop, and the reason is that it is the only reduction with
+    no loop over the values to put the test in. A count reads ordinals and bits;
+    on a float dtype it now has to read the values as well, and there is no
+    arrangement in which it does not. So on a float column this walks the values
+    once, writes down which rows are there, and then counts exactly as it always
+    did. Everything else here calls `_there`. See #170.
+    """
+    comptime if dt.is_floating_point():
+        var present = present_bitmap_of(source, validity, len(codes))
+        var missing = present.null_count() > 0
+        return _count_bits(present, missing, codes, groups)
+    return _count_bits(validity, has_null, codes, groups)
+
+
+def _count_bits(
+    validity: Bitmap,
+    has_null: Bool,
+    codes: Array[DType.uint32],
+    groups: Int,
+) raises -> Array[DType.int64]:
+    """Counts the set bits per group. Needs no dtype and reads no values."""
     if not has_null:
         return group_size(codes, groups)
     return _tally_core[check=True](validity, codes, groups)
@@ -997,11 +1075,13 @@ def group_sum[
 ](values: Array[dt], codes: Array[DType.uint32], groups: Int) raises -> Array[
     accumulator(dt)
 ]:
-    """Adds up the non-null values in each group.
+    """Adds up the values in each group that are there.
 
     The nulls are added too. They hold zero, so it makes no difference to the
     answer and it saves a bitmap read per row. That is the invariant stated in
-    `firepanda/kernel/__init__.mojo` being spent.
+    `firepanda/kernel/__init__.mojo` being spent. On a float dtype a NaN is made
+    to hold zero on the way past for exactly the same reason, so it is stepped
+    over the way pandas steps over it and this still reads no bitmap. See #170.
 
     Args:
         values: The column being aggregated.
@@ -1023,6 +1103,31 @@ def group_sum[
     return _sum_core(values.unsafe_ptr(), codes, groups)
 
 
+def _addend[
+    dt: DType, //, origin: ImmOrigin, acc: DType
+](source: Pointer[Scalar[dt], origin], i: Int) -> Scalar[acc]:
+    """The value at row `i` as a sum sees it, which is zero where it is NaN.
+
+    A NaN contributes nothing to a pandas sum, and zero is what contributing
+    nothing means to an addition, so the row is turned into a zero rather than
+    being skipped. Skipping would work in the two scatter loops and would not
+    work in `_partitioned_sums`, where the rows have already been counted into
+    their partitions by the time any value is read, and one rule in three places
+    is worth more than a branch saved in two of them.
+
+    This is also the reason the sum can still add the nulls in. A null holds a
+    zero and a NaN is now made to hold one, so neither spelling of missing needs
+    a bitmap read and neither changes the answer. On any dtype that is not
+    floating point there is nothing to test and the test is compiled away. See
+    #170.
+    """
+    var value = source.unsafe_offset(i).unsafe_load().cast[acc]()
+    comptime if dt.is_floating_point():
+        if isnan(value):
+            return Scalar[acc](0)
+    return value
+
+
 def _sum_core[
     dt: DType, //, origin: ImmOrigin, acc: DType = accumulator(dt)
 ](
@@ -1031,6 +1136,10 @@ def _sum_core[
     groups: Int,
 ) raises -> Array[acc]:
     """Accumulates every row into its group, validity ignored on purpose.
+
+    Nothing here reads a bitmap. A null holds a zero and `_addend` gives a NaN
+    the same treatment, so both spellings of missing add nothing and neither has
+    to be looked up. Every other core in this file calls `_there` instead.
 
     The accumulator is a parameter with the natural widening as its default,
     because a grouped sum and a grouped mean want different ones. A sum over
@@ -1053,7 +1162,7 @@ def _sum_core[
             var g = Int(at.unsafe_offset(i).unsafe_load())
             totals.unsafe_offset(g).unsafe_store(
                 totals.unsafe_offset(g).unsafe_load()
-                + source.unsafe_offset(i).unsafe_load().cast[acc]()
+                + _addend[acc=acc](source, i)
             )
         return out^
 
@@ -1067,7 +1176,7 @@ def _sum_core[
             var g = Int(at.unsafe_offset(i).unsafe_load())
             totals.unsafe_offset(g).unsafe_store(
                 totals.unsafe_offset(g).unsafe_load()
-                + source.unsafe_offset(i).unsafe_load().cast[acc]()
+                + _addend[acc=acc](source, i)
             )
 
     parallel_for(one, workers)
@@ -1128,8 +1237,11 @@ def _mean_core[
     values is a large float rather than whatever the int64 wrap happened to leave
     behind. `group_sum` still wraps, because there pandas wraps too.
     """
+    # The numerator steps over a NaN inside `_addend` and the divisor steps over
+    # it inside `_count_core`, so the two agree about which rows were read
+    # without either of them telling the other. See #170.
     var sums = _sum_core[acc=DType.float64](source, codes, groups)
-    var counts = _count_core(validity, has_null, codes, groups)
+    var counts = _count_core(source, validity, has_null, codes, groups)
 
     var out = Array[DType.float64](groups)
     var target = out.unsafe_ptr()
@@ -1261,7 +1373,7 @@ def _extreme_core[
     if workers <= 1:
         var at = codes.unsafe_ptr()
         for i in range(n):
-            if has_null and not validity.get(i):
+            if not _there(source, validity, has_null, i):
                 continue
             var g = Int(at.unsafe_offset(i).unsafe_load())
             var value = source.unsafe_offset(i).unsafe_load()
@@ -1298,7 +1410,7 @@ def _extreme_core[
             var hit = seen.unsafe_ptr().unsafe_offset(w * groups)
             var at = codes.unsafe_ptr()
             for i in range(bounds[w], bounds[w + 1]):
-                if has_null and not validity.get(i):
+                if not _there(source, validity, has_null, i):
                     continue
                 var g = Int(at.unsafe_offset(i).unsafe_load())
                 var value = source.unsafe_offset(i).unsafe_load()
@@ -1389,12 +1501,13 @@ def _extreme_core[
 def group_first[
     dt: DType
 ](values: Array[dt], codes: Array[DType.uint32], groups: Int) -> Array[dt]:
-    """Returns each group's first non-null value in row order.
+    """Returns each group's first value in row order that is there.
 
     pandas skips nulls here rather than reporting the literal first row, so a
     group whose first row is null reports its second. That is `first()` and not
     `nth(0)`, and the two differ only on data with nulls in it, which is exactly
-    the data where it matters.
+    the data where it matters. On a float column it skips a NaN for the same
+    reason, because a NaN is the other way pandas says a row holds nothing.
 
     Args:
         values: The column being aggregated.
@@ -1468,7 +1581,7 @@ def _edge_core[
     var filled = 0
     for step in range(rows):
         var i = step if want_first else rows - 1 - step
-        if has_null and not validity.get(i):
+        if not _there(source, validity, has_null, i):
             continue
         var g = Int(at.unsafe_offset(i).unsafe_load())
         if out.data.validity.get(g):
@@ -1676,7 +1789,7 @@ def _var_core[
     accurate the mean was.
     """
     var means = _mean_core(source, validity, has_null, codes, groups)
-    var counts = _count_core(validity, has_null, codes, groups)
+    var counts = _count_core(source, validity, has_null, codes, groups)
 
     var rows = len(codes)
     var workers = _private_workers[DType.float64](rows, groups)
@@ -1696,7 +1809,7 @@ def _var_core[
         var plain = deltas.unsafe_ptr().unsafe_offset(w * groups)
         var totals = partials.unsafe_ptr().unsafe_offset(w * groups)
         for i in range(bounds[w], bounds[w + 1]):
-            if has_null and not validity.get(i):
+            if not _there(source, validity, has_null, i):
                 continue
             var g = Int(at.unsafe_offset(i).unsafe_load())
             var delta = (
@@ -1781,7 +1894,7 @@ def _sem_core[
     var out = _var_core[want_std=True](
         source, validity, has_null, codes, groups, ddof
     )
-    var counts = _count_core(validity, has_null, codes, groups)
+    var counts = _count_core(source, validity, has_null, codes, groups)
     var target = out.unsafe_ptr()
     var n = counts.unsafe_ptr()
     for g in range(groups):
@@ -1847,7 +1960,7 @@ def _skew_core[
         If one of the workers the parallel route starts cannot be run.
     """
     var means = _mean_core(source, validity, has_null, codes, groups)
-    var counts = _count_core(validity, has_null, codes, groups)
+    var counts = _count_core(source, validity, has_null, codes, groups)
 
     var rows = len(codes)
     var workers = _private_workers[DType.float64](rows, groups)
@@ -1864,7 +1977,7 @@ def _skew_core[
         var second = squares.unsafe_ptr().unsafe_offset(w * groups)
         var third = cubes.unsafe_ptr().unsafe_offset(w * groups)
         for i in range(bounds[w], bounds[w + 1]):
-            if has_null and not validity.get(i):
+            if not _there(source, validity, has_null, i):
                 continue
             var g = Int(at.unsafe_offset(i).unsafe_load())
             var delta = (
@@ -2118,7 +2231,7 @@ def _fill_slab_serial[
     var into = slab.unsafe_ptr()
     var at = codes.unsafe_ptr()
     for i in range(len(codes)):
-        if has_null and not validity.get(i):
+        if not _there(source, validity, has_null, i):
             continue
         var g = Int(at.unsafe_offset(i).unsafe_load())
         into.unsafe_offset(cursor[g]).unsafe_store(
@@ -2217,7 +2330,7 @@ def _fill_slab[
         for p in range(parts):
             cursor.append(starts[p * workers + w])
         for i in range(blocks[w], blocks[w + 1]):
-            if has_null and not validity.get(i):
+            if not _there(source, validity, has_null, i):
                 continue
             var g = at.unsafe_offset(i).unsafe_load()
             var p = Int(g) >> shift
@@ -2261,7 +2374,7 @@ def _quantile_core[
     q: Float64,
 ) raises -> Array[DType.float64]:
     """Sorts each group's values and reads the position `q` falls at."""
-    var counts = _count_core(validity, has_null, codes, groups)
+    var counts = _count_core(source, validity, has_null, codes, groups)
     var bounds = _slab_bounds(counts, groups)
     # Every element of the slab is a present row and the fill writes all of them,
     # so zeroing it first is a pass over the column for nothing.
@@ -2340,7 +2453,7 @@ def _nunique_core[
     counts distinct values on a high cardinality column is the case where the
     set would be biggest and it is also the case where it would collide most.
     """
-    var counts = _count_core(validity, has_null, codes, groups)
+    var counts = _count_core(source, validity, has_null, codes, groups)
     var bounds = _slab_bounds(counts, groups)
     # Every element of the slab is a present row and the fill writes all of them,
     # so zeroing it first is a pass over the column for nothing.
@@ -2511,9 +2624,9 @@ def _pair_core[
         var mx = sum_x.unsafe_ptr().unsafe_offset(w * groups)
         var my = sum_y.unsafe_ptr().unsafe_offset(w * groups)
         for i in range(bounds[w], bounds[w + 1]):
-            if left_has_null and not left_valid.get(i):
+            if not _there(left, left_valid, left_has_null, i):
                 continue
-            if right_has_null and not right_valid.get(i):
+            if not _there(right, right_valid, right_has_null, i):
                 continue
             var g = Int(at.unsafe_offset(i).unsafe_load())
             n_at.unsafe_offset(g).unsafe_store(
@@ -2563,9 +2676,9 @@ def _pair_core[
             w * groups if want_corr else 0
         )
         for i in range(bounds[w], bounds[w + 1]):
-            if left_has_null and not left_valid.get(i):
+            if not _there(left, left_valid, left_has_null, i):
                 continue
-            if right_has_null and not right_valid.get(i):
+            if not _there(right, right_valid, right_has_null, i):
                 continue
             var g = Int(at.unsafe_offset(i).unsafe_load())
             var a = (
@@ -2763,7 +2876,7 @@ def _dispatch_core[
     if kind == AggKind.SIZE:
         return AnyArray(group_size(codes, groups))
     if kind == AggKind.COUNT:
-        return AnyArray(_count_core(validity, has_null, codes, groups))
+        return AnyArray(_count_core(source, validity, has_null, codes, groups))
     if kind == AggKind.SUM:
         return AnyArray(_sum_core(source, codes, groups))
     if kind == AggKind.MEAN:
@@ -2948,7 +3061,7 @@ def aggregate_group_strings(
         return AnyArray(group_size(codes, groups))
     if kind == AggKind.COUNT:
         return AnyArray(
-            _count_core(col.validity, col.null_count() > 0, codes, groups)
+            _count_bits(col.validity, col.null_count() > 0, codes, groups)
         )
     if kind == AggKind.NUNIQUE:
         var ordinals = factorize_strings(StringArray(copy=col)).into_codes()

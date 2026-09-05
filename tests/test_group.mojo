@@ -27,7 +27,7 @@ and that an output name collision is refused rather than silently taking the las
 one.
 """
 
-from std.math import isnan, sqrt
+from std.math import isnan, nan, sqrt
 from std.testing import (
     TestSuite,
     assert_almost_equal,
@@ -2045,6 +2045,238 @@ def test_a_slab_too_wide_to_fill_on_one_core_agrees_with_a_hand_answer() raises:
             what = "median"
         elif distinct[g] != Int64(PER_GROUP - 1):
             what = "distinct count"
+        if what:
+            wrong = g
+            break
+
+    assert_equal(wrong, -1, String(what, " is wrong at group ", wrong))
+
+
+def nanned(values: List[Scalar[DType.float64]]) -> Array[DType.float64]:
+    """Builds a float64 column, writing a NaN wherever the list holds one."""
+    return from_list(values)
+
+
+def test_a_grouped_count_does_not_count_a_nan() raises:
+    # The first of the grouped half of #170. Group 0 holds a value, a NaN and a
+    # value, group 1 holds a value and a null, and pandas counts two and one. The
+    # NaN used to count, so group 0 came back as three and every mean built on
+    # that count was divided by the wrong number.
+    var col = nanned([1.0, 5.0, nan[DType.float64](), 0.0, 3.0])
+    col.set_null(3)
+    var codes = codes_of([0, 1, 0, 1, 0])
+
+    var counted = group_count(col, codes, 2)
+    assert_equal(counted[0], 2)
+    assert_equal(counted[1], 1)
+    # `size` is the one reduction that counts rows rather than values, so it is
+    # still three and the difference between the two numbers is the NaN.
+    assert_equal(group_size(codes, 2)[0], 3)
+
+
+def test_a_grouped_sum_steps_over_a_nan() raises:
+    # A sum reads no bitmap at all, so this is the one reduction the presence
+    # bitmap does not fix and `_addend` does. One NaN anywhere in a group used to
+    # make the whole group's sum NaN, which is the loudest possible version of
+    # this bug and the one a user hits first.
+    var col = nanned([1.0, 5.0, nan[DType.float64](), 0.0, 3.0])
+    col.set_null(3)
+    var codes = codes_of([0, 1, 0, 1, 0])
+
+    var total = group_sum(col, codes, 2)
+    assert_almost_equal(Float64(total[0]), 4.0, atol=1e-12)
+    assert_almost_equal(Float64(total[1]), 5.0, atol=1e-12)
+
+
+def test_a_grouped_mean_divides_by_what_is_left_after_the_nans() raises:
+    # The numerator loses the NaN inside `_addend` and the divisor loses it
+    # because the count was taken from the presence bitmap. Both halves have to
+    # move together: a numerator that skips and a divisor that does not gives
+    # two thirds of the right answer, which is a wrong number rather than an
+    # obviously broken one.
+    var col = nanned([1.0, 5.0, nan[DType.float64](), 0.0, 3.0])
+    col.set_null(3)
+    var codes = codes_of([0, 1, 0, 1, 0])
+
+    var averaged = group_mean(col, codes, 2)
+    assert_almost_equal(averaged[0], 2.0, atol=1e-12)
+    assert_almost_equal(averaged[1], 5.0, atol=1e-12)
+
+
+def test_a_group_of_nothing_but_nan_has_no_minimum() raises:
+    # This is the shape that was silently wrong rather than loudly wrong.
+    # `_extreme_core` starts every slot at the identity and marks a group seen
+    # the moment it reads a row whose validity bit is set, so a group of nothing
+    # but NaN used to come back as positive infinity for the minimum and negative
+    # infinity for the maximum. Neither is a number in the data.
+    var col = nanned(
+        [nan[DType.float64](), 4.0, nan[DType.float64](), nan[DType.float64]()]
+    )
+    var codes = codes_of([0, 1, 0, 0])
+
+    var low = group_min(col.copy(), codes, 2)
+    var high = group_max(col^, codes, 2)
+    assert_missing(low, 0, "a group of nothing but NaN has no minimum")
+    assert_missing(high, 0, "a group of nothing but NaN has no maximum")
+    assert_almost_equal(low[1], 4.0, atol=1e-12)
+    assert_almost_equal(high[1], 4.0, atol=1e-12)
+
+
+def test_a_grouped_extreme_steps_over_a_nan_without_losing_the_group() raises:
+    # The other half of the pair above. A group holding a NaN and a real value
+    # has to report the real one, so the skip cannot be implemented by giving up
+    # on the group the moment it sees a NaN.
+    var col = nanned([9.0, nan[DType.float64](), 2.0, nan[DType.float64]()])
+    var codes = codes_of([0, 0, 0, 1])
+
+    var low = group_min(col.copy(), codes, 2)
+    var high = group_max(col^, codes, 2)
+    assert_almost_equal(low[0], 2.0, atol=1e-12)
+    assert_almost_equal(high[0], 9.0, atol=1e-12)
+    assert_missing(low, 1, "a group holding one NaN has no minimum")
+
+
+def test_a_grouped_first_and_last_step_over_a_nan() raises:
+    # `first` is not `nth(0)`, and after #170 that is true of a NaN as well as of
+    # a null. Group 0 opens with a NaN and closes with one, so both ends have to
+    # walk inwards past it.
+    var col = nanned(
+        [nan[DType.float64](), 7.0, 8.0, nan[DType.float64](), 5.0]
+    )
+    var codes = codes_of([0, 0, 0, 0, 1])
+
+    var early = group_first(col.copy(), codes, 2)
+    var late = group_last(col^, codes, 2)
+    assert_almost_equal(early[0], 7.0, atol=1e-12)
+    assert_almost_equal(late[0], 8.0, atol=1e-12)
+    assert_almost_equal(early[1], 5.0, atol=1e-12)
+
+
+def test_a_grouped_median_steps_over_a_nan() raises:
+    # An order statistic has to drop the NaN before it sorts rather than after,
+    # because a NaN compares false against everything and where a sort leaves one
+    # is not something to build an answer on. The presence bitmap does this by
+    # never gathering the row into the slab in the first place.
+    var col = nanned(
+        [1.0, 2.0, nan[DType.float64](), 3.0, 100.0, nan[DType.float64]()]
+    )
+    var codes = codes_of([0, 0, 0, 0, 1, 1])
+
+    var middles = group_median(col.copy(), codes, 2)
+    assert_almost_equal(middles[0], 2.0, atol=1e-12)
+    assert_almost_equal(middles[1], 100.0, atol=1e-12)
+
+    var high = group_quantile(col^, codes, 2, 1.0)
+    assert_almost_equal(high[0], 3.0, atol=1e-12)
+
+
+def test_a_grouped_nunique_does_not_count_a_nan() raises:
+    # pandas leaves the missing values out of `nunique` unless it is asked not
+    # to, and two NaNs are not two distinct values on the way out either.
+    var col = nanned(
+        [1.0, 1.0, nan[DType.float64](), 2.0, nan[DType.float64]()]
+    )
+    var codes = codes_of([0, 0, 0, 0, 1])
+
+    var distinct = group_nunique(col, codes, 2)
+    assert_equal(distinct[0], 2)
+    assert_equal(distinct[1], 0)
+
+
+def test_a_grouped_variance_steps_over_a_nan() raises:
+    # `_var_core` centres on a mean it asks `_mean_core` for and then walks the
+    # rows again, so both passes have to leave the same rows out. A group of one
+    # real value and one NaN has no spread rather than a NaN one, since after the
+    # skip it has a single value and the default `ddof` of one leaves no divisor.
+    var col = nanned(
+        [2.0, 4.0, 6.0, nan[DType.float64](), 5.0, nan[DType.float64]()]
+    )
+    var codes = codes_of([0, 0, 0, 0, 1, 1])
+
+    var spread = group_var(col.copy(), codes, 2, 1)
+    assert_almost_equal(spread[0], 4.0, atol=1e-12)
+    assert_missing(spread, 1, "one value after the skip has no variance")
+
+    var deviation = group_std(col^, codes, 2, 1)
+    assert_almost_equal(deviation[0], 2.0, atol=1e-12)
+
+
+def test_a_grouped_covariance_drops_the_row_where_either_side_is_a_nan() raises:
+    # A covariance is a statement about rows in which both values were observed,
+    # so a NaN on one side takes the row out of both means. Group 0 is a perfect
+    # line once the poisoned row is gone, and it is not a line at all if the row
+    # stays and its NaN spreads through the sums.
+    var x = nanned([1.0, 2.0, 3.0, nan[DType.float64]()])
+    var y = nanned([2.0, 4.0, 6.0, 100.0])
+    var codes = codes_of([0, 0, 0, 0])
+
+    var together = group_corr(x.copy(), y.copy(), codes, 1)
+    assert_almost_equal(together[0], 1.0, atol=1e-12)
+
+    var spread = group_cov(x^, y^, codes, 1, 1)
+    assert_almost_equal(spread[0], 2.0, atol=1e-12)
+
+
+def test_an_int_group_never_reads_a_nan_bit_pattern() raises:
+    # The NaN test in `_there` and `_addend` is compiled away on an int dtype,
+    # which is both the reason this costs nothing there and the reason the bit
+    # pattern of a float NaN read as an int64 stays an ordinary number. It is
+    # 0x7ff8000000000000, which is what `nan[DType.float64]()` is made of.
+    var col = ints([9221120237041090560, 1, 9221120237041090560])
+    var codes = codes_of([0, 0, 1])
+
+    var counted = group_count(col.copy(), codes, 2)
+    assert_equal(counted[0], 2)
+    assert_equal(counted[1], 1)
+    assert_equal(group_sum(col.copy(), codes, 2)[0], 9221120237041090561)
+    assert_equal(group_min(col^, codes, 2)[1], 9221120237041090560)
+
+
+def test_a_partitioned_grouped_sum_steps_over_a_nan() raises:
+    # The same shape as the int64 test above, which is the only one in this file
+    # that reaches `_partitioned_sums`, because that loop copies the values into
+    # partition order in one pass and folds them in another. `_addend` runs in
+    # the copy rather than in the fold, so a NaN that slipped through would not
+    # show up until several hundred thousand rows in.
+    comptime ROWS = 300_000
+    comptime GROUPS = 2_100_000
+
+    assert_true(
+        _partition_parts[DType.float64](ROWS, GROUPS) > 0,
+        "this shape no longer reaches the partitioned route",
+    )
+
+    var values = Array[DType.float64](ROWS)
+    var codes = Array[DType.uint32](ROWS)
+    for i in range(ROWS):
+        values[i] = Float64(i % 1000) - 500.0
+        codes[i] = UInt32((i * 977) % GROUPS)
+    for i in range(0, ROWS, 5):
+        values[i] = nan[DType.float64]()
+    for i in range(0, ROWS, 7):
+        values.set_null(i)
+
+    var want_sum = List[Float64](length=GROUPS, fill=0.0)
+    var want_count = List[Int64](length=GROUPS, fill=0)
+    for i in range(ROWS):
+        var g = Int(codes[i])
+        if not values.data.validity.get(i) or isnan(values[i]):
+            continue
+        want_count[g] += 1
+        want_sum[g] += values[i]
+
+    var total = group_sum(values.copy(), codes, GROUPS)
+    var counted = group_count(values^, codes, GROUPS)
+
+    # One scan that stops at the first disagreement, for the reason the int64
+    # test above gives: two million assertions build two million messages.
+    var wrong = -1
+    var what = String()
+    for g in range(GROUPS):
+        if abs(Float64(total[g]) - want_sum[g]) > 1e-9:
+            what = "sum"
+        elif counted[g] != want_count[g]:
+            what = "count"
         if what:
             wrong = g
             break
