@@ -24,6 +24,12 @@ class DataFrame:
     def tail(self, n: int) -> DataFrame:
         """The last n rows."""
         ...
+    def arrow_c_schema(self) -> object:
+        """The frame's Arrow schema, in a capsule."""
+        ...
+    def arrow_c_array(self, requested_schema: object | None) -> list[object]:
+        """The frame's Arrow schema and data, in two capsules."""
+        ...
 
 def read_csv(path: str) -> DataFrame:
     """Reads a CSV file into a frame."""

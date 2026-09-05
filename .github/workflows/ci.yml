@@ -209,9 +209,14 @@ jobs:
       # it. That test is the only mechanical measurement of the compatibility
       # goal in the repository, and without pandas installed it skips silently,
       # which is the same as not having written it.
+      # pyarrow and polars are here for the same reason. The Arrow protocol tests
+      # are a claim about other people's code and they are worth nothing if the
+      # other people's code is not installed to disagree.
       - name: Extension tests
         if: needs.guard.outputs.has_python == 'true'
-        run: uv run --no-project --with pytest --with pandas python -m pytest python/tests -q
+        run: >
+          uv run --no-project --with pytest --with pandas --with pyarrow
+          --with polars python -m pytest python/tests -q
 
       # Every fuzzer at once. The bound is per fuzzer, as it was when they ran
       # in sequence, so this shortens the step without shortening the fuzz.

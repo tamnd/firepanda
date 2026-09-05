@@ -48,3 +48,10 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = dataframe.def_method[PyDataFrame.tail](
         "tail", docstring="The last n rows."
     )
+    _ = dataframe.def_method[PyDataFrame.arrow_c_schema](
+        "arrow_c_schema", docstring="The frame's Arrow schema, in a capsule."
+    )
+    _ = dataframe.def_method[PyDataFrame.arrow_c_array](
+        "arrow_c_array",
+        docstring="The frame's Arrow schema and data, in two capsules.",
+    )

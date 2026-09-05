@@ -21,6 +21,7 @@ says what was already decided and why.
 | [12-the-python-front-door-measured.md](12-the-python-front-door-measured.md) | Document 07 checked against a running toolchain, with what works, what does not, and what it cost |
 | [13-the-bound-type-is-not-a-dataframe.md](13-the-bound-type-is-not-a-dataframe.md) | What `PythonTypeBuilder` cannot do, and why the pandas surface has to be a Python object |
 | [14-errors-across-the-boundary.md](14-errors-across-the-boundary.md) | How one Mojo `Error` becomes the seven Python exception classes document 07 promised |
+| [15-the-arrow-capsule-boundary.md](15-the-arrow-capsule-boundary.md) | How a frame reaches pyarrow and Polars with no copy, and who owns the memory afterwards |
 | [engine/](engine/00-README.md) | How DuckDB and Polars execute a query, and what firepanda is going to do about it |
 
 ## How to read this

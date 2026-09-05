@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### pyarrow and Polars read a firepanda frame with no copy
+
+`pyarrow.record_batch(df)` and `polars.DataFrame(df)` now work, on a frame that Python is still holding, without copying a byte of it. There is no firepanda specific code on their side and none on ours: the frame answers `__arrow_c_schema__` and `__arrow_c_array__`, which is the interface pandas, Polars, DuckDB and pyarrow have all agreed on, and every library that speaks it gets the same answer.
+
+A frame crosses as one array of struct type with a child per column, which is what Arrow's C Data Interface has instead of a table. The interesting part turned out not to be the layout but the ownership. A column export could consume its column, because nothing else wanted it, and a frame that a Python object is still holding cannot be consumed and must not be copied, since copying it is the entire cost the protocol exists to avoid. So `PyDataFrame` holds the frame as a share rather than a value, an export takes a copy of the share, and the memory stays alive until the frame and every consumer reading it have let go. `del df` while pyarrow is still reading is now a correct program, and there is a test that does exactly that.
+
+Every child of the export holds its own share too, because a consumer is allowed to take one column out of a struct array and drop the parent.
+
+Two things are refused rather than half done. A `requested_schema` other than `None` raises `NotImplementedError`, because converting on the way out is not written and handing back a schema nobody asked for is worse than saying no. A column stored in more than one chunk has no single Arrow array to be, so it names itself and points at the stream protocol, which is not built yet.
+
+DuckDB is not in the list above and it is not an oversight. Its replacement scan and its `from_arrow` both want `__arrow_c_stream__` and neither accepts an object that offers only the array protocol, so that row of M3's exit criteria is blocked on the stream rather than on any of this. `docs/specs/15-the-arrow-capsule-boundary.md` is the whole design, including how the zero copy is asserted from Python when Python cannot see a firepanda buffer's address.
+
 ### `except KeyError` works again
 
 Document 07 has had a table since the beginning saying which Python exception each kind of firepanda error becomes, and document 12 then measured that a bound Mojo function can raise exactly one Python class and it is `Exception`. So the table was a promise with no mechanism under it, and a `try: ... except KeyError:` around a column lookup, which is code that predates this project by fifteen years, would not have fired.
