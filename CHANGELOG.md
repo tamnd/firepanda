@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### The merge that folds the workers' tables stops waking thirty two threads for three thousand entries
+
+A parallel factorize gives every worker its own hash table, and a slice drawn from anywhere in a column sees the keys the whole column has, so each of those tables ends up holding roughly the column's whole cardinality. Folding them into one numbering afterwards is the merge, and it runs on every core because on a column of a million distinct keys it has a million entries to dedupe.
+
+On a column of a hundred distinct keys it has thirty two hundred, and it was still running on every core. Instrumented on an i9-13900K at ten million rows of short text, the three phases of the string factorize came out at 6.2 milliseconds to build the tables, 3.0 to merge them and 0.9 to renumber the rows. Three milliseconds to dedupe thirty two hundred entries is not work, it is four rounds of handing tasks out and waiting for them back: two to bucket the entries by hash, one to lay the representative rows out end to end, and one for the buckets themselves. A round of thirty two tasks that do almost nothing measured at about three hundred microseconds on that machine, because the workers have gone quiet between phases and have to be woken.
+
+So below `MERGE_SERIAL_ENTRIES`, sixteen thousand entries, the merge inserts them into a single table on the calling thread instead. The bucketing exists to make the merge independent across cores and buys nothing on one, and the answer does not depend on it: a bucket only decides which core sees an entry, and the entry that owns a group is the first one offering its key however the entries were dealt out. The same bound now covers reading the keys out of the workers' tables and flattening their representative rows, which are the other two phases whose size is the group count rather than the row count.
+
+Measured on the same machine at ten million rows, three ABBA blocks. Factorizing one text column of a hundred distinct keys went from 10.4 to 11.0 milliseconds down to 7.7 to 8.3, and grouping on two of them went from 26.8 to 27.5 down to 22.0 to 22.9, with every new run below every old run in both. Six keys went from 150.2 to 151.5 down to 144.6 to 147.4. The two integer key rows came out two to five per cent slower, which is the code layout swing this machine has shown three times before on changes that cannot touch the path being timed: neither of them reaches a merge, because an integer key of a narrow range is factorized by indexing a table with the value. A text column of a hundred thousand distinct keys did not move, which is the control: it is routed down the partitioned build, which has no merge at all, and it was not expected to and did not.
+
+Against db-benchmark at 0.5GB on the same machine, three ABBA blocks of five runs. q2 went from 0.0316 to 0.0325 seconds down to 0.0263 to 0.0272, q4 from 0.0145 to 0.0152 down to 0.0122 to 0.0128, q6 from 0.283 to 0.289 down to 0.273 to 0.276 and q10 from 0.211 to 0.216 down to 0.201 to 0.207, every new run below every old run in all four. q1, q3 and q9 improved with some overlap. q5 and q7 did not move. Peak memory is the same everywhere, to within a megabyte.
+
+Both merges get the serial route, the numeric one and the text one, because they have the same shape and the same floor under them. The numeric route already had tests on both sides of the bound; the text route gets one, which factorizes the same column at a hundred and at three thousand distinct keys with eight workers, putting the entry count either side of sixteen thousand, and compares both against one thread.
+
 ### A frame you can hold from Python, generated from one table
 
 `firepanda.read_csv(path)` returns a `DataFrame`. You can take its length, ask it for its columns and its shape, print it, and slice it with `head` and `tail`. That is the whole surface and it is small on purpose, because the interesting part of this change is where each piece lives rather than how much of it there is.

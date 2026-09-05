@@ -934,6 +934,28 @@ keeps it in L1 while it is being built. Eight measured no better than four on
 any of the shapes here and pays the per bucket setup twice as often.
 """
 
+comptime MERGE_SERIAL_ENTRIES = 1 << 14
+"""Group entries below which the merge folds the workers' tables on one thread.
+
+The parallel merge is four rounds of task handout before any of its own work
+starts: two to bucket the entries by hash, one to lay the representative rows
+out end to end, and one for the buckets themselves. Measured on the reference
+machine, one round of thirty two tasks that do almost nothing takes about three
+hundred microseconds, because the workers have gone quiet between phases and
+have to be woken. So those four rounds are more than a millisecond of floor
+under a routine whose actual work is one hash insert per entry.
+
+A hundred groups found by thirty two workers is thirty two hundred entries, and
+one thread dedupes those in well under a tenth of that floor. Sixteen thousand
+is where the two get close: still under a millisecond serially, and the parallel
+route cannot beat that however many cores it has, because the floor does not
+move with the entry count.
+
+Nothing about the answer changes. A bucket only decides which core sees an
+entry, and the entry that owns a group is the first one offering its key however
+the entries were dealt out.
+"""
+
 comptime MERGE_BLOCK = 1 << 16
 """Entries per block in the pass that numbers the merged groups.
 
@@ -1021,6 +1043,11 @@ def _flatten_reps(
     worker, and a list of lists costs two loads and a bounds check to do that.
     Flattening them first is one pass over a number of rows the column dwarfs.
 
+    Below `MERGE_SERIAL_ENTRIES` it runs on the calling thread, for the reason
+    written there. A few thousand int64 writes is not worth a round of task
+    handout, and the two callers that reach this with that few entries have
+    already decided the same thing about the phase behind it.
+
     Args:
         founds: Each worker's representative row per local ordinal.
         starts: Where each worker's entries begin, with a final total.
@@ -1030,6 +1057,14 @@ def _flatten_reps(
         One int64 row index per entry.
     """
     var reps = Buffer(overwritten=starts[workers] * 8)
+
+    if starts[workers] <= MERGE_SERIAL_ENTRIES:
+        var out = reps.bitcast[DType.int64]()
+        for w in range(workers):
+            var at = starts[w]
+            for k in range(len(founds[w])):
+                out.unsafe_offset(at + k).unsafe_write(Int64(founds[w][k]))
+        return reps^
 
     def one(w: Int) raises {mut reps, imm}:
         var out = reps.bitcast[DType.int64]()
@@ -1325,6 +1360,51 @@ def _rank_by_first_row(
     return _Merged(map^, firsts^)
 
 
+def _merge_hashed_serial(
+    found: Buffer,
+    starts: List[Int],
+    founds: List[List[Int]],
+    workers: Int,
+    offset: Int,
+    seed: UInt64,
+) raises -> _Merged:
+    """`_merge_hashed` on one thread, for an entry count that does not need more.
+
+    The bucketing exists to make the merge independent across cores, and on one
+    core it is two passes and a count table that buy nothing. So this inserts
+    the entries into a single table in entry order instead, which is the order
+    the buckets would have preserved anyway.
+
+    Args:
+        found: One hash per entry.
+        starts: Where each worker's entries begin, with a final total.
+        founds: Each worker's representative row per local ordinal.
+        workers: How many workers built tables.
+        offset: Added to every final ordinal.
+        seed: The per-query hash seed.
+
+    Returns:
+        The renumbering and the representative row of each merged group.
+    """
+    var total = starts[workers]
+    var reps = _flatten_reps(founds, starts, workers)
+    var owners = Buffer(overwritten=total * 4)
+    var marks = Buffer(total)
+    var hashed = found.bitcast[DType.uint64]()
+    var own = owners.bitcast[DType.uint32]()
+    var mark = marks.unsafe_ptr()
+    var table = HashTable(total, seed)
+    var winners = List[Int]()
+    for e in range(total):
+        var ordinal = table.insert(hashed.unsafe_offset(e).unsafe_load())
+        if ordinal == len(winners):
+            winners.append(e)
+            mark.unsafe_offset(e).unsafe_store(UInt8(1))
+        own.unsafe_offset(e).unsafe_write(UInt32(winners[ordinal]))
+
+    return _rank_entries(marks, owners, reps, total, offset)
+
+
 def _merge_hashed(
     found: Buffer,
     starts: List[Int],
@@ -1354,6 +1434,10 @@ def _merge_hashed(
         The renumbering and the representative row of each merged group.
     """
     var total = starts[workers]
+    if total <= MERGE_SERIAL_ENTRIES:
+        return _merge_hashed_serial(
+            found, starts, founds, workers, offset, seed
+        )
     var bits = _merge_bits(workers)
     var buckets = 1 << bits
     var split = _bucket_entries(found, starts, workers, bits)
@@ -1379,6 +1463,58 @@ def _merge_hashed(
             own.unsafe_offset(e).unsafe_write(UInt32(winners[ordinal]))
 
     parallel_for(one, buckets)
+    return _rank_entries(marks, owners, reps, total, offset)
+
+
+def _merge_strings_serial(
+    found: Buffer,
+    starts: List[Int],
+    founds: List[List[Int]],
+    workers: Int,
+    offset: Int,
+    seed: UInt64,
+    col: StringArray,
+) raises -> _Merged:
+    """`_merge_strings` on one thread, for an entry count that does not need more.
+
+    `_merge_hashed_serial` with the key comparison put back, which is the same
+    difference the two parallel routes have.
+
+    Args:
+        found: One hash per entry.
+        starts: Where each worker's entries begin, with a final total.
+        founds: Each worker's representative row per local ordinal.
+        workers: How many workers built tables.
+        offset: Added to every final ordinal.
+        seed: The per-query hash seed.
+        col: The column, for the comparison.
+
+    Returns:
+        The renumbering and the representative row of each merged group.
+    """
+    var total = starts[workers]
+    var reps = _flatten_reps(founds, starts, workers)
+    var owners = Buffer(overwritten=total * 4)
+    var marks = Buffer(total)
+    var hashed = found.bitcast[DType.uint64]()
+    var rep = reps.bitcast[DType.int64]()
+    var own = owners.bitcast[DType.uint32]()
+    var mark = marks.unsafe_ptr()
+    var table = HashTable(total, seed)
+    var local = List[Int]()
+    var winners = List[Int]()
+    for e in range(total):
+        var ordinal = table.insert_string(
+            hashed.unsafe_offset(e).unsafe_load(),
+            Int(rep.unsafe_offset(e).unsafe_load()),
+            col,
+            local,
+        )
+        if ordinal == len(winners):
+            winners.append(e)
+            mark.unsafe_offset(e).unsafe_store(UInt8(1))
+        own.unsafe_offset(e).unsafe_write(UInt32(winners[ordinal]))
+
     return _rank_entries(marks, owners, reps, total, offset)
 
 
@@ -1411,6 +1547,10 @@ def _merge_strings(
         The renumbering and the representative row of each merged group.
     """
     var total = starts[workers]
+    if total <= MERGE_SERIAL_ENTRIES:
+        return _merge_strings_serial(
+            found, starts, founds, workers, offset, seed, col
+        )
     var bits = _merge_bits(workers)
     var buckets = 1 << bits
     var split = _bucket_entries(found, starts, workers, bits)
@@ -1804,7 +1944,14 @@ def _factorize_hashed_parallel[
     def dump(w: Int) raises {mut found, imm}:
         tables[w].keys_by_ordinal(found, starts[w])
 
-    parallel_for(dump, workers)
+    if total <= MERGE_SERIAL_ENTRIES:
+        # Reading a few thousand keys out of the tables is not worth waking
+        # thirty two workers for, and the merge behind it has already decided
+        # that about a phase with more work in it than this one.
+        for w in range(workers):
+            tables[w].keys_by_ordinal(found, starts[w])
+    else:
+        parallel_for(dump, workers)
 
     var null_group = -1
     if has_null:
@@ -2313,7 +2460,14 @@ def _factorize_strings_parallel(
     def dump(w: Int) raises {mut found, imm}:
         tables[w].keys_by_ordinal(found, starts[w])
 
-    parallel_for(dump, workers)
+    if total <= MERGE_SERIAL_ENTRIES:
+        # Reading a few thousand keys out of the tables is not worth waking
+        # thirty two workers for, and the merge behind it has already decided
+        # that about a phase with more work in it than this one.
+        for w in range(workers):
+            tables[w].keys_by_ordinal(found, starts[w])
+    else:
+        parallel_for(dump, workers)
 
     var map = Buffer(0)
     var firsts = List[Int]()
