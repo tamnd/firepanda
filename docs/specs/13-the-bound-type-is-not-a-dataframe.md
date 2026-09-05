@@ -76,7 +76,36 @@ So delegation costs between 44 and 85 nanoseconds per call. For anything that to
 
 The number that deserves more attention is the 90.4 nanoseconds for the bound call itself, before any wrapper. That is expensive for a call that does nothing but read an integer out of a struct, and it is the real floor on how fine grained this API can afford to be. It says the boundary should be crossed once per operation on a column, never once per element, which is the same rule the Arrow crossing in document 12 section 3 is built on. Any part of the design that is tempted to cross per row should be read again.
 
-## 7. What this changes about the plan
+## 7. The binding table cannot be a table
+
+Document 07 section 3 asks for one declarative table that the registration is generated from, and both document 12 and this document have agreed with it. It is worth knowing what shape that table is allowed to be before writing one, because the obvious shape does not compile.
+
+`def_method` is declared `def def_method[method_type: TrivialRegisterPassable, //, method: PyObjectFunction[method_type, method.self_type, method.has_kwargs]](mut self, method_name: StringSpan[ImmStaticOrigin], docstring: StringSpan[ImmStaticOrigin] = StringSpan(""))`. The `//` marks `method_type` as inferred only, so it cannot be passed and has to be recovered from the argument at the call site. That is the whole difficulty. A bare function converts implicitly to `PyObjectFunction`, and choosing which of its 138 constructors applies needs the concrete function type, which the compiler prints as `def height(py_self: PythonObject) raises thin -> PythonObject`. Pass that function through anything generic and the type is gone.
+
+A plain comptime alias survives, so `comptime H = Frame.height` followed by `b.def_method[H]("height")` works and the method appears on the type. A struct holding the function as a parameter does not: `struct Entry[t: TrivialRegisterPassable, //, f: t]` accepts `Entry[Frame.width]("width")` without complaint, and then `b.def_method[e.f](e.name)` fails with `failed to infer parameter 'method_type'`. A helper parameterized the same way directly, with no struct in the middle, fails identically, which is what says the problem is the implicit conversion rather than the indirection.
+
+The way through is to do the conversion where the function is named and forward the result, spelling out all three parameters at every layer.
+
+```mojo
+def bind[
+    mt: TrivialRegisterPassable, st: Deinitable, hk: Bool, //,
+    m: PyObjectFunction[mt, st, hk],
+](mut b: PythonTypeBuilder, name: StaticString):
+    _ = b.def_method[m](name)
+
+comptime w = PyObjectFunction(Frame.width)
+bind[w](t, "width")
+```
+
+That compiles, imports, and the method is callable, so a binding can be handed around after all. What cannot be done is collecting them. Every `PyObjectFunction` has a different type, so any list of them is heterogeneous, and a variadic parameter pack over them is rejected before the body is ever looked at, with `element type parameter must be an 'inferred' parameter` and then `inferred parameter cannot depend on non-inferred parameter` once per parameter.
+
+So the registration is a sequence of calls, one per binding, and in this toolchain it cannot be anything else. The table cannot be a Mojo value that Mojo walks, which means the single source of truth has to sit outside Mojo and emit that sequence. The four outputs in section 8 are generated files, and CI regenerates them and diffs to prove they are current.
+
+This is a smaller loss than it looks. The property document 07 wanted was that an upstream change to the binding API is one file rather than four hundred call sites, and that property survives intact. The one file is the generator rather than the table, and the four hundred call sites exist without anybody writing or reading them.
+
+Two incidental notes from the same probes. `fn` is gone from type expressions as well as from declarations, so `fn (PythonObject) raises -> PythonObject` written as a type is a syntax error, and `thin` is part of the printed type and a hand written annotation without it will not match. And `alias` is now deprecated in favour of `comptime`, which has nothing to do with any of this but will appear as a warning in anything new.
+
+## 8. What this changes about the plan
 
 P2 as written produces three artifacts from the binding table: the Mojo registration, the `.pyi` stubs and a surface parity test. It now has to produce four. The Python wrapper class is generated from the same table, or at minimum its delegation is, because a table that generates the stubs but leaves the wrappers hand written puts the two most easily divergent files in the project on either side of a boundary with nothing checking them against each other.
 
@@ -95,5 +124,7 @@ The type probe. Build a module with `mojo build --emit shared-lib probe.mojo -o 
 The subclass probe is three lines in the same interpreter: `class Sub(Frame): pass`, then `f.extra = 1`, then `dir(Frame)`.
 
 The arity probe generates a method with n `PythonObject` arguments for n in a range, builds each one, and counts `error:` lines in the output. Eight succeeds and nine fails for `def_function`, and for `def_method` the same bisection puts the last success at seven arguments after `py_self`.
+
+The table probe from section 7 is four builds of the same module, each one adding a layer of indirection between the function and `def_method`: a bare `comptime` alias, a struct parameterized on the function, a helper parameterized the same way, and a `PyObjectFunction` built at the naming site and forwarded. The first and last build and the middle two do not. The pack question is one more build, adding `def register[*entries: Named]` over two entries of differing types, which fails in the parameter list rather than in the body.
 
 The timing numbers come from `timeit` at two hundred thousand iterations against a wrapper class with `__slots__ = ('_inner',)`, comparing a direct bound method call against the same call reached through `__len__` and through `__getitem__`.
