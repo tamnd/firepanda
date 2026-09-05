@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A join is an operator in the pipeline now
+
+`Join` holds the right frame whole, builds its key table and buckets it once in `bind`, and after that reads them and nothing else. So one node can be handed to every core at once, the same way a filter is, and a join no longer has to be a break in the pipeline.
+
+What that buys is not a faster probe. Pairing a million rows against a thousand is about half a millisecond and the whole join is about three, so five sixths of a join is the gathers that build its output, and those gathers cost the same here. What changes is what happens to their output. A join done as a whole frame operation writes every column of every paired row to memory and whatever runs next reads it all back, which on a five column join of a million rows is a hundred and sixty megabytes each way for an answer that might be three numbers. Done a chunk at a time in front of a `Reduce`, the chunk that came out of the probe is folded away while it is still in cache and the intermediate is never written at all.
+
+The node does inner, left, semi and anti joins on a single fixed width key column. Right and outer are refused, because both have to emit right rows that nothing matched and that is not known until the last chunk has gone past, which makes them breakers wearing this node's clothes. A composite or text key is refused too, because the ordinal space those need is built by concatenating both sides and having both sides is what a stream does not have. Every refusal happens in `bind`, before a row moves, and a planner that meets one uses `Materialize` and the whole frame join, which is what it did before this node existed.
+
+The projection is on the node rather than left to a `Project` afterwards, for the same reason `join_on` has one: a column that is going to be dropped is not a small waste at the end of a join, it is most of the work.
+
+Nineteen tests in `tests/test_pipeline.mojo` and four benchmark rows in the pipeline section.
+
+The numbers on an i9-13900K, three blocks each, say two things and the second one is a problem this change does not fix. The join itself is faster as an operator than as a whole frame call: at a million rows `exec/pipeline_join_only` is 2.34 to 2.39 ms against `exec/join_frame` at 2.87 to 2.94, and at eight million it is 20.2 to 20.8 against 22.6 to 22.7, with every streamed run below every whole frame run in both. But putting a `Reduce` behind it only wins at the smaller size: `exec/pipeline_join_reduce` is 2.92 to 3.00 ms against `exec/pipeline_join_two_steps` at 3.51 to 3.54 at a million rows, and 25.8 to 26.4 against 24.7 at eight million, where the fused form loses.
+
+The reason is the reduction and not the join. A chunk is a hundred and twenty eight thousand rows and that is exactly one morsel, so the fold of each chunk takes the serial route, and the driver runs it on one thread after the parallel prefix has finished. The whole frame aggregation the two step form ends in has eight million rows in front of it and spreads over every core. So the fused form trades a round trip to memory for a serial fold, and at eight million rows the fold costs more than the round trip saves. Folding inside the parallel prefix, a running row per worker combined at the end, is the next change and is what makes the trade a win at every size.
+
 ### The join's code to row table is a value too, and the walk takes a stretch of rows
 
 The other half of the same groundwork. `join_indices` did two things in one function: scan the right side into a table from ordinal to row number, then walk the left side against it emitting pairs. Those are now `bucket_side` and `pair_probe` with a `ProbeTable` between them, and `join_indices` calls them in order.

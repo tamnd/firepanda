@@ -85,7 +85,7 @@ from firepanda.array.any import AnyArray, ColumnRefs, borrow_columns
 from firepanda.array.array import Array
 from firepanda.buffer.buffer import Buffer
 from firepanda.dtype.lists import ALL
-from firepanda.exec import parallel_morsels
+from firepanda.exec.morsel import parallel_morsels
 from firepanda.hash.factorize import CHUNK_ROWS, DIRECT_LIMIT, direct_plan
 from firepanda.hash.function import DEFAULT_SEED, hash_chunk
 from firepanda.hash.grouping import group_ordinals
@@ -439,6 +439,23 @@ struct BuildSide(Movable):
         self.base = base
         self.table = table^
         self.miss = miss
+
+    def __init__(out self):
+        """Constructs a table with nothing in it.
+
+        For a caller that has to hold the field before it has the column to
+        fill it from, which is what a pipeline node planning its schema does. It
+        is a table over no keys rather than an absent one, so a probe of the
+        dtype it claims finds the empty hash table and answers that every row
+        matched nothing, which is what a join against an empty side is.
+        """
+        self.key = DType.bool
+        self.direct = False
+        self.seats = Buffer(0)
+        self.span = 0
+        self.base = UInt64(0)
+        self.table = HashTable(0, DEFAULT_SEED)
+        self.miss = UInt32(0)
 
     def groups(self) -> Int:
         """How many ordinals this side hands out, counting the miss one.
