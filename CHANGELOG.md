@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### The join's code to row table is a value too, and the walk takes a stretch of rows
+
+The other half of the same groundwork. `join_indices` did two things in one function: scan the right side into a table from ordinal to row number, then walk the left side against it emitting pairs. Those are now `bucket_side` and `pair_probe` with a `ProbeTable` between them, and `join_indices` calls them in order.
+
+What the split buys is that the walk takes a stretch of rows rather than a frame. It numbers its output rows from the start of the stretch it was given, so a caller pairing a chunk gets rows numbered within that chunk and shifts them if it wants absolute ones, while the row numbers from the built side stay absolute because that side is one frame whichever chunk is going past. Together with `BuildSide` from the previous change, that is everything a join node needs to hold between chunks.
+
+Three tests in `tests/test_join.mojo` pair a five row side in two pieces against one table and compare against pairing it in one call, over the inner, left, outer, semi and anti kinds, on the bucketed route and on the route taken when the built side's key is unique, and with an empty first piece. An outer join's unmatched rows on the built side are appended once every piece has gone past, which is what the sink would do at the end of a pipeline, and the shared bitmap that remembers them survives the pieces.
+
+No behaviour change and no measurable one. 48 tests in `tests/test_join.mojo`, and the join fuzzer's two million cases still agree with the nested loop twin.
+
 ### The join's built table is a value a pipeline node can hold
 
 `align_keys` builds a table over the smaller side's keys and asks it about every row of the larger one, and the two halves of that were already separate functions with the built table passed between them. What they were not is usable from outside the pass that made them, because the table was parameterized on the key dtype, and a pipeline node lives in a `Variant` that has to name every alternative it holds. One alternative per key dtype is not a list anyone can write.
