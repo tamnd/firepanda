@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.42] - 2026-09-05
+
+Built against Mojo 1.0.0 (ed45d567). The engine's driver stops being the serial part of a parallel library, several reductions get their arithmetic corrected, two more grouped reductions arrive, and one more allocation that was being zeroed before it was filled is not any more.
+
+The change with the numbers behind it is the pipeline driver. The kernels underneath the engine have used every core for a long time, but the driver that pushes chunks along a line of operators ran on the thread that called it, so a filter run through the engine used one core where the same filter over a whole frame used sixteen. It now runs the elementwise operators at the front of the line on every core and keeps the rest of the line in chunk order, which is worth two thirds off a computed column and a filter and a projection over a million rows.
+
+The rest is correctness. A variance or a standard deviation computed the two pass way was correcting against the wrong centre, an empty float reduction answered null where pandas and numpy answer NaN, and a mean over an integer column was computed from a sum that had already wrapped. None of those are edge cases nobody would hit, and all three came out of running the conformance suite rather than out of reading the code.
+
 ### The front of a pipeline runs on every core
 
 Until now a pipeline ran one chunk at a time on the thread that called it, which meant the engine's own driver was the one part of the library that did not use the machine. The kernels underneath it were already parallel, so a filter over a whole frame used all sixteen cores and the same filter run as a pipeline used one.
