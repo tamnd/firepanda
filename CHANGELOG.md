@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.43] - 2026-09-05
+
+Built against Mojo 1.0.0 (ed45d567). A frame gets an index, the streaming join becomes an operator the pipeline can actually run a query through, and three reductions stop reading the same column twice.
+
+The largest change by surface area is the index. A pandas row is identified by a label and not by a position, and every operation that chooses rows carries the labels of the rows it chose. firepanda had none of that, so `df.tail(5)` came back labelled from zero and a sort threw the old labels away. `DataFrame` and `Series` now have one, it is either an arithmetic range costing no memory at all or an array of labels, and `take`, `filter` and `slice` carry it, which covers `head`, `tail`, `sort_values` and `drop_nulls` underneath. `group_by` grows an `as_index` flag on top of it. Measured against the pandas conformance suite, the groupby section goes from 54 passing to 111 and the failure count across the three sections goes from 88 to 31.
+
+The engine work is the join. The built table, the code to row lists and the walk that pairs against them are all values now rather than phases inside one function, so a `Join` is a node a pipeline can hold, hashing its build side once in `bind` and emitting a chunk per chunk. A reduction sitting behind it folds each chunk on the core that produced it rather than on the driver's thread afterwards, which was worth a fifth off a join followed by a reduction at eight million rows. Run against the db-benchmark join queries on a 13900K, the three that join against a small table are now between 1.4 and 1.6 times DuckDB and hold two thirds of its memory. The two that join against a table their own size are not, and the reason is written down in issue #79 rather than glossed over.
+
+The rest is arithmetic that was being done twice. A grouped mean asked for a sum and then asked for a count, and on a float column the count had to walk the whole column again first because a NaN is not a value. It reads the column once now, and the variance, the standard deviation and the skewness take their count from the same call, so a standard deviation is two passes over the column where it used to be four.
+
+On the Python side, the distribution claim that had been measured by hand on one laptop is now a build script and four tests that run on every platform the project ships for. `pixi run build-extension` produces a self contained directory of 2.9 megabytes, and the tests import it from a child interpreter with no Mojo toolchain on the path, asserting that inside the child rather than trusting it. Binding a whole type was tried next and it does not work: the toolchain's type builder has no properties, no subscripting and no length, so `df["revenue"]` cannot be written in Mojo, and the object a user holds is a Python object holding a Mojo one by design rather than by convenience.
+
 ### The pandas surface cannot be written in Mojo, and now we know why
 
 `docs/specs/13-the-bound-type-is-not-a-dataframe.md` is the measurement that document 12 did not make. Document 12 bound four functions, because that was all the distribution question needed. This one binds a type, and binding a type is a different exercise with a much larger consequence.
