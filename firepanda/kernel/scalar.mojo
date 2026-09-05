@@ -15,7 +15,7 @@ Read the twins to find out what a kernel is supposed to do. They are the
 specification in the only form that runs.
 """
 
-from std.math import sqrt
+from std.math import nan, sqrt
 
 from firepanda.array.array import Array
 from firepanda.array.strings import StringArray
@@ -677,8 +677,13 @@ def group_scalar[
             valid.append(True)
         elif kind == AggKind.MEAN:
             if len(present) == 0:
-                values.append(Float64(0))
-                valid.append(False)
+                # A group with nothing in it says so with a NaN in a row that
+                # stays valid, because that is the only missing a pandas float
+                # column has. A mean always answers in float64 so it always
+                # takes that branch. `min`, `max`, `first` and `last` below keep
+                # the column's own dtype, so they ask the dtype. See #170.
+                values.append(nan[DType.float64]())
+                valid.append(True)
             else:
                 var total = Float64(0)
                 for k in range(len(present)):
@@ -687,8 +692,16 @@ def group_scalar[
                 valid.append(True)
         elif kind == AggKind.MIN or kind == AggKind.MAX:
             if len(present) == 0:
-                values.append(Float64(0))
-                valid.append(False)
+                # These two keep the column's own dtype, so the spelling of
+                # missing is the column's decision and not the reduction's. A
+                # float column has a NaN to write and takes it. Anything else
+                # has no NaN and a null is all there is.
+                comptime if dt.is_floating_point():
+                    values.append(nan[DType.float64]())
+                    valid.append(True)
+                else:
+                    values.append(Float64(0))
+                    valid.append(False)
             else:
                 var best = present[0]
                 for k in range(1, len(present)):
@@ -701,8 +714,14 @@ def group_scalar[
                 valid.append(True)
         elif kind == AggKind.FIRST or kind == AggKind.LAST:
             if len(present) == 0:
-                values.append(Float64(0))
-                valid.append(False)
+                # Same rule as the two extremes above and for the same reason,
+                # since these also answer in the column's own dtype.
+                comptime if dt.is_floating_point():
+                    values.append(nan[DType.float64]())
+                    valid.append(True)
+                else:
+                    values.append(Float64(0))
+                    valid.append(False)
             else:
                 var at = 0 if kind == AggKind.FIRST else len(present) - 1
                 values.append(present[at])
@@ -710,8 +729,8 @@ def group_scalar[
         elif kind == AggKind.VAR or kind == AggKind.STD or kind == AggKind.SEM:
             var divisor = len(present) - Int(kind.param)
             if divisor <= 0:
-                values.append(Float64(0))
-                valid.append(False)
+                values.append(nan[DType.float64]())
+                valid.append(True)
             else:
                 var total = Float64(0)
                 for k in range(len(present)):
@@ -733,8 +752,8 @@ def group_scalar[
                 valid.append(True)
         elif kind == AggKind.SKEW:
             if len(present) < 3:
-                values.append(Float64(0))
-                valid.append(False)
+                values.append(nan[DType.float64]())
+                valid.append(True)
             else:
                 var total = Float64(0)
                 for k in range(len(present)):
@@ -759,8 +778,8 @@ def group_scalar[
                 valid.append(True)
         elif kind == AggKind.MEDIAN or kind == AggKind.QUANTILE:
             if len(present) == 0:
-                values.append(Float64(0))
-                valid.append(False)
+                values.append(nan[DType.float64]())
+                valid.append(True)
             else:
                 # An insertion sort, because the point of the twin is that the
                 # reader can see it is a sort rather than take one on trust.

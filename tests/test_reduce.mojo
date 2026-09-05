@@ -21,6 +21,7 @@ the oracle would not catch it if both routes were wrong in the same way. Here
 the row count, which is pandas' answer.
 """
 
+from std.math import isnan
 from std.testing import (
     TestSuite,
     assert_almost_equal,
@@ -253,9 +254,38 @@ def test_a_column_of_all_nulls_follows_the_pandas_policy() raises:
     var sized = reduce_any(AnyArray(col.copy()), AggKind.SIZE)
     assert_equal(sized.as_typed[DType.int64]()[0], 3)
 
-    assert_false(reduce_any(AnyArray(col.copy()), AggKind.MEAN).is_valid(0))
+    # The mean answers in float64 and there says missing with a NaN in a row that
+    # stays valid, which is what a pandas float column does. The two extremes
+    # keep the column's own dtype, int64 here, where a NaN is not a value that
+    # exists and a null is the only spelling available. See #170.
+    var averaged = reduce_any(AnyArray(col.copy()), AggKind.MEAN)
+    assert_true(averaged.is_valid(0), "the mean should not be null")
+    assert_true(
+        isnan(averaged.as_typed[DType.float64]()[0]),
+        "the mean of nothing should be NaN",
+    )
     assert_false(reduce_any(AnyArray(col.copy()), AggKind.MIN).is_valid(0))
     assert_false(reduce_any(AnyArray(col^), AggKind.MAX).is_valid(0))
+
+
+def test_an_all_null_float_column_reduces_to_nan_and_not_to_a_null() raises:
+    # The same column one dtype over. The minimum and the maximum keep the
+    # column's own dtype rather than widening, so which spelling of missing they
+    # use is the column's decision: the int64 above has no NaN to write and this
+    # one does. The conformance suite reported `null, expected nan` on exactly
+    # this, for `basics/min` and `basics/max` on `float64_all_null`.
+    var col = Array[DType.float64](3)
+    col.set_null(0)
+    col.set_null(1)
+    col.set_null(2)
+
+    for kind in [AggKind.MEAN, AggKind.MIN, AggKind.MAX]:
+        var reduced = reduce_any(AnyArray(col.copy()), kind)
+        assert_true(reduced.is_valid(0), String(kind, " should not be null"))
+        assert_true(
+            isnan(reduced.as_typed[DType.float64]()[0]),
+            String(kind, " should be NaN"),
+        )
 
 
 def test_an_empty_column_sums_to_zero_and_has_no_minimum() raises:

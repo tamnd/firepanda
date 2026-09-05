@@ -46,10 +46,27 @@ ceiling holds it to four workers, a sum is 16.4 ms against 10.0 ms.
 
 pandas is not consistent here and it has reasons, so this copies it rather than
 inventing something tidier. A sum over a group with no non-null values is zero
-and not null, because `min_count` defaults to zero. A count is zero. A minimum, a
-maximum, a mean, a first and a last are all null, because there is no value to
-report and zero would be a lie. `size` is the odd one out and counts rows rather
-than values, nulls included, which is the only way to ask how big a group is.
+and not null, because `min_count` defaults to zero. A count is zero. `size` is
+the odd one out and counts rows rather than values, nulls included, which is the
+only way to ask how big a group is.
+
+Everything else reports that it found nothing, and the spelling depends on the
+dtype it answers in rather than on which reduction it is. A float column says it
+with a NaN in a row that stays valid. Any other dtype says it with a null, which
+holds a zero the way every null in the package does.
+
+That is not two rules, it is one rule and a dtype that does not have both
+options. pandas has no separate presence bitmap for a float column and NaN is the
+only missing it has there, so NaN is not a second spelling invented for variety,
+it is what missing looks like. An int64 column has no NaN available to write, so
+a null is the only spelling there is. firepanda used to report a null in both
+cases and the difference was visible at the API boundary, which is #170.
+
+Sorting the reductions by which branch they take: a mean, a variance, a
+deviation, a standard error, a skewness, a median, a quantile, a correlation and
+a covariance always answer in float64 and so always take the NaN. A minimum, a
+maximum, a first and a last keep the column's own dtype, so they take the NaN on
+a float column and the null on every other one.
 
 ## The null-is-zero invariant pays off twice here
 
@@ -69,7 +86,7 @@ covers both.
 """
 
 from std.collections.span import Span
-from std.math import sqrt
+from std.math import nan, sqrt
 from std.sys.info import simd_width_of, size_of
 
 from firepanda.array.any import AnyArray
@@ -1077,8 +1094,9 @@ def group_mean[
         dt: The column's dtype.
 
     Returns:
-        A column of `groups` means. A group with no non-null values is null,
-        because zero would be a value the group does not have.
+        A column of `groups` means. A group with no non-null values is NaN and
+        not null, because zero would be a value the group does not have and a
+        pandas float column spells missing with a NaN.
 
     Raises:
         If one of the workers the parallel route starts cannot be run. A
@@ -1120,7 +1138,9 @@ def _mean_core[
     for g in range(groups):
         var count = n.unsafe_offset(g).unsafe_load()
         if count == 0:
-            out.data.validity.set(g, False)
+            # A group with nothing in it gets NaN and stays valid, because in a
+            # pandas float column NaN is what missing looks like. See #170.
+            target.unsafe_offset(g).unsafe_store(nan[DType.float64]())
             continue
         target.unsafe_offset(g).unsafe_store(
             total.unsafe_offset(g).unsafe_load() / Float64(count)
@@ -1348,11 +1368,21 @@ def _extreme_core[
                 out.data.validity.set(g, True)
 
     # A group that was never seen still holds the identity, which is a real value
-    # of the dtype and would read as a maximum of negative infinity. Zero it, so
-    # that a null holds a zero the way every other null in the package does.
-    for g in range(groups):
-        if not out.data.validity.get(g):
-            best.unsafe_offset(g).unsafe_store(Scalar[dt](0))
+    # of the dtype and would read as a maximum of negative infinity. It has to be
+    # overwritten either way, and what goes in depends on whether the dtype has a
+    # NaN. A float column takes one and stays valid, because that is what pandas
+    # has there and it is the same rule the reductions that answer in float64
+    # follow. Every other dtype takes a zero behind a cleared bit, because there
+    # is no NaN to write and a null is the only spelling available. See #170.
+    comptime if dt.is_floating_point():
+        for g in range(groups):
+            if not out.data.validity.get(g):
+                best.unsafe_offset(g).unsafe_store(nan[dt]())
+                out.data.validity.set(g, True)
+    else:
+        for g in range(groups):
+            if not out.data.validity.get(g):
+                best.unsafe_offset(g).unsafe_store(Scalar[dt](0))
     return out^
 
 
@@ -1450,6 +1480,17 @@ def _edge_core[
         filled += 1
         if filled == groups:
             break
+
+    # A float column says missing with a NaN and stays valid, the same rule the
+    # rest of this file follows. Nothing to do when the walk filled every group,
+    # which is the common shape and the one the early exit above is for, and
+    # nothing to do for a dtype that has no NaN to write. See #170.
+    comptime if dt.is_floating_point():
+        if filled < groups:
+            for g in range(groups):
+                if not out.data.validity.get(g):
+                    target.unsafe_offset(g).unsafe_store(nan[dt]())
+                    out.data.validity.set(g, True)
     return out^
 
 
@@ -1475,7 +1516,7 @@ def group_var[
 
     Returns:
         A column of `groups` variances. A group with `ddof` or fewer non-null
-        values is null, which is the case pandas reports as NaN.
+        values is NaN, which is what pandas reports there.
 
     Raises:
         If one of the workers the parallel route starts cannot be run. A
@@ -1511,8 +1552,8 @@ def group_std[
         dt: The column's dtype.
 
     Returns:
-        A column of `groups` standard deviations, null on the same groups
-        `group_var` reports null on.
+        A column of `groups` standard deviations, NaN on the same groups
+        `group_var` reports NaN on.
 
     Raises:
         If one of the workers the parallel route starts cannot be run. A
@@ -1549,8 +1590,8 @@ def group_sem[
         dt: The column's dtype.
 
     Returns:
-        A column of `groups` standard errors, null on the same groups
-        `group_std` reports null on.
+        A column of `groups` standard errors, NaN on the same groups
+        `group_std` reports NaN on.
 
     Raises:
         If one of the workers the parallel route starts cannot be run. A
@@ -1582,9 +1623,9 @@ def group_skew[
         dt: The column's dtype.
 
     Returns:
-        A column of `groups` skewnesses, null where a group has fewer than three
-        non-null values, which is the case pandas reports as NaN. A group whose
-        values are all equal is zero rather than null.
+        A column of `groups` skewnesses, NaN where a group has fewer than three
+        non-null values, which is what pandas reports there. A group whose values
+        are all equal is zero rather than NaN.
 
     Raises:
         If one of the workers the parallel route starts cannot be run. A
@@ -1682,8 +1723,9 @@ def _var_core[
         var present = Int(n.unsafe_offset(g).unsafe_load())
         var divisor = present - ddof
         if divisor <= 0:
-            out.data.validity.set(g, False)
-            target.unsafe_offset(g).unsafe_store(0.0)
+            # Too few values to have a spread, so NaN and still valid. A pandas
+            # float column says missing with NaN and not with a null. See #170.
+            target.unsafe_offset(g).unsafe_store(nan[DType.float64]())
             continue
         var residual = missed.unsafe_offset(g).unsafe_load()
         var squares = target.unsafe_offset(
@@ -1730,7 +1772,7 @@ def _sem_core[
         ddof: Subtracted from each group's count to give the variance divisor.
 
     Returns:
-        A column of `groups` standard errors, null where the variance was null,
+        A column of `groups` standard errors, NaN where the variance was NaN,
         which is where a group had `ddof` or fewer values.
 
     Raises:
@@ -1798,7 +1840,7 @@ def _skew_core[
         groups: The number of distinct ordinals.
 
     Returns:
-        A column of `groups` skewnesses, null where a group has fewer than three
+        A column of `groups` skewnesses, NaN where a group has fewer than three
         non-null values.
 
     Raises:
@@ -1854,8 +1896,9 @@ def _skew_core[
     for g in range(groups):
         var present = Int(n.unsafe_offset(g).unsafe_load())
         if present < 3:
-            out.data.validity.set(g, False)
-            target.unsafe_offset(g).unsafe_store(0.0)
+            # A skewness needs three values and this group has fewer, so NaN and
+            # still valid, the way a pandas float column spells missing. See #170.
+            target.unsafe_offset(g).unsafe_store(nan[DType.float64]())
             continue
         var size = Float64(present)
         # The three sums are taken about the mean, so in exact arithmetic the
@@ -1909,7 +1952,7 @@ def group_median[
         dt: The column's dtype.
 
     Returns:
-        A column of `groups` medians, null where a group has no non-null values.
+        A column of `groups` medians, NaN where a group has no non-null values.
         An even count interpolates between the two middle values, so the median
         of a column of integers is a float and can be a half.
 
@@ -1947,6 +1990,7 @@ def group_quantile[
     Returns:
         A column of `groups` quantiles, interpolated linearly between the two
         values the position falls between, which is what pandas does by default.
+        NaN where a group has no non-null values.
 
     Raises:
         If `q` is outside zero to one.
@@ -2227,8 +2271,10 @@ def _quantile_core[
     var out = Array[DType.float64](groups)
 
     # One group's run of the slab is nobody else's, so this loop needs no
-    # private tables and no merge, only a cut that leaves two workers off the
-    # same byte of validity. It is the whole cost of a median on a high
+    # private tables and no merge. It needs no care about where the cut falls
+    # either, now that an empty group answers NaN in its own float64 slot rather
+    # than clearing a bit two workers could share a byte of. It is the whole
+    # cost of a median on a high
     # cardinality key, where the row count is spread over so many groups that
     # the sorts are short and there are millions of them.
     var blocks = _group_blocks(len(codes), groups)
@@ -2241,7 +2287,9 @@ def _quantile_core[
             var start = bounds[g]
             var count = bounds[g + 1] - start
             if count == 0:
-                out.data.validity.set(g, False)
+                # Nothing to take a quantile of, so NaN and still valid, which is
+                # how a pandas float column carries a missing value. See #170.
+                target.unsafe_offset(g).unsafe_store(nan[DType.float64]())
                 continue
             sort(
                 Span[Scalar[dt], origin_of(slab)](
@@ -2348,7 +2396,7 @@ def group_corr[
 
     Returns:
         A column of `groups` correlations between minus one and one. A group with
-        fewer than two rows in which both values are present is null, and so is a
+        fewer than two rows in which both values are present is NaN, and so is a
         group in which either column does not vary, because the correlation is a
         zero over a zero there.
 
@@ -2394,7 +2442,7 @@ def group_cov[
 
     Returns:
         A column of `groups` covariances. A group with `ddof` or fewer pairwise
-        present rows is null.
+        present rows is NaN.
 
     Raises:
         If one of the workers the parallel route starts cannot be run. A
@@ -2560,8 +2608,10 @@ def _pair_core[
                 * yy.unsafe_offset(g).unsafe_load()
             )
             if n < 2 or not (spread > 0.0):
-                out.data.validity.set(g, False)
-                sxy.unsafe_offset(g).unsafe_store(0.0)
+                # No complete pairs to correlate, or a column that never moves,
+                # so there is no correlation to report. NaN and still valid, the
+                # way a pandas float column says missing. See #170.
+                sxy.unsafe_offset(g).unsafe_store(nan[DType.float64]())
                 continue
             # The quotient is one in exact arithmetic when the two columns are
             # the same column, and floating point reaches 1.0000000000000002
@@ -2577,8 +2627,9 @@ def _pair_core[
         else:
             var divisor = n - ddof
             if divisor <= 0:
-                out.data.validity.set(g, False)
-                sxy.unsafe_offset(g).unsafe_store(0.0)
+                # Too few complete pairs to have a covariance. NaN and still
+                # valid, which is what missing looks like here. See #170.
+                sxy.unsafe_offset(g).unsafe_store(nan[DType.float64]())
                 continue
             sxy.unsafe_offset(g).unsafe_store(
                 sxy.unsafe_offset(g).unsafe_load() / Float64(divisor)
