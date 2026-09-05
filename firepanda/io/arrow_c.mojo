@@ -398,6 +398,54 @@ def array_release_callback(f: ArrayRelease) -> VoidPtr:
     return Pointer(to=f).unsafe_bitcast[VoidPtr]()[]
 
 
+def stream_get_schema_callback(f: StreamGetSchema) -> VoidPtr:
+    """Reinterprets a stream's schema function as the void pointer the field holds.
+
+    Args:
+        f: The function.
+
+    Returns:
+        Its address.
+    """
+    return Pointer(to=f).unsafe_bitcast[VoidPtr]()[]
+
+
+def stream_get_next_callback(f: StreamGetNext) -> VoidPtr:
+    """Reinterprets a stream's next function as the void pointer the field holds.
+
+    Args:
+        f: The function.
+
+    Returns:
+        Its address.
+    """
+    return Pointer(to=f).unsafe_bitcast[VoidPtr]()[]
+
+
+def stream_get_last_error_callback(f: StreamGetLastError) -> VoidPtr:
+    """Reinterprets a stream's error function as the void pointer the field holds.
+
+    Args:
+        f: The function.
+
+    Returns:
+        Its address.
+    """
+    return Pointer(to=f).unsafe_bitcast[VoidPtr]()[]
+
+
+def stream_release_callback(f: StreamRelease) -> VoidPtr:
+    """Reinterprets a stream release function as the void pointer the field holds.
+
+    Args:
+        f: The function.
+
+    Returns:
+        Its address.
+    """
+    return Pointer(to=f).unsafe_bitcast[VoidPtr]()[]
+
+
 def release_schema(mut schema: ArrowSchema):
     """Calls a schema's release callback, if it has one.
 

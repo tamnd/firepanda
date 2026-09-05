@@ -30,11 +30,16 @@ from firepanda.io.arrow_c import (
     release_schema,
 )
 from firepanda.io.arrow_export import export_frame_array, export_frame_schema
-from firepanda.io.arrow_stream import import_frame, import_stream
+from firepanda.io.arrow_stream import (
+    export_frame_stream,
+    import_frame,
+    import_stream,
+)
 from firepanda.io.read import read_csv
 from firepanda.py.convert import (
     array_capsule,
     schema_capsule,
+    stream_capsule,
     take_array,
     take_schema,
     take_stream,
@@ -221,10 +226,12 @@ struct PyDataFrame(Movable, Writable):
     ) raises -> List[Pointer[AnyArray, MutAnyOrigin]]:
         """Points at every column of the frame, without copying any of them.
 
-        A column with more than one chunk has no single Arrow array to be, which
-        is what `__arrow_c_stream__` is for and this is not. The refusal happens
-        here rather than half way through an export, so nothing has been
-        allocated by the time it is raised.
+        A column with more than one chunk has no single Arrow array to be. The
+        stream protocol is where that is expressible in principle, and the export
+        hands out one batch per frame, so it is not expressible here either yet.
+        The refusal happens before anything is allocated rather than half way
+        through an export, and it is shared by both directions of the export for
+        that reason.
 
         Args:
             py_self: The frame.
@@ -252,9 +259,9 @@ struct PyDataFrame(Movable, Writable):
                         frame.names()[i],
                         "'",
                         (
-                            " is stored in more than one chunk, which the Arrow"
-                            " array protocol cannot express; use the stream"
-                            " protocol instead"
+                            " is stored in more than one chunk, and an export"
+                            " hands out one batch, so there is nowhere for the"
+                            " second chunk to go yet"
                         ),
                     ),
                 )
@@ -323,6 +330,53 @@ struct PyDataFrame(Movable, Writable):
         except cause:
             raise retagged(UNSUPPORTED, cause)
         return pair
+
+    @staticmethod
+    def arrow_c_stream(
+        py_self: PythonObject, requested_schema: PythonObject
+    ) raises -> PythonObject:
+        """Hands the frame out as an Arrow stream capsule, without copying.
+
+        This is the Mojo half of `__arrow_c_stream__`, and it is the half of the
+        protocol nearly every consumer reaches for first. DuckDB accepts nothing
+        else, and `pyarrow.table`, `polars.DataFrame` and `pandas.DataFrame` all
+        look for it before they look for an array.
+
+        A firepanda frame has no chunking, so the stream is one batch and then
+        the end. That is a stream a consumer cannot tell from any other, which is
+        the point: what it costs to be read is the same either way.
+
+        Args:
+            py_self: The frame.
+            requested_schema: A schema capsule the consumer would rather have, or
+                `None`. Anything other than `None` is refused, for the reason
+                `arrow_c_array` gives.
+
+        Returns:
+            A `PyCapsule` named `arrow_array_stream`.
+        """
+        if requested_schema is not Python.none():
+            raise tagged(
+                UNSUPPORTED,
+                (
+                    "requested_schema is not supported yet; pass None and cast"
+                    " the result instead"
+                ),
+            )
+        var columns = Self._borrowed(py_self)
+        ref frame = Self._frame(py_self)[].frame[]
+        var types = List[LogicalType](capacity=frame.width())
+        for i in range(frame.width()):
+            types.append(frame.columns[i].type)
+        var names = frame.names()
+        var rows = len(frame)
+        var keep = Self._frame(py_self)[].frame
+        try:
+            return stream_capsule(
+                export_frame_stream(columns^, types^, names^, rows, keep^)
+            )
+        except cause:
+            raise retagged(UNSUPPORTED, cause)
 
     def write_to(self, mut writer: Some[Writer]):
         """Writes the frame the way `describe` does.

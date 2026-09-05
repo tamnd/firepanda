@@ -22,7 +22,7 @@ says what was already decided and why.
 | [13-the-bound-type-is-not-a-dataframe.md](13-the-bound-type-is-not-a-dataframe.md) | What `PythonTypeBuilder` cannot do, and why the pandas surface has to be a Python object |
 | [14-errors-across-the-boundary.md](14-errors-across-the-boundary.md) | How one Mojo `Error` becomes the seven Python exception classes document 07 promised |
 | [15-the-arrow-capsule-boundary.md](15-the-arrow-capsule-boundary.md) | How a frame reaches pyarrow and Polars with no copy, and who owns the memory afterwards |
-| [16-reading-somebody-elses-arrow.md](16-reading-somebody-elses-arrow.md) | How a pyarrow, Polars or pandas frame becomes a firepanda frame, and what the real producers taught the checks |
+| [16-reading-somebody-elses-arrow.md](16-reading-somebody-elses-arrow.md) | The Arrow stream in both directions, what the real producers taught the checks, and how DuckDB finally reads a frame |
 | [engine/](engine/00-README.md) | How DuckDB and Polars execute a query, and what firepanda is going to do about it |
 
 ## How to read this
