@@ -186,7 +186,7 @@ def test_the_python_signature_matches_pandas(firepanda: ModuleType) -> None:
                     f" defaults to {match.default!r}"
                 )
 
-    against = {"DataFrame": pd.DataFrame}
+    against = {"DataFrame": pd.DataFrame, "Series": pd.Series}
     for exposed in bindings.TYPES:
         reference = against.get(exposed.py)
         if reference is None:

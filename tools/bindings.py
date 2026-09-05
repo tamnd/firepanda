@@ -169,9 +169,11 @@ class Member:
     """The return annotation. `mypy --strict` runs over the generated file, so
     every member needs one."""
 
-    wraps: bool = False
-    """Whether the result is another extension frame that needs wrapping back up
-    in the Python class."""
+    wraps: str = ""
+    """The Python class to wrap the result in, when the result is another
+    extension object. Empty means the result crosses as it is. It is a name
+    rather than a flag because a frame method can hand back a series, so the
+    class to wrap in is not always the class the method is on."""
 
 
 @dataclass(frozen=True)
@@ -199,6 +201,14 @@ class Exposed:
     members: tuple[Member, ...] = ()
     """The members on the Python side."""
 
+    mixin: str = ""
+    """A hand written base class in `python/firepanda/_pandas.py` for the members
+    that are not a plain delegation. The note at the top of this file asks for
+    exactly this rather than for expressions in the table growing logic, and
+    `DataFrame.__getitem__` is the member that reached it: what `df[key]` does
+    depends on what `key` is, and a conditional smuggled into a `body` string
+    would be code in a table."""
+
 
 FRAME = Exposed(
     mojo="PyDataFrame",
@@ -206,6 +216,7 @@ FRAME = Exposed(
     py="DataFrame",
     doc=("A two dimensional labelled data structure with columns of potentially different types."),
     init="PyDataFrame.py_init",
+    mixin="DataFrameMixin",
     bindings=(
         Binding(
             mojo="PyDataFrame.length",
@@ -237,6 +248,20 @@ FRAME = Exposed(
             name="tail",
             doc="The last n rows.",
             params=(("n", "int"),),
+            returns="DataFrame",
+        ),
+        Binding(
+            mojo="PyDataFrame.column",
+            name="column",
+            doc="One column, as a series.",
+            params=(("name", "str"),),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PyDataFrame.select",
+            name="select",
+            doc="Several columns, as a frame.",
+            params=(("names", "list[str]"),),
             returns="DataFrame",
         ),
         Binding(
@@ -296,7 +321,7 @@ FRAME = Exposed(
             body="self._inner.head(n)",
             doc="The first n rows.",
             returns="DataFrame",
-            wraps=True,
+            wraps="DataFrame",
         ),
         Member(
             name="tail",
@@ -305,7 +330,7 @@ FRAME = Exposed(
             body="self._inner.tail(n)",
             doc="The last n rows.",
             returns="DataFrame",
-            wraps=True,
+            wraps="DataFrame",
         ),
         Member(
             name="__arrow_c_schema__",
@@ -324,6 +349,151 @@ FRAME = Exposed(
         ),
     ),
 )
+
+SERIES = Exposed(
+    mojo="PySeries",
+    name="Series",
+    py="Series",
+    doc="A one dimensional labelled array holding data of a single type.",
+    init="PySeries.py_init",
+    bindings=(
+        Binding(
+            mojo="PySeries.length",
+            name="length",
+            doc="The number of rows.",
+            returns="int",
+        ),
+        Binding(
+            mojo="PySeries.label",
+            name="label",
+            doc="The name of the column.",
+            returns="str",
+        ),
+        Binding(
+            mojo="PySeries.dtype",
+            name="dtype",
+            doc="The type, as firepanda spells it.",
+            returns="str",
+        ),
+        Binding(
+            mojo="PySeries.null_count",
+            name="null_count",
+            doc="How many rows are missing.",
+            returns="int",
+        ),
+        Binding(
+            mojo="PySeries.head",
+            name="head",
+            doc="The first n rows.",
+            params=(("n", "int"),),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.tail",
+            name="tail",
+            doc="The last n rows.",
+            params=(("n", "int"),),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.to_list",
+            name="to_list",
+            doc="Every value, copied into a Python list.",
+            returns="list[object]",
+        ),
+    ),
+    members=(
+        Member(
+            name="__len__",
+            kind="dunder",
+            body="self._inner.length()",
+            doc="The number of rows, so that len(s) works.",
+            returns="int",
+        ),
+        Member(
+            name="__repr__",
+            kind="dunder",
+            body="repr(self._inner)",
+            doc="The series, rendered.",
+            returns="str",
+        ),
+        Member(
+            name="__str__",
+            kind="dunder",
+            body="repr(self._inner)",
+            doc="The series, rendered. Same as repr, which is what pandas does.",
+            returns="str",
+        ),
+        Member(
+            name="name",
+            kind="property",
+            body="self._inner.label()",
+            doc="The name of the series.",
+            returns="str",
+        ),
+        Member(
+            name="dtype",
+            kind="property",
+            body="self._inner.dtype()",
+            doc="The type of the values, as a string rather than a numpy dtype.",
+            returns="str",
+        ),
+        Member(
+            name="size",
+            kind="property",
+            body="self._inner.length()",
+            doc="The number of elements.",
+            returns="int",
+        ),
+        Member(
+            name="shape",
+            kind="property",
+            body="(self._inner.length(),)",
+            doc="A tuple of the number of rows, which for a series is one long.",
+            returns="tuple[int]",
+        ),
+        Member(
+            name="head",
+            kind="method",
+            signature="n: int = 5",
+            body="self._inner.head(n)",
+            doc="The first n rows.",
+            returns="Series",
+            wraps="Series",
+        ),
+        Member(
+            name="tail",
+            kind="method",
+            signature="n: int = 5",
+            body="self._inner.tail(n)",
+            doc="The last n rows.",
+            returns="Series",
+            wraps="Series",
+        ),
+        Member(
+            name="tolist",
+            kind="method",
+            body="list(self._inner.to_list())",
+            doc="The values as a Python list, with None where a value is missing.",
+            returns="list[object]",
+        ),
+        Member(
+            name="count",
+            kind="method",
+            body="self._inner.length() - self._inner.null_count()",
+            doc="The number of values that are not missing.",
+            returns="int",
+        ),
+        Member(
+            name="hasnans",
+            kind="property",
+            body="self._inner.null_count() > 0",
+            doc="Whether any value is missing.",
+            returns="bool",
+        ),
+    ),
+)
+
 
 FUNCTIONS = (
     Binding(
@@ -354,7 +524,7 @@ FUNCTIONS = (
     ),
 )
 
-TYPES: tuple[Exposed, ...] = (FRAME,)
+TYPES: tuple[Exposed, ...] = (FRAME, SERIES)
 
 BANNER_MOJO = (
     "# Generated by tools/bindings.py. Do not edit.\n"
@@ -475,14 +645,17 @@ def stubs() -> str:
     out.append("")
     out.append("The public API is `firepanda`, whose annotations are inline.")
     out.append('"""\n')
-    out.append("class DataFrame:")
-    for b in FRAME.bindings:
-        args = "".join(f", {name}: {kind}" for name, kind in b.params)
-        out.append(f"    def {b.name}(self{args}) -> {b.returns}:")
-        out.append(f'        """{b.doc}"""')
-        out.append("        ...")
-    for fn in FUNCTIONS:
+    for t in TYPES:
+        out.append(f"class {t.name}:")
+        for b in t.bindings:
+            args = "".join(f", {name}: {kind}" for name, kind in b.params)
+            out.append(f"    def {b.name}(self{args}) -> {b.returns}:")
+            out.append(f'        """{b.doc}"""')
+            out.append("        ...")
         out.append("")
+    for at, fn in enumerate(FUNCTIONS):
+        if at:
+            out.append("")
         args = ", ".join(f"{name}: {kind}" for name, kind in fn.params)
         out.append(f"def {fn.name}({args}) -> {fn.returns}:")
         out.append(f'    """{fn.doc}"""')
@@ -514,22 +687,39 @@ def wrapper() -> str:
     out.append('"""\n')
     out.append("from __future__ import annotations\n")
     out.append("from . import _firepanda")
+    mixins = sorted({t.mixin for t in TYPES if t.mixin})
+    if mixins:
+        out.append("from ._pandas import " + ", ".join(mixins))
     out.append("from .errors import translate")
 
     out.append("")
     out.append("__all__ = [" + ", ".join(f'"{t.py}"' for t in TYPES) + "]")
-    out.append("")
 
     for t in TYPES:
         out.append("")
-        out.append(f"class {t.py}:")
+        out.append("")
+        base = f"({t.mixin})" if t.mixin else ""
+        out.append(f"class {t.py}{base}:")
         out.extend(_docstring(t.doc, "    "))
         out.append("")
         out.append('    __slots__ = ("_inner",)')
         out.append("")
-        out.append(f"    def __init__(self, inner: _firepanda.{t.name}) -> None:")
-        out.append('        """Wraps an extension object. Not a public entry point."""')
-        out.append("        self._inner = inner")
+        if t.init:
+            # `inner` defaults so that `firepanda.DataFrame()` reaches the Mojo
+            # refusal, which says how to build one, rather than a missing
+            # argument complaint about a parameter no user was ever meant to
+            # pass. When construction from Python does get written, this is
+            # where it arrives.
+            out.append(f"    def __init__(self, inner: _firepanda.{t.name} | None = None) -> None:")
+            out.append('        """Wraps an extension object. Not a public entry point."""')
+            out.extend(
+                _guarded(f"inner = _firepanda.{t.name}() if inner is None else inner", "        ")
+            )
+            out.append("        self._inner = inner")
+        else:
+            out.append(f"    def __init__(self, inner: _firepanda.{t.name}) -> None:")
+            out.append('        """Wraps an extension object. Not a public entry point."""')
+            out.append("        self._inner = inner")
 
         for m in t.members:
             out.append("")
@@ -540,7 +730,7 @@ def wrapper() -> str:
                 sig = f", {m.signature}" if m.signature else ""
                 out.append(f"    def {m.name}(self{sig}) -> {m.returns}:")
             out.append(f'        """{m.doc}"""')
-            body = f"{t.py}({m.body})" if m.wraps else m.body
+            body = f"{m.wraps}({m.body})" if m.wraps else m.body
             out.extend(_guarded(f"return {body}", "        "))
 
     for fn in FUNCTIONS:

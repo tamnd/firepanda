@@ -18,20 +18,25 @@ nothing when nothing raises, which is measured in document 14.
 from __future__ import annotations
 
 from . import _firepanda
+from ._pandas import DataFrameMixin
 from .errors import translate
 
-__all__ = ["DataFrame"]
+__all__ = ["DataFrame", "Series"]
 
 
-class DataFrame:
+class DataFrame(DataFrameMixin):
     """A two dimensional labelled data structure with columns of potentially different
     types.
     """
 
     __slots__ = ("_inner",)
 
-    def __init__(self, inner: _firepanda.DataFrame) -> None:
+    def __init__(self, inner: _firepanda.DataFrame | None = None) -> None:
         """Wraps an extension object. Not a public entry point."""
+        try:
+            inner = _firepanda.DataFrame() if inner is None else inner
+        except Exception as error:
+            raise translate(error) from None
         self._inner = inner
 
     def __len__(self) -> int:
@@ -96,6 +101,109 @@ class DataFrame:
         """The frame's Arrow data, as an arrow_schema and an arrow_array PyCapsule."""
         try:
             return tuple(self._inner.arrow_c_array(requested_schema))
+        except Exception as error:
+            raise translate(error) from None
+
+
+class Series:
+    """A one dimensional labelled array holding data of a single type."""
+
+    __slots__ = ("_inner",)
+
+    def __init__(self, inner: _firepanda.Series | None = None) -> None:
+        """Wraps an extension object. Not a public entry point."""
+        try:
+            inner = _firepanda.Series() if inner is None else inner
+        except Exception as error:
+            raise translate(error) from None
+        self._inner = inner
+
+    def __len__(self) -> int:
+        """The number of rows, so that len(s) works."""
+        try:
+            return self._inner.length()
+        except Exception as error:
+            raise translate(error) from None
+
+    def __repr__(self) -> str:
+        """The series, rendered."""
+        try:
+            return repr(self._inner)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __str__(self) -> str:
+        """The series, rendered. Same as repr, which is what pandas does."""
+        try:
+            return repr(self._inner)
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def name(self) -> str:
+        """The name of the series."""
+        try:
+            return self._inner.label()
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def dtype(self) -> str:
+        """The type of the values, as a string rather than a numpy dtype."""
+        try:
+            return self._inner.dtype()
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def size(self) -> int:
+        """The number of elements."""
+        try:
+            return self._inner.length()
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def shape(self) -> tuple[int]:
+        """A tuple of the number of rows, which for a series is one long."""
+        try:
+            return (self._inner.length(),)
+        except Exception as error:
+            raise translate(error) from None
+
+    def head(self, n: int = 5) -> Series:
+        """The first n rows."""
+        try:
+            return Series(self._inner.head(n))
+        except Exception as error:
+            raise translate(error) from None
+
+    def tail(self, n: int = 5) -> Series:
+        """The last n rows."""
+        try:
+            return Series(self._inner.tail(n))
+        except Exception as error:
+            raise translate(error) from None
+
+    def tolist(self) -> list[object]:
+        """The values as a Python list, with None where a value is missing."""
+        try:
+            return list(self._inner.to_list())
+        except Exception as error:
+            raise translate(error) from None
+
+    def count(self) -> int:
+        """The number of values that are not missing."""
+        try:
+            return self._inner.length() - self._inner.null_count()
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def hasnans(self) -> bool:
+        """Whether any value is missing."""
+        try:
+            return self._inner.null_count() > 0
         except Exception as error:
             raise translate(error) from None
 

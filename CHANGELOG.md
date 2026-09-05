@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### `df["a"]` works, and gives back a `Series`
+
+The most written expression in pandas had no answer until now. The bound frame could report its shape, print itself and hand its memory to pyarrow, and the one thing it could not do was give you a column, which makes it a demonstration rather than something anybody can port code to.
+
+`Series` is the second bound type. It carries `name`, `dtype`, `size`, `shape`, `count`, `hasnans`, `head`, `tail`, `tolist`, `len` and a repr, which is a small surface chosen to be the things a person checks when they have just taken a column out and want to know whether it is the one they meant. `df[["a", "b"]]` is the other half of the bracket and gives back a frame.
+
+`tolist` on an integer column with a hole in it returns `[10, None, 25]` where pandas returns `[10.0, nan, 25.0]`. That is a real divergence and it is deliberate. A numpy int64 array has nowhere to record absence, so pandas has to widen the column and fill the hole; a firepanda column is Arrow and carries a validity bitmap, so the value is missing rather than approximated. pyarrow and Polars both answer the same way, and `Series.dtype` is a string rather than a numpy dtype for a related reason: the names agree, so `str(s.dtype)` reads the same on both sides, and code comparing against `numpy.int64` fails visibly rather than subtly.
+
+Two things about the generator changed to allow a second type. A method may now return a type other than the one it is on, since `df["a"]` returns a series from a frame. And an empty `firepanda.DataFrame()` reaches the refusal that says to use `read_csv`, rather than complaining about a missing argument named `inner` that no user was ever meant to pass.
+
+`df[key]` with a key that is not a name or a list of names raises a `TypeError` saying what is read today. pandas also takes a mask, a slice and a callable there, and approximating any of them would turn an error into a wrong answer. Document 17 is the design, including why this is the first member to live in a hand written file rather than in the binding table.
+
 ### firepanda reads a pyarrow, Polars or pandas frame
 
 `firepanda.from_arrow(obj)` builds a frame from anything that speaks the Arrow PyCapsule protocol, which until now was a one way boundary: a frame could be handed to pyarrow and Polars, and the only way to make one in the first place was to read a CSV. A pyarrow table or record batch, a Polars frame and a pandas frame all arrive the same way, with no code here that knows which one it was.
