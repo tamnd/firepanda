@@ -1183,6 +1183,192 @@ def _sum_core[
     return _merge_sums(partials, groups, workers)
 
 
+struct GroupTotals(Movable):
+    """A grouped sum beside the count of the rows that went into it."""
+
+    var sums: Array[DType.float64]
+    """One sum per group, in float64, with nulls and NaNs adding nothing."""
+
+    var counts: Array[DType.int64]
+    """How many rows of each group held a value, which is a mean's divisor."""
+
+    def __init__(
+        out self,
+        var sums: Array[DType.float64],
+        var counts: Array[DType.int64],
+    ):
+        """Holds the two columns a mean is made of.
+
+        Args:
+            sums: The grouped sums.
+            counts: The grouped counts.
+        """
+        self.sums = sums^
+        self.counts = counts^
+
+
+def _fused_sum_count[
+    dt: DType, //, check: Bool, origin: ImmOrigin
+](
+    source: Pointer[Scalar[dt], origin],
+    validity: Bitmap,
+    codes: Array[DType.uint32],
+    groups: Int,
+    workers: Int,
+) raises -> GroupTotals:
+    """Scatters each row into its group's sum and its group's count at once.
+
+    The two private tables sit beside each other and are written from the same
+    read of the value, so the count costs an increment rather than a second walk
+    over the column and a third over the ordinals.
+
+    Args:
+        source: The values.
+        validity: Which rows are present. Read only when `check`.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals.
+        workers: How many private tables to build, which is at least two.
+
+    Parameters:
+        dt: The column's dtype.
+        check: True to skip null rows, False when the column has no nulls.
+        origin: Where the values are borrowed from.
+
+    Returns:
+        The sums and the counts.
+
+    Raises:
+        If one of the workers cannot be run.
+    """
+    var rows = len(codes)
+    var bounds = _row_bounds(rows, workers)
+    var sums = Array[DType.float64](groups * workers)
+    var tally = Array[DType.int64](groups * workers)
+
+    def one(w: Int) raises {mut sums, mut tally, imm}:
+        var totals = sums.unsafe_ptr().unsafe_offset(w * groups)
+        var seen = tally.unsafe_ptr().unsafe_offset(w * groups)
+        var at = codes.unsafe_ptr()
+        for i in range(bounds[w], bounds[w + 1]):
+            var g = Int(at.unsafe_offset(i).unsafe_load())
+            var value = (
+                source.unsafe_offset(i).unsafe_load().cast[DType.float64]()
+            )
+            var here = True
+            comptime if dt.is_floating_point():
+                # A NaN adds nothing and is not a value, which is the same rule
+                # `_addend` and `_count_core` reach separately. See #170.
+                if isnan(value):
+                    value = 0
+                    here = False
+            comptime if check:
+                if not validity.get(i):
+                    value = 0
+                    here = False
+            totals.unsafe_offset(g).unsafe_store(
+                totals.unsafe_offset(g).unsafe_load() + value
+            )
+            if here:
+                seen.unsafe_offset(g).unsafe_store(
+                    seen.unsafe_offset(g).unsafe_load() + 1
+                )
+
+    parallel_for(one, workers)
+    return GroupTotals(
+        _merge_sums(sums, groups, workers), _merge_sums(tally, groups, workers)
+    )
+
+
+def _sum_and_count[
+    dt: DType, //, origin: ImmOrigin
+](
+    source: Pointer[Scalar[dt], origin],
+    validity: Bitmap,
+    has_null: Bool,
+    codes: Array[DType.uint32],
+    groups: Int,
+) raises -> GroupTotals:
+    """Returns a grouped sum and the count that goes with it.
+
+    A mean, a variance, a standard error and a skewness all want both of these
+    over the same column, and asking for them separately walks the column twice
+    and the ordinals three times. On a float column it is worse than that, since
+    `_count_core` has to build a presence bitmap first because a NaN is not a
+    value, so a mean over ten million floats read eighty megabytes of values
+    twice and forty of ordinals three times to produce two arrays of a hundred
+    entries.
+
+    Fusing them is only done on the private table route. The serial route and
+    the partitioned route have shapes of their own, and a partitioned scatter in
+    particular counts its rows into partitions before it reads a value, so
+    carrying a second accumulator through it is a different change. Those two
+    still ask for the sum and the count one at a time and get exactly what they
+    got before.
+
+    Args:
+        source: The values.
+        validity: Which rows are present.
+        has_null: Whether `validity` has anything to say.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals.
+
+    Parameters:
+        dt: The column's dtype.
+        origin: Where the values are borrowed from.
+
+    Returns:
+        The sums and the counts.
+
+    Raises:
+        If one of the workers the parallel route starts cannot be run.
+    """
+    # Two tables per worker rather than one, so the budget is asked for twice
+    # the groups. Both entries are eight bytes wide, so that is the same
+    # question in bytes.
+    var workers = _private_workers[DType.float64](len(codes), groups * 2)
+    if workers <= 1:
+        var sums = _sum_core[acc=DType.float64](source, codes, groups)
+        var counts = _count_core(source, validity, has_null, codes, groups)
+        return GroupTotals(sums^, counts^)
+    if has_null:
+        return _fused_sum_count[check=True](
+            source, validity, codes, groups, workers
+        )
+    return _fused_sum_count[check=False](
+        source, validity, codes, groups, workers
+    )
+
+
+def _divide_sums(
+    sums: Array[DType.float64], counts: Array[DType.int64], groups: Int
+) -> Array[DType.float64]:
+    """Divides each group's sum by its count.
+
+    Args:
+        sums: The grouped sums.
+        counts: The grouped counts.
+        groups: How many groups there are.
+
+    Returns:
+        A column of `groups` means, NaN where a group counted nothing.
+    """
+    var out = Array[DType.float64](groups)
+    var target = out.unsafe_ptr()
+    var total = sums.unsafe_ptr()
+    var n = counts.unsafe_ptr()
+    for g in range(groups):
+        var count = n.unsafe_offset(g).unsafe_load()
+        if count == 0:
+            # A group with nothing in it gets NaN and stays valid, because in a
+            # pandas float column NaN is what missing looks like. See #170.
+            target.unsafe_offset(g).unsafe_store(nan[DType.float64]())
+            continue
+        target.unsafe_offset(g).unsafe_store(
+            total.unsafe_offset(g).unsafe_load() / Float64(count)
+        )
+    return out^
+
+
 def group_mean[
     dt: DType
 ](values: Array[dt], codes: Array[DType.uint32], groups: Int) raises -> Array[
@@ -1237,27 +1423,11 @@ def _mean_core[
     values is a large float rather than whatever the int64 wrap happened to leave
     behind. `group_sum` still wraps, because there pandas wraps too.
     """
-    # The numerator steps over a NaN inside `_addend` and the divisor steps over
-    # it inside `_count_core`, so the two agree about which rows were read
-    # without either of them telling the other. See #170.
-    var sums = _sum_core[acc=DType.float64](source, codes, groups)
-    var counts = _count_core(source, validity, has_null, codes, groups)
-
-    var out = Array[DType.float64](groups)
-    var target = out.unsafe_ptr()
-    var total = sums.unsafe_ptr()
-    var n = counts.unsafe_ptr()
-    for g in range(groups):
-        var count = n.unsafe_offset(g).unsafe_load()
-        if count == 0:
-            # A group with nothing in it gets NaN and stays valid, because in a
-            # pandas float column NaN is what missing looks like. See #170.
-            target.unsafe_offset(g).unsafe_store(nan[DType.float64]())
-            continue
-        target.unsafe_offset(g).unsafe_store(
-            total.unsafe_offset(g).unsafe_load() / Float64(count)
-        )
-    return out^
+    # The numerator steps over a NaN and so does the divisor, so the two agree
+    # about which rows were read. Fused, they agree by construction rather than
+    # by two loops reaching the same rule apart. See #170.
+    var totals = _sum_and_count(source, validity, has_null, codes, groups)
+    return _divide_sums(totals.sums, totals.counts, groups)
 
 
 def group_min[
@@ -1788,8 +1958,8 @@ def _var_core[
     cancel. It costs one add per row and makes the answer independent of how
     accurate the mean was.
     """
-    var means = _mean_core(source, validity, has_null, codes, groups)
-    var counts = _count_core(source, validity, has_null, codes, groups)
+    var totals = _sum_and_count(source, validity, has_null, codes, groups)
+    var means = _divide_sums(totals.sums, totals.counts, groups)
 
     var rows = len(codes)
     var workers = _private_workers[DType.float64](rows, groups)
@@ -1831,7 +2001,7 @@ def _var_core[
     var out = partials^
     var target = out.unsafe_ptr()
     var missed = deltas.unsafe_ptr()
-    var n = counts.unsafe_ptr()
+    var n = totals.counts.unsafe_ptr()
     for g in range(groups):
         var present = Int(n.unsafe_offset(g).unsafe_load())
         var divisor = present - ddof
@@ -1959,8 +2129,8 @@ def _skew_core[
     Raises:
         If one of the workers the parallel route starts cannot be run.
     """
-    var means = _mean_core(source, validity, has_null, codes, groups)
-    var counts = _count_core(source, validity, has_null, codes, groups)
+    var totals = _sum_and_count(source, validity, has_null, codes, groups)
+    var means = _divide_sums(totals.sums, totals.counts, groups)
 
     var rows = len(codes)
     var workers = _private_workers[DType.float64](rows, groups)
@@ -2005,7 +2175,7 @@ def _skew_core[
     var target = out.unsafe_ptr()
     var first_total = deltas.unsafe_ptr()
     var third_total = cubes.unsafe_ptr()
-    var n = counts.unsafe_ptr()
+    var n = totals.counts.unsafe_ptr()
     for g in range(groups):
         var present = Int(n.unsafe_offset(g).unsafe_load())
         if present < 3:
