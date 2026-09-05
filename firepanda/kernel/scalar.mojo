@@ -26,8 +26,34 @@ from .compare import CMP_EQ, CMP_GE, CMP_GT, CMP_LE, CMP_LT, CMP_NE
 from .group import AggKind
 
 
+def _is_there[dt: DType](col: Array[dt], i: Int) -> Bool:
+    """Says whether row `i` holds a value the reductions should read.
+
+    Its validity bit has to be set, and on a float dtype it must not be a NaN,
+    because pandas steps over a NaN exactly as it steps over a value that was
+    never there. The fast kernels do this with a compare and a select per vector
+    and this does it one row at a time, which is the point of the twin. See #170.
+
+    Args:
+        col: The column.
+        i: The row.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        True if the row holds a value.
+    """
+    if not col.is_valid(i):
+        return False
+    comptime if dt.is_floating_point():
+        if isnan(col[i]):
+            return False
+    return True
+
+
 def sum_scalar[dt: DType](col: Array[dt]) -> Scalar[accumulator(dt)]:
-    """Adds up the non-null values, one at a time, checking validity for each.
+    """Adds up the values that are there, one at a time.
 
     Args:
         col: The column.
@@ -41,13 +67,18 @@ def sum_scalar[dt: DType](col: Array[dt]) -> Scalar[accumulator(dt)]:
     comptime acc = accumulator(dt)
     var total = Scalar[acc](0)
     for i in range(len(col)):
-        if col.is_valid(i):
+        if _is_there(col, i):
             total += Scalar[acc](col[i])
     return total
 
 
 def count_scalar[dt: DType](col: Array[dt]) -> Int:
-    """Counts the non-null values, one at a time.
+    """Counts the set validity bits, one at a time.
+
+    This one does not use `_is_there`, and the difference is deliberate. It is
+    the twin of `count_of`, which is the Arrow count and says what is in the
+    buffers. The pandas count, which a NaN is missing from, is
+    `nulls.missing_count_any` and has its own twin in the tests.
 
     Args:
         col: The column.
@@ -66,7 +97,7 @@ def count_scalar[dt: DType](col: Array[dt]) -> Int:
 
 
 def min_scalar[dt: DType](col: Array[dt]) -> Tuple[Scalar[dt], Bool]:
-    """Finds the smallest non-null value, one at a time.
+    """Finds the smallest value that is there, one at a time.
 
     Args:
         col: The column.
@@ -80,7 +111,7 @@ def min_scalar[dt: DType](col: Array[dt]) -> Tuple[Scalar[dt], Bool]:
     var best = Scalar[dt](0)
     var seen = False
     for i in range(len(col)):
-        if not col.is_valid(i):
+        if not _is_there(col, i):
             continue
         var value = col[i]
         if not seen or value < best:
@@ -90,7 +121,7 @@ def min_scalar[dt: DType](col: Array[dt]) -> Tuple[Scalar[dt], Bool]:
 
 
 def max_scalar[dt: DType](col: Array[dt]) -> Tuple[Scalar[dt], Bool]:
-    """Finds the largest non-null value, one at a time.
+    """Finds the largest value that is there, one at a time.
 
     Args:
         col: The column.
@@ -104,7 +135,7 @@ def max_scalar[dt: DType](col: Array[dt]) -> Tuple[Scalar[dt], Bool]:
     var best = Scalar[dt](0)
     var seen = False
     for i in range(len(col)):
-        if not col.is_valid(i):
+        if not _is_there(col, i):
             continue
         var value = col[i]
         if not seen or value > best:
@@ -114,7 +145,7 @@ def max_scalar[dt: DType](col: Array[dt]) -> Tuple[Scalar[dt], Bool]:
 
 
 def mean_scalar[dt: DType](col: Array[dt]) -> Tuple[Float64, Bool]:
-    """Averages the non-null values, one at a time.
+    """Averages the values that are there, one at a time.
 
     Args:
         col: The column.
@@ -128,7 +159,7 @@ def mean_scalar[dt: DType](col: Array[dt]) -> Tuple[Float64, Bool]:
     var total = Float64(0)
     var present = 0
     for i in range(len(col)):
-        if col.is_valid(i):
+        if _is_there(col, i):
             total += Float64(col[i])
             present += 1
     if present == 0:
