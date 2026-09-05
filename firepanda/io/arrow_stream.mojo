@@ -586,9 +586,7 @@ struct _FrameStreamBox[K: Copyable & Deinitable](Movable):
             capacity=len(columns)
         )
         for column in columns:
-            self.columns.append(
-                column.unsafe_origin_cast[MutUntrackedOrigin]()
-            )
+            self.columns.append(column.unsafe_origin_cast[MutUntrackedOrigin]())
         self.types = types^
         self.names = names^
         self.rows = rows
@@ -623,13 +621,9 @@ def _exported_stream_schema[
     """
     if not stream[].private_data:
         return EINVAL
-    var box = (
-        stream[].private_data.value().unsafe_bitcast[_FrameStreamBox[K]]()
-    )
+    var box = stream[].private_data.value().unsafe_bitcast[_FrameStreamBox[K]]()
     try:
-        out_schema.unsafe_write(
-            export_frame_schema(box[].types, box[].names)
-        )
+        out_schema.unsafe_write(export_frame_schema(box[].types, box[].names))
         return 0
     except:
         return EINVAL
@@ -651,9 +645,7 @@ def _exported_stream_next[
     """
     if not stream[].private_data:
         return EINVAL
-    var box = (
-        stream[].private_data.value().unsafe_bitcast[_FrameStreamBox[K]]()
-    )
+    var box = stream[].private_data.value().unsafe_bitcast[_FrameStreamBox[K]]()
     if box[].at != 0:
         out_array.unsafe_write(ArrowArray())
         return 0
@@ -690,9 +682,7 @@ def _exported_stream_error[
     """
     if not stream[].private_data:
         return None
-    var box = (
-        stream[].private_data.value().unsafe_bitcast[_FrameStreamBox[K]]()
-    )
+    var box = stream[].private_data.value().unsafe_bitcast[_FrameStreamBox[K]]()
     return box[].message
 
 
@@ -772,9 +762,7 @@ def export_frame_stream[
     var box = external_call[
         "malloc", Pointer[_FrameStreamBox[K], MutUntrackedOrigin]
     ](size_of[_FrameStreamBox[K]]())
-    box.unsafe_write(
-        _FrameStreamBox[K](keep^, columns^, types^, names^, rows)
-    )
+    box.unsafe_write(_FrameStreamBox[K](keep^, columns^, types^, names^, rows))
 
     var out = ArrowArrayStream()
     out.private_data = box.unsafe_bitcast[NoneType]()
