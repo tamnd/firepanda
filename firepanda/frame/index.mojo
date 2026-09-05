@@ -105,17 +105,36 @@ arbitrary are arbitrary in pandas too: `union` sorts by default while `intersect
 and a union with an empty index or with itself returns unsorted because it takes an
 early return before the sort.
 
+The editing operations came third and none of them needed a new idea. `append` is a
+concatenation, `delete` and `insert` are a gather over a list of positions, `drop` is a
+lookup and then the same gather, and `putmask` is a gather over the two sides
+concatenated. Writing them as gathers rather than as loops over the labels is not
+tidiness: the gather already knows about nulls, about strings and about every dtype, so
+a null inserted into a string index works without a line being written about it, and
+there is one place to fix if it does not.
+
+The slice locators are the part of that group with something in it. A `loc` slice
+includes both of its ends, and what makes that true is that the left bound of a label is
+the first row at least it and the right bound is the first row past it, so a label
+sitting in four rows gives a pair covering all four. On a monotonic index that pair is
+two binary searches, on a descending one the same searches with both comparisons turned
+over, and on an index that is neither there is nothing to search: pandas looks the label
+up instead, refuses when it is absent or repeated, and says in the message that sorting
+the index is the fix. The monotonic check in front of the search is a scan and is not
+remembered, for the same reason `is_unique` is not remembered, so what the search buys
+against the fallback is the factorize rather than the pass.
+
 What this still does not do is align. There is no `reindex` and no `loc`, and the
-remaining names on https://github.com/tamnd/firepanda/issues/154 are `append`, `delete`,
-`drop`, `putmask`, the slice locators and the level accessors. What is here is what
-those are made of.
+remaining names on https://github.com/tamnd/firepanda/issues/154 are the level
+accessors and `asof_locs`. What is here is what those are made of.
 """
 
 from std.collections import Optional
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
-from firepanda.dtype.lists import ALL
+from firepanda.dtype.lists import ALL, ORDERED
+from firepanda.frame.display import DisplayOptions, render_value
 from firepanda.hash.function import key_bits
 from firepanda.hash.grouping import KeyCodes, factorize_any
 from firepanda.kernel.concat import concat_two_any
@@ -125,7 +144,7 @@ from firepanda.kernel.select import (
     take_any,
     take_range,
 )
-from firepanda.kernel.sort import argsort_any, is_sorted_any
+from firepanda.kernel.sort import argsort_any, is_sorted_any, sort_key
 
 
 comptime NOT_FOUND = Int64(-1)
@@ -414,6 +433,132 @@ def _gathered(
     for i in range(len(order)):
         by.append(Int(order[i]))
     return Index(take_any(out, by), name^)
+
+
+def _label_order(a: AnyArray, i: Int, b: AnyArray, j: Int) raises -> Int:
+    """Compares two labels the way a sort would.
+
+    The ordering companion of `_same_label`, and it agrees with it on which pairs
+    are equal. A null is greater than every present label, which puts nulls at
+    the end and is where `argsort_any` puts them, so a bound looked up with a
+    null lands past the last row rather than in the middle of the index.
+
+    Args:
+        a: The first column.
+        i: The row in it.
+        b: The second column.
+        j: The row in it.
+
+    Returns:
+        A negative number when the first label is smaller, zero when they are
+        the same label, and a positive number when it is larger.
+
+    Raises:
+        Error: If the dtypes differ or cannot be ordered.
+    """
+    if a.dtype() != b.dtype() or a.is_string() != b.is_string():
+        raise Error(
+            String(
+                "index: labels must have the same dtype; got ",
+                a.dtype(),
+                " and ",
+                b.dtype(),
+            )
+        )
+    var a_here = a.is_valid(i)
+    var b_here = b.is_valid(j)
+    if not a_here or not b_here:
+        if a_here:
+            return -1
+        if b_here:
+            return 1
+        return 0
+    if a.is_string():
+        ref mine = a.strings()
+        ref theirs = b.strings()
+        var left = mine.unsafe_bytes(i)
+        var right = theirs.unsafe_bytes(j)
+        var shared = len(left)
+        if len(right) < shared:
+            shared = len(right)
+        for k in range(shared):
+            if left[k] != right[k]:
+                return -1 if left[k] < right[k] else 1
+        if len(left) == len(right):
+            return 0
+        return -1 if len(left) < len(right) else 1
+    comptime for candidate in ORDERED:
+        if a.dtype() == candidate:
+            # `sort_key` is the same total order the sort uses, which is what
+            # keeps a bound consistent with the sortedness that let us search
+            # for it, and it is why a float compares here without a special
+            # case for the sign bit.
+            var left = sort_key(
+                a.unsafe_ptr[candidate]().unsafe_offset(i).unsafe_load()
+            )
+            var right = sort_key(
+                b.unsafe_ptr[candidate]().unsafe_offset(j).unsafe_load()
+            )
+            if left < right:
+                return -1
+            if left > right:
+                return 1
+            return 0
+    raise Error(String("index: unorderable label dtype ", a.dtype()))
+
+
+def _shown_label(col: AnyArray, i: Int) -> String:
+    """Renders one label for an error message.
+
+    The frame printer already knows how to spell every dtype and how to spell a
+    null, and an error that names the label the caller passed is worth a great
+    deal more than one that says a label is missing.
+
+    Args:
+        col: The column.
+        i: The row.
+
+    Returns:
+        The label as text.
+    """
+    return render_value(col, i, DisplayOptions())
+
+
+def _searched(
+    values: AnyArray, label: AnyArray, right: Bool, ascending: Bool
+) raises -> Int:
+    """Binary searches a monotonic column for where a label belongs.
+
+    One function covers all four cases because they differ only in which way the
+    comparison has to fall for the answer to be further right. On an ascending
+    column the left bound is the first row at least the label and the right bound
+    is the first row past it, and on a descending column both tests turn over.
+
+    Args:
+        values: The labels, ascending or descending with no nulls in the middle.
+        label: The label to place, as a column of one row.
+        right: Look for the end of a run of equal labels rather than its start.
+        ascending: Whether the column increases.
+
+    Returns:
+        A position between zero and the length of the column.
+
+    Raises:
+        Error: If the dtypes differ or cannot be ordered.
+    """
+    var lo = 0
+    var hi = len(values)
+    while lo < hi:
+        var mid = lo + (hi - lo) // 2
+        var order = _label_order(values, mid, label, 0)
+        var before = (order < 0) if ascending else (order > 0)
+        if right and order == 0:
+            before = True
+        if before:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
 
 
 struct Index(Copyable, Movable, Sized):
@@ -1215,3 +1360,426 @@ struct Index(Copyable, Movable, Sized):
             taken[at] = 1
             picks.append(i)
         return _gathered(joined.labels, picks, name^, sort)
+
+    def append(self, other: Self) raises -> Self:
+        """This index's labels followed by another's.
+
+        Not a union. Nothing is deduplicated and nothing is sorted, so appending
+        an index to itself gives every label twice, which is what `concat` wants
+        and is the whole difference between the two operations.
+
+        Two adjacent ranges stay a range, so appending the index of one slice of
+        a frame to the index of the next costs two integers and no memory. That
+        is the same argument the representation exists for and it is worth having
+        here because a concatenation of frames read in pieces is exactly this
+        case.
+
+        Args:
+            other: The labels to put after this index's.
+
+        Returns:
+            The concatenation, named what both sides agree on.
+
+        Raises:
+            Error: If the label dtypes differ.
+        """
+        var name = _shared_name(self.name, other.name)
+        if other.length == 0:
+            return self.renamed(name^)
+        if self.length == 0:
+            return other.renamed(name^)
+        if (
+            self.is_range()
+            and other.is_range()
+            and other.start == self.start + self.length
+        ):
+            return Self(self.start, self.length + other.length, name^)
+        return Self(
+            concat_two_any(self.materialize(), other.materialize()), name^
+        )
+
+    def append(self, others: List[Self]) raises -> Self:
+        """This index's labels followed by several others', in order.
+
+        The name survives only when every side agrees on it, which follows from
+        applying the two index rule down the list and is what pandas does.
+
+        Args:
+            others: The indexes to put after this one, in order.
+
+        Returns:
+            The concatenation.
+
+        Raises:
+            Error: If the label dtypes differ.
+        """
+        var out = Self(copy=self)
+        for i in range(len(others)):
+            out = out.append(others[i])
+        return out^
+
+    def delete(self, positions: List[Int]) raises -> Self:
+        """The index without the rows at a set of positions.
+
+        By position rather than by label, which is what separates this from
+        `drop`. A position appearing twice removes one row, since a row can only
+        be removed once.
+
+        Args:
+            positions: The rows to remove. A negative position counts from the
+                end, so -1 is the last row.
+
+        Returns:
+            The remaining labels in their original order.
+
+        Raises:
+            Error: If a position is outside the index.
+        """
+        var marks = _filled(self.length, Int64(0))
+        for i in range(len(positions)):
+            var at = positions[i]
+            if at < 0:
+                at += self.length
+            if at < 0 or at >= self.length:
+                raise Error(
+                    String(
+                        "index: delete position ",
+                        positions[i],
+                        " is out of bounds for an index of length ",
+                        self.length,
+                    )
+                )
+            marks[at] = 1
+        var picks = List[Int]()
+        for i in range(self.length):
+            if marks[i] == 0:
+                picks.append(i)
+        return self.take(picks)
+
+    def delete(self, position: Int) raises -> Self:
+        """The index without the row at one position.
+
+        Args:
+            position: The row to remove, counting from the end when negative.
+
+        Returns:
+            The remaining labels.
+
+        Raises:
+            Error: If the position is outside the index.
+        """
+        var one: List[Int] = [position]
+        return self.delete(one)
+
+    def insert(self, position: Int, label: AnyArray) raises -> Self:
+        """The index with one label put in at a position.
+
+        Args:
+            position: Where the new label lands, from zero to the length of the
+                index inclusive, counting from the end when negative.
+            label: The label, as a column of exactly one row.
+
+        Returns:
+            An index one row longer.
+
+        Raises:
+            Error: If the position is outside the index, if more than one label
+                was passed, or if the dtypes differ.
+        """
+        if len(label) != 1:
+            raise Error(
+                String("index: insert takes one label, got ", len(label))
+            )
+        var at = position
+        if at < 0:
+            at += self.length
+        if at < 0 or at > self.length:
+            raise Error(
+                String(
+                    "index: insert position ",
+                    position,
+                    " is out of bounds for an index of length ",
+                    self.length,
+                )
+            )
+        # The new label is row `self.length` of the concatenation, so putting it
+        # in is a gather that names that row where it belongs. One pass and no
+        # per row branch, and the null and string cases come along with the
+        # gather rather than being written twice.
+        var both = concat_two_any(self.materialize(), label)
+        var picks = List[Int](capacity=self.length + 1)
+        for i in range(at):
+            picks.append(i)
+        picks.append(self.length)
+        for i in range(at, self.length):
+            picks.append(i)
+        return Self(take_any(both, picks), Optional[String](copy=self.name))
+
+    def drop(self, labels: AnyArray, errors: String = "raise") raises -> Self:
+        """The index without every row carrying one of a set of labels.
+
+        By label rather than by position, and every occurrence goes, so dropping
+        `1` from `[1, 1, 2]` leaves `[2]` rather than `[1, 2]`.
+
+        Args:
+            labels: The labels to remove.
+            errors: `"raise"` to refuse when a label is not in the index, naming
+                the ones that are not, or `"ignore"` to remove what is there and
+                say nothing about the rest.
+
+        Returns:
+            The remaining labels in their original order.
+
+        Raises:
+            Error: If a label is missing and `errors` is `"raise"`, if `errors`
+                is neither word, or if the dtypes differ.
+        """
+        if errors != "raise" and errors != "ignore":
+            raise Error(
+                String(
+                    "index: drop errors must be 'raise' or 'ignore'; got ",
+                    errors,
+                )
+            )
+        var found = self.get_indexer_non_unique(labels)
+        if errors == "raise" and len(found.missing) > 0:
+            var absent = String()
+            for i in range(len(found.missing)):
+                if i > 0:
+                    absent += ", "
+                absent += _shown_label(labels, Int(found.missing[i]))
+            raise Error(String("index: [", absent, "] not found in axis"))
+        var marks = _filled(self.length, Int64(0))
+        ref positions = found.positions
+        for i in range(len(positions)):
+            var at = positions[i]
+            if at != NOT_FOUND:
+                marks[Int(at)] = 1
+        var picks = List[Int]()
+        for i in range(self.length):
+            if marks[i] == 0:
+                picks.append(i)
+        return self.take(picks)
+
+    def putmask(self, mask: Array[DType.bool], value: AnyArray) raises -> Self:
+        """The index with the rows a mask picks out replaced.
+
+        The replacement is either one label, which goes everywhere the mask is
+        true, or a column as long as the index, in which case row `i` takes row
+        `i`. A null in the mask is a false, since a row we cannot say to replace
+        is a row we leave alone.
+
+        Args:
+            mask: Which rows to replace. Must be as long as this index.
+            value: The replacement, either one row or as many rows as this index.
+
+        Returns:
+            An index of the same length.
+
+        Raises:
+            Error: If the mask is the wrong length, if the replacement is neither
+                one row nor the whole length, or if the dtypes differ.
+        """
+        if len(mask) != self.length:
+            raise Error(
+                String(
+                    (
+                        "index: putmask mask and index must be the same"
+                        " length; got"
+                    ),
+                    " ",
+                    len(mask),
+                    " and ",
+                    self.length,
+                )
+            )
+        if len(value) != 1 and len(value) != self.length:
+            raise Error(
+                String(
+                    "index: putmask replacement must be one label or ",
+                    self.length,
+                    "; got ",
+                    len(value),
+                )
+            )
+        var any_set = False
+        for i in range(self.length):
+            if mask.is_valid(i) and Bool(mask[i]):
+                any_set = True
+                break
+        if not any_set:
+            return Self(copy=self)
+        var wide = len(value) != 1
+        var both = concat_two_any(self.materialize(), value)
+        var picks = List[Int](capacity=self.length)
+        for i in range(self.length):
+            if mask.is_valid(i) and Bool(mask[i]):
+                picks.append(self.length + i if wide else self.length)
+            else:
+                picks.append(i)
+        return Self(take_any(both, picks), Optional[String](copy=self.name))
+
+    def get_slice_bound(self, label: AnyArray, side: String) raises -> Int:
+        """Where a label sits when the index is read as an ordered thing.
+
+        A `loc` slice is inclusive of both ends, and this is what makes that
+        true: the left bound of a label is the first row that is at least it and
+        the right bound is the first row past it, so a label that appears four
+        times gives a pair that covers all four.
+
+        The search is binary and the monotonic check in front of it is a scan, so
+        the bound costs a pass over the labels and not a lookup. Nothing is
+        cached, for the same reason `is_unique` caches nothing: an index is copied
+        into every frame derived from it and a remembered answer would have to be
+        invalidated by `take` and `filter`. What the search buys against the
+        fallback is the factorize, not the scan.
+
+        An index that is neither ascending nor descending has no bound to search
+        for, so pandas looks the label up instead and refuses when it is not
+        there or is there twice, and says in the message that sorting the index
+        is the fix. This does the same.
+
+        Args:
+            label: The label, as a column of exactly one row.
+            side: `"left"` for the first row that is at least the label, or
+                `"right"` for the first row past it.
+
+        Returns:
+            A position between zero and the length of the index.
+
+        Raises:
+            Error: If `side` is neither word, if more than one label was passed,
+                if the dtypes differ, or if the index is not monotonic and the
+                label is missing or repeated.
+        """
+        if side != "left" and side != "right":
+            raise Error(
+                String("index: side must be 'left' or 'right'; got ", side)
+            )
+        if len(label) != 1:
+            raise Error(
+                String(
+                    "index: a slice bound is one label, got ",
+                    len(label),
+                )
+            )
+        var right = side == "right"
+
+        if self.is_range():
+            if (
+                not label.is_string()
+                and label.dtype() == DType.int64
+                and label.is_valid(0)
+            ):
+                # A range is sorted, has no duplicates and holds every integer
+                # between its ends, so the bound is arithmetic and reads nothing.
+                ref only = label.as_typed_view[DType.int64]()
+                var at = Int(only[0]) - self.start
+                if right:
+                    at += 1
+                if at < 0:
+                    return 0
+                if at > self.length:
+                    return self.length
+                return at
+            # Anything else is either a null or the wrong dtype, and both are
+            # answered by the general path rather than by a second rule here.
+            var built = self.materialize()
+            return _searched(built, label, right, ascending=True)
+
+        ref values = self.labels.value()
+        if self.is_monotonic_increasing():
+            return _searched(values, label, right, ascending=True)
+        if self.is_monotonic_decreasing():
+            return _searched(values, label, right, ascending=False)
+
+        var hits = 0
+        var first = 0
+        for i in range(self.length):
+            if _same_label(values, i, label, 0):
+                if hits == 0:
+                    first = i
+                hits += 1
+        if hits == 0:
+            raise Error(
+                String(
+                    "index: cannot get the ",
+                    side,
+                    " slice bound of a non-monotonic index for the missing",
+                    " label ",
+                    _shown_label(label, 0),
+                    "; either sort the index or use a label it has",
+                )
+            )
+        if hits > 1:
+            raise Error(
+                String(
+                    "index: cannot get the ",
+                    side,
+                    " slice bound of a non-monotonic index for the repeated",
+                    " label ",
+                    _shown_label(label, 0),
+                )
+            )
+        return first + 1 if right else first
+
+    def slice_locs(
+        self,
+        start: Optional[AnyArray] = Optional[AnyArray](),
+        end: Optional[AnyArray] = Optional[AnyArray](),
+    ) raises -> Tuple[Int, Int]:
+        """The half-open row range a pair of labels describes.
+
+        The left bound of the first label and the right bound of the second,
+        which is why a `loc` slice includes both ends while the pair it returns
+        is half open like every other range in the library. A missing bound means
+        the end of the index on that side.
+
+        Both labels are looked up the same way whether the index ascends or
+        descends, so on a descending index the caller names the larger label
+        first, which is what reading the index in order means.
+
+        Args:
+            start: The first label, or nothing for the start of the index.
+            end: The last label, or nothing for the end of the index.
+
+        Returns:
+            The first row and one past the last.
+
+        Raises:
+            Error: If a bound cannot be placed.
+        """
+        var first = 0
+        if start:
+            first = self.get_slice_bound(start.value(), "left")
+        var last = self.length
+        if end:
+            last = self.get_slice_bound(end.value(), "right")
+        return (first, last)
+
+    def slice_indexer(
+        self,
+        start: Optional[AnyArray] = Optional[AnyArray](),
+        end: Optional[AnyArray] = Optional[AnyArray](),
+        step: Int = 1,
+    ) raises -> Tuple[Int, Int, Int]:
+        """The same range as `slice_locs`, with the step carried through.
+
+        The step is not used to find the bounds and pandas does not use it
+        either, so this is `slice_locs` and a third number. It exists because the
+        caller of a `loc` slice has a step to pass on and would otherwise have to
+        rebuild the triple itself.
+
+        Args:
+            start: The first label, or nothing for the start of the index.
+            end: The last label, or nothing for the end of the index.
+            step: The stride, returned unchanged.
+
+        Returns:
+            The first row, one past the last, and the step.
+
+        Raises:
+            Error: If a bound cannot be placed.
+        """
+        var found = self.slice_locs(start, end)
+        return (found[0], found[1], step)

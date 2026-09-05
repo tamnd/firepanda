@@ -1,6 +1,6 @@
 # 19. Finding a label in an index
 
-Written September 2026, against pandas 3.0.5. This document covers the lookups and the set operations on the `Index` type: the four questions an index answers about itself, the three ways it answers where a label is, the two ways it compares itself against another index, and the four ways two indexes combine. It does not cover the remaining names on issue #154, which are `append`, `delete`, `drop`, `putmask`, the slice locators and the level accessors, and it does not cover the Python facing `Index`.
+Written September 2026, against pandas 3.0.5. This document covers the lookups and the set operations on the `Index` type: the four questions an index answers about itself, the three ways it answers where a label is, the two ways it compares itself against another index, and the four ways two indexes combine. It does not cover the editing operations and the slice locators, which are document 20, nor the level accessors, and it does not cover the Python facing `Index`.
 
 ## Why the lookups come before anything that uses them
 

@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### An index can be edited, and a label can become a slice bound
+
+`Index` gained `append`, `delete`, `insert`, `drop` and `putmask`, which change the labels, and `get_slice_bound`, `slice_locs` and `slice_indexer`, which turn a label into a position. With the lookups and the set operations already there, that is the whole of the flat index apart from the level accessors.
+
+The five editing operations are each a gather or a concatenation over what already existed, and writing them that way rather than as loops over the labels is where their correctness comes from. The gather knows about the validity bitmap, about the offsets in a string column and about every dtype, so inserting a null into a string index works without a line being written about it.
+
+A slice bound is what makes `df.loc["b":"d"]` include both ends while every other range in the library is half open. The left bound of a label is the first row at least it and the right bound is the first row past it, so on `["a", "b", "b", "c"]` the pair for `"b"` is `(1, 3)` and covers both b rows. On a monotonic index that is a binary search, on a descending one it is the same search with both comparisons turned over, and on an index that is neither there is nothing to search for, so the label is looked up instead and a missing or repeated one is refused with an error naming it and saying that sorting the index is the fix.
+
+The monotonic check in front of the search is a linear pass and is not cached, for the same reason `is_unique` is not: an index is copied into every frame derived from it and a remembered answer would have to be invalidated by `take` and `filter`. So a bound is a pass over the labels either way, and what the search buys against the fallback is the per row dtype and null check rather than the pass. Measured on 200,000 rows on a busy machine, an unsorted index costs about eight times a sorted one and a range costs about a thousandth of either, since a bound in a range is `label - start` and two clamps.
+
+`insert` of a missing label keeps the dtype, so `Index([3, 1]).insert(1, null)` is an int64 index with a hole in it where pandas gives float64 with a NaN, because a numpy int64 array has nowhere to record absence and an Arrow column does. That is a visible difference and it is not one we intend to change. `drop` takes `errors="raise"` or `errors="ignore"` with the pandas spelling. Cross dtype promotion is still missing and now missing in three more places, all of which raise in the same words.
+
 ## [0.6.45] - 2026-09-06
 
 Built against Mojo 1.0.0 (ed45d567). A frame now crosses the Python boundary in both directions, `Index` grew the lookups and the set operations that `loc`, `reindex` and `align` are made of, and a group by asking for several reductions stopped reading its ordinals once per reduction.
