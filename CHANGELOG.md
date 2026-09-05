@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### `firepanda.DataFrame({"a": [1, 2, 3]})` works
+
+The first line of every pandas tutorial has an answer. A frame is built from a mapping of column name to values and a series from a sequence, with the type inferred in one pass: bool gives bool, integer gives int64, integer mixed with float gives float64, and text gives string. A `None` is a cleared validity bit and a `float("nan")` is a value that is present, which is the difference an Arrow column can record and a pandas float column cannot.
+
+Both constructors declare the pandas signature in full and refuse `index`, `columns`, `dtype` and `copy` by name, so a caller who passes one is told what is missing rather than that the keyword was unexpected. `firepanda.DataFrame()` and `firepanda.Series()` now make empty ones instead of refusing.
+
+A mixture pandas would resolve with an object column is refused rather than approximated, with the row and the type in the message, because there is no column type here that holds both and guessing which one was meant is how a plausible wrong answer gets made.
+
 ### A column exports itself
 
 `Series` answers `__arrow_c_schema__` and `__arrow_c_array__`, so `pa.array(df["qty"])` and `pl.Series(df["qty"])` hand back the column with no copy and no per element Python object. The exported field carries the series name, which is what Polars picks up as its own. Unlike the frame's export there is nothing to refuse here, since taking a column out of a frame flattens it and there is exactly one array by construction.

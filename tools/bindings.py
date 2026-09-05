@@ -195,6 +195,17 @@ class Exposed:
     init: str | None = None
     """The Mojo `py_init`, or None for a type Python cannot construct."""
 
+    init_params: tuple[tuple[str, str], ...] = ()
+    """The extension constructor's parameters. Narrower than the pandas one on
+    purpose, because the Python layer turns the pandas call into this one."""
+
+    constructed: bool = False
+    """Whether the mixin writes `__init__`. A type that a user constructs has to
+    expose the pandas constructor signature, and that cannot also be the internal
+    hand off that puts a wrapper around an extension object, so the generator
+    emits `_wrap` for the internal one and stays out of the way of the public
+    one. Document 18 section 5."""
+
     bindings: tuple[Binding, ...] = ()
     """The methods on the extension side."""
 
@@ -222,6 +233,8 @@ FRAME = Exposed(
     doc=("A two dimensional labelled data structure with columns of potentially different types."),
     init="PyDataFrame.py_init",
     mixin="DataFrameMixin",
+    constructed=True,
+    init_params=(("data", "object"),),
     bindings=(
         Binding(
             mojo="PyDataFrame.length",
@@ -362,6 +375,9 @@ SERIES = Exposed(
     doc="A one dimensional labelled array holding data of a single type.",
     init="PySeries.py_init",
     module="firepanda.py.series",
+    mixin="SeriesMixin",
+    constructed=True,
+    init_params=(("data", "object"), ("name", "str")),
     bindings=(
         Binding(
             mojo="PySeries.length",
@@ -710,6 +726,12 @@ def stubs() -> str:
     out.append('"""\n')
     for t in TYPES:
         out.append(f"class {t.name}:")
+        if t.init_params:
+            args = "".join(f", {name}: {kind}" for name, kind in t.init_params)
+            out.append(f"    def __init__(self{args}) -> None:")
+            out.append('        """Builds one. The Python layer owns the pandas signature."""')
+            out.append("        ...")
+            out.append("")
         for b in t.bindings:
             args = "".join(f", {name}: {kind}" for name, kind in b.params)
             out.append(f"    def {b.name}(self{args}) -> {b.returns}:")
@@ -765,21 +787,21 @@ def wrapper() -> str:
         out.append(f"class {t.py}{base}:")
         out.extend(_docstring(t.doc, "    "))
         out.append("")
-        out.append('    __slots__ = ("_inner",)')
+        out.append('    __slots__ = ()' if t.mixin else '    __slots__ = ("_inner",)')
         out.append("")
-        if t.init:
-            # `inner` defaults so that `firepanda.DataFrame()` reaches the Mojo
-            # refusal, which says how to build one, rather than a missing
-            # argument complaint about a parameter no user was ever meant to
-            # pass. When construction from Python does get written, this is
-            # where it arrives.
-            out.append(f"    def __init__(self, inner: _firepanda.{t.name} | None = None) -> None:")
-            out.append('        """Wraps an extension object. Not a public entry point."""')
-            out.extend(
-                _guarded(f"inner = _firepanda.{t.name}() if inner is None else inner", "        ")
-            )
-            out.append("        self._inner = inner")
-        else:
+        out.append("    @classmethod")
+        out.append(f"    def _wrap(cls, inner: _firepanda.{t.name}) -> {t.py}:")
+        out.append('        """Puts the wrapper around an extension object.')
+        out.append("")
+        out.append("        Not a public entry point. It allocates without going through")
+        out.append("        __init__ because __init__ is the pandas constructor, which takes")
+        out.append("        data rather than an extension object.")
+        out.append('        """')
+        out.append("        self = object.__new__(cls)")
+        out.append("        self._inner = inner")
+        out.append("        return self")
+        if not t.constructed:
+            out.append("")
             out.append(f"    def __init__(self, inner: _firepanda.{t.name}) -> None:")
             out.append('        """Wraps an extension object. Not a public entry point."""')
             out.append("        self._inner = inner")
@@ -793,7 +815,7 @@ def wrapper() -> str:
                 sig = f", {m.signature}" if m.signature else ""
                 out.append(f"    def {m.name}(self{sig}) -> {m.returns}:")
             out.append(f'        """{m.doc}"""')
-            body = f"{m.wraps}({m.body})" if m.wraps else m.body
+            body = f"{m.wraps}._wrap({m.body})" if m.wraps else m.body
             out.extend(_guarded(f"return {body}", "        "))
 
     for fn in FUNCTIONS:
@@ -806,7 +828,7 @@ def wrapper() -> str:
         out.append(f'    """{fn.doc}"""')
         wrap = fn.returns if fn.returns in {t.py for t in TYPES} else ""
         call = f"_firepanda.{fn.name}({passed})"
-        body = f"return {wrap}({call})" if wrap else f"return {call}"
+        body = f"return {wrap}._wrap({call})" if wrap else f"return {call}"
         out.extend(_guarded(body, "    "))
     return "\n".join(out) + "\n"
 

@@ -32,6 +32,7 @@ from firepanda.io.arrow_c import (
 from firepanda.io.arrow_export import export_frame_array, export_frame_schema
 from firepanda.io.arrow_stream import import_frame, import_stream
 from firepanda.io.read import read_csv
+from firepanda.py.build import frame_from
 from firepanda.py.convert import (
     array_capsule,
     schema_capsule,
@@ -102,27 +103,22 @@ struct PyDataFrame(Movable, Writable):
     def py_init(
         out self: Self, args: PythonObject, kwargs: PythonObject
     ) raises:
-        """Refuses to build a frame from Python.
+        """Builds a frame out of a mapping of column name to values.
 
-        There is no argument shape that makes sense yet. A frame arrives through
-        `read_csv` or `read_parquet` and the constructor that takes columns needs
-        the Python to Arrow conversion that is not written. Raising here is
-        better than accepting nothing and handing back an empty frame, which
-        would look like it worked.
+        One positional argument and nothing else. The pandas constructor takes
+        five and the other four are refused by name on the Python side, which is
+        where the pandas signature lives, because a caller who passes `columns=`
+        should get a message about `columns` rather than a complaint about an
+        unexpected keyword. Document 18 section 4 is why the split is that way
+        round.
 
         Args:
-            args: Positional arguments, of which none are accepted.
-            kwargs: Keyword arguments, of which none are accepted.
+            args: The data, or nothing for an empty frame.
+            kwargs: Keyword arguments, of which none are accepted, because the
+                Python layer has already turned them into the positional one.
         """
-        check_arguments_arity(0, args, "DataFrame")
-        raise tagged(
-            UNSUPPORTED,
-            (
-                "construct a frame with firepanda.read_csv or"
-                " firepanda.read_parquet; building one from columns is not"
-                " wired up yet"
-            ),
-        )
+        check_arguments_arity(1, args, "DataFrame")
+        self = Self(ArcPointer(frame_from(args[0])))
 
     @staticmethod
     def _frame(py_self: PythonObject) -> Pointer[Self, MutAnyOrigin]:

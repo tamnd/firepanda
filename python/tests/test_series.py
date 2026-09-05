@@ -128,21 +128,15 @@ def test_a_key_that_is_not_read_yet_says_so(firepanda: ModuleType, tmp_path: Pat
     assert "column name" in str(caught.value)
 
 
-def test_a_series_cannot_be_constructed_from_python_yet(firepanda: ModuleType) -> None:
-    """And says what to do instead, rather than handing back an empty column.
+def test_an_empty_constructor_gives_an_empty_one(firepanda: ModuleType) -> None:
+    """`firepanda.Series()` and `firepanda.DataFrame()` are what pandas says they are.
 
-    `firepanda.Series()` reaching this at all is the point. The generated wrapper
-    takes the extension object as its argument, so before it had a default the
-    answer to an empty call was a complaint about a missing parameter that no
-    user was ever meant to pass. It now reaches the refusal underneath, which
-    says what to do instead, and `DataFrame` gained the same thing.
+    This used to be a refusal, because the generated wrapper took the extension
+    object as its only argument and there was no conversion behind it. Both
+    halves of that are gone now.
     """
-    with pytest.raises(NotImplementedError) as caught:
-        firepanda.Series()
-    assert "df['name']" in str(caught.value)
-    with pytest.raises(NotImplementedError) as caught:
-        firepanda.DataFrame()
-    assert "read_csv" in str(caught.value)
+    assert len(firepanda.Series()) == 0
+    assert firepanda.DataFrame().shape == (0, 0)
 
 
 def test_a_series_renders(firepanda: ModuleType, tmp_path: Path) -> None:

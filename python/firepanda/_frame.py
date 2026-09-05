@@ -18,7 +18,7 @@ nothing when nothing raises, which is measured in document 14.
 from __future__ import annotations
 
 from . import _firepanda
-from ._pandas import DataFrameMixin
+from ._pandas import DataFrameMixin, SeriesMixin
 from .errors import translate
 
 __all__ = ["DataFrame", "Series"]
@@ -29,15 +29,19 @@ class DataFrame(DataFrameMixin):
     types.
     """
 
-    __slots__ = ("_inner",)
+    __slots__ = ()
 
-    def __init__(self, inner: _firepanda.DataFrame | None = None) -> None:
-        """Wraps an extension object. Not a public entry point."""
-        try:
-            inner = _firepanda.DataFrame() if inner is None else inner
-        except Exception as error:
-            raise translate(error) from None
+    @classmethod
+    def _wrap(cls, inner: _firepanda.DataFrame) -> DataFrame:
+        """Puts the wrapper around an extension object.
+
+        Not a public entry point. It allocates without going through
+        __init__ because __init__ is the pandas constructor, which takes
+        data rather than an extension object.
+        """
+        self = object.__new__(cls)
         self._inner = inner
+        return self
 
     def __len__(self) -> int:
         """The number of rows, so that len(df) works."""
@@ -79,14 +83,14 @@ class DataFrame(DataFrameMixin):
     def head(self, n: int = 5) -> DataFrame:
         """The first n rows."""
         try:
-            return DataFrame(self._inner.head(n))
+            return DataFrame._wrap(self._inner.head(n))
         except Exception as error:
             raise translate(error) from None
 
     def tail(self, n: int = 5) -> DataFrame:
         """The last n rows."""
         try:
-            return DataFrame(self._inner.tail(n))
+            return DataFrame._wrap(self._inner.tail(n))
         except Exception as error:
             raise translate(error) from None
 
@@ -105,18 +109,22 @@ class DataFrame(DataFrameMixin):
             raise translate(error) from None
 
 
-class Series:
+class Series(SeriesMixin):
     """A one dimensional labelled array holding data of a single type."""
 
-    __slots__ = ("_inner",)
+    __slots__ = ()
 
-    def __init__(self, inner: _firepanda.Series | None = None) -> None:
-        """Wraps an extension object. Not a public entry point."""
-        try:
-            inner = _firepanda.Series() if inner is None else inner
-        except Exception as error:
-            raise translate(error) from None
+    @classmethod
+    def _wrap(cls, inner: _firepanda.Series) -> Series:
+        """Puts the wrapper around an extension object.
+
+        Not a public entry point. It allocates without going through
+        __init__ because __init__ is the pandas constructor, which takes
+        data rather than an extension object.
+        """
+        self = object.__new__(cls)
         self._inner = inner
+        return self
 
     def __len__(self) -> int:
         """The number of rows, so that len(s) works."""
@@ -174,14 +182,14 @@ class Series:
     def head(self, n: int = 5) -> Series:
         """The first n rows."""
         try:
-            return Series(self._inner.head(n))
+            return Series._wrap(self._inner.head(n))
         except Exception as error:
             raise translate(error) from None
 
     def tail(self, n: int = 5) -> Series:
         """The last n rows."""
         try:
-            return Series(self._inner.tail(n))
+            return Series._wrap(self._inner.tail(n))
         except Exception as error:
             raise translate(error) from None
 
@@ -225,7 +233,7 @@ class Series:
 def read_csv(filepath_or_buffer: str) -> DataFrame:
     """Reads a CSV file into a frame."""
     try:
-        return DataFrame(_firepanda.read_csv(filepath_or_buffer))
+        return DataFrame._wrap(_firepanda.read_csv(filepath_or_buffer))
     except Exception as error:
         raise translate(error) from None
 
@@ -233,7 +241,7 @@ def read_csv(filepath_or_buffer: str) -> DataFrame:
 def from_arrow(source: object) -> DataFrame:
     """Builds a frame from a pyarrow, Polars or pandas frame."""
     try:
-        return DataFrame(_firepanda.from_arrow(source))
+        return DataFrame._wrap(_firepanda.from_arrow(source))
     except Exception as error:
         raise translate(error) from None
 

@@ -118,10 +118,20 @@ def test_the_python_class_delegates_and_does_not_hold_state(firepanda: ModuleTyp
     Python object being a thin front for a Mojo value, and an accidental
     `__dict__` is how a second, divergent copy of the state gets somewhere by
     mistake.
+
+    The slot is declared on the hand written mixin rather than on the generated
+    class, because the constructor is on the mixin and a class cannot assign to
+    a slot it does not own. What matters is the property rather than where the
+    tuple is written, so this asserts the property: an instance has one attribute
+    and no dictionary to grow a second one in.
     """
-    cls = firepanda.DataFrame
-    assert cls.__slots__ == ("_inner",)
-    assert not hasattr(cls, "__dict__") or "__dict__" not in cls.__slots__
+    for name in ("DataFrame", "Series"):
+        cls = getattr(firepanda, name)
+        assert cls.__slots__ == ()
+        instance = cls()
+        assert not hasattr(instance, "__dict__")
+        with pytest.raises(AttributeError):
+            instance.something_else = 1
 
 
 def test_a_frame_read_from_csv_answers_the_pandas_way(
