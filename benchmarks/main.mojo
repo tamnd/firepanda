@@ -1568,6 +1568,15 @@ def bench_nulls(mut harness: Harness) raises:
     one it is nothing, which makes the pair of rows a direct reading of how much
     the word at a time shortcut is worth.
 
+    `nulls/ffill_float` and `nulls/ffill_nans` are the same scan on the dtype
+    where a NaN is missing too. The shortcut has to know the answer for a whole
+    block before it decides to copy it, so the word is corrected first, and on a
+    float column with no NaN in it that is a vector `isnan` per block and no
+    change to the word, which is what `nulls/ffill_float` against `nulls/ffill`
+    measures. `nulls/ffill_nans` is one in eight NaN, so no block is all present
+    and the scan runs a row at a time throughout, which is the same worst case
+    `nulls/is_null_nans` is and is not a shape real columns have.
+
     `concat/*` is pure memory traffic. Two parts and eight parts of the same
     total height do the same amount of copying, so the difference between them is
     per-part overhead, and the frame row adds a schema walk and three columns.
@@ -1668,6 +1677,20 @@ def bench_nulls(mut harness: Harness) raises:
         keep(len(out))
 
     harness.record("nulls/ffill_sparse", "rows", rows, ffill_sparse)
+
+    def ffill_float() raises {imm floats, imm rows}:
+        keep(rows)
+        var out = fill_forward(floats)
+        keep(len(out))
+
+    harness.record("nulls/ffill_float", "rows", rows, ffill_float)
+
+    def ffill_nans() raises {imm nanned, imm rows}:
+        keep(rows)
+        var out = fill_forward(nanned)
+        keep(len(out))
+
+    harness.record("nulls/ffill_nans", "rows", rows, ffill_nans)
 
     # Two lists of parts covering the same total height, so the difference
     # between the two rows is per-part overhead and nothing else.

@@ -915,7 +915,14 @@ def coalesce_scalar[dt: DType](a: Array[dt], b: Array[dt]) -> Array[dt]:
 def fill_scalar[
     dt: DType, //, forward: Bool
 ](col: Array[dt], limit: Int) -> Array[dt]:
-    """Carries the nearest present value over the nulls, one row at a time.
+    """Carries the nearest present value over the missing rows, one at a time.
+
+    `_is_there` and not `is_valid`, so a NaN is filled over and is never carried,
+    which is the rule the kernel gets to by folding a vector `isnan` into the
+    block copy and testing the value inline in the row loop. This walks out from
+    each missing row until it finds one that is there, which cannot get a word
+    boundary wrong because it has no words, and cannot get the fold wrong because
+    it has no blocks. See #170.
 
     Args:
         col: The column.
@@ -926,11 +933,12 @@ def fill_scalar[
         forward: True to carry from earlier rows, false to carry from later ones.
 
     Returns:
-        A column of the same height.
+        A column of the same height, with a row that could not be filled spelled
+        the way the dtype spells missing, as in the kernel.
     """
     var out = Array[dt](len(col))
     for i in range(len(col)):
-        if col.is_valid(i):
+        if _is_there(col, i):
             out.set_valid(i, col[i])
             continue
 
@@ -939,14 +947,17 @@ def fill_scalar[
         var step = i - 1 if forward else i + 1
         while step >= 0 and step < len(col):
             run += 1
-            if col.is_valid(step):
+            if _is_there(col, step):
                 if limit <= 0 or run <= limit:
                     out.set_valid(i, col[step])
                     found = True
                 break
             step = step - 1 if forward else step + 1
         if not found:
-            out.set_null(i)
+            comptime if dt.is_floating_point():
+                out.set_valid(i, nan[dt]())
+            else:
+                out.set_null(i)
     return out^
 
 

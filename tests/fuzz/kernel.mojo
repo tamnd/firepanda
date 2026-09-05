@@ -61,6 +61,7 @@ from firepanda.kernel import (
 )
 from firepanda.kernel.arith import OP_ADD, OP_MUL, OP_SUB
 from firepanda.kernel.compare import CMP_GE, CMP_LT
+from firepanda.kernel.nulls import fill_backward, fill_forward
 from firepanda.kernel.scalar import (
     add_scalar,
     argsort_scalar,
@@ -71,6 +72,7 @@ from firepanda.kernel.scalar import (
     divide_const_scalar,
     divide_scalar,
     equal_scalar,
+    fill_scalar,
     filter_scalar,
     group_scalar,
     group_top_scalar,
@@ -289,6 +291,96 @@ def nan_reductions[dt: DType](mut rng: Rng, step: Int, seed: UInt64) raises:
             seed,
             "mean_of over NaN",
             String(avg.value, " but twin has ", avg_twin[0]),
+        )
+
+    nan_fills(a, step, seed)
+
+
+def nan_fills[dt: DType](a: Array[dt], step: Int, seed: UInt64) raises:
+    """Checks both fills over a column with NaNs in it against their twin.
+
+    This is the check the fills did not have at all before, and it is the one
+    they most needed. The kernel decides for a whole block of sixty four rows at
+    once whether it can copy them and take the carry from the end, and the twin
+    walks out from each missing row on its own, so the two disagree first at a
+    word boundary and the length here is drawn from a range whose top is prime
+    precisely so that the boundary lands in a different place every case.
+
+    The limit is drawn as well, because a NaN is a row of the run the limit is
+    counting rather than a value that resets it, and a fill that got that wrong
+    would fill one row too many and only on a float column.
+
+    Args:
+        a: The column, which has NaNs in it.
+        step: The case number.
+        seed: The seed.
+
+    Parameters:
+        dt: The dtype to test at.
+
+    Raises:
+        If either fill disagrees with its twin.
+    """
+    var limit = step % 4
+    var forward = fill_forward(a, limit)
+    var forward_twin = fill_scalar[forward=True](a, limit)
+    var backward = fill_backward(a, limit)
+    var backward_twin = fill_scalar[forward=False](a, limit)
+
+    for i in range(len(a)):
+        # A NaN is what missing looks like coming out of a fill on a float
+        # column, so the comparison is on which rows are a NaN and then on the
+        # values of the rest. Comparing the values first would call every
+        # missing row a difference, since a NaN is not equal to itself.
+        if isnan(forward[i]) != isnan(forward_twin[i]):
+            fail(
+                step,
+                seed,
+                "fill_forward over NaN",
+                String("row ", i, " disagrees about being missing"),
+            )
+        if not isnan(forward[i]) and forward[i] != forward_twin[i]:
+            fail(
+                step,
+                seed,
+                "fill_forward over NaN",
+                String(
+                    "row ",
+                    i,
+                    ": ",
+                    forward[i],
+                    " but twin has ",
+                    forward_twin[i],
+                ),
+            )
+        if isnan(backward[i]) != isnan(backward_twin[i]):
+            fail(
+                step,
+                seed,
+                "fill_backward over NaN",
+                String("row ", i, " disagrees about being missing"),
+            )
+        if not isnan(backward[i]) and backward[i] != backward_twin[i]:
+            fail(
+                step,
+                seed,
+                "fill_backward over NaN",
+                String(
+                    "row ",
+                    i,
+                    ": ",
+                    backward[i],
+                    " but twin has ",
+                    backward_twin[i],
+                ),
+            )
+
+    if forward.null_count() != 0 or backward.null_count() != 0:
+        fail(
+            step,
+            seed,
+            "fill over NaN",
+            "a float column came out of a fill carrying a null",
         )
 
 

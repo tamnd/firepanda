@@ -20,6 +20,7 @@ the two answers differ. That is the property, not a coincidence.
 """
 
 from std.math import isnan, nan
+from std.math import isnan, nan
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from firepanda.array.any import AnyArray, borrow_columns
@@ -700,6 +701,167 @@ def test_is_null_agrees_with_its_twin_on_a_float_column() raises:
         missing,
         "the count and the mask agree on how many there are",
     )
+
+
+def floats(
+    values: List[Float64], missing: List[Int]
+) raises -> Array[DType.float64]:
+    """Builds a float64 column with nulls at the given positions.
+
+    The float twin of `gapped`, and the reason there are two of them rather than
+    one parameterized one is that a float column has two spellings of missing and
+    a test that wants a NaN writes it as a value here rather than as a position.
+
+    Args:
+        values: The values, one per row. Write a NaN where a NaN is wanted.
+        missing: Which rows are null. Their value is ignored.
+
+    Returns:
+        The column.
+    """
+    var col = Array[DType.float64](len(values))
+    for i in range(len(values)):
+        col.set_valid(i, values[i])
+    for m in range(len(missing)):
+        col.set_null(missing[m])
+    return col^
+
+
+def test_a_fill_carries_over_a_nan_and_not_from_one() raises:
+    # The two halves of the bug in one column. Row 1 is a NaN with its validity
+    # bit set, so a fill that only reads the bitmap leaves it standing, and then
+    # carries it into row 2, which is a real null. One NaN turning a gap that had
+    # a 5 behind it into a run of NaN is the part that does the damage.
+    var col = floats([5.0, nan[DType.float64](), 0.0, 8.0], [2])
+    var out = fill_forward(col)
+    assert_equal(out[0], 5.0, "row 0")
+    assert_equal(out[1], 5.0, "the NaN is filled over")
+    assert_equal(out[2], 5.0, "the null after it gets the 5 and not the NaN")
+    assert_equal(out[3], 8.0, "row 3")
+    assert_equal(out.null_count(), 0, "nothing left missing")
+
+
+def test_a_backward_fill_carries_over_a_nan_and_not_from_one() raises:
+    # The same shape read the other way, since the two directions are separate
+    # passes over the same corrected word and either one could be the one that
+    # was not changed.
+    var col = floats([0.0, nan[DType.float64](), 8.0, 3.0], [0])
+    var out = fill_backward(col)
+    assert_equal(out[0], 8.0, "row 0 carried back past the NaN")
+    assert_equal(out[1], 8.0, "the NaN is filled over")
+    assert_equal(out[2], 8.0, "row 2")
+    assert_equal(out[3], 3.0, "row 3")
+
+
+def test_a_float_row_that_cannot_be_filled_comes_back_as_a_nan() raises:
+    # pandas has no null on a float column, so this is what it gives, and it is
+    # the same rule the reductions took in #179: keep the column's dtype and
+    # answer with the missing that dtype has.
+    var col = floats([0.0, 0.0, 7.0], [0, 1])
+    var out = fill_forward(col)
+    assert_true(isnan(out[0]), "row 0 has nothing behind it")
+    assert_true(isnan(out[1]), "row 1 has nothing behind it either")
+    assert_equal(out[2], 7.0, "row 2")
+    assert_equal(out.null_count(), 0, "and it is a NaN rather than a null")
+
+
+def test_an_int_row_that_cannot_be_filled_is_still_a_null() raises:
+    # The other half of the dtype rule, stated here rather than left to be
+    # inferred from the int tests above, because the point of it is the contrast.
+    var col = gapped([Int64(0), 0, 7], [0, 1])
+    var out = fill_forward(col)
+    assert_equal(out.null_count(), 2, "an int64 column has no NaN to write")
+
+
+def test_a_float_column_with_nothing_to_carry_fills_to_nothing() raises:
+    # Every row missing and no direction to carry from, which is the shape that
+    # closed `basics/ffill` on the all null float frame. Both spellings of
+    # missing are in it and both come back as the one spelling pandas has.
+    var col = floats([nan[DType.float64](), 0.0, nan[DType.float64]()], [1])
+    var forward = fill_forward(col)
+    var backward = fill_backward(col)
+    for i in range(3):
+        assert_true(isnan(forward[i]), "forward row " + String(i))
+        assert_true(isnan(backward[i]), "backward row " + String(i))
+    assert_equal(forward.null_count(), 0, "no nulls forward")
+    assert_equal(backward.null_count(), 0, "no nulls backward")
+
+
+def test_a_nan_counts_against_the_fill_limit() raises:
+    # A NaN is missing, so it is a row of the run the limit is counting rather
+    # than a present value that resets it. Getting this wrong fills one row too
+    # many and only on a float column, which is the kind of difference that
+    # survives a long time.
+    var col = floats([4.0, nan[DType.float64](), 0.0, 0.0], [2, 3])
+    var out = fill_forward(col, 2)
+    assert_equal(out[1], 4.0, "one row into the run")
+    assert_equal(out[2], 4.0, "two rows into the run")
+    assert_true(isnan(out[3]), "three rows is past the limit")
+
+
+def test_a_float_fill_crosses_a_word_boundary() raises:
+    # The float version of the seam test above. The all present shortcut copies a
+    # whole block and takes the carry from the end of it, and on a float column
+    # that block is only all present after the word has been corrected, so the
+    # NaN at row 63 is the one that would be copied through and then carried.
+    var values = List[Float64]()
+    for i in range(200):
+        values.append(Float64(i))
+    values[63] = nan[DType.float64]()
+    values[64] = nan[DType.float64]()
+    var col = floats(values, [128])
+
+    var out = fill_forward(col)
+    assert_equal(out[62], 62.0, "the last real value in the first word")
+    assert_equal(out[63], 62.0, "the NaN at the end of the first word")
+    assert_equal(out[64], 62.0, "carried across the seam and not a NaN")
+    assert_equal(out[65], 65.0, "the first real value after it")
+    assert_equal(out[128], 127.0, "the null inside the third word")
+    assert_equal(out.null_count(), 0, "nothing left missing")
+
+
+def test_the_fills_agree_with_their_twin_on_a_float_column() raises:
+    # Three hundred rows so the column runs past the fourth bitmap word, a NaN
+    # every seventh row and a cleared bit every fifth, so most words hold both
+    # spellings of missing and the all present shortcut is entered as well as
+    # skipped. The twin has no word loop at all, which is what makes this worth
+    # running: the kernel corrects a word of sixty four rows before it looks at
+    # the block, and the twin walks out from each missing row on its own.
+    var col = Array[DType.float64](300)
+    for i in range(300):
+        if i % 7 == 3:
+            col.set_valid(i, nan[DType.float64]())
+        elif i % 5 == 0:
+            col.set_null(i)
+        else:
+            col.set_valid(i, Float64(i))
+
+    for limit in [0, 1, 3]:
+        var fast_ffill = fill_forward(col, limit)
+        var slow_ffill = fill_scalar[forward=True](col, limit)
+        var fast_bfill = fill_backward(col, limit)
+        var slow_bfill = fill_scalar[forward=False](col, limit)
+        for i in range(300):
+            assert_equal(
+                isnan(fast_ffill[i]),
+                isnan(slow_ffill[i]),
+                "ffill missing row " + String(i),
+            )
+            if not isnan(fast_ffill[i]):
+                assert_equal(
+                    fast_ffill[i], slow_ffill[i], "ffill row " + String(i)
+                )
+            assert_equal(
+                isnan(fast_bfill[i]),
+                isnan(slow_bfill[i]),
+                "bfill missing row " + String(i),
+            )
+            if not isnan(fast_bfill[i]):
+                assert_equal(
+                    fast_bfill[i], slow_bfill[i], "bfill row " + String(i)
+                )
+        assert_equal(fast_ffill.null_count(), 0, "the kernel writes no null")
+        assert_equal(slow_ffill.null_count(), 0, "and neither does the twin")
 
 
 def main() raises:

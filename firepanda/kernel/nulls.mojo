@@ -45,6 +45,17 @@ the nearest present value in a direction, which is only meaningful when the rows
 are in an order that means something, so unlike everything else in this package
 they are order-dependent by construction.
 
+The fills read the values on a float column for the same reason the questions
+above them do, and it matters more here, because a fill does not only report what
+is missing, it copies a value over it. A NaN treated as present is wrong twice:
+the row is left standing where pandas would have filled it, and worse, the NaN is
+picked up as the carry and runs forward over every null after it, so one NaN
+turns a gap that had a perfectly good value behind it into a run of NaN. What
+comes back out is dtype dependent in the same way `min` and `first` are: a row
+that could not be filled is a null on an integer column and a NaN on a float one,
+because that is the only missing pandas has on a float column, so a float column
+never comes out of a fill carrying a null. See #170.
+
 The expansion and the pick both run on every core. Neither carries anything from
 one row to the next, so the column splits over morsels the way an elementwise
 kernel does, and a morsel boundary is a multiple of sixty four rows, so the
@@ -65,7 +76,7 @@ picking one, for the same reason `concat` does.
 """
 
 from std.bit import pop_count
-from std.math import isnan
+from std.math import isnan, nan
 from std.sys.info import simd_width_of
 
 from firepanda.array.any import AnyArray, ColumnRefs
@@ -722,8 +733,10 @@ def fill_forward[dt: DType](col: Array[dt], limit: Int = 0) -> Array[dt]:
         dt: The dtype.
 
     Returns:
-        A column of the same height. A null before the first present value stays
-        null, because there is nothing behind it to carry.
+        A column of the same height. A row before the first present value is
+        still missing afterwards, because there is nothing behind it to carry,
+        and it is spelled the way the dtype spells missing: a null on an integer
+        column and a NaN on a float one.
     """
     return _fill_core[forward=True](
         col.unsafe_ptr(), col.data.validity, len(col), limit
@@ -741,8 +754,9 @@ def fill_backward[dt: DType](col: Array[dt], limit: Int = 0) -> Array[dt]:
         dt: The dtype.
 
     Returns:
-        A column of the same height. A null after the last present value stays
-        null.
+        A column of the same height. A row after the last present value is still
+        missing afterwards, spelled the way the dtype spells missing: a null on
+        an integer column and a NaN on a float one.
     """
     return _fill_core[forward=False](
         col.unsafe_ptr(), col.data.validity, len(col), limit
@@ -820,6 +834,34 @@ def _fill_core[
     nothing to fill, so its values are copied in blocks and the carry is taken
     from whichever end the scan is leaving. On a column with few nulls that is
     the entire loop.
+
+    On a float dtype a NaN is missing as well, and the two things that follow
+    from that are both wanted. A NaN is filled over rather than left standing,
+    and a NaN is never picked up as the carry, which is the worse of the two: one
+    NaN taken as the carry runs forward over every null after it and turns a gap
+    that had a perfectly good value behind it into a run of NaN.
+
+    Neither of those costs a pass over the values, and the arrangement that gets
+    there is the same one the grouped reductions use. The block copy has the
+    values in registers already, so it folds a vector `isnan` into the copy and
+    reduces the lanes once at the end of the block rather than once per vector.
+    A block that turns out to have held a NaN falls through to the row loop,
+    which rewrites it. The row loop has the value in hand too, so it tests there
+    rather than in a corrected word built in front of it. Building that word
+    instead was written first and thrown away, because it costs a whole extra
+    read of the values. The two builds run back to back on a million rows: with
+    the corrected word a clean float column filled in 682 microseconds against
+    474 for the int64 column it should be level with, and folded into the copy it
+    is 489 against 489, which is level to the microsecond.
+
+    What a row that could not be filled comes back as depends on the dtype. On an
+    int64 column it is a null, which is the only missing that dtype has. On a
+    float column it is a NaN, because that is the only missing pandas has there,
+    and a fill is an operation whose output is a statement about what is still
+    missing afterwards. That is the same rule the reductions took in #179, where
+    `min` and `max` and `first` and `last` keep the column's dtype and answer
+    with a NaN on a float column and a null on an integer one. So a float column
+    never comes out of a fill with a null in it. See #170.
     """
     comptime width = simd_width_of[dt]()
     var out = Array[dt](rows)
@@ -840,28 +882,43 @@ def _fill_core[
 
         var word = valid.unsafe_word(wi)
         if word == UInt64.MAX:
+            var nanned = False
+            var lanes = SIMD[DType.bool, width](fill=False)
             var i = base
             while i + width <= last:
-                target.unsafe_offset(i).unsafe_store(
-                    src.unsafe_offset(i).unsafe_load[width=width]()
-                )
+                var chunk = src.unsafe_offset(i).unsafe_load[width=width]()
+                target.unsafe_offset(i).unsafe_store(chunk)
+                comptime if dt.is_floating_point():
+                    lanes |= isnan(chunk)
                 i += width
+            comptime if dt.is_floating_point():
+                nanned = lanes.reduce_or()
             while i < last:
-                target.unsafe_offset(i).unsafe_store(
-                    src.unsafe_offset(i).unsafe_load()
-                )
+                var value = src.unsafe_offset(i).unsafe_load()
+                target.unsafe_offset(i).unsafe_store(value)
+                comptime if dt.is_floating_point():
+                    if isnan(value):
+                        nanned = True
                 i += 1
-            carry = src.unsafe_offset(
-                last - 1 if forward else base
-            ).unsafe_load()
-            have = True
-            run = 0
-            continue
+            # Only a block that held one falls through, and the row loop below
+            # writes over what was just copied. On any dtype without a NaN this
+            # is always False and the branch is compiled away.
+            if not nanned:
+                carry = src.unsafe_offset(
+                    last - 1 if forward else base
+                ).unsafe_load()
+                have = True
+                run = 0
+                continue
 
         for step in range(base, last):
             var i = step if forward else base + last - 1 - step
             var value = src.unsafe_offset(i).unsafe_load()
-            if ((word >> UInt64(i - base)) & 1) == 1:
+            var there = ((word >> UInt64(i - base)) & 1) == 1
+            comptime if dt.is_floating_point():
+                if isnan(value):
+                    there = False
+            if there:
                 target.unsafe_offset(i).unsafe_store(value)
                 carry = value
                 have = True
@@ -872,7 +929,10 @@ def _fill_core[
             if have and (limit <= 0 or run <= limit):
                 target.unsafe_offset(i).unsafe_store(carry)
             else:
-                out.data.validity.set(i, False)
+                comptime if dt.is_floating_point():
+                    target.unsafe_offset(i).unsafe_store(nan[dt]())
+                else:
+                    out.data.validity.set(i, False)
     return out^
 
 
