@@ -1484,6 +1484,42 @@ def bench_index(mut harness: Harness) raises:
         "index/is_monotonic_increasing", "rows", rows, index_monotonic
     )
 
+    # The two shapes an alignment actually hits, and the gap between them is the
+    # whole argument for the short circuits. `index/union_disjoint` does the work:
+    # concatenate, factorize, count each ordinal on each side and then sort the
+    # result, which is a sort on top of everything `get_indexer_labels` already
+    # does. `index/union_equal` is two frames labelled the same being added
+    # together, which is the common case by a wide margin, and it returns without
+    # building anything because `equals` compared two label sets and stopped. Both
+    # are on materialized indexes, because two ranges would compare by start and
+    # length and the second row would measure nothing at all.
+    #
+    # Read the ratio rather than the two numbers. The pair was first measured on a
+    # machine with several other builds running on it, where the whole `index/`
+    # group carried an interquartile range around twenty per cent and the absolute
+    # figures moved by more than a factor of two between runs. The ratio did not:
+    # the short circuit is worth about nineteen times the general path, and what
+    # it does not save is the copy of the labels it hands back, which is the 12 ns
+    # a row `index/union_equal` is made of.
+    var apart = Array[DType.int64](rows)
+    for i in range(rows):
+        apart[i] = Int64(i + rows // 2)
+    var shifted = Index(AnyArray(apart^), Optional[String]())
+
+    def union_disjoint() raises {imm materialized, imm shifted}:
+        keep(materialized.length)
+        var out = materialized.union(shifted)
+        keep(out.length)
+
+    harness.record("index/union_disjoint", "rows", rows, union_disjoint)
+
+    def union_equal() raises {imm materialized}:
+        keep(materialized.length)
+        var out = materialized.union(materialized)
+        keep(out.length)
+
+    harness.record("index/union_equal", "rows", rows, union_equal)
+
 
 def bench_hash(mut harness: Harness) raises:
     """Measures the hash table, and measures whether it was worth writing.
