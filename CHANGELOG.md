@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### `Series.argsort` returns int64, and the kernel keeps its uint32
+
+The permutation a sort produces is uint32 here, one value per row, rewritten in full on every pass, and it is the largest temporary in the sort path. pandas returns int64 from `Series.argsort`, because numpy's `argsort` returns the platform index type and pandas uses a negative position as its sentinel for a row that is not there. firepanda has no such sentinel, a null is placed by `nulls_first` rather than removed and marked, so the sign is dead weight and on a ten million row sort the wider form is eighty megabytes of ordinals rather than forty.
+
+So the two do not have to agree everywhere, and now they do not. The kernel is unchanged. `Series.argsort`, which is the one place a user reads the permutation rather than a sort consuming it, widens on the way out, which is one pass over an array the sort has already been over many times. `Series.sort_values` calls `argsort_any` directly and pays nothing. `DataFrame.argsort` is unchanged and stays uint32 too, because pandas has no `DataFrame.argsort` and there is nobody to match.
+
+Found by the conformance suite, which reported `dtype uint32, expected int64` on `stats/argsort` for two corpus frames with the values correct in both. One of the two passes completely now. The other turned out to be hiding something more interesting behind the dtype: `keys_10` has one duplicated value in ten thousand rows, firepanda's sort is stable and puts the earlier row first, and pandas' default `argsort` is a quicksort that puts the later one first. `Series.argsort(kind="stable")` in pandas gives firepanda's answer exactly. Nothing is changed here for that, because pandas documents its default as not stable and a stable answer is one of the answers an unstable sort is allowed to give.
+
 ### The join's ordinal list is not zeroed either
 
 The same thing as the gather, one layer up. A join gives both sides one list of ordinals, one entry per row of the left side followed by one per row of the right, and it allocated that list zeroed. Nothing reads a zero out of it: the build side writes its own stretch and the probe side writes the rest, between them every slot. So the zeroing was a pass over both sides that only cost, and since the probe half is written by every core at once, it was also the pass that put most of the list on one core before the others wrote to it.
