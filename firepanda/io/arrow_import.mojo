@@ -80,11 +80,14 @@ from .arrow_c import (
 )
 
 
-def _format_string(schema: ArrowSchema) raises -> String:
+def format_string(schema: ArrowSchema) raises -> String:
     """Reads a schema's format string into memory firepanda owns.
 
     Copied rather than borrowed because the schema is released before the
     imported column is returned, and the format string dies with it.
+
+    Public because `arrow_stream.mojo` reads the format string of every child of
+    a struct schema before any of them reaches this file.
 
     Args:
         schema: The schema.
@@ -149,6 +152,36 @@ def _bytes_at(
     if not slot:
         raise Error(String("arrow: buffer ", i, " is null and must not be"))
     return slot.value().unsafe_bitcast[UInt8]()
+
+
+def _sizes_at(
+    array: ArrowArray, variadic: Int
+) raises -> Pointer[Int64, MutUntrackedOrigin]:
+    """Reads the lengths of a view array's data buffers.
+
+    That list is what makes it possible to check a view before following it. A
+    view is three numbers a stranger chose, and following one without checking is
+    an out of bounds read waiting for a malformed file.
+
+    A producer with no data buffers is allowed to leave the list null, and Polars
+    does, so the pointer returned in that case is the views buffer instead. It is
+    never read: with no data buffers no view can legally be long, so every caller
+    raises on the buffer index before it reaches the length. Mojo's `Pointer` has
+    no null to return instead.
+
+    Args:
+        array: The array.
+        variadic: How many data buffers it has, which the caller has computed.
+
+    Returns:
+        One length per data buffer.
+
+    Raises:
+        Error: If the array has data buffers but no list of their lengths.
+    """
+    if variadic == 0:
+        return _bytes_at(array, 1).unsafe_bitcast[Int64]()
+    return _bytes_at(array, Int(array.n_buffers) - 1).unsafe_bitcast[Int64]()
 
 
 def _import_validity(array: ArrowArray, length: Int) raises -> Bitmap:
@@ -309,13 +342,7 @@ def _import_views(
         .unsafe_offset(Int(array.offset))
     )
 
-    # The lengths of the producer's data buffers, which is what makes it possible
-    # to check a view before following it. A view is three numbers a stranger
-    # chose, and following one without checking is an out of bounds read waiting
-    # for a malformed file.
-    var sizes = _bytes_at(array, Int(array.n_buffers) - 1).unsafe_bitcast[
-        Int64
-    ]()
+    var sizes = _sizes_at(array, variadic)
 
     var needed = 0
     for i in range(length):
@@ -585,12 +612,16 @@ def _check(array: ArrowArray, format: StringSlice) raises:
 
     var expected: Int64
     if format == "vu" or format == "vz":
-        # Validity, views, at least one data buffer and the sizes. A producer may
-        # have any number of data buffers, so this is a floor rather than a count.
-        if array.n_buffers < 4:
+        # Validity, views and the sizes, plus a data buffer per variadic block. A
+        # producer may have any number of those and is allowed to have none, which
+        # is what Polars hands over for a column whose every string is short
+        # enough to sit inside its view. So three is the floor rather than four,
+        # and a column that arrives with three buffers is one that cannot legally
+        # contain a long view.
+        if array.n_buffers < 3:
             raise Error(
                 String(
-                    "arrow: a view column needs at least four buffers, got ",
+                    "arrow: a view column needs at least three buffers, got ",
                     array.n_buffers,
                 )
             )
@@ -781,9 +812,7 @@ def _plan_views(array: ArrowArray, length: Int, whole: Bool) raises -> Int:
         .unsafe_bitcast[StringView]()
         .unsafe_offset(Int(array.offset))
     )
-    var sizes = _bytes_at(array, Int(array.n_buffers) - 1).unsafe_bitcast[
-        Int64
-    ]()
+    var sizes = _sizes_at(array, variadic)
 
     var needed = 0
     for i in range(length):
@@ -933,9 +962,7 @@ def _fill_views(
     var target = (
         sink.values.unsafe_ptr().unsafe_bitcast[StringView]().unsafe_offset(at)
     )
-    var sizes = _bytes_at(array, Int(array.n_buffers) - 1).unsafe_bitcast[
-        Int64
-    ]()
+    var sizes = _sizes_at(array, variadic)
 
     if whole and variadic == 1 and array.offset == 0:
         # The producer's column is already shaped like ours, so the views and the
@@ -1145,7 +1172,7 @@ def import_array(
 
     var format: String
     try:
-        format = _format_string(schema)
+        format = format_string(schema)
     except error:
         release_array(array)
         release_schema(schema)

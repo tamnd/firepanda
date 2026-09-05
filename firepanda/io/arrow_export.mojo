@@ -91,6 +91,7 @@ from firepanda.dtype.logical import LogicalType
 
 from .arrow_c import (
     ARROW_FLAG_NULLABLE,
+    STRUCT_FORMAT,
     ArrayPtr,
     ArrowArray,
     ArrowSchema,
@@ -103,9 +104,6 @@ from .arrow_c import (
     release_schema,
     schema_release_callback,
 )
-
-comptime STRUCT_FORMAT = "+s"
-"""The Arrow format string for a struct, which is what a frame is."""
 
 
 struct _SchemaBox(Movable):

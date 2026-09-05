@@ -78,4 +78,4 @@ Document 07 section 8 asks that `to_pandas`, `to_polars` and passing the frame t
 
 DuckDB does not, and the reason is worth recording because it is not a bug in any of this. DuckDB's replacement scan and its `from_arrow` both look for `__arrow_c_stream__` and neither accepts an object that offers only `__arrow_c_array__`. So the DuckDB row of the exit criteria is blocked on the stream protocol rather than on anything here, which is the work `firepanda/io/arrow_stream.mojo` will be.
 
-The reverse direction, constructing a frame from anything that exposes the protocol, is not built either. It is the other half of the same interface and it is what makes a pandas or Polars result arrive for free, and until it exists the boundary is one way.
+The reverse direction, constructing a frame from anything that exposes the protocol, is document 16. It landed after this one and it changed the reading above: measuring what the libraries actually offer showed that `__arrow_c_array__` is almost never what a table has, so the import was built on the stream rather than on the array, and the stream export that DuckDB wants is the piece still missing.

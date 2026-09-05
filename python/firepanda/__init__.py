@@ -35,9 +35,9 @@ whichever function they called first.
 from __future__ import annotations
 
 from . import _firepanda, errors
-from ._frame import DataFrame, read_csv
+from ._frame import DataFrame, from_arrow, read_csv
 
-__all__ = ["DataFrame", "__version__", "errors", "read_csv"]
+__all__ = ["DataFrame", "__version__", "errors", "from_arrow", "read_csv"]
 
 __version__: str = _firepanda.version()
 """The version, asked of the extension rather than written down here.

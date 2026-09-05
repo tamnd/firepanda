@@ -108,6 +108,14 @@ def read_csv(filepath_or_buffer: str) -> DataFrame:
         raise translate(error) from None
 
 
+def from_arrow(source: object) -> DataFrame:
+    """Builds a frame from a pyarrow, Polars or pandas frame."""
+    try:
+        return DataFrame(_firepanda.from_arrow(source))
+    except Exception as error:
+        raise translate(error) from None
+
+
 def _raise_for_test(kind: str) -> object:
     """Raises one classified error of the given kind. For tests only."""
     try:
