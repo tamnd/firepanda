@@ -33,10 +33,14 @@ pushed through the rest of the line in chunk order on the calling thread, so the
 result is the same frame in the same order as the sequential driver produces.
 
 It runs a batch at a time rather than the whole source at once, and the batch is
-one chunk per worker. That is what keeps the engine streaming. Running every
+a few chunks per worker. That is what keeps the engine streaming. Running every
 chunk through the prefix first and then draining would hold the whole
 intermediate result in memory, which is what a chunked engine exists to avoid;
-a batch holds one chunk per core and no more.
+a batch holds a fixed number of chunks per core and no more. Inside a batch the
+chunks are handed out by the morsel queue, one at a time to whichever worker
+asks next, so the batch can be wider than the machine without costing a task per
+chunk and a slow chunk costs the batch its own length rather than a worker's
+whole share.
 
 A pipeline containing a `Limit` is fed one chunk at a time as before. Reading
 ahead on behalf of thirty two cores is reading rows that the limit was about to
@@ -55,10 +59,23 @@ from firepanda.dtype.schema import Schema
 from firepanda.frame.frame import DataFrame
 
 from .chunk import Chunk
+from .morsel import parallel_morsels
 from .node import Node, NodeStatus, node_apply, node_bind, node_computes_per_row
 from .node import node_ends_early, node_finish, node_is_breaker
 from .node import node_is_row_local, node_process, node_status
-from .parallel import parallel_for, worker_count
+from .parallel import worker_count
+
+comptime BATCH_CHUNKS_PER_WORKER = 4
+"""How many chunks of a batch one worker is expected to get through.
+
+The batch has to be at least as wide as the machine or cores sit idle, and it
+cannot be the whole source or the engine stops streaming. Wider than one chunk
+per worker is worth having because the tasks are started once per batch and a
+batch of four chunks each pays for them a quarter as often. Four rather than
+forty because a batch is held in memory all at once, and at a hundred and twenty
+eight thousand rows a chunk, four per worker on a thirty two thread machine is
+already sixteen million rows in flight.
+"""
 
 
 struct Scan(Movable):
@@ -221,20 +238,52 @@ struct Collect(Movable):
         return DataFrame(schema^, self.columns^)
 
 
+def _apply_prefix(
+    ops: List[Node], lead: Int, var chunk: Chunk
+) raises -> Optional[Chunk]:
+    """Runs one chunk through the first `lead` operators.
+
+    Args:
+        ops: The line of operators. Only the first `lead` are used.
+        lead: How many leading operators to run. At least one.
+        chunk: The chunk, consumed.
+
+    Returns:
+        What came out, or nothing if an operator kept no rows.
+
+    Raises:
+        If any operator raises.
+    """
+    for i in range(lead):
+        var out = node_apply(ops[i], chunk^)
+        if not out:
+            return None
+        chunk = out.take()
+    return Optional[Chunk](chunk^)
+
+
 def _run_head(
     ops: List[Node], lead: Int, mut taken: List[Optional[Chunk]]
 ) raises -> List[Optional[Chunk]]:
     """Runs one batch of chunks through the first `lead` operators, in parallel.
 
-    A free function rather than a method so that the body handed to
-    `parallel_for` captures the two lists and the operators and nothing else.
-    A closure written inside `Pipeline` would capture the whole pipeline, and
-    the source and the sink have no business being reachable from a worker.
+    A free function rather than a method so that the body handed to the
+    scheduler captures the two lists and the operators and nothing else. A
+    closure written inside `Pipeline` would capture the whole pipeline, and the
+    source and the sink have no business being reachable from a worker.
 
-    `taken` and `made` are read and written at one index per worker, and both
+    `taken` and `made` are read and written at one index per chunk, and both
     lists are their final length before the first body runs, so no two workers
     touch the same element and nothing moves under anyone. The operators are
     shared and never written; that is what `node_apply` is for.
+
+    The chunks are handed out a morsel of one at a time rather than given out
+    one task each. A task costs about ten microseconds to create and the
+    creating is serial on this thread, so a batch of a hundred and twenty eight
+    chunks would spend more than a millisecond starting tasks before any of them
+    ran. Through the queue it starts one task per worker whatever the batch
+    holds, and a chunk that turns out to be expensive costs the batch one chunk
+    of tail rather than one worker's whole share.
 
     Args:
         ops: The line of operators. Only the first `lead` are used.
@@ -252,16 +301,13 @@ def _run_head(
     for _ in range(count):
         made.append(Optional[Chunk]())
 
-    def head(at: Int) raises {mut taken, mut made, imm}:
-        var current = taken[at].take()
-        for i in range(lead):
-            var out = node_apply(ops[i], current^)
-            if not out:
-                return
-            current = out.take()
-        made[at] = Optional[Chunk](current^)
+    def head(start: Int, stop: Int) raises {mut taken, mut made, imm}:
+        for at in range(start, stop):
+            var out = _apply_prefix(ops, lead, taken[at].take())
+            if out:
+                made[at] = Optional[Chunk](out.take())
 
-    parallel_for(head, count)
+    parallel_morsels(head, count, 1)
     return made^
 
 
@@ -384,12 +430,14 @@ struct Pipeline(Movable):
         ):
             lead += 1
 
-        # A task costs about ten microseconds to create and the creating
-        # happens on this thread, one after another, so the prefix has to have
-        # something for the other cores to do or the tasks are all that is
-        # added. A project or a cast on its own does not: measured on the
-        # i9-13900K a project over sixty four chunks took twice as long spread
-        # out as it did in a line, and over eight chunks it was still slower.
+        # Starting the workers costs about ten microseconds a task and the
+        # starting is serial on this thread, so a prefix has to have something
+        # for the other cores to do before it is worth handing out at all. A
+        # project or a cast does not: measured on the i9-13900K, a project over
+        # sixty four chunks was forty per cent slower spread out even with the
+        # tasks down to one per worker, because a project only rebuilds a chunk
+        # out of columns it already has and a cast walks a column through the
+        # allocator, and neither is waiting on arithmetic.
         for i in range(lead):
             if node_computes_per_row(self.operators[i]):
                 return lead
@@ -398,12 +446,12 @@ struct Pipeline(Movable):
     def _run_batched(mut self, lead: Int, mut sink: Collect) raises:
         """Runs the source through the parallel prefix and then the rest.
 
-        One batch is one chunk per worker. The batch is read off the source,
-        every chunk of it goes through the first `lead` operators on a core of
-        its own, and then the survivors are pushed through the operators after
-        the prefix in the order the source handed them out. Chunk order is what
-        makes this the same execution as the sequential driver rather than an
-        approximation of it.
+        One batch is `BATCH_CHUNKS_PER_WORKER` chunks per worker. The batch is
+        read off the source, every chunk of it goes through the first `lead`
+        operators on whichever core asks for it, and then the survivors are
+        pushed through the operators after the prefix in the order the source
+        handed them out. Chunk order is what makes this the same execution as
+        the sequential driver rather than an approximation of it.
 
         Args:
             lead: How many leading operators to run in parallel. At least one.
@@ -415,7 +463,7 @@ struct Pipeline(Movable):
         # No `_finished` check anywhere in here. This route is only taken when
         # no operator can end early, which is what `_parallel_lead` checked, so
         # the answer would be False every time it was asked.
-        var batch = worker_count()
+        var batch = worker_count() * BATCH_CHUNKS_PER_WORKER
         while True:
             var taken = List[Optional[Chunk]](capacity=batch)
             for _ in range(batch):
