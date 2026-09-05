@@ -1,9 +1,14 @@
-"""Reading a whole table from an Arrow producer, rather than a single column.
+"""The table level of the C Data Interface, in both directions.
 
-`arrow_import.mojo` reads one column. This reads a frame, and the two are
-separate files because they answer to different structures: a column is an
-`ArrowArray`, and a table is either a struct array with one child per column or
-an `ArrowArrayStream` handing out a run of them.
+`arrow_import.mojo` reads one column and `arrow_export.mojo` writes one. This is
+the frame, and it is a separate file because a frame answers to different
+structures: a column is an `ArrowArray`, and a table is either a struct array
+with one child per column or an `ArrowArrayStream` handing out a run of them.
+
+Both directions are here because they are the same three structures read one way
+and written the other, and a change to one that is not matched in the other is a
+frame that cannot survive its own round trip. The reading is the bulk of it and
+comes first. The producer is the last section.
 
 ### The stream is the one that matters, which was a surprise
 
@@ -60,24 +65,37 @@ every batch is held until the frame is built and then all of them are released
 together, on the way out and on the way to a raise alike.
 """
 
+from std.ffi import c_char, external_call
+from std.memory import Pointer
+from std.sys import size_of
+
 from firepanda.array.any import AnyArray
+from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.frame.frame import DataFrame
 
 from .arrow_c import (
+    EINVAL,
     STRUCT_FORMAT,
     ArrayPtr,
     ArrowArray,
     ArrowArrayStream,
     ArrowSchema,
+    NullableCString,
     SchemaPtr,
+    StreamPtr,
     release_array,
     release_schema,
     release_stream,
     stream_error,
+    stream_get_last_error_callback,
+    stream_get_next_callback,
+    stream_get_schema_callback,
     stream_next,
+    stream_release_callback,
     stream_schema,
 )
+from .arrow_export import export_frame_array, export_frame_schema
 from .arrow_import import ColumnSink, format_string
 from .assemble import ArrowLayout, assemble
 
@@ -497,3 +515,261 @@ def _why(mut stream: ArrowArrayStream, code: Int32) raises -> String:
     if message.byte_length() != 0:
         return message^
     return String("error ", code)
+
+
+struct _FrameStreamBox[K: Copyable & Deinitable](Movable):
+    """What an exported stream's `private_data` points at.
+
+    Everything the two callbacks need in order to build a schema and an array on
+    demand, plus the keep alive that makes borrowing the frame's buffers safe.
+    That is the same bargain `_BorrowedArrayBox` makes in `arrow_export.mojo`,
+    for the same reason: a box that held a column would be holding a deep copy
+    and would no longer be pointing at the frame the user has.
+
+    The batch is built when it is asked for rather than at construction, because
+    a consumer is allowed to release a stream without ever calling `get_next`,
+    and a batch built eagerly for that consumer would be a batch nobody ever
+    releases.
+    """
+
+    var keep: Self.K
+    """A share of whatever owns the columns."""
+
+    var columns: List[Pointer[AnyArray, MutUntrackedOrigin]]
+    """One pointer per column, in schema order, into the frame itself.
+
+    Untracked rather than `MutAnyOrigin` because a struct field is not allowed to
+    expose `AnyOrigin`, which is a rule worth having: a field with that origin
+    tells the compiler a pointer is live for as long as anything is, which is
+    exactly the claim a box like this cannot make on its own. What makes these
+    pointers safe is `keep`, and that is a fact about this type rather than about
+    the pointers, so it belongs in this comment rather than in an origin."""
+
+    var types: List[LogicalType]
+    """The column types, for the schema."""
+
+    var names: List[String]
+    """The column names, in the same order."""
+
+    var rows: Int
+    """The row count, which the struct array needs and the columns do not carry."""
+
+    var at: Int
+    """How many batches have been handed out, which is zero or one."""
+
+    var message: Pointer[c_char, MutUntrackedOrigin]
+    """What `get_last_error` returns, allocated because it outlives every scope.
+
+    A C string rather than a Mojo `String` because the consumer reads it after
+    the call has returned, and because nothing in the C interface knows what a
+    Mojo `String` is."""
+
+    def __init__(
+        out self,
+        var keep: Self.K,
+        var columns: List[Pointer[AnyArray, MutAnyOrigin]],
+        var types: List[LogicalType],
+        var names: List[String],
+        rows: Int,
+    ):
+        """Constructs the box and its error message.
+
+        Args:
+            keep: A share of whatever owns the columns.
+            columns: One pointer per column, in schema order.
+            types: The column types.
+            names: The column names.
+            rows: The row count.
+        """
+        self.keep = keep^
+        self.columns = List[Pointer[AnyArray, MutUntrackedOrigin]](
+            capacity=len(columns)
+        )
+        for column in columns:
+            self.columns.append(column.unsafe_origin_cast[MutUntrackedOrigin]())
+        self.types = types^
+        self.names = names^
+        self.rows = rows
+        self.at = 0
+        var text = String(
+            "firepanda could not export this frame through the Arrow stream"
+            " protocol"
+        )
+        var size = text.byte_length()
+        self.message = external_call[
+            "malloc", Pointer[c_char, MutUntrackedOrigin]
+        ](size + 1)
+        for i in range(size):
+            self.message.unsafe_offset(i).unsafe_write(
+                c_char(text.as_bytes()[i])
+            )
+        self.message.unsafe_offset(size).unsafe_write(c_char(0))
+
+
+def _exported_stream_schema[
+    K: Copyable & Deinitable
+](stream: StreamPtr, out_schema: SchemaPtr) abi("C") -> Int32:
+    """Describes the frame. Installed as `ArrowArrayStream.get_schema`.
+
+    Built fresh on every call rather than handed out from the box, because the
+    consumer owns what it is given and releases it, and a consumer that asked
+    twice would otherwise be handed the same structure to release twice.
+
+    Parameters:
+        K: The keep alive's type, which has to be the one `export_frame_stream`
+            used or the box is read as the wrong type.
+    """
+    if not stream[].private_data:
+        return EINVAL
+    var box = stream[].private_data.value().unsafe_bitcast[_FrameStreamBox[K]]()
+    try:
+        out_schema.unsafe_write(export_frame_schema(box[].types, box[].names))
+        return 0
+    except:
+        return EINVAL
+
+
+def _exported_stream_next[
+    K: Copyable & Deinitable
+](stream: StreamPtr, out_array: ArrayPtr) abi("C") -> Int32:
+    """Hands out the frame, once. Installed as `ArrowArrayStream.get_next`.
+
+    A firepanda frame has no chunking, so the stream it exports is one batch
+    followed by the end. The end is the released state written into the caller's
+    structure, which is how the interface says a stream is finished rather than
+    broken.
+
+    Parameters:
+        K: The keep alive's type, which has to be the one `export_frame_stream`
+            used or the box is read as the wrong type.
+    """
+    if not stream[].private_data:
+        return EINVAL
+    var box = stream[].private_data.value().unsafe_bitcast[_FrameStreamBox[K]]()
+    if box[].at != 0:
+        out_array.unsafe_write(ArrowArray())
+        return 0
+    box[].at = 1
+    try:
+        var columns = List[Pointer[AnyArray, MutAnyOrigin]](
+            capacity=len(box[].columns)
+        )
+        for column in box[].columns:
+            columns.append(column.unsafe_origin_cast[MutAnyOrigin]())
+        out_array.unsafe_write(
+            export_frame_array(columns^, box[].rows, box[].keep.copy())
+        )
+        return 0
+    except:
+        return EINVAL
+
+
+def _exported_stream_error[
+    K: Copyable & Deinitable
+](stream: StreamPtr) abi("C") -> NullableCString:
+    """Says what went wrong. Installed as `ArrowArrayStream.get_last_error`.
+
+    One message rather than a specific one, and it is worth saying why rather
+    than leaving it looking lazy. Nothing in the two callbacks above can fail for
+    a reason the caller can act on: the schema is exported once in
+    `export_frame_stream` before the stream is handed over, so a frame holding a
+    type Arrow has no format for raises there, with a real message, on the thread
+    that asked for it. What is left is allocation failure.
+
+    Parameters:
+        K: The keep alive's type, which has to be the one `export_frame_stream`
+            used or the box is read as the wrong type.
+    """
+    if not stream[].private_data:
+        return None
+    var box = stream[].private_data.value().unsafe_bitcast[_FrameStreamBox[K]]()
+    return box[].message
+
+
+def _release_exported_stream[
+    K: Copyable & Deinitable
+](stream: StreamPtr) abi("C") -> None:
+    """Frees the box. Installed as `ArrowArrayStream.release`.
+
+    Destroying the box drops the keep alive, so the frame goes away with the last
+    consumer rather than with the Mojo scope that exported it. It does not touch
+    anything `get_next` handed out: a batch is a structure of its own and the
+    consumer owes it its own release call.
+
+    Parameters:
+        K: The keep alive's type, which has to be the one `export_frame_stream`
+            used or the box is read as the wrong type.
+    """
+    if not stream[].release:
+        return
+    if stream[].private_data:
+        var box = (
+            stream[].private_data.value().unsafe_bitcast[_FrameStreamBox[K]]()
+        )
+        external_call["free", NoneType](box[].message)
+        box.unsafe_deinit_pointee()
+        external_call["free", NoneType](box)
+        stream[].private_data = None
+    stream[].get_schema = None
+    stream[].get_next = None
+    stream[].get_last_error = None
+    stream[].release = None
+
+
+def export_frame_stream[
+    K: Copyable & Deinitable
+](
+    var columns: List[Pointer[AnyArray, MutAnyOrigin]],
+    var types: List[LogicalType],
+    var names: List[String],
+    rows: Int,
+    var keep: K,
+) raises -> ArrowArrayStream:
+    """Hands a frame to a C consumer as a stream of one batch.
+
+    This is what DuckDB wants and what `pyarrow.table`, Polars and pandas all
+    reach for first, because `__arrow_c_stream__` is what nearly everything at
+    the table level looks for. Nothing is copied that `export_frame_array` would
+    not have copied, which is to say nothing at all except a bool column's bit
+    packing, and that copy does not happen until a consumer asks for the batch.
+
+    The schema is exported once here and released again, before the stream is
+    handed over. It is thrown away, and it is not wasted: a frame holding a type
+    Arrow has no format for has to fail somewhere, and failing here means it
+    fails with a message, on the caller's thread, rather than as an error code
+    from inside a callback the caller did not write.
+
+    Parameters:
+        K: The keep alive's type.
+
+    Args:
+        columns: One pointer per column, in schema order. Each must be reachable
+            through `keep` and each must have exactly `rows` rows.
+        types: The column types, in the same order.
+        names: The column names, in the same order.
+        rows: The row count.
+        keep: A share of whatever owns the columns.
+
+    Returns:
+        The stream, which the consumer must release.
+
+    Raises:
+        Error: If the frame holds a type that has no Arrow format string.
+    """
+    var proof = export_frame_schema(types, names)
+    release_schema(proof)
+
+    var box = external_call[
+        "malloc", Pointer[_FrameStreamBox[K], MutUntrackedOrigin]
+    ](size_of[_FrameStreamBox[K]]())
+    box.unsafe_write(_FrameStreamBox[K](keep^, columns^, types^, names^, rows))
+
+    var out = ArrowArrayStream()
+    out.private_data = box.unsafe_bitcast[NoneType]()
+    out.get_schema = stream_get_schema_callback(_exported_stream_schema[K])
+    out.get_next = stream_get_next_callback(_exported_stream_next[K])
+    out.get_last_error = stream_get_last_error_callback(
+        _exported_stream_error[K]
+    )
+    out.release = stream_release_callback(_release_exported_stream[K])
+    return out^

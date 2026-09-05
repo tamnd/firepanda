@@ -40,6 +40,9 @@ class DataFrame:
     def arrow_c_array(self, requested_schema: object | None) -> list[object]:
         """The frame's Arrow schema and data, in two capsules."""
         ...
+    def arrow_c_stream(self, requested_schema: object | None) -> object:
+        """The frame as an Arrow stream, in a capsule."""
+        ...
 
 class Series:
     def __init__(self, data: object, name: str) -> None:

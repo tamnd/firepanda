@@ -295,6 +295,13 @@ FRAME = Exposed(
             params=(("requested_schema", "object | None"),),
             returns="list[object]",
         ),
+        Binding(
+            mojo="PyDataFrame.arrow_c_stream",
+            name="arrow_c_stream",
+            doc="The frame as an Arrow stream, in a capsule.",
+            params=(("requested_schema", "object | None"),),
+            returns="object",
+        ),
     ),
     members=(
         Member(
@@ -364,6 +371,14 @@ FRAME = Exposed(
             body="tuple(self._inner.arrow_c_array(requested_schema))",
             doc="The frame's Arrow data, as an arrow_schema and an arrow_array PyCapsule.",
             returns="tuple[object, ...]",
+        ),
+        Member(
+            name="__arrow_c_stream__",
+            kind="dunder",
+            signature="requested_schema: object | None = None",
+            body="self._inner.arrow_c_stream(requested_schema)",
+            doc="The frame as a stream of one batch, as an arrow_array_stream PyCapsule.",
+            returns="object",
         ),
     ),
 )

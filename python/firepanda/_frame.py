@@ -108,6 +108,13 @@ class DataFrame(DataFrameMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def __arrow_c_stream__(self, requested_schema: object | None = None) -> object:
+        """The frame as a stream of one batch, as an arrow_array_stream PyCapsule."""
+        try:
+            return self._inner.arrow_c_stream(requested_schema)
+        except Exception as error:
+            raise translate(error) from None
+
 
 class Series(SeriesMixin):
     """A one dimensional labelled array holding data of a single type."""

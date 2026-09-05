@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### DuckDB reads a firepanda frame
+
+A frame now answers `__arrow_c_stream__` as well as `__arrow_c_array__`, which means `duckdb.sql("select ... from df")` works on a firepanda frame with no conversion step and no copy. DuckDB is worth naming because it is the consumer that accepts nothing else: handed an object with only the array half it refuses it outright, so the stream is not a nicety on top of the array export but the thing that decides whether a whole class of tools can read us at all.
+
+A firepanda frame has no chunking, so the stream is one batch and then the end, which is a stream a consumer cannot tell apart from any other. The batch is built when it is asked for rather than when the stream is made, because a consumer is allowed to release a stream it never read and pyarrow and DuckDB both do that on some paths. The frame's schema is exported once when the stream is created and thrown away: a column of a type Arrow has no format string for has to fail somewhere, and failing there means it fails with a real message rather than as an error code out of a callback the caller did not write.
+
+Ownership is the same as the array export. The stream holds a share of the frame, every batch it hands out takes its own share, and a consumer that keeps a batch and drops the stream is still reading live memory. Document 16 is the design, and it now covers both directions.
+
 ### An index can be edited, and a label can become a slice bound
 
 `Index` gained `append`, `delete`, `insert`, `drop` and `putmask`, which change the labels, and `get_slice_bound`, `slice_locs` and `slice_indexer`, which turn a label into a position. With the lookups and the set operations already there, that is the whole of the flat index apart from the level accessors.

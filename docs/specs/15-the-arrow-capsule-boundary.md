@@ -68,7 +68,7 @@ The zero copy claim needs a word about how it is tested from Python, because the
 
 **A requested schema.** The protocol lets a consumer ask for the data in a schema of its choosing and lets a producer refuse. Converting on the way out is not written, and the alternative to refusing is handing back a different schema from the one that was asked for and letting the consumer find out later, so anything other than `None` raises `NotImplementedError`.
 
-**A column with more than one chunk.** A chunked column has no single Arrow array to be. That is what `__arrow_c_stream__` is for and this is not it, so the refusal is explicit, names the column, and points at the stream. It happens before anything is allocated rather than half way through an export.
+**A column with more than one chunk.** A chunked column has no single Arrow array to be. The stream is where that is expressible in principle, and the stream export hands out one batch per frame, so it is refused there too. The refusal is explicit, names the column, and happens before anything is allocated rather than half way through an export.
 
 **A column of the null type.** Inherited from M2. firepanda has the type and constructs no column that carries it, so there is nothing to export.
 
@@ -76,6 +76,6 @@ The zero copy claim needs a word about how it is tested from Python, because the
 
 Document 07 section 8 asks that `to_pandas`, `to_polars` and passing the frame to DuckDB all work with no copy. Two of the three are now true and tested: `pyarrow.record_batch(df)` and `polars.DataFrame(df)` both read a firepanda frame with no firepanda specific code on their side.
 
-DuckDB does not, and the reason is worth recording because it is not a bug in any of this. DuckDB's replacement scan and its `from_arrow` both look for `__arrow_c_stream__` and neither accepts an object that offers only `__arrow_c_array__`. So the DuckDB row of the exit criteria is blocked on the stream protocol rather than on anything here, which is the work `firepanda/io/arrow_stream.mojo` will be.
+DuckDB did not, and the reason is worth recording because it was not a bug in any of this. DuckDB's replacement scan and its `from_arrow` both look for `__arrow_c_stream__` and neither accepts an object that offers only `__arrow_c_array__`. So the DuckDB row of the exit criteria was blocked on the stream protocol rather than on anything here, and it is now closed by the stream export in document 16 section 9.
 
 The reverse direction, constructing a frame from anything that exposes the protocol, is document 16. It landed after this one and it changed the reading above: measuring what the libraries actually offer showed that `__arrow_c_array__` is almost never what a table has, so the import was built on the stream rather than on the array, and the stream export that DuckDB wants is the piece still missing.
