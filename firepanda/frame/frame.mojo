@@ -989,6 +989,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                     specs[s].kind,
                     grouping.codes,
                     grouping.groups,
+                    trusted=True,
                 )
             fields.append(Field(name, produced.type))
             columns.append(produced^)

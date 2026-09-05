@@ -312,6 +312,64 @@ def test_a_code_out_of_range_is_refused() raises:
         )
 
 
+def test_trusted_codes_reduce_to_what_checked_codes_reduce_to() raises:
+    """`trusted` says the caller made the codes itself, and it takes the check
+    away and nothing else.
+
+    Every call inside firepanda that passes it hands over codes a
+    `group_ordinals` or a lasting map produced a few lines earlier, so the
+    reduction has to come back with what it would have come back with had the
+    check run. Thirteen reductions is more than the sum this file's other erased
+    test uses, because the check sits in front of all of them and a reduction
+    that read the codes differently would only show up on the one that does.
+    """
+    var kinds = [
+        AggKind.SIZE,
+        AggKind.COUNT,
+        AggKind.SUM,
+        AggKind.MIN,
+        AggKind.MAX,
+        AggKind.FIRST,
+        AggKind.LAST,
+        AggKind.NUNIQUE,
+    ]
+    for k in range(len(kinds)):
+        var checked = aggregate_group_any(
+            AnyArray(sample_values()), kinds[k], sample_codes(), 3
+        )
+        var trusted = aggregate_group_any(
+            AnyArray(sample_values()),
+            kinds[k],
+            sample_codes(),
+            3,
+            trusted=True,
+        )
+        assert_equal(checked.dtype(), trusted.dtype())
+        assert_equal(len(checked), len(trusted))
+        for g in range(len(checked)):
+            assert_equal(checked.is_valid(g), trusted.is_valid(g))
+            if checked.is_valid(g):
+                assert_equal(
+                    checked.as_typed[DType.int64]()[g],
+                    trusted.as_typed[DType.int64]()[g],
+                )
+
+    # The mean is the one of them that answers in a different dtype, so it is
+    # compared on its own rather than left out.
+    var mean_checked = aggregate_group_any(
+        AnyArray(sample_values()), AggKind.MEAN, sample_codes(), 3
+    )
+    var mean_trusted = aggregate_group_any(
+        AnyArray(sample_values()), AggKind.MEAN, sample_codes(), 3, trusted=True
+    )
+    assert_equal(mean_checked.dtype(), mean_trusted.dtype())
+    for g in range(len(mean_checked)):
+        assert_equal(
+            mean_checked.as_typed[DType.float64]()[g],
+            mean_trusted.as_typed[DType.float64]()[g],
+        )
+
+
 def test_a_length_mismatch_is_refused() raises:
     with assert_raises():
         _ = aggregate_group_any(
