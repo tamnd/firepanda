@@ -290,5 +290,164 @@ def test_a_grouped_result_gets_fresh_labels() raises:
     )
 
 
+def keyed() raises -> DataFrame:
+    """A five row frame with three distinct keys, out of order and repeating."""
+    var columns = List[Series]()
+    columns.append(
+        Series("k", from_list[DType.int64]([Int64(30), 10, 20, 10, 30]))
+    )
+    columns.append(Series("v", from_list[DType.int64]([Int64(1), 2, 3, 4, 5])))
+    return DataFrame.from_series(columns^)
+
+
+def summed() -> List[AggSpec]:
+    """One spec, the sum of `v`."""
+    var specs = List[AggSpec]()
+    specs.append(AggSpec("v", AggKind.SUM))
+    return specs^
+
+
+def test_choosing_columns_does_not_choose_rows() raises:
+    """`select` keeps every row it was given, so it keeps every label too.
+
+    Worth its own test because `select` is the one row preserving method that
+    builds its result from a schema and a column list rather than by copying the
+    frame, so it is the one that had to be told.
+    """
+    var built = frame_of(10).tail(4).select(["a"]).index.materialize()
+    assert_equal(len(built), 4, "four rows")
+    for i in range(4):
+        assert_equal(label_at(built, i), 6 + i, "label " + String(i))
+
+
+def test_dropping_a_column_keeps_the_labels_too() raises:
+    """`drop` is `select` underneath, which is why this is worth asserting."""
+    var narrowed = keyed().tail(3).drop(["v"])
+    assert_equal(narrowed.width(), 1, "one column left")
+    var built = narrowed.index.materialize()
+    assert_equal(len(built), 3, "three rows")
+    assert_equal(label_at(built, 0), 2, "the first label")
+
+
+def test_selecting_no_columns_keeps_the_height_and_the_labels() raises:
+    """A frame of no columns is still as tall as the one it came from."""
+    var narrowed = frame_of(10).tail(4).select(List[String]())
+    assert_equal(len(narrowed), 4, "four rows and no columns")
+    assert_equal(
+        label_at(narrowed.index.materialize(), 0), 6, "the first label"
+    )
+
+
+def test_as_index_puts_the_key_in_the_labels() raises:
+    """This is `df.groupby("k").sum()`, which is what pandas returns by default.
+
+    The key stops being a column and becomes the row labels, and the level takes
+    the key column's name. The sort runs before this, so the labels come out
+    ascending because `sort` defaults to true and not because anything here
+    ordered them.
+    """
+    var grouped = keyed().group_by(["k"], summed(), True, True, True)
+    assert_equal(len(grouped), 3, "three distinct keys")
+    assert_equal(grouped.width(), 1, "the key is no longer a column")
+    assert_false(grouped.has("k"), "the key column is gone")
+    assert_true(grouped.has("v_sum"), "the aggregate is still here")
+    assert_false(grouped.index.is_default(), "the labels are the keys")
+    assert_true(grouped.index.name, "the level is named")
+    assert_equal(grouped.index.name.value(), "k", "named after the key column")
+    var built = grouped.index.materialize()
+    assert_equal(label_at(built, 0), 10, "the first key")
+    assert_equal(label_at(built, 1), 20, "the second key")
+    assert_equal(label_at(built, 2), 30, "the third key")
+
+
+def test_the_labels_follow_the_group_order_that_was_asked_for() raises:
+    """With `sort=False` the labels are the keys in the order they were seen.
+
+    The key has to be read after the sort rather than before it, and this is the
+    case that tells the two apart: first seen order here is 30, 10, 20, which is
+    not the ascending order the other test gets.
+    """
+    var grouped = keyed().group_by(["k"], summed(), True, False, True)
+    var built = grouped.index.materialize()
+    assert_equal(label_at(built, 0), 30, "the first key seen")
+    assert_equal(label_at(built, 1), 10, "the second key seen")
+    assert_equal(label_at(built, 2), 20, "the third key seen")
+
+
+def test_the_values_are_the_same_whichever_shape_is_asked_for() raises:
+    """`as_index` moves a column, it does not change an answer.
+
+    Cheap to assert and it is the property that matters most, since the flat form
+    is what the conformance suite has been measuring the arithmetic against all
+    along.
+    """
+    var flat = keyed().group_by(["k"], summed(), True, True, False)
+    var indexed = keyed().group_by(["k"], summed(), True, True, True)
+    assert_equal(len(flat), len(indexed), "the same number of groups")
+    var flat_sum = flat.column("v_sum").values.as_typed[DType.int64]()
+    var indexed_sum = indexed.column("v_sum").values.as_typed[DType.int64]()
+    for i in range(len(flat)):
+        assert_equal(Int(flat_sum[i]), Int(indexed_sum[i]), "sum " + String(i))
+    var flat_key = flat.column("k").values.as_typed[DType.int64]()
+    var built = indexed.index.materialize()
+    for i in range(len(flat)):
+        assert_equal(Int(flat_key[i]), label_at(built, i), "key " + String(i))
+
+
+def test_as_index_with_two_keys_says_why_it_cannot() raises:
+    """Two keys are a MultiIndex in pandas and there is no MultiIndex here.
+
+    Raising is the point. Handing back one of the two levels would be an answer
+    that looks right and is not, and it is exactly the kind of thing a conformance
+    suite would score as a pass.
+    """
+    var columns = List[Series]()
+    columns.append(Series("k", from_list[DType.int64]([Int64(1), 1, 2])))
+    columns.append(Series("j", from_list[DType.int64]([Int64(7), 8, 7])))
+    columns.append(Series("v", from_list[DType.int64]([Int64(1), 2, 3])))
+    var df = DataFrame.from_series(columns^)
+    var raised = False
+    try:
+        _ = df.group_by(["k", "j"], summed(), True, True, True)
+    except e:
+        raised = True
+        assert_true(
+            String(e).find("MultiIndex") >= 0,
+            "the error says what is missing: " + String(e),
+        )
+    assert_true(raised, "asking for two levels raises")
+
+
+def test_a_column_of_a_frame_carries_the_frame_labels() raises:
+    """`df.groupby("k")["v"].mean()` is a column of an indexed result.
+
+    A column has the frame's rows, so it has the frame's labels, and pulling one
+    out is not an operation that chooses rows. This is the path most of the single
+    column conformance cases take.
+    """
+    var grouped = keyed().group_by(["k"], summed(), True, True, True)
+    var column = grouped.column("v_sum")
+    assert_equal(column.index.name.value(), "k", "the level name came too")
+    var built = column.index.materialize()
+    assert_equal(len(built), 3, "three labels")
+    assert_equal(label_at(built, 0), 10, "the first key")
+    assert_equal(label_at(built, 2), 30, "the last key")
+
+
+def test_group_agg_and_group_count_pass_as_index_through() raises:
+    """The two wrappers are the spelling most callers reach for."""
+    var summed_all = keyed().group_agg(["k"], AggKind.SUM, True, True, True)
+    assert_false(summed_all.has("k"), "group_agg moved the key")
+    assert_equal(
+        summed_all.index.name.value(), "k", "group_agg named the level"
+    )
+    var counted_rows = keyed().group_count(["k"], True, True, True)
+    assert_false(counted_rows.has("k"), "group_count moved the key")
+    assert_true(counted_rows.has("size"), "the count is still here")
+    assert_equal(
+        label_at(counted_rows.index.materialize(), 0), 10, "the first key"
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

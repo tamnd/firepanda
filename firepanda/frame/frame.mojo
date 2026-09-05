@@ -50,6 +50,8 @@ a facade over a plan, which is true from M4 onwards. At M1 the facade is the
 implementation and every method runs when it is called.
 """
 
+from std.collections import Optional
+
 from firepanda.array.any import AnyArray, ColumnRefs, borrow_columns
 from firepanda.array.array import Array
 from firepanda.array.chunked import ChunkedArray, Sortedness, wrap_columns
@@ -350,7 +352,13 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             If no column has that name.
         """
         var at = self.schema.index_of(name)
-        return Series(name, ChunkedArray(copy=self.columns[at]).combine())
+        var out = Series(name, ChunkedArray(copy=self.columns[at]).combine())
+        # A column of a frame has the frame's rows, so it has the frame's labels.
+        # This is how a grouped result reaches a caller that wanted one column of
+        # it, which is `df.groupby("k")["v"].mean()` and is the shape most of the
+        # single column cases in the conformance suite ask for.
+        out.index = Index(copy=self.index)
+        return out^
 
     def select(self, names: List[String]) raises -> Self:
         """Returns a frame with only the named columns, in the order given.
@@ -380,6 +388,11 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             )
         var out = Self(self.schema.select(names), columns^)
         out.rows = self.rows
+        # Choosing columns does not choose rows, so the labels come through
+        # unchanged. This matters twice over: `drop` is `select` underneath, and
+        # selecting no columns at all still leaves a frame that is as tall as this
+        # one, which is the case the `rows` line above exists for.
+        out.index = Index(copy=self.index)
         return out^
 
     def drop(self, names: List[String]) raises -> Self:
@@ -886,6 +899,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         specs: List[AggSpec],
         dropna: Bool = True,
         sort: Bool = True,
+        as_index: Bool = False,
     ) raises -> Self:
         """Groups rows by one or more key columns and reduces each group.
 
@@ -895,6 +909,17 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         grouping is a scatter over the rows, and the only sort that happens is on
         the result, which is one row per group.
 
+        `as_index` moves the key out of the columns and into the row labels, which
+        is what pandas does by default and is the shape `df.groupby("k").sum()`
+        returns. It is off here and on there, which is the one default in this
+        method that does not match pandas, and the reason is that pandas puts two
+        keys into a MultiIndex and firepanda has no MultiIndex yet. Defaulting to
+        on would mean a two key group by raising by default, which is a worse
+        answer than a shape that differs. So it is off, asking for it with more
+        than one key raises rather than quietly giving back one level, and the
+        default flips when the MultiIndex lands. Everything else here already
+        matches pandas: `dropna` and `sort` are both on, as they are there.
+
         Args:
             by: The key columns. At least one, no repeats.
             specs: What to compute. May be empty, which gives the distinct key
@@ -902,14 +927,25 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             dropna: Drop the groups whose key contains a null, as pandas does.
             sort: Order the result by the key columns ascending, as pandas does.
                 False leaves the groups in first-seen order and costs nothing.
+            as_index: Return the key as the row labels rather than as a column,
+                named after the key column. One key only, for now.
 
         Returns:
             The aggregated frame.
 
         Raises:
-            If a name is missing or repeated, if two outputs would collide, or if
-            a dtype involved has no physical layout.
+            If a name is missing or repeated, if two outputs would collide, if a
+            dtype involved has no physical layout, or if `as_index` is asked for
+            with more than one key.
         """
+        if as_index and len(by) != 1:
+            raise Error(
+                "group by: as_index needs exactly one key, and "
+                + String(len(by))
+                + " were given. Two keys are a MultiIndex in pandas and"
+                " firepanda has no MultiIndex yet, so there is no honest one"
+                " level answer to give back here."
+            )
         var at = List[Int](capacity=len(by))
         for i in range(len(by)):
             var idx = self.schema.index_of(by[i])
@@ -1010,10 +1046,20 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         # and the sort above left behind, which is the permutation of the group
         # ordinals and is not a fact about anything: grouping a frame and getting
         # back rows labelled 9, 3 and 218 says only which group happened to hash
-        # where. pandas labels these by the key instead, which is the second stage
-        # in https://github.com/tamnd/firepanda/issues/191 and is what will replace
-        # this line. Until then the default is the honest answer and it is also the
-        # one `as_index=False` asks for.
+        # where.
+        #
+        # pandas labels these by the key, which is what `as_index` asks for. The
+        # key is taken from the finished frame rather than from `columns` above,
+        # because the dropna filter and the sort have both run since then and the
+        # labels have to be the keys of the rows that survived, in the order they
+        # came out in.
+        if as_index:
+            var at = out.schema.index_of(by[0])
+            var labels = ChunkedArray(copy=out.columns[at]).combine()
+            out = out.drop(by)
+            out.index = Index(labels^, Optional[String](by[0]))
+            return out^
+
         out.index = Index(len(out))
         return out^
 
@@ -1159,6 +1205,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         kind: AggKind,
         dropna: Bool = True,
         sort: Bool = True,
+        as_index: Bool = False,
     ) raises -> Self:
         """Applies one reduction to every column that is not a key.
 
@@ -1171,6 +1218,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             kind: The reduction to apply to everything else.
             dropna: As `group_by`.
             sort: As `group_by`.
+            as_index: As `group_by`.
 
         Returns:
             The aggregated frame.
@@ -1188,10 +1236,14 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                     break
             if not is_key:
                 specs.append(AggSpec(name, kind, name))
-        return self.group_by(by, specs, dropna, sort)
+        return self.group_by(by, specs, dropna, sort, as_index)
 
     def group_count(
-        self, by: List[String], dropna: Bool = True, sort: Bool = True
+        self,
+        by: List[String],
+        dropna: Bool = True,
+        sort: Bool = True,
+        as_index: Bool = False,
     ) raises -> Self:
         """Counts the rows in each group.
 
@@ -1203,6 +1255,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             by: The key columns.
             dropna: As `group_by`.
             sort: As `group_by`.
+            as_index: As `group_by`.
 
         Returns:
             The key columns plus an int64 column called `size`.
@@ -1214,7 +1267,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             raise Error("group by: at least one key column is required")
         var specs = List[AggSpec]()
         specs.append(AggSpec(by[0], AggKind.SIZE, "size"))
-        return self.group_by(by, specs, dropna, sort)
+        return self.group_by(by, specs, dropna, sort, as_index)
 
     def join(
         self,
