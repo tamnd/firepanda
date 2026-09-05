@@ -18,6 +18,7 @@ says what was already decided and why.
 | [09-quality-bar.md](09-quality-bar.md) | Testing, and living without a race detector |
 | [10-benchmarks.md](10-benchmarks.md) | What gets measured and against whom |
 | [11-package-layout.md](11-package-layout.md) | The tree, and why Mojo 1.0's import rules decide it |
+| [12-the-python-front-door-measured.md](12-the-python-front-door-measured.md) | Document 07 checked against a running toolchain, with what works, what does not, and what it cost |
 | [engine/](engine/00-README.md) | How DuckDB and Polars execute a query, and what firepanda is going to do about it |
 
 ## How to read this
@@ -28,6 +29,8 @@ Arrow C Data Interface can be implemented in Mojo with genuinely zero copies, an
 that a self-contained wheel can be built despite an unstable ABI. Documents 03, 02
 and 07 respectively. If one of those is false, the milestone that depends on it is
 where the plan changes.
+
+Two of those three claims have since been checked against a running toolchain rather than argued for, and both held: the Arrow C Data Interface landed at M2 and its zero copy is asserted by pointer address in the test suite, and a self contained wheel was built and imported from an interpreter with no Mojo toolchain reachable. Document 12 is that check, and it also records the two things that turned out not to work.
 
 **Claims marked [verify] are not confirmed.** Mojo reached 1.0 recently and the
 standard library moved substantially on the way there, so any sample older than
