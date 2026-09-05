@@ -23,12 +23,30 @@ operator is a function from a chunk to a chunk, it runs to completion, and it
 keeps no resumption state. DuckDB and the Polars streaming engine both push, and
 the reason both give is this one.
 
-What is not here yet is parallelism. The driver takes chunks one at a time on
-the calling thread. The morsel queue next door is what will hand different
-chunks to different workers, and the operators are already written for it, since
-every one of them is a function of its own chunk and its own fields. Getting the
-sequential driver right first is deliberate: a pipeline whose answers are wrong
-is not made better by computing them on thirty two cores.
+The leading run of elementwise operators runs on every core. A filter, a
+projection, an expression and a cast all produce an output row from their own
+input row and nothing else, and none of them writes anything to itself, so the
+same node can be handed to thirty two workers at once with no copy and no lock.
+The driver finds how many operators at the front of the line are like that, and
+runs the source's chunks through that prefix in parallel. Whatever comes out is
+pushed through the rest of the line in chunk order on the calling thread, so the
+result is the same frame in the same order as the sequential driver produces.
+
+It runs a batch at a time rather than the whole source at once, and the batch is
+one chunk per worker. That is what keeps the engine streaming. Running every
+chunk through the prefix first and then draining would hold the whole
+intermediate result in memory, which is what a chunked engine exists to avoid;
+a batch holds one chunk per core and no more.
+
+A pipeline containing a `Limit` is fed one chunk at a time as before. Reading
+ahead on behalf of thirty two cores is reading rows that the limit was about to
+make unnecessary, and a `head` over a large file is the case where that is the
+whole cost of the query.
+
+What is still not here is a parallel breaker. A group by merges every chunk into
+one table on the calling thread, so a query whose work is in the grouping gets
+the prefix in parallel and the grouping serial. Thread local tables merged
+partition wise is the next step and it is a change to `Group`, not to this file.
 """
 
 from firepanda.array.any import AnyArray
@@ -37,8 +55,10 @@ from firepanda.dtype.schema import Schema
 from firepanda.frame.frame import DataFrame
 
 from .chunk import Chunk
-from .node import Node, NodeStatus, node_bind, node_finish, node_is_breaker
-from .node import node_process, node_status
+from .node import Node, NodeStatus, node_apply, node_bind, node_computes_per_row
+from .node import node_ends_early, node_finish, node_is_breaker
+from .node import node_is_row_local, node_process, node_status
+from .parallel import parallel_for, worker_count
 
 
 struct Scan(Movable):
@@ -201,6 +221,50 @@ struct Collect(Movable):
         return DataFrame(schema^, self.columns^)
 
 
+def _run_head(
+    ops: List[Node], lead: Int, mut taken: List[Optional[Chunk]]
+) raises -> List[Optional[Chunk]]:
+    """Runs one batch of chunks through the first `lead` operators, in parallel.
+
+    A free function rather than a method so that the body handed to
+    `parallel_for` captures the two lists and the operators and nothing else.
+    A closure written inside `Pipeline` would capture the whole pipeline, and
+    the source and the sink have no business being reachable from a worker.
+
+    `taken` and `made` are read and written at one index per worker, and both
+    lists are their final length before the first body runs, so no two workers
+    touch the same element and nothing moves under anyone. The operators are
+    shared and never written; that is what `node_apply` is for.
+
+    Args:
+        ops: The line of operators. Only the first `lead` are used.
+        lead: How many leading operators to run. At least one.
+        taken: The batch. Every element is moved out.
+
+    Returns:
+        One slot per input chunk, empty where the prefix kept no rows.
+
+    Raises:
+        If any operator raises.
+    """
+    var count = len(taken)
+    var made = List[Optional[Chunk]](capacity=count)
+    for _ in range(count):
+        made.append(Optional[Chunk]())
+
+    def head(at: Int) raises {mut taken, mut made, imm}:
+        var current = taken[at].take()
+        for i in range(lead):
+            var out = node_apply(ops[i], current^)
+            if not out:
+                return
+            current = out.take()
+        made[at] = Optional[Chunk](current^)
+
+    parallel_for(head, count)
+    return made^
+
+
 struct Pipeline(Movable):
     """A source, a line of operators and a sink, run by pushing chunks."""
 
@@ -279,13 +343,17 @@ struct Pipeline(Movable):
             If any operator raises.
         """
         var sink = Collect()
-        while True:
-            if self._finished():
-                break
-            var chunk = self.source.next()
-            if not chunk:
-                break
-            self._push(0, chunk.take(), sink)
+        var lead = self._parallel_lead()
+        if lead > 0:
+            self._run_batched(lead, sink)
+        else:
+            while True:
+                if self._finished():
+                    break
+                var chunk = self.source.next()
+                if not chunk:
+                    break
+                self._push(0, chunk.take(), sink)
         for i in range(len(self.operators)):
             while True:
                 var out = node_finish(self.operators[i])
@@ -293,6 +361,78 @@ struct Pipeline(Movable):
                     break
                 self._push(i + 1, out.take(), sink)
         return sink^.into_frame(self.schema^)
+
+    def _parallel_lead(self) raises -> Int:
+        """Returns how many operators at the front of the line run in parallel.
+
+        Zero means the whole pipeline runs on the calling thread, which is the
+        answer when the first operator carries state, when there is a limit
+        anywhere in the line, when there is only one chunk to run, when the
+        runtime has one worker, or when the prefix is not worth a task.
+
+        Returns:
+            The number of leading operators to run on every core, or zero.
+        """
+        if worker_count() < 2 or self.source.num_chunks() < 2:
+            return 0
+        for i in range(len(self.operators)):
+            if node_ends_early(self.operators[i]):
+                return 0
+        var lead = 0
+        while lead < len(self.operators) and node_is_row_local(
+            self.operators[lead]
+        ):
+            lead += 1
+
+        # A task costs about ten microseconds to create and the creating
+        # happens on this thread, one after another, so the prefix has to have
+        # something for the other cores to do or the tasks are all that is
+        # added. A project or a cast on its own does not: measured on the
+        # i9-13900K a project over sixty four chunks took twice as long spread
+        # out as it did in a line, and over eight chunks it was still slower.
+        for i in range(lead):
+            if node_computes_per_row(self.operators[i]):
+                return lead
+        return 0
+
+    def _run_batched(mut self, lead: Int, mut sink: Collect) raises:
+        """Runs the source through the parallel prefix and then the rest.
+
+        One batch is one chunk per worker. The batch is read off the source,
+        every chunk of it goes through the first `lead` operators on a core of
+        its own, and then the survivors are pushed through the operators after
+        the prefix in the order the source handed them out. Chunk order is what
+        makes this the same execution as the sequential driver rather than an
+        approximation of it.
+
+        Args:
+            lead: How many leading operators to run in parallel. At least one.
+            sink: Where the rows that reach the end go.
+
+        Raises:
+            If any operator raises.
+        """
+        # No `_finished` check anywhere in here. This route is only taken when
+        # no operator can end early, which is what `_parallel_lead` checked, so
+        # the answer would be False every time it was asked.
+        var batch = worker_count()
+        while True:
+            var taken = List[Optional[Chunk]](capacity=batch)
+            for _ in range(batch):
+                var chunk = self.source.next()
+                if not chunk:
+                    break
+                taken.append(Optional[Chunk](chunk.take()))
+            var count = len(taken)
+            if count == 0:
+                return
+
+            var made = _run_head(self.operators, lead, taken)
+
+            for at in range(count):
+                if not made[at]:
+                    continue
+                self._push(lead, made[at].take(), sink)
 
     def _finished(self) -> Bool:
         """Reports whether reading more of the source would be wasted work.

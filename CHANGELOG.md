@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### The front of a pipeline runs on every core
+
+Until now a pipeline ran one chunk at a time on the thread that called it, which meant the engine's own driver was the one part of the library that did not use the machine. The kernels underneath it were already parallel, so a filter over a whole frame used all sixteen cores and the same filter run as a pipeline used one.
+
+The change is that the driver looks at the front of the line and asks how many operators in a row produce their output from their own input and write nothing to themselves. A filter, a projection, a computed column and a cast all qualify: give one of those a chunk and it hands one back, and it does not care what it was given before or what it will be given next. So one operator can be shared by every worker with no copy and no lock, which is what the four `process` methods becoming non mutating is for, and what `node_apply` is: a way to run a node on a chunk while only borrowing it. A group by or a limit does not qualify, because both hold something between chunks.
+
+The driver runs that prefix a batch at a time, one chunk per worker and no more, then pushes the survivors through the rest of the line in chunk order on the calling thread. Taking a batch rather than the whole source is the point: running every chunk through the prefix first would hold the entire intermediate result in memory, which is the thing a chunked engine exists to avoid. Keeping the tail in chunk order is what makes this the same execution as before rather than an approximation of it, so the rows come out in the order the source had them and a group by downstream sees exactly the chunks it used to.
+
+A pipeline with a limit anywhere in it stays on the old route. A limit is the only operator that can say it is finished before its input runs out, so reading a batch ahead on behalf of sixteen cores would read rows the limit was about to make unnecessary.
+
+The second gate took the measurement to find. Spreading the work costs a task per chunk, and tasks are created on the calling thread one after another at roughly ten microseconds each, so the prefix has to have something for the other cores to do or the tasks are the only thing that got added. A filter and a computed column evaluate something per row and get faster on more cores. A projection only rebuilds a chunk out of columns it already has, and a cast walks a column through the allocator, so both are waiting on memory rather than on arithmetic and neither gains anything. Measured on the i9-13900K, a project on its own over sixty four chunks took twice as long spread out as it did in a line, and over eight chunks it was still slower. So the driver takes the parallel route only when the prefix contains a filter or a computed column.
+
+On that machine, at a million rows, over a line of a computed column then a filter then a projection: `exec/pipeline_line_16k` 5.59 ms to 1.94 and `exec/pipeline_line` 5.26 to 1.66, both with every new run below every old one across three alternating blocks. `exec/pipeline_project`, `exec/pipeline_project_128k`, `exec/pipeline_cast` and `exec/pipeline_cast_128k` all take the sequential route now and all four land inside the noise, between minus 0.2 and plus 1.8 percent. `exec/pipeline_line_one_chunk` and `exec/pipeline_limited` are the controls and did not move.
+
+Handing tasks out one per chunk is not the last word. A shared counter that gives each worker several chunks would pay for the tasks once per core rather than once per chunk, and would let the projection and the cast back onto the parallel route. That is a later change and it needs the batch to stay bounded.
+
 ### A float reduction with nothing to reduce answers NaN and not null
 
 pandas has no separate presence bitmap for a float64 column. NaN is the only missing it has there, and `isna` on a float column is a NaN test. firepanda has a bitmap for every dtype, so it had a second way of saying missing, and until now the grouped and whole column reductions that answer in float64 used it. A mean of a group with no values came back null. So did a variance or a standard deviation or a standard error with fewer values than degrees of freedom, a skewness of fewer than three, a median or a quantile of nothing, and a correlation with no complete pairs or with a column that does not move.

@@ -35,7 +35,8 @@ from .chunk import Chunk
 from .morsel import MORSEL_ROWS, Morsel, MorselQueue, parallel_morsels
 from .node import Cast, Compute, Filter, Group, GroupAgg, Limit, Materialize
 from .node import Node, NodeStatus, Project
-from .node import node_bind, node_finish, node_is_breaker, node_process
-from .node import node_status
+from .node import node_apply, node_bind, node_computes_per_row
+from .node import node_ends_early, node_finish, node_is_breaker
+from .node import node_is_row_local, node_process, node_status
 from .parallel import parallel_for, worker_count
 from .pipeline import Collect, Pipeline, Scan
