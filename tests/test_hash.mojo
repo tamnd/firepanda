@@ -348,6 +348,46 @@ def test_the_parallel_direct_route_leaves_most_of_its_range_unused() raises:
     same_direct_routes(col, 40001, 16, "direct sparse range")
 
 
+def test_a_direct_slice_is_read_to_its_last_row_for_one_group() raises:
+    """A worker on the direct route stops scanning once its table is full, and
+    the last row of a slice is where that has to still be true.
+
+    Four of the five values are everywhere and the fifth is on the last row of
+    every slice, so a worker that stopped a group early, or that counted the
+    group before recording the row it was on, would lose that value or record
+    the wrong row for it. Both show up against the serial route, which reads
+    every row and never stops.
+    """
+    var n = 8192
+    var workers = 4
+    var col = Array[DType.int32](n)
+    for i in range(n):
+        col[i] = Int32(i % 4)
+    for w in range(workers):
+        col[n * (w + 1) // workers - 1] = Int32(4)
+    same_direct_routes(col, 5, workers, "direct last row is a group")
+
+
+def test_a_direct_slice_stops_once_it_has_seen_everything() raises:
+    """The other side of it: a slice whose table fills in its first few rows has
+    nothing left to learn from the rest of it and stops reading.
+
+    Every value is in the first twenty rows and the remaining eight thousand are
+    repeats, so a worker that kept going would record nothing further, which is
+    what makes the two routes still have to agree. The nulls are here because
+    they are the rows a worker steps over without touching its table, and a stop
+    condition that counted rows rather than groups would trip on them.
+    """
+    var n = 8192
+    var col = Array[DType.int32](n)
+    for i in range(n):
+        col[i] = Int32(i % 20)
+    for i in range(len(col)):
+        if i % 13 == 0:
+            col.set_null(i)
+    same_direct_routes(col, 20, 8, "direct table fills early")
+
+
 def test_the_parallel_route_agrees_on_a_low_cardinality_column() raises:
     same_routes(hashed_column(8192, 100), 4, "parallel 100 groups")
 
