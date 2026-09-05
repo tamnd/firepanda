@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### The Python front door, measured rather than argued for
+
+`docs/specs/07-python-bindings.md` was written before any of it existed and it asks the reader to check it against the installed toolchain. `docs/specs/12-the-python-front-door-measured.md` is that check, run against Mojo 1.0.0 on macOS arm64, and every number in it came out of a command.
+
+The headline is that the problem document 07 calls the hardest one is largely solved and cost 2.8 megabytes. A Mojo Python extension links two Mojo runtime libraries which pull in two more, it does not link libpython at all, and the four of them vendored beside a 170 kilobyte extension import and run on a stock Homebrew CPython 3.14 launched with `env -i` and a `PATH` that has no Mojo binary on it. For scale, the pandas 3.0.3 and numpy 2.5.2 this project is measured against occupy 46.4 and 23.2 megabytes installed.
+
+The Arrow crossing works today and the zero copy is proven by address rather than by eye. firepanda's Arrow C Data Interface landed at M2 and knew nothing about Python; wrapping an exported schema and array in PyCapsules is about forty lines, and `pyarrow.array` accepts the result with the right type, length, values and null count, with the values buffer address on the pyarrow side equal to the one firepanda handed out. What is still missing on that side is `ArrowArrayStream`, which is what `__arrow_c_stream__` needs.
+
+Two things do not work and they are the real M3 risks, neither of which document 07 flags as one. A function registered with `def_function` can raise exactly one Python exception type and it is `Exception`, and setting a typed one by hand first does not survive, because the binding wrapper overwrites it, so the error mapping table has to live in the thin Python layer. And `PyErr_CheckSignals` is not exposed by `std.python._cpython` at all, so the Ctrl-C exit criterion needs either a `dlsym` of our own or a different threading model.
+
+Also recorded: `GILReleased` works and was measured rather than assumed, at 673 ticks of another Python thread against 1 while the GIL is held, and the first attempt at that measurement was worthless because the compiler folded the workload away.
+
 ### A grouped result can be indexed by its key
 
 pandas returns `df.groupby("k").sum()` indexed by the key, with the key gone from the columns and the level named after the column it came from. `group_by` grows an `as_index` flag that asks for exactly that, and `group_agg` and `group_count` pass it through, so the three spellings a caller reaches for all have it.
