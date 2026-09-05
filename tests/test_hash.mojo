@@ -27,6 +27,7 @@ from firepanda.hash import (
     DEFAULT_SEED,
     DIRECT_LIMIT,
     HashTable,
+    direct_plan,
     factorize,
     factorize_dense,
     factorize_dict,
@@ -43,6 +44,7 @@ from firepanda.hash.factorize import (
     PARALLEL_MIN_SLICE,
     PARALLEL_ROWS,
     PARALLEL_STRING_ROWS,
+    PLAN_PREFIX_ROWS,
     RANK_BLOCK,
     Factorized,
     _estimate_groups,
@@ -1371,6 +1373,92 @@ def test_text_splits_earlier_than_numbers() raises:
             PARALLEL_ROWS,
         ),
     )
+
+
+def _split_scan_column(n: Int, at: Int, far: Int64) -> Array[DType.int64]:
+    """A column of two values with a third planted at one row.
+
+    Args:
+        n: The number of rows.
+        at: The row the planted value goes on, or -1 for none.
+        far: The planted value.
+
+    Returns:
+        The column, with no nulls.
+    """
+    var col = Array[DType.int64](n)
+    for i in range(n):
+        col[i] = Int64(i % 7)
+    if at >= 0:
+        col[at] = far
+    return col^
+
+
+def test_the_range_scan_agrees_across_the_row_it_splits_at() raises:
+    """`direct_plan` reads `PLAN_PREFIX_ROWS` where it stands and hands the rest
+    to the cores, and the point of the split is that where a value sits does not
+    change what comes out.
+
+    So the same wide value is planted on the last row the prefix reads, on the
+    first row it does not, on a morsel boundary past that and on the last row of
+    the column, and every one of those has to come back with the eight groups
+    the column has. All of them sit past the seventh row, so the seven narrow
+    values are still numbered by where they first appear and the planted one is
+    still the group nobody had seen. The narrow column with nothing planted is
+    the other half of it: the scan has to get all the way to the end and still
+    say the range is seven.
+    """
+    var rows = PLAN_PREFIX_ROWS * 5
+    var far = Int64(DIRECT_LIMIT) * 4
+
+    var narrow = factorize(_split_scan_column(rows, -1, far))
+    assert_equal(narrow.count(), 7)
+
+    var places = [
+        7,
+        PLAN_PREFIX_ROWS - 1,
+        PLAN_PREFIX_ROWS,
+        PLAN_PREFIX_ROWS + MORSEL_ROWS,
+        rows - 1,
+    ]
+    for k in range(len(places)):
+        var at = places[k]
+        var planted = factorize(_split_scan_column(rows, at, far))
+        assert_equal(planted.count(), 8)
+        assert_equal(Int(planted.codes[at]), 7)
+        for i in range(rows):
+            if i != at:
+                assert_equal(Int(planted.codes[i]), i % 7)
+
+
+def test_the_range_scan_skips_nulls_on_both_sides_of_the_split() raises:
+    """A null holds no value, so it is not in the range whichever side of the
+    boundary the scan splits at it sits on.
+
+    The values here sit far from zero and a null's slot holds zero, so a scan
+    that read one would come back with a range four times what a table is worth
+    instead of a range of seven. Both nulls are placed where a scan that got the
+    split wrong would miss them: one on the last row the prefix reads and one on
+    the last row of the column.
+    """
+    var rows = PLAN_PREFIX_ROWS * 5
+    var base = Int64(DIRECT_LIMIT) * 4
+    var col = Array[DType.int64](rows)
+    for i in range(rows):
+        col[i] = base + Int64(i % 7)
+    col.set_null(PLAN_PREFIX_ROWS - 1)
+    col.set_null(rows - 1)
+
+    var plan = direct_plan(col, rows // DIRECT_SHARE)
+    assert_equal(plan.span, 7)
+    assert_equal(Int(plan.base), Int(base))
+
+    var found = factorize(col)
+    assert_equal(found.count(), 8)
+    assert_equal(found.null_group, 0)
+    assert_equal(Int(found.codes[PLAN_PREFIX_ROWS - 1]), 0)
+    assert_equal(Int(found.codes[rows - 1]), 0)
+    assert_equal(Int(found.codes[0]), 1)
 
 
 def main() raises:
