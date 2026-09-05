@@ -4,6 +4,8 @@ Document 12 measured the Python front door and found that the hard problem was n
 
 That assumption is wrong, and the way it is wrong decides the architecture of the whole Python layer rather than the shape of one file. `PythonTypeBuilder` can attach methods to a type and nothing else. It cannot attach `__getitem__`, it cannot attach `__len__`, it cannot attach a property, and the type it produces cannot be subclassed from Python. Those four facts together mean that `df["revenue"]`, `len(df)`, `df.shape` and `for row in df` cannot be implemented in Mojo at all in this toolchain. Since `df["revenue"]` is the single most common line of pandas ever written, a firepanda whose user facing object is a bound Mojo type is not a pandas replacement, it is a library with an unfamiliar accessor syntax.
 
+Counted rather than argued, 281 of the 1011 public entries in pandas 3.0.5 are properties or operators, so 28 percent of the surface this project exists to reproduce is unreachable from Mojo in this toolchain, and it is the 28 percent people type most.
+
 The conclusion is that the object a user holds is a pure Python object that holds a Mojo object, and this document is the measurement that argues for it, including what the extra layer costs in nanoseconds.
 
 ## What was actually run
@@ -33,6 +35,8 @@ list(iter(f)) -> TypeError: 'Frame' object is not iterable
 
 The one thing that does work is printing. A bound type that implements `Writable` gets both `__str__` and `__repr__` for free, with no call to the builder, which is a genuinely nice piece of design. There is a wrinkle in it. Both of them come from `write_repr_to`, and `write_to` is silently ignored: the probe's `write_to` writes `Frame(7 rows)` and its `write_repr_to` writes `Frame(n=7)`, and both `str(f)` and `repr(f)` returned `Frame(n=7)`. For firepanda this is survivable, because pandas prints the same table for both, but a struct that carefully writes two different forms will find that only one of them is ever reachable and there is nothing in the API to say so.
 
+It is worth knowing how much of pandas that rules out, rather than arguing from four examples. Walking the public surface of `DataFrame`, `Series`, `Index`, `MultiIndex`, the two GroupBy types, `Rolling` and `Resampler`, plus the module level functions, pandas 3.0.5 has 1011 public entries. 730 are methods, 127 are properties and 154 are operators and other dunders. So 281 of them, 28 percent of the pandas surface, cannot be expressed through `PythonTypeBuilder` by any route, and the missing 28 percent includes `df["a"]`, `df.shape`, `df.columns`, `df.iloc`, `df.loc`, `df.dtypes`, `len(df)`, `df + 1` and every comparison operator, which is to say it includes most of what anybody actually types.
+
 ## 3. Inheritance is not the way out either
 
 The obvious workaround for a type that is missing dunders is to subclass it in Python and add them there, which costs one small class and keeps the object identity intact. That is not available. `class Sub(Frame)` fails with `TypeError: type 'Frame' is not an acceptable base type`, because the type is created without `Py_TPFLAGS_BASETYPE` and nothing in the builder offers to set it.
@@ -45,7 +49,9 @@ So the relationship between the Python object and the Mojo object has to be comp
 
 `PyObjectFunction` carries about 138 `__init__` overloads, covering arities zero through eight in raises and non raises forms, returning `PythonObject` or nothing, with and without `var **kwargs: PythonObject`. Nine arguments is rejected. For `def_method` the `py_self` argument is one of the eight, so a bound method gets seven real ones.
 
-Seven is not a comfortable number for this API. `DataFrame.merge` in pandas takes thirteen parameters, `read_csv` takes upwards of forty, and `groupby` takes nine. The saving grace is that keyword arguments do not count against the ceiling and they work properly: a method declared with `var **kwargs: PythonObject` compiles alongside up to seven positional arguments, and at runtime `probe.show('agg', volume='sum', p99='quantile')` returned `['agg', ['volume', 'sum'], ['p99', 'quantile']]`, so both the values and their order survive the crossing.
+Seven is not a comfortable number for this API, and the same walk of the surface says exactly how uncomfortable. 34 of the 730 public methods take more than seven positional parameters, which is 4.7 percent, and the worst of them is `DataFrame.hist` at sixteen, followed by `merge_asof` at fourteen and `merge` at thirteen. So the ceiling is a problem for one method in twenty rather than for the API as a whole, which is a much better position than the number seven suggests on its own. 149 of those methods already take `**kwargs` in pandas, so a keyword route is not foreign to the surface being copied.
+
+The saving grace is that keyword arguments do not count against the ceiling and they work properly: a method declared with `var **kwargs: PythonObject` compiles alongside up to seven positional arguments, and at runtime `probe.show('agg', volume='sum', p99='quantile')` returned `['agg', ['volume', 'sum'], ['p99', 'quantile']]`, so both the values and their order survive the crossing.
 
 That means the ceiling is not a wall, but it does dictate a house style. Every bound method takes the arguments that are positional in pandas and pushes the rest through `**kwargs`, and since the Python layer from section 3 is already in front of every one of these, that layer is where the real pandas signature lives, with its defaults and its keyword only markers and its type annotations. The Mojo side gets a narrow calling convention and the Python side gets the pandas one. This is the same conclusion section 6 arrives at from a different direction.
 
@@ -124,6 +130,8 @@ The type probe. Build a module with `mojo build --emit shared-lib probe.mojo -o 
 The subclass probe is three lines in the same interpreter: `class Sub(Frame): pass`, then `f.extra = 1`, then `dir(Frame)`.
 
 The arity probe generates a method with n `PythonObject` arguments for n in a range, builds each one, and counts `error:` lines in the output. Eight succeeds and nine fails for `def_function`, and for `def_method` the same bisection puts the last success at seven arguments after `py_self`.
+
+The surface counts come from a script that walks `dir()` on each of the eight types, sorts each member into a method, a property or a dunder using `inspect.getattr_static` so that nothing is triggered by being looked at, and reads the parameter kinds off `inspect.signature`. It is the same walk the signature parity test in section 8 needs, so it should land in the tree with that test rather than staying a probe. Run against pandas 3.0.5, it reads nothing it cannot introspect.
 
 The table probe from section 7 is four builds of the same module, each one adding a layer of indirection between the function and `def_method`: a bare `comptime` alias, a struct parameterized on the function, a helper parameterized the same way, and a `PyObjectFunction` built at the naming site and forwarded. The first and last build and the middle two do not. The pack question is one more build, adding `def register[*entries: Named]` over two entries of differing types, which fails in the parameter list rather than in the body.
 
