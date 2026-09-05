@@ -38,9 +38,13 @@ from firepanda.io.arrow_c import (
     VoidPtr,
     release_array,
     release_schema,
+    release_stream,
+    stream_next,
+    stream_schema,
 )
 from firepanda.io.arrow_export import export_frame_array, export_frame_schema
 from firepanda.io.arrow_stream import (
+    export_frame_stream,
     frame_layout,
     import_frame,
     import_stream,
@@ -434,6 +438,152 @@ def test_a_released_stream_is_refused() raises:
     var stream = ArrowArrayStream()
     with assert_raises(contains="already been released"):
         _ = import_stream(stream)
+
+
+def _types_of(frame: ArcPointer[DataFrame]) -> List[LogicalType]:
+    """The column types, which the stream export takes rather than the frame."""
+    var out = List[LogicalType](capacity=frame[].width())
+    for i in range(frame[].width()):
+        out.append(frame[].columns[i].type)
+    return out^
+
+
+def _pointers_of(
+    frame: ArcPointer[DataFrame],
+) -> List[Pointer[AnyArray, MutAnyOrigin]]:
+    """One pointer per column, the way the binding builds them."""
+    var out = List[Pointer[AnyArray, MutAnyOrigin]](capacity=frame[].width())
+    for i in range(frame[].width()):
+        try:
+            out.append(
+                Pointer(to=frame[].columns[i].only()).unsafe_origin_cast[
+                    MutAnyOrigin
+                ]()
+            )
+        except:
+            pass
+    return out^
+
+
+def _exported(frame: ArcPointer[DataFrame]) raises -> ArrowArrayStream:
+    """Exports a frame as a stream, the way the binding does."""
+    return export_frame_stream(
+        _pointers_of(frame),
+        _types_of(frame),
+        frame[].names(),
+        len(frame[]),
+        frame,
+    )
+
+
+def test_an_exported_stream_describes_the_frame() raises:
+    var source = _held()
+    var stream = _exported(source)
+    var schema = ArrowSchema()
+    assert_equal(stream_schema(stream, schema), 0)
+    var layout = frame_layout(schema)
+    assert_equal(len(layout), 2)
+    assert_equal(layout.names[0], "qty")
+    assert_equal(layout.names[1], "name")
+    assert_equal(layout.formats[0], "l")
+    assert_equal(layout.formats[1], "vu")
+    release_schema(schema)
+    release_stream(stream)
+
+
+def test_an_exported_stream_describes_itself_as_often_as_it_is_asked() raises:
+    # The consumer owns what it is given and releases it, so a producer that
+    # handed out the same structure twice would be asking to have it released
+    # twice.
+    var source = _held()
+    var stream = _exported(source)
+    var first = ArrowSchema()
+    var second = ArrowSchema()
+    assert_equal(stream_schema(stream, first), 0)
+    assert_equal(stream_schema(stream, second), 0)
+    assert_true(first.format.value() != second.format.value())
+    release_schema(first)
+    release_schema(second)
+    release_stream(stream)
+
+
+def test_an_exported_stream_hands_out_one_batch_and_then_ends() raises:
+    # A frame has no chunking, so its stream is one batch. The end is the
+    # released state written into the caller's structure rather than an error.
+    var source = _held()
+    var stream = _exported(source)
+    var first = ArrowArray()
+    assert_equal(stream_next(stream, first), 0)
+    assert_true(not first.is_released())
+    assert_equal(first.length, 3)
+    assert_equal(first.n_children, 2)
+    release_array(first)
+
+    var second = ArrowArray()
+    assert_equal(stream_next(stream, second), 0)
+    assert_true(second.is_released())
+    release_stream(stream)
+
+
+def test_an_exported_stream_borrows_rather_than_copies() raises:
+    # The claim the whole export exists for. The batch's buffers are the frame's
+    # own, which a producer that copied could not manage while the frame is still
+    # alive and holding them.
+    var source = _held()
+    var stream = _exported(source)
+    var batch = ArrowArray()
+    assert_equal(stream_next(stream, batch), 0)
+    var child = batch.children.value().unsafe_offset(0)[]
+    assert_equal(
+        Int(child[].buffers.value().unsafe_offset(1)[].value()),
+        Int(source[].columns[0].only().data.values.unsafe_ptr()),
+    )
+    release_array(batch)
+    release_stream(stream)
+
+
+def test_an_exported_stream_keeps_the_frame_alive() raises:
+    # The ownership question the borrow creates. Every other holder lets go
+    # inside the block and the consumer keeps reading afterwards, so the values
+    # read are freed memory unless the stream is holding a share.
+    var stream: ArrowArrayStream
+
+    def build() raises -> ArrowArrayStream:
+        return _exported(_held())
+
+    stream = build()
+    var frame = import_stream(stream)
+    assert_equal(len(frame), 3)
+    assert_equal(frame.column("qty").as_typed[DType.int64]()[2], 25)
+    assert_equal(frame.column("name").text(0), "rivet")
+
+
+def test_a_frame_round_trips_through_its_own_stream() raises:
+    # The two directions checked against each other rather than against a
+    # reading of the specification, which is the only check that catches a
+    # mistake made in one of them and not the other.
+    var source = _held()
+    var stream = _exported(source)
+    var frame = import_stream(stream)
+    assert_equal(len(frame), 3)
+    assert_equal(frame.width(), 2)
+    assert_equal(frame.names()[0], "qty")
+    assert_equal(frame.column("qty").as_typed[DType.int64]()[0], 4)
+    assert_equal(frame.column("qty").null_count(), 1)
+    assert_equal(
+        frame.column("name").text(2), "a name longer than twelve bytes"
+    )
+
+
+def test_an_exported_stream_released_without_being_read_is_not_a_leak() raises:
+    # A consumer is allowed to change its mind, which is why the batch is built
+    # when it is asked for rather than when the stream is made.
+    var source = _held()
+    var stream = _exported(source)
+    release_stream(stream)
+    assert_true(stream.is_released())
+    release_stream(stream)
+    assert_true(stream.is_released())
 
 
 def _as_void[T: AnyType](f: T) -> VoidPtr:

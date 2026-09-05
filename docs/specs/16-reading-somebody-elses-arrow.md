@@ -1,8 +1,8 @@
-# Reading somebody else's Arrow
+# The Arrow stream, in both directions
 
-Document 15 is the export direction, which is how a firepanda frame reaches pyarrow, Polars and pandas. This is the other one, and it is the half that decides whether firepanda can be put in the middle of anything. Until it exists the only way to make a frame is to read a CSV, and a library that cannot be handed data is a library nobody can add to a pipeline that already runs.
+Document 15 is the array export, which is how a firepanda frame reaches pyarrow and Polars. This is the rest of the boundary: reading a frame from somebody else, and handing one out as a stream rather than as a single array. The reading is the half that decides whether firepanda can be put in the middle of anything, because until it exists the only way to make a frame is to read a CSV, and a library that cannot be handed data is a library nobody can add to a pipeline that already runs. The stream export is the half that DuckDB and everything like it require.
 
-It covers `firepanda.from_arrow`, the code behind it in `firepanda/io/arrow_stream.mojo`, and the two things measuring real producers changed about the plan.
+It covers `firepanda.from_arrow`, `__arrow_c_stream__`, the code behind both in `firepanda/io/arrow_stream.mojo`, and the two things measuring real producers changed about the plan.
 
 ## 1. The stream is the main road, which was not the plan
 
@@ -21,7 +21,7 @@ Against pyarrow 25.0.1, Polars 1.44.1 and pandas 3.0.5, this is what is actually
 
 One container type in six offers the array half. An importer that read only arrays would read a pyarrow record batch and nothing else, which is to say it would not read a pandas frame, which is the whole point. So the stream is not the follow up to the array direction, it is the road, and both were built together rather than one after the other.
 
-The same measurement settles the DuckDB row of M3's exit criteria in document 08, which document 15 section 7 left open. DuckDB refuses an object that offers only `__arrow_c_array__` with `Python Object Type DataFrame is not an accepted Arrow Object`, and what it wants is `__arrow_c_stream__`. That is the export side of the stream, which is still to be written, and the import side landing first does not close it. It does mean the stream structure, its four callbacks and the release protocol are now declared, exercised and tested from the consumer side, which is most of what the export needs.
+The same measurement settles the DuckDB row of M3's exit criteria in document 08, which document 15 section 7 left open. DuckDB refuses an object that offers only `__arrow_c_array__` with `Python Object Type DataFrame is not an accepted Arrow Object`, and what it wants is `__arrow_c_stream__`. That is the export side of the stream, which section 9 is about, and it now works: `duckdb.sql("select ... from df")` reads a firepanda frame with no copy and no firepanda specific code on DuckDB's side.
 
 ## 2. This direction copies, and that is not a compromise
 
@@ -79,16 +79,34 @@ The two are told apart by the message, in `_import_kind` in `firepanda/py/frame.
 
 The Mojo suite in `tests/test_arrow_stream.mojo` builds a conforming `ArrowArrayStream` by hand around firepanda's own exporter. That is not a compromise, because it is the only way to get a stream into the Mojo suite without linking somebody else's library into it, and because every assertion is against the values that went in rather than against what the exporter said about them. What it buys that a round trip cannot is the two things a real producer does and ours cannot do by accident: hand out more than one batch, and fail part way through after batches have already been taken.
 
+The export half is tested in the same two places. `tests/test_arrow_stream.mojo` asserts the buffer address the batch hands out is the frame's own, which is the zero copy claim made directly, and it covers a stream described twice, a stream released without ever being read, and a frame round tripping through its own stream. `python/tests/test_arrow.py` adds DuckDB, which is the consumer that accepts nothing but the stream and therefore the one that says whether the stream is conforming rather than merely self consistent.
+
 The Python suite in `python/tests/test_arrow_import.py` is the half that matters more, and it is deliberately written against pyarrow, Polars and pandas rather than against a fixture. A test that built its own conforming stream would be testing this code against my reading of the specification, which is the reading that produced the code. Those three implemented the protocol without knowing firepanda existed, so what they hand over is what the protocol actually is. It covers a record batch, a table, a table of several chunks, a slice, a table with no rows, a Polars frame, a Polars frame of only short strings, a pandas frame, a round trip out and back, a frame read after its producer has been collected, a thousand imports in a loop, and each of the refusals above.
 
 The loop is there for the two failures a single import will not show. A leak of one frame is invisible and a double release is a crash that one import is unlikely to reach, and repetition turns both into something a test can see.
 
-## 9. What is left
+## 9. Handing a frame out as a stream
 
-**The stream export.** `__arrow_c_stream__` on a frame, which is what DuckDB wants and what a chunked column needs in order to be exportable at all. The structure and the release protocol are now settled by this work.
+`__arrow_c_stream__` on a frame is the same three structures written rather than read, and it lives in the same file for that reason. A change to one direction that is not matched in the other is a frame that cannot survive its own round trip, and having both in one place is what makes that easy to see.
+
+A firepanda frame has no chunking, so the stream it exports is one batch followed by the end. The end is the released state written into the caller's structure, which is how the interface says a stream is finished rather than broken. That is a stream a consumer cannot tell from any other, which is the point, because it means what a firepanda frame costs to read is the same as what anything else costs to read.
+
+Nothing is copied that the array export would not have copied, which is to say nothing at all except a bool column's bit packing. The box behind the stream holds a share of the frame, exactly as `_BorrowedArrayBox` does in document 15 section 2, and every batch it hands out takes its own share, so a consumer that keeps a batch and drops the stream is still reading live memory.
+
+Two decisions in it are worth writing down.
+
+**The batch is built when it is asked for, not when the stream is made.** A consumer is allowed to release a stream without ever calling `get_next`, and pyarrow and DuckDB both do that on some paths. A batch built eagerly for such a consumer is a batch nobody ever releases.
+
+**The schema is exported once at construction and thrown away.** It is not wasted. A frame holding a type Arrow has no format string for has to fail somewhere, and doing it here means it fails with a real message, on the thread that asked for it, rather than as an error code returned from inside a callback the caller did not write. What is left for `get_last_error` to report is allocation failure, which is why it has one message rather than a specific one.
+
+**A chunked column is still refused, and by both directions of the export.** The stream is where chunking is expressible in principle, and this stream hands out one batch, so it is not expressible yet in practice. The refusal names the column and happens before anything is allocated. Nothing in the tree produces a chunked column today, so this is a shape the code has to be honest about rather than a thing users hit.
+
+## 10. What is left
 
 **A `Series` on both sides.** There is no bound `Series` type yet, so neither direction has a column level entry point.
 
-**`requested_schema`.** Still refused in both directions. Honouring it is a conversion, and a conversion belongs in the import path where it can allocate, which is now a place that exists.
+**`requested_schema`.** Still refused in every direction. Honouring it is a conversion, and a conversion belongs in the import path where it can allocate, which is now a place that exists.
+
+**A stream of more than one batch.** Both the export and the chunked column refusal above are waiting on the same thing, which is a frame that can hold a column in more than one piece.
 
 **Dictionary and nested columns.** Both refused by name. The dictionary reader is what the categorical section of the conformance suite is waiting on.

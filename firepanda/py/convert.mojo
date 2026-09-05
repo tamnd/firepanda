@@ -62,8 +62,10 @@ from firepanda.io.arrow_c import (
     ArrowArrayStream,
     ArrowSchema,
     SchemaPtr,
+    StreamPtr,
     release_array,
     release_schema,
+    release_stream,
 )
 
 comptime SCHEMA_CAPSULE = "arrow_schema"
@@ -98,6 +100,19 @@ def _drop_array(capsule: PyObjectPtr) abi("C") -> None:
         ).unsafe_bitcast[ArrowArray]()
         release_array(array[])
         external_call["free", NoneType](array)
+    except:
+        pass
+
+
+def _drop_stream(capsule: PyObjectPtr) abi("C") -> None:
+    """Releases and frees a stream capsule's struct. Called by CPython."""
+    try:
+        ref cpython = Python().cpython()
+        var stream = cpython.PyCapsule_GetPointer(
+            capsule, String(STREAM_CAPSULE)
+        ).unsafe_bitcast[ArrowArrayStream]()
+        release_stream(stream[])
+        external_call["free", NoneType](stream)
     except:
         pass
 
@@ -140,6 +155,27 @@ def array_capsule(var array: ArrowArray) raises -> PythonObject:
         .cpython()
         .PyCapsule_New(
             box.unsafe_bitcast[NoneType](), ARRAY_CAPSULE, _drop_array
+        )
+    )
+
+
+def stream_capsule(var stream: ArrowArrayStream) raises -> PythonObject:
+    """Wraps an exported stream in the capsule the protocol expects.
+
+    Args:
+        stream: The stream, consumed. Ownership of it passes to the capsule and
+            from there to whoever holds the capsule.
+
+    Returns:
+        A `PyCapsule` named `arrow_array_stream`.
+    """
+    var box = external_call["malloc", StreamPtr](size_of[ArrowArrayStream]())
+    box.unsafe_write(stream^)
+    return PythonObject(
+        from_owned=Python()
+        .cpython()
+        .PyCapsule_New(
+            box.unsafe_bitcast[NoneType](), STREAM_CAPSULE, _drop_stream
         )
     )
 
