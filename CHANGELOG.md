@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A grouped result can be indexed by its key
+
+pandas returns `df.groupby("k").sum()` indexed by the key, with the key gone from the columns and the level named after the column it came from. `group_by` grows an `as_index` flag that asks for exactly that, and `group_agg` and `group_count` pass it through, so the three spellings a caller reaches for all have it.
+
+The key is read off the finished frame rather than off the gathered key column, because the dropna filter and the sort have both run by then and the labels have to be the keys of the rows that survived, in the order those rows came out in. Reading it earlier gives the right set of labels in the wrong order, and `sort=False` is the case that tells the two apart.
+
+`as_index` defaults to false, which is the one default in this method that does not match pandas, and the reason is that pandas puts two keys into a MultiIndex and firepanda has none. Defaulting to true would mean a two key group by raising by default, which is a worse answer than a shape that differs. So it is off, asking for it with more than one key raises and says why, and the default flips when the MultiIndex lands. Everything else here already matches pandas: `dropna` and `sort` are both on. Nothing existing changes shape, so there is no migration.
+
+Two gaps in the index shipped in the previous entry are fixed here and both are the same mistake. `select` builds its result from a schema and a column list rather than by copying the frame, so it was the one row preserving method that had to be told to carry the labels, and `drop` is `select` underneath, so it lost them too. `column` is the other: a column of a frame has the frame's rows, so it has the frame's labels, and without that `df.groupby("k")["v"].mean()` comes back with the labels dropped at the last step. The rule these three now follow is the previous entry's rule read the other way round: an operation that does not choose rows keeps the labels it was given.
+
+Eight tests in `tests/test_index.mojo`, including one that asserts the flat and indexed forms hold the same numbers in the same order, since `as_index` moves a column and must not change an answer.
+
+Measured on the conformance suite in [firepanda-compat](https://github.com/tamnd/firepanda-compat), the groupby section goes from 54 pass and 62 fail to 111 and 5. Of the 5 left, 3 are the Arrow reader refusing a dictionary encoded column and 2 are the two key grouping asking for a MultiIndex. basics is unchanged at 155 and 22 and stats at 52 and 4, so nothing regressed. Across the three sections the failure count goes from 88 to 31.
+
 ### Frames and series carry row labels
 
 pandas identifies a row by a label and not by a position, and every operation that chooses rows carries the labels of the rows it chose. firepanda had none of that. A frame was a schema, some columns and a height, and the only answer it had to "which row is this" was the row's position, so `df.tail(5)` of a ten row frame came back labelled 0 through 4 where pandas labels it 5 through 9, `sort_values` came back in the new order with the old labels thrown away, and `dropna` came back renumbered instead of with holes in it. `DataFrame` and `Series` now have an `index`, and `take`, `filter` and `slice` carry it, which covers `head`, `tail`, `sort_values` and `drop_nulls` as well since each of those is one of the three underneath.
