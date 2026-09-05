@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A frame you can hold from Python, generated from one table
+
+`firepanda.read_csv(path)` returns a `DataFrame`. You can take its length, ask it for its columns and its shape, print it, and slice it with `head` and `tail`. That is the whole surface and it is small on purpose, because the interesting part of this change is where each piece lives rather than how much of it there is.
+
+The pandas API is a Python class, not the bound Mojo type, and the 0.6.43 entry below explains why. The Mojo side is a private calling convention with names like `length` and `width` and no dunders in it, and `python/firepanda/_frame.py` is the part a user meets. That arrangement puts the two files most likely to drift apart on opposite sides of a language boundary, where nothing would notice, so both are generated from the table in `tools/bindings.py` along with the type stubs. Document 07 asked for one declarative table and this is it, though not in the shape that document imagined: a Mojo value the registration loops over does not compile, so the loop happens at generation time and the registration is checked in as source.
+
+`python/tests/test_bindings.py` is what makes the table worth having rather than merely tidy. It walks the table against the extension and against the Python class in both directions, so a binding added by hand or a member quietly dropped fails rather than drifting, and it checks that the generated files on disk are still what the table says, which is what gives the other tests their meaning. One test compares our signatures against pandas itself with `inspect.signature`. It found something on its first run: pandas calls the first argument of `read_csv` `filepath_or_buffer` and we had called it `path`.
+
+Two absences are deliberate. `read_parquet` is not here, because the Parquet reader reaches the DuckDB loader and its `dlopen` does not survive being built into a shared library. And `DataFrame()` raises rather than handing back an empty frame, because there is no Python to Arrow conversion yet and a constructor that accepts nothing and succeeds looks like it worked.
+
 ## [0.6.43] - 2026-09-05
 
 Built against Mojo 1.0.0 (ed45d567). A frame gets an index, the streaming join becomes an operator the pipeline can actually run a query through, and three reductions stop reading the same column twice.
