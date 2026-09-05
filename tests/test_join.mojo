@@ -35,7 +35,15 @@ from firepanda.array.any import AnyArray
 from firepanda.array.array import Array, from_list
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.series import Series
-from firepanda.join.pairs import JoinKind, join_indices
+from firepanda.bitmap.bitmap import Bitmap
+from firepanda.join.keys import align_keys
+from firepanda.join.pairs import (
+    JoinIndices,
+    JoinKind,
+    bucket_side,
+    join_indices,
+    pair_probe,
+)
 from firepanda.join.scalar import join_nested
 
 
@@ -823,6 +831,176 @@ def test_a_projection_can_name_a_suffixed_column() raises:
     var v = out.column("v_right").as_typed[DType.int64]()
     assert_equal(v[0], 100)
     assert_equal(v[1], 200)
+
+
+def paired_in_pieces(
+    left: DataFrame, right: DataFrame, cut: Int, kind: JoinKind
+) raises -> JoinIndices:
+    """Pairs the left side in two pieces against one table built from the right.
+
+    This is the shape a streaming join has. The right side is scanned once, each
+    piece of the left is walked against it, and the piece's row numbers, which
+    come back counted from where the piece started, are shifted to where the
+    piece was.
+
+    Args:
+        left: The probe side.
+        right: The side scanned into the table.
+        cut: Which left row the second piece starts at.
+        kind: Which rows to keep.
+
+    Returns:
+        The pairs, in the order the pieces produced them.
+
+    Raises:
+        Whatever the alignment or the pairing raises.
+    """
+    var rows = len(left)
+    var other = len(right)
+    var aligned = align_keys(
+        left.column_refs(), keys(0), rows, right.column_refs(), keys(0), other
+    )
+    var table = bucket_side(
+        aligned.codes,
+        rows,
+        other,
+        aligned.absent,
+        rows,
+        aligned.has_nulls,
+        aligned.groups,
+    )
+    var matched = Bitmap(
+        other if kind == JoinKind.OUTER else 0, all_valid=False
+    )
+    var out_left = List[Int]()
+    var out_right = List[Int]()
+    var edges = List[Int]()
+    edges.append(0)
+    edges.append(cut)
+    edges.append(rows)
+    for p in range(2):
+        var at = edges[p]
+        var piece = pair_probe(
+            table,
+            aligned.codes,
+            at,
+            edges[p + 1] - at,
+            aligned.absent,
+            at,
+            aligned.has_nulls,
+            kind,
+            matched,
+        )
+        for r in range(len(piece)):
+            var l = piece.left_at[r]
+            out_left.append(l if l < 0 else l + at)
+            out_right.append(piece.right_at[r])
+
+    # The unmatched right rows of an outer join are known only once every piece
+    # has gone past, which in a pipeline is what the sink does at the end.
+    if kind == JoinKind.OUTER:
+        for r in range(other):
+            if not matched.get(r):
+                out_left.append(-1)
+                out_right.append(r)
+    return JoinIndices(out_left^, out_right^)
+
+
+def piecewise_kinds() -> List[JoinKind]:
+    """The kinds that pair one side against the other in one direction.
+
+    A right join is a left join with the sides exchanged, so pairing its probe
+    side in pieces means pairing the right frame in pieces and it is the same
+    statement about the same function.
+    """
+    var out = List[JoinKind]()
+    out.append(JoinKind.INNER)
+    out.append(JoinKind.LEFT)
+    out.append(JoinKind.OUTER)
+    out.append(JoinKind.SEMI)
+    out.append(JoinKind.ANTI)
+    return out^
+
+
+def assert_same_pairs(got: JoinIndices, want: JoinIndices, what: String) raises:
+    """Compares two pairings entry by entry.
+
+    Args:
+        got: The pairing under test.
+        want: The pairing it should equal.
+        what: What to name in a failure.
+
+    Raises:
+        If they differ anywhere.
+    """
+    assert_equal(len(got), len(want), String("row count for ", what))
+    for r in range(len(want)):
+        assert_equal(
+            got.left_at[r], want.left_at[r], String("left row ", r, " ", what)
+        )
+        assert_equal(
+            got.right_at[r],
+            want.right_at[r],
+            String("right row ", r, " ", what),
+        )
+
+
+def test_pairing_a_side_in_two_pieces_gives_what_pairing_it_once_gives() raises:
+    var kinds = piecewise_kinds()
+    for i in range(len(kinds)):
+        var whole = join_indices(
+            left_frame().column_refs(),
+            keys(0),
+            5,
+            right_frame().column_refs(),
+            keys(0),
+            5,
+            kinds[i],
+        )
+        var pieces = paired_in_pieces(left_frame(), right_frame(), 2, kinds[i])
+        assert_same_pairs(pieces^, whole^, String(kinds[i]))
+
+
+def test_pairing_in_pieces_agrees_on_a_key_unique_on_the_built_side() raises:
+    # The right side here has no repeated key, which is the route that fills one
+    # table from code to row and never builds a bucket at all.
+    var kinds = piecewise_kinds()
+    for i in range(len(kinds)):
+        var unique = pair_frame(
+            Series("k", ints([2, 3, 4, 5, 6])),
+            Series("b", ints([200, 300, 400, 500, 600])),
+        )
+        var whole = join_indices(
+            left_frame().column_refs(),
+            keys(0),
+            5,
+            unique.column_refs(),
+            keys(0),
+            5,
+            kinds[i],
+        )
+        var other = pair_frame(
+            Series("k", ints([2, 3, 4, 5, 6])),
+            Series("b", ints([200, 300, 400, 500, 600])),
+        )
+        var pieces = paired_in_pieces(left_frame(), other, 3, kinds[i])
+        assert_same_pairs(pieces^, whole^, String(kinds[i]))
+
+
+def test_a_piece_of_no_rows_pairs_with_nothing() raises:
+    var whole = join_indices(
+        left_frame().column_refs(),
+        keys(0),
+        5,
+        right_frame().column_refs(),
+        keys(0),
+        5,
+        JoinKind.INNER,
+    )
+    var pieces = paired_in_pieces(
+        left_frame(), right_frame(), 0, JoinKind.INNER
+    )
+    assert_same_pairs(pieces^, whole^, "an empty first piece")
 
 
 def main() raises:

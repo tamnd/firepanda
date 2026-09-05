@@ -76,6 +76,20 @@ An outer join is the exception and stays on one thread. It has to remember which
 right rows were paired so that it can emit the rest afterwards, and that memory
 is a bitmap, whose set is a read modify write of a word eight rows share.
 
+## Two halves, kept apart
+
+The scan that buckets one side and the walk that pairs the other are two
+functions rather than one, `bucket_side` and `pair_probe`, with `ProbeTable`
+between them. A whole frame join calls them in order and has no use for the
+seam, but a join in a pipeline builds the table once from the frame it holds and
+then walks every chunk that arrives against it, which is only expressible if the
+table is a value and the walk takes a stretch of rows rather than a frame.
+
+The walk numbers its output rows from the start of the stretch it was given, so
+a chunk gets rows numbered within that chunk, and the caller shifts them if it
+wants absolute ones. The row numbers from the built side are absolute either
+way, since that side is one frame whichever chunk is going past.
+
 ## The two lists
 
 Both index lists are the same length and both use a negative to mean "no row
@@ -257,6 +271,61 @@ struct JoinIndices(Movable, Sized):
         return Self(right^, left^)
 
 
+struct ProbeTable(Movable):
+    """One side of a join scanned into a table from ordinal to row number.
+
+    Two shapes in one struct, because most joins are onto a key that is unique
+    on this side and a bucket per ordinal is the wrong shape for those. The
+    unused shape is an empty `List`.
+    """
+
+    var unique: Bool
+    """Whether every ordinal on this side belongs to exactly one row."""
+
+    var only: List[Int32]
+    """The unique shape: this side's row per ordinal, or -1, or empty."""
+
+    var starts: List[Int]
+    """The general shape: where each ordinal's run of rows begins, or empty.
+
+    One longer than the ordinal count, so an ordinal's run is `starts[g]` up to
+    `starts[g + 1]` and the last entry is the total.
+    """
+
+    var bucket: List[Int]
+    """The general shape: this side's row numbers, grouped by ordinal.
+
+    In increasing row order within an ordinal, which is what fixes the output
+    order within a probe row.
+    """
+
+    var rows: Int
+    """How many rows this side has."""
+
+    def __init__(
+        out self,
+        unique: Bool,
+        var only: List[Int32],
+        var starts: List[Int],
+        var bucket: List[Int],
+        rows: Int,
+    ):
+        """Constructs a table.
+
+        Args:
+            unique: Whether the unique shape was taken.
+            only: The unique shape's rows per ordinal, or an empty list.
+            starts: The general shape's edges, or an empty list.
+            bucket: The general shape's row numbers, or an empty list.
+            rows: How many rows this side has.
+        """
+        self.unique = unique
+        self.only = only^
+        self.starts = starts^
+        self.bucket = bucket^
+        self.rows = rows
+
+
 def join_indices[
     l: ImmOrigin, r: ImmOrigin
 ](
@@ -326,33 +395,94 @@ def join_indices[
         right_keys,
         right_rows,
     )
-    var codes = aligned.codes.unsafe_ptr()
-    var groups = aligned.groups
-    var has_nulls = aligned.has_nulls
-    ref absent = aligned.absent
+    var table = bucket_side(
+        aligned.codes,
+        left_rows,
+        right_rows,
+        aligned.absent,
+        left_rows,
+        aligned.has_nulls,
+        aligned.groups,
+    )
 
-    # Most joins are onto a key that is unique on the right, and a bucket per
-    # code is the wrong shape for those: every bucket holds one row, so the
-    # counts, the prefix sum, the cursor walk and the bucket array itself all
-    # exist to express "one". A single table from code to row says the same
+    # An outer join's unmatched right rows are appended after the pairing,
+    # because knowing how many of them there are means having already done it.
+    var wants_right = kind == JoinKind.OUTER
+    var matched = Bitmap(right_rows if wants_right else 0, all_valid=False)
+    var paired = pair_probe(
+        table,
+        aligned.codes,
+        0,
+        left_rows,
+        aligned.absent,
+        0,
+        aligned.has_nulls,
+        kind,
+        matched,
+    )
+    if wants_right:
+        for r in range(right_rows):
+            if not matched.get(r):
+                paired.left_at.append(-1)
+                paired.right_at.append(r)
+    return paired^
+
+
+def bucket_side(
+    codes: Array[DType.uint32],
+    side_at: Int,
+    rows: Int,
+    absent: List[Bool],
+    absent_at: Int,
+    has_nulls: Bool,
+    groups: Int,
+) raises -> ProbeTable:
+    """Scans one side's ordinals into a table from ordinal to row number.
+
+    Split out of `join_indices` because a streaming join builds this once from
+    the frame it holds and then pairs every chunk that arrives against it, so it
+    has to be a value that outlives the pass that filled it. Nothing in here
+    looks at the other side.
+
+    Args:
+        codes: The ordinals of both sides, as `align_keys` returns them.
+        side_at: Where this side's ordinals start in `codes`.
+        rows: How many rows this side has.
+        absent: The null key flags, or an empty list.
+        absent_at: Where this side's flags start in `absent`.
+        has_nulls: Whether `absent` was filled.
+        groups: How many ordinals there are.
+
+    Returns:
+        The table, ready to be paired against.
+
+    Raises:
+        Error: If a read raises, which it does not.
+    """
+    var code_at = codes.unsafe_ptr()
+
+    # Most joins are onto a key that is unique on the side being scanned, and a
+    # bucket per code is the wrong shape for those: every bucket holds one row,
+    # so the counts, the prefix sum, the cursor walk and the bucket array itself
+    # all exist to express "one". A single table from code to row says the same
     # thing in one pass and one allocation, and the allocation is `int32` rather
     # than `Int`, so the widest join in the suite carries forty megabytes here
     # where the general shape carries a hundred and sixty.
     #
     # Uniqueness is not asked in advance, it is assumed and then contradicted.
-    # The first right row whose code is already taken ends the pass and the
+    # The first row whose code is already taken ends the pass and the
     # general build runs from the top, having lost that much of one scan and
     # nothing else. A key with duplicates usually reaches its first one early,
     # and a key without them was never going to pay.
-    var unique = right_rows <= Int(Int32.MAX)
+    var unique = rows <= Int(Int32.MAX)
     var only = List[Int32]()
     if unique:
         only = List[Int32](length=groups, fill=-1)
         var seat = only.unsafe_ptr()
-        for r in range(right_rows):
-            if has_nulls and absent[left_rows + r]:
+        for r in range(rows):
+            if has_nulls and absent[absent_at + r]:
                 continue
-            var g = Int(codes.unsafe_offset(left_rows + r).unsafe_load())
+            var g = Int(code_at.unsafe_offset(side_at + r).unsafe_load())
             if seat.unsafe_offset(g).unsafe_load() >= 0:
                 unique = False
                 break
@@ -360,9 +490,9 @@ def join_indices[
         if not unique:
             only = List[Int32]()
 
-    # Bucket the right side by code: count, prefix sum, scatter. Scanning in
+    # Bucket this side by code: count, prefix sum, scatter. Scanning in
     # increasing row order is what puts each bucket in increasing row order,
-    # which is what fixes the output order within a left row.
+    # which is what fixes the output order within a probe row.
     #
     # The group table is as long as the number of distinct key tuples, which on
     # a join between two frames that are mostly one to one is as long as the
@@ -373,10 +503,10 @@ def join_indices[
     var bucket = List[Int]()
     if not unique:
         var edge = starts.unsafe_ptr()
-        for r in range(right_rows):
-            if has_nulls and absent[left_rows + r]:
+        for r in range(rows):
+            if has_nulls and absent[absent_at + r]:
                 continue
-            var g = Int(codes.unsafe_offset(left_rows + r).unsafe_load()) + 1
+            var g = Int(code_at.unsafe_offset(side_at + r).unsafe_load()) + 1
             edge.unsafe_offset(g).unsafe_write(
                 edge.unsafe_offset(g).unsafe_load() + 1
             )
@@ -397,10 +527,10 @@ def join_indices[
             unsafe_uninit_length=edge.unsafe_offset(groups).unsafe_load()
         )
         var into = bucket.unsafe_ptr()
-        for r in range(right_rows):
-            if has_nulls and absent[left_rows + r]:
+        for r in range(rows):
+            if has_nulls and absent[absent_at + r]:
                 continue
-            var g = Int(codes.unsafe_offset(left_rows + r).unsafe_load())
+            var g = Int(code_at.unsafe_offset(side_at + r).unsafe_load())
             var at = edge.unsafe_offset(g).unsafe_load()
             into.unsafe_offset(at).unsafe_write(r)
             edge.unsafe_offset(g).unsafe_write(at + 1)
@@ -410,22 +540,60 @@ def join_indices[
             )
         edge.unsafe_offset(0).unsafe_write(0)
 
-    var wants_right = kind == JoinKind.OUTER
-    var matched = Bitmap(right_rows if wants_right else 0, all_valid=False)
+    return ProbeTable(unique, only^, starts^, bucket^, rows)
 
-    # The left side is walked in morsels, and a morsel is counted and then
-    # emitted over the same rows. What a left row emits depends on that row and
-    # on the buckets, and the buckets are finished, so nothing here is shared
+
+def pair_probe(
+    table: ProbeTable,
+    codes: Array[DType.uint32],
+    probe_at: Int,
+    probe_rows: Int,
+    absent: List[Bool],
+    absent_at: Int,
+    has_nulls: Bool,
+    kind: JoinKind,
+    mut matched: Bitmap,
+) raises -> JoinIndices:
+    """Walks one side against a built table and emits the pairs.
+
+    The output row numbers on the probe side are counted from `probe_at`, so a
+    caller pairing a chunk gets rows numbered within that chunk. The row numbers
+    on the built side are absolute, since the table holds one frame whichever
+    chunk is going past.
+
+    Args:
+        table: The other side, bucketed by ordinal.
+        codes: The ordinals of both sides, as `align_keys` returns them.
+        probe_at: Where this side's ordinals start in `codes`.
+        probe_rows: How many rows this side has.
+        absent: The null key flags, or an empty list.
+        absent_at: Where this side's flags start in `absent`.
+        has_nulls: Whether `absent` was filled.
+        kind: Which rows to keep.
+        matched: For an outer join, every built side row that paired is set.
+            Sized to the built side's height, or empty for any other kind.
+
+    Returns:
+        One entry per output row, in probe row order.
+
+    Raises:
+        Error: If the parallel emit raises.
+    """
+    var wants_right = kind == JoinKind.OUTER
+
+    # The probe side is walked in morsels, and a morsel is counted and then
+    # emitted over the same rows. What a row emits depends on that row and on
+    # the buckets, and the buckets are finished, so nothing here is shared
     # between two morsels except where each of them writes, which the counts
     # settle before any of them writes anything.
     #
-    # An outer join stays on one thread. Its emit marks every right row it pairs
-    # in `matched`, and setting a bit is a read modify write of a word that eight
-    # neighbouring rows share, so two workers doing it at once would drop marks
-    # and invent unmatched right rows. No other kind touches anything shared.
-    var parallel = left_rows >= PARALLEL_LEFT_ROWS and not wants_right
-    var chunk = LEFT_MORSEL_ROWS if parallel else max(left_rows, 1)
-    var pieces = (left_rows + chunk - 1) // chunk
+    # An outer join stays on one thread. Its emit marks every built side row it
+    # pairs in `matched`, and setting a bit is a read modify write of a word that
+    # eight neighbouring rows share, so two workers doing it at once would drop
+    # marks and invent unmatched rows. No other kind touches anything shared.
+    var parallel = probe_rows >= PARALLEL_LEFT_ROWS and not wants_right
+    var chunk = LEFT_MORSEL_ROWS if parallel else max(probe_rows, 1)
+    var pieces = (probe_rows + chunk - 1) // chunk
     if pieces == 0:
         # An empty left side rounds down to no morsels at all, and the passes
         # below still run once and still write where their morsel ends. One
@@ -434,7 +602,7 @@ def join_indices[
 
     # Count the output rows before emitting any, so the two lists are allocated
     # once at the right size. Same trade as `_filter_core`: a second pass over
-    # the left rows against a reallocation and a copy of everything already
+    # the probe rows against a reallocation and a copy of everything already
     # written, several times, on a result that a many-to-many join makes far
     # taller than either input. Here it buys the split as well, because a morsel
     # can only write where the morsels before it stopped.
@@ -454,15 +622,15 @@ def join_indices[
     # ones going backwards.
     #
     # The pointer is taken again inside each body rather than captured, because
-    # its origin names `aligned` and a capture list cannot carry that.
+    # its origin names `codes` and a capture list cannot carry that.
     def tally_one(start: Int, stop: Int) raises {mut counts, imm}:
-        var code_at = aligned.codes.unsafe_ptr()
-        var seat = only.unsafe_ptr()
+        var code_at = codes.unsafe_ptr()
+        var seat = table.only.unsafe_ptr()
         var here = 0
         for i in range(start, stop):
             var hit = False
-            if not has_nulls or not absent[i]:
-                var g = Int(code_at.unsafe_offset(i).unsafe_load())
+            if not has_nulls or not absent[absent_at + i]:
+                var g = Int(code_at.unsafe_offset(probe_at + i).unsafe_load())
                 hit = seat.unsafe_offset(g).unsafe_load() >= 0
             if not hit:
                 here += Int(kind.keeps_unmatched_left())
@@ -471,13 +639,13 @@ def join_indices[
         counts[start // chunk + 1] = here
 
     def tally(start: Int, stop: Int) raises {mut counts, imm}:
-        var code_at = aligned.codes.unsafe_ptr()
+        var code_at = codes.unsafe_ptr()
         var here = 0
         for i in range(start, stop):
             var width = 0
-            if not has_nulls or not absent[i]:
-                var g = Int(code_at.unsafe_offset(i).unsafe_load())
-                width = starts[g + 1] - starts[g]
+            if not has_nulls or not absent[absent_at + i]:
+                var g = Int(code_at.unsafe_offset(probe_at + i).unsafe_load())
+                width = table.starts[g + 1] - table.starts[g]
             if width == 0:
                 here += Int(kind.keeps_unmatched_left())
             elif kind == JoinKind.ANTI:
@@ -489,37 +657,35 @@ def join_indices[
         counts[start // chunk + 1] = here
 
     if not parallel:
-        if unique:
-            tally_one(0, left_rows)
+        if table.unique:
+            tally_one(0, probe_rows)
         else:
-            tally(0, left_rows)
-    elif unique:
-        parallel_morsels(tally_one, left_rows, chunk)
+            tally(0, probe_rows)
+    elif table.unique:
+        parallel_morsels(tally_one, probe_rows, chunk)
     else:
-        parallel_morsels(tally, left_rows, chunk)
+        parallel_morsels(tally, probe_rows, chunk)
     for m in range(pieces):
         counts[m + 1] += counts[m]
 
-    # An outer join's unmatched right rows are appended after the split, because
-    # knowing how many of them there are means having already done the probe.
     var out_left = List[Int](unsafe_uninit_length=counts[pieces])
     var out_right = List[Int](unsafe_uninit_length=counts[pieces])
 
-    # The unique twin of the loop below. A left row pairs with at most one right
-    # row here, so the inner loop over a bucket is gone and with it the reason
-    # to look up where the bucket started.
+    # The unique twin of the loop below. A probe row pairs with at most one row
+    # here, so the inner loop over a bucket is gone and with it the reason to
+    # look up where the bucket started.
     def spill_one(
         start: Int, stop: Int
     ) raises {mut out_left, mut out_right, mut matched, imm}:
-        var code_at = aligned.codes.unsafe_ptr()
-        var seat = only.unsafe_ptr()
+        var code_at = codes.unsafe_ptr()
+        var seat = table.only.unsafe_ptr()
         var left_out = out_left.unsafe_ptr()
         var right_out = out_right.unsafe_ptr()
         var put = counts[start // chunk]
         for i in range(start, stop):
             var r = -1
-            if not has_nulls or not absent[i]:
-                var g = Int(code_at.unsafe_offset(i).unsafe_load())
+            if not has_nulls or not absent[absent_at + i]:
+                var g = Int(code_at.unsafe_offset(probe_at + i).unsafe_load())
                 r = Int(seat.unsafe_offset(g).unsafe_load())
 
             if r < 0:
@@ -546,17 +712,17 @@ def join_indices[
     def spill(
         start: Int, stop: Int
     ) raises {mut out_left, mut out_right, mut matched, imm}:
-        var code_at = aligned.codes.unsafe_ptr()
+        var code_at = codes.unsafe_ptr()
         var left_out = out_left.unsafe_ptr()
         var right_out = out_right.unsafe_ptr()
         var put = counts[start // chunk]
         for i in range(start, stop):
             var first = -1
             var last = -1
-            if not has_nulls or not absent[i]:
-                var g = Int(code_at.unsafe_offset(i).unsafe_load())
-                first = starts[g]
-                last = starts[g + 1]
+            if not has_nulls or not absent[absent_at + i]:
+                var g = Int(code_at.unsafe_offset(probe_at + i).unsafe_load())
+                first = table.starts[g]
+                last = table.starts[g + 1]
 
             if first == last:
                 if kind.keeps_unmatched_left():
@@ -575,26 +741,20 @@ def join_indices[
 
             for p in range(first, last):
                 left_out.unsafe_offset(put).unsafe_write(i)
-                right_out.unsafe_offset(put).unsafe_write(bucket[p])
+                right_out.unsafe_offset(put).unsafe_write(table.bucket[p])
                 put += 1
                 if wants_right:
-                    matched.set(bucket[p], True)
+                    matched.set(table.bucket[p], True)
 
     if not parallel:
-        if unique:
-            spill_one(0, left_rows)
+        if table.unique:
+            spill_one(0, probe_rows)
         else:
-            spill(0, left_rows)
-    elif unique:
-        parallel_morsels(spill_one, left_rows, chunk)
+            spill(0, probe_rows)
+    elif table.unique:
+        parallel_morsels(spill_one, probe_rows, chunk)
     else:
-        parallel_morsels(spill, left_rows, chunk)
-
-    if wants_right:
-        for r in range(right_rows):
-            if not matched.get(r):
-                out_left.append(-1)
-                out_right.append(r)
+        parallel_morsels(spill, probe_rows, chunk)
 
     return JoinIndices(out_left^, out_right^)
 
