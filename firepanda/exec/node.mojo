@@ -869,11 +869,24 @@ struct Join(Movable):
                 self._source.append(source[found])
         return Schema(kept^)
 
-    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+    def process(
+        self, var chunk: Chunk, spread: Bool = True
+    ) raises -> Optional[Chunk]:
         """Probes one chunk against the built table and gathers what paired.
 
         Args:
             chunk: The chunk. Consumed.
+            spread: Whether this chunk may be worked on by more than one core.
+                False when a worker is running this, which is the ordinary case
+                in a parallel pipeline and is what `node_apply` passes. The
+                probe, the pairing and both gathers each have a row count above
+                which they hand themselves out in morsels, and a pipeline chunk
+                is above two of those, so a worker calling this without the flag
+                starts a second layer of tasks inside the one it is already in.
+                Measured at ten million rows joined against ten thousand, that
+                nesting cost nothing, because a task that finds no free worker
+                runs on the one that made it. It is still wrong to ask for, and
+                it stops being free the moment the queue is not saturated.
 
         Returns:
             The paired rows, or None when nothing paired, which is a chunk of no
@@ -890,7 +903,7 @@ struct Join(Movable):
 
         ref key = chunk.columns[self._left_at]
         var codes = Array[DType.uint32](overwritten=rows)
-        _probe_key(self._side, key, codes)
+        _probe_key(self._side, key, codes, spread)
         var absent = _key_nulls(key, rows)
         var matched = Bitmap(0, all_valid=False)
         var pairs = pair_probe(
@@ -903,6 +916,7 @@ struct Join(Movable):
             len(absent) > 0,
             self.kind,
             matched,
+            spread,
         )
         if len(pairs) == 0:
             return None
@@ -914,11 +928,14 @@ struct Join(Movable):
                     take_any(
                         self.right.columns[self._source[w]].only(),
                         pairs.right_at,
+                        spread,
                     )
                 )
             else:
                 out.append(
-                    take_any(chunk.columns[self._source[w]], pairs.left_at)
+                    take_any(
+                        chunk.columns[self._source[w]], pairs.left_at, spread
+                    )
                 )
         var height = len(pairs)
         _ = chunk^
@@ -992,7 +1009,10 @@ def _build_key(
 
 
 def _probe_key(
-    built: BuildSide, key: AnyArray, mut codes: Array[DType.uint32]
+    built: BuildSide,
+    key: AnyArray,
+    mut codes: Array[DType.uint32],
+    spread: Bool = True,
 ) raises:
     """Probes the built table with a column whose dtype is a runtime value.
 
@@ -1000,6 +1020,7 @@ def _probe_key(
         built: The table the build side filled.
         key: The probe side's key column.
         codes: Filled with one ordinal per row of it.
+        spread: Whether the probe may use more than one core.
 
     Raises:
         If the dtype is text, has no fixed width layout, or is not the one the
@@ -1009,7 +1030,7 @@ def _probe_key(
         comptime for candidate in ALL:
             if key.dtype() == candidate:
                 ref view = key.as_typed_view[candidate]()
-                return probe_side[candidate](built, view, 0, codes)
+                return probe_side[candidate](built, view, 0, codes, spread)
     raise Error("join: no key table for dtype " + String(key.dtype()))
 
 
@@ -2462,7 +2483,9 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
     if node.isa[Cast]():
         return node[Cast].process(chunk^)
     if node.isa[Join]():
-        return node[Join].process(chunk^)
+        # False, because this is the entry point several workers share and a
+        # join's own kernels would each hand themselves out to workers again.
+        return node[Join].process(chunk^, False)
     raise Error("apply: this node carries state between chunks")
 
 

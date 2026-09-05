@@ -451,5 +451,34 @@ def test_a_table_built_from_one_dtype_refuses_a_probe_of_another() raises:
         probe_side[DType.float64](built, floats([1.0, 2.0]), 3, codes)
 
 
+def test_probing_on_one_core_gives_what_probing_on_all_of_them_gives() raises:
+    """The two routes through `spread` write the same ordinals.
+
+    Above `PARALLEL_PROBE_ROWS` the probe hands itself out in morsels, and a
+    caller that is already running on a worker passes False to stop it. That is
+    a scheduling decision and it must not be a correctness one, so the same
+    column goes through both ways and the ordinals are compared row by row.
+    """
+    var rows = (1 << 17) + 5
+    var probe = Array[DType.int64](overwritten=rows)
+    for i in range(rows):
+        probe[i] = Int64(i % 7)
+
+    var build_codes = Array[DType.uint32](overwritten=4)
+    var built = build_side[DType.int64](ints([0, 2, 4, 6]), 0, build_codes)
+
+    var spread = Array[DType.uint32](overwritten=rows)
+    probe_side[DType.int64](built, probe, 0, spread)
+    var alone = Array[DType.uint32](overwritten=rows)
+    probe_side[DType.int64](built, probe, 0, alone, False)
+
+    var bad = -1
+    for i in range(rows):
+        if spread[i] != alone[i]:
+            bad = i
+            break
+    assert_equal(bad, -1, String("row ", bad))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
