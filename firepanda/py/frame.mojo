@@ -49,6 +49,7 @@ from firepanda.py.errors import (
     retagged,
     tagged,
 )
+from firepanda.py.series import PySeries
 
 
 def _int(value: PythonObject, name: String) raises -> Int:
@@ -214,6 +215,69 @@ struct PyDataFrame(Movable, Writable):
                 ArcPointer(Self._frame(py_self)[].frame[].tail(_int(n, "n")))
             )
         )
+
+    @staticmethod
+    def column(
+        py_self: PythonObject, name: PythonObject
+    ) raises -> PythonObject:
+        """Takes one column out, as a series.
+
+        This is what `df["a"]` reaches, which is the most written expression in
+        pandas and had no answer at all before there was a bound series type.
+
+        It copies, and it flattens a column stored in more than one piece,
+        because a `Series` in the core is one contiguous array. Document 13 has
+        the argument for why a borrowing version is not a small change: the
+        Python object would have to keep the frame alive without owning it, which
+        is the same lifetime problem the Arrow export solves and would want
+        solving the same way.
+
+        Args:
+            py_self: The frame.
+            name: The column name.
+
+        Returns:
+            A new series carrying the column's name.
+        """
+        var wanted = String(name)
+        try:
+            return PythonObject(
+                alloc=PySeries(
+                    ArcPointer(Self._frame(py_self)[].frame[].column(wanted))
+                )
+            )
+        except:
+            raise tagged(COLUMN, String("no such column ", name.__repr__()))
+
+    @staticmethod
+    def select(
+        py_self: PythonObject, names: PythonObject
+    ) raises -> PythonObject:
+        """Takes several columns out, as a frame.
+
+        This is the other half of `df[...]`, the one where the key is a list.
+        Naming a column twice is an error rather than a duplication, which is the
+        core's rule and is right: the result would have two columns under one
+        name and nothing downstream could address the second.
+
+        Args:
+            py_self: The frame.
+            names: The column names, in the order they should come out.
+
+        Returns:
+            A new frame with only those columns.
+        """
+        var wanted = List[String](capacity=Int(len(names)))
+        for name in names:
+            wanted.append(String(name))
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(Self._frame(py_self)[].frame[].select(wanted))
+                )
+            )
+        except cause:
+            raise retagged(COLUMN, cause)
 
     @staticmethod
     def _borrowed(

@@ -24,11 +24,40 @@ class DataFrame:
     def tail(self, n: int) -> DataFrame:
         """The last n rows."""
         ...
+    def column(self, name: str) -> Series:
+        """One column, as a series."""
+        ...
+    def select(self, names: list[str]) -> DataFrame:
+        """Several columns, as a frame."""
+        ...
     def arrow_c_schema(self) -> object:
         """The frame's Arrow schema, in a capsule."""
         ...
     def arrow_c_array(self, requested_schema: object | None) -> list[object]:
         """The frame's Arrow schema and data, in two capsules."""
+        ...
+
+class Series:
+    def length(self) -> int:
+        """The number of rows."""
+        ...
+    def label(self) -> str:
+        """The name of the column."""
+        ...
+    def dtype(self) -> str:
+        """The type, as firepanda spells it."""
+        ...
+    def null_count(self) -> int:
+        """How many rows are missing."""
+        ...
+    def head(self, n: int) -> Series:
+        """The first n rows."""
+        ...
+    def tail(self, n: int) -> Series:
+        """The last n rows."""
+        ...
+    def to_list(self) -> list[object]:
+        """Every value, copied into a Python list."""
         ...
 
 def read_csv(path: str) -> DataFrame:

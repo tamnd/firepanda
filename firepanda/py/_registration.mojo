@@ -13,6 +13,7 @@ from std.python import PythonObject
 from std.python.bindings import PythonModuleBuilder
 
 from firepanda.py.frame import PyDataFrame, open_arrow, open_csv, raise_for_test
+from firepanda.py.series import PySeries
 
 
 def register(mut module: PythonModuleBuilder) raises:
@@ -52,10 +53,36 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = dataframe.def_method[PyDataFrame.tail](
         "tail", docstring="The last n rows."
     )
+    _ = dataframe.def_method[PyDataFrame.column](
+        "column", docstring="One column, as a series."
+    )
+    _ = dataframe.def_method[PyDataFrame.select](
+        "select", docstring="Several columns, as a frame."
+    )
     _ = dataframe.def_method[PyDataFrame.arrow_c_schema](
         "arrow_c_schema", docstring="The frame's Arrow schema, in a capsule."
     )
     _ = dataframe.def_method[PyDataFrame.arrow_c_array](
         "arrow_c_array",
         docstring="The frame's Arrow schema and data, in two capsules.",
+    )
+
+    ref series = module.add_type[PySeries]("Series")
+    _ = series.def_py_init[PySeries.py_init]()
+    _ = series.def_method[PySeries.length](
+        "length", docstring="The number of rows."
+    )
+    _ = series.def_method[PySeries.label](
+        "label", docstring="The name of the column."
+    )
+    _ = series.def_method[PySeries.dtype](
+        "dtype", docstring="The type, as firepanda spells it."
+    )
+    _ = series.def_method[PySeries.null_count](
+        "null_count", docstring="How many rows are missing."
+    )
+    _ = series.def_method[PySeries.head]("head", docstring="The first n rows.")
+    _ = series.def_method[PySeries.tail]("tail", docstring="The last n rows.")
+    _ = series.def_method[PySeries.to_list](
+        "to_list", docstring="Every value, copied into a Python list."
     )
