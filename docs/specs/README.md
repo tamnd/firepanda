@@ -25,6 +25,7 @@ says what was already decided and why.
 | [16-reading-somebody-elses-arrow.md](16-reading-somebody-elses-arrow.md) | How a pyarrow, Polars or pandas frame becomes a firepanda frame, and what the real producers taught the checks |
 | [17-the-column-you-can-hold.md](17-the-column-you-can-hold.md) | The bound `Series`, what `df[key]` does with each kind of key, how a column exports itself, and where the hand written members go |
 | [18-making-a-frame-out-of-python.md](18-making-a-frame-out-of-python.md) | How `pd.DataFrame({...})` becomes an Arrow frame, what the inference decides, and where the pandas constructor signature lives |
+| [19-finding-a-label-in-an-index.md](19-finding-a-label-in-an-index.md) | The lookup half of `Index`, why one factorize answers all of it, and what the unmaterialized range is worth |
 | [engine/](engine/00-README.md) | How DuckDB and Polars execute a query, and what firepanda is going to do about it |
 
 ## How to read this
