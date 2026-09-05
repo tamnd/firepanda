@@ -37,6 +37,7 @@ files disagree and nobody can say why.
 
 from std.benchmark import Unit, keep, run
 from std.ffi import c_char
+from std.math import nan
 from std.memory import unsafe_memcpy
 from std.collections.span import Span
 from std.sys import argv
@@ -146,6 +147,7 @@ from firepanda.kernel import (
     mean_of,
     is_null,
     min_of,
+    missing_count_any,
     multiply,
     sum_of,
     take_any,
@@ -1488,10 +1490,26 @@ def bench_nulls(mut harness: Harness) raises:
     per row. The gap between the two is the whole design of these kernels and it
     should be visible in the numbers rather than only in the comments.
 
-    `nulls/is_null` is the one operation here that never reads a value. Its cost
-    is the expansion from a bit per row to a byte per row, so it should run at
-    close to the speed of a memory write and should not care about density at
-    all, since an all-present word and an all-null word are both a block store.
+    `nulls/is_null` on the int64 column never reads a value. Its cost is the
+    expansion from a bit per row to a byte per row, so it should run at close to
+    the speed of a memory write and should not care about density at all, since
+    an all-present word and an all-null word are both a block store.
+
+    The three float rows are the same operation on the dtype where a NaN is
+    missing too, so they do read the values, and they are here to put a number on
+    what that costs rather than leaving it to an argument. `nulls/is_null_float`
+    is the common shape, a float column with no NaN anywhere, where the scan
+    finds nothing and every word takes the vector branch. `nulls/is_null_nans` is
+    one in eight NaN, so every word takes the bit by bit branch as well, which is
+    the worst case by construction: real columns do not have a NaN in every
+    sixty four rows. The gap between those two is the price of the slow branch
+    and the gap between the first and the int64 row is the price of the scan.
+
+    `nulls/count_float` is the same scan without the bitmap at the end of it,
+    which is what `Series.count` runs. It used to be a subtraction of two numbers
+    the column already knew and it is a pass over the values now, so it is the
+    row where this shows up as a regression rather than as a cost inside
+    something that was already touching memory.
 
     `nulls/ffill` is the only scan. Row `i` depends on row `i - 1`, so there is
     nothing to vectorize and the only saving available is skipping the words with
@@ -1537,6 +1555,40 @@ def bench_nulls(mut harness: Harness) raises:
         keep(len(mask))
 
     harness.record("nulls/is_null_sparse", "rows", rows, null_mask_sparse)
+
+    var floats = Array[DType.float64](rows)
+    var nanned = Array[DType.float64](rows)
+    for i in range(rows):
+        var draw = rng.next_u64()
+        floats[i] = Float64(Int(draw % 1000))
+        if draw % 8 == 0:
+            nanned[i] = nan[DType.float64]()
+        else:
+            nanned[i] = Float64(Int(draw % 1000))
+
+    def null_mask_float() raises {imm floats, imm rows}:
+        keep(rows)
+        var mask = is_null(floats)
+        keep(len(mask))
+
+    harness.record("nulls/is_null_float", "rows", rows, null_mask_float)
+
+    def null_mask_nans() raises {imm nanned, imm rows}:
+        keep(rows)
+        var mask = is_null(nanned)
+        keep(len(mask))
+
+    harness.record("nulls/is_null_nans", "rows", rows, null_mask_nans)
+
+    # Erased once, outside the closure. Erasing inside it would copy eight
+    # megabytes per repetition and the row would be measuring the copy.
+    var erased = AnyArray(floats.copy())
+
+    def count_float() raises {imm erased, imm rows}:
+        keep(rows)
+        keep(missing_count_any(erased))
+
+    harness.record("nulls/count_float", "rows", rows, count_float)
 
     def coalesce_dense() raises {imm dense, imm fallback, imm rows}:
         keep(rows)

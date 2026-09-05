@@ -19,6 +19,7 @@ a docstring, so there is one that fills a column forward and backward and assert
 the two answers differ. That is the property, not a coincidence.
 """
 
+from std.math import isnan, nan
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from firepanda.array.any import AnyArray, borrow_columns
@@ -26,6 +27,7 @@ from firepanda.array.array import Array, from_list
 from firepanda.dtype.lists import ALL
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.series import Series
+from firepanda.kernel.group import AggKind
 from firepanda.kernel.nulls import (
     all_valid_mask,
     coalesce,
@@ -37,7 +39,9 @@ from firepanda.kernel.nulls import (
     is_not_null,
     is_null,
     is_null_any,
+    missing_count_any,
 )
+from firepanda.kernel.reduce import reduce_any
 from firepanda.kernel.scalar import (
     coalesce_scalar,
     fill_scalar,
@@ -429,6 +433,142 @@ def test_series_is_null_returns_a_usable_mask() raises:
     assert_equal(len(kept), 2, "two rows survive")
 
 
+def nan_column(
+    values: List[Float64], missing: List[Int]
+) raises -> Array[DType.float64]:
+    """Builds a float64 column, where a NaN in `values` stays a NaN.
+
+    The two ways of being missing are both spellable here on purpose, because
+    every test below needs a column that has one of each in it. A position named
+    in `missing` gets a cleared bit, and a position holding `nan[float64]()` gets
+    a NaN behind a bit that stays set, which is what pandas hands over.
+
+    Args:
+        values: The values, one per row.
+        missing: Which rows get a cleared validity bit.
+
+    Returns:
+        The column.
+    """
+    var col = Array[DType.float64](len(values))
+    for i in range(len(values)):
+        col[i] = values[i]
+    for i in range(len(missing)):
+        col.set_null(missing[i])
+    return col^
+
+
+def test_a_nan_is_missing_and_a_cleared_bit_is_missing() raises:
+    # The whole of this change in one assertion. Row 1 is a NaN with its validity
+    # bit set, which is how pandas spells missing and how an Arrow file from
+    # pandas arrives. Row 3 is a cleared bit, which is how Arrow spells it. Both
+    # are missing and rows 0 and 2 are not.
+    var col = nan_column(
+        [1.0, nan[DType.float64](), 3.0, 0.0, 5.0],
+        [3],
+    )
+
+    var missing = is_null(col)
+    assert_false(missing[0], "a value is not missing")
+    assert_true(missing[1], "a NaN is missing")
+    assert_false(missing[2], "a value is not missing")
+    assert_true(missing[3], "a cleared bit is missing")
+    assert_false(missing[4], "a value is not missing")
+
+    var present = is_not_null(col)
+    for i in range(5):
+        assert_equal(
+            present[i], not missing[i], "the two are each other's inverse"
+        )
+
+
+def test_an_int_column_never_reads_its_values() raises:
+    # The other half of the rule, and the reason it is keyed on the dtype. An
+    # int64 column has no NaN to find, so nothing changed for it, and the value
+    # that would be a NaN's bit pattern read as an integer is an ordinary number
+    # that is present.
+    var col = gapped([Int64(1), 9221120237041090560, 3], [2])
+
+    var missing = is_null(col)
+    assert_false(missing[0], "a value is not missing")
+    assert_false(missing[1], "a NaN's bits as an integer are a value")
+    assert_true(missing[2], "a cleared bit is missing")
+
+
+def test_a_nan_counts_as_missing_and_a_count_says_so() raises:
+    # `Series([1.0, nan]).count()` is 1 in pandas. It was 2 here, because the
+    # count was `len` minus a number the bitmap knew and the bitmap does not
+    # know about NaN. See #170.
+    var col = nan_column([1.0, nan[DType.float64](), 3.0, 0.0], [3])
+    assert_equal(missing_count_any(AnyArray(col.copy())), 2, "one of each")
+
+    var counted = reduce_any(AnyArray(col^), AggKind.COUNT)
+    assert_equal(counted.as_typed[DType.int64]()[0], 2, "two rows hold a value")
+
+
+def test_a_count_over_a_float_column_with_no_nans_is_unchanged() raises:
+    # The shape that has to stay fast and has to stay right. The scan reads every
+    # value, finds nothing, and answers what the bitmap alone would have.
+    var col = nan_column([1.0, 2.0, 3.0, 4.0, 5.0], [1, 4])
+    assert_equal(missing_count_any(AnyArray(col^)), 2, "the two cleared bits")
+
+
+def test_a_nan_past_a_word_boundary_is_still_found() raises:
+    # The scan asks one word of sixty four rows at a time whether it holds any
+    # NaN at all and only takes apart the words that say yes, so a column where
+    # the NaN is alone in the second word runs both branches in one call and a
+    # boundary error shows up here rather than at ten million rows.
+    var values = List[Float64]()
+    for _ in range(200):
+        values.append(1.0)
+    values[63] = nan[DType.float64]()
+    values[64] = nan[DType.float64]()
+    values[199] = nan[DType.float64]()
+    var col = nan_column(values, [0, 128])
+
+    var missing = is_null(col)
+    for i in range(200):
+        var expected = i == 0 or i == 63 or i == 64 or i == 128 or i == 199
+        assert_equal(missing[i], expected, String("row ", i))
+    assert_equal(missing_count_any(AnyArray(col^)), 5, "three NaNs, two bits")
+
+
+def test_a_cleared_row_cannot_contribute_a_nan() raises:
+    # The scan reads the values under the cleared bits rather than skipping them,
+    # which is safe only because a null holds a zero. `set_null` is what puts the
+    # zero there, so this asserts the invariant that makes the shortcut legal.
+    var col = nan_column([1.0, nan[DType.float64](), 3.0], [1])
+    assert_equal(missing_count_any(AnyArray(col.copy())), 1, "row 1, once")
+    assert_false(isnan(col[1]), "a cleared row holds a zero")
+
+
+def test_series_null_count_is_the_pandas_one() raises:
+    # `Series` is the pandas side of the library and counts a NaN. `Array` is the
+    # Arrow side and counts bits. Both numbers are right and they are different,
+    # which is the thing to be able to point at when somebody asks why.
+    var col = nan_column([1.0, nan[DType.float64](), 3.0, 0.0], [3])
+    assert_equal(col.null_count(), 1, "the Array counts the cleared bit")
+
+    var s = Series("a", AnyArray(col^))
+    assert_equal(s.null_count(), 2, "the Series counts the NaN as well")
+    assert_equal(len(s.drop_nulls()), 2, "and drops it")
+
+
+def test_drop_nulls_drops_a_nan_row() raises:
+    # The visible consequence, on a frame as well as on a series. Row 1 is only
+    # missing because of a NaN in one column and it goes.
+    var columns = List[Series]()
+    columns.append(
+        Series("a", nan_column([1.0, nan[DType.float64](), 3.0], List[Int]()))
+    )
+    columns.append(Series("b", gapped([Int64(4), 5, 6], List[Int]())))
+    var frame = DataFrame.from_series(columns^)
+
+    var kept = frame.drop_nulls()
+    assert_equal(len(kept), 2, "the NaN row is gone")
+    assert_equal(kept.column("b").as_typed[DType.int64]()[1], 6, "rows 0 and 2")
+
+
 def test_frame_drop_nulls_looks_at_every_column() raises:
     var columns = List[Series]()
     columns.append(Series("a", gapped([Int64(1), 2, 3], [0])))
@@ -529,6 +669,37 @@ def test_the_kernels_agree_with_their_twins() raises:
                 "bfill validity row " + String(i),
             )
             assert_equal(fast_bfill[i], slow_bfill[i], "bfill row " + String(i))
+
+
+def test_is_null_agrees_with_its_twin_on_a_float_column() raises:
+    # Three hundred rows on purpose, so the column runs past the fourth bitmap
+    # word and both branches of the kernel's word loop are entered many times.
+    # A NaN every seventh row and a cleared bit every fifth means most words
+    # hold both spellings of missing and neither branch is the only one taken.
+    # The twin has no word loop at all, which is what makes the comparison worth
+    # anything.
+    var rng = Rng(0x2545F4914F6CDD1D)
+    var col = Array[DType.float64](300)
+    for i in range(300):
+        if i % 5 == 0:
+            col.set_null(i)
+        elif i % 7 == 0:
+            col[i] = nan[DType.float64]()
+        else:
+            col[i] = Float64(Int(rng.next_below(1000)))
+
+    var fast = is_null(col)
+    var slow = is_null_scalar(col)
+    var missing = 0
+    for i in range(300):
+        assert_equal(fast[i], slow[i], "is_null row " + String(i))
+        if fast[i]:
+            missing += 1
+    assert_equal(
+        missing_count_any(AnyArray(col^)),
+        missing,
+        "the count and the mask agree on how many there are",
+    )
 
 
 def main() raises:

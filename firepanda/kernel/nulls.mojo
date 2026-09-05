@@ -2,13 +2,40 @@
 
 Four operations live here and they split cleanly in two.
 
-`is_null` and `is_not_null` never touch the values buffer. Whether a row is
-missing is entirely a fact about the validity bitmap, so both of them are a
-bitmap copy and, for `is_not_null`, an invert. That is also why neither needs the
-dtype: the erased spelling takes an `AnyArray` and never has to ask what is in
-it. The result itself is never null, because "is this row missing" has an answer
-on every row including the missing ones. pandas agrees, and it is one of the few
-places where a three-valued logic argument does not come up.
+`is_null` and `is_not_null` report whether a row is missing. The result itself is
+never null, because "is this row missing" has an answer on every row including
+the missing ones. pandas agrees, and it is one of the few places where a three
+valued logic argument does not come up.
+
+What missing means is the interesting part and it is not only the validity
+bitmap. On a float column a NaN is missing too, because pandas on the numpy
+backend has no separate presence bitmap there and NaN is the only missing it has.
+`Series([1.0, nan]).count()` is 1 in pandas, and a library that answered 2 would
+be wrong about a question nobody thinks is subtle. So on a float dtype these
+functions read the values as well as the bitmap, and a row is present when its
+bit is set and its value is not NaN. On every other dtype nothing changed and
+nothing is read, since there is no NaN to find.
+
+That is a divergence from Arrow, where a NaN is an ordinary float that happens to
+compare false against itself, and it is taken deliberately. The values buffer
+still holds the NaN and still writes it back out, so nothing is lost on the round
+trip; it is only the answer to "is this missing" that follows pandas. See #170.
+
+The cost is a read of the values buffer on a float column where there used to be
+none. It is arranged so that the common shape pays almost nothing: a word of the
+bitmap covers sixty four rows, those rows are scanned with a vector `isnan` and a
+reduction, and only a word that turns out to hold a NaN is taken apart bit by
+bit. A float column with no NaN in it therefore costs one load, one compare and
+one reduce per vector, and produces a bitmap identical to the one it started
+with. A row whose validity bit is already clear holds a zero rather than
+whatever the producer had, which is the rule everywhere in this package, so a
+cleared row can be scanned along with the rest and cannot contribute a NaN.
+
+`Array.null_count` is not part of this and still counts cleared bits and nothing
+else. That is the line between the two halves of the library: an `Array` is
+Arrow and says what is in the buffers, and a `Series` is pandas and says what
+pandas would say. `Series.null_count` is on the pandas side of it and counts a
+NaN, which is why `Series.drop_nulls` drops one.
 
 `coalesce` and the two directional fills do touch the values, and both of them
 answer the same question: what should stand in for a missing value. `coalesce`
@@ -37,21 +64,97 @@ None of these promote. `coalesce` over an int32 and a float64 raises rather than
 picking one, for the same reason `concat` does.
 """
 
+from std.bit import pop_count
+from std.math import isnan
 from std.sys.info import simd_width_of
 
 from firepanda.array.any import AnyArray, ColumnRefs
 from firepanda.array.array import Array
 from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
-from firepanda.dtype.lists import ALL
-from firepanda.exec import parallel_morsels
+from firepanda.dtype.lists import ALL, FLOAT
+from firepanda.exec import MORSEL_ROWS, parallel_morsels
+
+
+def present_bitmap[dt: DType](col: Array[dt]) raises -> Bitmap:
+    """Returns the rows that hold a value, with a NaN counting as holding none.
+
+    The one place the pandas rule for a float column is written down. Everything
+    else here that has to know what missing means asks this.
+
+    Args:
+        col: The column to look at.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A bitmap as long as the column's validity, set where a row is present.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    comptime if not dt.is_floating_point():
+        return Bitmap(copy=col.data.validity)
+    return _drop_nans(col.unsafe_ptr(), col.data.validity, len(col))
+
+
+def present_bitmap_any(col: AnyArray) raises -> Bitmap:
+    """Returns the present rows, for a column whose dtype is a runtime value.
+
+    A string column has no float spelling and takes the copy, which is why the
+    dispatch is over `FLOAT` rather than over `ALL` with a test inside it.
+
+    Args:
+        col: The column to look at.
+
+    Returns:
+        A bitmap as long as the column's validity, set where a row is present.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    if not col.is_string():
+        comptime for candidate in FLOAT:
+            if col.dtype() == candidate:
+                return _drop_nans(
+                    col.unsafe_ptr[candidate](), col.data.validity, len(col)
+                )
+    return Bitmap(copy=col.data.validity)
+
+
+def missing_count_any(col: AnyArray) raises -> Int:
+    """Counts the rows that hold no value, with a NaN counting as holding none.
+
+    This is `Array.null_count` plus the NaNs, and on anything but a float column
+    it is exactly `Array.null_count` and costs nothing. On a float column it is a
+    pass over the values, which is a real change from a number the column already
+    knew, and it is what makes `Series.count` agree with pandas.
+
+    Args:
+        col: The column to look at.
+
+    Returns:
+        How many rows pandas would call missing.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    if not col.is_string():
+        comptime for candidate in FLOAT:
+            if col.dtype() == candidate:
+                return len(col) - _present_count(
+                    col.unsafe_ptr[candidate](), col.data.validity, len(col)
+                )
+    return col.null_count()
 
 
 def is_null[dt: DType](col: Array[dt]) raises -> Array[DType.bool]:
     """Returns true where a row is missing.
 
     Args:
-        col: The column to look at. Its values are not read.
+        col: The column to look at. Its values are read on a float dtype and
+            not on any other.
 
     Parameters:
         dt: The dtype.
@@ -62,15 +165,14 @@ def is_null[dt: DType](col: Array[dt]) raises -> Array[DType.bool]:
     Raises:
         Error: Only what the morsel runtime raises.
     """
-    return _null_mask[wants_null=True](col.data.validity, len(col))
+    return _null_mask[wants_null=True](present_bitmap(col), len(col))
 
 
 def is_null_any(col: AnyArray) raises -> Array[DType.bool]:
     """Returns true where a row is missing, for a column whose dtype is a runtime value.
 
     Args:
-        col: The column to look at. Its values are not read, so the dtype never
-            comes into it.
+        col: The column to look at.
 
     Returns:
         A bool column with no nulls of its own.
@@ -78,14 +180,15 @@ def is_null_any(col: AnyArray) raises -> Array[DType.bool]:
     Raises:
         Error: Only what the morsel runtime raises.
     """
-    return _null_mask[wants_null=True](col.data.validity, len(col))
+    return _null_mask[wants_null=True](present_bitmap_any(col), len(col))
 
 
 def is_not_null[dt: DType](col: Array[dt]) raises -> Array[DType.bool]:
     """Returns true where a row is present.
 
     Args:
-        col: The column to look at. Its values are not read.
+        col: The column to look at. Its values are read on a float dtype and
+            not on any other.
 
     Parameters:
         dt: The dtype.
@@ -96,7 +199,7 @@ def is_not_null[dt: DType](col: Array[dt]) raises -> Array[DType.bool]:
     Raises:
         Error: Only what the morsel runtime raises.
     """
-    return _null_mask[wants_null=False](col.data.validity, len(col))
+    return _null_mask[wants_null=False](present_bitmap(col), len(col))
 
 
 def is_not_null_any(col: AnyArray) raises -> Array[DType.bool]:
@@ -111,7 +214,7 @@ def is_not_null_any(col: AnyArray) raises -> Array[DType.bool]:
     Raises:
         Error: Only what the morsel runtime raises.
     """
-    return _null_mask[wants_null=False](col.data.validity, len(col))
+    return _null_mask[wants_null=False](present_bitmap_any(col), len(col))
 
 
 def all_valid_mask[
@@ -122,6 +225,10 @@ def all_valid_mask[
     The intersection is taken on the bitmaps, a word at a time, and expanded to
     a byte per row once at the end. Expanding first and combining the bool
     columns afterwards would do the same work sixty four times over.
+
+    A float column contributes its NaNs to the intersection, since a row that a
+    float column has no value in is a row `dropna` drops, so the bitmap folded in
+    is `present_bitmap_any` and not the raw validity.
 
     Args:
         columns: The columns to look at. All of them must be `rows` tall. An
@@ -138,8 +245,194 @@ def all_valid_mask[
     """
     var combined = Bitmap(rows, all_valid=True)
     for c in range(len(columns)):
-        combined.and_with(columns[c][].data.validity)
+        combined.and_with(present_bitmap_any(columns[c][]))
     return _null_mask[wants_null=False](combined, rows)
+
+
+def _drop_nans[
+    dt: DType, //, origin: ImmOrigin
+](
+    source: Pointer[Scalar[dt], origin], valid: Bitmap, rows: Int
+) raises -> Bitmap:
+    """Copies a validity bitmap with the bit cleared on every row holding a NaN.
+
+    A word of the bitmap is sixty four rows, and the question asked of those rows
+    first is whether any of them is NaN at all, which is a vector `isnan` and a
+    reduction and touches no bits. Only a word that says yes is then taken apart
+    one row at a time. So the price on a float column with no NaN in it is a scan
+    of the values and nothing else, and the price on a column that is all NaN is
+    the scan plus the bit loop, which is the shape that has to be slow.
+
+    A row whose bit is already clear is scanned along with the rest rather than
+    being skipped. It holds a zero, because every null in this package does, so
+    it cannot be a NaN and cannot change an answer, and testing for it would cost
+    more than reading it.
+
+    Args:
+        source: The values.
+        valid: The validity to start from.
+        rows: The height.
+
+    Parameters:
+        dt: The value dtype, which the caller has already established is a float
+            one.
+        origin: Where the values live.
+
+    Returns:
+        A new bitmap. The one passed in is not touched.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    comptime width = simd_width_of[dt]()
+    var out = Bitmap(copy=valid)
+
+    def scan(start: Int, stop: Int) {mut out, imm source, imm}:
+        for w in range(start // 64, (stop + 63) // 64):
+            var word = out.unsafe_word(w)
+            if word == 0:
+                continue
+            var base = w * 64
+            var last = base + 64
+            if last > stop:
+                last = stop
+
+            var dirty = False
+            var i = base
+            while i + width <= last:
+                var chunk = source.unsafe_offset(i).unsafe_load[width=width]()
+                if isnan(chunk).reduce_or():
+                    dirty = True
+                    break
+                i += width
+            if not dirty:
+                while i < last:
+                    if isnan(source.unsafe_offset(i).unsafe_load()):
+                        dirty = True
+                        break
+                    i += 1
+            if not dirty:
+                continue
+
+            for j in range(base, last):
+                if isnan(source.unsafe_offset(j).unsafe_load()):
+                    word &= ~(UInt64(1) << UInt64(j - base))
+            out.unsafe_set_word(w, word)
+
+    parallel_morsels(scan, rows)
+    return out^
+
+
+def _present_count[
+    dt: DType, //, origin: ImmOrigin
+](source: Pointer[Scalar[dt], origin], valid: Bitmap, rows: Int) raises -> Int:
+    """Counts the rows whose bit is set and whose value is not NaN.
+
+    The same scan as `_drop_nans` without the bitmap it would have to allocate
+    and then count, since a count is all the caller wanted. The two are kept
+    apart rather than one being written in terms of the other, because a `count`
+    on a ten million row column should not allocate a megabyte to answer.
+
+    Args:
+        source: The values.
+        valid: The validity.
+        rows: The height.
+
+    Parameters:
+        dt: The value dtype, which the caller has already established is a float
+            one.
+        origin: Where the values live.
+
+    Returns:
+        How many rows hold a value.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    if rows <= MORSEL_ROWS:
+        return _present_range(source, valid, 0, rows)
+
+    # One slot per morsel and a serial add at the end, the arrangement every
+    # reduction in `agg.mojo` uses. A count of integers is associative in a way a
+    # sum of floats is not, so the order this adds them back in does not matter,
+    # but it is left in morsel order anyway to match.
+    var count = (rows + MORSEL_ROWS - 1) // MORSEL_ROWS
+    var partials = Array[DType.int64](count)
+
+    def tally(start: Int, stop: Int) {mut partials, imm source, imm valid, imm}:
+        partials.unsafe_ptr().unsafe_offset(start // MORSEL_ROWS).unsafe_write(
+            Int64(_present_range(source, valid, start, stop))
+        )
+
+    parallel_morsels(tally, rows)
+
+    var found = 0
+    for i in range(count):
+        found += Int(partials[i])
+    return found
+
+
+def _present_range[
+    dt: DType, //, origin: ImmOrigin
+](
+    source: Pointer[Scalar[dt], origin], valid: Bitmap, start: Int, stop: Int
+) -> Int:
+    """Counts the present rows of one morsel.
+
+    The range starts and ends on a multiple of sixty four rows except at the end
+    of the column, so the word loop is derived from it and no two callers of this
+    ever look at the same word.
+
+    Args:
+        source: The values.
+        valid: The validity.
+        start: The first row.
+        stop: One past the last row.
+
+    Parameters:
+        dt: The value dtype.
+        origin: Where the values live.
+
+    Returns:
+        How many rows in the range hold a value.
+    """
+    comptime width = simd_width_of[dt]()
+    var found = 0
+
+    for w in range(start // 64, (stop + 63) // 64):
+        var word = valid.unsafe_word(w)
+        if word == 0:
+            continue
+        var base = w * 64
+        var last = base + 64
+        if last > stop:
+            last = stop
+
+        var dirty = False
+        var i = base
+        while i + width <= last:
+            var chunk = source.unsafe_offset(i).unsafe_load[width=width]()
+            if isnan(chunk).reduce_or():
+                dirty = True
+                break
+            i += width
+        if not dirty:
+            while i < last:
+                if isnan(source.unsafe_offset(i).unsafe_load()):
+                    dirty = True
+                    break
+                i += 1
+        if not dirty:
+            found += Int(pop_count(word))
+            continue
+
+        for j in range(base, last):
+            if (word >> UInt64(j - base)) & 1 == 0:
+                continue
+            if not isnan(source.unsafe_offset(j).unsafe_load()):
+                found += 1
+
+    return found
 
 
 def _null_mask[

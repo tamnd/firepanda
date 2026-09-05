@@ -15,7 +15,7 @@ Read the twins to find out what a kernel is supposed to do. They are the
 specification in the only form that runs.
 """
 
-from std.math import nan, sqrt
+from std.math import isnan, nan, sqrt
 
 from firepanda.array.array import Array
 from firepanda.array.strings import StringArray
@@ -917,6 +917,12 @@ def fill_scalar[
 def is_null_scalar[dt: DType](col: Array[dt]) -> Array[DType.bool]:
     """Reports which rows are missing, one row at a time.
 
+    A NaN is missing on a float column, which is what the kernel says and what
+    pandas says. The kernel gets there by asking a word of sixty four rows
+    whether it holds any NaN before it looks at a single bit; this asks each row
+    on its own and cannot get a boundary wrong, which is the whole point of it
+    being here. See #170.
+
     Args:
         col: The column.
 
@@ -928,7 +934,11 @@ def is_null_scalar[dt: DType](col: Array[dt]) -> Array[DType.bool]:
     """
     var out = Array[DType.bool](len(col))
     for i in range(len(col)):
-        out[i] = not col.is_valid(i)
+        var missing = not col.is_valid(i)
+        comptime if dt.is_floating_point():
+            if isnan(col[i]):
+                missing = True
+        out[i] = missing
     return out^
 
 
