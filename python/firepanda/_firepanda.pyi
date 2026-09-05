@@ -9,6 +9,10 @@ The public API is `firepanda`, whose annotations are inline.
 """
 
 class DataFrame:
+    def __init__(self, data: object) -> None:
+        """Builds one. The Python layer owns the pandas signature."""
+        ...
+
     def length(self) -> int:
         """The number of rows."""
         ...
@@ -38,6 +42,10 @@ class DataFrame:
         ...
 
 class Series:
+    def __init__(self, data: object, name: str) -> None:
+        """Builds one. The Python layer owns the pandas signature."""
+        ...
+
     def length(self) -> int:
         """The number of rows."""
         ...

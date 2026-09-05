@@ -22,6 +22,7 @@ from firepanda.dtype.dispatch import dispatch_typed
 from firepanda.dtype.lists import ALL
 from firepanda.dtype.logical import TypeKind
 from firepanda.frame.series import Series
+from firepanda.py.build import column_from, empty_column
 from firepanda.io.arrow_export import export_array_borrowed, export_schema
 from firepanda.py.convert import array_capsule, schema_capsule
 from firepanda.py.errors import DTYPE, UNSUPPORTED, retagged, tagged
@@ -107,25 +108,23 @@ struct PySeries(Movable, Writable):
     def py_init(
         out self: Self, args: PythonObject, kwargs: PythonObject
     ) raises:
-        """Refuses to build a series from Python.
+        """Builds a series out of a Python sequence.
 
-        `pd.Series([1, 2, 3])` needs the Python to Arrow conversion that is not
-        written, and the same argument `PyDataFrame.py_init` makes applies here:
-        accepting the call and handing back an empty column would look like it
-        worked.
+        Two positional arguments, the values and the name, and nothing else. The
+        pandas constructor takes five and the other three are refused by name on
+        the Python side, for the reason `PyDataFrame.py_init` gives.
 
         Args:
-            args: Positional arguments, of which none are accepted.
-            kwargs: Keyword arguments, of which none are accepted.
+            args: The values and the name.
+            kwargs: Keyword arguments, of which none are accepted, because the
+                Python layer has already turned them into positional ones.
         """
-        check_arguments_arity(0, args, "Series")
-        raise tagged(
-            UNSUPPORTED,
-            (
-                "take a series out of a frame with df['name']; building one"
-                " from values is not wired up yet"
-            ),
-        )
+        check_arguments_arity(2, args, "Series")
+        var name = String(args[1])
+        if args[0] is Python.none():
+            self = Self(ArcPointer(Series(name, empty_column(0))))
+        else:
+            self = Self(ArcPointer(column_from(name, args[0])))
 
     @staticmethod
     def _held(py_self: PythonObject) -> Pointer[Self, MutAnyOrigin]:
