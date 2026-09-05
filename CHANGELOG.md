@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### The parallel prefix hands chunks out by a counter instead of one task each
+
+The driver that runs the front of a pipeline on every core started one task per chunk, and a task costs about ten microseconds to create on an i9-13900K with the creating serial on the calling thread. Sixty four chunks is six hundred microseconds of starting tasks before any of them runs, which on a query that takes two milliseconds is a third of it.
+
+It goes through the morsel queue now, the same one every parallel kernel in the library already uses. That starts one task per worker whatever the batch holds, and each worker takes the next chunk off a shared counter when it has finished the one it had. The batch is four chunks per worker rather than one, so the tasks are paid for a quarter as often, and it is four rather than forty because a batch is held in memory all at once and at a hundred and twenty eight thousand rows a chunk, four per worker on a thirty two thread machine is already sixteen million rows in flight.
+
+The other half of what a queue buys is that a chunk which turns out to be expensive costs the batch one chunk of tail rather than one worker's whole share. A batch handed out up front finishes when its slowest worker does.
+
+`exec/pipeline_line_16k`, which is sixty four chunks through a computed column, a filter and a projection, goes from 1.95 ms to 1.60, with every new run below every old one. `exec/pipeline_line` is the same query in eight chunks and does not move, which is the control that says the gain is the task count and not the queue. The other six rows are all inside a point and a half.
+
+The gate that keeps a projection or a cast off the parallel route stays, and the measurement that says it has to is worth recording. With the tasks down to one per worker a project over sixty four chunks was still forty per cent slower spread out than in a line. At that point the tasks are thirty two rather than sixty four and the remaining cost is close to what thirty two of them cost to start, which puts a floor of a few hundred microseconds under going parallel at all. A query shorter than that is better off on one core, and a projection at a million rows is shorter than that.
+
 ### The grouped reductions step over a NaN as well
 
 The whole column reductions learned to treat a NaN as missing in the entry above this one, and the grouped ones did not, so `df.groupby(k).sum()` still took a NaN in and answered NaN for the whole group where pandas answers the total of the rows either side of it. That is the same disagreement as before, only worse, because a single NaN anywhere in a million row column now poisons exactly one group and leaves the rest looking right, which is the kind of wrong answer nobody notices. Every reduction in `kernel/group.mojo` now steps over a NaN the way it steps over a null: `group_sum`, `group_mean`, `group_min`, `group_max`, `group_count`, `group_first`, `group_last`, `group_median`, `group_quantile`, `group_nunique`, `group_var`, `group_std`, `group_sem`, `group_skew`, `group_cov` and `group_corr`.
