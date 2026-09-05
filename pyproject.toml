@@ -39,12 +39,20 @@ Issues = "https://github.com/tamnd/firepanda/issues"
 Changelog = "https://github.com/tamnd/firepanda/blob/main/CHANGELOG.md"
 
 # Placeholder. The real build backend compiles firepanda/py/module.mojo into an
-# extension exporting PyInit_firepanda and vendors the Mojo runtime beside it.
-# That lands at M3, and the first task of M3 is confirming the runtime may be
-# redistributed at all. docs/specs/07-python-bindings.md section 2.
+# extension exporting PyInit__firepanda and vendors the Mojo runtime beside it,
+# which is what tools/build_extension.sh already does outside the packaging
+# system. Wiring the two together is M3 P8, and the flag below is what tells CI
+# the wiring exists. docs/specs/12-the-python-front-door-measured.md section 2.
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.firepanda]
+# Whether a wheel built from this tree would contain the extension. False means
+# the backend above is still the placeholder, and .github/workflows/wheels.yml
+# skips rather than building something that cannot import itself. Flip it in the
+# pull request that replaces the backend, not before.
+wheels = false
 
 [tool.hatch.build.targets.wheel]
 packages = ["python/firepanda"]
