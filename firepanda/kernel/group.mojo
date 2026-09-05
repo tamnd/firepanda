@@ -3114,7 +3114,12 @@ def _dispatch_core[
 
 
 def aggregate_group_any(
-    col: AnyArray, kind: AggKind, codes: Array[DType.uint32], groups: Int
+    col: AnyArray,
+    kind: AggKind,
+    codes: Array[DType.uint32],
+    groups: Int,
+    *,
+    trusted: Bool = False,
 ) raises -> AnyArray:
     """Runs one grouped reduction over a column whose dtype is a runtime value.
 
@@ -3125,11 +3130,25 @@ def aggregate_group_any(
     typed spellings above skip it, because their codes come from `factorize` in
     the same expression that produced them.
 
+    Once per call is once per reduction, though, and a group by asking for three
+    reductions of the same grouping is three passes over the codes to learn the
+    same thing three times. On a hundred million rows that is four hundred
+    megabytes of memory traffic per reduction, on a query whose real work is a
+    pass over the codes and a pass over the values, so the check was a third of
+    it. `trusted` is how a caller that made the codes itself says so. Every
+    caller inside firepanda is one: the four of them build a grouping with
+    `group_ordinals` and hand its codes straight here, so there is nothing about
+    them left to find out. The default is still the check, because a caller from
+    outside can pass whatever it likes and a code out of range reads memory the
+    output does not own.
+
     Args:
         col: The column being aggregated.
         kind: Which reduction.
         codes: One group ordinal per row.
         groups: The number of distinct ordinals.
+        trusted: True if the caller produced these codes and has already
+            established that every one of them names a group that exists.
 
     Returns:
         A column of `groups` values.
@@ -3148,7 +3167,8 @@ def aggregate_group_any(
             + " rows and the column has "
             + String(len(col))
         )
-    _check_codes(codes, groups)
+    if not trusted:
+        _check_codes(codes, groups)
 
     if kind == AggKind.SIZE:
         return AnyArray(group_size(codes, groups))

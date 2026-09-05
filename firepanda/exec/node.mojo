@@ -1527,6 +1527,7 @@ struct Group(Movable):
                     self._produce[s],
                     local.codes,
                     local.groups,
+                    trusted=True,
                 )
             )
         self._absorb(made^)
@@ -1573,7 +1574,11 @@ struct Group(Movable):
             self._room = state_capacity(after, 0)
             for s in range(len(self._source)):
                 var made = aggregate_group_any(
-                    columns[self._source[s]], self._produce[s], codes, after
+                    columns[self._source[s]],
+                    self._produce[s],
+                    codes,
+                    after,
+                    trusted=True,
                 )
                 widen_any(made, self._room, self._produce[s])
                 self._values.append(made^)
@@ -1680,6 +1685,7 @@ struct Group(Movable):
                     self._merge[s],
                     merged.codes,
                     merged.groups,
+                    trusted=True,
                 )
             )
         self.state = next^

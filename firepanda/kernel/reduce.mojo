@@ -108,7 +108,7 @@ def reduce_any(col: AnyArray, kind: AggKind) raises -> AnyArray:
                 )
 
     var codes = Array[DType.uint32](len(col))
-    return aggregate_group_any(col, kind, codes^, 1)
+    return aggregate_group_any(col, kind, codes^, 1, trusted=True)
 
 
 def _reduce_core[
