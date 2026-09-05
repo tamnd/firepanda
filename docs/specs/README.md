@@ -26,6 +26,7 @@ says what was already decided and why.
 | [17-the-column-you-can-hold.md](17-the-column-you-can-hold.md) | The bound `Series`, what `df[key]` does with each kind of key, how a column exports itself, and where the hand written members go |
 | [18-making-a-frame-out-of-python.md](18-making-a-frame-out-of-python.md) | How `pd.DataFrame({...})` becomes an Arrow frame, what the inference decides, and where the pandas constructor signature lives |
 | [19-finding-a-label-in-an-index.md](19-finding-a-label-in-an-index.md) | The lookups and the set operations on `Index`, why one factorize answers all of them, and what the unmaterialized range is worth |
+| [20-editing-an-index.md](20-editing-an-index.md) | The five operations that change an index's labels, the three that turn a label into a slice bound, and what an unsorted index costs |
 | [engine/](engine/00-README.md) | How DuckDB and Polars execute a query, and what firepanda is going to do about it |
 
 ## How to read this

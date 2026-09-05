@@ -1520,6 +1520,65 @@ def bench_index(mut harness: Harness) raises:
 
     harness.record("index/union_equal", "rows", rows, union_equal)
 
+    # What an unsorted index costs a `loc` slice. All three rows place one label
+    # in an index of the same size and differ only in what the index is.
+    #
+    # `index/slice_bound_range` is arithmetic, `label - start` and two clamps, so
+    # it is recorded over a thousand lookups because one of them is below the
+    # resolution of the clock. `index/slice_bound_sorted` is the binary search,
+    # and the number it reports is almost entirely the monotonic check in front of
+    # it: that is one sequential pass and the search after it is about eighteen
+    # comparisons, so the row is really `index/is_monotonic_increasing` with a
+    # rounding error on top, and it is the same number for the same reason.
+    # `index/slice_bound_unsorted` is the fallback, which is a linear scan with a
+    # dtype check and a null check per row, and the gap between the last two is
+    # the cost of not having sorted the index.
+    #
+    # The check is not cached and the row is what that decision costs. Caching it
+    # would take the middle row to nearly nothing on a second call and would have
+    # to be invalidated by `take` and `filter`, which is a correctness problem in
+    # exchange for a pass, and the same argument `is_unique` already made.
+    #
+    # Read the ratio here too. The quietest of three runs on a busy machine gave
+    # 99 us for a thousand range lookups, 114 us for the sorted bound and 969 us
+    # for the unsorted one, so an unsorted index costs about eight times a sorted
+    # one and a range costs about a thousandth of either. The two other runs put
+    # the sorted against unsorted ratio at 14 and at 2.5 with interquartile
+    # ranges up to 272 per cent, so the direction is solid and the size of the
+    # gap is not, and anybody using these numbers for anything should measure
+    # again on a quiet machine.
+    var shuffled = Array[DType.int64](rows)
+    for i in range(rows):
+        shuffled[i] = Int64(i)
+    for i in range(rows - 1, 0, -1):
+        var j = Int(rng.next_u64() % UInt64(i + 1))
+        var held = shuffled[i]
+        shuffled[i] = shuffled[j]
+        shuffled[j] = held
+    var scattered = Index(AnyArray(shuffled^), Optional[String]())
+    var wanted = Array[DType.int64](1)
+    wanted[0] = Int64(rows // 3)
+    var needle = AnyArray(wanted^)
+
+    def bound_range() raises {imm ranged, imm needle}:
+        keep(ranged.length)
+        for _ in range(1000):
+            keep(ranged.get_slice_bound(needle, "left"))
+
+    harness.record("index/slice_bound_range", "lookups", 1000, bound_range)
+
+    def bound_sorted() raises {imm materialized, imm needle}:
+        keep(materialized.length)
+        keep(materialized.get_slice_bound(needle, "left"))
+
+    harness.record("index/slice_bound_sorted", "rows", rows, bound_sorted)
+
+    def bound_unsorted() raises {imm scattered, imm needle}:
+        keep(scattered.length)
+        keep(scattered.get_slice_bound(needle, "left"))
+
+    harness.record("index/slice_bound_unsorted", "rows", rows, bound_unsorted)
+
 
 def bench_hash(mut harness: Harness) raises:
     """Measures the hash table, and measures whether it was worth writing.
