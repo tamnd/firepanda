@@ -433,9 +433,7 @@ struct PyDataFrame(Movable, Writable):
         var keep = Self._frame(py_self)[].frame
         try:
             return stream_capsule(
-                export_frame_stream(
-                    columns^, types^, names^, rows, keep^
-                )
+                export_frame_stream(columns^, types^, names^, rows, keep^)
             )
         except cause:
             raise retagged(UNSUPPORTED, cause)
