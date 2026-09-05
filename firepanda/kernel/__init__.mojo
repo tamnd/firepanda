@@ -96,6 +96,9 @@ from .nulls import (
     is_not_null_any,
     is_null,
     is_null_any,
+    missing_count_any,
+    present_bitmap,
+    present_bitmap_any,
 )
 from .reduce import reduce_any
 from .select import filter_any, filter_rows, take_any, take_rows

@@ -39,6 +39,7 @@ from firepanda.dtype.lists import ALL
 from .accum import accumulator
 from .agg import extreme_over, mean_over, sum_over
 from .group import AggKind, aggregate_group_any
+from .nulls import missing_count_any
 
 
 def _takes_fast_route(kind: AggKind) -> Bool:
@@ -81,11 +82,14 @@ def reduce_any(col: AnyArray, kind: AggKind) raises -> AnyArray:
         return AnyArray(sized^)
 
     if kind == AggKind.COUNT:
-        # Counting does not read the values, so this is the one reduction that
-        # does not care what the dtype is and works on a column of strings on
-        # the same line as a column of numbers.
+        # The one reduction that works on a column of strings on the same line as
+        # a column of numbers, since counting what is there needs no order and no
+        # arithmetic. It used to need no values either and was a subtraction of
+        # two numbers the column already knew. On a float column it is a scan
+        # now, because a NaN is missing and the validity bitmap does not know
+        # that. See #170.
         var counted = Array[DType.int64](1)
-        counted[0] = Int64(len(col) - col.null_count())
+        counted[0] = Int64(len(col) - missing_count_any(col))
         return AnyArray(counted^)
 
     # As in `aggregate_group_any`: uint8 is in ALL, so a string column would

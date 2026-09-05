@@ -33,6 +33,7 @@ from firepanda.kernel.nulls import (
     fill_forward_any,
     is_not_null_any,
     is_null_any,
+    missing_count_any,
 )
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.sort import argsort_any, is_sorted_any
@@ -138,13 +139,23 @@ struct Series(Copyable, Movable, Sized, Writable):
         """
         return self.values.is_valid(i)
 
-    def null_count(self) -> Int:
-        """Returns the number of nulls.
+    def null_count(self) raises -> Int:
+        """Returns the number of rows pandas would call missing.
+
+        On a float column that is the cleared validity bits plus the NaNs, which
+        is a scan of the values rather than a number the column already knows.
+        `Array.null_count` is the other one and still counts bits and nothing
+        else. The split is the line between the two halves of the library: an
+        `Array` is Arrow and says what is in the buffers, a `Series` is pandas
+        and says what pandas would say. See #170.
 
         Returns:
-            The count of clear validity bits.
+            The count of missing rows.
+
+        Raises:
+            Error: Only what the morsel runtime raises.
         """
-        return self.values.null_count()
+        return missing_count_any(self.values)
 
     def as_typed[dt: DType](self) raises -> Array[dt]:
         """Returns the data as a typed column.
