@@ -59,6 +59,12 @@ class Series:
     def to_list(self) -> list[object]:
         """Every value, copied into a Python list."""
         ...
+    def arrow_c_schema(self) -> object:
+        """The column's Arrow schema, in a capsule."""
+        ...
+    def arrow_c_array(self, requested_schema: object | None) -> list[object]:
+        """The column's Arrow schema and data, in two capsules."""
+        ...
 
 def read_csv(path: str) -> DataFrame:
     """Reads a CSV file into a frame."""

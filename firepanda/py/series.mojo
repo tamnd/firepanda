@@ -22,7 +22,9 @@ from firepanda.dtype.dispatch import dispatch_typed
 from firepanda.dtype.lists import ALL
 from firepanda.dtype.logical import TypeKind
 from firepanda.frame.series import Series
-from firepanda.py.errors import DTYPE, UNSUPPORTED, tagged
+from firepanda.io.arrow_export import export_array_borrowed, export_schema
+from firepanda.py.convert import array_capsule, schema_capsule
+from firepanda.py.errors import DTYPE, UNSUPPORTED, retagged, tagged
 
 
 def _int(value: PythonObject, name: String) raises -> Int:
@@ -276,6 +278,80 @@ struct PySeries(Movable, Writable):
                     out.append(Python.none())
             return out
         return dispatch_typed[ALL](series.values, _numbers)
+
+    @staticmethod
+    def arrow_c_schema(py_self: PythonObject) raises -> PythonObject:
+        """Describes the column as an Arrow schema capsule.
+
+        This is the Mojo half of `__arrow_c_schema__`. A series is one Arrow
+        array rather than a struct of them, so what comes back describes the
+        column's own type and not a wrapper around it, which is the whole
+        difference between this and the frame's version.
+
+        The field carries the series name. Arrow allows a top level array to have
+        no name and pyarrow exports its own arrays that way, but a name that is
+        already known is worth handing over: it is what `polars.Series` picks up
+        as its name, and losing it here would mean the caller has to put it back.
+
+        Args:
+            py_self: The series.
+
+        Returns:
+            A `PyCapsule` named `arrow_schema`.
+        """
+        ref series = Self._held(py_self)[].series[]
+        try:
+            return schema_capsule(export_schema(series.logical(), series.name))
+        except cause:
+            raise retagged(UNSUPPORTED, cause)
+
+    @staticmethod
+    def arrow_c_array(
+        py_self: PythonObject, requested_schema: PythonObject
+    ) raises -> PythonObject:
+        """Hands the column out as an Arrow array capsule, without copying.
+
+        This is the Mojo half of `__arrow_c_array__`, and it is the fast way out
+        of a column that `to_list` is the slow way out of. The buffers in the
+        exported array are the column's own, and the export takes a share of the
+        series, so a consumer can outlive the Python object and still be reading
+        live memory.
+
+        The frame's version has to refuse a column stored in more than one chunk,
+        because a struct array has no way to express one. A series does not, since
+        taking a column out of a frame flattens it, so there is exactly one array
+        here by construction and nothing to refuse.
+
+        Args:
+            py_self: The series.
+            requested_schema: A schema capsule the consumer would rather have, or
+                `None`. Anything other than `None` is refused, for the reason the
+                frame gives: converting on the way out is not written, and a
+                consumer is entitled to assume it got what it asked for.
+
+        Returns:
+            A list of two capsules, the schema and the array, which the Python
+            layer hands back as the tuple the protocol asks for.
+        """
+        if requested_schema is not Python.none():
+            raise tagged(
+                UNSUPPORTED,
+                (
+                    "requested_schema is not supported yet; pass None and cast"
+                    " the result instead"
+                ),
+            )
+        var keep = Self._held(py_self)[].series
+        var column = Pointer(to=keep[].values).unsafe_origin_cast[
+            MutAnyOrigin
+        ]()
+        var pair = Python.list()
+        pair.append(Self.arrow_c_schema(py_self))
+        try:
+            pair.append(array_capsule(export_array_borrowed(column, keep^)))
+        except cause:
+            raise retagged(UNSUPPORTED, cause)
+        return pair
 
     def write_to(self, mut writer: Some[Writer]):
         """Writes the series the way the core writes it.
