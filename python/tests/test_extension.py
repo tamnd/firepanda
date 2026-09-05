@@ -24,17 +24,13 @@ These tests skip when there is no build to look at. Running them needs
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
 
 import pytest
-
-REPO = Path(__file__).resolve().parents[2]
-PACKAGE = REPO / "python" / "firepanda"
-BUILT = REPO / "build" / "extension"
+from conftest import BUILT, REPO, stage
 
 needs_a_build = pytest.mark.skipif(
     not (BUILT / "_firepanda.so").exists(),
@@ -50,24 +46,6 @@ needs_a_build = pytest.mark.skipif(
 # Vendoring a second libc++ into a process that already has one is worse than
 # the wasted megabyte suggests.
 SIZE_BUDGET = 8 * 1024 * 1024
-
-
-def _staged(root: Path) -> Path:
-    """Lays out the package the way an installed wheel has it, under `root`.
-
-    The extension and the runtime libraries sit inside the package directory
-    rather than beside it, which is what makes `@loader_path` and `$ORIGIN` the
-    right answer: the library looks for its neighbours in the directory it was
-    loaded from, and in a wheel that directory is the package.
-    """
-    package = root / "firepanda"
-    package.mkdir()
-    for source in PACKAGE.iterdir():
-        if source.is_file():
-            shutil.copy2(source, package / source.name)
-    for source in BUILT.iterdir():
-        shutil.copy2(source, package / source.name)
-    return package
 
 
 def _stripped_environment() -> dict[str, str]:
@@ -89,7 +67,7 @@ print(firepanda.__version__)
 
 @needs_a_build
 def test_the_extension_imports_with_no_toolchain_anywhere(tmp_path: Path) -> None:
-    _staged(tmp_path)
+    stage(tmp_path)
     finished = subprocess.run(
         [sys.executable, "-c", CHILD],
         cwd=tmp_path,

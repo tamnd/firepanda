@@ -6,11 +6,18 @@ the Python here exists to give that extension a name people can import, a place
 for type stubs to live, and somewhere to put the pure Python conveniences that
 are not worth crossing the boundary for.
 
-Right now it does one thing, which is report the version. That is not a feature
-and is not meant to become one. It is the smallest end to end path through the
-whole boundary, from a `pixi run build-extension` to a working import, and
-having it land on its own means the interesting parts arrive on top of something
-already known to work rather than alongside it.
+It is more than a name, though, and document 13 is why. `PythonTypeBuilder` can
+attach methods to a type and nothing else, so `df["a"]`, `len(df)`, `df.shape`
+and every operator are not expressible in Mojo, and 28 percent of the pandas
+surface is properties and operators. A bound type cannot be subclassed and has no
+`__dict__` either, so neither of the obvious ways round that is available. The
+pandas API therefore lives here, in `_frame.py`, and each class holds an
+extension object and delegates to it. The Mojo side is a private calling
+convention with names like `length` and no dunders at all.
+
+Both halves are generated from the table in `tools/bindings.py`, because they are
+the two files in this project most likely to drift apart and they sit on opposite
+sides of a language boundary where nothing would notice.
 
 The import of `_firepanda` below is deliberately at module level and
 deliberately not guarded. A firepanda install with no extension in it is not a
@@ -22,8 +29,9 @@ whichever function they called first.
 from __future__ import annotations
 
 from . import _firepanda
+from ._frame import DataFrame, read_csv
 
-__all__ = ["__version__"]
+__all__ = ["DataFrame", "__version__", "read_csv"]
 
 __version__: str = _firepanda.version()
 """The version, asked of the extension rather than written down here.

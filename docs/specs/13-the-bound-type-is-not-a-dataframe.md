@@ -63,6 +63,10 @@ Calling a bound method with the wrong number of arguments produces `Exception: T
 
 This is not firepanda's code and cannot be fixed in firepanda's code. It is one more thing the Python layer has to cover, and it raises the priority of that layer from a convenience to a requirement, because without it the first error a new user sees is untyped and unnamed.
 
+There is one exception to document 12's rule, found while writing the first real binding rather than while probing for it. A `raise Error(...)` inside a `def_py_init` arrives in Python as a `ValueError`, not as an `Exception`. The same `raise Error(...)` inside a `def_function` or a `def_method` arrives as an `Exception`. So the constructor path is not a special case worth relying on, it is a third behaviour to account for: the error mapping in #200 has to look at where the call entered rather than assuming one answer for the whole boundary, and a test that only exercises methods will not see it.
+
+A smaller one, worth recording because it is the kind of thing that gets diagnosed twice. A finalized type carries no `__module__`, and CPython 3.14 says so with `DeprecationWarning: builtin type DataFrame has no __module__ attribute` the first time the extension is imported. Nothing breaks and there is no way to set it from the builder. It is visible in the test output, and it is another reason the name a user sees belongs to the Python class rather than to the bound type.
+
 ## 6. So the surface is a Python object, and here is what that costs
 
 Sections 1 through 5 all arrive at the same place from different directions. The dunders are not reachable, subclassing is not available, the arity ceiling wants a narrow convention underneath a wide signature, and both the library's errors and the binding layer's own errors need re-raising with the right type. Every one of those is solved by the same thing, a hand written or generated pure Python class holding the Mojo value, and none of them is solved by anything else.
@@ -123,6 +127,12 @@ Two things in document 12 section 8 should be restated in light of this. The sur
 
 Nothing here changes M3's ordering. P2 is still the next thing to build and it is still the thing everything after it depends on. It is simply larger than it was written to be, and the part that grew is the part that faces the user.
 
+### What P2 came out as
+
+Written after the fact, so that this document says what was built rather than only what was expected. The table is `tools/bindings.py` and it writes all four outputs: `firepanda/py/_registration.mojo`, `python/firepanda/_frame.py` and `python/firepanda/_firepanda.pyi`, with the fourth being the parity tests in `python/tests/test_bindings.py` that read the table directly rather than being generated from it. The Mojo side is `firepanda/py/frame.mojo` and it is `length`, `width`, `names`, `head` and `tail`, none of which is a name a user ever types.
+
+Three things came out differently from the description above. The stub file did not shrink as much as predicted, because the narrow convention still needs a return type on every entry for `mypy --strict` to have anything to check the Python layer against, and typing the boundary as `object` throughout makes the whole exercise vacuous. The signature parity test found something on its first run, which is that pandas calls the first argument of `read_csv` `filepath_or_buffer`, so the table now carries a Python facing parameter name separately from the extension one. And `read_parquet` is not in the extension at all, because the Parquet reader reaches the DuckDB loader and its `external_call["dlopen"]` fails the shared library build, which is #211 and is a fact about the build rather than about the bindings.
+
 ## How to run the probes again
 
 The type probe. Build a module with `mojo build --emit shared-lib probe.mojo -o probe.so` from inside the pixi project, where `probe.mojo` declares a `@fieldwise_init struct Frame(Movable, Writable)` with a `py_init` static method, two static methods taking `py_self`, and both `write_to` and `write_repr_to` writing different text. Register it with `b.add_type[Frame]("Frame").def_py_init[Frame.py_init]().def_method[Frame.height]("height")`, remembering that the builder cannot be assigned to a `var`. Then import it and evaluate `f["a"]`, `len(f)`, `f.shape` and `list(iter(f))`, each in its own `try`, and compare `str(f)` against `repr(f)`.
@@ -131,7 +141,7 @@ The subclass probe is three lines in the same interpreter: `class Sub(Frame): pa
 
 The arity probe generates a method with n `PythonObject` arguments for n in a range, builds each one, and counts `error:` lines in the output. Eight succeeds and nine fails for `def_function`, and for `def_method` the same bisection puts the last success at seven arguments after `py_self`.
 
-The surface counts come from a script that walks `dir()` on each of the eight types, sorts each member into a method, a property or a dunder using `inspect.getattr_static` so that nothing is triggered by being looked at, and reads the parameter kinds off `inspect.signature`. It is the same walk the signature parity test in section 8 needs, so it should land in the tree with that test rather than staying a probe. Run against pandas 3.0.5, it reads nothing it cannot introspect.
+The surface counts come from a script that walks `dir()` on each of the eight types, sorts each member into a method, a property or a dunder using `inspect.getattr_static` so that nothing is triggered by being looked at, and reads the parameter kinds off `inspect.signature`. Run against pandas 3.0.5, it reads nothing it cannot introspect. The narrower version of that walk landed in the tree with the parity tests, over `DataFrame` only, because `DataFrame` is the only type bound so far and a walk over eight types that compares against one would be checking nothing seven eighths of the time. It should widen as each type arrives rather than in one go.
 
 The table probe from section 7 is four builds of the same module, each one adding a layer of indirection between the function and `def_method`: a bare `comptime` alias, a struct parameterized on the function, a helper parameterized the same way, and a `PyObjectFunction` built at the naming site and forwarded. The first and last build and the middle two do not. The pack question is one more build, adding `def register[*entries: Named]` over two entries of differing types, which fails in the parameter list rather than in the body.
 

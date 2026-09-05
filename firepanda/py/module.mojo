@@ -1,11 +1,16 @@
-"""The symbol CPython looks for, and nothing else yet.
+"""The symbol CPython looks for.
 
 Python loads a compiled extension by finding a shared library that exports
-`PyInit_<name>()` and calling it. This file is that function. It has no bindings
-in it on purpose: the point of landing it on its own is that the distribution
-claim in `docs/specs/12-the-python-front-door-measured.md` section 2 becomes
-something a build script does and CI checks, rather than something that was
-measured by hand on one machine on one afternoon.
+`PyInit_<name>()` and calling it. This file is that function, and almost nothing
+else. The bindings themselves are in `_registration.mojo`, which is generated
+from the table in `tools/bindings.py`, so this file holds only the two things
+that cannot be generated: the exported symbol, and `version`, which exists to
+check the build rather than to be used.
+
+Document 13 section 7 says why the registration is a generated flat sequence of
+calls rather than a table something iterates over: `def_method` will not accept a
+function that has passed through anything generic, and a collection of bindings
+cannot be given a type at all.
 
 ### The name is `_firepanda`, not `firepanda`
 
@@ -42,6 +47,7 @@ from std.os import abort
 from std.python import PythonObject
 from std.python.bindings import PythonModuleBuilder
 
+from firepanda.py._registration import register
 from firepanda.version import VERSION
 
 
@@ -61,6 +67,8 @@ def PyInit__firepanda() abi("C") -> PythonObject:
                 " string."
             ),
         )
+        register(module)
+
         return module.finalize()
     except e:
         abort(t"firepanda extension init failed: {e}")
@@ -69,8 +77,9 @@ def PyInit__firepanda() abi("C") -> PythonObject:
 def report_version() raises -> PythonObject:
     """Reports the version the extension was built from.
 
-    This is the whole surface of the extension at the moment and it is here to
-    be a check rather than a feature. A wheel that imports and then reports a
+    This is a check rather than a feature, and it is the one binding that is
+    written here by hand rather than generated, because it is about the artifact
+    and not about the library. A wheel that imports and then reports a
     version from a different build than the Python package around it is a wheel
     that was assembled wrongly, and the two halves have no other way to notice.
 

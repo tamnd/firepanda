@@ -135,6 +135,23 @@ jobs:
         if: needs.guard.outputs.has_python == 'true'
         run: uvx ruff check python/ && uvx ruff format --check python/
 
+      # The generated files are checked in, because a wheel has to build without
+      # a Mojo toolchain deciding what is in it and because a diff on them is the
+      # clearest review of a binding change there is. Checking them in means they
+      # can go stale, and this is the step that says so. The same check runs as a
+      # test, but it is worth failing here too: this job takes half a minute and
+      # the one that runs the tests takes a good deal longer.
+      - name: Generated bindings are current
+        if: needs.guard.outputs.has_python == 'true'
+        run: uv run --no-project python tools/bindings.py --check
+
+      # mypy in strict mode, over the package only. The generated Python layer is
+      # the whole point: it is written by a script that cannot itself be type
+      # checked usefully, so the check that matters is on what comes out of it.
+      - name: mypy
+        if: needs.guard.outputs.has_python == 'true'
+        run: uvx mypy
+
   build:
     name: Build & test (${{ matrix.os }}, mojo ${{ matrix.mojo }})
     needs: guard
@@ -188,9 +205,13 @@ jobs:
       # so it should be a plain CPython with pytest in it rather than anything
       # that has firepanda installed and could be answering the import from
       # somewhere other than the directory under test.
+      # pandas is here because one of these tests compares our signatures against
+      # it. That test is the only mechanical measurement of the compatibility
+      # goal in the repository, and without pandas installed it skips silently,
+      # which is the same as not having written it.
       - name: Extension tests
         if: needs.guard.outputs.has_python == 'true'
-        run: uv run --no-project --with pytest python -m pytest python/tests -q
+        run: uv run --no-project --with pytest --with pandas python -m pytest python/tests -q
 
       # Every fuzzer at once. The bound is per fuzzer, as it was when they ran
       # in sequence, so this shortens the step without shortening the fuzz.
