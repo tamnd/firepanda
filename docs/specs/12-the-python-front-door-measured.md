@@ -4,6 +4,8 @@ Document 07 describes the Python front door and it was written before any of it 
 
 The short version is that the problem 07 called the hardest one is largely solved and cost 2.9 megabytes, the Arrow crossing that 07 treated as the centrepiece works today with zero copy proven by pointer identity, and the two items 07 spent one paragraph each on, error mapping and Ctrl-C, are the two that do not work at all. M3 should be reordered around that.
 
+Everything below binds functions rather than types, because that is all the distribution question needed. Binding a type turned out to be a different exercise with a much larger consequence, and document 13 is that measurement. Read it before designing anything that a user will hold.
+
 ## What was actually run
 
 Three probes, all outside the firepanda tree so that none of this is in the library yet.
