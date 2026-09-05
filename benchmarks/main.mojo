@@ -133,6 +133,7 @@ from firepanda.kernel import (
     fill_forward,
     filter_any,
     filter_rows,
+    group_count,
     group_first,
     group_mean,
     group_median,
@@ -2597,6 +2598,13 @@ def bench_group(mut harness: Harness) raises:
 
     var values = Array[DType.int64](rows)
     var sparse = Array[DType.int64](rows)
+    # Every row above and below this pair is int64, where a grouped reduction
+    # reads no values looking for a NaN and cannot have changed. These two are
+    # the float column with nothing wrong with it, which is the common shape and
+    # the one paying for the scan, and the same column with a NaN in every
+    # eighth row, which is a worse column than anything real. See #170.
+    var clean = Array[DType.float64](rows)
+    var nanned = Array[DType.float64](rows)
     var codes = Array[DType.uint32](rows)
     var few = Array[DType.uint32](rows)
     var many = Array[DType.uint32](rows)
@@ -2624,6 +2632,10 @@ def bench_group(mut harness: Harness) raises:
         key[i] = Int64(draw % UInt64(GROUPS))
         spread[i] = Int64(draw % UInt64(wide))
         spread_values[i] = Int64(draw % 1000)
+        clean[i] = Float64(draw % 1000)
+        nanned[i] = nan[DType.float64]() if draw & 7 == 1 else Float64(
+            draw % 1000
+        )
         other[i] = Int64((draw >> 20) % 8)
         own[i] = UInt32(draw % UInt64(nearly))
         if draw & 7 == 0:
@@ -2684,6 +2696,41 @@ def bench_group(mut harness: Harness) raises:
         keep(out[0])
 
     harness.record("group/first_sparse", "rows", rows, first_grouped)
+
+    def sum_float() raises {imm clean, imm codes}:
+        keep(clean)
+        var out = group_sum(clean, codes, GROUPS)
+        keep(out[0])
+
+    harness.record("group/sum_float", "rows", rows, sum_float)
+
+    def sum_float_nans() raises {imm nanned, imm codes}:
+        keep(nanned)
+        var out = group_sum(nanned, codes, GROUPS)
+        keep(out[0])
+
+    harness.record("group/sum_float_nans", "rows", rows, sum_float_nans)
+
+    def mean_float() raises {imm clean, imm codes}:
+        keep(clean)
+        var out = group_mean(clean, codes, GROUPS)
+        keep(out[0])
+
+    harness.record("group/mean_float", "rows", rows, mean_float)
+
+    def min_float() raises {imm clean, imm codes}:
+        keep(clean)
+        var out = group_min(clean, codes, GROUPS)
+        keep(out[0])
+
+    harness.record("group/min_float", "rows", rows, min_float)
+
+    def count_float() raises {imm clean, imm codes}:
+        keep(clean)
+        var out = group_count(clean, codes, GROUPS)
+        keep(out[0])
+
+    harness.record("group/count_float", "rows", rows, count_float)
 
     def size_grouped() raises {imm codes}:
         keep(codes)

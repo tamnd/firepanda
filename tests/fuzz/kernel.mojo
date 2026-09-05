@@ -371,6 +371,99 @@ def same_column[
             )
 
 
+def same_grouped[
+    dt: DType
+](
+    a: Array[dt],
+    kind: AggKind,
+    codes: Array[DType.uint32],
+    groups: Int,
+    step: Int,
+    seed: UInt64,
+) raises:
+    """Runs one grouped reduction against its twin and reports a disagreement.
+
+    Pulled out of `run_one` so it can be run twice over the same codes, once on
+    the column the generator drew and once on a column with NaNs in it. See #170.
+
+    Args:
+        a: The column being aggregated.
+        kind: Which reduction.
+        codes: One group ordinal per row.
+        groups: The number of distinct ordinals.
+        step: The case number.
+        seed: The seed.
+
+    Raises:
+        Whatever the reduction raises, and nothing of its own.
+    """
+    var reduced = cast_any(
+        aggregate_group(a, kind, codes, groups), DType.float64
+    ).as_typed[DType.float64]()
+    var twin = group_scalar(a, kind, codes, groups)
+    for g in range(groups):
+        if reduced.is_valid(g) != twin[1][g]:
+            fail(
+                step,
+                seed,
+                "aggregate_group",
+                String("group ", g, " validity under ", kind),
+            )
+        if reduced.is_valid(g):
+            # NaN is an answer here and not an error, because a float valued
+            # reduction with nothing to reduce reports one rather than a null.
+            # It has to be checked before the subtraction rather than after,
+            # since NaN minus anything is NaN and NaN fails every comparison, so
+            # a difference of one NaN against a real number would slide through
+            # the tolerance below without ever firing. See #170.
+            if isnan(reduced[g]) or isnan(twin[0][g]):
+                if isnan(reduced[g]) != isnan(twin[0][g]):
+                    fail(
+                        step,
+                        seed,
+                        "aggregate_group",
+                        String(
+                            "group ",
+                            g,
+                            " is ",
+                            reduced[g],
+                            " but twin has ",
+                            twin[0][g],
+                            " under ",
+                            kind,
+                        ),
+                    )
+                continue
+            var delta = reduced[g] - twin[0][g]
+            if delta < 0.0:
+                delta = -delta
+            # Relative once the numbers get big. The two sides add the same terms
+            # in different orders, which is exact for a sum of integers and is
+            # not for a variance, where the result is a square and a column of
+            # values near a million lands near 1e12. An absolute tolerance there
+            # is asking floating point addition to be associative.
+            var scale = reduced[g] if reduced[g] >= 0.0 else -reduced[g]
+            var tolerance = 1.0e-9
+            if scale > 1.0:
+                tolerance = 1.0e-9 * scale
+            if delta > tolerance:
+                fail(
+                    step,
+                    seed,
+                    "aggregate_group",
+                    String(
+                        "group ",
+                        g,
+                        " is ",
+                        reduced[g],
+                        " but twin has ",
+                        twin[0][g],
+                        " under ",
+                        kind,
+                    ),
+                )
+
+
 def run_one[dt: DType](mut rng: Rng, step: Int, seed: UInt64) raises:
     """Draws two random columns and runs every kernel over them.
 
@@ -628,71 +721,16 @@ def run_one[dt: DType](mut rng: Rng, step: Int, seed: UInt64) raises:
         kind = AggKind.quantile_at(Float64(rng.next_below(101)) / 100.0)
     elif kind == AggKind.VAR or kind == AggKind.STD or kind == AggKind.SEM:
         kind = AggKind(kind.code, Float64(rng.next_below(3)))
-    var reduced = cast_any(
-        aggregate_group(a, kind, codes, groups), DType.float64
-    ).as_typed[DType.float64]()
-    var twin = group_scalar(a, kind, codes, groups)
-    for g in range(groups):
-        if reduced.is_valid(g) != twin[1][g]:
-            fail(
-                step,
-                seed,
-                "aggregate_group",
-                String("group ", g, " validity under ", kind),
-            )
-        if reduced.is_valid(g):
-            # NaN is an answer here and not an error, because a float valued
-            # reduction with nothing to reduce reports one rather than a null.
-            # It has to be checked before the subtraction rather than after,
-            # since NaN minus anything is NaN and NaN fails every comparison, so
-            # a difference of one NaN against a real number would slide through
-            # the tolerance below without ever firing. See #170.
-            if isnan(reduced[g]) or isnan(twin[0][g]):
-                if isnan(reduced[g]) != isnan(twin[0][g]):
-                    fail(
-                        step,
-                        seed,
-                        "aggregate_group",
-                        String(
-                            "group ",
-                            g,
-                            " is ",
-                            reduced[g],
-                            " but twin has ",
-                            twin[0][g],
-                            " under ",
-                            kind,
-                        ),
-                    )
-                continue
-            var delta = reduced[g] - twin[0][g]
-            if delta < 0.0:
-                delta = -delta
-            # Relative once the numbers get big. The two sides add the same terms
-            # in different orders, which is exact for a sum of integers and is
-            # not for a variance, where the result is a square and a column of
-            # values near a million lands near 1e12. An absolute tolerance there
-            # is asking floating point addition to be associative.
-            var scale = reduced[g] if reduced[g] >= 0.0 else -reduced[g]
-            var tolerance = 1.0e-9
-            if scale > 1.0:
-                tolerance = 1.0e-9 * scale
-            if delta > tolerance:
-                fail(
-                    step,
-                    seed,
-                    "aggregate_group",
-                    String(
-                        "group ",
-                        g,
-                        " is ",
-                        reduced[g],
-                        " but twin has ",
-                        twin[0][g],
-                        " under ",
-                        kind,
-                    ),
-                )
+    same_grouped(a, kind, codes, groups, step, seed)
+
+    # The same reduction again over a column that has NaNs in it as well as
+    # nulls. `random_column` never draws a NaN, so without this the grouped path
+    # would only ever be checked on one of the two spellings of missing, and the
+    # grouped kernels have to step over both. Only on a float dtype, because
+    # there is no NaN to draw on any other one. See #170.
+    comptime if dt.is_floating_point():
+        var poisoned = nan_column[dt](rng, length, step % 4)
+        same_grouped(poisoned, kind, codes, groups, step, seed)
 
     # Top-n per group, against the twin that scans the column once per slot.
     # The same drawn codes, because the interesting shape here is a crowded group
