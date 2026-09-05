@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### The join's built table is a value a pipeline node can hold
+
+`align_keys` builds a table over the smaller side's keys and asks it about every row of the larger one, and the two halves of that were already separate functions with the built table passed between them. What they were not is usable from outside the pass that made them, because the table was parameterized on the key dtype, and a pipeline node lives in a `Variant` that has to name every alternative it holds. One alternative per key dtype is not a list anyone can write.
+
+So `BuildSide` carries the key dtype as a field instead of as a parameter, and the one value of that dtype it holds, the key that indexes slot zero of the direct table, is kept as the bits of a `UInt64` and cast back on the way out. The cast truncates to the low bits, so the round trip returns what was put in for every integer key, and a key that is not an integer never takes the direct route and never reaches the field. `build_side` and `probe_side` are the two halves under their own names, and `probe_side` refuses a probe column whose dtype is not the one the table was built from, which is the check the type parameter used to make for free.
+
+Nothing about a join changes. The probe still only reads, which is what let it run on every core already and is also what lets it be called once per chunk with the same table, and the four new tests in `tests/test_join_keys.mojo` are that statement checked: build once, probe in two pieces, compare against probing in one, on the direct route and on the hashed route. The join microbenchmarks on the i9-13900K are where they were, `join/inner_1000` at 2.9 to 3.3 milliseconds over a million rows and `join/indices_1000` at half a millisecond, and the join fuzzer's two million cases still agree with the nested loop twin.
+
 ### A reduction over the whole input is an operator now
 
 `Reduce` is a node that folds every chunk that goes past into one row: a sum, a mean, a minimum, a maximum or a count over the whole input, with no key to group by. It is a breaker, since the answer is not known until the last row has been seen, and it is the cheapest breaker there is, because what it holds between chunks is one row per state slot whatever the input was.

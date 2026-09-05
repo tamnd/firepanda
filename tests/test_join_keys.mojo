@@ -19,18 +19,30 @@ table, and two key columns or a string key take the concat and factorize
 fallback. Each of those shapes appears here at least once, and the assertions are
 the same ones in every case.
 
+The last few tests are about the seam rather than the answer. `build_side` and
+`probe_side` are `align_keys`' second route split in half so a streaming join can
+keep the table between chunks, and what has to hold is that probing in pieces
+writes what probing in one go writes. Each of those tests does it both ways over
+the same rows and compares, once on each route.
+
 The wider correctness argument for this file is `tests/fuzz/join.mojo`, which
 generates both sides at random sizes with random null densities and compares
 every pairing against the nested loop twin. What is here is the cases that fuzzer
 is unlikely to reach on purpose and that would be hard to read if it did.
 """
 
-from std.testing import TestSuite, assert_equal, assert_not_equal, assert_true
+from std.testing import (
+    TestSuite,
+    assert_equal,
+    assert_not_equal,
+    assert_raises,
+    assert_true,
+)
 
 from firepanda.array.any import AnyArray, borrow_columns
 from firepanda.array.array import Array, from_list
 from firepanda.array.strings import StringArray, StringBuilder
-from firepanda.join.keys import KeyAlignment, align_keys
+from firepanda.join.keys import KeyAlignment, align_keys, build_side, probe_side
 
 
 def ints(values: List[Scalar[DType.int64]]) -> Array[DType.int64]:
@@ -357,6 +369,86 @@ def test_a_probe_past_the_split_aligns_what_one_thread_would() raises:
             wrong = r
             break
     assert_equal(wrong, -1, String("right row ", wrong))
+
+
+def probed(
+    build: Array[DType.int64], probe: Array[DType.int64]
+) raises -> Array[DType.uint32]:
+    """Builds a table from one column and probes it with another, in one call.
+
+    Args:
+        build: The column the table is built from.
+        probe: The column asked about it.
+
+    Returns:
+        The build side's ordinals followed by the probe side's, which is the
+        layout `align_keys` hands back.
+
+    Raises:
+        Whatever the build or the probe raises.
+    """
+    var codes = Array[DType.uint32](overwritten=len(build) + len(probe))
+    var built = build_side[DType.int64](build, 0, codes)
+    probe_side[DType.int64](built, probe, len(build), codes)
+    return codes^
+
+
+def test_a_table_probed_in_two_pieces_answers_as_it_would_in_one() raises:
+    var whole = probed(ints([5, 7, 9, 7]), ints([9, 4, 5, 7, 9, 5, 4, 7]))
+
+    var codes = Array[DType.uint32](overwritten=12)
+    var built = build_side[DType.int64](ints([5, 7, 9, 7]), 0, codes)
+    probe_side[DType.int64](built, ints([9, 4, 5, 7]), 4, codes)
+    probe_side[DType.int64](built, ints([9, 5, 4, 7]), 8, codes)
+
+    assert_equal(built.groups(), 4, "three keys and the miss")
+    var bad = -1
+    for i in range(12):
+        if whole[i] != codes[i]:
+            bad = i
+            break
+    assert_equal(bad, -1, String("row ", bad))
+
+
+def test_a_wide_key_table_probed_in_two_pieces_answers_the_same_way() raises:
+    # Keys this far apart have no table indexed by value small enough to be
+    # worth building, so this goes through the hash route and the one above
+    # does not.
+    var far = Int64(1) << 40
+    var whole = probed(
+        ints([far, 3, far + 9]), ints([3, far + 9, 8, far, 3, 8])
+    )
+
+    var codes = Array[DType.uint32](overwritten=9)
+    var built = build_side[DType.int64](ints([far, 3, far + 9]), 0, codes)
+    probe_side[DType.int64](built, ints([3, far + 9, 8]), 3, codes)
+    probe_side[DType.int64](built, ints([far, 3, 8]), 6, codes)
+
+    assert_equal(built.groups(), 4, "three keys and the miss")
+    var bad = -1
+    for i in range(9):
+        if whole[i] != codes[i]:
+            bad = i
+            break
+    assert_equal(bad, -1, String("row ", bad))
+
+
+def test_a_probe_of_nothing_leaves_the_table_ready_for_the_next_one() raises:
+    var codes = Array[DType.uint32](overwritten=6)
+    var built = build_side[DType.int64](ints([2, 4]), 0, codes)
+    probe_side[DType.int64](built, ints(List[Scalar[DType.int64]]()), 2, codes)
+    probe_side[DType.int64](built, ints([4, 5, 2, 4]), 2, codes)
+
+    assert_equal(codes[2], codes[1], "the four found the four")
+    assert_equal(codes[4], codes[0], "the two found the two")
+    assert_equal(Int(codes[3]), built.groups() - 1, "the five found nothing")
+
+
+def test_a_table_built_from_one_dtype_refuses_a_probe_of_another() raises:
+    var codes = Array[DType.uint32](overwritten=6)
+    var built = build_side[DType.int64](ints([1, 2, 3]), 0, codes)
+    with assert_raises(contains="the probe column is"):
+        probe_side[DType.float64](built, floats([1.0, 2.0]), 3, codes)
 
 
 def main() raises:

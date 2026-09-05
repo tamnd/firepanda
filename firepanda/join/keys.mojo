@@ -63,6 +63,22 @@ miss ordinal for free. Nulls on the build side keep whatever code the loop
 happened to write, because every read of a build side code is already guarded by
 the caller's null list, and giving them a code nobody reads is cheaper than
 branching to give them a better one.
+
+## Keeping the built table
+
+`BuildSide` is the filled table on its own, and `build_side` and `probe_side` are
+the two halves of the second route split apart. A whole frame join builds and
+probes in one breath and has no use for the seam, but a streaming join builds
+once and then probes with every chunk that arrives, so the table has to outlive
+the pass that filled it and the probe has to be callable more than once. Both are
+true of these two functions: the probe only reads.
+
+`BuildSide` carries the key dtype rather than being parameterized on it, and its
+one value of that dtype is held as the bits of a `UInt64`. That is what lets a
+pipeline node hold one, because a node is stored in a `Variant` that names its
+alternatives and a type per key dtype is not a list anyone can write. `dt.cast`
+truncates on the way back, so the round trip through the wider type is exact for
+every integer key, and a key that is not an integer never reaches the field.
 """
 
 from firepanda.array.any import AnyArray, ColumnRefs, borrow_columns
@@ -343,7 +359,7 @@ def _probe_route[
     return _build_and_probe[dt](left, 0, right, left_rows, codes)
 
 
-struct _Built[dt: DType](Movable):
+struct BuildSide(Movable):
     """The build side's keys in a table, ready to be asked about a probe side.
 
     A whole frame join builds this, probes it once with the other frame and
@@ -356,6 +372,13 @@ struct _Built[dt: DType](Movable):
     objects is not expressible in Mojo 1.0 and a `Variant` here would be two
     branches in the probe either way. The unused route costs one empty `Buffer`
     or one empty `HashTable`, which is a 64-byte block and a few words.
+    """
+
+    var key: DType
+    """The dtype of the key column this was built from.
+
+    A probe with any other dtype would read the same slots meaning something
+    else, so `probe_side` refuses one.
     """
 
     var direct: Bool
@@ -371,8 +394,13 @@ struct _Built[dt: DType](Movable):
     var span: Int
     """How many slots `seats` has, or zero."""
 
-    var base: Scalar[Self.dt]
-    """The key value that indexes slot zero, or zero."""
+    var base: UInt64
+    """The bits of the key value that indexes slot zero, or zero.
+
+    Held wide and untyped so the struct is not parameterized on the key dtype.
+    `probe_side` casts it back down, which truncates to the low bits and so
+    returns the value that was put in.
+    """
 
     var table: HashTable
     """The hashed route's table, or an empty one."""
@@ -385,29 +413,41 @@ struct _Built[dt: DType](Movable):
 
     def __init__(
         out self,
+        key: DType,
         direct: Bool,
         var seats: Buffer,
         span: Int,
-        base: Scalar[Self.dt],
+        base: UInt64,
         var table: HashTable,
         miss: UInt32,
     ):
         """Constructs a built side.
 
         Args:
+            key: The key dtype.
             direct: Whether the direct route was taken.
             seats: The direct route's slots, or an empty buffer.
             span: How many slots there are.
-            base: The value indexing slot zero.
+            base: The bits of the value indexing slot zero.
             table: The hashed route's table, or an empty one.
             miss: The ordinal for a row that matches nothing.
         """
+        self.key = key
         self.direct = direct
         self.seats = seats^
         self.span = span
         self.base = base
         self.table = table^
         self.miss = miss
+
+    def groups(self) -> Int:
+        """How many ordinals this side hands out, counting the miss one.
+
+        Returns:
+            One past the miss ordinal, which is what a table indexed by ordinal
+            has to be sized to.
+        """
+        return Int(self.miss) + 1
 
 
 def _build_and_probe[
@@ -437,16 +477,16 @@ def _build_and_probe[
     Raises:
         Error: If the parallel probe raises.
     """
-    var built = _build[dt](build, build_at, codes)
-    _probe_into[dt](built, probe, probe_at, codes)
-    return Int(built.miss) + 1
+    var built = build_side[dt](build, build_at, codes)
+    probe_side[dt](built, probe, probe_at, codes)
+    return built.groups()
 
 
-def _build[
+def build_side[
     dt: DType
 ](
     build: Array[dt], build_at: Int, mut codes: Array[DType.uint32]
-) raises -> _Built[dt]:
+) raises -> BuildSide:
     """Picks the table the build side wants and fills it and its own codes.
 
     An integer key whose values sit in a narrow enough range gets a table indexed
@@ -492,7 +532,7 @@ def _build_direct[
     span: Int,
     base: Scalar[dt],
     mut codes: Array[DType.uint32],
-) raises -> _Built[dt]:
+) raises -> BuildSide:
     """Fills a table indexed by the key value.
 
     Args:
@@ -540,8 +580,14 @@ def _build_direct[
         else:
             out.unsafe_offset(build_at + i).unsafe_write(stored - 1)
 
-    return _Built[dt](
-        True, seats^, span, base, HashTable(0, DEFAULT_SEED), UInt32(found)
+    return BuildSide(
+        dt,
+        True,
+        seats^,
+        span,
+        base.cast[DType.uint64](),
+        HashTable(0, DEFAULT_SEED),
+        UInt32(found),
     )
 
 
@@ -549,7 +595,7 @@ def _build_hashed[
     dt: DType
 ](
     build: Array[dt], build_at: Int, mut codes: Array[DType.uint32]
-) raises -> _Built[dt]:
+) raises -> BuildSide:
     """Fills the hash table.
 
     The build writes into a list of its own and the result is copied across,
@@ -606,13 +652,13 @@ def _build_hashed[
         )
 
     var miss = UInt32(len(table))
-    return _Built[dt](False, Buffer(0), 0, Scalar[dt](), table^, miss)
+    return BuildSide(dt, False, Buffer(0), 0, UInt64(0), table^, miss)
 
 
-def _probe_into[
+def probe_side[
     dt: DType
 ](
-    built: _Built[dt],
+    built: BuildSide,
     probe: Array[dt],
     probe_at: Int,
     mut codes: Array[DType.uint32],
@@ -620,8 +666,9 @@ def _probe_into[
     """Asks the built side about every row of a probe side.
 
     Reads the table and writes nothing to it, which is what lets every core do
-    this at once, and it is also what will let a streaming join call this once
-    per chunk with the same built side.
+    this at once, and it is also what lets a streaming join call this once per
+    chunk with the same built side. Two calls over two halves of a column write
+    the same ordinals one call over the whole of it would.
 
     The two routes get a function each and the choice is made here, rather than
     one loop that reads `built.direct` per morsel. One loop was tried first and
@@ -642,15 +689,23 @@ def _probe_into[
         dt: The key dtype.
 
     Raises:
-        Error: If the parallel probe raises.
+        Error: If the probe column's dtype is not the one the table was built
+            from, or if the parallel probe raises.
     """
+    if built.key != dt:
+        raise Error(
+            "join: the table was built from a "
+            + String(built.key)
+            + " key and the probe column is "
+            + String(dt)
+        )
     if len(probe) == 0:
         return
     if built.direct:
         _probe_direct[dt](
             built.seats,
             built.span,
-            built.base,
+            built.base.cast[dt](),
             built.miss,
             probe,
             probe_at,
