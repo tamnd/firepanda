@@ -168,6 +168,30 @@ jobs:
       - name: Unit and docstring tests
         run: pixi run test
 
+      # The extension, and the claim that it carries everything it needs. The
+      # claim was first measured by hand on one laptop, and the ways it stops
+      # being true are all quiet, so it is checked here on every platform we ship
+      # for. docs/specs/12-the-python-front-door-measured.md section 2.
+      - name: patchelf
+        if: needs.guard.outputs.has_python == 'true' && runner.os == 'Linux'
+        run: sudo apt-get install -y patchelf
+
+      - name: Build the extension
+        if: needs.guard.outputs.has_python == 'true'
+        run: pixi run build-extension
+
+      - uses: astral-sh/setup-uv@v7
+        if: needs.guard.outputs.has_python == 'true'
+
+      # `--no-project` on purpose. The tests here run a child interpreter with the
+      # environment stripped out of it, and the interpreter they run is this one,
+      # so it should be a plain CPython with pytest in it rather than anything
+      # that has firepanda installed and could be answering the import from
+      # somewhere other than the directory under test.
+      - name: Extension tests
+        if: needs.guard.outputs.has_python == 'true'
+        run: uv run --no-project --with pytest python -m pytest python/tests -q
+
       # Every fuzzer at once. The bound is per fuzzer, as it was when they ran
       # in sequence, so this shortens the step without shortening the fuzz.
       - name: Differential fuzz (bounded)

@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A Python extension that builds, and a build that gets checked
+
+`firepanda/py/` is the Python front door and it opens onto one function, which reports the version. That is the point rather than a limitation. The distribution claim in `docs/specs/12-the-python-front-door-measured.md` was measured by hand on one laptop on one afternoon, and every way it could stop being true is a quiet one, so this turns it into `pixi run build-extension` and four tests that run on every platform the project ships for.
+
+The build script produces a directory holding the extension and the four Mojo runtime libraries, with nothing in it pointing anywhere outside itself, and it prints what that weighs. Today that is 2.9 megabytes. The tests stage that directory the way an installed wheel has it and import it from a child interpreter with the environment taken away, asserting inside the child that no Mojo toolchain is on `PATH` before it imports anything, because a test that quietly ran inside the build environment would pass and mean nothing.
+
+Automating the hand copying found two traps worth writing down. Following dependencies by file name vendors the system C++ library, because the Mojo runtime names that one by absolute path while it names its own libraries through `@rpath`, and a second `libc++` in a host process is a worse problem than the 1.17 megabytes it costs. And on Apple silicon, editing a load command invalidates a binary's signature, after which the loader kills the process rather than reporting anything: the entire symptom is `import firepanda` exiting 137 with both streams empty. The script re-signs what it edits and edits as little as it can, so the vendored libraries come out byte identical to the toolchain's, and one of the tests verifies signatures purely so that failure has a name.
+
+`python/firepanda/__init__.py` asks the extension what version it was built from rather than carrying a fourth copy of the string, and the test compares that against the wheel metadata, which is how a wheel assembled out of two different builds gets caught.
+
 ### A grouped mean reads its column once instead of twice
 
 `_mean_core` asked for a grouped sum and then asked for a grouped count, and the two walked the same column and the same ordinals separately. On a float column it was worse than that, because a NaN is not a value, so the count had to build a presence bitmap over the whole column before it could count anything. A mean over ten million floats into a hundred groups read eighty megabytes of values twice and forty megabytes of ordinals three times, to produce two arrays of a hundred entries.
@@ -31,11 +41,12 @@ Three kernels inside a join hand themselves out in morsels once the row count is
 This was measured on an i9-13900K at ten million rows joined against ten thousand and it moved nothing, in either direction, at chunk sizes of thirty two thousand, a hundred and thirty one thousand and five hundred and twelve thousand. The reason is that the morsel scheduler starts one task per worker rather than one per morsel, and a task that finds no free worker runs on the thread that made it, so the inner layer collapsed back onto the caller. It is recorded here as a change that costs nothing and is not visible today, kept because asking for thirty two times the tasks is only free while the queue is saturated, and the queue stops being saturated the moment a pipeline is narrower than the machine.
 
 Two tests were added, one per kernel, that run the same probe and the same pairing both ways at a row count above the threshold and compare the ordinals element by element.
+
 ### The Python front door, measured rather than argued for
 
 `docs/specs/07-python-bindings.md` was written before any of it existed and it asks the reader to check it against the installed toolchain. `docs/specs/12-the-python-front-door-measured.md` is that check, run against Mojo 1.0.0 on macOS arm64, and every number in it came out of a command.
 
-The headline is that the problem document 07 calls the hardest one is largely solved and cost 2.8 megabytes. A Mojo Python extension links two Mojo runtime libraries which pull in two more, it does not link libpython at all, and the four of them vendored beside a 170 kilobyte extension import and run on a stock Homebrew CPython 3.14 launched with `env -i` and a `PATH` that has no Mojo binary on it. For scale, the pandas 3.0.3 and numpy 2.5.2 this project is measured against occupy 46.4 and 23.2 megabytes installed.
+The headline is that the problem document 07 calls the hardest one is largely solved and cost 2.9 megabytes. A Mojo Python extension links two Mojo runtime libraries which pull in two more, it does not link libpython at all, and the four of them vendored beside a 177 kilobyte extension import and run on a stock Homebrew CPython 3.14 launched with `env -i` and a `PATH` that has no Mojo binary on it. For scale, the pandas 3.0.3 and numpy 2.5.2 this project is measured against occupy 46.4 and 23.2 megabytes installed.
 
 The Arrow crossing works today and the zero copy is proven by address rather than by eye. firepanda's Arrow C Data Interface landed at M2 and knew nothing about Python; wrapping an exported schema and array in PyCapsules is about forty lines, and `pyarrow.array` accepts the result with the right type, length, values and null count, with the values buffer address on the pyarrow side equal to the one firepanda handed out. What is still missing on that side is `ArrowArrayStream`, which is what `__arrow_c_stream__` needs.
 

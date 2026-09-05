@@ -79,6 +79,13 @@ build = "mkdir -p build && mojo precompile firepanda -o build/firepanda.mojoc"
 test = { cmd = "bash tools/run_tests.sh", depends-on = ["build"] }
 format = "mojo format firepanda tests benchmarks tools"
 
+# The CPython extension, and everything it needs, in one directory that points at
+# nothing outside itself. Separate from `build` because it is a different output
+# for a different consumer: `build` produces a .mojoc for Mojo callers, this
+# produces a .so for CPython. docs/specs/12-the-python-front-door-measured.md
+# section 2.
+build-extension = "bash tools/build_extension.sh"
+
 # Not `mojo format --check`. That flag does not exist in Mojo 1.0; the formatter
 # only rewrites in place. tools/format_check.sh does the copy-format-diff dance.
 format-check = "bash tools/format_check.sh"
