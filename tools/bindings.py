@@ -201,6 +201,11 @@ class Exposed:
     members: tuple[Member, ...] = ()
     """The members on the Python side."""
 
+    module: str = "firepanda.py.frame"
+    """The Mojo module the struct is defined in. The registration imports from
+    here, and a type that lives in its own file rather than next to the frame
+    says so instead of relying on the frame re-exporting it."""
+
     mixin: str = ""
     """A hand written base class in `python/firepanda/_pandas.py` for the members
     that are not a plain delegation. The note at the top of this file asks for
@@ -356,6 +361,7 @@ SERIES = Exposed(
     py="Series",
     doc="A one dimensional labelled array holding data of a single type.",
     init="PySeries.py_init",
+    module="firepanda.py.series",
     bindings=(
         Binding(
             mojo="PySeries.length",
@@ -566,6 +572,9 @@ def _register_call(opener: str, name: str, doc: str) -> list[str]:
     Returns:
         The lines of the call, including the closing bracket.
     """
+    whole = f'{opener}"{name}", docstring="{doc}")'
+    if len(whole) <= MOJO_COLUMNS:
+        return [whole]
     short = f'        "{name}", docstring="{doc}"'
     if len(short) <= MOJO_COLUMNS:
         return [opener, short, "    )"]
@@ -589,6 +598,27 @@ def _register_call(opener: str, name: str, doc: str) -> list[str]:
     ]
 
 
+def _import(module: str, names: list[str]) -> list[str]:
+    """Writes one import the way `mojo format` would have written it.
+
+    Same problem as `_register_call` and the same reason for solving it here: the
+    generated file is format checked like any other source, so an import that is
+    merely valid is not enough. Over eighty columns the formatter puts the names
+    in brackets, one per line, with a trailing comma.
+
+    Args:
+        module: The module to import from.
+        names: The names to import, already sorted.
+
+    Returns:
+        The lines of the import.
+    """
+    one = f"from {module} import " + ", ".join(names)
+    if len(one) <= MOJO_COLUMNS:
+        return [one]
+    return [f"from {module} import ("] + [f"    {name}," for name in names] + [")"]
+
+
 def registration() -> str:
     """Writes the Mojo file that registers everything.
 
@@ -604,9 +634,14 @@ def registration() -> str:
     out.append("")
     out.append("from std.python import PythonObject")
     out.append("from std.python.bindings import PythonModuleBuilder\n")
-    mojo_types = sorted({t.mojo for t in TYPES})
-    imports = sorted({b.mojo.split(".")[0] for b in FUNCTIONS} | set(mojo_types))
-    out.append("from firepanda.py.frame import " + ", ".join(imports) + "\n")
+    wanted: dict[str, set[str]] = {}
+    for fn in FUNCTIONS:
+        wanted.setdefault("firepanda.py.frame", set()).add(fn.mojo.split(".")[0])
+    for t in TYPES:
+        wanted.setdefault(t.module, set()).add(t.mojo)
+    for module in sorted(wanted):
+        out.extend(_import(module, sorted(wanted[module])))
+    out.append("")
     out.append("")
     out.append("def register(mut module: PythonModuleBuilder) raises:")
     out.append('    """Registers every binding on the module.')

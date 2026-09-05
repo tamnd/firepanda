@@ -12,13 +12,8 @@ a loop.
 from std.python import PythonObject
 from std.python.bindings import PythonModuleBuilder
 
-from firepanda.py.frame import (
-    PyDataFrame,
-    PySeries,
-    open_arrow,
-    open_csv,
-    raise_for_test,
-)
+from firepanda.py.frame import PyDataFrame, open_arrow, open_csv, raise_for_test
+from firepanda.py.series import PySeries
 
 
 def register(mut module: PythonModuleBuilder) raises:
