@@ -37,6 +37,7 @@ from firepanda.exec import (
     NodeStatus,
     Pipeline,
     Project,
+    Reduce,
     Scan,
     node_apply,
     node_computes_per_row,
@@ -701,6 +702,127 @@ def test_a_projection_on_its_own_still_returns_every_row_in_order() raises:
     assert_equal(len(got), 200, "every row of every chunk")
     for i in range(len(got)):
         assert_equal(got[i], Int64(i + 1), "row " + String(i))
+
+
+def totals() raises -> Reduce:
+    """A reduction over column 0 that asks for every kind that folds."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.SUM, "total"))
+    aggs.append(GroupAgg(0, AggKind.MIN, "low"))
+    aggs.append(GroupAgg(0, AggKind.MAX, "high"))
+    aggs.append(GroupAgg(0, AggKind.COUNT, "seen"))
+    return Reduce(aggs^)
+
+
+def one_int(df: DataFrame, name: String) raises -> Int64:
+    """Reads the single row of an int64 output column."""
+    return df.column(name).as_typed[DType.int64]()[0]
+
+
+def test_a_reduction_over_chunks_gives_the_whole_frame_answer() raises:
+    """Six rows arriving in chunks of two, three and one. Every one of these is
+    the answer `agg` gives over the same frame in one piece."""
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(totals()))
+    var out = pipeline^.run()
+    assert_equal(len(out), 1, "one row")
+    assert_equal(one_int(out, "total"), 21, "1 through 6")
+    assert_equal(one_int(out, "low"), 1, "the smallest, from the first chunk")
+    assert_equal(one_int(out, "high"), 6, "the largest, from the last chunk")
+    assert_equal(one_int(out, "seen"), 6, "every row, counted once")
+
+
+def test_a_mean_over_uneven_chunks_is_not_a_mean_of_means() raises:
+    """The chunks are two, three and one row long, so the means of the chunks
+    are 1.5, 4 and 6 and averaging those gives 3.833. The answer is 3.5, which
+    is what keeping a sum and a count apart until the last moment buys."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.MEAN, "average"))
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Reduce(aggs^)))
+    var out = pipeline^.run()
+    assert_equal(len(out), 1, "one row")
+    var got = out.column("average").as_typed[DType.float64]()[0]
+    assert_equal(got, Float64(3.5), "the mean of one through six")
+
+
+def test_a_reduction_reduces_what_reached_it() raises:
+    """Two hundred rows through a filter that drops every third one. The
+    reduction is at the end of a pipeline whose front runs on every core, so
+    what this checks is that nothing was folded twice and nothing was lost."""
+    var pipeline = Pipeline(many_chunk_frame())
+    pipeline.add(Node(Filter(1)))
+    pipeline.add(Node(totals()))
+    var out = pipeline^.run()
+    assert_equal(len(out), 1, "one row")
+
+    var whole = many_chunk_frame()
+    var mask = whole.column("keep").as_typed[DType.bool]()
+    var direct = whole.filter(mask)
+    var want = Int64(0)
+    var values = read_back(direct, "n")
+    for i in range(len(values)):
+        want += values[i]
+    assert_equal(one_int(out, "seen"), Int64(len(values)), "rows kept")
+    assert_equal(one_int(out, "total"), want, "the sum of the rows kept")
+    assert_equal(one_int(out, "low"), 1, "the first row survives the mask")
+    assert_equal(one_int(out, "high"), 200, "so does the last")
+
+
+def test_a_reduction_holds_everything_until_the_input_is_done() raises:
+    """It is a breaker, it is not row local, and it is not worth a task, so the
+    driver treats it the way it treats a group by."""
+    assert_true(node_is_breaker(Node(totals())), "nothing comes out early")
+    assert_false(node_is_row_local(Node(totals())), "it holds a running answer")
+    assert_false(node_ends_early(Node(totals())), "it needs the last row")
+    assert_false(node_computes_per_row(Node(totals())), "not a prefix operator")
+    assert_equal(
+        node_status(Node(totals())),
+        NodeStatus.NEED_MORE_INPUT,
+        "before anything has arrived",
+    )
+
+
+def test_a_reduction_that_does_not_fold_is_refused_at_plan_time() raises:
+    """A median of medians is not a median, and there is no state short of the
+    values that would make it one, so this is an error before a row moves."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.MEDIAN, "middle"))
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="cannot be computed a chunk at a time"):
+        pipeline.add(Node(Reduce(aggs^)))
+
+
+def test_a_reduction_with_nothing_to_reduce_is_an_error() raises:
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="at least one aggregate"):
+        pipeline.add(Node(Reduce(List[GroupAgg]())))
+
+
+def test_two_reductions_cannot_be_given_the_same_name() raises:
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.SUM, "answer"))
+    aggs.append(GroupAgg(0, AggKind.MIN, "answer"))
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="would both be called answer"):
+        pipeline.add(Node(Reduce(aggs^)))
+
+
+def test_a_reduction_of_a_column_that_is_not_there_is_an_error() raises:
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(7, AggKind.SUM, "total"))
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="outside a schema"):
+        pipeline.add(Node(Reduce(aggs^)))
+
+
+def test_a_sum_of_a_column_of_names_is_an_error() raises:
+    """A minimum of a column of names means something and a sum does not."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(1, AggKind.SUM, "total"))
+    var pipeline = Pipeline(word_frame())
+    with assert_raises(contains="not defined on text"):
+        pipeline.add(Node(Reduce(aggs^)))
 
 
 def main() raises:

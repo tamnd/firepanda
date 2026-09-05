@@ -8,6 +8,24 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A reduction over the whole input is an operator now
+
+`Reduce` is a node that folds every chunk that goes past into one row: a sum, a mean, a minimum, a maximum or a count over the whole input, with no key to group by. It is a breaker, since the answer is not known until the last row has been seen, and it is the cheapest breaker there is, because what it holds between chunks is one row per state slot whatever the input was.
+
+It is a separate node rather than a `Group` with an empty key list for the same reason `agg` is a separate method from `group_by`. A group by hashes every row to find out which group it belongs to and there is nothing here to find out, so the reductions read the column straight through and the hashing never happens. The docstring on `agg` puts that at eighty five milliseconds against five on ten million rows.
+
+What it is for is the shape every one of the five db-benchmark join queries has: a join and then a sum. Run as two whole frame calls the join writes ten million rows to memory and the reduction reads them straight back, which on two float columns is a hundred and sixty megabytes out and a hundred and sixty in for an answer of three numbers. Run as a pipeline the reduction folds each chunk into a running row and the chunk is dropped while it is still in cache, so those bytes never leave the core. That is why this comes before the streaming join rather than after: without it the join would have nothing to hand its chunks to and the round trip would come straight back.
+
+The merge is the same trick `Group` uses and it needs no kernel of its own. A chunk's answer and the running answer are both one row, so combining them is a reduction over a column of two rows run with the kind that combines partials, which is the kind itself for a sum, a minimum or a maximum and a sum for the two counts, since merging counts means adding them rather than counting them again. A mean is a sum and a count in two slots with the division held back to the end, because a mean of means is only the mean when every chunk is the same size, and there is a test on chunks of two, three and one rows that gives 3.5 where a mean of means would give 3.833.
+
+Measured on the i9-13900K at a million rows, three blocks, medians. The query is a computed column, a filter that keeps half the rows, and then a sum, a minimum and a count. Fused it is 1.92 ms and split into a pipeline that hands back a frame followed by a reduction over that frame it is 2.77, so the fusing is worth 31 per cent, and every fused run was below every split run. The gap is the round trip: the split route pays 1.11 ms after the filter has finished, and the fused route pays 0.26 over the same pipeline ending in a projection.
+
+Folding a chunk at a time turns out to cost nothing rather than a little, which is not what I expected. `exec/pipeline_reduce_only` is the node on its own over a frame in eight chunks at 0.83 ms and `exec/agg_frame` is `agg` over the same rows in one piece at 0.94, so eight whole column reductions and eight two row merges came out slightly ahead of one pass. Both are within a few per cent of each other and the honest reading is that the per chunk cost is below the noise, not that chunking is faster.
+
+The reductions that do not fold are refused when the pipeline is built rather than when a row arrives. A median of medians is not a median and there is no state short of the values that would make it one, so the answer for those is still `Materialize`. An input that hands over no chunks at all produces no rows rather than a row of nothing, which is what `Group` does with the same input, and a pipeline that needs to match `agg`'s one row there can put a `Materialize` in instead.
+
+Nine tests in `tests/test_pipeline.mojo` and four benchmark rows in the pipeline section.
+
 ### The fills step over a NaN, and answer in the dtype's own spelling for missing
 
 `ffill` and `bfill` were the last place in the kernel where a NaN was still treated as an ordinary value, and a fill is the worst place for that to be true, because a fill does not only report what is missing, it copies a value over it. So the mistake is made twice. The row holding the NaN is left standing where pandas would have filled it, and then, worse, the NaN is picked up as the carry and runs forward over every null after it, which turns a gap that had a perfectly good value sitting behind it into a run of NaN. One NaN in the wrong row was enough to destroy an arbitrary stretch of a column. `fill_forward` and `fill_backward` in `kernel/nulls.mojo` now treat a NaN as missing on a float dtype, which fills over it and never carries it.

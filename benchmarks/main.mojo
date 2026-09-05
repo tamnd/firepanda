@@ -72,7 +72,7 @@ from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.dtype.lists import NUMERIC
 from firepanda.exec import Cast, Compute, Filter, Group, GroupAgg
-from firepanda.exec import Limit, Materialize, Node, Pipeline, Project
+from firepanda.exec import Limit, Materialize, Node, Pipeline, Project, Reduce
 from firepanda.exec.morsel import MORSEL_ROWS
 from firepanda.frame.display import DisplayOptions, render_column
 from firepanda.frame.frame import DataFrame
@@ -3250,6 +3250,39 @@ def _whole_frame_group(var frame: DataFrame) raises -> DataFrame:
     )
 
 
+def _whole_frame_agg(var frame: DataFrame) raises -> DataFrame:
+    """The two step route's second step: stack the chunks and reduce them.
+
+    The stack is not overhead invented for the benchmark, and it is the same one
+    `_whole_frame_group` pays. `DataFrame.agg` reduces one array per column, so
+    a frame that arrived in chunks has to be put back together before it can be
+    asked for a sum, and that copy of everything that got through the filter is
+    part of what the streaming node removes.
+
+    Args:
+        frame: The collected input. Consumed.
+
+    Returns:
+        One row of three numbers.
+
+    Raises:
+        If the reduction raises.
+    """
+    var columns = List[ChunkedArray](capacity=len(frame.schema))
+    for i in range(len(frame.schema)):
+        columns.append(
+            ChunkedArray(ChunkedArray(copy=frame.columns[i]).combine())
+        )
+    var whole = DataFrame(Schema(copy=frame.schema), columns^)
+    return whole.agg(
+        [
+            AggSpec("value", AggKind.SUM, "total"),
+            AggSpec("value", AggKind.MIN, "low"),
+            AggSpec("value", AggKind.COUNT, "seen"),
+        ]
+    )
+
+
 def bench_pipeline(mut harness: Harness) raises:
     """The engine driver on a line of elementwise operators.
 
@@ -3271,6 +3304,14 @@ def bench_pipeline(mut harness: Harness) raises:
     `pipeline_project` is the same line with the arithmetic taken out, so it is
     close to the driver on its own: three moves of a column list per chunk and
     whatever the batch costs.
+
+    The last four rows are about the reduction node rather than the driver.
+    `pipeline_reduce` against `pipeline_reduce_two_steps` is the same query
+    written both ways, fused and not, and the gap is a round trip to memory of
+    everything the filter let through. `pipeline_reduce_only` against
+    `agg_frame` is the price of folding a chunk at a time instead of reading the
+    column in one pass, which is what the fusing has to pay for out of what it
+    saves.
 
     Args:
         harness: The harness.
@@ -3389,6 +3430,68 @@ def bench_pipeline(mut harness: Harness) raises:
         keep(out.rows)
 
     harness.record("exec/pipeline_limited", "rows", rows, line_limited)
+
+    # The pair the reduction node exists for. Both rows compute the same three
+    # numbers over the same surviving rows. The first folds each chunk away as
+    # it arrives, so nothing the filter produced is ever written anywhere. The
+    # second is how the query is written today: the pipeline hands back a frame
+    # of the survivors and the reduction reads it. The difference between the
+    # two is a round trip to memory of everything that got through the filter,
+    # and it is the same difference a join followed by a reduction has, at ten
+    # times the width.
+    def reduce_fused() raises {imm streamed}:
+        keep(streamed.rows)
+        var aggs = List[GroupAgg]()
+        aggs.append(GroupAgg(1, AggKind.SUM, "total"))
+        aggs.append(GroupAgg(1, AggKind.MIN, "low"))
+        aggs.append(GroupAgg(1, AggKind.COUNT, "seen"))
+        var pipeline = Pipeline(DataFrame(copy=streamed))
+        pipeline.add(Node(Compute(1, Value(Int64(500)), BinaryOp.LT, "hit")))
+        pipeline.add(Node(Filter(2)))
+        pipeline.add(Node(Reduce(aggs^)))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record("exec/pipeline_reduce", "rows", rows, reduce_fused)
+
+    def reduce_two_steps() raises {imm streamed}:
+        keep(streamed.rows)
+        var pipeline = Pipeline(DataFrame(copy=streamed))
+        pipeline.add(Node(Compute(1, Value(Int64(500)), BinaryOp.LT, "hit")))
+        pipeline.add(Node(Filter(2)))
+        pipeline.add(Node(Project([0, 1])))
+        var out = _whole_frame_agg(pipeline^.run())
+        keep(out.rows)
+
+    harness.record(
+        "exec/pipeline_reduce_two_steps", "rows", rows, reduce_two_steps
+    )
+
+    # The reduction on its own over a chunked frame, against `agg` over the same
+    # rows in one piece. What separates them is per chunk cost: eight chunks is
+    # eight whole column reductions and eight two row merges instead of one
+    # pass, and the row says how much that is.
+    def reduce_alone() raises {imm streamed}:
+        keep(streamed.rows)
+        var aggs = List[GroupAgg]()
+        aggs.append(GroupAgg(1, AggKind.SUM, "total"))
+        var pipeline = Pipeline(DataFrame(copy=streamed))
+        pipeline.add(Node(Reduce(aggs^)))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record("exec/pipeline_reduce_only", "rows", rows, reduce_alone)
+
+    # The copy is here because every pipeline row above pays one when it builds
+    # its source, and a reference that did not pay it would be measuring the
+    # copy rather than the reduction.
+    def agg_whole() raises {imm whole}:
+        keep(whole.rows)
+        var one = DataFrame(copy=whole)
+        var out = one.agg([AggSpec("value", AggKind.SUM, "total")])
+        keep(out.rows)
+
+    harness.record("exec/agg_frame", "rows", rows, agg_whole)
 
 
 def bench_join(mut harness: Harness) raises:

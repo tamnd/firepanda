@@ -64,6 +64,8 @@ From `polar/06-whats-new.md`, the observation that Polars did sinks before joins
 
 A writer that consumes chunks and never holds the whole result is much easier than an engine that produces them, and it can be built during M2 alongside the readers. `write_parquet` on a frame larger than memory is a user visible capability we could have before the engine exists.
 
+The whole input reduction is the other sink and it is the one the benchmark numbers want first. Every one of the five db-benchmark join queries is a join followed by a sum, and run as two whole frame calls the join writes ten million rows to memory for the reduction to read straight back. On two float columns that is a hundred and sixty megabytes out and a hundred and sixty in, for an answer of three numbers. As a pipeline stage the reduction folds each chunk into a running row and the chunk is dropped while it is still in cache, so those bytes never reach memory at all. It is worth building before the streaming join rather than after, because without it the join has nothing to hand its chunks to and the round trip comes back.
+
 ## Definition of done for M2b
 
 The `Materialize` fallback is still present and still correct, and these are no longer using it: filter, select, arithmetic, comparison, cast, group by, inner and left join, sort.
