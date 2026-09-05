@@ -915,6 +915,56 @@ def bench_kernel(mut harness: Harness) raises:
 
     harness.record("kernel/mean_sparse", "rows", rows, mean_sparse)
 
+    # Everything above is int64 and none of it changed when the reductions
+    # learned to step over a NaN, because only a float column can hold one and
+    # only a float column pays for looking. These five are the float shape of the
+    # same rows. `_clean` has no NaN in it and is what an ordinary column costs
+    # now, and `_nans` has one row in eight and is worse than anything real. See
+    # #170.
+    var clean = Array[DType.float64](rows)
+    var nanned = Array[DType.float64](rows)
+    for i in range(rows):
+        clean[i] = Float64(i % 1000)
+        if i % 8 == 0:
+            nanned[i] = nan[DType.float64]()
+        else:
+            nanned[i] = Float64(i % 1000)
+
+    def sum_float() raises {imm clean}:
+        keep(clean)
+        var total = sum_of(clean)
+        keep(total.value)
+
+    harness.record("kernel/sum_float", "rows", rows, sum_float)
+
+    def sum_nans() raises {imm nanned}:
+        keep(nanned)
+        var total = sum_of(nanned)
+        keep(total.value)
+
+    harness.record("kernel/sum_nans", "rows", rows, sum_nans)
+
+    def min_float() raises {imm clean}:
+        keep(clean)
+        var low = min_of(clean)
+        keep(low.value)
+
+    harness.record("kernel/min_float", "rows", rows, min_float)
+
+    def min_nans() raises {imm nanned}:
+        keep(nanned)
+        var low = min_of(nanned)
+        keep(low.value)
+
+    harness.record("kernel/min_nans", "rows", rows, min_nans)
+
+    def mean_float() raises {imm clean}:
+        keep(clean)
+        var avg = mean_of(clean)
+        keep(avg.value)
+
+    harness.record("kernel/mean_float", "rows", rows, mean_float)
+
     def add_dense() raises {imm dense, imm other}:
         keep(dense)
         var out = add(dense, other)

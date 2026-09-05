@@ -17,6 +17,18 @@ one of the first two, and the third is only ever paid for on the boundary.
 
 `count_of` is a popcount and does not look at the values at all.
 
+On a float dtype all of them step over a NaN as well as over a null, because
+that is what pandas does and a NaN is one of pandas' two spellings of missing.
+The sum turns a NaN into a zero and the extremes turn it into their own identity,
+both with a compare and a select per vector, so the loop shape is unchanged and
+the branch is gone before the loop exists on every other dtype. The mean needs
+the divisor as well as the total, so `_sum_range` hands back how many values it
+stepped over and `mean_over` subtracts that from the count it was given. That is
+one pass and not two, which is the whole reason the count is threaded through
+rather than being asked for separately. `count_of` is the exception and still
+counts bits and nothing else, because it is the Arrow answer; the pandas one is
+`nulls.missing_count_any`. See #170.
+
 Every reduction comes in two spellings. The `_of` one takes a typed column and
 is what a caller with an `Array[dt]` in hand wants. The `_over` one takes the
 values pointer, the validity and the row count, and is what a caller holding an
@@ -47,6 +59,7 @@ Every function here has a twin in `scalar.mojo` and the fuzz harness runs them
 against each other. See the note on the null-is-zero invariant in `__init__.mojo`.
 """
 
+from std.math import isnan
 from std.sys.info import simd_width_of
 
 from firepanda.array.array import Array
@@ -93,8 +106,30 @@ struct AggResult[dt: DType](Copyable, Movable):
         return Self(Scalar[Self.dt](0), False)
 
 
+@fieldwise_init
+struct SumResult[acc: DType](Copyable, Movable):
+    """A total, and how many values were left out of it for being NaN.
+
+    A mean needs both, and getting the second one any other way means a second
+    pass over the values. On any dtype that is not floating point `skipped` is
+    zero and the loop that would have counted is compiled away.
+    """
+
+    var total: Scalar[Self.acc]
+    """The sum of everything that was not NaN."""
+
+    var skipped: Int
+    """How many values were NaN and so contributed nothing."""
+
+
 def count_of[dt: DType](col: Array[dt]) -> Int:
-    """Returns the number of non-null values in a column.
+    """Returns the number of set validity bits in a column.
+
+    This is the Arrow answer and not the pandas one. On a float column pandas
+    would also count a NaN as missing, which this does not, because an `Array` is
+    the Arrow half of the library and says what is in the buffers. The pandas
+    answer is `nulls.missing_count_any`, and it is what `Series.count` uses. See
+    #170.
 
     Args:
         col: The column.
@@ -114,6 +149,10 @@ def sum_of[dt: DType](col: Array[dt]) raises -> AggResult[accumulator(dt)]:
     The nulls are added too. They are zero, so it makes no difference to the
     answer and it removes the validity bitmap from the inner loop entirely. See
     `__init__.mojo` for why that invariant is safe to lean on.
+
+    A NaN is not added, on a float dtype, because pandas steps over one exactly
+    as it steps over a value that was never there. It is turned into a zero on
+    the way into the accumulator, which is the same trick and the same reason.
 
     The sum of an empty column, and the sum of a column that is entirely null, is
     zero and is valid. That is what pandas does, and it is a genuinely awkward
@@ -166,40 +205,83 @@ def sum_over[
     Raises:
         Error: Only what the morsel runtime raises.
     """
+    return AggResult[acc](sum_and_skipped_over[acc=acc](source, n).total, True)
+
+
+def sum_and_skipped_over[
+    dt: DType, //, origin: ImmOrigin, acc: DType = accumulator(dt)
+](source: Pointer[Scalar[dt], origin], n: Int) raises -> SumResult[acc]:
+    """Adds up `n` values and says how many of them were NaN.
+
+    This is `sum_over` with the second number kept rather than thrown away, and
+    the mean is the caller that wants it. Everything the docstring above says
+    about the accumulator and about the order of the additions applies here,
+    because this is the function that does the work and that one is a wrapper.
+
+    Args:
+        source: The values.
+        n: How many of them.
+
+    Parameters:
+        dt: The value dtype.
+        origin: Where the values live.
+        acc: What to accumulate in. Defaults to int64, uint64 or float64.
+
+    Returns:
+        The total and the number of NaN values that were stepped over.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
     if n <= MORSEL_ROWS:
-        return AggResult[acc](_sum_range[acc=acc](source, 0, n), True)
+        return _sum_range[acc=acc](source, 0, n)
 
     var count = (n + MORSEL_ROWS - 1) // MORSEL_ROWS
     var partials = Array[acc](count)
+
+    # One slot per morsel for the NaN count as well, which is a few hundred bytes
+    # next to the column being read and is allocated on every dtype rather than
+    # only on the floating point ones. Making the allocation conditional would
+    # mean two spellings of this loop for a saving of one small array.
+    var passed = Array[DType.int64](count)
 
     # The closure captures the column and takes the pointer inside itself, which
     # is not a preference. Hoisting the pointer out and capturing that instead
     # makes the compiler emit invalid code for the call into the morsel runtime,
     # and it fails in the backend rather than at the call, so it is worth naming
     # here. Every other kernel in this package captures the column the same way.
-    def add_up(start: Int, stop: Int) {mut partials, imm}:
-        partials.unsafe_ptr().unsafe_offset(start // MORSEL_ROWS).unsafe_write(
-            _sum_range[acc=acc](source, start, stop)
-        )
+    def add_up(start: Int, stop: Int) {mut partials, mut passed, imm}:
+        var found = _sum_range[acc=acc](source, start, stop)
+        var at = start // MORSEL_ROWS
+        partials.unsafe_ptr().unsafe_offset(at).unsafe_write(found.total)
+        passed.unsafe_ptr().unsafe_offset(at).unsafe_write(Int64(found.skipped))
 
     parallel_morsels(add_up, n)
 
     var slots = partials.unsafe_ptr()
+    var skips = passed.unsafe_ptr()
 
     # Added back in morsel order rather than in whatever order the workers
     # happened to finish, so the answer does not depend on the scheduling. It
     # still is not the order a single loop would have used, which is the note in
     # the module docstring about floating point.
     var total = Scalar[acc](0)
+    var skipped = 0
     for i in range(count):
         total += slots.unsafe_offset(i).unsafe_load()
-    return AggResult[acc](total, True)
+        skipped += Int(skips.unsafe_offset(i).unsafe_load())
+    return SumResult[acc](total, skipped)
 
 
 def _sum_range[
     dt: DType, //, origin: ImmOrigin, acc: DType = accumulator(dt)
-](source: Pointer[Scalar[dt], origin], start: Int, stop: Int) -> Scalar[acc]:
+](source: Pointer[Scalar[dt], origin], start: Int, stop: Int) -> SumResult[acc]:
     """Adds up one range of values, on one thread.
+
+    On a float dtype a NaN is turned into a zero before it reaches the
+    accumulator and is counted instead, which is two extra vector instructions on
+    a loop that is waiting on memory. On every other dtype the two `comptime if`
+    blocks are not there at all and the loop is what it was.
 
     Args:
         source: The values.
@@ -212,22 +294,35 @@ def _sum_range[
         acc: What to accumulate in.
 
     Returns:
-        The total over the range.
+        The total over the range and how many NaN values it stepped over.
     """
     comptime width = simd_width_of[dt]()
 
     var ptr = source
     var lanes = SIMD[acc, width](0)
+    var nans = SIMD[DType.int64, width](0)
     var i = start
     while i + width <= stop:
-        lanes += ptr.unsafe_offset(i).unsafe_load[width=width]().cast[acc]()
+        var chunk = ptr.unsafe_offset(i).unsafe_load[width=width]().cast[acc]()
+        comptime if dt.is_floating_point():
+            var missing = isnan(chunk)
+            nans += missing.cast[DType.int64]()
+            chunk = missing.select(SIMD[acc, width](0), chunk)
+        lanes += chunk
         i += width
 
     var total = lanes.reduce_add()
+    var skipped = Int(nans.reduce_add())
     while i < stop:
-        total += Scalar[acc](ptr.unsafe_offset(i).unsafe_load())
+        var value = Scalar[acc](ptr.unsafe_offset(i).unsafe_load())
+        comptime if dt.is_floating_point():
+            if isnan(value):
+                skipped += 1
+                i += 1
+                continue
+        total += value
         i += 1
-    return total
+    return SumResult[acc](total, skipped)
 
 
 def min_of[dt: DType](col: Array[dt]) raises -> AggResult[dt]:
@@ -280,6 +375,13 @@ def extreme_over[
     Min and max differ by one comparison and nothing else, so they share a body
     parameterized on which one it is. `want_min` is a parameter rather than an
     argument so the branch is gone before the loop exists.
+
+    On a float dtype a NaN is not a candidate, because pandas steps over one. It
+    is replaced by the identity, which loses every comparison it is in, and the
+    range keeps a separate note of whether it saw anything real. A column that is
+    entirely NaN therefore reports that it found nothing, the same as a column
+    that is entirely null, and `reduce.mojo` turns that into the NaN pandas
+    would have given.
 
     Past one morsel this runs on every core. Each morsel reduces its own rows
     into a slot of its own, and a morsel that saw nothing but nulls says so in a
@@ -387,8 +489,11 @@ def _extreme_range[
 
         if word == UInt64.MAX and last == base + BLOCK:
             # The whole block is present, so the values can go through the vector
-            # unit without a single bit test.
-            seen = True
+            # unit without a single bit test. On a float dtype present is not the
+            # same thing as there, so the word alone no longer settles whether
+            # anything was found and the loop below has to say so.
+            comptime if not dt.is_floating_point():
+                seen = True
             var i = base
 
             # Booleans skip the vector unit and fall straight through to the
@@ -398,33 +503,55 @@ def _extreme_range[
             # possible values has nothing to gain from sixteen lanes.
             comptime if dt != DType.bool:
                 var lanes = SIMD[dt, width](identity)
+                var real = SIMD[DType.bool, width](fill=False)
                 while i + width <= last:
                     var chunk = ptr.unsafe_offset(i).unsafe_load[width=width]()
+
+                    comptime if dt.is_floating_point():
+                        # A NaN becomes the identity, which can never win, and
+                        # the lanes that held something real are remembered on
+                        # the side. They cannot be read back out of the fold
+                        # afterwards, because a block of nothing but NaN folds to
+                        # the identity and so does a block holding one genuine
+                        # infinity.
+                        var missing = isnan(chunk)
+                        chunk = missing.select(SIMD[dt, width](identity), chunk)
+                        real = real | ~missing
 
                     comptime if want_min:
                         lanes = min(lanes, chunk)
                     else:
                         lanes = max(lanes, chunk)
                     i += width
+
+                comptime if dt.is_floating_point():
+                    if real.reduce_or():
+                        seen = True
                 var folded = (
                     lanes.reduce_min() if want_min else lanes.reduce_max()
                 )
                 best = _better[dt, want_min](best, folded)
 
             while i < last:
-                best = _better[dt, want_min](
-                    best, ptr.unsafe_offset(i).unsafe_load()
-                )
+                var value = ptr.unsafe_offset(i).unsafe_load()
+                comptime if dt.is_floating_point():
+                    if isnan(value):
+                        i += 1
+                        continue
+                    seen = True
+                best = _better[dt, want_min](best, value)
                 i += 1
             continue
 
         for i in range(base, last):
             if (word >> UInt64(i - base)) & 1 == 0:
                 continue
+            var value = ptr.unsafe_offset(i).unsafe_load()
+            comptime if dt.is_floating_point():
+                if isnan(value):
+                    continue
             seen = True
-            best = _better[dt, want_min](
-                best, ptr.unsafe_offset(i).unsafe_load()
-            )
+            best = _better[dt, want_min](best, value)
 
     if not seen:
         return AggResult[dt].none()
@@ -510,5 +637,14 @@ def mean_over[
     # the corpus column of large int64 values the two differ by ten orders of
     # magnitude: 2040395725.875 out of the wrapped total against -4.6e18, which
     # is the mean of the values that are actually in the column.
-    var total = sum_over[acc=DType.float64](source, n)
-    return AggResult[DType.float64](total.value / Float64(present), True)
+    var total = sum_and_skipped_over[acc=DType.float64](source, n)
+
+    # The divisor loses the NaNs as well as the nulls. Every NaN the sum stepped
+    # over was in a row whose validity bit was set, because a null holds a zero
+    # and a zero is not a NaN, so subtracting the one count from the other cannot
+    # take the same row away twice. On any dtype that is not floating point the
+    # subtraction is of zero.
+    var divisor = present - total.skipped
+    if divisor <= 0:
+        return AggResult[DType.float64].none()
+    return AggResult[DType.float64](total.total / Float64(divisor), True)

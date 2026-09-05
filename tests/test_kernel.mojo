@@ -11,7 +11,7 @@ empty reduction, and `test_setitem_into_a_null_breaks_the_invariant` documents t
 one way a caller can make `sum_of` give a wrong answer.
 """
 
-from std.math import isinf, isnan
+from std.math import isinf, isnan, nan
 from std.testing import (
     TestSuite,
     assert_almost_equal,
@@ -161,6 +161,113 @@ def test_min_of_all_null_is_invalid() raises:
     assert_false(min_of(col).valid)
     assert_false(max_of(col).valid)
     assert_false(mean_of(col).valid)
+
+
+def test_every_reduction_steps_over_a_nan() raises:
+    # pandas has no presence bitmap on a float column, so NaN is the missing it
+    # has there and every reduction skips one. firepanda has both spellings and
+    # skips both. See #170.
+    var col = from_list[DType.float64]([1.0, 0.0, 3.0, 0.0, 5.0])
+    col[1] = nan[DType.float64]()
+    col.set_null(3)
+
+    assert_equal(Float64(sum_of(col).value), 9.0)
+    assert_equal(min_of(col).value, 1.0)
+    assert_equal(max_of(col).value, 5.0)
+    assert_equal(mean_of(col).value, 3.0)
+
+    # The divisor lost the NaN and the null, so it is three and not five and not
+    # four. `count_of` is the exception on purpose: it is the Arrow answer and
+    # counts the four rows whose validity bit is set.
+    assert_equal(count_of(col), 4)
+
+
+def test_a_column_of_nothing_but_nan_has_no_minimum() raises:
+    # The case the vector path cannot answer by looking at what it folded to,
+    # because a block of nothing but NaN folds to the identity and so would a
+    # block holding one real infinity. Two hundred rows so the whole word path
+    # runs three times and the tail once.
+    var col = Array[DType.float64](200)
+    for i in range(200):
+        col[i] = nan[DType.float64]()
+
+    assert_false(min_of(col).valid)
+    assert_false(max_of(col).valid)
+    assert_false(mean_of(col).valid)
+    assert_true(sum_of(col).valid)
+    assert_equal(Float64(sum_of(col).value), 0.0)
+
+
+def test_a_real_infinity_is_not_mistaken_for_an_empty_block() raises:
+    # The other half of the case above. Every value here folds to the identity a
+    # minimum starts from, and the answer is that value rather than nothing.
+    var col = Array[DType.float64](128)
+    for i in range(128):
+        col[i] = nan[DType.float64]()
+    col[70] = Float64.MAX_FINITE * 2
+
+    var low = min_of(col)
+    assert_true(low.valid)
+    assert_true(isinf(low.value))
+
+
+def test_a_nan_inside_a_full_validity_word_is_still_skipped() raises:
+    # No nulls anywhere, so every word takes the vectorized path and the NaNs
+    # have to be found by the values rather than by the bitmap. The four
+    # positions are the first row, the two either side of a word boundary and one
+    # in the middle of the last word.
+    var col = Array[DType.float64](256)
+    for i in range(256):
+        col[i] = Float64(i + 1)
+    for at in [0, 63, 64, 200]:
+        col[at] = nan[DType.float64]()
+
+    var expected = Float64(0)
+    for i in range(256):
+        if i != 0 and i != 63 and i != 64 and i != 200:
+            expected += Float64(i + 1)
+
+    assert_equal(Float64(sum_of(col).value), expected)
+    assert_equal(min_of(col).value, 2.0)
+    assert_equal(max_of(col).value, 256.0)
+    assert_equal(mean_of(col).value, expected / 252.0)
+
+
+def test_a_nan_past_the_morsel_split_is_still_skipped() raises:
+    # Longer than one morsel, so the reduction runs on every core and the NaN
+    # counts have to be carried out of the workers and added up rather than being
+    # counted once. Every value is one, so the total is the number of rows that
+    # were read and the assertion is about which rows those were.
+    var rows = 300000
+    var col = Array[DType.float64](rows)
+    for i in range(rows):
+        col[i] = 1.0
+    for i in range(rows):
+        if i % 3 == 0:
+            col[i] = nan[DType.float64]()
+        elif i % 7 == 0:
+            col.set_null(i)
+
+    var wanted = 0
+    for i in range(rows):
+        if i % 3 != 0 and i % 7 != 0:
+            wanted += 1
+
+    assert_equal(Float64(sum_of(col).value), Float64(wanted))
+    assert_equal(mean_of(col).value, 1.0)
+    assert_equal(min_of(col).value, 1.0)
+    assert_equal(max_of(col).value, 1.0)
+
+
+def test_an_int_column_never_reads_a_nan_bit_pattern() raises:
+    # 9221120237041090560 is the bit pattern of a quiet NaN read as an integer.
+    # In an int64 column it is a number like any other and the reductions have no
+    # business noticing it.
+    var col = from_list[DType.int64]([1, 9221120237041090560, 2])
+
+    assert_equal(count_of(col), 3)
+    assert_equal(max_of(col).value, 9221120237041090560)
+    assert_equal(min_of(col).value, 1)
 
 
 def test_reductions_over_an_empty_column() raises:

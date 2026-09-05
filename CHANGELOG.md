@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### The reductions step over a NaN too
+
+Making a NaN missing when something asks whether a row is missing, which shipped in 0.6.42, did not make it missing to the code that reads the values. So a sum or a mean or a minimum still took the NaN in and came back NaN where pandas gives the answer sitting in the data. `isna` and `sum` disagreed with each other about the same row, which is worse than either of them being wrong on its own. `sum_of`, `mean_of`, `min_of` and `max_of` now step over a NaN on a float dtype, and so does everything `reduce.mojo` routes through them, which is `Series.sum`, `Series.mean`, `Series.min` and `Series.max` and the frame forms of all four.
+
+The rule is applied in the loop rather than in front of it. A sum turns a NaN into a zero on the way into the accumulator, which is the same trick the null-is-zero invariant already uses and is free for the same reason: zero is the identity for addition. A minimum turns it into the identity the reduction started from, which loses every comparison it is in. Both are one compare and one select per vector and both are behind a `comptime if`, so an int64 or a uint32 or a string column has no such instruction anywhere in it and the loop is the loop it was.
+
+The mean needed one more thing, because it wants the divisor as well as the total, and asking for the count separately would mean a second pass over the values. `_sum_range` counts the NaNs it stepped over and hands that back with the total, and `mean_over` subtracts it from the count of set validity bits it was given. Subtracting the one from the other cannot take the same row away twice, because a null holds a zero and a zero is not a NaN, so every NaN the sum stepped over was in a row whose bit was set.
+
+The minimum has the one case that is genuinely awkward. The vectorized path used to take a full validity word as proof that it had seen a value, and that is no longer true, since a word can be full and every value under it can be a NaN. It cannot be recovered from what the lanes folded to either: a block of nothing but NaN folds to the identity, and so does a block holding one real infinity, and those two have to give different answers. So the lanes that held something real are accumulated on the side, one vertical OR per vector and one reduce per block, and there is a test for each half of that pair.
+
+Five benchmark rows are added rather than argued about. The existing `kernel/sum_*` and `kernel/min_*` rows are int64 and measure the path that did not change; the new `kernel/sum_float`, `kernel/sum_nans`, `kernel/min_float`, `kernel/min_nans` and `kernel/mean_float` are the float shape of the same work, with `_nans` holding one NaN in eight. Across three runs on the machine used here every one of them lands inside the band the unchanged int64 rows occupy, between 179 and 567 us on a million rows, and the run to run spread on this machine is larger than anything the change could be costing.
+
+The fuzz harness grew a column generator that draws NaNs, which it deliberately did not have before, and a check that runs the four reductions against their scalar twins over it at four shapes: NaN only, null only, both, and nothing but NaN. The twins learned the rule in one place, `_is_there`, so that the thing the fast kernels are checked against is still the obvious version written out one row at a time.
+
+Two conformance failures close, `basics/sum` and `basics/mean` on `float64_half_null`, which holds one NaN and one infinity on top of its nulls and is the frame that made this visible. basics goes from 137 pass and 40 fail to 139 and 38. This is not all of https://github.com/tamnd/firepanda/issues/170: the grouped reductions still count and average a NaN, and the order statistics still sort one, and both are next.
+
 ## [0.6.42] - 2026-09-05
 
 Built against Mojo 1.0.0 (ed45d567). The engine's driver stops being the serial part of a parallel library, several reductions get their arithmetic corrected, two more grouped reductions arrive, and one more allocation that was being zeroed before it was filled is not any more.

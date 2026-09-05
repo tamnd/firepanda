@@ -28,7 +28,7 @@ Usage:
     mojo run -I . tests/fuzz/kernel.mojo [--cases=N] [--seed=N] [--max-total-time=SECONDS]
 """
 
-from std.math import isnan
+from std.math import isnan, nan
 from std.sys import argv
 from std.time import perf_counter_ns
 
@@ -189,6 +189,107 @@ def random_column[
                     out.set_null(i)
             at = stop
     return out^
+
+
+def nan_column[dt: DType](mut rng: Rng, length: Int, shape: Int) -> Array[dt]:
+    """Builds a float column holding both spellings of missing.
+
+    `random_column` never draws a NaN and should not start. Most of the kernels
+    it feeds treat a NaN as an ordinary value on purpose, so putting one in would
+    only check that a kernel and its twin agree about a value neither of them
+    looks at. The reductions are the ones that step over a NaN, so they get a
+    column of their own.
+
+    Args:
+        rng: The generator.
+        length: The number of rows.
+        shape: 0 for NaN only, 1 for null only, 2 for both, 3 for nothing but
+            NaN.
+
+    Parameters:
+        dt: The dtype, which is always a floating point one here.
+
+    Returns:
+        The column.
+    """
+    var out = Array[dt](length)
+    for i in range(length):
+        if shape == 3:
+            out[i] = nan[dt]()
+            continue
+        out[i] = Scalar[dt](rng.next_range(1, 60))
+        var draw = rng.next_below(8)
+        if draw == 0 and shape != 1:
+            out[i] = nan[dt]()
+        elif draw == 1 and shape != 0:
+            out.set_null(i)
+    return out^
+
+
+def nan_reductions[dt: DType](mut rng: Rng, step: Int, seed: UInt64) raises:
+    """Checks the whole column reductions over a column with NaNs in it.
+
+    The values are small integers, so the sums are exact and can be compared for
+    equality rather than within a tolerance, the same as everywhere else in this
+    harness. What is under test is which rows were read and not the arithmetic.
+
+    Args:
+        rng: The generator.
+        step: The case number.
+        seed: The seed.
+
+    Parameters:
+        dt: The dtype to test at.
+
+    Raises:
+        If any reduction disagrees with its twin.
+    """
+    var a = nan_column[dt](rng, rng.next_below(MAX_LENGTH), step % 4)
+
+    var total = sum_of(a)
+    if total.value != sum_scalar(a):
+        fail(
+            step,
+            seed,
+            "sum_of over NaN",
+            String(total.value, " but twin has ", sum_scalar(a)),
+        )
+
+    var low = min_of(a)
+    var low_twin = min_scalar(a)
+    if low.valid != low_twin[1]:
+        fail(step, seed, "min_of over NaN", "validity disagrees with the twin")
+    if low.valid and low.value != low_twin[0]:
+        fail(
+            step,
+            seed,
+            "min_of over NaN",
+            String(low.value, " but twin has ", low_twin[0]),
+        )
+
+    var high = max_of(a)
+    var high_twin = max_scalar(a)
+    if high.valid != high_twin[1]:
+        fail(step, seed, "max_of over NaN", "validity disagrees with the twin")
+    if high.valid and high.value != high_twin[0]:
+        fail(
+            step,
+            seed,
+            "max_of over NaN",
+            String(high.value, " but twin has ", high_twin[0]),
+        )
+
+    var avg = mean_of(a)
+    var avg_twin = mean_scalar(a)
+    if avg.valid != avg_twin[1]:
+        fail(step, seed, "mean_of over NaN", "validity disagrees with the twin")
+    if avg.valid and avg.value != avg_twin[0]:
+        fail(
+            step,
+            seed,
+            "mean_of over NaN",
+            String(avg.value, " but twin has ", avg_twin[0]),
+        )
 
 
 def fail(step: Int, seed: UInt64, what: String, detail: String) raises:
@@ -377,6 +478,9 @@ def run_one[dt: DType](mut rng: Rng, step: Int, seed: UInt64) raises:
             "mean_of",
             String(avg.value, " but twin has ", avg_twin[0]),
         )
+
+    comptime if dt.is_floating_point():
+        nan_reductions[dt](rng, step, seed)
 
     same_column(add(a, b), add_scalar(a, b), step, seed, "add")
     same_column(subtract(a, b), subtract_scalar(a, b), step, seed, "subtract")
