@@ -104,6 +104,20 @@ The pandas API is a Python class, not the bound Mojo type, and the 0.6.43 entry 
 
 Two absences are deliberate. `read_parquet` is not here, because the Parquet reader reaches the DuckDB loader and its `dlopen` does not survive being built into a shared library. And `DataFrame()` raises rather than handing back an empty frame, because there is no Python to Arrow conversion yet and a constructor that accepts nothing and succeeds looks like it worked.
 
+### A group by asking for three reductions checks its ordinals once instead of three times
+
+This change reached the release through the release branch itself rather than through a pull request of its own, so it is not in the release notes on GitHub for 0.6.44. It is recorded here because the code is in the tag.
+
+`aggregate_group_any` is the erased entry point every grouped reduction goes through, and the first thing it does is make sure no ordinal names a group that was never allocated. That check is not a per row test, it is `max_of` over the ordinals compared against the group count, which is one pass over a column the group by has already touched. Cheap enough to be invisible when it went in, and it was measured at the time against the thing it was guarding.
+
+What was never looked at is that once per call is once per reduction. `df.group_by(["id4"], [mean(v1), mean(v2), mean(v3)])` runs it three times over the same ordinals to learn the same fact three times. On a hundred million rows the ordinals are four hundred megabytes, so that is one and a quarter gigabytes of memory traffic on a query whose real work is a pass over the key and a pass over each value. It was about a third of db-benchmark q4.
+
+None of it was ever finding anything, because every caller inside firepanda made the ordinals itself. There are four of them and they all build a grouping with `group_ordinals`, or fill an array from a lasting map, in the same function that then hands the ordinals here. So `aggregate_group_any` takes a `trusted` flag, defaulting to off, and those four pass it. A caller from outside still gets the check, because a caller from outside can pass whatever it likes and an ordinal out of range reads memory the output does not own.
+
+Measured on an i9-13900K, three ABBA blocks. At forty million rows a frame group by with three reductions went from 62.3 to 66.5 milliseconds down to 56.4 to 59.2, every new run below every old run. One reduction went from 44.7 to 49.5 down to 42.8 to 45.5, which is the one pass it has to save rather than two.
+
+On db-benchmark at 0.5GB, five runs a block and three blocks, q4 went from 0.0117 to 0.0189 seconds down to 0.0104 to 0.0116, again with every new run under every old one, and it was 1.18x on a second run of the group by queries alone where the ranges were tighter. q5 gained 8 to 11 per cent and q1, q3, q7 and q8 between 2 and 12. The five join queries are the control here, since a join asks for no reductions at all and cannot reach this code: they came out between 0.90x and 0.99x, which is the size of the noise in a run that long and is what the group by numbers have to be read against. q4 is the one that is clean in both runs, and it is also the one with the most reductions per grouping.
+
 ## [0.6.43] - 2026-09-05
 
 Built against Mojo 1.0.0 (ed45d567). A frame gets an index, the streaming join becomes an operator the pipeline can actually run a query through, and three reductions stop reading the same column twice.
