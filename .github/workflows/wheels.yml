@@ -33,13 +33,22 @@ jobs:
       ready: ${{ steps.detect.outputs.ready }}
     steps:
       - uses: actions/checkout@v7
+      # The gate used to be whether `firepanda/py/module.mojo` exists, and that
+      # turned out to be the wrong question. It exists now, and it builds, and
+      # `pixi run build-extension` produces a working self contained directory,
+      # but the build backend in pyproject.toml is still the hatchling
+      # placeholder that copies `python/firepanda` and compiles nothing. A wheel
+      # built from that has no extension in it and fails its own import test,
+      # which is a true report of a thing nobody claimed. So the gate asks
+      # whether there is a backend that can build a wheel, and that flag flips in
+      # the pull request that writes one.
       - id: detect
         run: |
-          if [ -f firepanda/py/module.mojo ]; then
+          if grep -q '^wheels = true' pyproject.toml; then
             echo "ready=true" >> "$GITHUB_OUTPUT"
           else
             echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=No bindings yet::The Python front door lands at M3; wheel builds are skipped until then."
+            echo "::notice title=No wheel backend yet::The extension builds, but pyproject.toml still has the placeholder backend; wheels land with M3 P8."
           fi
 
   wheels:
