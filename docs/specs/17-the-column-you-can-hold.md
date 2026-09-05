@@ -8,7 +8,7 @@ This is the second bound type, the expression that reaches it, and the two thing
 
 On the Mojo side, `PySeries` in `firepanda/py/series.mojo` is `PyDataFrame` with a different payload. It holds an `ArcPointer[Series]` rather than an `ArcPointer[DataFrame]`, for the reason document 15 gives: a share is what lets an Arrow export hand out pointers into this memory and keep it alive after the Python object is gone. Nothing in this milestone exports a series yet, and holding it as a value now would mean changing the type later rather than changing one call site.
 
-On the Python side, `Series` is generated from the same table as `DataFrame` and delegates the same way. What it exposes is `name`, `dtype`, `size`, `shape`, `count`, `hasnans`, `head`, `tail`, `tolist`, `len` and a repr. That is a small surface and it is chosen rather than arbitrary: it is what a person checks when they have just pulled a column out and want to know whether it is the column they meant.
+On the Python side, `Series` is generated from the same table as `DataFrame` and delegates the same way. What it exposes is `name`, `dtype`, `size`, `shape`, `count`, `hasnans`, `head`, `tail`, `tolist`, `len`, a repr, and the two Arrow capsule dunders section 5 is about. That is a small surface and it is chosen rather than arbitrary: it is what a person checks when they have just pulled a column out and want to know whether it is the column they meant, plus the way out to every other library.
 
 ## 2. `df[key]` is two operations wearing one name
 
@@ -34,26 +34,42 @@ It copies every value, one Python object at a time, which is the slowest thing i
 
 It also costs binary size. Reading a column of unknown dtype means dispatching over the twelve physical dtypes, which compiles twelve copies of the loop, and the extension went from 760,688 bytes to 917,968. That is 157 kilobytes for one method, against a budget of eight megabytes, and it is the clearest single example of the cost model document 03 states: a dispatch list is a multiplier on binary size, so the lists stay narrow and a kernel that does not need a dtype parameter does not take one.
 
-The way out is not to make `tolist` cheaper, it is to make it unnecessary. `__arrow_c_array__` on a series hands the whole column to numpy or pyarrow with no copy and no per element Python object, and `to_numpy` after it. Both are M3 work that this type is the prerequisite for.
+The way out is not to make `tolist` cheaper, it is to make it unnecessary, and section 5 is that. `__arrow_c_array__` on a series hands the whole column over with no copy and no per element Python object, so `tolist` is now the thing you reach for when you want Python values in particular rather than the only way to get anything at all.
 
 Three kinds of column take different paths out. Text is not dispatched over the numeric dtypes, because a string column is physically uint8 and would come back as a list of byte values, which is the kind of bug that looks like a formatting problem. A column of the null type has no buffer at all, so there is nothing to read and every row is missing. Everything else is one typed pass.
 
-## 5. Two things a second type changed about the generator
+## 5. A column goes out as a column
+
+A series answers `__arrow_c_schema__` and `__arrow_c_array__`, the same two names the frame answers, and the difference is what comes out of them. A frame is a struct in Arrow's type system with one child per column, so its export is one struct array and a consumer reaches into it to find a column. A series is not a struct of one thing, it is the thing, so its export is the column's own array and `pa.array(df["qty"])` gives back an `int64` array rather than something to unpack.
+
+Two things fall out of that which are worth saying rather than leaving to be discovered.
+
+**There is nothing to refuse.** The frame's export has to check that no column is stored in more than one chunk, because a struct array has no way to express one, and it refuses before allocating anything so that the failure is clean. A series cannot be in that state: taking a column out of a frame flattens it, so there is exactly one array by construction, and the check would be dead code rather than caution.
+
+**The name travels.** Arrow allows a top level array to have no name and pyarrow exports its own arrays that way, so passing the name is a choice rather than an obligation. It is worth making, because a series always knows its name and `polars.Series` picks it straight up off the field, and a consumer that has to put the name back by hand has been handed less than was available for free.
+
+What this closes is the array direction of the P5 issue, and what it costs is nothing new: the buffers are the column's own memory and the export takes a share of the series, so the array outlives the Python object it came from. That is the ownership argument document 15 section 2 makes for the frame, unchanged, because it was never about frames. It cost 24,240 bytes of binary, against the 157 kilobytes section 4 records for `tolist`, which is the cost model working the way it is supposed to: the fast path is the small one because it does not dispatch over dtypes at all.
+
+`requested_schema` is still refused on both types. Converting on the way out is not written, and a consumer is entitled to assume that what it asked for is what it got, so answering with the wrong type and no complaint would be worse than not answering.
+
+## 6. Two things a second type changed about the generator
 
 **A method can return a type other than its own.** `wraps` used to be a flag, because the only thing a frame method returned was a frame. `DataFrame.__getitem__` returns a series, so it is a class name now.
 
 **An empty constructor reaches the refusal.** The generated `__init__` takes the extension object, which is not a public entry point, so `firepanda.DataFrame()` used to answer with a complaint about a missing argument named `inner` that no user was ever meant to pass. The parameter now defaults, and an empty call reaches the Mojo `py_init`, which refuses with a message saying to use `read_csv`. That was a pre-existing wart on `DataFrame` and it was worth fixing here rather than later, because the second type would otherwise have doubled it.
 
-## 6. `dtype` is a string, and says so
+## 7. `dtype` is a string, and says so
 
 pandas returns a numpy dtype object from `Series.dtype` and this returns a string. The names agree for every type both libraries have, so `str(s.dtype)` reads the same on both sides, and code that compares against `numpy.int64` fails immediately and visibly rather than subtly. Returning something that pretends to be a numpy dtype without being one would be the worse choice, since the failure would then be at a distance from the cause.
 
-## 7. What is left
+## 8. What is left
 
-**`__arrow_c_array__` and `__arrow_c_stream__` on a series.** This is the type they were waiting on, and they are the last open rows of the array direction in the P5 issue.
+**`__arrow_c_stream__` on a series.** A series is one array and pyarrow's own `Array` offers only the array half for the same reason, so this is a smaller gap than it looks. It matters for the consumers that read only the stream, which is DuckDB and anything holding a chunked column, and it is the shape document 16 section 9 already built for the frame.
+
+**`to_numpy`.** The array export is what it needs and it is now there, so this is a Python side call through pyarrow rather than new Mojo, but it wants a decision about what happens to nulls, which is section 3 again in a place where the answer may have to be different.
 
 **Positional and label access.** `s[0]`, `s.iloc[0]` and `s.loc[label]` are all unwritten. They want the index work rather than the binding work, so they are not simply more rows in the table.
 
 **Construction from Python.** `pd.Series([1, 2, 3])` still refuses, and it needs the Python to Arrow conversion that also blocks `pd.DataFrame({...})`.
 
-**Everything in document 06 section 3.** The surface here is eleven members against a pandas `Series` of several hundred. What it buys is not coverage, it is that a column can now be held at all, which is what every one of those several hundred is a method on.
+**Everything in document 06 section 3.** The surface here is thirteen members against a pandas `Series` of several hundred. What it buys is not coverage, it is that a column can now be held at all, which is what every one of those several hundred is a method on.

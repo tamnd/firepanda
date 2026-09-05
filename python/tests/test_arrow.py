@@ -257,3 +257,133 @@ def test_an_empty_frame_exports(firepanda: ModuleType, tmp_path: Path) -> None:
     batch = pa.record_batch(frame_of(firepanda, tmp_path, "name,qty\n"))
     assert batch.num_rows == 0
     assert batch.schema.names == ["name", "qty"]
+
+
+def test_a_series_answers_both_halves_of_the_protocol(
+    firepanda: ModuleType, tmp_path: Path
+) -> None:
+    """A column is an Arrow producer in its own right, not only through its frame."""
+    series = frame_of(firepanda, tmp_path)["qty"]
+    assert hasattr(series, "__arrow_c_schema__")
+    assert hasattr(series, "__arrow_c_array__")
+
+
+def test_a_series_hands_back_the_same_pair_of_capsules(
+    firepanda: ModuleType, tmp_path: Path
+) -> None:
+    """Same shape as the frame's answer, since it is the same protocol."""
+    import ctypes
+
+    is_valid = ctypes.pythonapi.PyCapsule_IsValid
+    is_valid.argtypes = [ctypes.py_object, ctypes.c_char_p]
+    is_valid.restype = ctypes.c_int
+
+    got = frame_of(firepanda, tmp_path)["qty"].__arrow_c_array__()
+    assert isinstance(got, tuple)
+    assert len(got) == 2
+    assert is_valid(got[0], b"arrow_schema") == 1
+    assert is_valid(got[1], b"arrow_array") == 1
+
+
+@needs["pyarrow"]
+def test_pyarrow_reads_a_series_of_every_type(firepanda: ModuleType, tmp_path: Path) -> None:
+    """A series exports as one array rather than as a struct of one child.
+
+    That is the difference from the frame's export and the reason both exist. A
+    consumer asking `pa.array` for a column gets a column, and does not have to
+    know it came out of a frame or reach into a struct to find it.
+    """
+    import pyarrow as pa
+
+    frame = frame_of(firepanda, tmp_path)
+    assert pa.array(frame["qty"]).to_pylist() == [4, 10, 25]
+    assert pa.array(frame["price"]).to_pylist() == [1.25, 0.40, 0.05]
+    assert pa.array(frame["ok"]).to_pylist() == [True, False, True]
+    assert pa.array(frame["name"]).to_pylist()[2].startswith("a much longer")
+    assert pa.array(frame["qty"]).type == pa.int64()
+    assert pa.array(frame["name"]).type == pa.string_view()
+
+
+@needs["pyarrow"]
+def test_a_null_in_a_series_stays_a_null(firepanda: ModuleType, tmp_path: Path) -> None:
+    """The validity bitmap crosses with the column rather than with the frame."""
+    import pyarrow as pa
+
+    frame = frame_of(firepanda, tmp_path, "name,qty\nrivet,\n,10\nnut,25\n")
+    assert pa.array(frame["qty"]).to_pylist() == [None, 10, 25]
+    assert pa.array(frame["name"]).to_pylist() == ["rivet", None, "nut"]
+    assert pa.array(frame["qty"]).null_count == 1
+
+
+@needs["pyarrow"]
+def test_the_same_series_exported_twice_hands_out_the_same_memory(
+    firepanda: ModuleType, tmp_path: Path
+) -> None:
+    """The zero copy assertion again, one column at a time.
+
+    Taking a column out of a frame does copy, because `column` flattens chunks,
+    so the address here is not the frame's address and there would be no sense in
+    comparing them. What this says is that the export itself copies nothing,
+    which is the part the protocol is responsible for.
+    """
+    import pyarrow as pa
+
+    series = frame_of(firepanda, tmp_path)["qty"]
+    first = pa.array(series)
+    second = pa.array(series)
+    assert first.buffers()[1].address == second.buffers()[1].address
+
+
+@needs["pyarrow"]
+def test_the_series_can_be_dropped_while_a_consumer_still_holds_the_data(
+    firepanda: ModuleType, tmp_path: Path
+) -> None:
+    """The export holds a share of the column, so the last reference is not the last owner.
+
+    The frame goes too, since it is the only other thing that could have been
+    keeping the memory alive, and the read below is reading freed memory if the
+    share is wrong.
+    """
+    import pyarrow as pa
+
+    frame = frame_of(firepanda, tmp_path)
+    series = frame["qty"]
+    array = pa.array(series)
+    del frame, series
+    gc.collect()
+    assert array.to_pylist() == [4, 10, 25]
+
+
+@needs["pyarrow"]
+def test_a_requested_schema_is_refused_on_a_series_too(
+    firepanda: ModuleType, tmp_path: Path
+) -> None:
+    """Casting on the way out is not written, and saying so beats guessing."""
+    series = frame_of(firepanda, tmp_path)["qty"]
+    with pytest.raises(NotImplementedError, match="requested_schema"):
+        series.__arrow_c_array__(object())
+
+
+@needs["polars"]
+def test_polars_reads_a_series_and_keeps_its_name(firepanda: ModuleType, tmp_path: Path) -> None:
+    """The name is on the exported field, which is why it is worth putting there.
+
+    Arrow lets a top level array go out unnamed and pyarrow exports its own that
+    way. A firepanda series always knows its name, and a consumer that has to put
+    it back by hand has been given less than was available.
+    """
+    import polars as pl
+
+    series = pl.Series(frame_of(firepanda, tmp_path)["price"])
+    assert series.name == "price"
+    assert series.to_list() == [1.25, 0.40, 0.05]
+
+
+@needs["pyarrow"]
+def test_an_empty_series_exports(firepanda: ModuleType, tmp_path: Path) -> None:
+    """A column with no rows still has a type, which is the whole of what it has."""
+    import pyarrow as pa
+
+    array = pa.array(frame_of(firepanda, tmp_path, "name,qty\n")["qty"])
+    assert len(array) == 0
+    assert array.to_pylist() == []

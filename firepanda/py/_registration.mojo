@@ -86,3 +86,10 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = series.def_method[PySeries.to_list](
         "to_list", docstring="Every value, copied into a Python list."
     )
+    _ = series.def_method[PySeries.arrow_c_schema](
+        "arrow_c_schema", docstring="The column's Arrow schema, in a capsule."
+    )
+    _ = series.def_method[PySeries.arrow_c_array](
+        "arrow_c_array",
+        docstring="The column's Arrow schema and data, in two capsules.",
+    )
