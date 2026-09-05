@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### The pandas surface cannot be written in Mojo, and now we know why
+
+`docs/specs/13-the-bound-type-is-not-a-dataframe.md` is the measurement that document 12 did not make. Document 12 bound four functions, because that was all the distribution question needed. This one binds a type, and binding a type is a different exercise with a much larger consequence.
+
+`PythonTypeBuilder` offers `def_py_init`, `def_method`, `def_staticmethod` and `finalize`, and nothing else. There is no `def_property`, no `def_getset`, no way at a type slot, and the type it produces is not an acceptable base class and its instances have no `__dict__`, so neither subclassing it nor decorating it after the fact is available either. Asked of a bound type directly, `f["a"]` is not subscriptable, `len(f)` has no len, `f.shape` does not exist and `iter(f)` is not iterable. `df["revenue"]` is the most common line of pandas ever written and it cannot be implemented in Mojo in this toolchain.
+
+So the object a user holds is a pure Python object holding a Mojo one, and that is now the architecture rather than a convenience. It is where document 12 had already put the error mapping, and section 5 of the new document adds a reason that cannot be designed around: the binding layer raises its own untyped error for the commonest user mistake, an arity mismatch, as `Exception: TypeError: <mojo function>() takes 1 positional argument but 2 were given`, which `except TypeError` does not catch and which names no function.
+
+The cost of that layer is measured rather than assumed, at 44 to 85 nanoseconds of delegation per call against 90 for the bound call itself, which is nothing next to any operation that touches a column and is the reason the boundary gets crossed once per column and never once per row.
+
+Two smaller findings are recorded with it. A bound method takes at most seven arguments after `py_self`, and keyword arguments do not count against that and survive the crossing with their order intact, so the narrow convention goes underneath and the real pandas signature goes in the Python layer. And a type implementing `Writable` gets `__str__` and `__repr__` for free, but both of them come from `write_repr_to` and `write_to` is silently ignored.
+
+M3 P2 grows a fourth output because of this. The binding table generates the Python wrapper as well as the registration, the stubs and the parity test, and the parity test gains a third surface to hold in agreement.
+
 ### A Python extension that builds, and a build that gets checked
 
 `firepanda/py/` is the Python front door and it opens onto one function, which reports the version. That is the point rather than a limitation. The distribution claim in `docs/specs/12-the-python-front-door-measured.md` was measured by hand on one laptop on one afternoon, and every way it could stop being true is a quiet one, so this turns it into `pixi run build-extension` and four tests that run on every platform the project ships for.
