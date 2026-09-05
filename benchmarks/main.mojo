@@ -77,6 +77,7 @@ from firepanda.exec.morsel import MORSEL_ROWS
 from firepanda.frame.display import DisplayOptions, render_column
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.groupby import AggSpec
+from firepanda.frame.index import Index
 from firepanda.frame.series import Series
 from firepanda.hash import (
     DEFAULT_SEED,
@@ -1371,6 +1372,117 @@ def bench_frame(mut harness: Harness) raises:
         keep(render_column("score", df[1], DisplayOptions()).byte_length())
 
     harness.record("frame/render_column", "renders", 1, series_render)
+
+
+def bench_index(mut harness: Harness) raises:
+    """Measures looking a label up, which is what every alignment is made of.
+
+    The pair to read first is `index/get_indexer_range` against
+    `index/get_indexer_labels`. They are the same index and the same lookup. The
+    first is a default index that is still an arithmetic range, so a label's
+    position is `label - start` and the loop touches no memory but the answer.
+    The second is that range materialized into a column, which takes the general
+    route: build one array holding the index's labels and the target's, factorize
+    it once, and two labels match exactly when they factorized to the same
+    ordinal. The ratio between the rows is what the range representation is worth
+    on the single most common operation there is, because a frame nobody set an
+    index on aligns against another one constantly and pays the first number
+    rather than the second every time. On the reference machine at two hundred
+    thousand rows it is 210 us against 13.5 ms, a factor of sixty four, which is
+    a larger gap than any other pair in this file.
+
+    The second of those numbers is also the honest statement of where the general
+    route stands. At 67 ns a row it is almost entirely the factorize, which
+    `index/is_unique` prices at 25 ns a row over half as many rows, so the lookup
+    itself is close to free and the work is in grouping the two label sets. The
+    concatenation is what makes it two hundred thousand rows of factorize rather
+    than one, and a factorize that took two columns and grouped them together
+    without building the joined array first would take most of that back. That is
+    a real improvement and it is not written, so this row is the thing to watch
+    when somebody writes it.
+
+    `index/get_indexer_non_unique` is the third route rather than a slower second
+    one. It answers a different question, since a label that appears twice has two
+    positions and the answer no longer has one row per label asked for, and it
+    costs a counting sort over the ordinals on top of the factorize the unique
+    form already does. It lands at 12.6 ms next to the unique form's 13.5, which
+    reads as a tie and is one, because the counting sort is three sequential
+    passes and the index it runs over has half as many distinct labels. It is
+    worth the space it takes because a merge on an index calls it and a merge on
+    an index is not a rare thing.
+
+    `index/is_unique` and `index/is_monotonic_increasing` are the two cheap
+    questions and they are not the same price at all. Uniqueness needs the whole
+    factorize, because the only way to know two labels are different is to have
+    grouped them. Monotonicity is one sequential pass with a comparison, which is
+    the sort of thing a machine does at memory bandwidth, and it runs at 194 us
+    against uniqueness at 5.0 ms. Both take the range shortcut and answer without
+    reading anything, which is why the rows here are on labels rather than on a
+    range, and the shortcut is worth twenty six times more on the first than on
+    the second.
+
+    Args:
+        harness: The harness.
+
+    Raises:
+        If a benchmark raises.
+    """
+    var rows = harness.options.rows
+    var rng = Rng(0x51D2C)
+
+    var ranged = Index(0, rows, Optional[String]())
+    var materialized = Index(ranged.materialize(), Optional[String]())
+
+    # Labels drawn from the same span the index covers, so most of them are found
+    # and the loop is not measuring the miss path by accident.
+    var asked = Array[DType.int64](rows)
+    for i in range(rows):
+        asked[i] = Int64(rng.next_u64() % UInt64(rows))
+    var target = AnyArray(asked^)
+
+    # The same labels again with each one repeated, which is what an index on a
+    # key column that is not a primary key looks like.
+    var repeated = Array[DType.int64](rows)
+    for i in range(rows):
+        repeated[i] = Int64(i // 2)
+    var doubled = Index(AnyArray(repeated^), Optional[String]())
+
+    def indexer_range() raises {imm ranged, imm target}:
+        keep(ranged.length)
+        var out = ranged.get_indexer(target)
+        keep(out)
+
+    harness.record("index/get_indexer_range", "rows", rows, indexer_range)
+
+    def indexer_labels() raises {imm materialized, imm target}:
+        keep(materialized.length)
+        var out = materialized.get_indexer(target)
+        keep(out)
+
+    harness.record("index/get_indexer_labels", "rows", rows, indexer_labels)
+
+    def indexer_non_unique() raises {imm doubled, imm target}:
+        keep(doubled.length)
+        var out = doubled.get_indexer_non_unique(target)
+        keep(out.positions)
+
+    harness.record(
+        "index/get_indexer_non_unique", "rows", rows, indexer_non_unique
+    )
+
+    def index_unique() raises {imm materialized}:
+        keep(materialized.length)
+        keep(materialized.is_unique())
+
+    harness.record("index/is_unique", "rows", rows, index_unique)
+
+    def index_monotonic() raises {imm materialized}:
+        keep(materialized.length)
+        keep(materialized.is_monotonic_increasing())
+
+    harness.record(
+        "index/is_monotonic_increasing", "rows", rows, index_monotonic
+    )
 
 
 def bench_hash(mut harness: Harness) raises:
@@ -4256,6 +4368,7 @@ def main() raises:
     bench_kernel(harness)
     bench_sort(harness)
     bench_frame(harness)
+    bench_index(harness)
     bench_hash(harness)
     bench_group(harness)
     bench_pipeline(harness)

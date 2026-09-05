@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### An index can say where a label is
+
+`Index` gained the lookups that everything built on an index calls: `is_unique`, `has_duplicates`, `is_monotonic_increasing`, `is_monotonic_decreasing`, `get_indexer`, `get_indexer_non_unique`, `get_loc`, `equals` and `identical`. `loc` is `get_loc`, `reindex` is `get_indexer`, a merge on an index is `get_indexer_non_unique`, and `align` is `equals` followed by `get_indexer`, so writing any of those four before this existed meant writing a lookup inside each of them and then deleting three.
+
+All of them are one idea. Put the index's labels and the labels being looked up into a single array, factorize it once, and two labels are the same label exactly when they came out with the same ordinal. Nulls fall out of that rather than being handled: the factorize puts every null in one group, so a null label matches a null label, which is what pandas does in `get_indexer` and nowhere else. `_factorize_any` lost its underscore and is now `factorize_any`, since the index calls it and there was no sense in a second copy.
+
+An index that is still an arithmetic range does none of that. A label's position in a range starting at `start` is `label - start`, so the lookup reads no memory and hashes nothing, and it runs sixty four times faster than the general route on the same two hundred thousand labels, 210 us against 13.5 ms. That is the largest ratio between two rows in the microbenchmark suite, and it is on the operation every unindexed frame performs each time it is aligned against another one. Five benchmarks under `index/` measure it, and the tests check the two routes against each other rather than only against hand counted positions, because a fast path is a second implementation of a function and the reason it exists is the reason it drifts.
+
+`get_indexer` refuses a non unique index the way pandas raises `InvalidIndexError`, since a label in two rows has no single position and returning either is a wrong answer. `get_loc` takes one label, answers with every position it sits at, and raises when it is absent rather than reporting a sentinel, which is the whole difference between it and `get_indexer`. `equals` compares labels and `identical` also compares the name.
+
+Two things are deliberately not here. `equals` returns `False` between an int64 index and a float64 index holding the same numbers, where pandas promotes both sides first and returns `True`, and `get_indexer` raises on a dtype mismatch for the same missing reason; both sites say so in the code. And `get_indexer` takes no `method`, so `"ffill"`, `"bfill"` and `"nearest"` are absent, though the monotonicity predicates they are built on now exist. Document 19 is the design.
+
 ### A narrow integer key stops being read twice
 
 Factorizing an integer column whose values fall in a small range takes the direct route, which allocates a table with a slot for every value in the range and indexes it by the value rather than by a hash. That route makes two passes: one to discover which values are actually there, and one to write the ordinal for each row. The discovery pass ran to the end of the column every time.

@@ -158,7 +158,7 @@ what the pass would have made of them.
 
 What is left paying is a group by on one key that has nulls, of any dtype,
 because all four routes put the null group at ordinal zero wherever its first
-null is and there is no later factorize to fix it. `_factorize_any` reports what
+null is and there is no later factorize to fix it. `factorize_any` reports what
 its route knows in a `KeyCodes` and `group_ordinals` decides from that.
 """
 
@@ -289,7 +289,7 @@ def group_ordinals[
                             )
                             return _packed_grouping(packed, plan.space)
 
-    var first = _factorize_any(columns[at[0]][])
+    var first = factorize_any(columns[at[0]][])
     var groups = first.groups
     var known = first.knows_rows()
     var codes = Array[DType.uint32](0)
@@ -319,7 +319,7 @@ def group_ordinals[
     stacked.append(codes^)
     counts.append(groups)
     for k in range(1, len(at)):
-        var key = _factorize_any(columns[at[k]][])
+        var key = factorize_any(columns[at[k]][])
         var next_groups = key.groups
         var next = Array[DType.uint32](0)
         var spare = List[Int]()
@@ -827,7 +827,7 @@ struct KeyCodes(Movable):
         return self.groups >= 0 and len(self.firsts) == self.groups
 
 
-def _factorize_any(col: AnyArray) raises -> KeyCodes:
+def factorize_any(col: AnyArray) raises -> KeyCodes:
     """Factorizes a column whose dtype is a runtime value.
 
     This used to make a typed copy of the whole column, because `factorize` takes
@@ -835,6 +835,12 @@ def _factorize_any(col: AnyArray) raises -> KeyCodes:
     copying. On a forty megabyte key column that was about a third of the
     ordinals, and a group by on six keys paid it six times. It reads through
     `as_typed_view` now, which borrows.
+
+    It lost its leading underscore when the index lookups were written, because
+    an index that has to say where a label is wants exactly this and there is no
+    sense in it having a second copy. Every null lands in one group, which is
+    what makes a null match a null in `Index.get_indexer` without that file
+    doing anything about it.
 
     Args:
         col: The key column.

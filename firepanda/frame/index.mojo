@@ -74,22 +74,172 @@ and it is deliberately narrower than "is a range": `tail` produces the range 5 t
 which is a range and is not default, and the difference is the whole of what those
 cases are testing.
 
-What this does not do is align. Nothing in the library looks a row up by its label,
-`loc` does not exist, and two frames added together do not match their indexes first.
-That is the `Index` API in https://github.com/tamnd/firepanda/issues/154, and it needs
-somewhere to live before it can be written. This is that somewhere.
+The lookups are the second thing written here and they are what makes the index an
+object rather than a field. `loc` is `get_loc`, `reindex` is `get_indexer`, a merge on
+an index is `get_indexer_non_unique`, and `align` is `equals` and `get_indexer` in that
+order. Writing any of those four before the lookups exist means writing a lookup inside
+each of them and then deleting three.
+
+All of them are built on one idea. Put the index's labels and the labels being looked
+up into one array, factorize that array once, and two labels are the same label exactly
+when they came out with the same ordinal. That is one pass over each side rather than a
+hash table built for the occasion and a probe per row, it reuses the factorize that the
+group by spent a great deal of effort on, and it gets the null rule right for free: the
+factorize puts every null in one group, so a null in the index is found by a null in the
+target, which is what pandas does and is the one place in the library where a missing
+value equals a missing value.
+
+A range does not do any of that. The position of a label in a range starting at `start`
+is `label - start`, so a lookup against the index that most frames have is arithmetic
+and touches no memory, which is the same argument the representation was chosen for.
+
+What this still does not do is align. There is no `union`, no `reindex` and no `loc`,
+and the four set operations are the other half of
+https://github.com/tamnd/firepanda/issues/154. What is here is what those are made of.
 """
 
 from std.collections import Optional
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
+from firepanda.dtype.lists import ALL
+from firepanda.hash.function import key_bits
+from firepanda.hash.grouping import KeyCodes, factorize_any
+from firepanda.kernel.concat import concat_two_any
 from firepanda.kernel.select import (
     filter_any,
     filter_range,
     take_any,
     take_range,
 )
+from firepanda.kernel.sort import is_sorted_any
+
+
+comptime NOT_FOUND = Int64(-1)
+"""What a lookup writes where a label is not in the index.
+
+pandas uses the same value, and it is a sentinel rather than a null because a
+caller passes an indexer straight to a gather and a gather already reads a
+negative position as a row that is not there.
+"""
+
+
+struct Matches(Movable):
+    """Every position a set of labels was found at, and the ones found nowhere.
+
+    This is what `get_indexer_non_unique` returns and it is a pair rather than
+    one array because the pair cannot be recovered from either half. Once a
+    label may match several rows the answer is no longer as long as the target
+    was, so a caller cannot tell which of its labels produced which run of
+    positions, and the labels that produced nothing are the ones it most often
+    wants.
+    """
+
+    var positions: Array[DType.int64]
+    """Every matching position, in target order, with a `NOT_FOUND` standing in
+    for a label that matched nothing so that no target label is silent."""
+
+    var missing: Array[DType.int64]
+    """Which rows of the target matched nothing, as positions in the target."""
+
+    def __init__(
+        out self,
+        var positions: Array[DType.int64],
+        var missing: Array[DType.int64],
+    ):
+        """Constructs a result.
+
+        Args:
+            positions: Every matching position, in target order.
+            missing: The target rows that matched nothing.
+        """
+        self.positions = positions^
+        self.missing = missing^
+
+
+def _same_label(a: AnyArray, i: Int, b: AnyArray, j: Int) raises -> Bool:
+    """Reports whether two rows hold the same label.
+
+    Deliberately not the join's `_same_key`, which answers False when either
+    side is null because a null key joins to nothing. A label is not a key. Two
+    missing labels are the same label to pandas, `Index([nan]).equals(...)` says
+    so, and an index equality that answered False for a pair of nulls would call
+    an index unequal to itself.
+
+    Args:
+        a: The first column.
+        i: The row in it.
+        b: The second column.
+        j: The row in it.
+
+    Returns:
+        Whether the two labels are the same, with null equal to null.
+
+    Raises:
+        Error: If the dtypes differ or have no physical layout.
+    """
+    if a.dtype() != b.dtype() or a.is_string() != b.is_string():
+        raise Error(
+            String(
+                "index: labels must have the same dtype; got ",
+                a.dtype(),
+                " and ",
+                b.dtype(),
+            )
+        )
+    var a_here = a.is_valid(i)
+    if a_here != b.is_valid(j):
+        return False
+    if not a_here:
+        return True
+    if a.is_string():
+        ref mine = a.strings()
+        ref theirs = b.strings()
+        return mine.equals(i, theirs.unsafe_bytes(j))
+    comptime for candidate in ALL:
+        if a.dtype() == candidate:
+            return key_bits(
+                a.unsafe_ptr[candidate]().unsafe_offset(i).unsafe_load()
+            ) == key_bits(
+                b.unsafe_ptr[candidate]().unsafe_offset(j).unsafe_load()
+            )
+    raise Error(String("index: unsupported label dtype ", a.dtype()))
+
+
+def _space_of(codes: KeyCodes) -> Int:
+    """How many ordinals a factorize may have handed out.
+
+    `KeyCodes.groups` is the count when the route that produced it knows one, and
+    it is documented as being able to say it does not. A table sized by the row
+    count is always big enough and is what a route that cannot say leaves as the
+    only safe answer, so this asks for the count and falls back rather than
+    trusting a field that has a way to be absent.
+
+    Args:
+        codes: What the factorize returned.
+
+    Returns:
+        A size that every ordinal in `codes.codes` is a valid position in.
+    """
+    if codes.groups >= 0:
+        return codes.groups
+    return len(codes.codes)
+
+
+def _filled(length: Int, value: Int64) -> Array[DType.int64]:
+    """Builds an int64 array with the same number in every row.
+
+    Args:
+        length: How many rows.
+        value: What to put in each.
+
+    Returns:
+        The array, with every row present.
+    """
+    var out = Array[DType.int64](overwritten=length)
+    for i in range(length):
+        out[i] = value
+    return out^
 
 
 struct Index(Copyable, Movable, Sized):
@@ -294,3 +444,363 @@ struct Index(Copyable, Movable, Sized):
             AnyArray(filter_range(self.start, mask)),
             Optional[String](copy=self.name),
         )
+
+    def is_unique(self) raises -> Bool:
+        """Whether no label appears twice.
+
+        A range is unique without being looked at, which is the answer for every
+        frame that has not been gathered or concatenated and is the reason this
+        is cheap in the case that matters.
+
+        Nothing is remembered. An index is copied into every frame that derives
+        from it and a cached answer would have to be invalidated by `take` and
+        `filter`, which is a correctness problem in exchange for a factorize.
+        When a caller asks this in a loop it should hold the answer itself.
+
+        Returns:
+            True when the labels are all different, counting two nulls as the
+            same label.
+
+        Raises:
+            Error: If the label dtype cannot be factorized.
+        """
+        if self.is_range():
+            return True
+        if self.length <= 1:
+            return True
+        return factorize_any(self.labels.value()).groups == self.length
+
+    def has_duplicates(self) raises -> Bool:
+        """Whether some label appears twice. The other spelling pandas has.
+
+        Returns:
+            The opposite of `is_unique`.
+
+        Raises:
+            Error: If the label dtype cannot be factorized.
+        """
+        return not self.is_unique()
+
+    def is_monotonic_increasing(self) raises -> Bool:
+        """Whether the labels never decrease.
+
+        A range never decreases, since the step is one. Labels are scanned, and
+        an index holding a null is not monotonic, which is what pandas says and
+        what `Series` already says about a column.
+
+        Returns:
+            True if every label is at least the one before it.
+
+        Raises:
+            Error: If the label dtype is not one firepanda can order.
+        """
+        if self.is_range():
+            return True
+        ref values = self.labels.value()
+        if values.null_count() > 0:
+            return False
+        return is_sorted_any(values, descending=False)
+
+    def is_monotonic_decreasing(self) raises -> Bool:
+        """Whether the labels never increase.
+
+        A range of two or more never satisfies this, because its step is one and
+        it has no descending form. A range of one or none satisfies both, which
+        is what pandas answers for an empty index and is worth stating because
+        the obvious implementation of a range fast path gets it wrong.
+
+        Returns:
+            True if every label is at most the one before it.
+
+        Raises:
+            Error: If the label dtype is not one firepanda can order.
+        """
+        if self.is_range():
+            return self.length <= 1
+        ref values = self.labels.value()
+        if values.null_count() > 0:
+            return False
+        return is_sorted_any(values, descending=True)
+
+    def _range_indexer(self, target: AnyArray) raises -> Array[DType.int64]:
+        """Looks labels up in a range, by subtracting rather than by searching.
+
+        Args:
+            target: The labels to look for. Must be int64, which is what a range
+                materializes to.
+
+        Returns:
+            One position per target row, `NOT_FOUND` where the label is outside
+            the range.
+
+        Raises:
+            Error: If the target is not int64.
+        """
+        ref labels = target.as_typed_view[DType.int64]()
+        var out = Array[DType.int64](overwritten=len(target))
+        var base = Int64(self.start)
+        var stop = base + Int64(self.length)
+        for i in range(len(target)):
+            if not target.is_valid(i):
+                out[i] = NOT_FOUND
+                continue
+            var label = labels[i]
+            if label < base or label >= stop:
+                out[i] = NOT_FOUND
+            else:
+                out[i] = label - base
+        return out^
+
+    def _ordinals(self, target: AnyArray) raises -> KeyCodes:
+        """Puts this index's labels and a target's into one ordinal space.
+
+        Two rows hold the same ordinal exactly when they hold the same label,
+        with every null in one group, which is what makes a null find a null.
+        The index's rows come first, so row `i` of the result is this index's row
+        `i` and row `len(self) + j` is the target's row `j`.
+
+        Args:
+            target: The labels to look for.
+
+        Returns:
+            One ordinal per row of the concatenation, this index's rows first,
+            with the ordinal count beside them.
+
+        Raises:
+            Error: If the dtypes differ or cannot be factorized.
+        """
+        var mine = self.materialize()
+        if mine.dtype() != target.dtype() or (
+            mine.is_string() != target.is_string()
+        ):
+            raise Error(
+                String(
+                    "index: looking a ",
+                    target.dtype(),
+                    " label up in a ",
+                    mine.dtype(),
+                    (
+                        " index is not written yet, because it needs a common"
+                        " type rather than a comparison"
+                    ),
+                )
+            )
+        return factorize_any(concat_two_any(mine, target))
+
+    def get_indexer(self, target: AnyArray) raises -> Array[DType.int64]:
+        """Where each of a set of labels sits in this index.
+
+        This is the primitive `reindex` and `align` are made of, and the one
+        worth being fast. A range answers by subtraction. Labels answer with one
+        factorize over both sides and two linear passes, rather than with a hash
+        table built for the occasion and a probe per row.
+
+        Args:
+            target: The labels to look for, in the order the answer should come
+                back in.
+
+        Returns:
+            One position per target row, `NOT_FOUND` where there is no such
+            label.
+
+        Raises:
+            Error: If this index has duplicates, which pandas refuses here for
+                the reason that there is no single position to report. Use
+                `get_indexer_non_unique`. Also if the dtypes differ.
+        """
+        if not self.is_unique():
+            raise Error(
+                "index: get_indexer needs a unique index, because a duplicated"
+                " label has more than one position; use"
+                " get_indexer_non_unique"
+            )
+        if self.is_range() and target.dtype() == DType.int64:
+            return self._range_indexer(target)
+
+        var rows = self.length
+        var found = self._ordinals(target)
+        ref codes = found.codes
+        var out = _filled(len(target), NOT_FOUND)
+        # One position per ordinal is enough because the index is unique, so the
+        # first pass never writes the same slot twice.
+        var at = _filled(_space_of(found), NOT_FOUND)
+        for i in range(rows):
+            at[Int(codes[i])] = Int64(i)
+        for j in range(len(target)):
+            out[j] = at[Int(codes[rows + j])]
+        return out^
+
+    def get_indexer_non_unique(self, target: AnyArray) raises -> Matches:
+        """Every position each of a set of labels sits at, and the ones absent.
+
+        The form to use when the index may hold a label twice, which is what a
+        merge on an index and a `loc` on a repeated key both need. A label that
+        matches three rows contributes three positions, in index order, and a
+        label that matches nothing contributes one `NOT_FOUND` so that the answer
+        never goes quiet about a label it was given.
+
+        Args:
+            target: The labels to look for.
+
+        Returns:
+            The positions and the target rows that found none.
+
+        Raises:
+            Error: If the dtypes differ or cannot be factorized.
+        """
+        var rows = self.length
+        var grouped = self._ordinals(target)
+        ref codes = grouped.codes
+        var space = _space_of(grouped)
+
+        # A counting sort over the ordinals, so that the positions holding one
+        # label end up next to each other and in index order. Three passes over
+        # numbers already in cache, against a list per ordinal and an allocation
+        # for each of them.
+        var starts = _filled(space + 1, Int64(0))
+        for i in range(rows):
+            var slot = Int(codes[i]) + 1
+            starts[slot] = starts[slot] + 1
+        for c in range(space):
+            starts[c + 1] = starts[c + 1] + starts[c]
+        var by_ordinal = Array[DType.int64](overwritten=rows)
+        var cursor = Array[DType.int64](overwritten=space)
+        for c in range(space):
+            cursor[c] = starts[c]
+        for i in range(rows):
+            var ordinal = Int(codes[i])
+            by_ordinal[Int(cursor[ordinal])] = Int64(i)
+            cursor[ordinal] = cursor[ordinal] + 1
+
+        var total = 0
+        var absent = 0
+        for j in range(len(target)):
+            var ordinal = Int(codes[rows + j])
+            var hits = Int(starts[ordinal + 1] - starts[ordinal])
+            if hits == 0:
+                absent += 1
+                total += 1
+            else:
+                total += hits
+
+        var positions = Array[DType.int64](overwritten=total)
+        var missing = Array[DType.int64](overwritten=absent)
+        var out_at = 0
+        var miss_at = 0
+        for j in range(len(target)):
+            var ordinal = Int(codes[rows + j])
+            var first = Int(starts[ordinal])
+            var last = Int(starts[ordinal + 1])
+            if first == last:
+                positions[out_at] = NOT_FOUND
+                out_at += 1
+                missing[miss_at] = Int64(j)
+                miss_at += 1
+                continue
+            for k in range(first, last):
+                positions[out_at] = by_ordinal[k]
+                out_at += 1
+        return Matches(positions^, missing^)
+
+    def get_loc(self, label: AnyArray) raises -> List[Int]:
+        """Where one label sits, raising rather than answering with a sentinel.
+
+        pandas returns an integer for a unique index and a slice or a mask for a
+        repeated one, which is three return types on one name and is a decision
+        for the layer that has a Python object to hand back. This returns every
+        position and lets that layer choose.
+
+        A label that is not there raises, and that is the whole difference
+        between this and `get_indexer`. It is what makes `df.loc["nope"]` a
+        `KeyError` rather than a row of nulls.
+
+        Args:
+            label: The label, as a column of exactly one row.
+
+        Returns:
+            Every position holding it, in order, never empty.
+
+        Raises:
+            Error: If the label is not in the index, if more than one label was
+                passed, or if the dtypes differ.
+        """
+        if len(label) != 1:
+            raise Error(
+                String(
+                    "index: get_loc takes one label, got ",
+                    len(label),
+                    "; use get_indexer for several",
+                )
+            )
+        var found = self.get_indexer_non_unique(label)
+        var out = List[Int]()
+        for i in range(len(found.positions)):
+            if found.positions[i] != NOT_FOUND:
+                out.append(Int(found.positions[i]))
+        if not out:
+            raise Error("index: label is not in the index")
+        return out^
+
+    def equals(self, other: Self) raises -> Bool:
+        """Whether two indexes hold the same labels in the same order.
+
+        The name is not part of it and neither is the representation, so a range
+        equals the array it materializes to and an unnamed index equals a named
+        one holding the same labels. That is what pandas means by `equals` and it
+        is what `align` asks, because two frames whose rows are labelled the same
+        need no alignment whatever their indexes are called.
+
+        Both sides being ranges is answered without materializing either, which
+        is the case that runs on every frame in the library.
+
+        Args:
+            other: The index to compare against.
+
+        Returns:
+            Whether the labels match.
+
+        Raises:
+            Error: If the label dtypes cannot be compared.
+        """
+        if self.length != other.length:
+            return False
+        if self.is_range() and other.is_range():
+            return self.start == other.start
+        var mine = self.materialize()
+        var theirs = other.materialize()
+        if mine.dtype() != theirs.dtype() or (
+            mine.is_string() != theirs.is_string()
+        ):
+            # pandas compares an int64 index equal to a float64 one holding the
+            # same numbers, because it promotes before it compares. Doing that
+            # here means a cast and a decision about which direction is safe, so
+            # for now two dtypes are two indexes and the divergence is written
+            # down rather than guessed at.
+            return False
+        for i in range(self.length):
+            if not _same_label(mine, i, theirs, i):
+                return False
+        return True
+
+    def identical(self, other: Self) raises -> Bool:
+        """Whether two indexes are the same index rather than merely equal.
+
+        The name has to match as well. `equals` and this one disagree on exactly
+        the pairs that `align` should accept and `assert_frame_equal` should
+        reject, which is why both exist and why having only one of them gets one
+        of those two wrong.
+
+        Args:
+            other: The index to compare against.
+
+        Returns:
+            Whether the labels and the name both match.
+
+        Raises:
+            Error: If the label dtypes cannot be compared.
+        """
+        if Bool(self.name) != Bool(other.name):
+            return False
+        if self.name and self.name.value() != other.name.value():
+            return False
+        return self.equals(other)
