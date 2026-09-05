@@ -1,6 +1,6 @@
 # 19. Finding a label in an index
 
-Written September 2026, against pandas 3.0.5. This document covers the lookup half of the `Index` type: the four questions an index answers about itself, the three ways it answers where a label is, and the two ways it compares itself against another index. It does not cover the set operations, which are the other half of issue #154, and it does not cover the Python facing `Index`.
+Written September 2026, against pandas 3.0.5. This document covers the lookups and the set operations on the `Index` type: the four questions an index answers about itself, the three ways it answers where a label is, the two ways it compares itself against another index, and the four ways two indexes combine. It does not cover the remaining names on issue #154, which are `append`, `delete`, `drop`, `putmask`, the slice locators and the level accessors, and it does not cover the Python facing `Index`.
 
 ## Why the lookups come before anything that uses them
 
@@ -48,9 +48,31 @@ Because the fast paths are a second implementation of a function that already ex
 
 `equals` compares labels and ignores names. Two ranges compare by start and length without materializing either. A range against a column materializes the range, because an index is what its labels are and not how they happen to be stored. `identical` is `equals` plus the name, which is what a frame comparison wants and what an alignment does not.
 
+## The four set operations
+
+They are the same machine with a different rule about which rows survive. Concatenate the two label sets, factorize once, then count how many rows carry each ordinal on each side separately. That pair of counts is the whole answer. A union keeps each label the larger of the two counts times, an intersection keeps the labels with a count above zero on both sides, a difference keeps the ones with no count on the right, and a symmetric difference keeps the ones with no count on the other side.
+
+The rules layered on top of that are where the bugs are, and every one of them was read off a running pandas 3.0.5 rather than off the documentation, which is wrong about at least one.
+
+**Order.** `union` sorts by default and, unsorted, is the left side's order followed by the labels only the right side has. `intersection` and `difference` are the other way round: their default is the left side's order and sorting is what you ask for. That asymmetry is not arbitrary once you look at it. An intersection is a filter of the left side, so there is an order to inherit; a union is not a filter of anything, so there is no order to inherit and one has to be invented. `symmetric_difference` sorts by default, and unsorted it is the left side's leftovers followed by the right side's.
+
+**Duplicates.** `union` is the only one of the four that keeps them, and it keeps each label the larger of the two counts rather than the sum, so `[1, 1, 2, 3]` union `[1, 2, 2, 4]` is `[1, 1, 2, 2, 3, 4]`. The reasoning is that a union of two label sets should be able to label at least as many rows as either of them could. The other three return unique values, including `intersection`, whose docstring in pandas 3.0.5 still says it keeps the smaller of the two counts and which has not done that for several versions.
+
+**Short circuits that are observable.** A union with an empty index, an empty index unioned with one, and an index unioned with itself all return in the original order, because pandas takes an early return before the sort. `Index([3, 1, 2])` union an empty index is `[3, 1, 2]` and not `[1, 2, 3]`. That is not an internal optimization detail, it is the answer, and it matters because unioning an index with an equal one is what aligning two frames with the same labels does and it is the most common call in the whole API. It is also the fast one: the short circuit is worth about nineteen times the general path, and two default ranges do not even compare labels because a range compares by start and length.
+
+**Names.** All four carry the name when both sides agree and drop it when they do not, on the reasoning that a label set drawn from two differently named levels is not either of them. `symmetric_difference` takes a `result_name` that overrides that, and it is the only one of the four that does, because it is the only one where neither side has a better claim.
+
+**Nulls.** A null is an ordinary label. It matches a null and it sorts last, so `[1, null, 3]` union `[null, 3, 5]` is `[1, 3, 5, null]`. Neither half of that is written in the index. Matching comes from the factorize putting every null in one group and the ordering comes from `argsort_any` defaulting to nulls last, so both are asserted in the tests rather than assumed.
+
+pandas can only hold a missing label in a float index, because a numpy int64 array has nowhere to record absence. An Arrow column carries a validity bitmap, so the same cases are written on integers here and mean the same thing.
+
+`unique` and `get_indexer_for` come out of the same machinery. `unique` keeps the first of each label rather than sorting, which is what pandas does and what a caller who wanted them sorted would rather ask for than have done twice. `get_indexer_for` is `get_indexer` when the index is unique and the positions half of `get_indexer_non_unique` when it is not, which is the method the rest of pandas calls internally when it does not know which kind of index it is holding.
+
 ## Divergences recorded rather than fixed
 
-`equals` returns `False` between an int64 index and a float64 index holding the same numbers. pandas returns `True`, because it promotes both to a common dtype before comparing. The promotion is the missing piece and it is missing in `get_indexer` too, for the same reason and with the same fix. It is noted in the code at both sites so that whoever writes the promotion finds both.
+`equals` returns `False` between an int64 index and a float64 index holding the same numbers. pandas returns `True`, because it promotes both to a common dtype before comparing. The same promotion is missing in `get_indexer` and in all four set operations, which raise where pandas answers `Index([1, 2]).union(Index([2.0, 3.0]))` with a float64 index. It is one missing piece in six places and it should be written once rather than six times, so all six say the same thing in the same words and none of them guesses.
+
+`sort` is a `Bool` and pandas' third state is not represented. pandas uses `sort=None` to mean sort unless the values cannot be compared, and every dtype firepanda has is comparable, so the distinction has nothing to bite on. The `Bool` default reproduces pandas' `None`, including the short circuits that skip the sort. What is not reachable is pandas' explicit `sort=True`, which sorts even in the short circuit.
 
 `get_indexer` does not take a `method` argument. pandas has `"ffill"`, `"bfill"`, `"nearest"` and a `tolerance`, all of which require the index to be monotonic and all of which are a different search from this one, being a binary search over an ordered column rather than an equality lookup. The monotonicity predicates they need exist now, which is most of what they are made of, and the search itself is not written.
 
