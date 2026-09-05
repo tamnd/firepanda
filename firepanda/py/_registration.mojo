@@ -59,3 +59,7 @@ def register(mut module: PythonModuleBuilder) raises:
         "arrow_c_array",
         docstring="The frame's Arrow schema and data, in two capsules.",
     )
+    _ = dataframe.def_method[PyDataFrame.arrow_c_stream](
+        "arrow_c_stream",
+        docstring="The frame as an Arrow stream, in a capsule.",
+    )

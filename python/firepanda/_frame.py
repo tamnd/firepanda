@@ -99,6 +99,13 @@ class DataFrame:
         except Exception as error:
             raise translate(error) from None
 
+    def __arrow_c_stream__(self, requested_schema: object | None = None) -> object:
+        """The frame as a stream of one batch, as an arrow_array_stream PyCapsule."""
+        try:
+            return self._inner.arrow_c_stream(requested_schema)
+        except Exception as error:
+            raise translate(error) from None
+
 
 def read_csv(filepath_or_buffer: str) -> DataFrame:
     """Reads a CSV file into a frame."""

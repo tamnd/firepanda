@@ -212,11 +212,15 @@ jobs:
       # pyarrow and polars are here for the same reason. The Arrow protocol tests
       # are a claim about other people's code and they are worth nothing if the
       # other people's code is not installed to disagree.
+      # duckdb is here because reading a firepanda frame with no copy is one of
+      # M3's exit criteria, and DuckDB is the consumer that accepts nothing but
+      # the stream protocol, so it is the one that says whether the stream export
+      # is actually conforming rather than merely self consistent.
       - name: Extension tests
         if: needs.guard.outputs.has_python == 'true'
         run: >
           uv run --no-project --with pytest --with pandas --with pyarrow
-          --with polars python -m pytest python/tests -q
+          --with polars --with duckdb python -m pytest python/tests -q
 
       # Every fuzzer at once. The bound is per fuzzer, as it was when they ran
       # in sequence, so this shortens the step without shortening the fuzz.

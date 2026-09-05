@@ -29,7 +29,7 @@ needs = {
     name: pytest.mark.skipif(
         importlib.util.find_spec(name) is None, reason=f"{name} is not installed"
     )
-    for name in ("pyarrow", "polars", "pandas")
+    for name in ("pyarrow", "polars", "pandas", "duckdb")
 }
 
 MIXED = (
@@ -257,3 +257,97 @@ def test_an_empty_frame_exports(firepanda: ModuleType, tmp_path: Path) -> None:
     batch = pa.record_batch(frame_of(firepanda, tmp_path, "name,qty\n"))
     assert batch.num_rows == 0
     assert batch.schema.names == ["name", "qty"]
+
+
+def test_the_frame_answers_the_stream_half_too(firepanda: ModuleType, tmp_path: Path) -> None:
+    """The half nearly every consumer looks for first.
+
+    `pyarrow.table`, `polars.DataFrame` and `pandas.DataFrame` all check for
+    `__arrow_c_stream__` before they check for an array, and DuckDB accepts
+    nothing else at all.
+    """
+    frame = frame_of(firepanda, tmp_path)
+    assert hasattr(frame, "__arrow_c_stream__")
+
+
+def test_the_stream_capsule_is_named_what_the_protocol_reserves(
+    firepanda: ModuleType, tmp_path: Path
+) -> None:
+    """A third reserved name, and the same handshake as the other two."""
+    import ctypes
+
+    is_valid = ctypes.pythonapi.PyCapsule_IsValid
+    is_valid.argtypes = [ctypes.py_object, ctypes.c_char_p]
+    is_valid.restype = ctypes.c_int
+
+    frame = frame_of(firepanda, tmp_path)
+    assert is_valid(frame.__arrow_c_stream__(), b"arrow_array_stream") == 1
+
+
+@needs["duckdb"]
+def test_duckdb_reads_the_frame(firepanda: ModuleType, tmp_path: Path) -> None:
+    """The last of M3's three exit criteria, and the reason the stream exists.
+
+    DuckDB's replacement scan looks for `__arrow_c_stream__` and refuses an
+    object that offers only `__arrow_c_array__`, with `Python Object Type
+    DataFrame is not an accepted Arrow Object`. So this test failed for as long
+    as the export was arrays only, however correct those arrays were.
+    """
+    import duckdb
+
+    df = frame_of(firepanda, tmp_path)  # noqa: F841
+    rows = duckdb.sql("select count(*) as n, max(qty) as m from df").fetchall()
+    assert rows == [(3, 25)]
+
+
+@needs["pyarrow"]
+def test_the_stream_is_one_batch_and_then_the_end(firepanda: ModuleType, tmp_path: Path) -> None:
+    """A frame has no chunking, so its stream has nothing to chunk into."""
+    import pyarrow as pa
+
+    reader = pa.RecordBatchReader._import_from_c_capsule(
+        frame_of(firepanda, tmp_path).__arrow_c_stream__()
+    )
+    batches = list(reader)
+    assert len(batches) == 1
+    assert batches[0].num_rows == 3
+
+
+@needs["pyarrow"]
+def test_the_stream_is_not_a_copy_either(firepanda: ModuleType, tmp_path: Path) -> None:
+    """Same argument as the array half, made against the same limitation.
+
+    Nothing in Python can see a firepanda buffer's address, so what is asserted
+    is that two exports of one frame hand out the same one. A producer that
+    copied could not, since the first copy is still alive and holding its
+    allocation while the second is made.
+    """
+    import pyarrow as pa
+
+    frame = frame_of(firepanda, tmp_path)
+    first = pa.table(frame).column("qty").chunk(0).buffers()[1].address
+    second = pa.table(frame).column("qty").chunk(0).buffers()[1].address
+    assert first == second
+
+
+def test_the_stream_refuses_a_requested_schema(firepanda: ModuleType, tmp_path: Path) -> None:
+    """Refused in both directions, for the reason document 15 section 6 gives."""
+    frame = frame_of(firepanda, tmp_path)
+    with pytest.raises(NotImplementedError):
+        frame.__arrow_c_stream__(object())
+
+
+@needs["pyarrow"]
+def test_a_stream_capsule_nobody_consumes_is_freed_rather_than_leaked(
+    firepanda: ModuleType, tmp_path: Path
+) -> None:
+    """A consumer may change its mind, and the capsule destructor is the backstop.
+
+    Which is also why the batch is built when it is asked for rather than when
+    the stream is made: a batch built for a consumer that never calls `get_next`
+    is a batch nobody ever releases.
+    """
+    frame = frame_of(firepanda, tmp_path)
+    for _ in range(1000):
+        frame.__arrow_c_stream__()
+    gc.collect()
