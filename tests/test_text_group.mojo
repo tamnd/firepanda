@@ -43,6 +43,7 @@ from firepanda.frame.series import Series
 from firepanda.hash.factorize import (
     RANK_BLOCK,
     FactorizedStrings,
+    MERGE_SERIAL_ENTRIES,
     _factorize_strings_parallel,
     _factorize_strings_partitioned,
     _factorize_strings_serial,
@@ -657,6 +658,41 @@ def test_the_parallel_string_route_keeps_first_appearance_order_across_slices() 
     assert_equal(found.firsts[8], quarter)
     assert_equal(found.firsts[9], quarter * 2)
     assert_equal(found.firsts[10], quarter * 3)
+
+
+def _merge_either_side(groups: Int) raises:
+    """Factorizes a column of `groups` distinct keys both ways and compares."""
+    var rows = 1 << 16
+    var builder = StringBuilder(capacity=rows)
+    for i in range(rows):
+        builder.append(String("k", i % groups).as_bytes())
+    var col = builder^.finish()
+
+    var one = _factorize_strings_serial(col, DEFAULT_SEED)
+    var many = _factorize_strings_parallel(col, DEFAULT_SEED, 8)
+    assert_equal(many.count(), one.count())
+    assert_equal(many.null_group, one.null_group)
+    for i in range(rows):
+        assert_equal(Int(many.codes[i]), Int(one.codes[i]))
+    for g in range(len(one.firsts)):
+        assert_equal(many.firsts[g], one.firsts[g])
+
+
+def test_the_merge_agrees_with_itself_either_side_of_the_serial_bound() raises:
+    """`MERGE_SERIAL_ENTRIES` picks between two ways of folding the workers'
+    tables into one numbering, and the point of the bound is that which one ran
+    is invisible from outside.
+
+    A worker's slice sees the same keys the whole column has, so its table ends
+    up holding roughly the column's whole cardinality, and the entry count the
+    bound is read against is that times the worker count. Eight workers put the
+    two cardinalities below on opposite sides of it. Both are compared against
+    one thread, which is what first appearance order means.
+    """
+    assert_true(100 * 8 < MERGE_SERIAL_ENTRIES)
+    assert_true(3000 * 8 > MERGE_SERIAL_ENTRIES)
+    _merge_either_side(100)
+    _merge_either_side(3000)
 
 
 def main() raises:
