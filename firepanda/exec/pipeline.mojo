@@ -60,9 +60,10 @@ from firepanda.frame.frame import DataFrame
 
 from .chunk import Chunk
 from .morsel import parallel_morsels
-from .node import Node, NodeStatus, node_apply, node_bind, node_computes_per_row
-from .node import node_ends_early, node_finish, node_is_breaker
-from .node import node_is_row_local, node_process, node_status
+from .node import Node, NodeStatus, Reduce, node_apply, node_bind
+from .node import node_computes_per_row, node_ends_early, node_finish
+from .node import node_is_breaker, node_is_row_local, node_process
+from .node import node_status
 from .parallel import worker_count
 
 comptime BATCH_CHUNKS_PER_WORKER = 4
@@ -263,7 +264,10 @@ def _apply_prefix(
 
 
 def _run_head(
-    ops: List[Node], lead: Int, mut taken: List[Optional[Chunk]]
+    ops: List[Node],
+    lead: Int,
+    fold_at: Int,
+    mut taken: List[Optional[Chunk]],
 ) raises -> List[Optional[Chunk]]:
     """Runs one batch of chunks through the first `lead` operators, in parallel.
 
@@ -285,13 +289,27 @@ def _run_head(
     holds, and a chunk that turns out to be expensive costs the batch one chunk
     of tail rather than one worker's whole share.
 
+    A reduction sitting immediately behind the prefix is folded here too, which
+    is what `fold_at` is. A fold of one chunk is a reduction of a hundred and
+    twenty eight thousand rows and a morsel is the same size, so the kernel
+    takes its serial route and there is no parallelism inside one fold to have.
+    Across a batch there is: each chunk becomes a one row partial on the core
+    that produced the chunk, while it is still in that core's cache, and the
+    caller merges the partials afterwards, which is a pass over one row per
+    chunk. Merging is left to the caller because the running row is the node's
+    and a worker has no business writing it.
+
     Args:
-        ops: The line of operators. Only the first `lead` are used.
+        ops: The line of operators. Only the first `lead` are used, plus the
+            one at `fold_at` if there is one.
         lead: How many leading operators to run. At least one.
+        fold_at: The position of a `Reduce` to fold each chunk into a partial
+            row with, or -1 for none.
         taken: The batch. Every element is moved out.
 
     Returns:
-        One slot per input chunk, empty where the prefix kept no rows.
+        One slot per input chunk, empty where the prefix kept no rows, holding
+        a partial row rather than the chunk when `fold_at` is set.
 
     Raises:
         If any operator raises.
@@ -304,8 +322,14 @@ def _run_head(
     def head(start: Int, stop: Int) raises {mut taken, mut made, imm}:
         for at in range(start, stop):
             var out = _apply_prefix(ops, lead, taken[at].take())
-            if out:
+            if not out:
+                continue
+            if fold_at < 0:
                 made[at] = Optional[Chunk](out.take())
+                continue
+            var row = ops[fold_at][Reduce].partial(out.take())
+            if row:
+                made[at] = Optional[Chunk](row.take())
 
     parallel_morsels(head, count, 1)
     return made^
@@ -475,12 +499,35 @@ struct Pipeline(Movable):
             if count == 0:
                 return
 
-            var made = _run_head(self.operators, lead, taken)
+            var fold_at = self._fold_at(lead)
+            var made = _run_head(self.operators, lead, fold_at, taken)
 
             for at in range(count):
                 if not made[at]:
                     continue
-                self._push(lead, made[at].take(), sink)
+                if fold_at < 0:
+                    self._push(lead, made[at].take(), sink)
+                else:
+                    self.operators[fold_at][Reduce].absorb(made[at].take())
+
+    def _fold_at(self, lead: Int) -> Int:
+        """Returns where a reduction the prefix can fold into sits, or -1.
+
+        It has to be the operator immediately behind the prefix, because that is
+        the only position where the chunk a worker is holding is the chunk the
+        reduction would be given.
+
+        Args:
+            lead: How many leading operators run in parallel.
+
+        Returns:
+            The position of that `Reduce`, or -1 if there is not one.
+        """
+        if lead >= len(self.operators):
+            return -1
+        if not self.operators[lead].isa[Reduce]():
+            return -1
+        return lead
 
     def _finished(self) -> Bool:
         """Reports whether reading more of the source would be wasted work.
