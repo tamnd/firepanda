@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A group by runs its reductions in one pass over the ordinals
+
+A group by asking for three means of one grouping was three calls to the reduction kernel, and each of them read the group ordinals out of memory from the beginning. The ordinals are four bytes a row, so at a hundred million rows that is four hundred megabytes read three times over to answer a question whose real work is one pass over the key and one pass over each value column. On db-benchmark q4 it was about a fifth of the query.
+
+The fix is not to keep the ordinals anywhere, which is not possible for four hundred megabytes, but to shorten the distance between the reads. The reductions now share a worker and a block of rows. Each worker takes its slice of the rows, cuts it into blocks of thirty two thousand, and runs every reduction over a block before moving on to the next one. The first reduction of a block pulls the ordinals in from memory and the ones after it find them in cache, so the ordinals cross the memory bus once per group by rather than once per reduction.
+
+Nothing about the arithmetic changes. Each reduction still accumulates into its own private table per worker, and the tables are still folded at the end in the same order, so a fused sum and an unfused sum add the same numbers in the same sequence. What did change is that the tables now come out of two shared allocations rather than one each, because every accumulator this route handles is eight bytes wide and is either a signed total or a floating point one.
+
+Three reductions are covered: sum, mean and count, over numeric columns whose accumulator is int64 or float64. Everything else falls through to the one at a time route and is woven back into the order the caller asked for, so a group by mixing a mean with a median fuses the mean with whatever can join it and runs the median on its own rather than giving up on both. Unsigned columns are left out on purpose, since a third table shape carried by every fused group by is not worth serving a case that pandas and db-benchmark both spell as a signed column.
+
+The route declines when the tables would not fit. Three reductions over a key of a million distinct values want three tables of a million entries on every core, which is far past the thirty two megabyte budget that already governs how many private tables a single reduction may build, so that group by is left exactly as it was.
+
+Measured on an i9-13900K in three ABBA blocks. At forty million rows a group by asking for three means of one key went from 34.979 to 36.072 milliseconds down to 22.934 to 30.050, with every new run below every old one. The controls did not move: one sum of one key came out at 0.99x, one sum of two keys at 1.00x, an unsorted group by at 1.00x, and a group by asking for a sum, a minimum and a maximum at 1.00x, that last one being what the route looks like when only one of the three can be fused and it therefore declines.
+
+On db-benchmark at a hundred million rows, three ABBA blocks of three runs each, q4 went from 0.0603 to 0.0765 seconds down to 0.0486 to 0.0655. That is 1.24x on the median and 1.24x on the fastest run, with twelve of the eighteen new runs below every old run. q1, q2, q3 and q5 are the controls and came out between 0.97x and 1.07x, which is the run to run spread of this machine at this size. q5 is a control rather than a beneficiary despite asking for three sums, because it groups by a key of a million values and the route declines.
+
 ### Two indexes can be combined
 
 `Index` gained `union`, `intersection`, `difference` and `symmetric_difference`, plus `unique` and `get_indexer_for`. With the lookups from the previous entry that is what `align` is made of, and `align` is what every binary operation between two frames is made of.
