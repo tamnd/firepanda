@@ -71,7 +71,7 @@ from firepanda.dtype.dispatch import dispatch
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.dtype.lists import NUMERIC
-from firepanda.exec import Cast, Compute, Filter, Group, GroupAgg
+from firepanda.exec import Cast, Compute, Filter, Group, GroupAgg, Join
 from firepanda.exec import Limit, Materialize, Node, Pipeline, Project, Reduce
 from firepanda.exec.morsel import MORSEL_ROWS
 from firepanda.frame.display import DisplayOptions, render_column
@@ -3313,6 +3313,14 @@ def bench_pipeline(mut harness: Harness) raises:
     column in one pass, which is what the fusing has to pay for out of what it
     saves.
 
+    The last four rows are the same two questions asked of the join node.
+    `pipeline_join_reduce` against `pipeline_join_two_steps` is a join followed
+    by a reduction written fused and not, and the gap is the whole reason a join
+    belongs in a pipeline: the second writes every column of every paired row to
+    memory so the first thing that reads them can add them up. `pipeline_join_only`
+    against `join_frame` is what the chunking costs when nothing is fused away,
+    which is what the fusing has to pay for out of what it saves.
+
     Args:
         harness: The harness.
 
@@ -3492,6 +3500,112 @@ def bench_pipeline(mut harness: Harness) raises:
         keep(out.rows)
 
     harness.record("exec/agg_frame", "rows", rows, agg_whole)
+
+    # A thousand keys against the million, which is the shape a fact table
+    # joined to a dimension table has and the shape the db-benchmark join
+    # queries have. Every probe row matches exactly one row here, so the output
+    # is as tall as the input and none of the gap below is a different number of
+    # rows going past.
+    var lookup_key = Array[DType.int64](1000)
+    var lookup_tag = Array[DType.int64](1000)
+    for i in range(1000):
+        lookup_key[i] = Int64(i)
+        lookup_tag[i] = Int64(i * 7 + 1)
+    var lookup_columns = List[AnyArray]()
+    lookup_columns.append(AnyArray(lookup_key^))
+    lookup_columns.append(AnyArray(lookup_tag^))
+    var lookup_fields = List[Field]()
+    lookup_fields.append(Field("key", LogicalType.INT64))
+    lookup_fields.append(Field("tag", LogicalType.INT64))
+    var lookup = DataFrame(Schema(lookup_fields^), lookup_columns^)
+
+    # The query the join node exists for, written both ways. The first probes a
+    # chunk, gathers two columns of it and folds them away while they are still
+    # in cache. The second is the same query as two whole frame operations: the
+    # join writes both columns for every row of the input and the reduction
+    # reads them back, which on a million rows is sixteen megabytes each way for
+    # an answer of two numbers.
+    def join_fused() raises {imm streamed, imm lookup}:
+        keep(streamed.rows)
+        var aggs = List[GroupAgg]()
+        aggs.append(GroupAgg(0, AggKind.SUM, "value_total"))
+        aggs.append(GroupAgg(1, AggKind.SUM, "tag_total"))
+        var pipeline = Pipeline(DataFrame(copy=streamed))
+        pipeline.add(
+            Node(
+                Join(
+                    DataFrame(copy=lookup),
+                    "key",
+                    "key",
+                    JoinKind.INNER,
+                    "_right",
+                    ["value", "tag"],
+                )
+            )
+        )
+        pipeline.add(Node(Reduce(aggs^)))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record("exec/pipeline_join_reduce", "rows", rows, join_fused)
+
+    def join_two_steps() raises {imm whole, imm lookup}:
+        keep(whole.rows)
+        var one = DataFrame(copy=whole)
+        var paired = one.join_on(
+            DataFrame(copy=lookup),
+            ["key"],
+            ["key"],
+            JoinKind.INNER,
+            "_right",
+            ["value", "tag"],
+        )
+        var specs = List[AggSpec]()
+        specs.append(AggSpec("value", AggKind.SUM, "value_total"))
+        specs.append(AggSpec("tag", AggKind.SUM, "tag_total"))
+        var out = paired.agg(specs)
+        keep(out.rows)
+
+    harness.record("exec/pipeline_join_two_steps", "rows", rows, join_two_steps)
+
+    # The join on its own in a pipeline, against the whole frame join over the
+    # same rows and the same two columns. Nothing is fused away here, so what
+    # this pair says is what the chunking itself costs, which is the price the
+    # row above has to pay for out of what it saves.
+    def join_streamed() raises {imm streamed, imm lookup}:
+        keep(streamed.rows)
+        var pipeline = Pipeline(DataFrame(copy=streamed))
+        pipeline.add(
+            Node(
+                Join(
+                    DataFrame(copy=lookup),
+                    "key",
+                    "key",
+                    JoinKind.INNER,
+                    "_right",
+                    ["value", "tag"],
+                )
+            )
+        )
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record("exec/pipeline_join_only", "rows", rows, join_streamed)
+
+    def join_whole() raises {imm whole, imm lookup}:
+        keep(whole.rows)
+        var one = DataFrame(copy=whole)
+        var out = one.join_on(
+            DataFrame(copy=lookup),
+            ["key"],
+            ["key"],
+            JoinKind.INNER,
+            "_right",
+            ["value", "tag"],
+        )
+        keep(out.rows)
+
+    harness.record("exec/join_frame", "rows", rows, join_whole)
 
 
 def bench_join(mut harness: Harness) raises:

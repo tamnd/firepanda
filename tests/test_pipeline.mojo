@@ -31,6 +31,7 @@ from firepanda.exec import (
     Filter,
     Group,
     GroupAgg,
+    Join,
     Limit,
     Materialize,
     Node,
@@ -47,6 +48,7 @@ from firepanda.exec import (
     node_status,
 )
 from firepanda.frame.frame import DataFrame
+from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
 
@@ -823,6 +825,275 @@ def test_a_sum_of_a_column_of_names_is_an_error() raises:
     var pipeline = Pipeline(word_frame())
     with assert_raises(contains="not defined on text"):
         pipeline.add(Node(Reduce(aggs^)))
+
+
+def lookup_frame() raises -> DataFrame:
+    """Four rows to join against, keyed on `n`.
+
+    The keys are 2, 4, 6 and 8, so of the six rows in `cut_frame` three match
+    and three do not, and the ones that do are not a prefix. Key 8 matches
+    nothing on the other side, which is what an outer join would have to notice
+    and this node does not.
+    """
+    var columns = List[AnyArray]()
+    columns.append(numbers([2, 4, 6, 8]))
+    columns.append(numbers([20, 40, 60, 80]))
+    var fields = List[Field]()
+    fields.append(Field("n", LogicalType.INT64))
+    fields.append(Field("tag", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def joined_rows(var pipeline: Pipeline) raises -> List[Int64]:
+    """Runs a pipeline and reads its `n` column back, sorted.
+
+    A join emits a chunk per chunk and the driver may hand the chunks to
+    different cores, so the order rows come back in is the order the chunks
+    finished in. Every test here compares sets, and sorting is how a list is
+    compared as a set.
+    """
+    var out = pipeline^.run()
+    var values = read_back(out, "n")
+    for i in range(len(values)):
+        for j in range(i + 1, len(values)):
+            if values[j] < values[i]:
+                var swap = values[i]
+                values[i] = values[j]
+                values[j] = swap
+    return values^
+
+
+def test_a_join_in_a_pipeline_gives_what_the_frame_join_gives() raises:
+    var whole = sample_frame().join_on(
+        lookup_frame(), ["n"], ["n"], JoinKind.INNER
+    )
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Join(lookup_frame(), "n", "n", JoinKind.INNER)))
+    assert_equal(
+        String(pipeline.schema), String(whole.schema), "the same output schema"
+    )
+    var values = joined_rows(pipeline^)
+    assert_equal(len(values), len(whole), "the same number of rows")
+    assert_equal(values[0], Int64(2), "the first key that matched")
+    assert_equal(values[1], Int64(4), "the second")
+    assert_equal(values[2], Int64(6), "the third")
+
+
+def test_a_join_over_chunks_agrees_with_a_join_over_one_chunk() raises:
+    """The whole claim of a streaming join: what came out of the six chunks is
+    what came out of the one."""
+    var one = Pipeline(sample_frame())
+    one.add(Node(Join(lookup_frame(), "n", "n", JoinKind.INNER)))
+    var many = Pipeline(cut_frame())
+    many.add(Node(Join(lookup_frame(), "n", "n", JoinKind.INNER)))
+    var a = joined_rows(one^)
+    var b = joined_rows(many^)
+    assert_equal(len(a), len(b), "the same height")
+    for i in range(len(a)):
+        assert_equal(a[i], b[i], "row " + String(i))
+
+
+def test_a_join_over_forty_chunks_matches_the_whole_frame_join() raises:
+    """Forty chunks is more than one batch, so this is the join run on every
+    core at once rather than one chunk after another. The chunks are five rows
+    each and the four keys land in the first two of them, so most workers are
+    handed a chunk that pairs with nothing."""
+    var pipeline = Pipeline(many_chunk_frame())
+    pipeline.add(Node(Join(lookup_frame(), "n", "n", JoinKind.INNER)))
+    var values = joined_rows(pipeline^)
+    assert_equal(len(values), 4, "the four keys the lookup has")
+    assert_equal(values[0], Int64(2), "the smallest key that matched")
+    assert_equal(values[3], Int64(8), "the largest")
+
+
+def test_a_left_join_keeps_a_row_that_matched_nothing() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Join(lookup_frame(), "n", "n", JoinKind.LEFT)))
+    var values = joined_rows(pipeline^)
+    assert_equal(len(values), 6, "every left row survived")
+    assert_equal(values[0], Int64(1), "the row that matched nothing is here")
+
+
+def test_a_semi_join_keeps_the_left_columns_and_nothing_else() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Join(lookup_frame(), "n", "n", JoinKind.SEMI)))
+    assert_equal(len(pipeline.schema), 2, "no column came from the right")
+    var values = joined_rows(pipeline^)
+    assert_equal(len(values), 3, "the three keys that matched")
+    assert_equal(values[0], Int64(2), "the first of them")
+
+
+def test_an_anti_join_keeps_the_rows_that_matched_nothing() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Join(lookup_frame(), "n", "n", JoinKind.ANTI)))
+    var values = joined_rows(pipeline^)
+    assert_equal(len(values), 3, "the three keys that missed")
+    assert_equal(values[0], Int64(1), "the first of them")
+    assert_equal(values[2], Int64(5), "the last of them")
+
+
+def test_a_join_builds_only_the_columns_it_was_asked_for() raises:
+    """Gathering is most of what a join costs, so a column that is going to be
+    dropped is not a small waste at the end, it is most of the work."""
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(
+        Node(
+            Join(
+                lookup_frame(),
+                "n",
+                "n",
+                JoinKind.INNER,
+                "_right",
+                ["tag", "n"],
+            )
+        )
+    )
+    assert_equal(len(pipeline.schema), 2, "two of the four")
+    assert_equal(pipeline.schema[0].name, "tag", "in the order asked for")
+    assert_equal(pipeline.schema[1].name, "n", "and not the natural one")
+    var values = joined_rows(pipeline^)
+    assert_equal(len(values), 3, "the three keys that matched")
+
+
+def test_a_join_feeding_a_reduction_never_writes_its_output() raises:
+    """The query the node exists for. What the join emits is folded away by the
+    reduction while it is still in cache, so the intermediate that a whole frame
+    join would have written is never written at all."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(2, AggKind.SUM, "total"))
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Join(lookup_frame(), "n", "n", JoinKind.INNER)))
+    pipeline.add(Node(Reduce(aggs^)))
+    var out = pipeline^.run()
+    assert_equal(len(out), 1, "one row came out")
+    var total = out.column("total").as_typed[DType.int64]()
+    assert_equal(total[0], Int64(120), "twenty and forty and sixty")
+
+
+def test_a_join_is_row_local_and_does_not_break_the_pipeline() raises:
+    """Its table is finished before the first chunk arrives and only read
+    afterwards, so every core can be handed the same node."""
+    var node = Node(Join(lookup_frame(), "n", "n", JoinKind.INNER))
+    assert_true(node_is_row_local(node), "row local")
+    assert_false(node_is_breaker(node), "not a breaker")
+    assert_true(node_computes_per_row(node), "worth spreading over the cores")
+    assert_false(node_ends_early(node), "it reads its whole input")
+    assert_true(
+        node_status(node) == NodeStatus.NEED_MORE_INPUT, "always wants more"
+    )
+
+
+def test_a_join_that_matched_nothing_in_a_chunk_drops_the_chunk() raises:
+    """Every key in this lookup misses, so every chunk emits nothing and the
+    sink still knows the shape of what it did not see."""
+    var far = List[Int64]()
+    far.append(Int64(100))
+    far.append(Int64(200))
+    var columns = List[AnyArray]()
+    columns.append(numbers(far))
+    var fields = List[Field]()
+    fields.append(Field("n", LogicalType.INT64))
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(
+        Node(
+            Join(
+                DataFrame(Schema(fields^), columns^),
+                "n",
+                "n",
+                JoinKind.INNER,
+            )
+        )
+    )
+    var out = pipeline^.run()
+    assert_equal(len(out), 0, "nothing paired")
+    assert_equal(out.width(), 2, "and the schema survived anyway")
+
+
+def test_a_null_key_matches_nothing_on_either_side() raises:
+    var keys = Array[DType.int64](3)
+    keys.set_valid(0, Int64(2))
+    keys.set_null(1)
+    keys.set_valid(2, Int64(4))
+    var columns = List[AnyArray]()
+    columns.append(AnyArray(keys^))
+    var fields = List[Field]()
+    fields.append(Field("n", LogicalType.INT64, True))
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(
+        Node(
+            Join(
+                DataFrame(Schema(fields^), columns^),
+                "n",
+                "n",
+                JoinKind.INNER,
+            )
+        )
+    )
+    var values = joined_rows(pipeline^)
+    assert_equal(len(values), 2, "two matched and the null matched nothing")
+    assert_equal(values[0], Int64(2), "the first")
+    assert_equal(values[1], Int64(4), "the second")
+
+
+def test_an_outer_join_in_a_pipeline_is_refused() raises:
+    """It has to emit right rows nothing matched, which is not known until the
+    last chunk, so it is a breaker wearing this node's clothes."""
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="not known until the last chunk"):
+        pipeline.add(Node(Join(lookup_frame(), "n", "n", JoinKind.OUTER)))
+
+
+def test_a_right_join_in_a_pipeline_is_refused() raises:
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="not known until the last chunk"):
+        pipeline.add(Node(Join(lookup_frame(), "n", "n", JoinKind.RIGHT)))
+
+
+def test_a_join_on_a_text_key_is_refused() raises:
+    """A text key needs the ordinal space that comes from concatenating both
+    sides, and having both sides is what a stream does not have."""
+    var pipeline = Pipeline(word_frame())
+    with assert_raises(contains="fixed width key"):
+        pipeline.add(Node(Join(word_frame(), "status", "status")))
+
+
+def test_a_join_on_keys_of_different_dtypes_is_refused() raises:
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="fixed width key"):
+        pipeline.add(Node(Join(lookup_frame(), "keep", "n")))
+
+
+def test_a_join_asked_for_a_column_the_result_has_not_got_is_refused() raises:
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="no column 'nope' to keep"):
+        pipeline.add(
+            Node(
+                Join(
+                    lookup_frame(),
+                    "n",
+                    "n",
+                    JoinKind.INNER,
+                    "_right",
+                    ["nope"],
+                )
+            )
+        )
+
+
+def test_a_right_column_that_collides_is_suffixed() raises:
+    """`keep` is on both sides here, and the key names differ, so the shared
+    name is the one that has to move out of the way."""
+    var columns = List[AnyArray]()
+    columns.append(numbers([2, 4]))
+    columns.append(numbers([20, 40]))
+    var fields = List[Field]()
+    fields.append(Field("id", LogicalType.INT64))
+    fields.append(Field("keep", LogicalType.INT64))
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Join(DataFrame(Schema(fields^), columns^), "n", "id")))
+    assert_equal(len(pipeline.schema), 4, "both keys and both payloads")
+    assert_equal(pipeline.schema[2].name, "id", "the right key kept its name")
+    assert_equal(pipeline.schema[3].name, "keep_right", "and this one moved")
 
 
 def main() raises:

@@ -103,7 +103,7 @@ from firepanda.array.array import Array
 from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
-from firepanda.exec import parallel_morsels
+from firepanda.exec.morsel import parallel_morsels
 
 from .keys import align_keys
 
@@ -324,6 +324,19 @@ struct ProbeTable(Movable):
         self.starts = starts^
         self.bucket = bucket^
         self.rows = rows
+
+    def __init__(out self):
+        """Constructs a table with no rows in it.
+
+        For a caller that has to hold the field before it has the side to fill
+        it from, which is what a pipeline node planning its schema does. Pairing
+        against it is not an error, it is a join against an empty frame.
+        """
+        self.unique = True
+        self.only = List[Int32]()
+        self.starts = List[Int]()
+        self.bucket = List[Int]()
+        self.rows = 0
 
 
 def join_indices[

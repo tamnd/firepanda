@@ -59,6 +59,16 @@ its place in a query that ends in a reduction, where the last operator's output
 is folded away while it is still in cache instead of being written to memory for
 something else to read back.
 
+`Join` is the one operator here that is not a breaker and still holds something
+between chunks, and the something is not state: it is a table it built once
+before the first chunk arrived and only ever reads afterwards. That is why it
+counts as row local, and it is the whole reason a join belongs in a pipeline at
+all. A join done as a whole frame operation writes its output to memory and then
+whatever comes next reads it back, which on a five column join of a million rows
+is a hundred and sixty megabytes each way for an answer that might be three
+numbers. Done a chunk at a time, ahead of a `Reduce`, the chunk that came out of
+the probe is folded away while it is still in L2.
+
 `Materialize` is the escape hatch and it is not temporary. It collects every
 chunk into one frame, calls a whole frame function, and gives the answer back as
 chunks. Anything with no chunked implementation goes through it, which is what
@@ -74,11 +84,20 @@ from firepanda.array.any import AnyArray, borrow_columns
 from firepanda.array.array import Array
 from firepanda.array.chunked import ChunkedArray
 from firepanda.array.value import Value
+from firepanda.bitmap.bitmap import Bitmap
+from firepanda.dtype.lists import ALL
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.frame.frame import DataFrame
 from firepanda.hash.grouping import group_ordinals
 from firepanda.hash.lasting import LastingKeys
+from firepanda.join.keys import BuildSide, build_side, probe_side
+from firepanda.join.pairs import (
+    JoinKind,
+    ProbeTable,
+    bucket_side,
+    pair_probe,
+)
 from firepanda.kernel.accum import accumulator
 from firepanda.kernel.binary import (
     BinaryOp,
@@ -615,6 +634,383 @@ struct Cast(Movable):
         var columns = chunk^.into_columns()
         columns[self.on] = cast_any(columns[self.on], self.to, self.strict)
         return Chunk(columns^, rows)
+
+
+struct Join(Movable):
+    """Pairs every chunk against a frame it built a table from once.
+
+    The build side is the whole right frame and it is held here, because a join
+    in a pipeline is a join whose right side is already in memory and whose left
+    side is arriving. `bind` hashes the right frame's key into a `BuildSide` and
+    buckets it into a `ProbeTable`, and after that both are read only, so
+    `process` is a pure function of its chunk and the node can be handed to every
+    core at once.
+
+    What that buys is not a faster probe. Pairing a million rows against a
+    thousand is half a millisecond and the whole join is three, so five sixths of
+    a join is the gathers that build its output. Those gathers do not get cheaper
+    here. What gets cheaper is what happens to their output: a whole frame join
+    writes a hundred and sixty megabytes and hands them to the next operator,
+    which reads them back, and a join in a pipeline hands the next operator a
+    chunk that is still in cache. On a query that ends in a reduction the
+    intermediate is never written at all.
+
+    ## What it will not do
+
+    Right and outer joins are refused, and so is a key that is not a single
+    fixed width column on each side. Both refusals are the same refusal: this
+    node emits a chunk per chunk and nothing else. An outer join has to emit the
+    right rows that nothing matched, which it cannot know until the last chunk
+    has gone past, so it is a breaker wearing this node's clothes. A right join
+    is an outer join's left half by the same argument. A composite or text key
+    needs the ordinal space that `align_keys` builds by concatenating both sides,
+    and concatenating both sides is having them both, which a stream does not.
+
+    Neither refusal loses anything. A planner that meets one of them uses
+    `Materialize` and the whole frame `join_on`, which is what it did before this
+    node existed.
+    """
+
+    var right: DataFrame
+    """The build side, held whole."""
+
+    var left_on: String
+    """The key column's name on the probe side."""
+
+    var right_on: String
+    """The key column's name on the build side."""
+
+    var kind: JoinKind
+    """Which rows to keep."""
+
+    var suffix: String
+    """Appended to a right column whose name collides."""
+
+    var columns: List[String]
+    """The projection, or empty for every output column.
+
+    Here rather than left to a `Project` afterwards for the reason `join_on` has
+    it: gathering is most of what a join costs, so a column that is going to be
+    dropped is not a small waste at the end, it is most of the work.
+    """
+
+    var _left_at: Int
+    """Where the key sits in the chunk, settled by `bind`."""
+
+    var _side: BuildSide
+    """The right frame's key table, filled by `bind`."""
+
+    var _table: ProbeTable
+    """The right frame's code to row lists, filled by `bind`."""
+
+    var _absent: List[Bool]
+    """Which right rows have a null key, or empty when none do."""
+
+    var _from_right: List[Bool]
+    """Per wanted column, whether it comes from the right frame."""
+
+    var _source: List[Int]
+    """Per wanted column, its position in the frame it comes from."""
+
+    def __init__(
+        out self,
+        var right: DataFrame,
+        var left_on: String,
+        var right_on: String,
+        kind: JoinKind = JoinKind.INNER,
+        var suffix: String = "_right",
+        var columns: List[String] = List[String](),
+    ):
+        """Constructs a join against a frame.
+
+        Nothing is built here. The table is built in `bind`, because building it
+        needs the key dtype and the key dtype is a question about the chunks that
+        will arrive as much as about the frame held here.
+
+        Args:
+            right: The build side. Consumed.
+            left_on: The key column's name on the probe side. Consumed.
+            right_on: The key column's name on the build side. Consumed.
+            kind: Which rows to keep. Inner, left, semi and anti only.
+            suffix: Appended to a right column whose name collides. Consumed.
+            columns: Which output columns to build, in the order wanted, or
+                empty for all of them in their natural order. Consumed.
+        """
+        self.right = right^
+        self.left_on = left_on^
+        self.right_on = right_on^
+        self.kind = kind
+        self.suffix = suffix^
+        self.columns = columns^
+        self._left_at = -1
+        self._side = BuildSide()
+        self._table = ProbeTable()
+        self._absent = List[Bool]()
+        self._from_right = List[Bool]()
+        self._source = List[Int]()
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Builds the table from the right frame and plans the output.
+
+        Args:
+            input: The schema of the chunks that will arrive. Consumed.
+
+        Returns:
+            The schema of the chunks this emits.
+
+        Raises:
+            If the kind is one this node does not do, if either key name is
+            missing, if the two keys have different dtypes, if the key is text,
+            or if a projected name is not one the result has.
+        """
+        if self.kind == JoinKind.RIGHT or self.kind == JoinKind.OUTER:
+            raise Error(
+                "join: a "
+                + String(self.kind)
+                + " join has to emit right rows that nothing matched, which is"
+                " not known until the last chunk; use the whole frame join"
+            )
+        if self.kind == JoinKind.CROSS:
+            raise Error("join: a cross join has no key to build a table from")
+
+        var here = input.index_of(self.left_on)
+        var there = self.right.schema.index_of(self.right_on)
+        var dt = self.right.schema[there].dtype.physical
+        if (
+            input[here].dtype.physical != dt
+            or self.right.columns[there].only().is_string()
+        ):
+            raise Error(
+                "join: this node needs one fixed width key of the same dtype on"
+                " each side; got "
+                + String(input[here].dtype.physical)
+                + " and "
+                + String(dt)
+            )
+
+        var rows = self.right.rows
+        var codes = Array[DType.uint32](overwritten=rows)
+        var side = _build_key(self.right.columns[there].only(), codes)
+        var absent = _key_nulls(self.right.columns[there].only(), rows)
+        self._side = side^
+        self._absent = absent^
+        self._left_at = here
+        self._table = bucket_side(
+            codes,
+            0,
+            rows,
+            self._absent,
+            0,
+            len(self._absent) > 0,
+            self._side.groups(),
+        )
+
+        # The same plan `join_on` makes, without the coalescing branch: an
+        # output row of these four kinds always has a probe side row behind it,
+        # so a shared key column is gathered from the probe side and never
+        # filled from both.
+        var fields = List[Field]()
+        var from_right = List[Bool]()
+        var source = List[Int]()
+        for i in range(len(input)):
+            var kind = input[i].dtype
+            fields.append(Field(input[i].name, kind))
+            from_right.append(False)
+            source.append(i)
+        if self.kind.keeps_right_columns():
+            for j in range(len(self.right.columns)):
+                if j == there and self.left_on == self.right_on:
+                    continue
+                var name = self.right.schema[j].name
+                if _names_include(fields, name):
+                    name = name + self.suffix
+                    if _names_include(fields, name):
+                        raise Error(
+                            "join: the right frame's column '"
+                            + self.right.schema[j].name
+                            + "' collides and so does '"
+                            + name
+                            + "'; pass a different suffix"
+                        )
+                fields.append(Field(name, self.right.schema[j].dtype))
+                from_right.append(True)
+                source.append(j)
+
+        var kept = List[Field]()
+        self._from_right = List[Bool]()
+        self._source = List[Int]()
+        if len(self.columns) == 0:
+            for i in range(len(fields)):
+                kept.append(fields[i].copy())
+                self._from_right.append(from_right[i])
+                self._source.append(source[i])
+        else:
+            for c in range(len(self.columns)):
+                var found = -1
+                for i in range(len(fields)):
+                    if fields[i].name == self.columns[c]:
+                        found = i
+                        break
+                if found < 0:
+                    raise Error(
+                        "join: the result has no column '"
+                        + self.columns[c]
+                        + "' to keep"
+                    )
+                for w in range(len(kept)):
+                    if kept[w].name == self.columns[c]:
+                        raise Error(
+                            "join: column '"
+                            + self.columns[c]
+                            + "' was asked for twice"
+                        )
+                kept.append(fields[found].copy())
+                self._from_right.append(from_right[found])
+                self._source.append(source[found])
+        return Schema(kept^)
+
+    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Probes one chunk against the built table and gathers what paired.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            The paired rows, or None when nothing paired, which is a chunk of no
+            rows and is skipped rather than pushed.
+
+        Raises:
+            If the node was not bound, or if the probe or a gather raises.
+        """
+        if self._left_at < 0:
+            raise Error("join: this node has not been bound to a schema")
+        var rows = len(chunk)
+        if rows == 0:
+            return None
+
+        ref key = chunk.columns[self._left_at]
+        var codes = Array[DType.uint32](overwritten=rows)
+        _probe_key(self._side, key, codes)
+        var absent = _key_nulls(key, rows)
+        var matched = Bitmap(0, all_valid=False)
+        var pairs = pair_probe(
+            self._table,
+            codes,
+            0,
+            rows,
+            absent,
+            0,
+            len(absent) > 0,
+            self.kind,
+            matched,
+        )
+        if len(pairs) == 0:
+            return None
+
+        var out = List[AnyArray](capacity=len(self._source))
+        for w in range(len(self._source)):
+            if self._from_right[w]:
+                out.append(
+                    take_any(
+                        self.right.columns[self._source[w]].only(),
+                        pairs.right_at,
+                    )
+                )
+            else:
+                out.append(
+                    take_any(chunk.columns[self._source[w]], pairs.left_at)
+                )
+        var height = len(pairs)
+        _ = chunk^
+        return Chunk(out^, height)
+
+
+def _names_include(fields: List[Field], name: String) -> Bool:
+    """Reports whether a field of that name has already been planned.
+
+    Args:
+        fields: The output fields so far.
+        name: The name to look for.
+
+    Returns:
+        True if one of them is called that.
+    """
+    for i in range(len(fields)):
+        if fields[i].name == name:
+            return True
+    return False
+
+
+def _key_nulls(key: AnyArray, rows: Int) raises -> List[Bool]:
+    """Flags every row of a key column whose value is missing.
+
+    The null count is asked first, because a key column with no nulls is the
+    ordinary case and the loop below is a pass over the column that answers
+    False every time.
+
+    Args:
+        key: The key column.
+        rows: How many rows of it to look at.
+
+    Returns:
+        One flag per row, or an empty list when the column has no nulls.
+
+    Raises:
+        If reading the validity bitmap raises.
+    """
+    if key.null_count() == 0:
+        return List[Bool]()
+    var out = List[Bool](capacity=rows)
+    for i in range(rows):
+        out.append(not key.is_valid(i))
+    return out^
+
+
+def _build_key(
+    key: AnyArray, mut codes: Array[DType.uint32]
+) raises -> BuildSide:
+    """Builds the key table for a column whose dtype is a runtime value.
+
+    Args:
+        key: The build side's key column.
+        codes: Filled with one ordinal per row of it.
+
+    Returns:
+        The table, ready to probe.
+
+    Raises:
+        If the dtype is text or has no fixed width layout.
+    """
+    # Before the dispatch, because uint8 is in ALL and a string column would
+    # match it and build a table over the first byte of each view.
+    if not key.is_string():
+        comptime for candidate in ALL:
+            if key.dtype() == candidate:
+                ref view = key.as_typed_view[candidate]()
+                return build_side[candidate](view, 0, codes)
+    raise Error("join: no key table for dtype " + String(key.dtype()))
+
+
+def _probe_key(
+    built: BuildSide, key: AnyArray, mut codes: Array[DType.uint32]
+) raises:
+    """Probes the built table with a column whose dtype is a runtime value.
+
+    Args:
+        built: The table the build side filled.
+        key: The probe side's key column.
+        codes: Filled with one ordinal per row of it.
+
+    Raises:
+        If the dtype is text, has no fixed width layout, or is not the one the
+        table was built from.
+    """
+    if not key.is_string():
+        comptime for candidate in ALL:
+            if key.dtype() == candidate:
+                ref view = key.as_typed_view[candidate]()
+                return probe_side[candidate](built, view, 0, codes)
+    raise Error("join: no key table for dtype " + String(key.dtype()))
 
 
 struct GroupAgg(Copyable, Movable, Writable):
@@ -1805,7 +2201,7 @@ def _stripe(var frame: DataFrame) raises -> List[AnyArray]:
 
 
 comptime Node = Variant[
-    Filter, Project, Compute, Cast, Limit, Group, Reduce, Materialize
+    Filter, Project, Compute, Cast, Join, Limit, Group, Reduce, Materialize
 ]
 """One operator, as a value the pipeline can hold in a list.
 
@@ -1842,6 +2238,8 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
         return node[Compute].bind(input^)
     if node.isa[Cast]():
         return node[Cast].bind(input^)
+    if node.isa[Join]():
+        return node[Join].bind(input^)
     if node.isa[Project]():
         ref keep = node[Project].keep
         var fields = List[Field](capacity=len(keep))
@@ -1882,23 +2280,26 @@ def node_status(node: Node) -> NodeStatus:
 def node_is_row_local(node: Node) -> Bool:
     """Reports whether a node's output row depends only on its own input row.
 
-    The four elementwise operators say yes and nothing else does. What that buys
-    is that the node reads itself and never writes itself, so one of them can be
-    handed to every core at once without a copy per worker and without a lock.
-    `Limit` counts rows, `Group` holds a table, `Reduce` holds a running answer
-    and `Materialize` holds the input, so all four say no.
+    The four elementwise operators say yes, and so does `Join`, whose output row
+    depends on its own input row and on a table that was finished before the
+    first chunk arrived. What that buys is that the node reads itself and never
+    writes itself, so one of them can be handed to every core at once without a
+    copy per worker and without a lock. `Limit` counts rows, `Group` holds a
+    table it is still filling, `Reduce` holds a running answer and `Materialize`
+    holds the input, so all four say no.
 
     Args:
         node: The node.
 
     Returns:
-        True for `Filter`, `Project`, `Compute` and `Cast`.
+        True for `Filter`, `Project`, `Compute`, `Cast` and `Join`.
     """
     return (
         node.isa[Filter]()
         or node.isa[Project]()
         or node.isa[Compute]()
         or node.isa[Cast]()
+        or node.isa[Join]()
     )
 
 
@@ -1924,7 +2325,9 @@ def node_computes_per_row(node: Node) -> Bool:
     """Reports whether a node works out a value for every row it is given.
 
     `Filter` evaluates a predicate and `Compute` evaluates an expression, so
-    both do arithmetic once per row and both get faster on more cores. `Project`
+    both do arithmetic once per row and both get faster on more cores. `Join`
+    hashes a key and gathers a row per output row, which is more work per row
+    than either, and its table is read only once `bind` has run. `Project`
     only rebuilds a chunk out of columns it already has and `Cast` walks a
     column through the allocator, so neither has much for a second core to do
     and both are held up by memory rather than by arithmetic. Measured on the
@@ -1936,9 +2339,9 @@ def node_computes_per_row(node: Node) -> Bool:
         node: The node.
 
     Returns:
-        True for `Filter` and `Compute`.
+        True for `Filter`, `Compute` and `Join`.
     """
-    return node.isa[Filter]() or node.isa[Compute]()
+    return node.isa[Filter]() or node.isa[Compute]() or node.isa[Join]()
 
 
 def node_is_breaker(node: Node) -> Bool:
@@ -1974,6 +2377,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Compute].process(chunk^)
     if node.isa[Cast]():
         return node[Cast].process(chunk^)
+    if node.isa[Join]():
+        return node[Join].process(chunk^)
     if node.isa[Limit]():
         return node[Limit].process(chunk^)
     if node.isa[Group]():
@@ -2010,6 +2415,8 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Compute].process(chunk^)
     if node.isa[Cast]():
         return node[Cast].process(chunk^)
+    if node.isa[Join]():
+        return node[Join].process(chunk^)
     raise Error("apply: this node carries state between chunks")
 
 
