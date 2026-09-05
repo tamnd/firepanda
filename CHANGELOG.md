@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A reduction behind the parallel prefix folds on the core that made the chunk
+
+`Reduce.process` was one function doing two things: reduce this chunk on its own, then merge that into the running row. The first is the expensive half and it does not need the node, so it is now `partial`, which reads the node and writes nothing to it. The second is `absorb`. `process` is the two of them called in order and behaves exactly as it did.
+
+What that split buys is where the fold runs. The driver hands a batch of chunks out to every core, and if the operator immediately behind the prefix is a reduction, each worker now folds its own chunk into a one row partial before handing it back, while the chunk is still in that core's cache. The driver merges the partials afterwards, which is a pass over one row per chunk. Merging is left to the driver rather than done in the worker because the running row belongs to the node and a worker has no business writing it.
+
+The reason this was worth doing is that there is no parallelism inside one fold to have. A chunk is a hundred and twenty eight thousand rows and a morsel is the same size, so a chunk reduced on its own takes the kernel's serial route. Before this the driver ran every one of those folds on one thread, one after another, after the parallel prefix had already finished. That was the whole of the regression the join node's benchmarks reported at eight million rows.
+
+Measured on an i9-13900K, three blocks, at eight million rows. `exec/pipeline_join_reduce` went from 25.832 to 26.435 ms to 20.709 to 21.465, against a control of `exec/pipeline_join_two_steps` at 24.370 to 24.766 that this change does not touch, so a join followed by a reduction is now faster fused than split at both sizes rather than only at the smaller one. `exec/pipeline_reduce` went from about 24 ms to 15.845 to 16.062 against the same style of control at 24.4 to 24.8. At a million rows `exec/pipeline_join_reduce` is 2.257 to 2.391 ms against 3.427 to 3.540, and `exec/pipeline_reduce` is 1.651 to 1.715 against 2.767 to 2.770.
+
+`exec/pipeline_reduce_only` is unchanged at 11.8 ms, and that is the control that says what the change is: it is a reduction with no prefix in front of it, so the driver has no parallel batch to fold inside and the node still folds on the calling thread.
+
+Four tests in `tests/test_pipeline.mojo`, including a mean, which is the case that makes a two column partial row out of one aggregation.
+
 ### A join is an operator in the pipeline now
 
 `Join` holds the right frame whole, builds its key table and buckets it once in `bind`, and after that reads them and nothing else. So one node can be handed to every core at once, the same way a filter is, and a join no longer has to be a break in the pipeline.

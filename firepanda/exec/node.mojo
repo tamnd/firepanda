@@ -1906,6 +1906,73 @@ struct Reduce(Movable):
             return NodeStatus.NEED_MORE_INPUT
         return NodeStatus.FINISHED
 
+    def partial(self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Reduces one chunk on its own, without touching the running answer.
+
+        The first half of `process`, split off because it is the expensive half
+        and it is the half that does not need the node. It reads the node and
+        writes nothing to it, so a batch of chunks can be reduced to a batch of
+        one row partials on every core at once, and the merging that follows is
+        a pass over one row per chunk. That matters because a chunk is a hundred
+        and twenty eight thousand rows and a morsel is the same, so a chunk
+        reduced on its own takes the serial route inside the kernel and there is
+        no other parallelism in a fold to have.
+
+        The row is in `_source` order and not the output's, and a mean is still
+        two columns at this point. `absorb` is what reads it and it is written
+        for that.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            One row of partial answers, or None for a chunk with no rows.
+
+        Raises:
+            If the chunk is not as wide as the input schema, or if a reduction
+            fails on the chunk's data.
+        """
+        if chunk.width() != len(self.input):
+            raise Error(
+                "reduce: chunk has "
+                + String(chunk.width())
+                + " columns and the input schema has "
+                + String(len(self.input))
+            )
+        if len(chunk) == 0:
+            return None
+        var columns = chunk^.into_columns()
+        var made = List[AnyArray](capacity=len(self._source))
+        for s in range(len(self._source)):
+            made.append(reduce_any(columns[self._source[s]], self._produce[s]))
+        return Chunk(made^)
+
+    def absorb(mut self, var partial: Chunk) raises:
+        """Merges one chunk's partial answers into the running row.
+
+        Args:
+            partial: A row from `partial`, in `_source` order. Consumed.
+
+        Raises:
+            If the row is not the width `partial` produces, or if merging
+            raises.
+        """
+        if partial.width() != len(self._source):
+            raise Error(
+                "reduce: a partial row has "
+                + String(partial.width())
+                + " columns and this reduction produces "
+                + String(len(self._source))
+            )
+        var made = partial^.into_columns()
+        if not self.started:
+            self.started = True
+            self.state = made^
+            return
+        for s in range(len(self._source)):
+            var pair = concat_two_any(self.state[s], made[s])
+            self.state[s] = reduce_any(pair, self._merge[s])
+
     def process(mut self, var chunk: Chunk) raises -> Optional[Chunk]:
         """Folds the chunk into the running answer.
 
@@ -1920,30 +1987,9 @@ struct Reduce(Movable):
             If the chunk is not as wide as the input schema, or if a reduction
             fails on the chunk's data.
         """
-        if chunk.width() != len(self.input):
-            raise Error(
-                "reduce: chunk has "
-                + String(chunk.width())
-                + " columns and the input schema has "
-                + String(len(self.input))
-            )
-        var rows = len(chunk)
-        if rows == 0:
-            return None
-        var columns = chunk^.into_columns()
-
-        var made = List[AnyArray](capacity=len(self._source))
-        for s in range(len(self._source)):
-            made.append(reduce_any(columns[self._source[s]], self._produce[s]))
-
-        if not self.started:
-            self.started = True
-            self.state = made^
-            return None
-
-        for s in range(len(self._source)):
-            var pair = concat_two_any(self.state[s], made[s])
-            self.state[s] = reduce_any(pair, self._merge[s])
+        var made = self.partial(chunk^)
+        if made:
+            self.absorb(made.take())
         return None
 
     def finish(mut self) raises -> Optional[Chunk]:

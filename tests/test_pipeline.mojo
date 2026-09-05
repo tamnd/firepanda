@@ -1096,5 +1096,80 @@ def test_a_right_column_that_collides_is_suffixed() raises:
     assert_equal(pipeline.schema[3].name, "keep_right", "and this one moved")
 
 
+def test_a_mean_folded_on_every_core_is_not_a_mean_of_means() raises:
+    """A mean is a sum and a count kept apart, so it is two columns of the
+    partial row a worker hands back, and this is the test that says both of them
+    survive the trip."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.MEAN, "average"))
+    var pipeline = Pipeline(many_chunk_frame())
+    pipeline.add(Node(Filter(1)))
+    pipeline.add(Node(Reduce(aggs^)))
+    var out = pipeline^.run()
+
+    var whole = many_chunk_frame()
+    var mask = whole.column("keep").as_typed[DType.bool]()
+    var values = read_back(whole.filter(mask), "n")
+    var total = Int64(0)
+    for i in range(len(values)):
+        total += values[i]
+    var want = Float64(total) / Float64(len(values))
+    var got = out.column("average").as_typed[DType.float64]()[0]
+    assert_equal(got, want, "the mean of what got through the filter")
+
+
+def test_folding_on_every_core_gives_what_folding_on_one_gives() raises:
+    """The same query over the same rows in one chunk and in forty. One chunk
+    is fewer than the driver spreads out, so the first runs the fold on this
+    thread and the second runs it on every core."""
+    var one = Pipeline(sample_frame())
+    one.add(Node(Filter(1)))
+    one.add(Node(totals()))
+    var here = one^.run()
+
+    var many = Pipeline(many_chunk_frame())
+    many.add(Node(Filter(1)))
+    many.add(Node(totals()))
+    var there = many^.run()
+
+    assert_equal(one_int(here, "low"), one_int(there, "low"), "the smallest")
+    assert_equal(one_int(here, "seen"), 4, "the four rows the mask keeps")
+    assert_equal(one_int(there, "seen"), 134, "the rows the other mask keeps")
+
+
+def test_a_reduction_behind_a_join_folds_on_the_core_that_probed() raises:
+    """The query the whole line of work exists for. The join is the parallel
+    prefix and the reduction is immediately behind it, so each chunk is probed,
+    gathered and folded away on one core without going to memory in between."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(2, AggKind.SUM, "tag_total"))
+    aggs.append(GroupAgg(2, AggKind.COUNT, "paired"))
+    var pipeline = Pipeline(many_chunk_frame())
+    pipeline.add(Node(Join(lookup_frame(), "n", "n", JoinKind.INNER)))
+    pipeline.add(Node(Reduce(aggs^)))
+    var out = pipeline^.run()
+    assert_equal(len(out), 1, "one row")
+    assert_equal(one_int(out, "paired"), 4, "the four keys that matched")
+    assert_equal(
+        one_int(out, "tag_total"), 200, "twenty and forty and sixty and eighty"
+    )
+
+
+def test_a_partial_row_of_the_wrong_width_is_refused() raises:
+    """A mean makes two columns of partial answers out of one aggregation, so a
+    row that has as many columns as the caller asked for aggregations is the
+    wrong row."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.MEAN, "average"))
+    var node = Reduce(aggs^)
+    var fields = List[Field]()
+    fields.append(Field("n", LogicalType.INT64))
+    _ = node.bind(Schema(fields^))
+    var columns = List[AnyArray]()
+    columns.append(numbers([21]))
+    with assert_raises(contains="this reduction produces"):
+        node.absorb(Chunk(columns^))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
