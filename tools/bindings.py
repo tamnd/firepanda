@@ -334,6 +334,13 @@ FUNCTIONS = (
         returns="DataFrame",
         py_params=(("filepath_or_buffer", "str"),),
     ),
+    Binding(
+        mojo="open_arrow",
+        name="from_arrow",
+        doc="Builds a frame from a pyarrow, Polars or pandas frame.",
+        params=(("source", "object"),),
+        returns="DataFrame",
+    ),
     # Not a user entry point. Every row of the error table in
     # `python/firepanda/errors.py` has to be exercised from Python, and five
     # bound methods cannot reach most of them, so the Mojo side offers a way to

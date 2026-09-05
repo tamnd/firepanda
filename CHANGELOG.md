@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### firepanda reads a pyarrow, Polars or pandas frame
+
+`firepanda.from_arrow(obj)` builds a frame from anything that speaks the Arrow PyCapsule protocol, which until now was a one way boundary: a frame could be handed to pyarrow and Polars, and the only way to make one in the first place was to read a CSV. A pyarrow table or record batch, a Polars frame and a pandas frame all arrive the same way, with no code here that knows which one it was.
+
+The design changed once real libraries were measured rather than the specification read. `__arrow_c_array__` is almost never what a table offers: of six container types across pyarrow, Polars and pandas, only `pyarrow.RecordBatch` has it, and everything else offers only `__arrow_c_stream__`. So the import is built on the stream, and the array is the fallback rather than the other way round. A stream of several batches becomes one frame in a single allocation per column rather than a frame per batch and a concatenate, which is what `assemble` already existed for.
+
+Unlike the export, this copies, and deliberately. A firepanda buffer is 64 byte aligned and over allocated so that kernels can read past the end of a column instead of branching on the tail, which is a promise no foreign buffer makes. So the bytes are copied once on the way in and the producer's memory is released before the call returns.
+
+Two live bugs in the array import fell out of pointing the code at Polars. A string view column has a minimum of three buffers rather than four, because a producer with no long strings has no data buffers at all, and the buffer of data buffer lengths may be absent in that same case. Polars produces both for any column whose strings are all short, which is a very common column, and the importer refused every one of them.
+
+Refusals come back as two different exceptions rather than one. A type firepanda does not have is `NotImplementedError`, because no amount of passing better data fixes it. An array that does not hold together is `ValueError`, because that is usually a bug in the producer.
+
+The Python tests for this run against pyarrow, Polars and pandas rather than against a fixture, since a fixture would only check the code against the reading of the specification that produced it. Document 16 is the design.
+
 ## [0.6.44] - 2026-09-05
 
 Built against Mojo 1.0.0 (ed45d567). Two passes that were being paid on one core while the rest of the machine waited are gone, pyarrow and Polars can read a firepanda frame without copying it, and `except KeyError` catches a missing column the way document 07 said it would.

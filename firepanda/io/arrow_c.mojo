@@ -6,10 +6,12 @@ wrong is not a compile error anywhere, in any language. It is a wrong pointer re
 at run time in somebody else's process.
 
 So this file declares them and nothing else. The export and import directions
-build on it and are separate, and `ArrowArrayStream` arrives with whichever of
-them needs it first. What is here is the part that has to be exactly right and can
-be checked without allocating anything: the field order, the field widths, and the
-format string for every type firepanda has.
+build on it and are separate. `ArrowArrayStream` is here too, because the import
+direction needed it immediately: almost nothing offers `__arrow_c_array__` at the
+table level, so a consumer that reads only arrays reads almost nothing. What is
+here is the part that has to be exactly right and can be checked without
+allocating anything: the field order, the field widths, and the format string for
+every type firepanda has.
 
 Three things about Mojo 1.0 decided how these are written, and all three were
 found by trying the alternatives.
@@ -88,6 +90,35 @@ comptime SchemaRelease = def(SchemaPtr) thin abi("C") -> None
 
 comptime ArrayRelease = def(ArrayPtr) thin abi("C") -> None
 """The type of `ArrowArray.release`."""
+
+comptime StreamPtr = Pointer[ArrowArrayStream, MutUntrackedOrigin]
+"""A `struct ArrowArrayStream*`."""
+
+comptime StreamGetSchema = def(StreamPtr, SchemaPtr) thin abi("C") -> Int32
+"""The type of `ArrowArrayStream.get_schema`."""
+
+comptime StreamGetNext = def(StreamPtr, ArrayPtr) thin abi("C") -> Int32
+"""The type of `ArrowArrayStream.get_next`."""
+
+comptime StreamGetLastError = def(StreamPtr) thin abi("C") -> NullableCString
+"""The type of `ArrowArrayStream.get_last_error`."""
+
+comptime StreamRelease = def(StreamPtr) thin abi("C") -> None
+"""The type of `ArrowArrayStream.release`."""
+
+comptime STRUCT_FORMAT = "+s"
+"""The Arrow format string for a struct, which is what a frame is.
+
+Both directions need it and they agree on it here rather than each spelling it
+out, because a frame that exported as one thing and imported as another would be
+a frame that could not survive its own round trip."""
+
+comptime EINVAL: Int32 = 22
+"""What a call on a stream that has no such callback reports.
+
+The interface says a non-zero return is an errno and leaves the choice of which
+to the producer. A stream missing a callback it is required to have is a producer
+that built the structure wrong, which is what `EINVAL` says."""
 
 comptime ARROW_FLAG_DICTIONARY_ORDERED: Int64 = 1
 """The dictionary indices are meaningfully ordered."""
@@ -207,6 +238,140 @@ struct ArrowArray(Copyable, Movable):
             True if the release callback is null.
         """
         return not self.release
+
+
+@fieldwise_init
+struct ArrowArrayStream(Copyable, Movable):
+    """The C `struct ArrowArrayStream`. Forty bytes, five fields, this order.
+
+    The third structure of the interface and the one that carries a whole table.
+    A stream hands out a schema once and then a run of arrays that all match it,
+    which is what a table with more than one record batch is, and it is the only
+    one of the three that nearly anything exposes at the table level: pyarrow's
+    `Table`, pandas and Polars all offer `__arrow_c_stream__` and none of them
+    offers `__arrow_c_array__`.
+
+    All four function pointers are void pointers here, for the reason the module
+    docstring gives about `Optional` around a function pointer being two words.
+    The callers below do the reinterpretation.
+    """
+
+    var get_schema: NullableVoidPtr
+    """Writes the stream's schema into the caller's structure. Returns errno."""
+
+    var get_next: NullableVoidPtr
+    """Writes the next array in. Returns errno, and writes the released state to
+    say the stream has ended."""
+
+    var get_last_error: NullableVoidPtr
+    """The message for the last non-zero return, or null if there was none."""
+
+    var release: NullableVoidPtr
+    """The callback that frees this stream. Null once it has been called."""
+
+    var private_data: NullableVoidPtr
+    """The producer's own state. Opaque to everyone else."""
+
+    def __init__(out self):
+        """Constructs a released stream, which is the all zero state."""
+        self.get_schema = None
+        self.get_next = None
+        self.get_last_error = None
+        self.release = None
+        self.private_data = None
+
+    def is_released(self) -> Bool:
+        """Reports whether this stream has been released.
+
+        Returns:
+            True if the release callback is null.
+        """
+        return not self.release
+
+
+def stream_schema(mut stream: ArrowArrayStream, mut out: ArrowSchema) -> Int32:
+    """Asks a stream for its schema.
+
+    Args:
+        stream: The stream.
+        out: Where to write the schema. Untouched unless the call succeeds.
+
+    Returns:
+        Zero on success, and otherwise an errno the producer chose.
+    """
+    if not stream.get_schema:
+        return EINVAL
+    var slot = stream.get_schema.value()
+    var f = Pointer(to=slot).unsafe_bitcast[StreamGetSchema]()[]
+    return f(
+        Pointer(to=stream).unsafe_origin_cast[MutUntrackedOrigin](),
+        Pointer(to=out).unsafe_origin_cast[MutUntrackedOrigin](),
+    )
+
+
+def stream_next(mut stream: ArrowArrayStream, mut out: ArrowArray) -> Int32:
+    """Asks a stream for its next array.
+
+    Args:
+        stream: The stream.
+        out: Where to write the array. A released array written here means the
+            stream has ended, which is not an error.
+
+    Returns:
+        Zero on success, and otherwise an errno the producer chose.
+    """
+    if not stream.get_next:
+        return EINVAL
+    var slot = stream.get_next.value()
+    var f = Pointer(to=slot).unsafe_bitcast[StreamGetNext]()[]
+    return f(
+        Pointer(to=stream).unsafe_origin_cast[MutUntrackedOrigin](),
+        Pointer(to=out).unsafe_origin_cast[MutUntrackedOrigin](),
+    )
+
+
+def stream_error(mut stream: ArrowArrayStream) -> String:
+    """Reads a stream's account of what went wrong.
+
+    The producer owns the string and it stays valid until the next call on the
+    stream, so it is copied here rather than handed back as a pointer.
+
+    Args:
+        stream: The stream, immediately after a call that returned non-zero.
+
+    Returns:
+        The message, or an empty string if the producer offered none.
+    """
+    if not stream.get_last_error:
+        return String()
+    var slot = stream.get_last_error.value()
+    var f = Pointer(to=slot).unsafe_bitcast[StreamGetLastError]()[]
+    var message = f(Pointer(to=stream).unsafe_origin_cast[MutUntrackedOrigin]())
+    if not message:
+        return String()
+    var p = message.value()
+    var out = String()
+    var i = 0
+    while True:
+        var byte = p.unsafe_offset(i).unsafe_load()
+        if byte == 0:
+            break
+        out += chr(Int(byte))
+        i += 1
+    return out^
+
+
+def release_stream(mut stream: ArrowArrayStream):
+    """Calls a stream's release callback, if it has one.
+
+    Args:
+        stream: The stream to release.
+    """
+    if not stream.release:
+        return
+    var slot = stream.release.value()
+    var f = Pointer(to=slot).unsafe_bitcast[StreamRelease]()[]
+    f(Pointer(to=stream).unsafe_origin_cast[MutUntrackedOrigin]())
 
 
 def schema_release_callback(f: SchemaRelease) -> VoidPtr:

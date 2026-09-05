@@ -35,6 +35,10 @@ def read_csv(path: str) -> DataFrame:
     """Reads a CSV file into a frame."""
     ...
 
+def from_arrow(source: object) -> DataFrame:
+    """Builds a frame from a pyarrow, Polars or pandas frame."""
+    ...
+
 def _raise_for_test(kind: str) -> object:
     """Raises one classified error of the given kind. For tests only."""
     ...

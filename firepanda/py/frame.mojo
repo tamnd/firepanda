@@ -23,9 +23,22 @@ from std.python.bindings import check_arguments_arity
 from firepanda.array.any import AnyArray
 from firepanda.dtype.logical import LogicalType
 from firepanda.frame import DataFrame
+from firepanda.io.arrow_c import (
+    ArrowArray,
+    ArrowArrayStream,
+    ArrowSchema,
+    release_schema,
+)
 from firepanda.io.arrow_export import export_frame_array, export_frame_schema
+from firepanda.io.arrow_stream import import_frame, import_stream
 from firepanda.io.read import read_csv
-from firepanda.py.convert import array_capsule, schema_capsule
+from firepanda.py.convert import (
+    array_capsule,
+    schema_capsule,
+    take_array,
+    take_schema,
+    take_stream,
+)
 from firepanda.py.errors import (
     CANCELLED,
     COLUMN,
@@ -354,6 +367,146 @@ def open_csv(path: PythonObject) raises -> PythonObject:
         )
     except cause:
         raise retagged(IO, cause)
+
+
+def _import_kind(cause: Error) -> String:
+    """Decides which Python exception an import failure should arrive as.
+
+    Two different things go wrong on the way in and a caller does different work
+    about each. Either firepanda has no column for what the producer sent, which
+    is a gap in this library and nothing the caller can fix by passing better
+    data, or the data itself does not hold together, which usually means the
+    producer has a bug. The first should reach Python as `NotImplementedError`
+    and the second as `ValueError`, and reporting a malformed buffer as a missing
+    feature sends the reader looking in the wrong place.
+
+    The two are told apart by the message, which is not lovely and is the honest
+    option available. Tagging them at the point they are raised would put the
+    binding's error vocabulary inside `firepanda/io/`, which is code that has to
+    work with no Python anywhere near it. So the rule is written down here where
+    it can be read: every refusal in the import path that means a gap says so
+    with the word supported, and none of the ones about malformed data use it.
+
+    Args:
+        cause: The error the import raised.
+
+    Returns:
+        The prefix to tag it with.
+    """
+    var message = String(cause)
+    if "supported" in message or "firepanda has no" in message:
+        return UNSUPPORTED
+    return VALUE
+
+
+def _from_stream(source: PythonObject) raises -> PythonObject:
+    """Reads a frame through the stream half of the protocol.
+
+    The path nearly everything takes. `pyarrow.Table`, Polars and pandas all
+    offer `__arrow_c_stream__` and none of them offers `__arrow_c_array__`, so an
+    importer that read only arrays would read almost nothing.
+
+    Args:
+        source: The object, already known to have `__arrow_c_stream__`.
+
+    Returns:
+        A new frame.
+    """
+    var capsule: PythonObject
+    try:
+        capsule = source.__arrow_c_stream__(Python.none())
+    except cause:
+        raise retagged(UNSUPPORTED, cause)
+
+    var stream: ArrowArrayStream
+    try:
+        stream = take_stream(capsule)
+    except cause:
+        raise retagged(VALUE, cause)
+
+    try:
+        return PythonObject(
+            alloc=PyDataFrame(ArcPointer(import_stream(stream)))
+        )
+    except cause:
+        raise retagged(_import_kind(cause), cause)
+
+
+def open_arrow(source: PythonObject) raises -> PythonObject:
+    """Builds a frame from anything that speaks the Arrow PyCapsule protocol.
+
+    This is the way in for every library on the other side of the boundary. A
+    pyarrow table, a Polars frame, a pandas frame, or anything else that answers
+    either half of the protocol arrives the same way and with no code here that
+    knows which one it was. The stream is tried first, because it is what nearly
+    everything at the table level actually offers.
+
+    Unlike the export, this copies. `firepanda/io/arrow_import.mojo` says why at
+    length, and the short version is that a firepanda buffer is 64-byte aligned
+    and over allocated so that kernels can read past the end of a column, which
+    is a promise no foreign buffer makes.
+
+    Args:
+        source: The object to read. It must offer `__arrow_c_stream__` or
+            `__arrow_c_array__`, and it must describe a struct, which is what a
+            table is in Arrow's type system.
+
+    Returns:
+        A new frame, owning all of its memory.
+    """
+    var builtins = Python.import_module("builtins")
+    if builtins.hasattr(source, "__arrow_c_stream__"):
+        return _from_stream(source)
+    if not builtins.hasattr(source, "__arrow_c_array__"):
+        raise tagged(
+            UNSUPPORTED,
+            String(
+                "cannot read a ",
+                Python.type(source).__name__,
+                (
+                    "; firepanda.from_arrow takes an object with"
+                    " __arrow_c_stream__ or __arrow_c_array__, such as a"
+                    " pyarrow table, a polars frame or a pandas frame"
+                ),
+            ),
+        )
+
+    var pair: PythonObject
+    try:
+        pair = source.__arrow_c_array__(Python.none())
+    except cause:
+        raise retagged(UNSUPPORTED, cause)
+    if len(pair) != 2:
+        raise tagged(
+            VALUE,
+            String(
+                "__arrow_c_array__ returned ",
+                len(pair),
+                " values and the protocol says two",
+            ),
+        )
+
+    var schema: ArrowSchema
+    try:
+        schema = take_schema(pair[0])
+    except cause:
+        raise retagged(VALUE, cause)
+
+    var array: ArrowArray
+    try:
+        array = take_array(pair[1])
+    except cause:
+        # The schema is ours now and the capsule it came from will not release
+        # it, so an array that never arrives still leaves this side owing one.
+        release_schema(schema)
+        raise retagged(VALUE, cause)
+
+    try:
+        return PythonObject(
+            alloc=PyDataFrame(ArcPointer(import_frame(schema, array)))
+        )
+    except cause:
+        raise retagged(_import_kind(cause), cause)
 
 
 def raise_for_test(kind: PythonObject) raises -> PythonObject:
