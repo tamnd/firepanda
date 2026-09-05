@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### The row labels are something Python can hold
+
+`df.index` and `s.index` return an `Index` now, which is the third bound type and the one that makes the thirty odd methods of the previous two entries reachable from Python at all. It carries the pandas surface: the properties, `tolist`, `get_loc`, `get_indexer`, the four set operations, the five editing operations, the slice bounds, `equals`, `identical`, `is_`, and indexing with an integer, a slice, a list of positions or a mask.
+
+Returning a list of labels would have been one line and would have been wrong. A list cannot be asked whether it is unique, cannot be unioned with another and cannot be handed to anything, so every method the index grew would have stayed unreachable and the surface would have had to be built again later on top of the real type. `tolist` is the list, and it is one member on this.
+
+`get_loc` is worth naming because pandas returns three different types from it and which one depends on the labels rather than on the argument: one hit is an integer, several hits in a row on a sorted index are a slice, and anything else is a boolean mask. The Mojo side returns positions, which is what all three are made of, and the Python side picks among them, so the rule is written once.
+
+A missing label now gets built in the index's own type rather than in the float64 that inferring from a list of `None` produces. Without that, inserting a null into an int64 index refuses two columns of different types and tells the user about a float64 they never mentioned. With it, `Index([3, 1]).insert(1, None)` stays int64 with a hole in it, which is the divergence from pandas the previous entry recorded and which now holds from Python too.
+
+One new error kind crosses the boundary. `firepanda.errors.OutOfBoundsError` is an `IndexError`, so `except IndexError` around `index[i]` keeps working the way it does against pandas.
+
+Four divergences are recorded rather than hidden. `values` and `==` give back Python lists where pandas gives numpy arrays. `nbytes` is zero for a range where pandas reports the size of its Python object. `None in Index([3, None, 1])` is true here and false in pandas, because the label pandas holds is NaN. And a frame and its columns do not share one index object, so `df.index.is_(df["a"].index)` is false while `equals` is true, which needs the frame to hold a shared index rather than an owned one.
+
 ### DuckDB reads a firepanda frame
 
 A frame now answers `__arrow_c_stream__` as well as `__arrow_c_array__`, which means `duckdb.sql("select ... from df")` works on a firepanda frame with no conversion step and no copy. DuckDB is worth naming because it is the consumer that accepts nothing else: handed an object with only the array half it refuses it outright, so the stream is not a nicety on top of the array export but the thing that decides whether a whole class of tools can read us at all.

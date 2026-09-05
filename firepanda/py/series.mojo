@@ -16,78 +16,15 @@ from std.memory import ArcPointer, Pointer
 from std.python import Python, PythonObject
 from std.python.bindings import check_arguments_arity
 
-from firepanda.array.any import AnyArray
-from firepanda.array.array import Array
-from firepanda.dtype.dispatch import dispatch_typed
-from firepanda.dtype.lists import ALL
-from firepanda.dtype.logical import TypeKind
+from firepanda.frame.index import Index
 from firepanda.frame.series import Series
+from firepanda.py.args import whole
 from firepanda.py.build import column_from, empty_column
 from firepanda.io.arrow_export import export_array_borrowed, export_schema
 from firepanda.py.convert import array_capsule, schema_capsule
-from firepanda.py.errors import DTYPE, UNSUPPORTED, retagged, tagged
-
-
-def _int(value: PythonObject, name: String) raises -> Int:
-    """Reads a Python integer, and says which argument was wrong if it is not one.
-
-    The same helper `frame.mojo` has, for the same reason. It is written twice
-    rather than shared because the shared version would have to live somewhere
-    both files import, and a two line helper is not worth a module.
-
-    Args:
-        value: What Python passed.
-        name: The parameter name, for the message.
-
-    Returns:
-        The integer.
-    """
-    try:
-        return Int(py=value)
-    except:
-        raise tagged(
-            DTYPE,
-            String(
-                name,
-                " must be an integer, got ",
-                Python.type(value).__name__,
-                " ",
-                value.__repr__(),
-            ),
-        )
-
-
-def _numbers[dt: DType](values: Array[dt]) raises -> PythonObject:
-    """Turns one typed column into a Python list.
-
-    A null becomes `None` rather than a NaN. pandas would have widened an integer
-    column with a missing value to float64 and put a NaN in the hole, because a
-    numpy int64 array has nowhere to record absence. A firepanda column is Arrow
-    and has a validity bitmap, so the value is missing rather than approximated,
-    and `None` is what says that. It is also what `pyarrow.Array.to_pylist` and
-    `polars.Series.to_list` both return, so the surprising answer here would be
-    the pandas one.
-
-    Args:
-        values: The column, borrowed rather than copied.
-
-    Parameters:
-        dt: The column's dtype, bound by the dispatch.
-
-    Returns:
-        A list with one element per row.
-    """
-    var out = Python.list()
-    for i in range(len(values)):
-        if not values.is_valid(i):
-            out.append(Python.none())
-        elif dt == DType.bool:
-            out.append(PythonObject(Bool(values[i])))
-        elif dt.is_floating_point():
-            out.append(PythonObject(Float64(values[i].cast[DType.float64]())))
-        else:
-            out.append(PythonObject(Int(values[i].cast[DType.int64]())))
-    return out
+from firepanda.py.index import PyIndex
+from firepanda.py.errors import UNSUPPORTED, retagged, tagged
+from firepanda.py.values import python_list
 
 
 @fieldwise_init
@@ -220,7 +157,7 @@ struct PySeries(Movable, Writable):
         """
         return PythonObject(
             alloc=Self(
-                ArcPointer(Self._held(py_self)[].series[].head(_int(n, "n")))
+                ArcPointer(Self._held(py_self)[].series[].head(whole(n, "n")))
             )
         )
 
@@ -237,7 +174,27 @@ struct PySeries(Movable, Writable):
         """
         return PythonObject(
             alloc=Self(
-                ArcPointer(Self._held(py_self)[].series[].tail(_int(n, "n")))
+                ArcPointer(Self._held(py_self)[].series[].tail(whole(n, "n")))
+            )
+        )
+
+    @staticmethod
+    def labels(py_self: PythonObject) raises -> PythonObject:
+        """Hands out the row labels, as an index.
+
+        This is what `s.index` reaches. A series taken out of a frame carries the
+        frame's labels, so this is how a caller finds out which rows a column's
+        values belong to.
+
+        Args:
+            py_self: The series.
+
+        Returns:
+            A new index carrying the series' labels.
+        """
+        return PythonObject(
+            alloc=PyIndex(
+                ArcPointer(Index(copy=Self._held(py_self)[].series[].index))
             )
         )
 
@@ -245,16 +202,11 @@ struct PySeries(Movable, Writable):
     def to_list(py_self: PythonObject) raises -> PythonObject:
         """Copies every value out into a Python list.
 
-        This is the slow way out of a column and it is here anyway, because until
-        `__arrow_c_array__` exists on a series it is the only way out, and
-        because a test that cannot read a value can only assert about shapes.
-        Nothing on a hot path should call it.
-
-        Three kinds of column are handled separately. Text is not dispatched over
-        `ALL` because a string column is physically uint8 and would come back as
-        a list of bytes. A column of the null type has no buffer at all, so there
-        is nothing to read and every row is missing. Everything else is one
-        typed pass.
+        This is the slow way out of a column and it is here anyway, because a
+        test that cannot read a value can only assert about shapes. Nothing on a
+        hot path should call it, and `__arrow_c_array__` is the way that does
+        not copy. What it does with a null and with a string column is
+        `firepanda/py/values.mojo`, which the index reads through as well.
 
         Args:
             py_self: The series.
@@ -262,21 +214,7 @@ struct PySeries(Movable, Writable):
         Returns:
             A list with one element per row, with `None` for the missing ones.
         """
-        ref series = Self._held(py_self)[].series[]
-        if series.logical().kind == TypeKind.NULL:
-            var out = Python.list()
-            for _ in range(len(series)):
-                out.append(Python.none())
-            return out
-        if series.is_string():
-            var out = Python.list()
-            for i in range(len(series)):
-                if series.is_valid(i):
-                    out.append(PythonObject(series.text(i)))
-                else:
-                    out.append(Python.none())
-            return out
-        return dispatch_typed[ALL](series.values, _numbers)
+        return python_list(Self._held(py_self)[].series[].values)
 
     @staticmethod
     def arrow_c_schema(py_self: PythonObject) raises -> PythonObject:

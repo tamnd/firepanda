@@ -76,4 +76,4 @@ pandas can only hold a missing label in a float index, because a numpy int64 arr
 
 `get_indexer` does not take a `method` argument. pandas has `"ffill"`, `"bfill"`, `"nearest"` and a `tolerance`, all of which require the index to be monotonic and all of which are a different search from this one, being a binary search over an ordered column rather than an equality lookup. The monotonicity predicates they need exist now, which is most of what they are made of, and the search itself is not written.
 
-The Python facing `Index` is not here. `df.index` and `s.index` return nothing today, so none of this is reachable from Python yet. It is reachable from `loc`, `reindex`, `merge` and `align` inside the library, which is what it was written for.
+The Python facing `Index` is not here. It arrived in document 21, so `df.index` and `s.index` reach all of this now, and the divergences that only show up at the boundary are recorded there. Inside the library it is reachable from `loc`, `reindex`, `merge` and `align`, which is what it was written for.

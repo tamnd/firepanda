@@ -43,6 +43,7 @@ __all__ = [
     "DTypeError",
     "FirepandaError",
     "InvalidArgumentError",
+    "OutOfBoundsError",
     "ReaderError",
     "UnsupportedError",
 ]
@@ -84,6 +85,15 @@ class InvalidArgumentError(FirepandaError, ValueError):
     """
 
 
+class OutOfBoundsError(FirepandaError, IndexError):
+    """A row number outside the thing it was addressing.
+
+    An `IndexError`, which is what a Python sequence raises and what `except
+    IndexError` around `index[i]` is already catching. pandas raises the plain
+    builtin here, so the only thing this adds is a name in the traceback.
+    """
+
+
 class ReaderError(FirepandaError, OSError):
     """A file that is missing, unreadable, or not what it claimed to be.
 
@@ -122,6 +132,7 @@ BY_KIND: dict[str, type[BaseException]] = {
     "column": ColumnNotFoundError,
     "dtype": DTypeError,
     "value": InvalidArgumentError,
+    "position": OutOfBoundsError,
     "io": ReaderError,
     "unsupported": UnsupportedError,
     "cancelled": CancelledError,

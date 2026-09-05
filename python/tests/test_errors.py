@@ -41,6 +41,7 @@ CATCHABLE_AS: dict[str, type[BaseException]] = {
     "column": KeyError,
     "dtype": TypeError,
     "value": ValueError,
+    "position": IndexError,
     "io": OSError,
     "unsupported": NotImplementedError,
     "cancelled": KeyboardInterrupt,

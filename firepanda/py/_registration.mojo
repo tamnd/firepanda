@@ -13,6 +13,7 @@ from std.python import PythonObject
 from std.python.bindings import PythonModuleBuilder
 
 from firepanda.py.frame import PyDataFrame, open_arrow, open_csv, raise_for_test
+from firepanda.py.index import PyIndex
 from firepanda.py.series import PySeries
 
 
@@ -59,6 +60,9 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = dataframe.def_method[PyDataFrame.select](
         "select", docstring="Several columns, as a frame."
     )
+    _ = dataframe.def_method[PyDataFrame.labels](
+        "labels", docstring="The row labels, as an index."
+    )
     _ = dataframe.def_method[PyDataFrame.arrow_c_schema](
         "arrow_c_schema", docstring="The frame's Arrow schema, in a capsule."
     )
@@ -90,10 +94,144 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = series.def_method[PySeries.to_list](
         "to_list", docstring="Every value, copied into a Python list."
     )
+    _ = series.def_method[PySeries.labels](
+        "labels", docstring="The row labels, as an index."
+    )
     _ = series.def_method[PySeries.arrow_c_schema](
         "arrow_c_schema", docstring="The column's Arrow schema, in a capsule."
     )
     _ = series.def_method[PySeries.arrow_c_array](
         "arrow_c_array",
         docstring="The column's Arrow schema and data, in two capsules.",
+    )
+
+    ref index = module.add_type[PyIndex]("Index")
+    _ = index.def_py_init[PyIndex.py_init]()
+    _ = index.def_method[PyIndex.length](
+        "length", docstring="The number of labels."
+    )
+    _ = index.def_method[PyIndex.label](
+        "label", docstring="The level name, or None."
+    )
+    _ = index.def_method[PyIndex.dtype](
+        "dtype", docstring="The type of the labels, as firepanda spells it."
+    )
+    _ = index.def_method[PyIndex.inferred_type](
+        "inferred_type", docstring="What pandas calls the kind of the labels."
+    )
+    _ = index.def_method[PyIndex.is_range](
+        "is_range",
+        docstring="Whether the labels are still an arithmetic range.",
+    )
+    _ = index.def_method[PyIndex.start](
+        "start", docstring="The first label of a range."
+    )
+    _ = index.def_method[PyIndex.nbytes](
+        "nbytes", docstring="The bytes the labels occupy."
+    )
+    _ = index.def_method[PyIndex.null_count](
+        "null_count", docstring="How many labels are missing."
+    )
+    _ = index.def_method[PyIndex.at](
+        "at", docstring="One label, as a Python value."
+    )
+    _ = index.def_method[PyIndex.to_list](
+        "to_list", docstring="Every label, copied into a Python list."
+    )
+    _ = index.def_method[PyIndex.slice_rows](
+        "slice_rows", docstring="A half open range of rows."
+    )
+    _ = index.def_method[PyIndex.take](
+        "take", docstring="Labels gathered by position."
+    )
+    _ = index.def_method[PyIndex.is_unique](
+        "is_unique", docstring="Whether every label appears once."
+    )
+    _ = index.def_method[PyIndex.is_monotonic_increasing](
+        "is_monotonic_increasing",
+        docstring="Whether the labels never decrease.",
+    )
+    _ = index.def_method[PyIndex.is_monotonic_decreasing](
+        "is_monotonic_decreasing",
+        docstring="Whether the labels never increase.",
+    )
+    _ = index.def_method[PyIndex.get_loc](
+        "get_loc", docstring="Every position one label sits at."
+    )
+    _ = index.def_method[PyIndex.get_indexer](
+        "get_indexer",
+        docstring=(
+            "Where each of a set of labels sits, with -1 for the missing."
+        ),
+    )
+    _ = index.def_method[PyIndex.contains](
+        "contains", docstring="Whether a label is in the index."
+    )
+    _ = index.def_method[PyIndex.equals](
+        "equals", docstring="Whether two indexes hold the same labels."
+    )
+    _ = index.def_method[PyIndex.identical](
+        "identical", docstring="Whether the labels and the name both match."
+    )
+    _ = index.def_method[PyIndex.same_as](
+        "same_as",
+        docstring="Whether two indexes are the same object underneath.",
+    )
+    _ = index.def_method[PyIndex.unique](
+        "unique", docstring="The first of each label."
+    )
+    _ = index.def_method[PyIndex.renamed](
+        "renamed", docstring="The index under a different level name."
+    )
+    _ = index.def_method[PyIndex.union](
+        "union", docstring="Every label either side has."
+    )
+    _ = index.def_method[PyIndex.intersection](
+        "intersection", docstring="Every label both sides have."
+    )
+    _ = index.def_method[PyIndex.difference](
+        "difference",
+        docstring="Every label this index has and the other does not.",
+    )
+    _ = index.def_method[PyIndex.symmetric_difference](
+        "symmetric_difference", docstring="Every label exactly one side has."
+    )
+    _ = index.def_method[PyIndex.append](
+        "append", docstring="One or several indexes put on the end of this one."
+    )
+    _ = index.def_method[PyIndex.delete](
+        "delete",
+        docstring="The index without the labels at a set of positions.",
+    )
+    _ = index.def_method[PyIndex.insert](
+        "insert", docstring="The index with one label put in at a position."
+    )
+    _ = index.def_method[PyIndex.drop](
+        "drop",
+        docstring=(
+            "The index without every row carrying one of a set of labels."
+        ),
+    )
+    _ = index.def_method[PyIndex.putmask](
+        "putmask",
+        docstring="The index with the labels a mask picks out replaced.",
+    )
+    _ = index.def_method[PyIndex.get_slice_bound](
+        "get_slice_bound",
+        docstring="Where a label sits when the index is read in order.",
+    )
+    _ = index.def_method[PyIndex.slice_locs](
+        "slice_locs",
+        docstring="The half open row range a pair of labels describes.",
+    )
+    _ = index.def_method[PyIndex.slice_indexer](
+        "slice_indexer",
+        docstring="The same range with the step carried through.",
+    )
+    _ = index.def_method[PyIndex.arrow_c_schema](
+        "arrow_c_schema", docstring="The labels' Arrow schema, in a capsule."
+    )
+    _ = index.def_method[PyIndex.arrow_c_array](
+        "arrow_c_array",
+        docstring="The labels' Arrow schema and data, in two capsules.",
     )

@@ -153,6 +153,29 @@ struct AnyArray(Copyable, Movable, Sized):
         """
         return self.data.validity.null_count()
 
+    def nbytes(self) -> Int:
+        """Returns the bytes the column's buffers occupy.
+
+        Every buffer the column actually has, which is not the same set for
+        every column: a fixed width column has values and maybe a validity
+        bitmap, and a string column has views and a payload instead of values.
+        The bitmap is counted at one byte per eight rows rather than at its
+        allocated capacity, so the answer is about the data and not about the
+        allocator's rounding.
+
+        pandas reports this as `nbytes` and reports it for a `RangeIndex` too,
+        where the number it gives is the size of the Python object rather than of
+        any labels. `firepanda/py/index.mojo` answers zero there instead.
+
+        Returns:
+            The size in bytes.
+        """
+        var out = self.data.validity.byte_length()
+        if self.text:
+            ref held = self.text.value()
+            return out + len(held.views) + len(held.payload)
+        return out + len(self.data.values)
+
     def is_string(self) -> Bool:
         """Reports whether the column holds variable width elements.
 
