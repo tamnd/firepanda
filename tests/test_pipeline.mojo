@@ -29,6 +29,8 @@ from firepanda.exec import (
     Collect,
     Compute,
     Filter,
+    Group,
+    GroupAgg,
     Limit,
     Materialize,
     Node,
@@ -36,11 +38,16 @@ from firepanda.exec import (
     Pipeline,
     Project,
     Scan,
+    node_apply,
+    node_computes_per_row,
+    node_ends_early,
     node_is_breaker,
+    node_is_row_local,
     node_status,
 )
 from firepanda.frame.frame import DataFrame
 from firepanda.kernel.binary import BinaryOp
+from firepanda.kernel.group import AggKind
 
 
 def numbers(values: List[Int64]) raises -> AnyArray:
@@ -84,6 +91,36 @@ def cut_frame() raises -> DataFrame:
     keep.append(flags([True, False]))
     keep.append(flags([True, True, False]))
     keep.append(flags([True]))
+    var columns = List[ChunkedArray]()
+    columns.append(n^)
+    columns.append(keep^)
+    var fields = List[Field]()
+    fields.append(Field("n", LogicalType.INT64))
+    fields.append(Field("keep", LogicalType.BOOL))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def many_chunk_frame() raises -> DataFrame:
+    """Two hundred rows in forty chunks of five, with a mask over them.
+
+    Forty is chosen to be more than one batch on this machine and more than one
+    on a smaller one, since a batch is one chunk per worker and the driver takes
+    the parallel route from two chunks upwards. The mask drops every third row,
+    so what survives is neither a prefix nor a stride the reader could guess,
+    and the numbers are consecutive, so the order of the answer is checkable by
+    looking at it rather than by comparing against a second run.
+    """
+    var n = ChunkedArray(LogicalType.INT64)
+    var keep = ChunkedArray(LogicalType.BOOL)
+    for c in range(40):
+        var values = List[Int64]()
+        var mask = List[Bool]()
+        for r in range(5):
+            var v = Int64(c * 5 + r + 1)
+            values.append(v)
+            mask.append(v % 3 != 0)
+        n.append(numbers(values))
+        keep.append(flags(mask))
     var columns = List[ChunkedArray]()
     columns.append(n^)
     columns.append(keep^)
@@ -535,6 +572,135 @@ def test_arithmetic_on_text_is_caught_at_plan_time() raises:
     var pipeline = Pipeline(word_frame())
     with assert_raises(contains="is not defined on"):
         pipeline.add(Node(Compute(1, 2, BinaryOp.ADD, "nope")))
+
+
+def counter() raises -> Group:
+    """A group by on column 0 that counts the rows in each group."""
+    var keys = List[Int]()
+    keys.append(0)
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.COUNT, "rows"))
+    return Group(keys^, aggs^)
+
+
+def test_the_elementwise_nodes_are_the_row_local_ones() raises:
+    assert_true(node_is_row_local(Node(Filter(0))), "filter")
+    assert_true(node_is_row_local(Node(Project([0]))), "project")
+    assert_true(
+        node_is_row_local(Node(Compute(0, 0, BinaryOp.ADD, "x"))), "compute"
+    )
+    assert_true(node_is_row_local(Node(Cast(0, LogicalType.INT32))), "cast")
+    assert_false(node_is_row_local(Node(Limit(3))), "limit counts rows")
+    assert_false(node_is_row_local(Node(counter())), "a group by holds a table")
+
+
+def test_only_a_limit_can_end_before_its_input_does() raises:
+    assert_true(node_ends_early(Node(Limit(3))), "limit")
+    assert_false(node_ends_early(Node(Filter(0))), "filter")
+    assert_false(
+        node_ends_early(Node(counter())),
+        "a group by finishes after the source does, not before",
+    )
+
+
+def test_a_stateful_node_refuses_to_be_applied_without_being_mutated() raises:
+    """`node_apply` is what several workers call on one shared node, so a node
+    that would be racing itself has to be turned away rather than run."""
+    var node = Node(Limit(3))
+    var columns = List[AnyArray]()
+    columns.append(numbers([1, 2, 3]))
+    with assert_raises(contains="carries state between chunks"):
+        _ = node_apply(node, Chunk(columns^))
+
+
+def test_the_parallel_prefix_keeps_the_rows_in_the_order_the_source_had_them() raises:
+    """Forty chunks through a filter and a projection, which is the shape the
+    driver runs on every core. The rows come back in source order or the batch
+    boundary lost one."""
+    var pipeline = Pipeline(many_chunk_frame())
+    pipeline.add(Node(Filter(1)))
+    pipeline.add(Node(Project([0])))
+    var out = pipeline^.run()
+    var got = read_back(out, "n")
+    assert_equal(len(got), 134, "two hundred rows less the multiples of three")
+    var want = 0
+    for i in range(len(got)):
+        want += 1
+        if want % 3 == 0:
+            want += 1
+        assert_equal(got[i], Int64(want), "row " + String(i))
+
+
+def test_the_parallel_prefix_agrees_with_the_frame_methods() raises:
+    var pipeline = Pipeline(many_chunk_frame())
+    pipeline.add(Node(Compute(0, Value(Int64(10)), BinaryOp.MUL, "ten")))
+    pipeline.add(Node(Filter(1)))
+    pipeline.add(Node(Project([2])))
+    var out = pipeline^.run()
+    var got = read_back(out, "ten")
+
+    var whole = many_chunk_frame()
+    var mask = whole.column("keep").as_typed[DType.bool]()
+    var direct = whole.filter(mask)
+    assert_equal(len(got), len(direct), "the same number of rows")
+    var expected = read_back(direct, "n")
+    for i in range(len(got)):
+        assert_equal(got[i], expected[i] * 10, "row " + String(i))
+
+
+def test_a_breaker_after_the_parallel_prefix_sees_every_row() raises:
+    """The prefix runs on every core and the breaker after it does not, so what
+    is being checked is that the hand off between the two loses nothing."""
+    var pipeline = Pipeline(many_chunk_frame())
+    pipeline.add(Node(Filter(1)))
+    pipeline.add(Node(Project([0])))
+    pipeline.add(Node(counter()))
+    var out = pipeline^.run()
+    assert_equal(len(out), 134, "one group per surviving row")
+
+
+def test_a_limit_over_many_chunks_still_reads_one_chunk() raises:
+    """The parallel route reads a batch ahead, which is the wrong thing to do
+    when a limit is going to throw most of the batch away, so a pipeline holding
+    one is fed a chunk at a time. The chunk count of the answer is what says so:
+    three rows out of chunks of five is one chunk, cut."""
+    var pipeline = Pipeline(many_chunk_frame())
+    pipeline.add(Node(Limit(3)))
+    var out = pipeline^.run()
+    assert_equal(len(out), 3, "rows")
+    assert_equal(out.columns[0].num_chunks(), 1, "chunks read")
+
+
+def test_only_the_operators_that_do_arithmetic_are_worth_a_task() raises:
+    """A task costs about as much to create as a projection costs to run, so the
+    driver asks what the prefix computes before it hands it out."""
+    assert_true(node_computes_per_row(Node(Filter(0))), "a predicate per row")
+    assert_true(
+        node_computes_per_row(Node(Compute(0, 0, BinaryOp.ADD, "x"))),
+        "an expression per row",
+    )
+    assert_false(
+        node_computes_per_row(Node(Project([0]))),
+        "a projection rebuilds a chunk out of columns it already has",
+    )
+    assert_false(
+        node_computes_per_row(Node(Cast(0, LogicalType.INT32))),
+        "a cast waits on the allocator, not on arithmetic",
+    )
+    assert_false(node_computes_per_row(Node(Limit(3))), "limit")
+    assert_false(node_computes_per_row(Node(counter())), "group by")
+
+
+def test_a_projection_on_its_own_still_returns_every_row_in_order() raises:
+    """Nothing in this pipeline is worth a task, so it runs on the calling
+    thread. What it returns has to be the same either way."""
+    var pipeline = Pipeline(many_chunk_frame())
+    pipeline.add(Node(Project([0])))
+    var out = pipeline^.run()
+    var got = read_back(out, "n")
+    assert_equal(len(got), 200, "every row of every chunk")
+    for i in range(len(got)):
+        assert_equal(got[i], Int64(i + 1), "row " + String(i))
 
 
 def main() raises:

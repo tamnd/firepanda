@@ -51,6 +51,7 @@ from std.time import perf_counter_ns
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.array.chunked import ChunkedArray
+from firepanda.array.value import Value
 from firepanda.array.strings import (
     StringArray,
     StringBuilder,
@@ -69,7 +70,8 @@ from firepanda.dtype.dispatch import dispatch
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.dtype.lists import NUMERIC
-from firepanda.exec import Group, GroupAgg, Materialize, Node, Pipeline
+from firepanda.exec import Cast, Compute, Filter, Group, GroupAgg
+from firepanda.exec import Limit, Materialize, Node, Pipeline, Project
 from firepanda.exec.morsel import MORSEL_ROWS
 from firepanda.frame.display import DisplayOptions, render_column
 from firepanda.frame.frame import DataFrame
@@ -151,6 +153,7 @@ from firepanda.kernel import (
 )
 from firepanda.kernel.arith import OP_ADD
 from firepanda.kernel.compare import CMP_EQ, CMP_LT
+from firepanda.kernel.binary import BinaryOp
 from firepanda.testing.rng import Rng
 from firepanda.kernel.scalar import (
     add_scalar,
@@ -3075,6 +3078,147 @@ def _whole_frame_group(var frame: DataFrame) raises -> DataFrame:
     )
 
 
+def bench_pipeline(mut harness: Harness) raises:
+    """The engine driver on a line of elementwise operators.
+
+    Every other pipeline row in this file puts a breaker first, which measures
+    the operator and not the driver. These put a comparison, a filter and a
+    projection in a line with nothing that carries state, which is the shape the
+    driver runs on every core, so what they measure is the driver: how a chunk
+    gets to a worker, what a batch boundary costs, and what is left over when
+    the per chunk work is small.
+
+    The three chunk sizes are the measurement. The same total per row work is
+    done in all three, so anything that differs between them is per chunk. At
+    sixteen thousand rows a chunk there are sixty four chunks and two batches on
+    a machine with thirty two workers, at a hundred and twenty eight thousand
+    there are eight chunks and one batch that does not fill the machine, and the
+    one chunk row has nothing to spread at all and is what the other two are
+    measured against.
+
+    `pipeline_project` is the same line with the arithmetic taken out, so it is
+    close to the driver on its own: three moves of a column list per chunk and
+    whatever the batch costs.
+
+    Args:
+        harness: The harness.
+
+    Raises:
+        If a benchmark raises.
+    """
+    var rows = harness.options.rows
+    var rng = Rng(0x51DE21)
+
+    var key = Array[DType.int64](rows)
+    var value = Array[DType.int64](rows)
+    for i in range(rows):
+        var draw = rng.next_u64()
+        key[i] = Int64(draw % 1000)
+        value[i] = Int64(draw % 1000)
+
+    var columns = List[AnyArray]()
+    columns.append(AnyArray(key^))
+    columns.append(AnyArray(value^))
+    var fields = List[Field]()
+    fields.append(Field("key", LogicalType.INT64))
+    fields.append(Field("value", LogicalType.INT64))
+    var flat = DataFrame(Schema(fields^), columns^)
+
+    var small = _in_chunks(flat, 16 * 1024, 0, 1)
+    var streamed = _in_chunks(flat, MORSEL_ROWS, 0, 1)
+    var whole = _in_chunks(flat, rows if rows > 0 else 1, 0, 1)
+
+    # Half the rows survive, so the filter neither passes everything through
+    # untouched nor empties a chunk and lets the driver skip the rest of the
+    # line for it.
+    def line_small() raises {imm small}:
+        keep(small.rows)
+        var pipeline = Pipeline(DataFrame(copy=small))
+        pipeline.add(Node(Compute(1, Value(Int64(500)), BinaryOp.LT, "hit")))
+        pipeline.add(Node(Filter(2)))
+        pipeline.add(Node(Project([0, 1])))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record("exec/pipeline_line_16k", "rows", rows, line_small)
+
+    def line_streamed() raises {imm streamed}:
+        keep(streamed.rows)
+        var pipeline = Pipeline(DataFrame(copy=streamed))
+        pipeline.add(Node(Compute(1, Value(Int64(500)), BinaryOp.LT, "hit")))
+        pipeline.add(Node(Filter(2)))
+        pipeline.add(Node(Project([0, 1])))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record("exec/pipeline_line", "rows", rows, line_streamed)
+
+    def line_whole() raises {imm whole}:
+        keep(whole.rows)
+        var pipeline = Pipeline(DataFrame(copy=whole))
+        pipeline.add(Node(Compute(1, Value(Int64(500)), BinaryOp.LT, "hit")))
+        pipeline.add(Node(Filter(2)))
+        pipeline.add(Node(Project([0, 1])))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record("exec/pipeline_line_one_chunk", "rows", rows, line_whole)
+
+    def project_small() raises {imm small}:
+        keep(small.rows)
+        var pipeline = Pipeline(DataFrame(copy=small))
+        pipeline.add(Node(Project([1, 0])))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record("exec/pipeline_project", "rows", rows, project_small)
+
+    def project_streamed() raises {imm streamed}:
+        keep(streamed.rows)
+        var pipeline = Pipeline(DataFrame(copy=streamed))
+        pipeline.add(Node(Project([1, 0])))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record("exec/pipeline_project_128k", "rows", rows, project_streamed)
+
+    # A cast is the elementwise operator that allocates, which is what says
+    # whether spreading the line over the cores spreads the allocation with it
+    # or serialises on one allocator.
+    def cast_small() raises {imm small}:
+        keep(small.rows)
+        var pipeline = Pipeline(DataFrame(copy=small))
+        pipeline.add(Node(Cast(1, LogicalType.FLOAT64)))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record("exec/pipeline_cast", "rows", rows, cast_small)
+
+    def cast_streamed() raises {imm streamed}:
+        keep(streamed.rows)
+        var pipeline = Pipeline(DataFrame(copy=streamed))
+        pipeline.add(Node(Cast(1, LogicalType.FLOAT64)))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record("exec/pipeline_cast_128k", "rows", rows, cast_streamed)
+
+    # The same line with a limit at the end of it, which is the case the driver
+    # refuses to read ahead for. A head of a thousand rows over a million should
+    # cost one chunk of work whatever the machine is, so what this row says is
+    # that reading a batch at a time did not quietly turn a limit into a scan.
+    def line_limited() raises {imm small}:
+        keep(small.rows)
+        var pipeline = Pipeline(DataFrame(copy=small))
+        pipeline.add(Node(Compute(1, Value(Int64(500)), BinaryOp.LT, "hit")))
+        pipeline.add(Node(Filter(2)))
+        pipeline.add(Node(Limit(1000)))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record("exec/pipeline_limited", "rows", rows, line_limited)
+
+
 def bench_join(mut harness: Harness) raises:
     """Times joins, from the row pairing up to `DataFrame.join`.
 
@@ -3699,6 +3843,7 @@ def main() raises:
     bench_frame(harness)
     bench_hash(harness)
     bench_group(harness)
+    bench_pipeline(harness)
     bench_join(harness)
     bench_nulls(harness)
     bench_csv(harness)
