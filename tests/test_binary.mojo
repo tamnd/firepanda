@@ -930,6 +930,16 @@ def test_which_dtype_a_weak_scalar_lands_on() raises:
         "a number on a bool column is the one case the column does not win",
     )
     assert_true(
+        weak_operand_type(LogicalType.BOOL, LogicalType.FLOAT64)
+        == LogicalType.FLOAT64,
+        "and a float on one keeps its own width for the same reason",
+    )
+    assert_true(
+        weak_operand_type(LogicalType.BOOL, LogicalType.BOOL)
+        == LogicalType.BOOL,
+        "a bool on a bool column is the case where nothing has to give",
+    )
+    assert_true(
         weak_operand_type(LogicalType.STRING, LogicalType.INT64)
         == LogicalType.INT64,
         "a text column has no width to give",

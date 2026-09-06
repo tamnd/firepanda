@@ -59,7 +59,7 @@ from firepanda.array.array import Array
 from firepanda.array.value import Value
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
-from firepanda.dtype.logical import LogicalType, TypeKind, promote
+from firepanda.dtype.logical import LogicalType, promote
 
 from .arith import (
     OP_ADD,
@@ -319,6 +319,13 @@ def weak_operand_type(column: LogicalType, scalar: LogicalType) -> LogicalType:
     int8, `int8 + True` is int8, `int8 + 2.5` is float64, `float32 + 2` is
     float32, `bool + 2` is int64 and `bool + True` is bool.
 
+    A bool column is not numeric here, so it takes the first branch and the
+    scalar keeps its own width. That is the right answer for all three of its
+    cases and not a coincidence: a bool column has no width to give a number,
+    which is exactly what the first branch says about a column that is not a
+    number. `bool + 2` is int64 and `bool + 2.5` is float64 because that is what
+    the scalar arrived as, and `bool + True` is bool for the same reason.
+
     Args:
         column: The dtype of the column the scalar is being applied to.
         scalar: The dtype the scalar was read as, which is the widest of its
@@ -331,9 +338,7 @@ def weak_operand_type(column: LogicalType, scalar: LogicalType) -> LogicalType:
         return scalar
     if scalar.is_float():
         return column if column.is_float() else LogicalType.FLOAT64
-    if scalar.kind == TypeKind.BOOL:
-        return column
-    return LogicalType.INT64 if column.kind == TypeKind.BOOL else column
+    return column
 
 
 def _fits[target: DType](value: Int64) -> Bool:
