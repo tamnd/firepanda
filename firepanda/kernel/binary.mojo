@@ -3,7 +3,7 @@
 `arith.mojo` and `compare.mojo` hold the loops, one per dtype, and both take the
 dtype as a parameter. A frame does not have one: at the frame boundary a column
 is an `AnyArray` and its dtype is a field. This is the boundary crossing, and it
-is the only file that has to know that the ten operations are two families.
+is the only file that has to know that the thirteen operations are two families.
 
 Three things happen before a loop runs. The two operand types are promoted to a
 common type, by the same `promote` a concat and a coalesce use, so int32 with
@@ -21,6 +21,12 @@ makes an expression's type depend on what is in the column.
 Division is not part of the arithmetic family. It always answers float64,
 whatever went in, which is what `/` does in pandas, so it promotes for the sake
 of checking that the operands are numbers and then ignores the answer.
+
+Floor division and the remainder look like division and are not. `//` and `%`
+keep the operand type in pandas, so they promote like addition does and an
+integer column stays an integer column. What they do about a zero divisor is
+`arith.mojo`'s subject and is the one place in the file where firepanda answers
+something pandas does not.
 
 A constant on either side goes through `binary_value_any`, which is the same
 three steps with a `Value` where the second column would be. It promotes against
@@ -57,7 +63,13 @@ from .arith import (
     arith_const,
     divide,
     divide_const,
+    floor_divide,
+    floor_divide_const,
+    modulo,
+    modulo_const,
     multiply,
+    power,
+    power_const,
     subtract,
 )
 from .cast import cast_any
@@ -80,7 +92,13 @@ from .text import compare_text, compare_text_const
 
 
 struct BinaryOp(Equatable, ImplicitlyCopyable, Movable, Writable):
-    """One of the ten elementwise operations over a pair of columns."""
+    """One of the thirteen elementwise operations over a pair of columns.
+
+    The codes are not arbitrary. Every arithmetic operation sorts below every
+    comparison, because that is what lets `is_comparison` be one integer
+    comparison instead of a list, and a new operation goes in on the side it
+    belongs to rather than on the end.
+    """
 
     var code: UInt8
     """The operation, as a small integer."""
@@ -97,22 +115,31 @@ struct BinaryOp(Equatable, ImplicitlyCopyable, Movable, Writable):
     comptime DIV = Self(3)
     """Division, which always answers float64."""
 
-    comptime EQ = Self(4)
+    comptime FLOORDIV = Self(4)
+    """Floor division, which keeps the operand type."""
+
+    comptime MOD = Self(5)
+    """The remainder that goes with the floor division."""
+
+    comptime POW = Self(6)
+    """Raising to a power."""
+
+    comptime EQ = Self(7)
     """Equality."""
 
-    comptime NE = Self(5)
+    comptime NE = Self(8)
     """Inequality."""
 
-    comptime LT = Self(6)
+    comptime LT = Self(9)
     """Less than."""
 
-    comptime LE = Self(7)
+    comptime LE = Self(10)
     """Less than or equal."""
 
-    comptime GT = Self(8)
+    comptime GT = Self(11)
     """Greater than."""
 
-    comptime GE = Self(9)
+    comptime GE = Self(12)
     """Greater than or equal."""
 
     def __init__(out self, code: UInt8):
@@ -149,7 +176,7 @@ struct BinaryOp(Equatable, ImplicitlyCopyable, Movable, Writable):
         """Reports whether the operation answers a bool column.
 
         Returns:
-            True for the six comparisons, false for the four arithmetic ones.
+            True for the six comparisons, false for the seven arithmetic ones.
         """
         return self.code >= Self.EQ.code
 
@@ -162,8 +189,9 @@ struct BinaryOp(Equatable, ImplicitlyCopyable, Movable, Writable):
         either side is a NaN.
 
         Equality and inequality are their own mirrors, and so is every
-        arithmetic operation as far as this is concerned, because subtraction and
-        division take a flag instead. Only the four ordered comparisons change.
+        arithmetic operation as far as this is concerned, because the five that
+        are not symmetric take a flag into the loop instead. Only the four
+        ordered comparisons change.
 
         Returns:
             The mirrored operation.
@@ -192,6 +220,12 @@ struct BinaryOp(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("*")
         elif self == Self.DIV:
             writer.write("/")
+        elif self == Self.FLOORDIV:
+            writer.write("//")
+        elif self == Self.MOD:
+            writer.write("%")
+        elif self == Self.POW:
+            writer.write("**")
         elif self == Self.EQ:
             writer.write("==")
         elif self == Self.NE:
@@ -223,7 +257,9 @@ def binary_type(
 
     Returns:
         The result type: bool for a comparison, float64 for a division, and the
-        promoted operand type for the other three.
+        promoted operand type for the other six. Floor division and the
+        remainder are in that last group and not with division, because `//` and
+        `%` keep the operand type in pandas and `/` does not.
 
     Raises:
         If the two types have no common type, or the operation is arithmetic and
@@ -370,6 +406,12 @@ def _binary_erased(
                     return AnyArray(subtract(x, y))
                 if op == BinaryOp.MUL:
                     return AnyArray(multiply(x, y))
+                if op == BinaryOp.FLOORDIV:
+                    return AnyArray(floor_divide(x, y))
+                if op == BinaryOp.MOD:
+                    return AnyArray(modulo(x, y))
+                if op == BinaryOp.POW:
+                    return AnyArray(power(x, y))
                 return AnyArray(divide(x, y))
     raise Error("binary: unsupported dtype")
 
@@ -527,5 +569,11 @@ def _binary_const_erased(
                     return AnyArray(arith_const[target, OP_SUB](x, y, flip))
                 if op == BinaryOp.MUL:
                     return AnyArray(arith_const[target, OP_MUL](x, y))
+                if op == BinaryOp.FLOORDIV:
+                    return AnyArray(floor_divide_const[target](x, y, flip))
+                if op == BinaryOp.MOD:
+                    return AnyArray(modulo_const[target](x, y, flip))
+                if op == BinaryOp.POW:
+                    return AnyArray(power_const[target](x, y, flip))
                 return AnyArray(divide_const[target](x, y, flip))
     raise Error("binary: unsupported dtype")

@@ -15,6 +15,7 @@ Read the twins to find out what a kernel is supposed to do. They are the
 specification in the only form that runs.
 """
 
+from std.ffi import external_call
 from std.math import isnan, nan, sqrt
 
 from firepanda.array.array import Array
@@ -266,6 +267,124 @@ def divide_scalar[
     return out^
 
 
+def floor_divide_scalar[dt: DType](a: Array[dt], b: Array[dt]) -> Array[dt]:
+    """Floor divides two columns, one element at a time.
+
+    The result keeps the operand type, which is what pandas does with `//` and
+    is not what it does with `/`. On an integer dtype a zero divisor has no
+    answer in the type, so the row is null; on a float dtype it is an infinity
+    or a NaN and the row is present. That rule is decided here and the kernel
+    follows it, which is the whole arrangement in this file.
+
+    Args:
+        a: The numerator column.
+        b: The denominator column. Must be the same length as `a`.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column of quotients, null wherever either input is null and, on an
+        integer dtype, wherever the divisor is zero.
+    """
+    var out = Array[dt](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i) or not b.is_valid(i):
+            out.set_null(i)
+            continue
+        comptime if dt.is_integral():
+            if b[i] == 0:
+                out.set_null(i)
+                continue
+        out.set_valid(i, a[i] // b[i])
+    return out^
+
+
+def modulo_scalar[dt: DType](a: Array[dt], b: Array[dt]) -> Array[dt]:
+    """Takes the remainder of two columns, one element at a time.
+
+    Same rule about a zero divisor as the floor division above, for the same
+    reason: the two come from one rounding and cannot disagree about which rows
+    have an answer.
+
+    Args:
+        a: The numerator column.
+        b: The denominator column. Must be the same length as `a`.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column of remainders, null wherever either input is null and, on an
+        integer dtype, wherever the divisor is zero.
+    """
+    var out = Array[dt](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i) or not b.is_valid(i):
+            out.set_null(i)
+            continue
+        comptime if dt.is_integral():
+            if b[i] == 0:
+                out.set_null(i)
+                continue
+        out.set_valid(i, a[i] % b[i])
+    return out^
+
+
+def power_scalar[dt: DType](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
+    """Raises one column to another, one element at a time.
+
+    Two rules live here rather than in the kernel. A negative exponent on a
+    signed integer dtype raises, because there is no answer in the integers and
+    numpy raises rather than answering the zero the instruction gives. And a
+    float power comes from the C library's `pow` rather than from the language's
+    operator, because the operator is a fast approximation and the library is
+    what numpy calls; see `_powers` in `arith.mojo` for the size of the
+    difference.
+
+    Args:
+        a: The base column.
+        b: The exponent column. Must be the same length as `a`.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column of powers, null wherever either input is null.
+
+    Raises:
+        Error: If the dtype is a signed integer and any exponent is negative.
+    """
+    var out = Array[dt](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i) or not b.is_valid(i):
+            out.set_null(i)
+            continue
+        comptime if dt.is_integral():
+            comptime if dt.is_signed():
+                if b[i] < 0:
+                    raise Error(
+                        "power: integers to negative integer powers are not"
+                        " allowed"
+                    )
+            out.set_valid(i, a[i] ** b[i])
+        elif dt == DType.float64:
+            out.set_valid(
+                i,
+                external_call["pow", Float64](
+                    a[i].cast[DType.float64](), b[i].cast[DType.float64]()
+                ).cast[dt](),
+            )
+        else:
+            out.set_valid(
+                i,
+                external_call["powf", Float32](
+                    a[i].cast[DType.float32](), b[i].cast[DType.float32]()
+                ).cast[dt](),
+            )
+    return out^
+
+
 def equal_scalar[dt: DType](a: Array[dt], b: Array[dt]) -> Array[DType.bool]:
     """Compares two columns for equality, one element at a time.
 
@@ -372,6 +491,146 @@ def divide_const_scalar[
             out.set_valid(i, Float64(b) / Float64(a[i]))
         else:
             out.set_valid(i, Float64(a[i]) / Float64(b))
+    return out^
+
+
+def floor_divide_const_scalar[
+    dt: DType
+](a: Array[dt], b: Scalar[dt], flip: Bool = False) -> Array[dt]:
+    """Floor divides against a constant, one element at a time.
+
+    Which operand is the divisor depends on the flag, and on an integer dtype
+    that is the whole difference between the two cases. Unflipped, the divisor
+    is the same for every row and the column is either all null or has no nulls
+    the input did not already have. Flipped, the divisor comes out of the column
+    and every row has to be looked at. The kernel takes those two apart and this
+    does not, which is the point.
+
+    Args:
+        a: The column.
+        b: The constant.
+        flip: True if the constant is the numerator.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column of quotients, null where the column is null and, on an integer
+        dtype, wherever the divisor is zero.
+    """
+    var out = Array[dt](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        var numerator = b if flip else a[i]
+        var divisor = a[i] if flip else b
+        comptime if dt.is_integral():
+            if divisor == 0:
+                out.set_null(i)
+                continue
+        out.set_valid(i, numerator // divisor)
+    return out^
+
+
+def modulo_const_scalar[
+    dt: DType
+](a: Array[dt], b: Scalar[dt], flip: Bool = False) -> Array[dt]:
+    """Takes the remainder against a constant, one element at a time.
+
+    Same rule about a zero divisor as the floor division above, and for the same
+    reason: the two come from one rounding and cannot disagree about which rows
+    have an answer.
+
+    Args:
+        a: The column.
+        b: The constant.
+        flip: True if the constant is the numerator.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column of remainders, null where the column is null and, on an integer
+        dtype, wherever the divisor is zero.
+    """
+    var out = Array[dt](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        var numerator = b if flip else a[i]
+        var divisor = a[i] if flip else b
+        comptime if dt.is_integral():
+            if divisor == 0:
+                out.set_null(i)
+                continue
+        out.set_valid(i, numerator % divisor)
+    return out^
+
+
+def power_const_scalar[
+    dt: DType
+](a: Array[dt], b: Scalar[dt], flip: Bool = False) raises -> Array[dt]:
+    """Raises against a constant, one element at a time.
+
+    The refusal of a negative exponent on a signed integer dtype is hoisted out
+    of the loop when the constant is the exponent, and left in the loop when the
+    column is. That is not an optimisation carried over from the kernel. A
+    constant exponent is a property of the operation and not of a row, so it is
+    wrong on a column with nothing in it just as much as on a full one, and the
+    call has to fail either way.
+
+    Args:
+        a: The column.
+        b: The constant.
+        flip: True if the constant is the base.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column of powers, null where the column is null.
+
+    Raises:
+        Error: If the dtype is a signed integer and an exponent is negative.
+    """
+    comptime if dt.is_integral() and dt.is_signed():
+        if not flip and b < 0:
+            raise Error(
+                "power: integers to negative integer powers are not allowed"
+            )
+    var out = Array[dt](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        var base = b if flip else a[i]
+        var exponent = a[i] if flip else b
+        comptime if dt.is_integral():
+            comptime if dt.is_signed():
+                if exponent < 0:
+                    raise Error(
+                        "power: integers to negative integer powers are not"
+                        " allowed"
+                    )
+            out.set_valid(i, base**exponent)
+        elif dt == DType.float64:
+            out.set_valid(
+                i,
+                external_call["pow", Float64](
+                    base.cast[DType.float64](),
+                    exponent.cast[DType.float64](),
+                ).cast[dt](),
+            )
+        else:
+            out.set_valid(
+                i,
+                external_call["powf", Float32](
+                    base.cast[DType.float32](),
+                    exponent.cast[DType.float32](),
+                ).cast[dt](),
+            )
     return out^
 
 
