@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### The shipped extension no longer carries its symbol table
+
+`tools/build_extension.sh` discards the local symbol names from `_firepanda.so` before it signs it. The build directory on this machine went from 5,141,776 bytes to 4,200,416, and the extension itself from 2,417,600 to 1,476,240, which is 39 percent off the file with nothing given up that a shipped artefact uses.
+
+The reason the saving is that large is that a Mojo generic is compiled once per set of type arguments and each copy is named after those arguments, spelled as MLIR types. One of those names in the current extension is over four thousand characters long and there are thousands of them. On a build that reaches the arithmetic kernels from Python, which is the next thing to land, the file is 7,858,352 bytes and only 2,998,272 of that is code: the symbol table is 4,849,664 and stripping takes the file to 3,064,128, which is 61 percent. The bigger the library gets the more this saves, because the names grow with the instantiations rather than with the source.
+
+What is given up is function names in a crash trace from a shipped build, which is the ordinary trade for a release artefact and is not how anybody debugs this anyway, since a developer already has the unstripped file in `build/` from their own `mojo build`. Only the extension is stripped. The four vendored runtime libraries arrive from the toolchain already stripped, so the same call takes nothing off them and the fresh signature it forces costs twelve kilobytes each.
+
+`python/tests/test_extension.py` gained a test that the names are gone, because the build script skips the step when there is no `strip` on the path and says so on stderr, which is right on a machine without binutils and is exactly the kind of quiet skip the size budget above it would not catch.
+
 ### The named forms on a frame, and `divmod` on a series
 
 `df.add(other)` and its nineteen relatives are in, so everything the operators do is reachable by name as well, and two things that the operators cannot say are reachable at all. `add` through `rpow` take `fill_value` and `eq` through `ge` do not, which is pandas' own split rather than an omission, and all twenty take `axis`. Each of them has three overloads, against another frame, against a series and against a constant, because that is the one Python method the binding layer has to stand on.

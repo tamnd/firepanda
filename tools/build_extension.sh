@@ -85,6 +85,49 @@ needed() {
   esac
 }
 
+# Throw away the local symbol names, which are most of the file.
+#
+# A Mojo generic is compiled once per set of type arguments and the name of each
+# copy carries those arguments in full, spelled as MLIR types. One of them in the
+# extension is over four thousand characters long, and there are thousands of
+# them, because every dtype pair that a kernel is instantiated for gets its own.
+# Measured on the build that first reached the arithmetic kernels from Python:
+# 7,858,352 bytes, of which the code was 2,998,272 and the symbol table was
+# 4,849,664. Discarding the local names takes the file to 3,064,128, which is 61
+# percent off for nothing given up that a shipped artefact uses.
+#
+# What is given up is function names in a crash trace, which for a release build
+# is the ordinary trade and is not the way anybody debugs this: a developer has
+# the unstripped file in `build/` from their own `mojo build` and it is that copy
+# they run under a debugger.
+#
+# Only the extension is stripped. The four runtime libraries come out of the
+# toolchain already stripped, so the same call takes nothing off them and the
+# signature it forces a fresh copy of costs twelve kilobytes each, which is a net
+# loss of fifty one kilobytes for no gain at all.
+shrink() {
+  command -v strip > /dev/null || {
+    echo "no strip on PATH, leaving the symbol table in" >&2
+    return 0
+  }
+
+  echo "discarding local symbols"
+  # Local symbols only. The dynamic symbol table is what the loader reads and
+  # `PyInit__firepanda` lives in it, so `-x` is the whole of what is safe here
+  # and `-s` would take the entry point out and leave a file Python cannot import.
+  strip -x "$1"
+
+  # Stripping edits the file and therefore invalidates its signature, with the
+  # SIGKILL consequence the codesign comment below describes. `relocate` signs
+  # this same file again a moment later and that is fine: `--force` replaces, two
+  # signatures never coexist, and the file is the same size either way. Signing
+  # here anyway is what keeps this function correct on its own rather than
+  # correct because of what happens to run after it.
+  case "$(uname -s)" in
+    Darwin) codesign --force --sign - "$1" ;;
+  esac
+}
+
 # Point a binary at the directory it is sitting in, and at nothing else.
 #
 # Only absolute rpaths are removed. The four runtime libraries carry several
@@ -153,6 +196,8 @@ while [ ${#pending[@]} -gt 0 ]; do
     pending+=("$out/$name")
   done < <(needed "$current")
 done
+
+shrink "$out/_firepanda.so"
 
 for file in "$out"/*; do
   relocate "$file"
