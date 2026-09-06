@@ -236,8 +236,11 @@ def test_a_type_firepanda_does_not_have_is_refused_by_name(
     """The producer is allowed to send anything Arrow has, and we have less of it."""
     import pyarrow as pa
 
+    # A duration used to be the example here and firepanda reads one now, so the
+    # example is a time of day, which is the next Arrow type with no firepanda
+    # spelling and is not going to acquire one by accident.
     with pytest.raises(firepanda.errors.UnsupportedError) as caught:
-        firepanda.from_arrow(pa.table({"when": pa.array([1, 2], type=pa.duration("s"))}))
+        firepanda.from_arrow(pa.table({"when": pa.array([1, 2], type=pa.time64("us"))}))
     assert "unsupported format string" in str(caught.value)
 
 
