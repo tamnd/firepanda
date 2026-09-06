@@ -1336,6 +1336,73 @@ struct Series(Copyable, Movable, Sized, Writable):
         """
         return self.binary(value, BinaryOp.POW, value_on_left=True)
 
+    def __divmod__(self, other: Self) raises -> Tuple[Self, Self]:
+        """Divides and takes the remainder in one call.
+
+        pandas has this on a series and not on a frame, and it is two calls
+        under the covers there as well, so the pair costs two passes and not
+        one. Doing it in a single pass would need a kernel that writes two
+        columns, which nothing else in `firepanda/kernel` does.
+
+        Args:
+            other: The divisors.
+
+        Returns:
+            The quotients rounded towards minus infinity, and the remainders.
+
+        Raises:
+            Error: If the operands cannot be aligned or divided.
+        """
+        return (self.floordiv(other), self.mod(other))
+
+    def __divmod__(self, value: Value) raises -> Tuple[Self, Self]:
+        """Divides every row by a constant and takes the remainder.
+
+        Args:
+            value: The divisor.
+
+        Returns:
+            The quotients and the remainders.
+
+        Raises:
+            Error: If the column cannot be divided.
+        """
+        return (
+            self.binary(value, BinaryOp.FLOORDIV),
+            self.binary(value, BinaryOp.MOD),
+        )
+
+    def __rdivmod__(self, other: Self) raises -> Tuple[Self, Self]:
+        """Divides another series by this one and takes the remainder.
+
+        Args:
+            other: The dividends.
+
+        Returns:
+            The quotients and the remainders.
+
+        Raises:
+            Error: If the operands cannot be aligned or divided.
+        """
+        return (self.rfloordiv(other), self.rmod(other))
+
+    def __rdivmod__(self, value: Value) raises -> Tuple[Self, Self]:
+        """Divides a constant by every row and takes the remainder.
+
+        Args:
+            value: The dividend.
+
+        Returns:
+            The quotients and the remainders.
+
+        Raises:
+            Error: If the column cannot be divided.
+        """
+        return (
+            self.binary(value, BinaryOp.FLOORDIV, value_on_left=True),
+            self.binary(value, BinaryOp.MOD, value_on_left=True),
+        )
+
     def __eq__(self, other: Self) raises -> Self:
         """Compares two identically labelled series for equality.
 

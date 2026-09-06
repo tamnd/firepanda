@@ -494,5 +494,119 @@ def test_the_erased_entry_point_takes_the_operation_as_a_value() raises:
     )
 
 
+def test_the_named_forms_reach_the_same_loops_as_the_operators() raises:
+    """Fourteen of them, and the only thing they add over the operators is the
+    two keyword arguments, so this checks the wiring rather than the
+    arithmetic."""
+    var a = frame(col("x", [7, 8]), [1, 2])
+    var b = frame(col("x", [2, 3]), [1, 2])
+    assert_equal(ints(a.add(b), "x")[0], Int64(9), "add")
+    assert_equal(ints(a.sub(b), "x")[0], Int64(5), "sub")
+    assert_equal(ints(a.mul(b), "x")[0], Int64(14), "mul")
+    assert_equal(floats(a.truediv(b), "x")[0], Float64(3.5), "truediv")
+    assert_equal(ints(a.floordiv(b), "x")[0], Int64(3), "floordiv")
+    assert_equal(ints(a.mod(b), "x")[0], Int64(1), "mod")
+    assert_equal(ints(a.pow(b), "x")[0], Int64(49), "pow")
+
+
+def test_the_reflected_named_forms_turn_the_operands_round() raises:
+    """Which is the only way to write `b - a` when `a` is the frame in hand."""
+    var a = frame(col("x", [7, 8]), [1, 2])
+    var b = frame(col("x", [2, 3]), [1, 2])
+    assert_equal(ints(a.rsub(b), "x")[0], Int64(-5), "rsub")
+    assert_equal(ints(a.rfloordiv(b), "x")[0], Int64(0), "rfloordiv")
+    assert_equal(ints(a.rmod(b), "x")[0], Int64(2), "rmod")
+    assert_equal(ints(a.rpow(b), "x")[0], Int64(128), "rpow")
+
+
+def test_a_named_form_takes_a_fill_value_between_two_frames() raises:
+    """The reason the named forms exist at all, since an operator has nowhere to
+    put one."""
+    var a = frame(col("x", [1, 2]), [1, 2])
+    var b = frame(col("x", [10, 20]), [2, 3])
+    var got = a.add(b, fill_value=Value(Int64(0)))
+    assert_equal(len(got), 3, "the union of the labels")
+    assert_equal(ints(got, "x")[0], Int64(1), "label 1 was filled")
+    assert_equal(ints(got, "x")[1], Int64(12), "label 2 had both")
+    assert_equal(ints(got, "x")[2], Int64(20), "label 3 was filled")
+
+
+def test_a_named_form_ignores_a_fill_value_against_a_constant() raises:
+    """pandas takes the argument and does nothing with it, because a constant is
+    never the side that is missing, and answering an error instead would break
+    code that passes `fill_value` through from somewhere else."""
+    var a = frame(col("x", [1, 2]), [1, 2])
+    var got = a.add(Value(Int64(3)), fill_value=Value(Int64(99)))
+    assert_equal(ints(got, "x")[0], Int64(4), "row 0")
+    assert_equal(ints(got, "x")[1], Int64(5), "row 1")
+
+
+def test_a_named_form_refuses_a_fill_value_against_a_series() raises:
+    """`NotImplementedError: fill_value 0 not supported.` is what pandas says,
+    and the reason is that a series is broadcast rather than aligned cell by
+    cell, so there is no second side for the fill to stand in for."""
+    var a = frame(col("x", [1, 2]), [1, 2])
+    var s = text_labelled("s", [10], ["x"])
+    with assert_raises(contains="fill_value has nothing to fill"):
+        _ = a.add(s, fill_value=Value(Int64(0)))
+
+
+def test_a_named_form_takes_an_axis_against_a_series() raises:
+    """Which is the other reason the named forms exist. The operator has to pick
+    one and picks the columns, so the rows are only reachable through here."""
+    var a = frame(col("x", [1, 2]), col("y", [3, 4]), [1, 2])
+    var down = series("s", [5, 6], [2, 3])
+    var got = a.add(down, axis=0)
+    assert_equal(len(got), 3, "the union of the labels")
+    assert_equal(ints(got, "x")[1], Int64(7), "2 + 5 on label 2")
+    assert_equal(ints(got, "y")[1], Int64(9), "4 + 5 on label 2")
+
+    var across = text_labelled("s", [10], ["x"])
+    assert_equal(ints(a.add(across), "x")[0], Int64(11), "and 1 is the default")
+
+
+def test_a_reflected_named_form_against_a_series_along_the_rows() raises:
+    """`a.rsub(s, axis=0)` is `s - a` down the rows, which is the combination
+    with the most to get wrong in it."""
+    var a = frame(col("x", [1, 2]), [1, 2])
+    var down = series("s", [5, 6], [2, 3])
+    var got = a.rsub(down, axis=0)
+    assert_equal(ints(got, "x")[1], Int64(3), "5 - 2 on label 2")
+    assert_equal(here(got, "x", 0), False, "label 1 is not in the series")
+
+
+def test_the_flexible_comparisons_align_where_the_operators_refuse() raises:
+    """The operator raises on two frames that are not shaped alike and the named
+    form answers, which is pandas. The divergence is what it answers for a cell
+    only one side has: this says missing and pandas says False."""
+    var a = frame(col("x", [1, 2]), [1, 2])
+    var b = frame(col("x", [1, 2]), [2, 3])
+    var got = a.eq(b)
+    assert_equal(len(got), 3, "the union of the labels")
+    assert_equal(flags(got, "x")[1], False, "2 is not 1")
+    assert_equal(here(got, "x", 0), False, "and label 1 has no answer")
+
+
+def test_the_six_comparison_named_forms_against_a_constant() raises:
+    """The same six the operators have, reachable by name for a caller that has
+    the operation as a value rather than as syntax."""
+    var a = frame(col("x", [7, 8]), col("y", [2, 3]), [1, 2])
+    var three = Value(Int64(3))
+    assert_equal(flags(a.eq(three), "y")[1], True, "eq")
+    assert_equal(flags(a.ne(three), "y")[1], False, "ne")
+    assert_equal(flags(a.lt(three), "y")[0], True, "lt")
+    assert_equal(flags(a.le(three), "y")[1], True, "le")
+    assert_equal(flags(a.gt(three), "x")[0], True, "gt")
+    assert_equal(flags(a.ge(three), "y")[1], True, "ge")
+
+
+def test_the_comparison_named_forms_reach_a_series_too() raises:
+    """Broadcast along the columns by default, the same as the arithmetic."""
+    var a = frame(col("x", [7, 8]), col("y", [2, 3]), [1, 2])
+    var s = text_labelled("s", [7, 3], ["x", "y"])
+    assert_equal(flags(a.eq(s), "x")[0], True, "7 equals 7")
+    assert_equal(flags(a.lt(s), "y")[0], True, "2 is below 3")
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

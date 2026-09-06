@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### The named forms on a frame, and `divmod` on a series
+
+`df.add(other)` and its nineteen relatives are in, so everything the operators do is reachable by name as well, and two things that the operators cannot say are reachable at all. `add` through `rpow` take `fill_value` and `eq` through `ge` do not, which is pandas' own split rather than an omission, and all twenty take `axis`. Each of them has three overloads, against another frame, against a series and against a constant, because that is the one Python method the binding layer has to stand on.
+
+`axis` is the argument that matters, because it is the only way to say the thing `df + s` cannot. The operator has to pick an axis and pandas picks the columns, so `df.add(s, axis=0)` is the only spelling of "add this series down the rows" there is. Between two frames `axis` is ignored, since two frames align on both of their axes whatever it says, and it is a parameter there because pandas has one and a binding that dropped it would fail the signature level of the conformance suite.
+
+`fill_value` has two behaviours that look like bugs and are measured. Against a constant it is accepted and ignored, because a constant is never the side that is missing, and refusing it would break code that passes the argument through from somewhere else. Against a series it raises, because a series is broadcast across the rows rather than aligned against them cell by cell, so there is no second side for a fill to stand in for. pandas says `NotImplementedError: fill_value 0 not supported.` there and this says the same thing in more words.
+
+`divmod` and `rdivmod` are on a series, which is where pandas has them and not on a frame. They are two passes rather than one, there as well as here, because the pair comes out of a floor division and a remainder run separately and a single pass would need a kernel that writes two columns, which nothing else in `firepanda/kernel` does.
+
+Comparing a text column against a string now has tests, which is the last thing that was holding the series comparison work open. `s < "b"` compares lexicographically and answers a boolean column, all six comparisons are covered, a string on the left turns the comparison round rather than being assumed to be on the right, and two text columns compare row by row. The behaviour was already there. Nothing had ever asked it a question.
+
+Writing those tests found one gap. `s + t` on two text columns concatenates in pandas and raises here, because the kernel has the six comparisons on text and not the one arithmetic operation text has. The alignment above it is ready and this is a loop in `firepanda/kernel/text.mojo` rather than a design question, so the test asserts the refusal and says which of the two it is instead of leaving the gap unrecorded.
+
 ## [0.6.47] - 2026-09-06
 
 Built against Mojo 1.0.0 (ed45d567). A series and a frame both do arithmetic now, the kernel has the operators that were missing under them, and a grouped correlation stopped reading its columns twice.
