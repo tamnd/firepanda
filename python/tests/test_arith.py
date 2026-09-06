@@ -36,6 +36,7 @@ fixed, this file is one of the places that has to be edited to say so.
 
 from __future__ import annotations
 
+import math
 from types import ModuleType
 
 import pytest
@@ -622,3 +623,54 @@ def test_a_bool_frame_divided_by_another_frame_is_refused(
 
     with pytest.raises(NotImplementedError, match="not implemented for bool dtypes"):
         frame() / frame()
+
+
+def test_a_float_quotient_of_an_infinity_is_a_nan(firepanda: ModuleType) -> None:
+    """`inf // 2` is a NaN in pandas and not an infinity, which is the opposite
+    of what the obvious expression gives.
+
+    There is no floor of an infinite quotient. numpy takes the remainder first
+    and derives the quotient from it, and the remainder of an infinity is a NaN,
+    so the NaN is what falls out. A zero divisor goes the other way and keeps its
+    infinity, because that one is a division and never reaches a floor.
+    """
+    top = firepanda.Series([math.inf, -math.inf, 2.0, 2.0])
+    bottom = firepanda.Series([2.0, 2.0, math.inf, 0.0])
+
+    quotients = (top // bottom).tolist()
+    assert math.isnan(quotients[0])
+    assert math.isnan(quotients[1])
+    assert quotients[2] == 0.0
+    assert quotients[3] == math.inf
+
+    remainders = (top % bottom).tolist()
+    assert math.isnan(remainders[0])
+    assert math.isnan(remainders[1])
+    assert remainders[2] == 2.0
+    assert math.isnan(remainders[3])
+
+
+def test_a_float_remainder_stays_exact_past_the_whole_integers(
+    firepanda: ModuleType,
+) -> None:
+    """The failure that matters here is not about infinities.
+
+    A float64 holds every integer up to 2 to the 53 and only some of them after
+    that, so `x - floor(x / y) * y` has no digits left the moment the quotient
+    passes that line. 2 to the 53 is about 9.0e15, which a nanosecond timestamp
+    passed in the spring of 1970, so this is an ordinary range. Every expected
+    value was read off pandas 3.0.3.
+    """
+    column = firepanda.Series([2.0**53, 2.0**54, 1e17, 1.7976931348623157e308])
+    assert (column % 3).tolist() == [2.0, 1.0, 1.0, 2.0]
+    assert (column % 3.0).tolist() == [2.0, 1.0, 1.0, 2.0]
+
+
+def test_a_float_remainder_takes_the_sign_of_the_divisor(firepanda: ModuleType) -> None:
+    """The Python rule and not the C one, which is what the integer columns
+    already do, and it survives the quotient being built out of `fmod`, whose own
+    remainder takes the sign of the numerator instead."""
+    top = firepanda.Series([7.0, -7.0, 7.0, -7.0])
+    bottom = firepanda.Series([3.0, 3.0, -3.0, -3.0])
+    assert (top % bottom).tolist() == [1.0, 2.0, -2.0, -1.0]
+    assert (top // bottom).tolist() == [2.0, -3.0, -3.0, 2.0]

@@ -35,6 +35,16 @@ of the types alone, and it is a registered divergence rather than a quiet
 difference. Floats still answer the infinity, because a float column can hold
 one.
 
+On a float those two are not vector instructions either, for a reason of their
+own that has nothing to do with a zero divisor. Mojo's `//` and `%` on a
+register of floats compute `floor(x / y)` and `x - floor(x / y) * y`, which is
+the obvious formula and is wrong twice: it loses every digit of the remainder
+once the quotient is too large for a float to hold an integer exactly, and it
+answers an infinity for `inf // 2` where NumPy answers a NaN. NumPy takes the
+remainder first with `fmod`, which is exact at every magnitude, and derives the
+quotient from it. So do `_remainders` and `_quotients`, which is where the
+detail of that lives.
+
 Nulling those rows is the only place in this file where the result depends on a
 value, so it is the only loop that touches the validity it was handed. The test
 is a horizontal reduce over the register, which is a few instructions against
@@ -63,6 +73,7 @@ found out inside it once per register.
 """
 
 from std.ffi import external_call
+from std.math import copysign, floor
 from std.sys.info import simd_width_of
 
 from firepanda.array.array import Array
@@ -239,8 +250,10 @@ def floor_divide[dt: DType](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
 
     The rounding is the Python one and not the C one, so a negative numerator
     rounds away from zero rather than towards it and `-7 // 3` is `-3`. That is
-    what numpy answers and what the hardware instruction underneath already
-    does here.
+    what numpy answers. On an integer dtype the hardware instruction underneath
+    already does it; on a float `_quotients` builds it out of a remainder,
+    because the obvious formula gets the infinities wrong and loses precision
+    on large numbers.
 
     Args:
         a: The numerator column.
@@ -270,7 +283,9 @@ def modulo[dt: DType](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
     not the C one, so `-7 % 3` is `2` rather than `-1`. It is the remainder that
     goes with the floor division above, and the two are consistent for the same
     reason they are in Python: the quotient and the remainder come from the same
-    rounding.
+    rounding. On a float they are consistent for a stronger reason than that,
+    since `_quotients` computes its answer out of the remainder rather than
+    beside it.
 
     Args:
         a: The numerator column.
@@ -362,6 +377,162 @@ def _powers[
     return out
 
 
+def _fmods[
+    dt: DType, width: Int
+](x: SIMD[dt, width], y: SIMD[dt, width]) -> SIMD[dt, width]:
+    """Takes the C remainder of a register of floats, one lane at a time.
+
+    This is the second loop body in the file that is not a vector instruction,
+    and it is here for the same reason `_powers` is: the answer has to be the
+    one NumPy gives rather than one close to it, and the only way to be sure of
+    that is to call what NumPy calls.
+
+    `fmod` is the remainder of a truncated division, so it takes the sign of the
+    numerator and is not the answer pandas reports on its own. It is exact for
+    every pair of finite floats whatever their magnitude, which is the property
+    the whole of `_remainders` and `_quotients` is built on, because the obvious
+    formula is not. Writing the remainder as `x - floor(x / y) * y` loses every
+    digit of its answer once `x / y` passes the point where a float stops being
+    able to hold an integer exactly, which is 2 to the 53 on a float64 and 2 to
+    the 24 on a float32, and that is not a far away number: a nanosecond
+    timestamp passed 2 to the 53 in the spring of 1970.
+
+    Half precision goes through the single precision call, which is what
+    `_powers` does with a half and what NumPy does with one.
+
+    Args:
+        x: The numerators.
+        y: The denominators.
+
+    Parameters:
+        dt: A floating point dtype.
+        width: How many lanes.
+
+    Returns:
+        A register of truncated remainders.
+    """
+    var out = SIMD[dt, width]()
+    comptime if dt == DType.float64:
+        for lane in range(width):
+            out[lane] = external_call["fmod", Float64](
+                x[lane].cast[DType.float64](), y[lane].cast[DType.float64]()
+            ).cast[dt]()
+    else:
+        for lane in range(width):
+            out[lane] = external_call["fmodf", Float32](
+                x[lane].cast[DType.float32](), y[lane].cast[DType.float32]()
+            ).cast[dt]()
+    return out
+
+
+def _remainders[
+    dt: DType, width: Int
+](x: SIMD[dt, width], y: SIMD[dt, width]) -> SIMD[dt, width]:
+    """Turns the C remainder of a register of floats into the Python one.
+
+    The two differ on the sign and nothing else. C takes the sign of the
+    numerator, so `fmod(-7, 3)` is `-1`, and Python and NumPy take the sign of
+    the divisor, so `-7 % 3` is `2`. Adding the divisor back on the lanes where
+    the two signs disagree is the whole of the correction, and it is exact,
+    because both operands of that addition are already exact.
+
+    A remainder of zero is the one case the correction has nothing to say about
+    and it still has a sign, because a float has a signed zero and NumPy gives
+    it the divisor's: `6 % -3` is a negative zero. Those lanes take a
+    `copysign` rather than the value `fmod` returned.
+
+    A NaN comes out a NaN either way. It is not equal to zero, so it is not the
+    `copysign` case, and if a negative divisor sends it down the correction it
+    is a NaN plus a number, which is a NaN again.
+
+    Args:
+        x: The numerators.
+        y: The denominators.
+
+    Parameters:
+        dt: A floating point dtype.
+        width: How many lanes.
+
+    Returns:
+        A register of remainders taking the sign of the divisor.
+    """
+    var zero = SIMD[dt, width](0)
+    var mod = _fmods(x, y)
+
+    # Both tests are written so that a NaN answers False to them, which is what
+    # leaves it alone. `eq` is an ordered comparison and so is `ne`, so a NaN is
+    # False against zero from either of them, and asking `ne` here rather than
+    # `eq` would send every NaN down the `copysign` branch and turn it into a
+    # zero.
+    var is_zero = mod.eq(zero)
+    var differ = y.lt(zero) ^ mod.lt(zero)
+    return is_zero.select(copysign(zero, y), differ.select(mod + y, mod))
+
+
+def _quotients[
+    dt: DType, width: Int
+](x: SIMD[dt, width], y: SIMD[dt, width]) -> SIMD[dt, width]:
+    """Floor divides a register of floats the way NumPy does.
+
+    The quotient is derived from the remainder rather than the other way round,
+    which is the part worth reading, because it looks like the long way to get
+    at something the hardware will divide in one instruction. `x - fmod(x, y)`
+    is an exact multiple of `y`, so dividing it lands on or beside an integer
+    however large the numbers were, where `floor(x / y)` is only as good as the
+    division that fed it.
+
+    Deriving it that way is also where the infinities come out right. There is
+    no floor of an infinite quotient, and NumPy answers a NaN rather than an
+    infinity for `inf // 2`. That falls out of the arithmetic here without a
+    test for it: the remainder of an infinity is a NaN, and a NaN carries
+    through the subtraction and the division and survives the floor.
+
+    Two things do need a test. A zero divisor has no remainder to derive
+    anything from, so those lanes take the plain quotient and answer the
+    infinity or the NaN the hardware produced, which is what a float column is
+    for. And a quotient of zero has a sign that neither the subtraction nor the
+    floor can be trusted with, so it takes the sign of the ordinary division.
+
+    The snap at the end is the last of NumPy's algorithm and it is not
+    superstition. The division is exact to within one bit, but the floor of a
+    value one bit below an integer is the integer beneath it, so a quotient that
+    should have been 3 can come back 2. Anything more than half a step above the
+    floor is that case rather than a genuine fraction.
+
+    Args:
+        x: The numerators.
+        y: The denominators.
+
+    Parameters:
+        dt: A floating point dtype.
+        width: How many lanes.
+
+    Returns:
+        A register of quotients rounded towards minus infinity.
+    """
+    var zero = SIMD[dt, width](0)
+    var mod = _fmods(x, y)
+    var ratio = x / y
+
+    # The same sign correction `_remainders` makes, one step further on: where
+    # the remainder had to have the divisor added back, the quotient it came
+    # from was one too large.
+    var div = (x - mod) / y
+    var differ = y.lt(zero) ^ mod.lt(zero)
+    div = (differ & ~mod.eq(zero)).select(div - 1, div)
+
+    var snapped = floor(div)
+    var above = div - snapped
+    snapped = above.gt(SIMD[dt, width](0.5)).select(snapped + 1, snapped)
+
+    # The zero test is `eq` rather than `ne` for the reason `_remainders` gives.
+    # A NaN quotient has to keep the `snapped` branch, and `snapped` is the
+    # floor of a NaN, which is a NaN.
+    return y.eq(zero).select(
+        ratio, div.eq(zero).select(copysign(zero, ratio), snapped)
+    )
+
+
 def _arith[dt: DType, op: Int](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
     """Applies an arithmetic operation elementwise.
 
@@ -415,9 +586,9 @@ def _arith[dt: DType, op: Int](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
             elif op == OP_MUL:
                 dst.unsafe_offset(i).unsafe_store(x * y)
             elif op == OP_FLOORDIV:
-                dst.unsafe_offset(i).unsafe_store(x // y)
+                dst.unsafe_offset(i).unsafe_store(_quotients(x, y))
             elif op == OP_MOD:
-                dst.unsafe_offset(i).unsafe_store(x % y)
+                dst.unsafe_offset(i).unsafe_store(_remainders(x, y))
             elif op == OP_DIV:
                 dst.unsafe_offset(i).unsafe_store(x / y)
             elif op == OP_OR:
@@ -713,26 +884,26 @@ def arith_const[
                 var i = start
                 while i < stop:
                     var x = src.unsafe_offset(i).unsafe_load[width=width]()
-                    dst.unsafe_offset(i).unsafe_store(y // x)
+                    dst.unsafe_offset(i).unsafe_store(_quotients(y, x))
                     i += width
             else:
                 var i = start
                 while i < stop:
                     var x = src.unsafe_offset(i).unsafe_load[width=width]()
-                    dst.unsafe_offset(i).unsafe_store(x // y)
+                    dst.unsafe_offset(i).unsafe_store(_quotients(x, y))
                     i += width
         elif op == OP_MOD:
             if flip:
                 var i = start
                 while i < stop:
                     var x = src.unsafe_offset(i).unsafe_load[width=width]()
-                    dst.unsafe_offset(i).unsafe_store(y % x)
+                    dst.unsafe_offset(i).unsafe_store(_remainders(y, x))
                     i += width
             else:
                 var i = start
                 while i < stop:
                     var x = src.unsafe_offset(i).unsafe_load[width=width]()
-                    dst.unsafe_offset(i).unsafe_store(x % y)
+                    dst.unsafe_offset(i).unsafe_store(_remainders(x, y))
                     i += width
         elif op == OP_DIV:
             if flip:

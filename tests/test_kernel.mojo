@@ -11,7 +11,7 @@ empty reduction, and `test_setitem_into_a_null_breaks_the_invariant` documents t
 one way a caller can make `sum_of` give a wrong answer.
 """
 
-from std.math import isinf, isnan, nan
+from std.math import inf, isinf, isnan, nan
 from std.testing import (
     TestSuite,
     assert_almost_equal,
@@ -372,6 +372,105 @@ def test_floor_division_and_the_remainder_match_the_twin() raises:
             assert_equal(quotients[i], quotients_twin[i])
             if not isnan(remainders[i]):
                 assert_equal(remainders[i], remainders_twin[i])
+
+
+def test_a_float_quotient_of_an_infinity_is_a_nan() raises:
+    """`inf // 2` is a NaN in numpy and an infinity in the expression everybody
+    reaches for first, which is `floor(x / y)`. There is no floor of an infinite
+    quotient, so numpy takes the remainder first and derives the quotient from
+    it, and the remainder of an infinity is a NaN. A zero divisor is the other
+    way round and stays an infinity, because that is a division and not a
+    floor."""
+    var huge = inf[DType.float64]()
+    var top = from_list[DType.float64](
+        [huge, -huge, 2.0, 2.0, 2.0, -2.0, huge, 0.0]
+    )
+    var bottom = from_list[DType.float64](
+        [2.0, 2.0, huge, 0.0, -0.0, 0.0, huge, 0.0]
+    )
+
+    var quotients = floor_divide(top, bottom)
+    assert_true(isnan(quotients[0]))
+    assert_true(isnan(quotients[1]))
+    assert_equal(quotients[2], 0.0)
+    assert_true(isinf(quotients[3]))
+    assert_true(quotients[3] > 0.0)
+    assert_true(isinf(quotients[4]))
+    assert_true(quotients[4] < 0.0)
+    assert_true(isinf(quotients[5]))
+    assert_true(quotients[5] < 0.0)
+    assert_true(isnan(quotients[6]))
+    assert_true(isnan(quotients[7]))
+
+    var remainders = modulo(top, bottom)
+    assert_true(isnan(remainders[0]))
+    assert_true(isnan(remainders[1]))
+    assert_equal(remainders[2], 2.0)
+    assert_true(isnan(remainders[3]))
+    assert_true(isnan(remainders[4]))
+    assert_true(isnan(remainders[5]))
+    assert_true(isnan(remainders[6]))
+    assert_true(isnan(remainders[7]))
+
+
+def test_a_float_remainder_takes_the_sign_of_the_divisor() raises:
+    """The Python rule rather than the C one, which is the same rule the integer
+    dtypes already follow, and the one place the two differ is a remainder of
+    zero: a float has a negative zero and numpy gives it the divisor's sign."""
+    var top = from_list[DType.float64]([7.0, -7.0, 7.0, -7.0, 6.0, 6.0])
+    var bottom = from_list[DType.float64]([3.0, 3.0, -3.0, -3.0, 3.0, -3.0])
+
+    var remainders = modulo(top, bottom)
+    assert_equal(remainders[0], 1.0)
+    assert_equal(remainders[1], 2.0)
+    assert_equal(remainders[2], -2.0)
+    assert_equal(remainders[3], -1.0)
+    assert_equal(remainders[4], 0.0)
+    assert_equal(remainders[5], 0.0)
+    # The sign of a zero does not show up in an equality, so it is read off the
+    # reciprocal, which is an infinity pointing the way the zero did.
+    assert_true(1.0 / remainders[4] > 0.0)
+    assert_true(1.0 / remainders[5] < 0.0)
+
+    var quotients = floor_divide(top, bottom)
+    assert_equal(quotients[0], 2.0)
+    assert_equal(quotients[1], -3.0)
+    assert_equal(quotients[2], -3.0)
+    assert_equal(quotients[3], 2.0)
+
+
+def test_a_float_remainder_stays_exact_past_the_whole_integers() raises:
+    """This is the failure that matters and it is not about infinities. A float
+    can hold every integer up to 2 to the 53 and only some of them after that,
+    so `x - floor(x / y) * y` has no digits left the moment the quotient passes
+    that line. 2 to the 53 is about 9.0e15, which a nanosecond timestamp passed
+    in the spring of 1970, so this is an ordinary range and not a corner."""
+    var top = from_list[DType.float64](
+        [9007199254740992.0, 18014398509481984.0, 1e17, 1.7976931348623157e308]
+    )
+    var bottom = from_list[DType.float64]([3.0, 3.0, 3.0, 3.0])
+
+    var remainders = modulo(top, bottom)
+    assert_equal(remainders[0], 2.0)
+    assert_equal(remainders[1], 1.0)
+    assert_equal(remainders[2], 1.0)
+    assert_equal(remainders[3], 2.0)
+
+
+def test_a_float32_remainder_stays_exact_past_its_own_line() raises:
+    """The same rule at the other width. A float32 holds every integer up to 2
+    to the 24, which is 16777216, so the line is thirty two million times
+    earlier and the failure is that much easier to reach."""
+    var top = from_list[DType.float32](
+        [16777216.0, 33554432.0, 1e17, 3.4028235e38]
+    )
+    var bottom = from_list[DType.float32]([3.0, 3.0, 3.0, 3.0])
+
+    var remainders = modulo(top, bottom)
+    assert_equal(remainders[0], 1.0)
+    assert_equal(remainders[1], 2.0)
+    assert_equal(remainders[2], 1.0)
+    assert_equal(remainders[3], 0.0)
 
 
 def test_the_power_matches_the_twin() raises:

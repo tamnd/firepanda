@@ -8,6 +8,24 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Float floor division and the remainder answer what pandas answers
+
+`//` and `%` on a float column were Mojo's SIMD operators, which compute `floor(x / y)` and `x - floor(x / y) * y`. That is the expression everybody reaches for and it is wrong in three ways, all of which a conformance case caught on its first run against pandas 3.0.3.
+
+The one that matters is not about infinities. A float64 can hold every integer up to 2 to the 53 and only some of them after that, so the moment the quotient passes that line the subtraction has no digits left and the remainder is noise. `1e17 % 3` answered `0.0` where pandas answers `1.0`, and the largest float in the corpus answered `-9.9792015476736e+291` where pandas answers `2.0`. On a float32 the line is 2 to the 24, which is 16777216, so it is thirty two million times easier to reach. Nothing about that range is pathological: a nanosecond timestamp passed 2 to the 53 in the spring of 1970, and `t % 86400e9` to get a time of day is an ordinary thing to write.
+
+The other two are the infinities. `inf // 2` answered `inf` where pandas answers `nan`, because there is no floor of an infinite quotient, and `2 % inf` answered `nan` where pandas answers `2.0`.
+
+All three come from the same place and are fixed by one change. numpy does not compute the remainder from the quotient, it computes the quotient from the remainder. `fmod` is a hardware instruction that is exact for every pair of finite floats whatever their magnitude, and `x - fmod(x, y)` is an exact multiple of `y`, so dividing that lands on an integer however large the numbers were. The remainder it gives takes the sign of the numerator, which is the C rule rather than the Python one, so the divisor is added back on the lanes where the two signs disagree and the quotient is reduced by one on the same lanes. That is the whole of `_remainders` and `_quotients`, and it is numpy's `npy_divmod` step for step, including the snap that catches a quotient sitting one bit below an integer.
+
+Two cases stay separate because the derivation has nothing to say about them. A zero divisor has no remainder to build anything from, so those rows take the plain division and keep the infinity or the NaN it gives, which is what a float column is for and is the one place a float differs from an integer column, where the row is a null. And a quotient of zero has a sign that the subtraction cannot be trusted with, so it takes the sign of the ordinary division: `-1.0 // -3.0` is a positive zero and `1.0 // -3.0` is `-1.0`.
+
+The remainder of zero has a sign too, because a float has a negative zero and pandas reports one. `6.0 % -3.0` is `-0.0` and `6.0 % 3.0` is `0.0`.
+
+The trap found on the way is worth recording, because it is not obvious and it silently turns every NaN into a zero. Mojo's `SIMD.ne` is an ordered comparison, so `nan.ne(0)` is `False` where IEEE `!=` is `True`. Both of the new loops are written to ask `eq` and take the other branch for that reason, and the comments say so where the code is.
+
+The scalar twin in `firepanda/kernel/scalar.mojo` was fixed first and separately. It used the same wrong expression, so it agreed with the kernel about the wrong answer, and a twin that agrees is worth nothing. That file's own rule is that when a twin and its kernel disagree the kernel is wrong, and when the twin is the wrong one it gets fixed there first.
+
 ### Arithmetic on two bool columns answers what pandas answers
 
 Every arithmetic operation on a pair of bool columns raised `binary: + is not defined on bool columns`. pandas answers three of the seven and refuses the other four with two different exception types and two different sentences, so the whole family was missing rather than one case of it, and a bool column is not an exotic thing to have: every comparison produces one and every mask is one.
