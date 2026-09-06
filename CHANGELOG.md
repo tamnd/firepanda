@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A Python number no longer drags a column up to int64
+
+`s + 2` on an int8 column answered int64. pandas 3 and NumPy 2 answer int8, and the difference is not a rounding of the rules, it is the rule: a Python integer has no width, so it takes the width of whatever it meets rather than bringing int64 along with it. NEP 50 settled this for NumPy 2 and pandas adopted it, and a library that claims the pandas API has to have it too. The old behaviour meant a frame read at the width it was stored at doubled in memory on the first arithmetic anybody did to it, and stayed doubled, because the widened column is what the next expression promotes against.
+
+The rule is short. A constant that arrived from Python without a dtype of its own takes the column's dtype, unless it is a float meeting an integer column, in which case it becomes float64 because there is no narrower float to pick out of an int64. A Python `bool` is a Python `int` and behaves like one. A number too large for the dtype it landed on is an `OverflowError` with pandas' own message, `Python integer 200 out of bounds for int8`, rather than a silent widening. Comparisons are the exception and never narrow and never raise, which is pandas' behaviour and is not an inconsistency: asking whether a byte is larger than two hundred has a perfectly good answer.
+
+Where the rule is applied is the part that took the thinking. It is not at the Python boundary, because `df + 2` is one constant meeting several dtypes at once, and a frame with an int8 column and an int64 column needs two different narrowings out of the same number. So a `Value` now carries a `weak` flag saying it arrived without a dtype, the bindings set it on anything that came in as a Python `int`, `float` or `bool`, and `resolve_constant` in the kernel applies the rule per column, once it knows which column. The flag is a fact about where the value came from rather than about what it holds, which is why equality ignores it, and a constant built in Mojo with a dtype the caller chose is not weak and promotes the way it always did.
+
+`ComputeNode.schema` resolves the constant too, and has to. It declares what a compute node will produce and `binary_value_any` produces it, so a rule applied in one and not the other is a plan whose stated dtype is not the dtype of the data it describes. Doing it there also means a constant too large for the column is caught at plan time, before a row moves.
+
+`OverflowError` is a new kind in the error table, the eighth, and it gets its own row rather than sharing `value`'s because an `OverflowError` is not a `ValueError` in Python and `except ValueError` around a pandas call does not catch one. The tag goes on at the binding the way every other tag does. The binding tells an overflow from a dtype clash by asking the question again on the failure path, which is what `compare_series` already does with its labels, and costs a handful of comparisons against a dtype on a path where something has already gone wrong.
+
+There are two refusals rather than one and they have different messages, both copied from pandas. `s + 2**64` is about the machine, since there is nothing here to put a number that large in, and says `Python int too large to convert to C long` before any column is consulted. `int8 + 200` is about the column and names it.
+
 ### Division stops widening a float column to double
 
 `binary_type` answered float64 for every division regardless of what it was dividing, so `float32 / float32` came out as a double where pandas keeps it at float32, and `float32 / int8` did the same. Dividing two integers still answers float64, which is right and is not changed, because there is no integer answer to `7 / 2` and something has to widen. The bug was doing that when nothing needed widening.

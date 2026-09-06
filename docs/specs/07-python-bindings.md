@@ -112,6 +112,7 @@ The binding layer maps our error taxonomy onto CPython exception classes:
 | unknown column | `KeyError` |
 | dtype mismatch, bad cast, `inplace=` | `TypeError` |
 | bad argument value, unparseable format | `ValueError` |
+| a scalar too large for the column's dtype | `OverflowError` |
 | missing file, IO failure | `OSError` |
 | unsupported operation, `object` dtype | `NotImplementedError` |
 | cancellation | `KeyboardInterrupt` |

@@ -43,6 +43,7 @@ __all__ = [
     "DTypeError",
     "FirepandaError",
     "InvalidArgumentError",
+    "NumericOverflowError",
     "OutOfBoundsError",
     "ReaderError",
     "UnsupportedError",
@@ -82,6 +83,17 @@ class InvalidArgumentError(FirepandaError, ValueError):
 
     A `ValueError`, on the same distinction Python itself draws: the type was
     acceptable and the value was not.
+    """
+
+
+class NumericOverflowError(FirepandaError, OverflowError):
+    """A number that does not fit the dtype it was asked to fit.
+
+    An `OverflowError`, which is what pandas raises when a scalar is too large
+    for the column it is being combined with, and which is not a `ValueError`,
+    so it needs a row of its own rather than sharing one with
+    `InvalidArgumentError`. The name says numeric to keep it apart from
+    `OutOfBoundsError`, which is about a position and is an `IndexError`.
     """
 
 
@@ -132,6 +144,7 @@ BY_KIND: dict[str, type[BaseException]] = {
     "column": ColumnNotFoundError,
     "dtype": DTypeError,
     "value": InvalidArgumentError,
+    "overflow": NumericOverflowError,
     "position": OutOfBoundsError,
     "io": ReaderError,
     "unsupported": UnsupportedError,

@@ -53,6 +53,15 @@ comptime VALUE = "firepanda:value: "
 """An argument of the right type and the wrong value, or something unparseable.
 Becomes `ValueError`."""
 
+comptime OVERFLOW = "firepanda:overflow: "
+"""A number that does not fit the dtype it was asked to fit. Becomes
+`OverflowError`.
+
+Its own kind rather than a shape of `value`, because `OverflowError` is not a
+`ValueError` in Python and an `except ValueError` written around a pandas call
+does not catch one. Folding it into `value` would be a difference nobody would
+find until it mattered."""
+
 comptime IO = "firepanda:io: "
 """A file that is missing, unreadable or malformed. Becomes `OSError`."""
 

@@ -364,3 +364,112 @@ def test_the_dtype_of_a_result_follows_the_operation(firepanda: ModuleType) -> N
     assert (left / 2).dtype == "float64"
     assert (left < 2).dtype == "bool"
     assert (-left).dtype == "int64"
+
+
+def _narrow(firepanda: ModuleType, dtype: str, values: list[object]) -> object:
+    """A frame of one column of a dtype nothing else in this file can produce.
+
+    A `Series` takes no dtype and a CSV only produces the four wide types, so
+    Arrow is the only door into a narrow column from Python. That is a real
+    limitation of the surface rather than an awkwardness of the test: until
+    `astype` exists, a user who wants an int8 frame gets one the same way.
+    """
+    pa = pytest.importorskip("pyarrow")
+    table = pa.table({"x": pa.array(values, type=getattr(pa, dtype)())})
+    return firepanda.from_arrow(table)
+
+
+def test_a_python_integer_takes_the_dtype_of_the_column(firepanda: ModuleType) -> None:
+    """`s + 2` on an int8 column answers int8, which is NumPy 2 and pandas 3.
+
+    A Python integer has no width, so it takes one from whatever it meets rather
+    than bringing int64 along and dragging the column up to it. This is the rule
+    NEP 50 settled and pandas adopted, and it is the difference between a frame
+    that stays the size it was read at and one that doubles on the first
+    arithmetic anybody does to it.
+    """
+    column = _narrow(firepanda, "int8", [1, 2, 3])["x"]
+    assert (column + 2).dtype == "int8"
+    assert (column + 2).tolist() == [3, 4, 5]
+    assert (2 + column).dtype == "int8"
+    assert (column * 2).dtype == "int8"
+
+
+def test_a_python_integer_too_large_for_the_column_is_an_overflow_error(
+    firepanda: ModuleType,
+) -> None:
+    """Taking the column's width means a number that does not fit has nowhere to go.
+
+    pandas raises here rather than quietly widening, and it raises an
+    `OverflowError`, which is not a `ValueError`, so it needs a class of its own
+    on this side too. The message is pandas' own word for word because that is
+    the string somebody who hits this will search for.
+    """
+    column = _narrow(firepanda, "int8", [1, 2, 3])["x"]
+    with pytest.raises(OverflowError, match="Python integer 200 out of bounds for int8") as caught:
+        column + 200
+    assert type(caught.value) is firepanda.errors.NumericOverflowError
+
+
+def test_a_comparison_against_a_large_python_integer_still_answers(
+    firepanda: ModuleType,
+) -> None:
+    """`s > 200` on an int8 column is False three times rather than an error.
+
+    Comparisons are the exception in pandas and the reason is not an
+    inconsistency. Asking whether a byte is bigger than two hundred has a
+    perfectly good answer and refusing to give it would be useless.
+    """
+    column = _narrow(firepanda, "int8", [1, 100, 127])["x"]
+    assert (column > 200).tolist() == [False, False, False]
+    assert (column < 200).tolist() == [True, True, True]
+
+
+def test_a_python_float_keeps_a_float32_column_at_its_width(
+    firepanda: ModuleType,
+) -> None:
+    """The same rule for the other kind of literal, and the half of the division
+    rule `test_the_dtype_of_a_result_follows_the_operation` cannot reach."""
+    column = _narrow(firepanda, "float32", [1.0, 2.0])["x"]
+    assert (column + 1.5).dtype == "float32"
+    assert (column / 2).dtype == "float32"
+    assert (column + 1.0e300).dtype == "float32"
+
+
+def test_each_column_of_a_frame_takes_the_constant_at_its_own_width(
+    firepanda: ModuleType,
+) -> None:
+    """`df + 2` is one constant meeting several dtypes, which is why the rule is
+    applied per column rather than once at the boundary.
+
+    A frame with a narrow column and a wide one gets two different narrowings
+    out of the same Python integer, and both columns keep the width they had.
+    """
+    pa = pytest.importorskip("pyarrow")
+    frame = firepanda.from_arrow(
+        pa.table(
+            {
+                "small": pa.array([1, 2], type=pa.int8()),
+                "big": pa.array([1, 2], type=pa.int64()),
+            }
+        )
+    )
+    answer = frame + 2
+    assert answer["small"].dtype == "int8"
+    assert answer["big"].dtype == "int64"
+    assert answer["small"].tolist() == [3, 4]
+
+    with pytest.raises(OverflowError, match="out of bounds for int8"):
+        frame + 200
+
+
+def test_an_integer_too_large_for_a_machine_word_says_so(firepanda: ModuleType) -> None:
+    """The other refusal, which happens before any column is consulted.
+
+    Python integers are unbounded and there is nothing here to put one in that
+    does not fit an int64, so this one is about the machine rather than about the
+    dtype and pandas gives it a different message. Both are `OverflowError`.
+    """
+    left, _ = _pair(firepanda)
+    with pytest.raises(OverflowError, match="Python int too large to convert to C long"):
+        left + 2**64
