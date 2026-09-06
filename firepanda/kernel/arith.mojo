@@ -78,6 +78,15 @@ comptime OP_MOD = 4
 comptime OP_POW = 5
 """Operation code for raising to a power."""
 
+comptime OP_DIV = 6
+"""Operation code for true division on a float dtype.
+
+Only a float dtype reaches the loops through this code. An integer division has
+to widen its answer to float64, which is a different result type from the one
+the operands had, and the loops here answer in the dtype they were given. That
+division goes through `divide` instead.
+"""
+
 
 def add[dt: DType](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
     """Adds two columns elementwise.
@@ -278,9 +287,11 @@ def _arith[dt: DType, op: Int](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
 
     Parameters:
         dt: The dtype.
-        op: One of the six operation codes. Floor division and the remainder
-            reach here on a float dtype only; the integer forms need the
-            validity and go through `_int_divide`.
+        op: One of the seven operation codes. Floor division, the remainder and
+            true division reach here on a float dtype only; the integer forms of
+            the first two need the validity and go through `_int_divide`, and an
+            integer true division answers a wider dtype than it was given and
+            goes through `divide`.
 
     Returns:
         A column of results, null wherever either input is null.
@@ -318,6 +329,8 @@ def _arith[dt: DType, op: Int](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
                 dst.unsafe_offset(i).unsafe_store(x // y)
             elif op == OP_MOD:
                 dst.unsafe_offset(i).unsafe_store(x % y)
+            elif op == OP_DIV:
+                dst.unsafe_offset(i).unsafe_store(x / y)
             else:
                 comptime if dt.is_integral():
                     comptime if dt.is_signed():
@@ -428,10 +441,44 @@ def _int_divide[
     return out^
 
 
+def divide_float[dt: DType](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
+    """Divides two float columns elementwise, keeping the dtype they had.
+
+    This exists beside `divide` rather than inside it because the two answer
+    different types and a Mojo function has one return type. Dividing two
+    integers has no integer answer, so it widens to float64 and `divide` does
+    that. Dividing two floats has an answer at the width it was given, and
+    pandas keeps it there: a float32 divided by a float32 is a float32, and a
+    float32 divided by an int8 is a float32 as well, because the promotion has
+    already made both sides a float32. Widening those to float64 would double
+    the size of a column for a precision nobody asked for, and it would stay
+    doubled for every operation after it.
+
+    The caller picks between the two on the dtype, which it knows at compile
+    time, so neither function pays for the choice.
+
+    Args:
+        a: The numerator column.
+        b: The denominator column. Must be the same length as `a`.
+
+    Parameters:
+        dt: The float dtype of both operands and of the answer.
+
+    Returns:
+        A column of the same dtype, null wherever either input is null. A
+        division by zero is an infinity or a NaN rather than a null, which is
+        what the hardware gives and what pandas reports.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    return _arith[dt, OP_DIV](a, b)
+
+
 def divide[
     dt: DType
 ](a: Array[dt], b: Array[dt]) raises -> Array[DType.float64]:
-    """Divides two columns elementwise, in float64.
+    """Divides two integer columns elementwise, in float64.
 
     Args:
         a: The numerator column.
@@ -508,8 +555,8 @@ def arith_const[
 
     Parameters:
         dt: The dtype. The constant is already at it; promotion happened above.
-        op: One of the six operation codes. Floor division and the remainder
-            reach here on a float dtype only.
+        op: One of the seven operation codes. Floor division, the remainder and
+            true division reach here on a float dtype only.
 
     Returns:
         A column of results, null wherever the column is null. A constant is
@@ -593,6 +640,19 @@ def arith_const[
                 while i < stop:
                     var x = src.unsafe_offset(i).unsafe_load[width=width]()
                     dst.unsafe_offset(i).unsafe_store(x % y)
+                    i += width
+        elif op == OP_DIV:
+            if flip:
+                var i = start
+                while i < stop:
+                    var x = src.unsafe_offset(i).unsafe_load[width=width]()
+                    dst.unsafe_offset(i).unsafe_store(y / x)
+                    i += width
+            else:
+                var i = start
+                while i < stop:
+                    var x = src.unsafe_offset(i).unsafe_load[width=width]()
+                    dst.unsafe_offset(i).unsafe_store(x / y)
                     i += width
         else:
             if flip:
@@ -792,12 +852,38 @@ def _int_divide_const[
     return out^
 
 
+def divide_float_const[
+    dt: DType
+](a: Array[dt], b: Scalar[dt], flip: Bool = False) raises -> Array[dt]:
+    """Divides a float column by a constant, or the other way round, at its width.
+
+    The constant form of `divide_float`, and it is separate from `divide_const`
+    for the same reason: an integer division widens to float64 and a float
+    division does not, and the two cannot share a return type.
+
+    Args:
+        a: The column.
+        b: The constant.
+        flip: True if the constant is the numerator.
+
+    Parameters:
+        dt: The float dtype of the column, the constant and the answer.
+
+    Returns:
+        A column of the same dtype, null wherever the column is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    return arith_const[dt, OP_DIV](a, b, flip)
+
+
 def divide_const[
     dt: DType
 ](a: Array[dt], b: Scalar[dt], flip: Bool = False) raises -> Array[
     DType.float64
 ]:
-    """Divides a column by a constant, or a constant by a column, in float64.
+    """Divides an integer column by a constant, or the other way round, in float64.
 
     Args:
         a: The column.

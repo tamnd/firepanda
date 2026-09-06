@@ -63,6 +63,8 @@ from .arith import (
     arith_const,
     divide,
     divide_const,
+    divide_float,
+    divide_float_const,
     floor_divide,
     floor_divide_const,
     modulo,
@@ -256,10 +258,21 @@ def binary_type(
         b: The right operand type.
 
     Returns:
-        The result type: bool for a comparison, float64 for a division, and the
-        promoted operand type for the other six. Floor division and the
-        remainder are in that last group and not with division, because `//` and
-        `%` keep the operand type in pandas and `/` does not.
+        The result type: bool for a comparison, the promoted operand type for
+        six of the seven arithmetic operations, and for division the promoted
+        type when that is already a float and float64 when it is not. Floor
+        division and the remainder are in the first group and not with division,
+        because `//` and `%` keep the operand type in pandas and `/` does not.
+
+        The condition on division is what pandas does and it is easy to get
+        wrong in the direction of always answering float64. Dividing two
+        integers produces a float because there is no integer answer, and that
+        is the whole of the rule. Once one side is already a float there is
+        nothing to widen, so `float32 / float32` is float32 and `float32 / int8`
+        is float32 as well, since `promote` has already decided that an int8 is
+        representable in a float32. Answering float64 to those doubles the
+        memory of a column for a precision nobody asked for, and it stays
+        doubled for every operation after it.
 
     Raises:
         If the two types have no common type, or the operation is arithmetic and
@@ -273,7 +286,7 @@ def binary_type(
             "binary: " + String(op) + " is not defined on " + String(common)
         )
     if op == BinaryOp.DIV:
-        return LogicalType.FLOAT64
+        return common if common.is_float() else LogicalType.FLOAT64
     return common
 
 
@@ -304,10 +317,12 @@ def binary_any(a: AnyArray, b: AnyArray, op: BinaryOp) raises -> AnyArray:
     # a common type and that the operation is defined on it.
     _ = binary_type(op, a.type, b.type)
 
-    # The common type is the promotion in all four shapes, including division:
-    # the divide loop reads its operands at their own width and answers float64
-    # whatever they were, so converting them to float64 first would be two
-    # copies of the column to reach the same answer.
+    # The common type is the promotion in all four shapes, including division.
+    # A float division answers at the common type, so there is nothing else to
+    # convert to. An integer division answers float64, and its loop reads the
+    # operands at their own width and widens each register as it goes, so
+    # casting both columns to float64 first would be two copies of the column
+    # to reach the same answer.
     var common = promote(a.type, b.type)
     if common.is_variable_width():
         return _compare_text_erased(a, b, op)
@@ -412,7 +427,12 @@ def _binary_erased(
                     return AnyArray(modulo(x, y))
                 if op == BinaryOp.POW:
                     return AnyArray(power(x, y))
-                return AnyArray(divide(x, y))
+                # Division is the one operation whose answer is not the type it
+                # was given, and only when it was given integers.
+                comptime if target.is_floating_point():
+                    return AnyArray(divide_float(x, y))
+                else:
+                    return AnyArray(divide(x, y))
     raise Error("binary: unsupported dtype")
 
 
@@ -575,5 +595,8 @@ def _binary_const_erased(
                     return AnyArray(modulo_const[target](x, y, flip))
                 if op == BinaryOp.POW:
                     return AnyArray(power_const[target](x, y, flip))
-                return AnyArray(divide_const[target](x, y, flip))
+                comptime if target.is_floating_point():
+                    return AnyArray(divide_float_const[target](x, y, flip))
+                else:
+                    return AnyArray(divide_const[target](x, y, flip))
     raise Error("binary: unsupported dtype")

@@ -44,6 +44,8 @@ from .arith import (
     arith_const,
     divide,
     divide_const,
+    divide_float,
+    divide_float_const,
     floor_divide,
     floor_divide_const,
     modulo,

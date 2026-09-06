@@ -111,7 +111,7 @@ def test_uint64_with_a_signed_type_goes_to_float64() raises:
     assert_equal(read[DType.float64](got)[0], Float64(2.0), "row 0")
 
 
-def test_division_always_answers_float64() raises:
+def test_dividing_two_integers_answers_float64() raises:
     var got = binary_any(
         typed[DType.int64]([7, 8]),
         typed[DType.int64]([2, 4]),
@@ -121,6 +121,76 @@ def test_division_always_answers_float64() raises:
     var values = read[DType.float64](got)
     assert_equal(values[0], Float64(3.5), "an integer division does not floor")
     assert_equal(values[1], Float64(2.0), "row 1")
+
+
+def test_division_keeps_a_float_operand_at_its_own_width() raises:
+    """`pd.Series([7.0, 8.0], dtype="float32") / ...` is float32 in pandas.
+
+    Division answers a float because two integers have no integer answer, and
+    that is the whole of the rule. Where one side is already a float there is
+    nothing to widen, and answering float64 here would double the memory of a
+    column for a precision nobody asked for.
+    """
+    var got = binary_any(
+        typed[DType.float32]([7.0, 8.0]),
+        typed[DType.float32]([2.0, 4.0]),
+        BinaryOp.DIV,
+    )
+    assert_true(got.type == LogicalType.FLOAT32, "result type")
+    var values = read[DType.float32](got)
+    assert_equal(values[0], Float32(3.5), "row 0")
+    assert_equal(values[1], Float32(2.0), "row 1")
+
+
+def test_a_float32_divided_by_an_integer_stays_float32() raises:
+    """pandas answers float32, because `promote` has already decided that an
+    int8 is representable in a float32 and there is nothing left to widen."""
+    var got = binary_any(
+        typed[DType.float32]([7.0, 8.0]),
+        typed[DType.int8]([2, 4]),
+        BinaryOp.DIV,
+    )
+    assert_true(got.type == LogicalType.FLOAT32, "result type")
+    var values = read[DType.float32](got)
+    assert_equal(values[0], Float32(3.5), "row 0")
+    assert_equal(values[1], Float32(2.0), "row 1")
+
+
+def test_an_int64_divided_by_a_float32_is_float64() raises:
+    """The other side of the same rule. An int64 is not representable in a
+    float32, so `promote` gives float64 and the division keeps it."""
+    var got = binary_any(
+        typed[DType.int64]([7, 8]),
+        typed[DType.float32]([2.0, 4.0]),
+        BinaryOp.DIV,
+    )
+    assert_true(got.type == LogicalType.FLOAT64, "result type")
+    var values = read[DType.float64](got)
+    assert_equal(values[0], Float64(3.5), "row 0")
+
+
+def test_a_float32_column_divided_by_a_constant_stays_float32() raises:
+    """The constant path has its own loop, so it needs its own test.
+
+    `binary_type` is what decides the answer and both paths ask it, but the
+    kernel underneath is a different function, and a division that keeps its
+    width in the column form while widening in the constant form would be a
+    disagreement nothing about the declared type would catch.
+    """
+    var right = binary_value_any(
+        typed[DType.float32]([7.0, 8.0]), Value(Float32(2.0)), BinaryOp.DIV
+    )
+    var left = binary_value_any(
+        typed[DType.float32]([2.0, 4.0]),
+        Value(Float32(8.0)),
+        BinaryOp.DIV,
+        True,
+    )
+    assert_true(right.type == LogicalType.FLOAT32, "result type")
+    assert_true(left.type == LogicalType.FLOAT32, "flipped result type")
+    assert_equal(read[DType.float32](right)[0], Float32(3.5), "7 / 2")
+    assert_equal(read[DType.float32](left)[0], Float32(4.0), "8 / 2")
+    assert_equal(read[DType.float32](left)[1], Float32(2.0), "8 / 4")
 
 
 def test_floor_division_keeps_the_operand_type_and_floors() raises:
