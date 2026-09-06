@@ -132,7 +132,15 @@ speeding up, and the answer for that case is partitioning the rows by code
 rather than replicating the table, which is a separate change.
 
 Thirty two megabytes is chosen so the tables are at worst a couple of times an
-L3 cache rather than a fraction of main memory.
+L3 cache rather than a fraction of main memory, and it has now been measured
+rather than reasoned about. db-benchmark q3, q5 and q7 at 5GB all group on a key
+of a million values, which at eight byte accumulators is eight megabytes a table
+and so four workers of the thirty two the machine has. Raising the budget to
+five hundred and twelve megabytes, which buys all thirty two workers, made q5
+1.9x slower, q7 1.4x slower and q3 1.2x slower. Twenty eight more cores scatter
+no faster than four here, because the scatter is waiting on memory either way,
+and what the extra cores buy is a merge over two hundred and fifty six megabytes
+instead of over thirty two. The starved looking route is the right one.
 """
 
 comptime PRIVATE_ROWS = 1 << 16
@@ -253,8 +261,14 @@ def _partition_parts[dt: DType](rows: Int, groups: Int) -> Int:
     entirely, which is to say where the group count is large enough that a table
     per worker does not fit inside `PRIVATE_BYTES` even twice over. Between the
     two there is a band where replication still fits but only for a handful of
-    workers, and which route wins there is a measurement nobody has taken, so
-    this does not guess at it.
+    workers, and the measurement in that band has now been taken: replication
+    wins it. db-benchmark q3, q5 and q7 at 5GB sit right in the middle of it,
+    four workers of thirty two, and moving them onto the partitioned route made
+    q5 1.05x slower and left q3 and q7 where they were. Three passes on all the
+    cores does not beat one pass on an eighth of them, because the copy the
+    partitioning writes and reads back is more traffic than the scatter it is
+    trying to make cache friendly. So the bar stays where it is, and the
+    partitioned route stays what happens when replication cannot run at all.
 
     Args:
         rows: How many rows are being scattered.

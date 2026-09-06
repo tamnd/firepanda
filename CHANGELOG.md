@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A correlation per group has a benchmark row, and two ideas about the scatter turned out wrong
+
+db-benchmark q9 is a correlation of two columns per group and it is the one query in that suite still slower than DuckDB. It had no microbenchmark row, so its cost had only ever been visible inside a whole suite run at a hundred million rows, which is not somewhere anything gets optimized from. `group/frame_correlation` is that row. At two hundred thousand rows it is 2.72 ms against 1.30 ms for `group/frame_one_key`, which is the same rows and the same key and one column and one pass, so the second column and the second pass are more than doubling the operation. A pair reduction reads its columns twice because the deviations it sums are taken around means it does not have until a first pass has finished.
+
+Two things the source had flagged as reasoned about rather than measured are now measured, and both times the reasoning was wrong in the same direction. Neither changes any behaviour and both are written into the docstrings so nobody spends another day on them.
+
+The first is the budget a replicated group by table gets. `PRIVATE_BYTES` is thirty two megabytes, and on a key of a million values with eight byte accumulators that is four workers of the thirty two the machine has, which looks like starvation. Raising the budget to five hundred and twelve megabytes so all thirty two can replicate made q5 1.9x slower, q7 1.4x slower and q3 1.2x slower. The scatter is waiting on memory either way, so twenty eight more cores scatter no faster, and what they do buy is a merge over two hundred and fifty six megabytes instead of over thirty two.
+
+The second is the band between the two routes. The partitioned route is taken only where replication cannot run at all, and in between there is a band where it runs but only on a handful of workers. Moving q3, q5 and q7 into the partitioned route, which is where they sit in that band, made q5 1.05x slower and left the other two where they were. Three passes on all the cores does not beat one pass on an eighth of them, because the copy the partitioning writes and reads back is more traffic than the scatter it is trying to make cache friendly.
+
 ### The unary operations follow pandas rather than numpy
 
 `-x`, `+x`, `abs(x)` and `~x` are in the kernel. There are four of them and three loops, because unary plus is the column unchanged on every type that has it at all and is answered by a copy rather than by a pass over the values. All four keep the operand type, so a plan can be told what an expression answers before a row moves.
