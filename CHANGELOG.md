@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.48] - 2026-09-06
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Most of this release is about what a number's type should be when Python hands one to a column, and the answer in three places was wider than it needed to be. A Python integer added to an int8 column made it int64, a float32 column divided by anything became float64, and both of those doubled the memory of a frame on the first arithmetic anybody did to it and kept it doubled, because the widened column is what the next expression promotes against. NEP 50 settled the first for NumPy 2 and pandas adopted it, and the second was a special case that was never true of floor division sitting next to it. Neither is a rounding of the rules and both are now what pandas answers.
+
+Alongside them the operators finally reach Python. That is 94 generated members across `Series` and `DataFrame`, each checked against a live pandas signature, and the part worth reading is that every one of these operations used to arrive in Python as a `RuntimeError` because the core cannot raise a typed exception and an untagged error becomes a `RuntimeError` by default. They are `ValueError` and `TypeError` now, classified where the failure happens, and there is an eighth error kind for the overflow the narrowing rule can produce.
+
+The performance work is one change with a large number attached. A factorize that indexes a table by the value itself could not merge its workers' tables once the key's range got wide, and was therefore running the whole factorize on one thread, including the pass that reads every row and writes its ordinal and does not touch the merge at all. Splitting those two apart, so the discovery stays on one thread and the numbering goes to every core, is 1.98x on the microbenchmark and 1.39x on db-benchmark q5 at a hundred million rows, which puts that query three and a half times ahead of DuckDB on the same machine.
+
+Three ideas were measured and dropped rather than shipped, and all three are written into the code they would have changed. Two are about the fused group by and one is about giving the direct factorize's row pass its own worker count. They are recorded because each of them reads like the obvious next thing to try.
+
 ### A group by on a wide integer key numbers its rows on every core
 
 A factorize that indexes a table by the value itself gives each worker its own table and merges them afterwards, and the merge reads a slot out of every table at every value in the range, so a wide range makes it expensive. `DIRECT_MERGE_BYTES` is where that stops being worth it, and past that width the whole factorize ran on one thread.
