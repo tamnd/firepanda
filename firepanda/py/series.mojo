@@ -28,6 +28,7 @@ from firepanda.py.errors import DTYPE, UNSUPPORTED, VALUE, retagged, tagged
 from firepanda.py.ops import (
     binary_op,
     constant,
+    binary_tag,
     constant_tag,
     fill,
     unary_op,
@@ -299,7 +300,11 @@ struct PySeries(Movable, Writable):
                 )
             )
         except cause:
-            raise retagged(DTYPE, cause)
+            var mine = List[LogicalType](capacity=1)
+            mine.append(Self._held(py_self)[].series[].logical())
+            var theirs = List[LogicalType](capacity=1)
+            theirs.append(right[].logical())
+            raise retagged(binary_tag(which, mine, theirs), cause)
 
     @staticmethod
     def binary_value(

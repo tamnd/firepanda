@@ -63,6 +63,7 @@ from firepanda.py.index import PyIndex
 from firepanda.py.ops import (
     binary_op,
     constant,
+    binary_tag,
     constant_tag,
     fill,
     unary_op,
@@ -367,7 +368,14 @@ struct PyDataFrame(Movable, Writable):
                 )
             )
         except cause:
-            raise retagged(DTYPE, cause)
+            raise retagged(
+                binary_tag(
+                    which,
+                    Self._dtypes_of(Self._frame(py_self)[].frame[]),
+                    Self._dtypes_of(right[]),
+                ),
+                cause,
+            )
 
     @staticmethod
     def binary_series(
@@ -419,7 +427,16 @@ struct PyDataFrame(Movable, Writable):
                 )
             )
         except cause:
-            raise retagged(DTYPE, cause)
+            var theirs = List[LogicalType](capacity=1)
+            theirs.append(right[].logical())
+            raise retagged(
+                binary_tag(
+                    which,
+                    Self._dtypes_of(Self._frame(py_self)[].frame[]),
+                    theirs,
+                ),
+                cause,
+            )
 
     @staticmethod
     def binary_value(
@@ -462,11 +479,27 @@ struct PyDataFrame(Movable, Writable):
             # Every column, because one narrow column among wide ones is
             # exactly the case that fails, and the frame stopped at the first
             # one that had no answer without saying which it was.
-            ref frame = Self._frame(py_self)[].frame[]
-            var dtypes = List[LogicalType](capacity=frame.width())
-            for i in range(frame.width()):
-                dtypes.append(frame.columns[i].type)
+            var dtypes = Self._dtypes_of(Self._frame(py_self)[].frame[])
             raise retagged(constant_tag(dtypes, right, which), cause)
+
+    @staticmethod
+    def _dtypes_of(frame: DataFrame) -> List[LogicalType]:
+        """The dtype of every column, for a tag that has to look at all of them.
+
+        A frame's arithmetic stops at the first pair with no answer and does not
+        say which pair that was, so the binding cannot ask about one column and
+        has to ask about the set.
+
+        Args:
+            frame: The frame.
+
+        Returns:
+            One dtype per column, left to right.
+        """
+        var dtypes = List[LogicalType](capacity=frame.width())
+        for i in range(frame.width()):
+            dtypes.append(frame.columns[i].type)
+        return dtypes^
 
     @staticmethod
     def compare_frame(

@@ -431,7 +431,7 @@ def test_a_null_survives_the_conversion_the_promotion_asks_for() raises:
     assert_true(not got.is_valid(1), "row 1 is still null")
 
 
-def test_bool_columns_compare_and_do_not_add() raises:
+def test_bool_columns_compare() raises:
     var left = typed[DType.bool]([True, False])
     var right = typed[DType.bool]([True, True])
     var got = binary_any(left, right, BinaryOp.EQ)
@@ -439,10 +439,95 @@ def test_bool_columns_compare_and_do_not_add() raises:
     assert_true(values[0], "true equals true")
     assert_true(not values[1], "false does not equal true")
 
-    with assert_raises(contains="is not defined on"):
+
+def test_adding_two_bool_columns_is_the_logical_or() raises:
+    """pandas answers `a + b` on two bools with the or, and this is that."""
+    var got = binary_any(
+        typed[DType.bool]([True, True, False, False]),
+        typed[DType.bool]([True, False, True, False]),
+        BinaryOp.ADD,
+    )
+    assert_true(got.type == LogicalType.BOOL, "the or stays bool")
+    var values = read[DType.bool](got)
+    assert_true(values[0], "true or true")
+    assert_true(values[1], "true or false")
+    assert_true(values[2], "false or true")
+    assert_true(not values[3], "false or false")
+
+
+def test_multiplying_two_bool_columns_is_the_logical_and() raises:
+    var got = binary_any(
+        typed[DType.bool]([True, True, False, False]),
+        typed[DType.bool]([True, False, True, False]),
+        BinaryOp.MUL,
+    )
+    assert_true(got.type == LogicalType.BOOL, "the and stays bool")
+    var values = read[DType.bool](got)
+    assert_true(values[0], "true and true")
+    assert_true(not values[1], "true and false")
+    assert_true(not values[2], "false and true")
+    assert_true(not values[3], "false and false")
+
+
+def test_a_null_in_a_bool_operand_propagates() raises:
+    """The or of a true and a missing is a missing here, and not a true.
+
+    Kleene logic would answer true, since a true or anything is true, and that
+    is what `|` does on a nullable bool column in pandas. This is `+`, which is
+    arithmetic, and arithmetic answers null wherever an operand is missing. The
+    two operators mean different things on the same dtype."""
+    var got = binary_any(
+        holes[DType.bool]([True, True], [True, False]),
+        typed[DType.bool]([False, True]),
+        BinaryOp.ADD,
+    )
+    var values = read[DType.bool](got)
+    assert_true(values[0], "true or false")
+    assert_true(got.is_valid(0), "row 0 is present")
+    assert_true(not got.is_valid(1), "the missing operand wins")
+
+
+def test_subtracting_two_bool_columns_names_the_operator_that_works() raises:
+    """The message is numpy's own, kept word for word, because the sentence
+    tells somebody what to write instead and a paraphrase would not."""
+    with assert_raises(contains="use the bitwise_xor, the `^` operator"):
         _ = binary_any(
-            typed[DType.bool]([True]), typed[DType.bool]([True]), BinaryOp.ADD
+            typed[DType.bool]([True]), typed[DType.bool]([True]), BinaryOp.SUB
         )
+
+
+def test_three_bool_operations_are_refused_on_two_columns() raises:
+    """`/`, `//` and `**` on two bool columns raise in pandas, and it is the one
+    place firepanda copies pandas rather than numpy on purpose.
+
+    numpy answers all three on two bool arrays, a float64 and two int8s, and it
+    is pandas that puts a dtype check in front of them. Answering them would be
+    three expressions where firepanda returns a column and pandas raises, which
+    is worse than the refusal being surprising."""
+    var a = typed[DType.bool]([True, False])
+    var b = typed[DType.bool]([True, True])
+    with assert_raises(contains="operator 'truediv' not implemented"):
+        _ = binary_any(a, b, BinaryOp.DIV)
+    with assert_raises(contains="operator 'floordiv' not implemented"):
+        _ = binary_any(a, b, BinaryOp.FLOORDIV)
+    with assert_raises(contains="operator 'pow' not implemented"):
+        _ = binary_any(a, b, BinaryOp.POW)
+
+
+def test_the_remainder_of_two_bool_columns_widens_to_int8() raises:
+    """`%` is the only one of the seven whose answer on two bools is a number,
+    it is an int8 in pandas, and firepanda copies the answer and the width.
+
+    A zero divisor is a null here where pandas answers zero, which is the
+    registered divergence the integer division already has and not a new one."""
+    var rest = binary_any(
+        typed[DType.bool]([True, True]),
+        typed[DType.bool]([True, False]),
+        BinaryOp.MOD,
+    )
+    assert_true(rest.type == LogicalType.INT8, "the remainder is int8")
+    assert_equal(read[DType.int8](rest)[0], Int8(0), "one modulo one")
+    assert_true(not rest.is_valid(1), "the zero divisor is a null")
 
 
 def test_a_bool_with_a_number_takes_the_number() raises:
@@ -524,10 +609,42 @@ def test_the_result_type_is_known_without_a_column() raises:
         == LogicalType.INT16,
         "a power keeps the operand type",
     )
+    assert_true(
+        binary_type(BinaryOp.MUL, LogicalType.BOOL, LogicalType.BOOL)
+        == LogicalType.BOOL,
+        "the logical and of two bools is a bool",
+    )
+    assert_true(
+        binary_type(BinaryOp.MOD, LogicalType.BOOL, LogicalType.BOOL)
+        == LogicalType.INT8,
+        "the remainder of two bools widens to int8",
+    )
     with assert_raises(contains="is not defined on"):
-        _ = binary_type(BinaryOp.MUL, LogicalType.BOOL, LogicalType.BOOL)
-    with assert_raises(contains="is not defined on"):
-        _ = binary_type(BinaryOp.FLOORDIV, LogicalType.BOOL, LogicalType.BOOL)
+        _ = binary_type(BinaryOp.ADD, LogicalType.STRING, LogicalType.STRING)
+
+
+def test_the_bool_result_types_are_the_seven_pandas_answers() raises:
+    """Three of the seven have an answer and four raise, and the four are not
+    the four numpy would refuse.
+
+    numpy answers `/`, `//` and `**` on two bool arrays, giving a float64 and
+    two int8s. pandas puts a dtype check in front of all three and refuses, so a
+    library copying numpy here would answer three expressions pandas does not.
+    The check is on the dtype and not on the shape of the other operand, so `s /
+    t` and `s / True` raise the same sentence. All seven were measured against
+    pandas 3.0.3."""
+    var b = LogicalType.BOOL
+    assert_true(binary_type(BinaryOp.ADD, b, b) == LogicalType.BOOL, "+")
+    assert_true(binary_type(BinaryOp.MUL, b, b) == LogicalType.BOOL, "*")
+    assert_true(binary_type(BinaryOp.MOD, b, b) == LogicalType.INT8, "%")
+    with assert_raises(contains="use the bitwise_xor"):
+        _ = binary_type(BinaryOp.SUB, b, b)
+    with assert_raises(contains="operator 'truediv' not implemented"):
+        _ = binary_type(BinaryOp.DIV, b, b)
+    with assert_raises(contains="operator 'floordiv' not implemented"):
+        _ = binary_type(BinaryOp.FLOORDIV, b, b)
+    with assert_raises(contains="operator 'pow' not implemented"):
+        _ = binary_type(BinaryOp.POW, b, b)
 
 
 def test_every_operation_prints_as_the_symbol_it_is_written_with() raises:
@@ -771,11 +888,71 @@ def test_a_text_constant_against_a_number_has_no_common_type() raises:
         )
 
 
-def test_a_constant_cannot_be_added_to_a_bool_column() raises:
-    with assert_raises(contains="is not defined on"):
+def test_a_bool_constant_ors_and_ands_a_bool_column() raises:
+    var ored = binary_value_any(
+        typed[DType.bool]([True, False]), Value(True).weakened(), BinaryOp.ADD
+    )
+    assert_true(ored.type == LogicalType.BOOL, "the or stays bool")
+    var left = read[DType.bool](ored)
+    assert_true(left[0], "true or true")
+    assert_true(left[1], "false or true")
+
+    var anded = binary_value_any(
+        typed[DType.bool]([True, False]), Value(True).weakened(), BinaryOp.MUL
+    )
+    var right = read[DType.bool](anded)
+    assert_true(right[0], "true and true")
+    assert_true(not right[1], "false and true")
+
+
+def test_a_bool_constant_remainder_widens_to_int8() raises:
+    """The one bool operation against a scalar that answers a number, and the
+    answer is zero everywhere because every remainder by one is."""
+    var got = binary_value_any(
+        typed[DType.bool]([True, False]), Value(True).weakened(), BinaryOp.MOD
+    )
+    assert_true(got.type == LogicalType.INT8, "the remainder is int8")
+    var values = read[DType.int8](got)
+    assert_equal(values[0], Int8(0), "one modulo one")
+    assert_equal(values[1], Int8(0), "zero modulo one")
+
+
+def test_three_bool_operations_are_refused_against_a_constant() raises:
+    """The same three are refused on two columns, because what pandas checks is
+    the dtype and not the shape of the other operand."""
+    with assert_raises(contains="operator 'truediv' not implemented"):
         _ = binary_value_any(
-            typed[DType.bool]([True, False]), Value(True), BinaryOp.ADD
+            typed[DType.bool]([True]), Value(True).weakened(), BinaryOp.DIV
         )
+    with assert_raises(contains="operator 'floordiv' not implemented"):
+        _ = binary_value_any(
+            typed[DType.bool]([True]),
+            Value(True).weakened(),
+            BinaryOp.FLOORDIV,
+        )
+    with assert_raises(contains="operator 'pow' not implemented"):
+        _ = binary_value_any(
+            typed[DType.bool]([True]), Value(True).weakened(), BinaryOp.POW
+        )
+    with assert_raises(contains="use the bitwise_xor"):
+        _ = binary_value_any(
+            typed[DType.bool]([True]), Value(True).weakened(), BinaryOp.SUB
+        )
+
+
+def test_a_number_constant_against_a_bool_column_is_ordinary_arithmetic() raises:
+    """None of the bool rules apply once the constant is a number, because the
+    two of them promote to the number's dtype and nothing about the pair is
+    still bool. `bool + 2` is an int64 three in pandas and it is here."""
+    var got = binary_value_any(
+        typed[DType.bool]([True, False]),
+        Value(Int64(2)).weakened(),
+        BinaryOp.ADD,
+    )
+    assert_true(got.type == LogicalType.INT64, "the number decides the width")
+    var values = read[DType.int64](got)
+    assert_equal(values[0], Int64(3), "true is one")
+    assert_equal(values[1], Int64(2), "false is zero")
 
 
 def test_a_weak_integer_takes_the_dtype_of_the_column() raises:

@@ -449,11 +449,11 @@ def test_a_compute_over_a_missing_column_is_caught_when_the_plan_is_built() rais
 
 
 def test_a_compute_with_no_answer_on_those_types_is_caught_at_plan_time() raises:
-    """Column 1 is bool, and adding two bools has no answer, so the pipeline
-    refuses to be built rather than raising on the first chunk."""
+    """Column 1 is bool, and subtracting two bools has no answer, so the
+    pipeline refuses to be built rather than raising on the first chunk."""
     var pipeline = Pipeline(cut_frame())
-    with assert_raises(contains="is not defined on"):
-        pipeline.add(Node(Compute(1, 1, BinaryOp.ADD, "nope")))
+    with assert_raises(contains="use the bitwise_xor"):
+        pipeline.add(Node(Compute(1, 1, BinaryOp.SUB, "nope")))
 
 
 def test_a_cast_changes_a_column_in_place_and_says_so_in_the_schema() raises:
@@ -531,9 +531,17 @@ def test_a_constant_computes_its_result_type_at_plan_time() raises:
 
 
 def test_a_constant_with_no_answer_on_that_type_is_caught_at_plan_time() raises:
+    """Dividing a bool column by a bool constant is one of the three pandas
+    refuses, and the plan is where the refusal happens.
+
+    The same operation on two bool columns answers a float64, which is pandas'
+    own asymmetry rather than one invented here, so this test needs the constant
+    form specifically. The one above uses the subtraction, which has no answer
+    in either shape.
+    """
     var pipeline = Pipeline(cut_frame())
-    with assert_raises(contains="is not defined on"):
-        pipeline.add(Node(Compute(1, Value(True), BinaryOp.ADD, "nope")))
+    with assert_raises(contains="operator 'truediv' not implemented"):
+        pipeline.add(Node(Compute(1, Value(True), BinaryOp.DIV, "nope")))
 
 
 def test_a_text_predicate_runs_end_to_end() raises:

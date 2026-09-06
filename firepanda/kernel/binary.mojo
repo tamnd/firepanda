@@ -59,7 +59,7 @@ from firepanda.array.array import Array
 from firepanda.array.value import Value
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
-from firepanda.dtype.logical import LogicalType, promote
+from firepanda.dtype.logical import LogicalType, TypeKind, promote
 
 from .arith import (
     OP_ADD,
@@ -73,6 +73,10 @@ from .arith import (
     divide_float_const,
     floor_divide,
     floor_divide_const,
+    logical_and,
+    logical_and_const,
+    logical_or,
+    logical_or_const,
     modulo,
     modulo_const,
     multiply,
@@ -259,6 +263,9 @@ def binary_type(
     the promotion has, and it is why an expression's type can be known at plan
     time even though the dtypes are values.
 
+    Two bools are the one pair that does not simply promote, and
+    `bool_arithmetic_type` has the whole of that.
+
     Args:
         op: The operation.
         a: The left operand type.
@@ -288,6 +295,8 @@ def binary_type(
     var common = promote(a, b)
     if op.is_comparison():
         return LogicalType.BOOL
+    if common.kind == TypeKind.BOOL:
+        return bool_arithmetic_type(op)
     if not common.is_numeric():
         raise Error(
             "binary: " + String(op) + " is not defined on " + String(common)
@@ -295,6 +304,101 @@ def binary_type(
     if op == BinaryOp.DIV:
         return common if common.is_float() else LogicalType.FLOAT64
     return common
+
+
+def unsupported_on_bool(op: BinaryOp) -> Bool:
+    """Reports which arithmetic pandas declines to define on two bools.
+
+    pandas raises `NotImplementedError` for three of the seven and a `TypeError`
+    for a fourth, and the difference is not an accident of where the failure
+    happens. `truediv`, `floordiv` and `pow` are turned away by a check on the
+    dtype before anything is dispatched, and the message says the operator is
+    not implemented for bool dtypes. Subtraction gets past that check and as far
+    as numpy, which refuses it with a sentence naming `^` instead.
+
+    The binding needs this to tag the error, since the two classes are different
+    on the Python side and the core does not tag anything itself. It is a
+    property of the operation and nothing else, so both halves can ask it.
+
+    Args:
+        op: The operation.
+
+    Returns:
+        True for the three pandas answers `NotImplementedError` to.
+    """
+    return op == BinaryOp.DIV or op == BinaryOp.FLOORDIV or op == BinaryOp.POW
+
+
+def bool_arithmetic_type(op: BinaryOp) raises -> LogicalType:
+    """The type an arithmetic operation answers on two bools.
+
+    None of this is a design anybody would choose from scratch and all of it is
+    measured against pandas 3.0.3. `+` is the logical or and `*` is the logical
+    and, which is the boolean semiring and is defensible. `%` widens to int8 and
+    is zero everywhere, which is numpy showing through. `-` has no answer at
+    all, and neither do `/`, `//` and `**`, which is the part that surprises
+    people: numpy answers all three on two bool arrays, giving a float64 and two
+    int8s, and pandas puts a dtype check in front of them and refuses.
+
+    So the operand that decides is the dtype and not the shape. `s / t` and
+    `s / True` both raise, on a bool column, and they raise the same sentence.
+
+    firepanda copies pandas rather than numpy here, because the pandas API is
+    what it claims, and both refusals keep pandas' wording because the wording
+    is the part a user acts on: the subtraction message names the operator that
+    does work.
+
+    Args:
+        op: The operation, which is not a comparison. Every comparison is
+            defined on bools and answers bool, and that is decided before this
+            is reached.
+
+    Returns:
+        Bool for `+` and `*`, and int8 for `%`, which are the three of the seven
+        that have an answer.
+
+    Raises:
+        For `-`, `/`, `//` and `**`. The message is pandas' own, and
+        `unsupported_on_bool` says which of the two classes it should become.
+    """
+    if op == BinaryOp.ADD or op == BinaryOp.MUL:
+        return LogicalType.BOOL
+    if op == BinaryOp.SUB:
+        raise Error(
+            "numpy boolean subtract, the `-` operator, is not supported, use"
+            " the bitwise_xor, the `^` operator, or the logical_xor function"
+            " instead."
+        )
+    if unsupported_on_bool(op):
+        raise Error(
+            String(
+                "operator '",
+                _pandas_name(op),
+                "' not implemented for bool dtypes",
+            )
+        )
+    return LogicalType.INT8
+
+
+def _pandas_name(op: BinaryOp) -> String:
+    """The name pandas uses for an operation inside an error message.
+
+    `binary_type` writes an operation as the symbol it is spelled with, which is
+    what a message about two dtypes wants. This message is pandas' and pandas
+    names the dunder instead, so the three that need it are spelled out here
+    rather than the symbol being bent to serve both.
+
+    Args:
+        op: One of the three operations pandas declines on bools.
+
+    Returns:
+        The pandas name.
+    """
+    if op == BinaryOp.DIV:
+        return "truediv"
+    if op == BinaryOp.FLOORDIV:
+        return "floordiv"
+    return "pow"
 
 
 def weak_operand_type(column: LogicalType, scalar: LogicalType) -> LogicalType:
@@ -499,7 +603,7 @@ def binary_any(a: AnyArray, b: AnyArray, op: BinaryOp) raises -> AnyArray:
         )
     # Checked first and for its own sake. Everything below assumes the pair has
     # a common type and that the operation is defined on it.
-    _ = binary_type(op, a.type, b.type)
+    var answer = binary_type(op, a.type, b.type)
 
     # The common type is the promotion in all four shapes, including division.
     # A float division answers at the common type, so there is nothing else to
@@ -508,6 +612,14 @@ def binary_any(a: AnyArray, b: AnyArray, op: BinaryOp) raises -> AnyArray:
     # casting both columns to float64 first would be two copies of the column
     # to reach the same answer.
     var common = promote(a.type, b.type)
+    # Bool is the one case where the common type is not the type the loop runs
+    # in. The remainder answers int8 on two bools, so both columns widen to int8
+    # first and the ordinary integer loop does the work, zero divisor rule and
+    # all, rather than there being a bool remainder loop that answers zero. The
+    # two that stay bool are `+` and `*`, whose answer type is the common type,
+    # so this leaves them alone, and the other four never get here.
+    if common.kind == TypeKind.BOOL and not op.is_comparison():
+        common = answer
     if common.is_variable_width():
         return _compare_text_erased(a, b, op)
 
@@ -595,6 +707,14 @@ def _binary_erased(
             if op == BinaryOp.GE:
                 return AnyArray(greater_equal(x, y))
             comptime if target == DType.bool:
+                # Two of the seven arrive here still bool. The remainder widened
+                # to int8 before the call and is running the integer loop
+                # somewhere else in this same `comptime for`, and the other four
+                # were turned away by `binary_type` before any column moved.
+                if op == BinaryOp.ADD:
+                    return AnyArray(logical_or(x, y))
+                if op == BinaryOp.MUL:
+                    return AnyArray(logical_and(x, y))
                 raise Error(
                     "binary: " + String(op) + " is not defined on bool columns"
                 )
@@ -653,6 +773,11 @@ def binary_value_any(
         return all_null(answer, len(a))
 
     var common = promote(a.type, scalar.type)
+    # The same widening `binary_any` does, and the same reason. A Python `True`
+    # against a bool column is the only way to reach it here, and writing it the
+    # same way in both places is what keeps them from drifting.
+    if common.kind == TypeKind.BOOL and not op.is_comparison():
+        common = answer
     # The comparison with the constant on the left is turned round rather than
     # given loops of its own. Subtraction and division cannot be turned round, so
     # they carry the flag into the loop, where the branch on it sits outside.
@@ -769,6 +894,12 @@ def _binary_const_erased(
             if op == BinaryOp.GE:
                 return AnyArray(compare_const[target, CMP_GE](x, y))
             comptime if target == DType.bool:
+                # The same two as the two column path, and no branch on
+                # `flip`, because both of them commute.
+                if op == BinaryOp.ADD:
+                    return AnyArray(logical_or_const(x, y))
+                if op == BinaryOp.MUL:
+                    return AnyArray(logical_and_const(x, y))
                 raise Error(
                     "binary: " + String(op) + " is not defined on bool columns"
                 )
