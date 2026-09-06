@@ -6,13 +6,19 @@ what an operation means and the kernel layer decides how it runs, and the two ar
 not allowed to leak into each other. `docs/specs/11-package-layout.md` puts it as
 `kernel` never seeing a `DataFrame`, and this file is the other half of that rule.
 
-Two divergences from pandas are visible here and both are from
-`docs/specs/04-python-dx.md`. There is no index, so a `Series` is positional and
-nothing aligns on labels. And nothing mutates: every method returns a new
+One divergence from pandas is visible here and it is from
+`docs/specs/04-python-dx.md`: nothing mutates. Every method returns a new
 `Series`, there is no `inplace=`, and the copy is real rather than a view. An
 eager API that hands out views has to answer what happens when the parent is
 dropped, and firepanda answers it by not having views until the plan layer at M4
 makes the lifetime explicit.
+
+The arithmetic at the bottom of the file matches rows by label and not by
+position, which is the thing about pandas that surprises people who came from
+arrays. `firepanda/frame/align.mojo` has the rules and the reasoning. The one to
+know before reading anything else is that `+` aligns and `==` refuses to, which
+is pandas' rule and not an oversight: a row that is on one side only has a
+missing sum and has no comparison at all.
 
 The cost of that is a copy per operation and it is worth being honest about the
 size of it. `head(10)` on a million row column copies ten values. `cast` copies
@@ -21,12 +27,18 @@ off a `DataFrame`, which is a full copy today, and it is the reason `at` exists
 next to `column`.
 """
 
+from std.collections import Optional
+
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.array.strings import StringArray
+from firepanda.array.value import Value
+from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.logical import LogicalType
+from firepanda.frame.align import align_pair, fill_one_sided, keep_rows
 from firepanda.frame.display import DisplayOptions, render_column
 from firepanda.frame.index import Index
+from firepanda.kernel.binary import BinaryOp, binary_any, binary_value_any
 from firepanda.kernel.cast import cast_any
 from firepanda.kernel.nulls import (
     coalesce_any,
@@ -38,6 +50,7 @@ from firepanda.kernel.nulls import (
 )
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.sort import argsort_any, is_sorted_any
+from firepanda.kernel.unary import UnaryOp, unary_any
 
 
 struct Series(Copyable, Movable, Sized, Writable):
@@ -227,7 +240,7 @@ struct Series(Copyable, Movable, Sized, Writable):
         Returns:
             A renamed copy.
         """
-        return Self(name, AnyArray(copy=self.values))
+        return self._relabelled(name, AnyArray(copy=self.values))
 
     def cast(self, to: DType, strict: Bool = True) raises -> Self:
         """Returns the series converted to another dtype.
@@ -252,7 +265,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             If either dtype has no physical layout, or the series is text and
             strict and some value is not a number.
         """
-        return Self(self.name, cast_any(self.values, to, strict))
+        return self._relabelled(self.name, cast_any(self.values, to, strict))
 
     def cast(self, to: LogicalType, strict: Bool = True) raises -> Self:
         """Returns the series converted to another logical type.
@@ -272,7 +285,7 @@ struct Series(Copyable, Movable, Sized, Writable):
             If the type has no conversion from this one, or the series is text
             and strict and some value is not a number.
         """
-        return Self(self.name, cast_any(self.values, to, strict))
+        return self._relabelled(self.name, cast_any(self.values, to, strict))
 
     def take(self, indices: List[Int]) raises -> Self:
         """Returns rows gathered by position.
@@ -506,7 +519,9 @@ struct Series(Copyable, Movable, Sized, Writable):
             If the dtypes differ, if the fallback is neither one row nor as tall
             as the series, or if the dtype has no physical layout.
         """
-        return Self(self.name, coalesce_any(self.values, other.values))
+        return self._relabelled(
+            self.name, coalesce_any(self.values, other.values)
+        )
 
     def fill_forward(self, limit: Int = 0) raises -> Self:
         """Returns the series with each null taking the last present value before it.
@@ -526,7 +541,7 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             If the dtype has no physical layout.
         """
-        return Self(self.name, fill_forward_any(self.values, limit))
+        return self._relabelled(self.name, fill_forward_any(self.values, limit))
 
     def fill_backward(self, limit: Int = 0) raises -> Self:
         """Returns the series with each null taking the next present value after it.
@@ -541,7 +556,1050 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             If the dtype has no physical layout.
         """
-        return Self(self.name, fill_backward_any(self.values, limit))
+        return self._relabelled(
+            self.name, fill_backward_any(self.values, limit)
+        )
+
+    def _relabelled(self, name: String, var values: AnyArray) raises -> Self:
+        """Builds a result that has this series' row labels.
+
+        Every operation that answers one row per input row keeps the labels,
+        because the labels are what the rows are called and nothing about a cast
+        or a fill renames a row. The plain constructor cannot do this, since it
+        takes a column with nothing attached and has to invent a range.
+
+        Args:
+            name: The result's name.
+            values: The result's column. Must be as tall as this series.
+
+        Returns:
+            The series.
+
+        Raises:
+            Error: If the column is a different height, which would mean the
+                labels do not describe it.
+        """
+        if len(values) != len(self.values):
+            raise Error(
+                "series: a result of "
+                + String(len(values))
+                + " rows cannot carry the labels of "
+                + String(len(self.values))
+            )
+        var out = Self(name, values^)
+        out.index = Index(copy=self.index)
+        return out^
+
+    def binary(
+        self,
+        other: Self,
+        op: BinaryOp,
+        fill_value: Optional[Value] = None,
+        flip: Bool = False,
+    ) raises -> Self:
+        """Applies an operation to two series, matching rows by label.
+
+        The alignment is in `firepanda/frame/align.mojo` and the short circuit
+        for two equal indexes is the case that runs on almost every call.
+
+        Args:
+            other: The right operand.
+            op: The operation.
+            fill_value: What to put where exactly one of the two sides is
+                missing. `None` leaves both sides as they are, which makes a row
+                either side is missing from a missing row.
+            flip: True for `other op self`, which is what the reflected forms
+                need and which alignment cannot express by swapping the
+                arguments, since the result keeps this series' name and labels.
+
+        Returns:
+            A series on the union of the two indexes.
+
+        Raises:
+            Error: If the labels differ and either index has a duplicate, or the
+                operation is not defined on the two dtypes.
+        """
+        var pair = align_pair(
+            self.index, self.values, other.index, other.values
+        )
+        var keep = Bitmap(0)
+        if fill_value:
+            keep = fill_one_sided(pair.left, pair.right, fill_value.value())
+
+        var out = binary_any(pair.right, pair.left, op) if flip else binary_any(
+            pair.left, pair.right, op
+        )
+        if fill_value:
+            keep_rows(out, keep)
+
+        var result = Self(_shared_name(self.name, other.name), out^)
+        result.index = pair^.into_index()
+        return result^
+
+    def binary(
+        self, value: Value, op: BinaryOp, value_on_left: Bool = False
+    ) raises -> Self:
+        """Applies an operation to every row of a series and one constant.
+
+        Nothing aligns here, because a constant has no labels to align against.
+
+        Args:
+            value: The constant.
+            op: The operation.
+            value_on_left: True for `5 - s` rather than `s - 5`.
+
+        Returns:
+            A series of the same height, on the same labels.
+
+        Raises:
+            Error: If the operation is not defined on the two types.
+        """
+        return self._relabelled(
+            self.name,
+            binary_value_any(self.values, value, op, value_on_left),
+        )
+
+    def compare(self, other: Self, op: BinaryOp) raises -> Self:
+        """Compares two series row by row, refusing to align them.
+
+        This is what `==` and its five relatives do, and it is deliberately not
+        what `+` does. pandas aligns an arithmetic operation and refuses to
+        align a comparison, saying it can only compare identically labelled
+        series, and the reason is that a comparison has no answer for a row that
+        is on one side only. Arithmetic can say the answer is missing there. A
+        comparison would have to say False, which reads as "these are different"
+        rather than as "one of them is not here". The flexible forms `eq` and
+        the rest do align, because they have a `fill_value` to say it with.
+
+        Args:
+            other: The right operand.
+            op: The comparison.
+
+        Returns:
+            A boolean series on this series' labels.
+
+        Raises:
+            Error: If the two indexes hold different labels, or the comparison
+                is not defined on the two dtypes.
+        """
+        if not self.index.equals(other.index):
+            raise Error(
+                "series: can only compare identically-labeled Series objects;"
+                " use the eq, ne, lt, le, gt or ge method to compare these two"
+                " on the union of their labels instead"
+            )
+        return self._relabelled(
+            _shared_name(self.name, other.name),
+            binary_any(self.values, other.values, op),
+        )
+
+    def add(
+        self, other: Self, fill_value: Optional[Value] = None
+    ) raises -> Self:
+        """Adds two series, matching rows by label.
+
+        Args:
+            other: The right operand.
+            fill_value: What to put where one side only is missing.
+
+        Returns:
+            The sums, on the union of the two indexes.
+
+        Raises:
+            Error: If the operands cannot be aligned or added.
+        """
+        return self.binary(other, BinaryOp.ADD, fill_value)
+
+    def radd(
+        self, other: Self, fill_value: Optional[Value] = None
+    ) raises -> Self:
+        """Adds two series the other way round.
+
+        Args:
+            other: The left operand.
+            fill_value: What to put where one side only is missing.
+
+        Returns:
+            The sums, on the union of the two indexes.
+
+        Raises:
+            Error: If the operands cannot be aligned or added.
+        """
+        return self.binary(other, BinaryOp.ADD, fill_value, flip=True)
+
+    def sub(
+        self, other: Self, fill_value: Optional[Value] = None
+    ) raises -> Self:
+        """Subtracts one series from another, matching rows by label.
+
+        Args:
+            other: The right operand.
+            fill_value: What to put where one side only is missing.
+
+        Returns:
+            The differences, on the union of the two indexes.
+
+        Raises:
+            Error: If the operands cannot be aligned or subtracted.
+        """
+        return self.binary(other, BinaryOp.SUB, fill_value)
+
+    def rsub(
+        self, other: Self, fill_value: Optional[Value] = None
+    ) raises -> Self:
+        """Subtracts this series from another one.
+
+        Args:
+            other: The left operand.
+            fill_value: What to put where one side only is missing.
+
+        Returns:
+            The differences, on the union of the two indexes.
+
+        Raises:
+            Error: If the operands cannot be aligned or subtracted.
+        """
+        return self.binary(other, BinaryOp.SUB, fill_value, flip=True)
+
+    def mul(
+        self, other: Self, fill_value: Optional[Value] = None
+    ) raises -> Self:
+        """Multiplies two series, matching rows by label.
+
+        Args:
+            other: The right operand.
+            fill_value: What to put where one side only is missing.
+
+        Returns:
+            The products, on the union of the two indexes.
+
+        Raises:
+            Error: If the operands cannot be aligned or multiplied.
+        """
+        return self.binary(other, BinaryOp.MUL, fill_value)
+
+    def rmul(
+        self, other: Self, fill_value: Optional[Value] = None
+    ) raises -> Self:
+        """Multiplies two series the other way round.
+
+        Args:
+            other: The left operand.
+            fill_value: What to put where one side only is missing.
+
+        Returns:
+            The products, on the union of the two indexes.
+
+        Raises:
+            Error: If the operands cannot be aligned or multiplied.
+        """
+        return self.binary(other, BinaryOp.MUL, fill_value, flip=True)
+
+    def truediv(
+        self, other: Self, fill_value: Optional[Value] = None
+    ) raises -> Self:
+        """Divides two series, matching rows by label.
+
+        Args:
+            other: The right operand.
+            fill_value: What to put where one side only is missing.
+
+        Returns:
+            A float64 series on the union of the two indexes.
+
+        Raises:
+            Error: If the operands cannot be aligned or divided.
+        """
+        return self.binary(other, BinaryOp.DIV, fill_value)
+
+    def rtruediv(
+        self, other: Self, fill_value: Optional[Value] = None
+    ) raises -> Self:
+        """Divides two series the other way round.
+
+        Args:
+            other: The left operand.
+            fill_value: What to put where one side only is missing.
+
+        Returns:
+            A float64 series on the union of the two indexes.
+
+        Raises:
+            Error: If the operands cannot be aligned or divided.
+        """
+        return self.binary(other, BinaryOp.DIV, fill_value, flip=True)
+
+    def floordiv(
+        self, other: Self, fill_value: Optional[Value] = None
+    ) raises -> Self:
+        """Floor divides two series, matching rows by label.
+
+        Args:
+            other: The right operand.
+            fill_value: What to put where one side only is missing.
+
+        Returns:
+            The quotients, on the union of the two indexes. An integer row whose
+            divisor is zero is missing rather than infinite, which is the
+            registered divergence explained in `firepanda/kernel/arith.mojo`.
+
+        Raises:
+            Error: If the operands cannot be aligned or divided.
+        """
+        return self.binary(other, BinaryOp.FLOORDIV, fill_value)
+
+    def rfloordiv(
+        self, other: Self, fill_value: Optional[Value] = None
+    ) raises -> Self:
+        """Floor divides two series the other way round.
+
+        Args:
+            other: The left operand.
+            fill_value: What to put where one side only is missing.
+
+        Returns:
+            The quotients, on the union of the two indexes.
+
+        Raises:
+            Error: If the operands cannot be aligned or divided.
+        """
+        return self.binary(other, BinaryOp.FLOORDIV, fill_value, flip=True)
+
+    def mod(
+        self, other: Self, fill_value: Optional[Value] = None
+    ) raises -> Self:
+        """Takes the remainder of two series, matching rows by label.
+
+        Args:
+            other: The right operand.
+            fill_value: What to put where one side only is missing.
+
+        Returns:
+            The remainders, on the union of the two indexes.
+
+        Raises:
+            Error: If the operands cannot be aligned or divided.
+        """
+        return self.binary(other, BinaryOp.MOD, fill_value)
+
+    def rmod(
+        self, other: Self, fill_value: Optional[Value] = None
+    ) raises -> Self:
+        """Takes the remainder the other way round.
+
+        Args:
+            other: The left operand.
+            fill_value: What to put where one side only is missing.
+
+        Returns:
+            The remainders, on the union of the two indexes.
+
+        Raises:
+            Error: If the operands cannot be aligned or divided.
+        """
+        return self.binary(other, BinaryOp.MOD, fill_value, flip=True)
+
+    def pow(
+        self, other: Self, fill_value: Optional[Value] = None
+    ) raises -> Self:
+        """Raises one series to the power of another, matching rows by label.
+
+        Args:
+            other: The exponents.
+            fill_value: What to put where one side only is missing.
+
+        Returns:
+            The powers, on the union of the two indexes.
+
+        Raises:
+            Error: If the operands cannot be aligned, or an integer column meets
+                a negative exponent, which numpy refuses and so does this.
+        """
+        return self.binary(other, BinaryOp.POW, fill_value)
+
+    def rpow(
+        self, other: Self, fill_value: Optional[Value] = None
+    ) raises -> Self:
+        """Raises another series to the power of this one.
+
+        Args:
+            other: The bases.
+            fill_value: What to put where one side only is missing.
+
+        Returns:
+            The powers, on the union of the two indexes.
+
+        Raises:
+            Error: If the operands cannot be aligned, or an integer column meets
+                a negative exponent.
+        """
+        return self.binary(other, BinaryOp.POW, fill_value, flip=True)
+
+    def eq(
+        self, other: Self, fill_value: Optional[Value] = None
+    ) raises -> Self:
+        """Compares two series for equality, matching rows by label.
+
+        The flexible form aligns where the `==` operator refuses to, because
+        this one has a `fill_value` to say what a row on one side only should be
+        compared against.
+
+        Args:
+            other: The right operand.
+            fill_value: What to compare against where one side only is missing.
+
+        Returns:
+            A boolean series on the union of the two indexes.
+
+        Raises:
+            Error: If the operands cannot be aligned or compared.
+        """
+        return self.binary(other, BinaryOp.EQ, fill_value)
+
+    def ne(
+        self, other: Self, fill_value: Optional[Value] = None
+    ) raises -> Self:
+        """Compares two series for difference, matching rows by label.
+
+        Args:
+            other: The right operand.
+            fill_value: What to compare against where one side only is missing.
+
+        Returns:
+            A boolean series on the union of the two indexes.
+
+        Raises:
+            Error: If the operands cannot be aligned or compared.
+        """
+        return self.binary(other, BinaryOp.NE, fill_value)
+
+    def lt(
+        self, other: Self, fill_value: Optional[Value] = None
+    ) raises -> Self:
+        """Compares two series with less than, matching rows by label.
+
+        Args:
+            other: The right operand.
+            fill_value: What to compare against where one side only is missing.
+
+        Returns:
+            A boolean series on the union of the two indexes.
+
+        Raises:
+            Error: If the operands cannot be aligned or compared.
+        """
+        return self.binary(other, BinaryOp.LT, fill_value)
+
+    def le(
+        self, other: Self, fill_value: Optional[Value] = None
+    ) raises -> Self:
+        """Compares two series with less than or equal, matching rows by label.
+
+        Args:
+            other: The right operand.
+            fill_value: What to compare against where one side only is missing.
+
+        Returns:
+            A boolean series on the union of the two indexes.
+
+        Raises:
+            Error: If the operands cannot be aligned or compared.
+        """
+        return self.binary(other, BinaryOp.LE, fill_value)
+
+    def gt(
+        self, other: Self, fill_value: Optional[Value] = None
+    ) raises -> Self:
+        """Compares two series with greater than, matching rows by label.
+
+        Args:
+            other: The right operand.
+            fill_value: What to compare against where one side only is missing.
+
+        Returns:
+            A boolean series on the union of the two indexes.
+
+        Raises:
+            Error: If the operands cannot be aligned or compared.
+        """
+        return self.binary(other, BinaryOp.GT, fill_value)
+
+    def ge(
+        self, other: Self, fill_value: Optional[Value] = None
+    ) raises -> Self:
+        """Compares two series with greater or equal, matching rows by label.
+
+        Args:
+            other: The right operand.
+            fill_value: What to compare against where one side only is missing.
+
+        Returns:
+            A boolean series on the union of the two indexes.
+
+        Raises:
+            Error: If the operands cannot be aligned or compared.
+        """
+        return self.binary(other, BinaryOp.GE, fill_value)
+
+    def __add__(self, other: Self) raises -> Self:
+        """Adds two series, matching rows by label.
+
+        Args:
+            other: The right operand.
+
+        Returns:
+            The sums.
+
+        Raises:
+            Error: If the operands cannot be aligned or added.
+        """
+        return self.binary(other, BinaryOp.ADD)
+
+    def __add__(self, value: Value) raises -> Self:
+        """Adds a constant to every row.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            The sums.
+
+        Raises:
+            Error: If the two types cannot be added.
+        """
+        return self.binary(value, BinaryOp.ADD)
+
+    def __radd__(self, value: Value) raises -> Self:
+        """Adds every row to a constant.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            The sums.
+
+        Raises:
+            Error: If the two types cannot be added.
+        """
+        return self.binary(value, BinaryOp.ADD, value_on_left=True)
+
+    def __sub__(self, other: Self) raises -> Self:
+        """Subtracts one series from another, matching rows by label.
+
+        Args:
+            other: The right operand.
+
+        Returns:
+            The differences.
+
+        Raises:
+            Error: If the operands cannot be aligned or subtracted.
+        """
+        return self.binary(other, BinaryOp.SUB)
+
+    def __sub__(self, value: Value) raises -> Self:
+        """Subtracts a constant from every row.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            The differences.
+
+        Raises:
+            Error: If the two types cannot be subtracted.
+        """
+        return self.binary(value, BinaryOp.SUB)
+
+    def __rsub__(self, value: Value) raises -> Self:
+        """Subtracts every row from a constant.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            The differences.
+
+        Raises:
+            Error: If the two types cannot be subtracted.
+        """
+        return self.binary(value, BinaryOp.SUB, value_on_left=True)
+
+    def __mul__(self, other: Self) raises -> Self:
+        """Multiplies two series, matching rows by label.
+
+        Args:
+            other: The right operand.
+
+        Returns:
+            The products.
+
+        Raises:
+            Error: If the operands cannot be aligned or multiplied.
+        """
+        return self.binary(other, BinaryOp.MUL)
+
+    def __mul__(self, value: Value) raises -> Self:
+        """Multiplies every row by a constant.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            The products.
+
+        Raises:
+            Error: If the two types cannot be multiplied.
+        """
+        return self.binary(value, BinaryOp.MUL)
+
+    def __rmul__(self, value: Value) raises -> Self:
+        """Multiplies a constant by every row.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            The products.
+
+        Raises:
+            Error: If the two types cannot be multiplied.
+        """
+        return self.binary(value, BinaryOp.MUL, value_on_left=True)
+
+    def __truediv__(self, other: Self) raises -> Self:
+        """Divides two series, matching rows by label.
+
+        Args:
+            other: The divisors.
+
+        Returns:
+            A float64 series.
+
+        Raises:
+            Error: If the operands cannot be aligned or divided.
+        """
+        return self.binary(other, BinaryOp.DIV)
+
+    def __truediv__(self, value: Value) raises -> Self:
+        """Divides every row by a constant.
+
+        Args:
+            value: The divisor.
+
+        Returns:
+            A float64 series.
+
+        Raises:
+            Error: If the two types cannot be divided.
+        """
+        return self.binary(value, BinaryOp.DIV)
+
+    def __rtruediv__(self, value: Value) raises -> Self:
+        """Divides a constant by every row.
+
+        Args:
+            value: The numerator.
+
+        Returns:
+            A float64 series.
+
+        Raises:
+            Error: If the two types cannot be divided.
+        """
+        return self.binary(value, BinaryOp.DIV, value_on_left=True)
+
+    def __floordiv__(self, other: Self) raises -> Self:
+        """Floor divides two series, matching rows by label.
+
+        Args:
+            other: The divisors.
+
+        Returns:
+            The quotients, keeping the operand type.
+
+        Raises:
+            Error: If the operands cannot be aligned or divided.
+        """
+        return self.binary(other, BinaryOp.FLOORDIV)
+
+    def __floordiv__(self, value: Value) raises -> Self:
+        """Floor divides every row by a constant.
+
+        Args:
+            value: The divisor.
+
+        Returns:
+            The quotients, keeping the operand type.
+
+        Raises:
+            Error: If the two types cannot be divided.
+        """
+        return self.binary(value, BinaryOp.FLOORDIV)
+
+    def __rfloordiv__(self, value: Value) raises -> Self:
+        """Floor divides a constant by every row.
+
+        Args:
+            value: The numerator.
+
+        Returns:
+            The quotients, keeping the operand type.
+
+        Raises:
+            Error: If the two types cannot be divided.
+        """
+        return self.binary(value, BinaryOp.FLOORDIV, value_on_left=True)
+
+    def __mod__(self, other: Self) raises -> Self:
+        """Takes the remainder of two series, matching rows by label.
+
+        Args:
+            other: The divisors.
+
+        Returns:
+            The remainders, keeping the operand type.
+
+        Raises:
+            Error: If the operands cannot be aligned or divided.
+        """
+        return self.binary(other, BinaryOp.MOD)
+
+    def __mod__(self, value: Value) raises -> Self:
+        """Takes the remainder of every row by a constant.
+
+        Args:
+            value: The divisor.
+
+        Returns:
+            The remainders, keeping the operand type.
+
+        Raises:
+            Error: If the two types cannot be divided.
+        """
+        return self.binary(value, BinaryOp.MOD)
+
+    def __rmod__(self, value: Value) raises -> Self:
+        """Takes the remainder of a constant by every row.
+
+        Args:
+            value: The numerator.
+
+        Returns:
+            The remainders, keeping the operand type.
+
+        Raises:
+            Error: If the two types cannot be divided.
+        """
+        return self.binary(value, BinaryOp.MOD, value_on_left=True)
+
+    def __pow__(self, other: Self) raises -> Self:
+        """Raises every row to the matching row of another series.
+
+        Args:
+            other: The exponents.
+
+        Returns:
+            The powers.
+
+        Raises:
+            Error: If the operands cannot be aligned, or an integer column meets
+                a negative exponent.
+        """
+        return self.binary(other, BinaryOp.POW)
+
+    def __pow__(self, value: Value) raises -> Self:
+        """Raises every row to a constant power.
+
+        Args:
+            value: The exponent.
+
+        Returns:
+            The powers.
+
+        Raises:
+            Error: If an integer column meets a negative exponent.
+        """
+        return self.binary(value, BinaryOp.POW)
+
+    def __rpow__(self, value: Value) raises -> Self:
+        """Raises a constant to the power of every row.
+
+        Args:
+            value: The base.
+
+        Returns:
+            The powers.
+
+        Raises:
+            Error: If an integer base meets a negative exponent.
+        """
+        return self.binary(value, BinaryOp.POW, value_on_left=True)
+
+    def __eq__(self, other: Self) raises -> Self:
+        """Compares two identically labelled series for equality.
+
+        Args:
+            other: The right operand.
+
+        Returns:
+            A boolean series.
+
+        Raises:
+            Error: If the labels differ, which `eq` allows and this does not.
+        """
+        return self.compare(other, BinaryOp.EQ)
+
+    def __eq__(self, value: Value) raises -> Self:
+        """Compares every row against a constant.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            A boolean series.
+
+        Raises:
+            Error: If the two types cannot be compared.
+        """
+        return self.binary(value, BinaryOp.EQ)
+
+    def __ne__(self, other: Self) raises -> Self:
+        """Compares two identically labelled series for difference.
+
+        Args:
+            other: The right operand.
+
+        Returns:
+            A boolean series.
+
+        Raises:
+            Error: If the labels differ.
+        """
+        return self.compare(other, BinaryOp.NE)
+
+    def __ne__(self, value: Value) raises -> Self:
+        """Compares every row against a constant for difference.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            A boolean series.
+
+        Raises:
+            Error: If the two types cannot be compared.
+        """
+        return self.binary(value, BinaryOp.NE)
+
+    def __lt__(self, other: Self) raises -> Self:
+        """Compares two identically labelled series with less than.
+
+        Args:
+            other: The right operand.
+
+        Returns:
+            A boolean series.
+
+        Raises:
+            Error: If the labels differ.
+        """
+        return self.compare(other, BinaryOp.LT)
+
+    def __lt__(self, value: Value) raises -> Self:
+        """Compares every row against a constant with less than.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            A boolean series.
+
+        Raises:
+            Error: If the two types cannot be compared.
+        """
+        return self.binary(value, BinaryOp.LT)
+
+    def __le__(self, other: Self) raises -> Self:
+        """Compares two identically labelled series with less or equal.
+
+        Args:
+            other: The right operand.
+
+        Returns:
+            A boolean series.
+
+        Raises:
+            Error: If the labels differ.
+        """
+        return self.compare(other, BinaryOp.LE)
+
+    def __le__(self, value: Value) raises -> Self:
+        """Compares every row against a constant with less or equal.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            A boolean series.
+
+        Raises:
+            Error: If the two types cannot be compared.
+        """
+        return self.binary(value, BinaryOp.LE)
+
+    def __gt__(self, other: Self) raises -> Self:
+        """Compares two identically labelled series with greater than.
+
+        Args:
+            other: The right operand.
+
+        Returns:
+            A boolean series.
+
+        Raises:
+            Error: If the labels differ.
+        """
+        return self.compare(other, BinaryOp.GT)
+
+    def __gt__(self, value: Value) raises -> Self:
+        """Compares every row against a constant with greater than.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            A boolean series.
+
+        Raises:
+            Error: If the two types cannot be compared.
+        """
+        return self.binary(value, BinaryOp.GT)
+
+    def __ge__(self, other: Self) raises -> Self:
+        """Compares two identically labelled series with greater or equal.
+
+        Args:
+            other: The right operand.
+
+        Returns:
+            A boolean series.
+
+        Raises:
+            Error: If the labels differ.
+        """
+        return self.compare(other, BinaryOp.GE)
+
+    def __ge__(self, value: Value) raises -> Self:
+        """Compares every row against a constant with greater or equal.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            A boolean series.
+
+        Raises:
+            Error: If the two types cannot be compared.
+        """
+        return self.binary(value, BinaryOp.GE)
+
+    def unary(self, op: UnaryOp) raises -> Self:
+        """Puts every row through a one operand operation.
+
+        Nothing aligns here, because there is only one operand and it brings its
+        own labels, so this is the kernel and a relabel and nothing else.
+
+        Args:
+            op: Which operation.
+
+        Returns:
+            A series of the same type, under the same labels and the same name.
+
+        Raises:
+            Error: If the operation has no meaning on this type, which is `-`
+                and `abs` on a text column and `~` on a float one.
+        """
+        return self._relabelled(self.name, unary_any(self.values, op))
+
+    def __neg__(self) raises -> Self:
+        """Flips the sign of every row.
+
+        On a bool column this is the logical not rather than an arithmetic
+        negation, which is pandas' answer and not numpy's. numpy refuses the
+        expression outright.
+
+        Returns:
+            The negated series.
+
+        Raises:
+            Error: If the type has no negation.
+        """
+        return self.unary(UnaryOp.NEG)
+
+    def __pos__(self) raises -> Self:
+        """Answers the series unchanged.
+
+        pandas has this and it does nothing on every type that accepts it at
+        all, so it is a copy rather than a pass over the values.
+
+        Returns:
+            A copy of the series.
+
+        Raises:
+            Error: If the type has no unary plus.
+        """
+        return self.unary(UnaryOp.POS)
+
+    def abs(self) raises -> Self:
+        """Takes the absolute value of every row.
+
+        pandas spells this both ways, `abs(s)` and `s.abs()`, and Mojo only has
+        the second. The builtin `abs` needs the `Absable` trait, and a trait
+        cannot be conformed to by a method that raises, so `abs(s)` does not
+        compile here even though `s.__abs__()` does. The Python surface gets
+        both spellings, since the dunder is still there for it to bind to.
+
+        The most negative integer answers itself, which is what the hardware
+        does and what numpy and pandas both report. A guard would make firepanda
+        the only one of the three that answers something else.
+
+        Returns:
+            The magnitudes.
+
+        Raises:
+            Error: If the type has no absolute value.
+        """
+        return self.unary(UnaryOp.ABS)
+
+    def __abs__(self) raises -> Self:
+        """Takes the absolute value of every row.
+
+        Here for the Python binding to reach, since `abs(s)` in Python looks
+        this up. Mojo callers want `abs` above, for the reason written there.
+
+        Returns:
+            The magnitudes.
+
+        Raises:
+            Error: If the type has no absolute value.
+        """
+        return self.abs()
+
+    def __invert__(self) raises -> Self:
+        """Inverts every row.
+
+        Two operations picked by the type: the logical not on a bool column, so
+        that a mask can be negated, and the bitwise not on an integer one, so
+        that `~Series([1, 2])` is `[-2, -3]`.
+
+        Returns:
+            The inverted series.
+
+        Raises:
+            Error: On a float column, which has no bitwise not.
+        """
+        return self.unary(UnaryOp.INVERT)
 
     def write_to(self, mut writer: Some[Writer]):
         """Writes the values, one per line, with a dtype footer.
@@ -554,6 +1612,25 @@ struct Series(Copyable, Movable, Sized, Writable):
             writer: The sink.
         """
         writer.write(render_column(self.name, self.values, DisplayOptions()))
+
+
+def _shared_name(a: String, b: String) -> String:
+    """The name a result of two series should carry.
+
+    pandas keeps the name when both operands agree on it and drops it when they
+    do not, on the reasoning that a column called `price` plus a column called
+    `tax` is neither of those things. An unnamed series is the empty string
+    here, so two differently named operands and two unnamed ones land on the
+    same answer, which is what pandas does with `None` as well.
+
+    Args:
+        a: The left name.
+        b: The right name.
+
+    Returns:
+        The shared name, or the empty string if they differ.
+    """
+    return a if a == b else String()
 
 
 def _head_end(n: Int, length: Int) -> Int:
