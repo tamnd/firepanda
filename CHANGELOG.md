@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.49] - 2026-09-06
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Two of the three changes here are pandas conformance on arithmetic, and both were found by running the conformance corpus against a live pandas rather than by reading the documentation. Float floor division and the remainder were computed from the quotient, which is the expression everybody writes and is wrong once the quotient passes the last integer a float can hold exactly. `1e17 % 3` answered zero where pandas answers one, and on a float32 the line where that starts is sixteen million, which a nanosecond timestamp passed in 1970. The fix computes the quotient from the remainder the way numpy does, using `fmod`, which is exact for every pair of finite floats, and it fixes the two infinity cases along with it. Arithmetic on two bool columns raised for all seven operators where pandas answers three of them, and the three it answers are the boolean semiring rather than what the symbols suggest, so `a + b` is the logical or. The four it refuses now raise the exception type and the sentence pandas raises, including three `NotImplementedError` cases that are the first use of the unsupported tag on that path.
+
+The performance change is the text factorize that db-benchmark q3 and q7 spend their time in. When a text key has too many values to give every worker its own table, the rows are cut into partitions by hash, and a partition holds rows from all over the column, so settling a hash match meant reading a view back out of a buffer sixteen bytes a row wide at a position nothing can predict. Taking the comparison out entirely, which is wrong and was only ever a measurement, took that factorize from 33 ms to 20 ms, so two fifths of it was one scattered load. Now the view travels with the row, written by the pass that is already reading the column in order, and the build compares two views it was handed. That is 34.8 ms to 28.7 ms on the microbenchmark and 1.15x on both q3 and q7 at ten million rows, and it costs sixteen bytes per non-null row while the partitions are alive, which is about fifteen percent on that query's peak resident set.
+
 ### A group by on a wide text key stops chasing its rows back into the column
 
 A text factorize on a key with too many values to fit a table per worker cuts the rows into partitions by hash, so each key is discovered once rather than once per worker. What a partition holds is rows from all over the column, and settling a hash match means comparing the row against the row that first produced that ordinal, so the build was reading a view back out of the column at a scattered position for every row. The views buffer is sixteen bytes a row, a hundred and sixty megabytes at ten million, and a load into it at a position nothing can predict is a cache miss that no prefetch reaches.
