@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A microbenchmark row for a join whose build side is as tall as its probe side
+
+Every join row in the benchmark file joins millions of fact rows against a dimension of a thousand or a hundred thousand. A table that size sits in cache and costs nothing to fill, so all of those rows measure the probe and none of them measures the build. That is the one phase of a join still running on a single thread, and nothing was pointed at it.
+
+`join/inner_equal_sides` gives the build side the same height as the probe side and a distinct key per row, so the table is as large as the input and filling it is a pass over every row of it. On two hundred thousand rows it is 18.4 ms against 7.6 for the thousand row dimension and 12.8 for the hundred thousand row one, over the same number of fact rows and producing the same output height. That is the shape db-benchmark j5 has, which is the join query furthest from where it should be.
+
 ### A timestamp column and a date column can be read, written and named
 
 An Arrow file with a timestamp column in it could not be opened. The reader stopped at the first column it did not recognise and raised, so a frame with six good columns and one timestamp was a frame you could not have at all. Arrow type 10 is a timestamp and Arrow type 8 is a date, and both are now types firepanda has.
