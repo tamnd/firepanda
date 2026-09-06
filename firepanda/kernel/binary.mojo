@@ -18,9 +18,12 @@ is what NumPy answers and is wrong in the same way NumPy is wrong. Being wrong
 in a way people already expect is worth more here than being right in a way that
 makes an expression's type depend on what is in the column.
 
-Division is not part of the arithmetic family. It always answers float64,
-whatever went in, which is what `/` does in pandas, so it promotes for the sake
-of checking that the operands are numbers and then ignores the answer.
+Division is the one operation whose answer is not the type it was given, and
+only when it was given integers. Two integers have no integer quotient so the
+answer is float64, and a float divided by anything it promotes against keeps the
+promoted width, so `float32 / float32` is float32. That is what `/` does in
+pandas. It means division uses the promotion rather than ignoring it, and the
+one thing it adds is the widening of the integer case.
 
 Floor division and the remainder look like division and are not. `//` and `%`
 keep the operand type in pandas, so they promote like addition does and an
@@ -115,7 +118,8 @@ struct BinaryOp(Equatable, ImplicitlyCopyable, Movable, Writable):
     """Multiplication."""
 
     comptime DIV = Self(3)
-    """Division, which always answers float64."""
+    """Division, which answers float64 on integers and the promoted width on
+    floats."""
 
     comptime FLOORDIV = Self(4)
     """Floor division, which keeps the operand type."""
