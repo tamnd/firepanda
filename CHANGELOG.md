@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A fused group by has a wide key benchmark row, and two ideas about it turned out wrong
+
+`group/frame_three_sums_wide` is three sums over three columns of a key with a hundred thousand values, which is db-benchmark q5 in the shape the microbenchmarks are in. The row beside it asks the same three reductions of a key with a thousand values, and the two land on different sides of the fused pass's worker budget, so the narrow key runs on every core and the wide one runs on six. q3 and q5 group on the wide shape and q4 on the narrow one, so a change that helps one and hurts the other now has somewhere to show it.
+
+The row was built to measure a change and the change did not work, twice, so both attempts are written into the kernel with their numbers. Sizing the fused pass's workers as a single reduction would be sized rather than as all of them together, with a ceiling on what they add up to, made the wide row 1.8x slower, 21.8 ms against 39.2 ms. That is the note already under `PRIVATE_BYTES` about raising the budget, reached from the other end: more workers on a wide key means bigger tables and a bigger merge, and the scatter is waiting on memory either way.
+
+Interleaving a group's accumulators into one stretch, which is the layout that took a pair reduction to 1.38x in the previous release, made the narrow row 0.84x and left the wide one where it was. The difference is the loop rather than the layout. A pair reduction updates all of a group's accumulators on the row it is reading, so one stretch is one cache line, while the fused pass runs each reduction over a whole block before starting the next one, so a sweep touches one accumulator per group and interleaving makes it pull three lines where it pulled one. Sharing a line only pays when the same row is what uses it.
+
+One thing in the tests was worth fixing on the way. The helper that compares two erased columns read each of them with `as_typed`, a deep copy of the whole column, inside its per value loop. Every test using it groups on thirty seven values, so it never showed. At the four hundred thousand groups the new test needs it was twenty minutes.
+
 ### The shipped extension no longer carries its symbol table
 
 `tools/build_extension.sh` discards the local symbol names from `_firepanda.so` before it signs it. The build directory on this machine went from 5,141,776 bytes to 4,200,416, and the extension itself from 2,417,600 to 1,476,240, which is 39 percent off the file with nothing given up that a shipped artefact uses.

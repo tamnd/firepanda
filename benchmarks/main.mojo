@@ -2846,8 +2846,18 @@ def bench_group(mut harness: Harness) raises:
     because the deviations it sums are taken around means it does not have until
     a first pass has finished. Against `group/frame_one_key`, which is one column
     and one pass over the same rows and the same key, it says what the second
-    column and the second pass cost. That is the whole of db-benchmark q9 and the
-    one query in that suite still slower than DuckDB.
+    column and the second pass cost. That is the whole of db-benchmark q9, which
+    was the last query in that suite slower than DuckDB until this row was used
+    to fix it.
+
+    `group/frame_three_sums_wide` is `group/frame_three_means` again on a key
+    with a hundred thousand values rather than a thousand, and over three columns
+    rather than one. Several reductions of one grouping share a pass, and the
+    worker count that pass gets comes out of a byte budget over a table of one
+    entry per group per reduction per worker, so the same three reductions run on
+    every core at the narrow key and on six at the wide one. db-benchmark q3 and
+    q5 group on the wide shape and q4 on the narrow one, so a change to the fused
+    pass that helps one and hurts the other has somewhere to show it.
 
     Args:
         harness: The harness.
@@ -2875,6 +2885,8 @@ def bench_group(mut harness: Harness) raises:
     var key = Array[DType.int64](rows)
     var spread = Array[DType.int64](rows)
     var spread_values = Array[DType.int64](rows)
+    var spread_second = Array[DType.int64](rows)
+    var spread_third = Array[DType.float64](rows)
     var other = Array[DType.int64](rows)
     var own = Array[DType.uint32](rows)
     var wide = 100_000 if rows >= 100_000 else rows
@@ -2896,6 +2908,8 @@ def bench_group(mut harness: Harness) raises:
         key[i] = Int64(draw % UInt64(GROUPS))
         spread[i] = Int64(draw % UInt64(wide))
         spread_values[i] = Int64(draw % 1000)
+        spread_second[i] = Int64((draw >> 12) % 1000)
+        spread_third[i] = Float64((draw >> 24) % 1000)
         clean[i] = Float64(draw % 1000)
         nanned[i] = nan[DType.float64]() if draw & 7 == 1 else Float64(
             draw % 1000
@@ -3145,6 +3159,8 @@ def bench_group(mut harness: Harness) raises:
     var wide_columns = List[Series]()
     wide_columns.append(Series("key", spread^))
     wide_columns.append(Series("value", spread_values^))
+    wide_columns.append(Series("second", spread_second^))
+    wide_columns.append(Series("third", spread_third^))
     var wide_df = DataFrame.from_series(wide_columns^)
 
     def ordinals_one_wide() raises {imm wide_df, imm one_key}:
@@ -3337,6 +3353,31 @@ def bench_group(mut harness: Harness) raises:
         keep(out.rows)
 
     harness.record("group/frame_correlation", "rows", rows, frame_correlation)
+
+    # The same three reductions of one grouping as `group/frame_three_means`,
+    # but on the key with a hundred thousand values in it rather than a
+    # thousand, and with three columns rather than one. That is the shape of
+    # db-benchmark q5, and the group count is what decides how the fused pass
+    # runs, because its budget is a fixed number of bytes and a table is one
+    # entry per group per reduction per worker. The narrow key buys every worker
+    # the machine has and the wide one buys six, and past a million groups it
+    # buys fewer than two and the whole group by goes back to a separate pass per
+    # reduction. Nothing here said any of that before this row.
+    def frame_three_sums_wide() raises {imm wide_df}:
+        keep(wide_df.rows)
+        var out = wide_df.group_by(
+            ["key"],
+            [
+                AggSpec("value", AggKind.SUM),
+                AggSpec("second", AggKind.SUM),
+                AggSpec("third", AggKind.SUM),
+            ],
+        )
+        keep(out.rows)
+
+    harness.record(
+        "group/frame_three_sums_wide", "rows", rows, frame_three_sums_wide
+    )
 
     # The two rows below are the same query asked of the same rows through the
     # same driver, and the only thing that differs is which operator does the
