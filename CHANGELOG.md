@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.46] - 2026-09-06
+
+Built against Mojo 1.0.0 (ed45d567). DuckDB can now read a firepanda frame without a copy, the row labels are a type Python can hold and edit, and a text key of few values stopped being factorized once per core.
+
+The three Python facing entries below finish the round trip that started last release. A frame goes out as an Arrow stream, an index comes back as an `Index` rather than as a list of labels, and the editing operations and slice bounds that `loc` is made of are reachable from both sides.
+
+The engine entry is the one worth reading if you group on text. A string factorize was building a hash table per core and then walking the whole ordinal array a second time to renumber what each core had numbered locally, which at a hundred million rows is eight hundred megabytes of traffic spent on bookkeeping. A column of few enough keys now shares one dictionary instead, and db-benchmark q1 and q2 at 5GB came in 1.32x and 1.25x faster for it.
+
 ### A text key of few values is grouped against one shared dictionary
 
 Grouping on a text column has been giving every worker its own hash table. Thirty two workers on a column of a hundred keys build thirty two tables holding the same hundred keys, merge them, and then walk the whole ordinal array a second time to turn each worker's local numbering into the shared one. That second walk is four bytes read and four written for every row, four hundred megabytes each way at a hundred million rows, and all of it is spent on renumbering rather than on grouping.
