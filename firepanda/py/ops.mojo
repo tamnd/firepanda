@@ -41,10 +41,14 @@ from std.collections import Optional
 from std.python import Python, PythonObject
 
 from firepanda.array.value import Value
-from firepanda.dtype.logical import LogicalType
-from firepanda.kernel.binary import BinaryOp, resolve_constant
+from firepanda.dtype.logical import LogicalType, TypeKind
+from firepanda.kernel.binary import (
+    BinaryOp,
+    resolve_constant,
+    unsupported_on_bool,
+)
 from firepanda.kernel.unary import UnaryOp
-from firepanda.py.errors import DTYPE, OVERFLOW, VALUE, tagged
+from firepanda.py.errors import DTYPE, OVERFLOW, UNSUPPORTED, VALUE, tagged
 
 
 def binary_op(name: String) raises -> BinaryOp:
@@ -204,16 +208,79 @@ def _as_int64(value: PythonObject) raises -> Int64:
         raise tagged(OVERFLOW, "Python int too large to convert to C long")
 
 
+def binary_tag(
+    op: BinaryOp, left: List[LogicalType], right: List[LogicalType]
+) -> String:
+    """Says which tag a failed operation between two columns should carry.
+
+    Almost every failure on this path is a pair of dtypes with no operation
+    between them, which is `dtype`. The exception is `/`, `//` and `**` on two
+    bools, which pandas declines with a `NotImplementedError` rather than a
+    `TypeError`, and which the core raises untagged like everything else.
+
+    The question is asked about the two sides rather than about the aligned
+    pairs. A frame carries one dtype per column and two frames line their
+    columns up by name, so a frame whose bool column does not meet the other
+    frame's bool column would be named `unsupported` here for a failure that was
+    something else. That is a wrong word on a call that was going to raise
+    anyway, and the alternative is doing the alignment a second time in the
+    binding to improve it.
+
+    A bool on one side only is not enough and is not a near miss. `bool / int8`
+    promotes to int8 and answers a float64, so nothing about it raises, and a
+    failure on a pair like that is a failure about something else.
+
+    Args:
+        op: The operation.
+        left: The left operand's dtypes, which is one for a series and one per
+            column for a frame.
+        right: The right operand's dtypes, read the same way.
+
+    Returns:
+        The `unsupported` prefix if the operation is one of the three and both
+        sides carry a bool, and the `dtype` prefix otherwise.
+    """
+    if not unsupported_on_bool(op):
+        return DTYPE
+    if not _holds_bool(left) or not _holds_bool(right):
+        return DTYPE
+    return UNSUPPORTED
+
+
+def _holds_bool(dtypes: List[LogicalType]) -> Bool:
+    """Whether any of the dtypes is bool.
+
+    Args:
+        dtypes: One dtype for a series, one per column for a frame.
+
+    Returns:
+        True if at least one is bool.
+    """
+    for dtype in dtypes:
+        if dtype.kind == TypeKind.BOOL:
+            return True
+    return False
+
+
 def constant_tag(
     dtypes: List[LogicalType], value: Value, op: BinaryOp
 ) -> String:
     """Says which tag a failed constant operation should carry.
 
-    An operation against a constant has two ways to fail and they are different
-    kinds. The dtypes can have no answer between them, which is `dtype`, and the
-    constant can be a number too large for the column it was headed for, which
-    is `overflow`. The core knows which one happened and cannot say so, because
-    it raises untagged, which is the rule `firepanda/py/errors.mojo` states.
+    An operation against a constant has three ways to fail and they are three
+    different kinds. The dtypes can have no answer between them, which is
+    `dtype`; the constant can be a number too large for the column it was headed
+    for, which is `overflow`; and it can be one of the three operations pandas
+    declines on a bool column, which is `unsupported`. The core knows which one
+    happened and cannot say so, because it raises untagged, which is the rule
+    `firepanda/py/errors.mojo` states.
+
+    The bool case is asked first and is asked as a question about the operation
+    rather than by catching anything, because it is the one failure that is not
+    a failure of the constant. `s / True` on a bool column raises for the same
+    reason `s / t` does, which is that pandas puts a dtype check in front of
+    `/`, `//` and `**` on bools, so nothing about resolving the constant went
+    wrong and there is nothing to re-run to find out.
 
     So the binding asks the question again on the failure path, the way
     `PySeries.compare_series` compares its labels again to find out which of its
@@ -228,11 +295,19 @@ def constant_tag(
         op: The operation.
 
     Returns:
-        The `overflow` prefix if resolving the constant against any of those
-        dtypes is what failed, and the `dtype` prefix otherwise. A frame that
-        fails on its third column is still an overflow, so any is the right
-        question rather than all.
+        The `unsupported` prefix if the operation is one of the three pandas
+        declines on a bool column, the `overflow` prefix if resolving the
+        constant against any of those dtypes is what failed, and
+        the `dtype` prefix otherwise. A frame that fails on its third column is
+        still an overflow, so any is the right question rather than all, and
+        pandas answers a mixed frame the same way: one bool column among the
+        integer ones is enough for `df / True` to raise.
     """
+    if value.type.kind == TypeKind.BOOL:
+        var one = List[LogicalType](capacity=1)
+        one.append(value.type)
+        if binary_tag(op, dtypes, one) == UNSUPPORTED:
+            return UNSUPPORTED
     for dtype in dtypes:
         try:
             _ = resolve_constant(dtype, value, op)

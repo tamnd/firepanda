@@ -8,10 +8,21 @@ away before the loop exists is what actually compiles here today.
 Every operation computes across the whole values buffer and repairs the null
 positions afterwards. See `mask.mojo` for why that is cheaper than checking.
 
-Division is the exception to the shape. It always produces float64, whatever went
-in, because that is what pandas does with `/` and because integer division that
-silently truncates is a bug generator. Division by zero gives an infinity or a
-NaN, not a null, which is also pandas.
+Division is the exception to the shape. Two integers produce a float64, because
+there is no integer answer to `7 / 2` and an integer division that silently
+truncates is a bug generator, and that is what pandas does with `/`. A float
+divided by anything keeps its own width, which is also pandas, and is why there
+are two entry points rather than one: `divide` widens and `divide_float` does
+not. Division by zero gives an infinity or a NaN, not a null, which is pandas
+again.
+
+Two bool columns are the other exception, and there two of the operators do not
+mean what they are spelled. `a + b` is the logical or and `a * b` is the logical
+and, which is numpy showing through pandas, so those two go through `logical_or`
+and `logical_and` rather than through the addition and the multiplication. The
+remainder is the only other one with an answer, and it is a number, so those
+columns widen to int8 before they get here and the loops in this file never see
+a bool remainder at all.
 
 Floor division and remainder keep the operand type, which is what pandas does
 with `//` and `%` right up until a divisor is zero. There pandas has four
@@ -87,6 +98,19 @@ the operands had, and the loops here answer in the dtype they were given. That
 division goes through `divide` instead.
 """
 
+comptime OP_OR = 7
+"""Operation code for the logical or, which is what `+` means on two bools.
+
+Only `DType.bool` reaches the loops through this code and the one below it. That
+is not a restriction imposed here, it is what the operations are: pandas answers
+`a + b` on two bool columns with the logical or and `a * b` with the logical and,
+because numpy does, and on any other dtype `+` is addition and reaches the loops
+through `OP_ADD`.
+"""
+
+comptime OP_AND = 8
+"""Operation code for the logical and, which is what `*` means on two bools."""
+
 
 def add[dt: DType](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
     """Adds two columns elementwise.
@@ -143,6 +167,71 @@ def multiply[dt: DType](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
         Error: Only what the morsel runtime raises.
     """
     return _arith[dt, OP_MUL](a, b)
+
+
+def logical_or[dt: DType](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
+    """Takes the logical or of two bool columns, which is what `+` means there.
+
+    pandas answers `a + b` on two bool columns with the or, on numpy's authority,
+    and answers addition on every other dtype.
+
+    The dtype is a parameter and then immediately refused for eleven of the
+    twelve, which reads like a contradiction and is not. The caller is inside a
+    `comptime for` over every dtype and the loop variable is not folded to a
+    literal at the call, so a signature naming `DType.bool` outright cannot be
+    called from there at all. `invert` has the same shape for the same reason.
+    Only the bool arm is ever reached, so only the bool body is ever emitted.
+
+    A null propagates rather than being read as a false. Kleene logic would say
+    that a true or a missing is true whatever the missing turns out to be, and
+    that is what `|` does in pandas on a nullable bool column. This is `+`, which
+    is arithmetic, and arithmetic here answers null wherever an operand is
+    missing. The two operators mean different things and this is the arithmetic
+    one.
+
+    Args:
+        a: The left column.
+        b: The right column. Must be the same length as `a`.
+
+    Parameters:
+        dt: The dtype. Must be `DType.bool`.
+
+    Returns:
+        A bool column, null wherever either input is null.
+
+    Raises:
+        Error: If the dtype is not bool, which is a caller that dispatched
+            wrongly rather than anything a user did.
+    """
+    comptime if dt != DType.bool:
+        raise Error("arith: the logical or is only defined on bool columns")
+    else:
+        return _arith[dt, OP_OR](a, b)
+
+
+def logical_and[dt: DType](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
+    """Takes the logical and of two bool columns, which is what `*` means there.
+
+    The multiplication to `logical_or`'s addition. A null propagates and the
+    dtype is a parameter for the reasons given there.
+
+    Args:
+        a: The left column.
+        b: The right column. Must be the same length as `a`.
+
+    Parameters:
+        dt: The dtype. Must be `DType.bool`.
+
+    Returns:
+        A bool column, null wherever either input is null.
+
+    Raises:
+        Error: If the dtype is not bool.
+    """
+    comptime if dt != DType.bool:
+        raise Error("arith: the logical and is only defined on bool columns")
+    else:
+        return _arith[dt, OP_AND](a, b)
 
 
 def floor_divide[dt: DType](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
@@ -331,6 +420,10 @@ def _arith[dt: DType, op: Int](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
                 dst.unsafe_offset(i).unsafe_store(x % y)
             elif op == OP_DIV:
                 dst.unsafe_offset(i).unsafe_store(x / y)
+            elif op == OP_OR:
+                dst.unsafe_offset(i).unsafe_store(x | y)
+            elif op == OP_AND:
+                dst.unsafe_offset(i).unsafe_store(x & y)
             else:
                 comptime if dt.is_integral():
                     comptime if dt.is_signed():
@@ -654,6 +747,21 @@ def arith_const[
                     var x = src.unsafe_offset(i).unsafe_load[width=width]()
                     dst.unsafe_offset(i).unsafe_store(x / y)
                     i += width
+        elif op == OP_OR:
+            # No branch on `flip`, for the same reason addition and
+            # multiplication have none: the or and the and are commutative, so
+            # the flipped form is the same loop.
+            var i = start
+            while i < stop:
+                var x = src.unsafe_offset(i).unsafe_load[width=width]()
+                dst.unsafe_offset(i).unsafe_store(x | y)
+                i += width
+        elif op == OP_AND:
+            var i = start
+            while i < stop:
+                var x = src.unsafe_offset(i).unsafe_load[width=width]()
+                dst.unsafe_offset(i).unsafe_store(x & y)
+                i += width
         else:
             if flip:
                 var i = start
@@ -689,6 +797,57 @@ def arith_const[
 
     out.data.validity = validity^
     return out^
+
+
+def logical_or_const[
+    dt: DType
+](a: Array[dt], b: Scalar[dt]) raises -> Array[dt]:
+    """Takes the logical or of a bool column and one constant.
+
+    There is no `flip` because the or commutes, so there is nothing for it to
+    change. The dtype is a parameter for the reason `logical_or` gives.
+
+    Args:
+        a: The column.
+        b: The constant.
+
+    Parameters:
+        dt: The dtype. Must be `DType.bool`.
+
+    Returns:
+        A bool column, null wherever the column is null.
+
+    Raises:
+        Error: If the dtype is not bool.
+    """
+    comptime if dt != DType.bool:
+        raise Error("arith: the logical or is only defined on bool columns")
+    else:
+        return arith_const[dt, OP_OR](a, b)
+
+
+def logical_and_const[
+    dt: DType
+](a: Array[dt], b: Scalar[dt]) raises -> Array[dt]:
+    """Takes the logical and of a bool column and one constant.
+
+    Args:
+        a: The column.
+        b: The constant.
+
+    Parameters:
+        dt: The dtype. Must be `DType.bool`.
+
+    Returns:
+        A bool column, null wherever the column is null.
+
+    Raises:
+        Error: If the dtype is not bool.
+    """
+    comptime if dt != DType.bool:
+        raise Error("arith: the logical and is only defined on bool columns")
+    else:
+        return arith_const[dt, OP_AND](a, b)
 
 
 def floor_divide_const[

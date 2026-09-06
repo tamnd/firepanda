@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Arithmetic on two bool columns answers what pandas answers
+
+Every arithmetic operation on a pair of bool columns raised `binary: + is not defined on bool columns`. pandas answers three of the seven and refuses the other four with two different exception types and two different sentences, so the whole family was missing rather than one case of it, and a bool column is not an exotic thing to have: every comparison produces one and every mask is one.
+
+The three that answer are not what the symbols look like. `a + b` is the logical or and `a * b` is the logical and, which is the boolean semiring and reads sensibly once you have seen it. `a % b` is an int8 and is zero everywhere, which is numpy showing through. None of that was invented here, all seven rows were read off a running pandas 3.0.3, and the odd ones were copied along with the sensible ones because a library that claims the pandas API does not get to keep only the parts it likes.
+
+The four refusals are the part worth knowing about, because numpy and pandas disagree and firepanda follows pandas. `a - b` raises `TypeError` in both, with numpy's own sentence naming `^` as the operator that does what you probably meant. `a / b`, `a // b` and `a ** b` are a float64 and two int8s in numpy, and pandas puts a dtype check in front of all three and raises `NotImplementedError: operator 'truediv' not implemented for bool dtypes`. A library that copied numpy there would answer three expressions where pandas raises, which is a worse kind of wrong than a surprising refusal. What the check reads is the dtype and not the shape of the other operand, so `s / t` and `s / True` raise the same sentence.
+
+Only `+` and `*` needed new loops, since those are the two whose answer is still a bool. The remainder answers a number, so both columns widen to int8 before dispatch and the ordinary integer loop does the work, which means the zero divisor rule comes along for free and there is nothing new to keep in step. `bool % bool` divides by zero the way an integer column does, giving a null where pandas gives a zero, which is the registered divergence integer division already had and not a new one.
+
+The two new loops are `logical_or` and `logical_and`, plus their constant forms, and a null propagates through them rather than being read as a false. Kleene logic would say a true or a missing is true whatever the missing turns out to be, and that is what `|` does on a nullable bool column in pandas. This is `+`, which is arithmetic, and arithmetic answers null wherever an operand is missing. Two operators on the same dtype meaning different things is confusing enough without picking the wrong one.
+
+The three `NotImplementedError` cases are the first use of the `unsupported` tag on this path. The binding tells them from a dtype clash by asking `binary_tag`, which is a question about the operation and the two sets of dtypes and needs no data, rather than by re-running anything, because nothing about the operands went wrong. Without that the core's untagged error would arrive in Python as a `RuntimeError`, which is not what anybody would write an `except` for. All five two operand entry points ask it, the series against a series, the frame against a frame, the frame against a series and both of the constant forms, because `s / t` and `df / df` and `df / True` all raise the same thing in pandas and a tag applied to one of them and not the others is the kind of inconsistency that is worse than not having the tag.
+
 ## [0.6.48] - 2026-09-06
 
 Built against Mojo 1.0.0 (ed45d567).

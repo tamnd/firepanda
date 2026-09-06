@@ -473,3 +473,152 @@ def test_an_integer_too_large_for_a_machine_word_says_so(firepanda: ModuleType) 
     left, _ = _pair(firepanda)
     with pytest.raises(OverflowError, match="Python int too large to convert to C long"):
         left + 2**64
+
+
+def _bools(firepanda: ModuleType, values: list[object]) -> object:
+    """A bool column, which Arrow is the shortest way to be sure of."""
+    return _narrow(firepanda, "bool_", values)["x"]
+
+
+def test_adding_two_bool_columns_is_the_logical_or(firepanda: ModuleType) -> None:
+    """`+` on two bools is the or and `*` is the and, which is pandas on numpy's
+    authority. The symbols do not mean what they look like and the answers were
+    read off pandas 3.0.3 rather than reasoned about here."""
+    left = _bools(firepanda, [True, True, False, False])
+    right = _bools(firepanda, [True, False, True, False])
+    assert (left + right).dtype == "bool"
+    assert (left + right).tolist() == [True, True, True, False]
+    assert (left * right).dtype == "bool"
+    assert (left * right).tolist() == [True, False, False, False]
+
+
+def test_subtracting_two_bool_columns_names_the_operator_that_works(
+    firepanda: ModuleType,
+) -> None:
+    """numpy's own sentence, kept word for word, because it tells somebody what
+    to write instead and a paraphrase would not."""
+    left = _bools(firepanda, [True, False])
+    right = _bools(firepanda, [False, True])
+    with pytest.raises(TypeError, match="use the bitwise_xor"):
+        left - right
+
+
+def test_three_bool_operations_are_refused_on_two_columns(firepanda: ModuleType) -> None:
+    """`/`, `//` and `**` on two bool columns raise in pandas, and this is the
+    place firepanda copies pandas rather than numpy on purpose.
+
+    numpy answers all three on two bool arrays, a float64 and two int8s, and it
+    is pandas that puts a dtype check in front of them. Answering them here would
+    be three expressions that give a column where pandas gives an exception.
+    """
+    left = _bools(firepanda, [True, True, False])
+    right = _bools(firepanda, [True, False, True])
+    for operation in (
+        lambda a, b: a / b,
+        lambda a, b: a // b,
+        lambda a, b: a**b,
+    ):
+        with pytest.raises(NotImplementedError, match="not implemented for bool dtypes"):
+            operation(left, right)
+
+
+def test_the_remainder_of_two_bool_columns_widens_to_int8(firepanda: ModuleType) -> None:
+    """`%` is the only one of the seven whose bool answer is a number.
+
+    The zero divisor row is null here where pandas answers zero, which is the
+    registered divergence integer division already has and is why this widens to
+    the ordinary integer loop rather than getting a loop of its own.
+    """
+    left = _bools(firepanda, [True, True])
+    right = _bools(firepanda, [True, False])
+    assert (left % right).dtype == "int8"
+    assert (left % right).tolist() == [0, None]
+
+
+def test_three_bool_operations_are_refused_against_a_python_bool(
+    firepanda: ModuleType,
+) -> None:
+    """The same three raise on two columns, because what pandas checks is the
+    dtype and not the shape of the other operand.
+
+    The tag is the interesting part rather than the refusal. The core raises
+    untagged and an untagged error becomes a `RuntimeError` on the way out, so
+    without `constant_tag` asking `unsupported_on_bool` these would arrive as a
+    `RuntimeError` where pandas gives a `NotImplementedError`.
+    """
+    column = _bools(firepanda, [True, False])
+    for operation in (lambda s: s / True, lambda s: s // True, lambda s: s**True):
+        with pytest.raises(NotImplementedError, match="not implemented for bool dtypes"):
+            operation(column)
+
+
+def test_a_bool_constant_ors_and_ands_a_bool_column(firepanda: ModuleType) -> None:
+    column = _bools(firepanda, [True, False])
+    assert (column + True).tolist() == [True, True]
+    assert (column * True).tolist() == [True, False]
+    assert (column + False).tolist() == [True, False]
+    assert (column % True).dtype == "int8"
+
+
+def test_a_python_number_against_a_bool_column_is_ordinary_arithmetic(
+    firepanda: ModuleType,
+) -> None:
+    """None of the bool rules survive the constant being a number, because then
+    nothing about the pair is still bool. `bool + 2` is an int64 in pandas."""
+    column = _bools(firepanda, [True, False])
+    assert (column + 2).dtype == "int64"
+    assert (column + 2).tolist() == [3, 2]
+    assert (column / 2).dtype == "float64"
+
+
+def test_a_bool_frame_takes_the_constant_the_way_a_bool_column_does(
+    firepanda: ModuleType,
+) -> None:
+    """One bool column among the integer ones is enough for `df / True` to be
+    refused, which is pandas and is why the binding asks any rather than all."""
+    pa = pytest.importorskip("pyarrow")
+    frame = firepanda.from_arrow(
+        pa.table(
+            {
+                "flag": pa.array([True, False], type=pa.bool_()),
+                "count": pa.array([1, 2], type=pa.int64()),
+            }
+        )
+    )
+    answer = frame + True
+    assert answer["flag"].dtype == "bool"
+    assert answer["count"].dtype == "int64"
+    assert answer["count"].tolist() == [2, 3]
+
+    with pytest.raises(NotImplementedError, match="not implemented for bool dtypes"):
+        frame / True
+
+
+def test_a_bool_frame_divided_by_another_frame_is_refused(
+    firepanda: ModuleType,
+) -> None:
+    """The frame against frame path asks the same question the column path does.
+
+    It has to ask it about two sets of dtypes rather than two dtypes, because a
+    frame stops at the first pair with no answer and does not say which pair
+    that was, and without the question the refusal would arrive as a
+    `RuntimeError` instead of a `NotImplementedError`.
+    """
+    pa = pytest.importorskip("pyarrow")
+
+    def frame() -> object:
+        return firepanda.from_arrow(
+            pa.table(
+                {
+                    "flag": pa.array([True, False], type=pa.bool_()),
+                    "count": pa.array([1, 2], type=pa.int64()),
+                }
+            )
+        )
+
+    added = frame() + frame()
+    assert added["flag"].dtype == "bool"
+    assert added["count"].tolist() == [2, 4]
+
+    with pytest.raises(NotImplementedError, match="not implemented for bool dtypes"):
+        frame() / frame()
