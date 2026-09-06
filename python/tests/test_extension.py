@@ -95,6 +95,27 @@ def test_the_build_directory_stays_the_size_it_was_measured_at() -> None:
 
 
 @needs_a_build
+def test_the_local_symbol_names_are_not_shipped() -> None:
+    """Because the build script's `shrink` can skip its work and say so quietly.
+
+    It skips when there is no `strip` on the path, which is right for a developer
+    on a machine without binutils and wrong to let past here, and the size budget
+    above will not catch it: an unstripped build of the surface as it stands is
+    still inside the budget, so this is measured directly instead.
+
+    The evidence is a substring rather than a symbol count, because reading a
+    symbol table means either a Mach-O and ELF parser or an external tool, and
+    neither earns its place. A Mojo generic's mangled name spells its type
+    arguments as MLIR and every one of them therefore contains `kgen.instref`.
+    There are over a thousand in an unstripped build and there is no other reason
+    for those thirteen bytes to be in the file, so nought or not nought is the
+    whole of the question.
+    """
+    found = (BUILT / "_firepanda.so").read_bytes().count(b"kgen.instref")
+    assert found == 0, f"{found} mangled Mojo symbol names are still in the extension"
+
+
+@needs_a_build
 @pytest.mark.skipif(sys.platform != "darwin", reason="signatures are a macOS concern")
 def test_every_binary_is_still_validly_signed() -> None:
     """Because the alternative diagnosis is a bare 137 and two empty streams.
