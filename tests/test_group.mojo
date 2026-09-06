@@ -1681,6 +1681,50 @@ def test_a_correlation_keeps_its_digits_on_large_values() raises:
     assert_almost_equal(out[0], 1.0, atol=1e-9)
 
 
+def test_a_parallel_correlation_keeps_its_digits_on_large_values() raises:
+    # The same timestamps as above but past the parallel threshold and all in
+    # one group, so every worker centres the group on a different one of its own
+    # rows and the merge has to move all of those origins onto one. The shifts it
+    # does that with are differences between values of the same group, seconds
+    # rather than 1.7e9, and this is the test that says so.
+    comptime ROWS = PRIVATE_ROWS + 10_000
+    var base = 1_700_000_000.0
+    var x = Array[DType.float64](ROWS)
+    var y = Array[DType.float64](ROWS)
+    var codes = Array[DType.uint32](ROWS)
+    for i in range(ROWS):
+        x[i] = base + Float64(i % 1000)
+        y[i] = base + 2.0 * Float64(i % 1000)
+        codes[i] = 0
+    var out = group_corr(x, y, codes, 1)
+    assert_almost_equal(out[0], 1.0, atol=1e-9)
+
+
+def test_a_parallel_covariance_of_a_column_with_itself_is_its_variance() raises:
+    # A covariance takes the other half of the merge, the one that carries no
+    # squares, and this is it on more than one worker. The variance is computed
+    # by a kernel that does not share a line with this one, so agreeing with it
+    # is a real check rather than the same arithmetic twice. Large values again,
+    # for the reason the test above gives.
+    comptime ROWS = PRIVATE_ROWS + 10_000
+    comptime GROUPS = 7
+    var base = 1_700_000_000.0
+    var x = Array[DType.float64](ROWS)
+    var codes = Array[DType.uint32](ROWS)
+    for i in range(ROWS):
+        x[i] = base + Float64((i * 37) % 991)
+        codes[i] = UInt32(i % GROUPS)
+    var covariance = group_cov(x, x, codes, GROUPS)
+    var spread = group_var(x, codes, GROUPS)
+    for g in range(GROUPS):
+        assert_almost_equal(
+            covariance[g],
+            spread[g],
+            atol=1e-6,
+            msg=String("group ", g, " disagrees with its variance"),
+        )
+
+
 def test_a_covariance_divides_by_the_count_it_was_asked_for() raises:
     # The deviation products sum to 11 over four rows, so the sample covariance
     # is 11 over 3 and the population one is 11 over 4.
