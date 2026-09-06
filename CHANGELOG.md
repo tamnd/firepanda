@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A text key of few values is grouped against one shared dictionary
+
+Grouping on a text column has been giving every worker its own hash table. Thirty two workers on a column of a hundred keys build thirty two tables holding the same hundred keys, merge them, and then walk the whole ordinal array a second time to turn each worker's local numbering into the shared one. That second walk is four bytes read and four written for every row, four hundred megabytes each way at a hundred million rows, and all of it is spent on renumbering rather than on grouping.
+
+A column of few enough keys and no nulls now takes a different route. One thread builds a table from the first sixty five thousand rows, writing their ordinals as it goes, and then every worker probes that one table read only for the rest of the column. There is no table per worker, no merge, and no renumbering pass, because the ordinal a row gets from the probe is the ordinal it keeps.
+
+Two things have to hold and neither is assumed. The prefix has to have seen every key, and the check is that its second half introduced none the first half had not, which on a column of a hundred keys is certain and on a column of a million never happens. The probe then has to find every key it looks for, and misses are counted rather than trusted, so a key that first appears halfway down the column is caught. Either check failing hands the column back to the route it replaced, so the cost of guessing wrong is one wasted pass and the checks that keep it rare are free.
+
+Nulls are left out on purpose. A null takes an ordinal of its own and that shifts every other ordinal along, which is bookkeeping the shared dictionary would have to carry for a case a group by key is almost never in.
+
 ### The row labels are something Python can hold
 
 `df.index` and `s.index` return an `Index` now, which is the third bound type and the one that makes the thirty odd methods of the previous two entries reachable from Python at all. It carries the pandas surface: the properties, `tolist`, `get_loc`, `get_indexer`, the four set operations, the five editing operations, the slice bounds, `equals`, `identical`, `is_`, and indexing with an integer, a slice, a list of positions or a mask.
