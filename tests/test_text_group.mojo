@@ -41,9 +41,12 @@ from firepanda.frame.frame import DataFrame
 from firepanda.frame.groupby import AggSpec
 from firepanda.frame.series import Series
 from firepanda.hash.factorize import (
+    DICTIONARY_GROUPS,
     RANK_BLOCK,
     FactorizedStrings,
     MERGE_SERIAL_ENTRIES,
+    PARALLEL_STRING_ROWS,
+    _factorize_strings_dictionary,
     _factorize_strings_parallel,
     _factorize_strings_partitioned,
     _factorize_strings_serial,
@@ -470,6 +473,24 @@ def same_partitioned_string_routes(
     lands_on_the_serial_string_route(col, parallel^, what)
 
 
+def same_dictionary_string_routes(
+    col: StringArray, workers: Int, what: String
+) raises:
+    """Runs the dictionary route over one column and asserts the same thing.
+
+    This one is held to the standard whether it took its own route or gave up
+    and handed the column to the slice route, because both answers are answers
+    it is allowed to return and neither is allowed to be wrong.
+
+    Args:
+        col: The column.
+        workers: How many slices to cut the probe into.
+        what: A label for the failure message.
+    """
+    var found = _factorize_strings_dictionary(col, DEFAULT_SEED, workers)
+    lands_on_the_serial_string_route(col, found^, what)
+
+
 def lands_on_the_serial_string_route(
     col: StringArray, var parallel: FactorizedStrings, what: String
 ) raises:
@@ -548,6 +569,82 @@ def test_the_parallel_string_route_agrees_when_every_row_is_null() raises:
     for _ in range(4096):
         builder.append_null()
     same_string_routes(builder^.finish(), 4, "all null")
+
+
+def test_the_string_dictionary_route_agrees_on_a_few_groups() raises:
+    # A hundred keys in sixty four thousand rows, which is the shape the route
+    # is for: the prefix is eight thousand rows and every key is in the first
+    # half of it, so the dictionary is complete and nothing misses. Seven
+    # workers rather than eight so the last slice is the odd one out.
+    same_dictionary_string_routes(repeating_text(65536, 100), 7, "few")
+
+
+def test_the_string_dictionary_route_agrees_with_one_worker() raises:
+    same_dictionary_string_routes(repeating_text(16384, 40), 1, "one worker")
+
+
+def test_the_string_dictionary_route_gives_up_on_a_late_key() raises:
+    # One key in the last row and nowhere else. The prefix cannot know about it,
+    # so the probe has to count it as a miss and the whole column has to go back
+    # through the slice route.
+    var rows = 65536
+    var builder = StringBuilder(capacity=rows)
+    for i in range(rows - 1):
+        builder.append(String("key_", (i * 37) % 100).as_bytes())
+    builder.append(String("key_late").as_bytes())
+    same_dictionary_string_routes(builder^.finish(), 8, "late key")
+
+
+def test_the_string_dictionary_route_gives_up_when_keys_keep_arriving() raises:
+    # Every row its own key, so the second half of the prefix introduces as many
+    # as the first did and the route declines before it probes anything.
+    same_dictionary_string_routes(repeating_text(32768, 32768), 8, "distinct")
+
+
+def test_the_string_dictionary_route_gives_up_on_too_many_groups() raises:
+    # Sized so the prefix does see every key, which means the only thing left to
+    # turn the route down is the group cap.
+    var groups = DICTIONARY_GROUPS + 8
+    same_dictionary_string_routes(repeating_text(66000, groups), 8, "cap")
+
+
+def test_the_string_dictionary_route_keeps_first_appearance_order() raises:
+    # The prefix numbers the keys it builds and the probe hands out those same
+    # numbers, so an ordinal is decided by where a key first appears and not by
+    # which worker happened to see it.
+    var rows = 65536
+    var builder = StringBuilder(capacity=rows)
+    for i in range(rows):
+        builder.append(String("key_", (i * 37) % 100).as_bytes())
+    var col = builder^.finish()
+
+    var found = _factorize_strings_dictionary(col, DEFAULT_SEED, 8)
+    assert_equal(found.count(), 100)
+    assert_equal(found.null_group, -1)
+    for i in range(100):
+        assert_equal(Int(found.codes[i]), i)
+        assert_equal(found.firsts[i], i)
+
+
+def test_the_string_route_picks_the_dictionary_when_it_can() raises:
+    # Through the front door rather than by hand, so the gate is covered as well
+    # as the route behind it. The answer is checked against what the column was
+    # built to say rather than against the serial route, because running the
+    # serial route over a quarter of a million rows is most of the time this
+    # test would take and the routes are already held against each other above.
+    var rows = PARALLEL_STRING_ROWS + 1000
+    var col = repeating_text(rows, 60)
+    var found = factorize_strings(col)
+    assert_equal(found.count(), 60)
+    assert_equal(found.null_group, -1)
+    for i in range(60):
+        assert_equal(found.firsts[i], i)
+    # The keys cycle with a period of sixty and the first sixty rows are the
+    # sixty first appearances, so a row's ordinal is its position in that cycle.
+    for i in range(rows):
+        if Int(found.codes[i]) != i % 60:
+            assert_equal(Int(found.codes[i]), i % 60)
+            break
 
 
 def test_the_partitioned_string_route_agrees_with_the_serial_one() raises:

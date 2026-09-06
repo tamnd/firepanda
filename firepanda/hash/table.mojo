@@ -564,6 +564,88 @@ struct HashTable(Movable, Sized):
                     break
                 at = (at + 1) & mask
 
+    def probe_strings(
+        self,
+        hashes: Buffer,
+        col: StringArray,
+        has_null: Bool,
+        base: Int,
+        count: Int,
+        miss: UInt32,
+        reps: List[StringView],
+        mut codes: Array[DType.uint32],
+    ) -> Int:
+        """Looks a chunk of a string column's keys up without inserting any.
+
+        `probe` with the key comparison put back, on the same terms
+        `build_strings` is `build` with it put back. A hash match is a candidate
+        and the row is settled against the view that was kept when the ordinal
+        was handed out, so a mismatch keeps probing exactly as an occupied slot
+        with a different hash does.
+
+        Being read only is what makes it worth having. Every worker can run this
+        against one table at once, because none of them writes to it, which is
+        how a column whose keys are all known in advance is factorized in a
+        single pass with no per worker table and no merge behind it.
+
+        Args:
+            hashes: Hashes for this chunk, indexed from zero, from
+                `hash_strings_chunk`. Hashed with this table's seed, or nothing
+                matches.
+            col: The column, needed for the comparison. Indexed by absolute row.
+            has_null: Whether the probe column has any nulls at all.
+            base: The absolute row index this chunk starts at.
+            count: How many rows are in this chunk.
+            miss: The ordinal written for a row whose key is not in the table,
+                and for a null row.
+            reps: The view that was kept for each ordinal when it was handed
+                out, which is what `build_strings` appends to as it goes.
+            codes: Where the per-row ordinals go, indexed by absolute row.
+
+        Returns:
+            How many rows of this chunk held a key the table does not have. A
+            null row is not one of them, since a null is not a key that went
+            missing.
+        """
+        var hash = hashes.bitcast[DType.uint64]()
+        var out = codes.unsafe_ptr()
+        var slots = self._slots.bitcast[DType.uint64]()
+        var mask = self._mask
+        var absent = 0
+
+        for j in range(count):
+            var i = base + j
+            if has_null and not col.is_valid(i):
+                out.unsafe_offset(i).unsafe_write(miss)
+                continue
+
+            if j + PROBE_LOOKAHEAD < count:
+                var ahead = (
+                    hash.unsafe_offset(j + PROBE_LOOKAHEAD).unsafe_load() & mask
+                )
+                prefetch[PrefetchOptions().for_read().high_locality()](
+                    slots.unsafe_offset(Int(ahead) * SLOT_WORDS)
+                )
+
+            var wanted = hash.unsafe_offset(j).unsafe_load()
+            var at = wanted & mask
+            while True:
+                var slot = Int(at) * SLOT_WORDS
+                var ordinal = slots.unsafe_offset(slot + 1).unsafe_load()
+                if ordinal == 0:
+                    out.unsafe_offset(i).unsafe_write(miss)
+                    absent += 1
+                    break
+                if slots.unsafe_offset(slot).unsafe_load() == wanted:
+                    if col.element_equals_view(i, reps[Int(ordinal) - 1]):
+                        out.unsafe_offset(i).unsafe_write(
+                            UInt32(Int(ordinal) - 1)
+                        )
+                        break
+                at = (at + 1) & mask
+
+        return absent
+
     def build_strings[
         indirect: Bool = False
     ](

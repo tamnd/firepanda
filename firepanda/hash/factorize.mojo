@@ -263,6 +263,27 @@ shorter column the sample is a sixteenth of it instead, so the cost of the
 decision stays proportional to the work the decision is about.
 """
 
+comptime DICTIONARY_GROUPS = 1 << 12
+"""Most groups a string column may have and still be factorized by dictionary.
+
+Four thousand keys are about a hundred and thirty kilobytes of slots and another
+sixty five of views, which every core reads at once and none of them writes, so
+it wants to sit in a core's own cache rather than be shared out of the last
+level. Past that the read only table stops being free to share and the route
+that gives each worker its own is the better one anyway, because a worker with
+its own table never compares against a line another core is also reading.
+"""
+
+comptime DICTIONARY_PREFIX = 1 << 16
+"""Rows a string column's dictionary is built from before the probe.
+
+The same sixty five thousand `PARALLEL_SAMPLE` estimates from, and for the same
+reason: it is enough to have met every key of a low cardinality column many
+times over, and small enough that building it on one thread is under a percent
+of the column. On a shorter column it is an eighth instead, so the serial part
+stays a bounded share of the whole.
+"""
+
 
 struct Factorized[dt: DType](Movable):
     """A column rewritten as group ordinals, plus a row per group they name."""
@@ -2495,6 +2516,14 @@ def factorize_strings(
             return _factorize_strings_partitioned(col, seed, most)
         var workers = _parallel_workers(groups, n)
         if workers > 1:
+            # A column of few enough keys and no nulls can be factorized against
+            # one read only table instead of one per worker, which is a pass over
+            # the ordinals cheaper. Nulls are left out because the ordinal they
+            # take shifts every other one along, and that is bookkeeping the
+            # dictionary route would have to do for a case a group by key is
+            # almost never in.
+            if groups <= DICTIONARY_GROUPS and col.null_count() == 0:
+                return _factorize_strings_dictionary(col, seed, workers)
             return _factorize_strings_parallel(col, seed, workers)
     return _factorize_strings_serial(col, seed)
 
@@ -2549,6 +2578,111 @@ def _projected_groups_strings(col: StringArray, seed: UInt64, n: Int) -> Int:
             measured = True
 
     return _estimate_groups(len(table), half, sample, n)
+
+
+def _factorize_strings_dictionary(
+    col: StringArray, seed: UInt64, workers: Int
+) raises -> FactorizedStrings:
+    """Factorizes a string column against a dictionary built from its front.
+
+    A column of a few thousand distinct keys over a hundred million rows has met
+    every key it has within its first few thousand rows. The route that gives
+    every worker its own table does not use that. It builds thirty two tables
+    holding the same hundred keys, merges them, and then walks the ordinals a
+    second time to turn each worker's local numbering into the shared one. That
+    second walk is four bytes read and four written per row, four hundred
+    megabytes each way at a hundred million rows, spent entirely on renumbering.
+
+    So build one table from the first `DICTIONARY_PREFIX` rows, on one thread,
+    and let every worker probe it read only for the rest. There is no per worker
+    table, no merge and no renumbering pass, and the ordinals a row gets are the
+    ones it keeps. The prefix rows are not sampled and thrown away either: they
+    are written into the same output array the probe writes the rest of, so the
+    dictionary is built out of work that had to happen anyway.
+
+    Two things have to be true and neither is assumed. The prefix has to have
+    seen every key, and the check for that is that its second half introduced
+    none the first half had not, which on a column of a hundred keys is certain
+    and on a column of a million is never. And the probe has to find every row's
+    key, which is counted rather than trusted, so a key that first appears
+    halfway down the column is caught and the whole thing falls back to the route
+    it replaced. The cost of being wrong is one wasted pass over the column, and
+    the check that makes it rare is free.
+
+    Ordinals come out in first appearance order, which is what the other routes
+    give. The dictionary is built from a prefix in row order, so its numbering is
+    first appearance order over the prefix, and a key absent from the prefix is a
+    key this route refuses to answer at all.
+
+    Args:
+        col: The column, which must have no nulls.
+        seed: The per-query hash seed.
+        workers: How many slices to cut the rest of the column into.
+
+    Returns:
+        The ordinals, a representative row per group, and -1 for the null group.
+    """
+    var n = len(col)
+    var built = min(DICTIONARY_PREFIX, n // 8)
+
+    # Every row is written, the prefix by the build and the rest by the probe,
+    # so the zero fill the plain constructor does is a pass over the output for
+    # nothing. The same argument the parallel route makes about its own.
+    var codes = Array[DType.uint32](overwritten=n)
+    var firsts = List[Int]()
+    var reps = List[StringView]()
+    var table = HashTable(0, seed)
+    var hashes = Buffer(CHUNK_ROWS * 8)
+
+    var half = 0
+    var measured = False
+    var base = 0
+    while base < built:
+        var count = min(CHUNK_ROWS, built - base)
+        hash_strings_chunk(col, base, count, seed, hashes)
+        table.build_strings(
+            hashes, col, False, base, base, count, built, 0, codes, firsts, reps
+        )
+        base += count
+        if not measured and base * 2 >= built:
+            half = len(table)
+            measured = True
+
+    if len(table) != half or len(table) > DICTIONARY_GROUPS:
+        return _factorize_strings_parallel(col, seed, workers)
+
+    var rest = n - built
+    var chunks = (rest + CHUNK_ROWS - 1) // CHUNK_ROWS
+    var bounds = List[Int](capacity=workers + 1)
+    for w in range(workers):
+        bounds.append(built + chunks * w // workers * CHUNK_ROWS)
+    bounds.append(n)
+
+    var absent = List[Int](capacity=workers)
+    for _ in range(workers):
+        absent.append(0)
+
+    def one(w: Int) raises {mut codes, mut absent, imm}:
+        var stop = bounds[w + 1]
+        var mine = Buffer(CHUNK_ROWS * 8)
+        var missed = 0
+        var at = bounds[w]
+        while at < stop:
+            var count = min(CHUNK_ROWS, stop - at)
+            hash_strings_chunk(col, at, count, seed, mine)
+            missed += table.probe_strings(
+                mine, col, False, at, count, UInt32.MAX, reps, codes
+            )
+            at += count
+        absent[w] = missed
+
+    parallel_for(one, workers)
+
+    for w in range(workers):
+        if absent[w] > 0:
+            return _factorize_strings_parallel(col, seed, workers)
+
+    return FactorizedStrings(codes^, firsts^, -1)
 
 
 def _factorize_strings_parallel(
