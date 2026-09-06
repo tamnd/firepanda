@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A correlation or covariance per group reads its columns once
+
+A grouped correlation used to read both of its columns twice. It centres each group on that group's two means, and it does not have the means until a pass has finished, so finding them was a pass of its own. At a hundred million rows that is an extra eight hundred megabytes read for arithmetic that has already been done once.
+
+It reads them once now. Instead of centring on the mean, each group is centred on the first pair of values that group is seen with, and everything after that is accumulated as a deviation from those. That keeps what the two pass form was protecting: the sums stay the size of the group's spread rather than the size of its values, so a correlation between two columns of timestamps around 1.7e9 with a spread of seconds still has all of its digits at the end. The mean is a better origin than the first pair, but not by enough to be worth reading two columns again, because what an origin has to be is inside the data rather than in the middle of it.
+
+Each worker picks its own origin, since it cannot know what the workers before it saw, so the merge moves every worker's sums onto one origin before adding them. That is exact in the count and linear in the shift, and the shift is a difference between two values of the same group, so it is as small as everything else in the calculation.
+
+The layout mattered more than the pass did, which was not the expected result. The first version of this kept eight accumulators per group in eight separate tables and came out 1.12x slower than the two pass form it replaced, because a row updates every accumulator its group has and so pulled in eight cache lines at eight unrelated addresses. Eight doubles is sixty four bytes, a buffer is aligned to sixty four bytes, so putting one group's eight accumulators in one slot makes a row touch one line. With that, `group/frame_correlation` at ten million rows went from 11.00 ms to 7.98 ms, 1.38x, with every run of the new code faster than every run of the old and five other group by rows unmoved. db-benchmark q9 at 5GB went from 0.2179 s to 0.1797 s.
+
 ### Arithmetic on a series aligns on the row labels
 
 `a + b` on two series is now a labelled operation rather than a positional one. The rows are matched by label, so two series labelled `abc` and `bcd` add to four rows and not to three, the two labels they share holding sums and the two they do not holding nothing. That is the rule everybody meets by accident the first time they add two columns that came out of different filters, and a library that added position by position would answer three wrong numbers instead.

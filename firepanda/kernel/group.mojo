@@ -2742,6 +2742,42 @@ def group_cov[
     )
 
 
+comptime SLOT = 8
+"""How many doubles one group's pair accumulator takes.
+
+Eight, which is sixty four bytes, which is a cache line, and buffers are aligned
+to one. A two column reduction touches every accumulator a group has on every
+row it reads, so laying them out as one slot per group instead of one table per
+accumulator turns eight lines pulled in at eight unrelated addresses into one.
+A covariance fills six of the eight and still takes all eight, because what the
+eight buy is that arithmetic rather than the storage.
+"""
+
+comptime COUNT = 0
+"""Where in a pair slot the count of complete pairs sits."""
+
+comptime BASE_X = 1
+"""Where in a pair slot the first column's origin sits."""
+
+comptime BASE_Y = 2
+"""Where in a pair slot the second column's origin sits."""
+
+comptime DEV_X = 3
+"""Where in a pair slot the first column's summed deviations sit."""
+
+comptime DEV_Y = 4
+"""Where in a pair slot the second column's summed deviations sit."""
+
+comptime PROD = 5
+"""Where in a pair slot the summed products of the two deviations sit."""
+
+comptime SQUARE_X = 6
+"""Where in a pair slot the first column's summed squared deviations sit."""
+
+comptime SQUARE_Y = 7
+"""Where in a pair slot the second column's summed squared deviations sit."""
+
+
 def _pair_core[
     dx: DType,
     dy: DType,
@@ -2760,161 +2796,230 @@ def _pair_core[
     groups: Int,
     ddof: Int,
 ) raises -> Array[DType.float64]:
-    """Centres both columns on their pairwise means and accumulates the products.
+    """Accumulates both columns as deviations from each group's first pair.
 
-    Two passes, for the reason `_var_core` takes two. The one pass form keeps the
-    five raw sums and subtracts at the end, and the subtraction is where a
-    correlation between two columns of timestamps stops having any significant
-    digits left. This computes each group's two means first and then accumulates
-    deviations, which is the same arithmetic the variance already does here and
-    is stable for the same reason.
+    One pass, and the origin is what makes one pass safe. The plain one pass form
+    keeps the five raw sums and subtracts at the end, and on two columns of
+    timestamps around 1.7e9 the subtraction has nothing left, which is the reason
+    this used to centre on the means and so had to find the means first. Taking
+    the group's first observed pair as an origin instead gets the same protection
+    without the extra read: every value is accumulated as a deviation from a
+    number that is itself one of the group's values, so the sums are the size of
+    the group's spread rather than the size of its values, and the subtraction at
+    the end is between quantities of the same magnitude as each other. The mean
+    is a better origin than the first pair but not by enough to be worth a second
+    read of two columns, because what the origin has to be is inside the data,
+    not in the middle of it.
 
-    Pairwise means rather than per column ones. A row where one of the two values
-    is null contributes to neither sum, because a covariance is a statement about
-    rows in which both were observed, and centring x on a mean taken over rows y
-    was missing from would bias every product afterwards. That is also what
-    pandas does, and it is why this cannot reuse `_mean_core`, which knows about
-    one column's validity and not two.
+    The origin is per worker as well as per group, since a worker cannot know
+    what the workers before it saw. Merging then has to move each worker's sums
+    onto one origin before adding them, which is exact in the count and linear in
+    the shift, and the shift is a difference between two values of the same
+    group, so it is as small as everything else here. That is `groups * workers`
+    arithmetic against the `rows` the pass did.
+
+    The layout is what makes one pass pay. A row updates every accumulator its
+    group has, so the accumulators are one `SLOT` of eight doubles per group
+    rather than eight tables of one double per group, and a row touches one cache
+    line instead of eight. Without that the single pass is 1.12x slower than the
+    two pass form it replaced on db-benchmark q9, which was measured before this
+    was.
+
+    Pairwise rather than per column. A row where one of the two values is null
+    contributes to neither sum, because a covariance is a statement about rows in
+    which both were observed, and centring x on rows y was missing from would
+    bias every product afterwards. That is also what pandas does, and it is why
+    this cannot reuse `_mean_core`, which knows about one column's validity and
+    not two.
     """
     var rows = len(codes)
-    # Three tables in the first pass and three in the second, all float64, so a
-    # worker's share of the budget is six times a group rather than one.
-    var workers = _private_workers[DType.float64](rows, groups * 6)
+    # Eight float64 per group per worker, so a worker's share of the budget is
+    # eight times a group rather than one. A covariance only fills six of them
+    # and still asks for eight, because what the eight buy is the layout below
+    # rather than the storage.
+    var workers = _private_workers[DType.float64](rows, groups * SLOT)
     var bounds = _row_bounds(rows, workers)
     var at = codes.unsafe_ptr()
 
-    var counts = Array[DType.float64](groups * workers)
-    var sum_x = Array[DType.float64](groups * workers)
-    var sum_y = Array[DType.float64](groups * workers)
+    # One slot of eight doubles per group rather than eight tables of one double
+    # per group. A scatter's cost is the lines it touches, and a row here updates
+    # every accumulator the group has, so eight tables mean eight lines pulled in
+    # at eight unrelated addresses. Eight doubles is sixty four bytes, buffers are
+    # sixty four byte aligned, and the slot is indexed in whole slots, so a row
+    # touches exactly one line and gets the other seven accumulators for nothing.
+    # That is what makes the single pass worth taking: measured against the two
+    # pass form, eight separate tables were 1.12x slower on db-benchmark q9 and
+    # the same arithmetic in one slot is faster than both.
+    var tables = Array[DType.float64](groups * workers * SLOT)
 
-    def totals(w: Int) raises {mut counts, mut sum_x, mut sum_y, imm}:
-        var n_at = counts.unsafe_ptr().unsafe_offset(w * groups)
-        var mx = sum_x.unsafe_ptr().unsafe_offset(w * groups)
-        var my = sum_y.unsafe_ptr().unsafe_offset(w * groups)
+    def spreads(w: Int) raises {mut tables, imm}:
+        var mine = tables.unsafe_ptr().unsafe_offset(w * groups * SLOT)
         for i in range(bounds[w], bounds[w + 1]):
             if not _there(left, left_valid, left_has_null, i):
                 continue
             if not _there(right, right_valid, right_has_null, i):
                 continue
-            var g = Int(at.unsafe_offset(i).unsafe_load())
-            n_at.unsafe_offset(g).unsafe_store(
-                n_at.unsafe_offset(g).unsafe_load() + 1.0
+            var slot = mine.unsafe_offset(
+                Int(at.unsafe_offset(i).unsafe_load()) * SLOT
             )
-            mx.unsafe_offset(g).unsafe_store(
-                mx.unsafe_offset(g).unsafe_load()
-                + left.unsafe_offset(i).unsafe_load().cast[DType.float64]()
-            )
-            my.unsafe_offset(g).unsafe_store(
-                my.unsafe_offset(g).unsafe_load()
-                + right.unsafe_offset(i).unsafe_load().cast[DType.float64]()
-            )
-
-    parallel_for(totals, workers)
-
-    if workers > 1:
-        counts = _merge_sums(counts, groups, workers)
-        sum_x = _merge_sums(sum_x, groups, workers)
-        sum_y = _merge_sums(sum_y, groups, workers)
-
-    # The count is carried as a float64 so that it merges with the same
-    # vectorized adder the two sums use. Every count here is a row count under
-    # two to the fifty three, so it is exact and the divisions below are the
-    # ones they would have been in an integer.
-    var n_at = counts.unsafe_ptr()
-    var mx = sum_x.unsafe_ptr()
-    var my = sum_y.unsafe_ptr()
-
-    for g in range(groups):
-        var n = n_at.unsafe_offset(g).unsafe_load()
-        if n == 0.0:
-            continue
-        mx.unsafe_offset(g).unsafe_store(mx.unsafe_offset(g).unsafe_load() / n)
-        my.unsafe_offset(g).unsafe_store(my.unsafe_offset(g).unsafe_load() / n)
-
-    var prod = Array[DType.float64](groups * workers)
-    var square_x = Array[DType.float64](groups * workers if want_corr else 0)
-    var square_y = Array[DType.float64](groups * workers if want_corr else 0)
-
-    def spreads(w: Int) raises {mut prod, mut square_x, mut square_y, imm}:
-        var sxy = prod.unsafe_ptr().unsafe_offset(w * groups)
-        var xx = square_x.unsafe_ptr().unsafe_offset(
-            w * groups if want_corr else 0
-        )
-        var yy = square_y.unsafe_ptr().unsafe_offset(
-            w * groups if want_corr else 0
-        )
-        for i in range(bounds[w], bounds[w + 1]):
-            if not _there(left, left_valid, left_has_null, i):
+            var xv = left.unsafe_offset(i).unsafe_load().cast[DType.float64]()
+            var yv = right.unsafe_offset(i).unsafe_load().cast[DType.float64]()
+            var n = slot.unsafe_offset(COUNT).unsafe_load()
+            if n == 0.0:
+                # The first pair this worker sees for the group is the origin it
+                # measures the rest against, and its own deviations are zero, so
+                # there is nothing to add to any of the sums.
+                slot.unsafe_offset(COUNT).unsafe_store(1.0)
+                slot.unsafe_offset(BASE_X).unsafe_store(xv)
+                slot.unsafe_offset(BASE_Y).unsafe_store(yv)
                 continue
-            if not _there(right, right_valid, right_has_null, i):
-                continue
-            var g = Int(at.unsafe_offset(i).unsafe_load())
-            var a = (
-                left.unsafe_offset(i).unsafe_load().cast[DType.float64]()
-                - mx.unsafe_offset(g).unsafe_load()
+            var a = xv - slot.unsafe_offset(BASE_X).unsafe_load()
+            var b = yv - slot.unsafe_offset(BASE_Y).unsafe_load()
+            slot.unsafe_offset(COUNT).unsafe_store(n + 1.0)
+            slot.unsafe_offset(DEV_X).unsafe_store(
+                slot.unsafe_offset(DEV_X).unsafe_load() + a
             )
-            var b = (
-                right.unsafe_offset(i).unsafe_load().cast[DType.float64]()
-                - my.unsafe_offset(g).unsafe_load()
+            slot.unsafe_offset(DEV_Y).unsafe_store(
+                slot.unsafe_offset(DEV_Y).unsafe_load() + b
             )
-            sxy.unsafe_offset(g).unsafe_store(
-                sxy.unsafe_offset(g).unsafe_load() + a * b
+            slot.unsafe_offset(PROD).unsafe_store(
+                slot.unsafe_offset(PROD).unsafe_load() + a * b
             )
             comptime if want_corr:
-                xx.unsafe_offset(g).unsafe_store(
-                    xx.unsafe_offset(g).unsafe_load() + a * a
+                slot.unsafe_offset(SQUARE_X).unsafe_store(
+                    slot.unsafe_offset(SQUARE_X).unsafe_load() + a * a
                 )
-                yy.unsafe_offset(g).unsafe_store(
-                    yy.unsafe_offset(g).unsafe_load() + b * b
+                slot.unsafe_offset(SQUARE_Y).unsafe_store(
+                    slot.unsafe_offset(SQUARE_Y).unsafe_load() + b * b
                 )
 
     parallel_for(spreads, workers)
 
+    # The count is carried as a float64 so that it sits in the slot with the
+    # sums and takes part in the same arithmetic without a conversion per use.
+    # Every count here is a row count under two to the fifty three, so it is
+    # exact.
+    var first = tables.unsafe_ptr()
+
     if workers > 1:
-        prod = _merge_sums(prod, groups, workers)
-        comptime if want_corr:
-            square_x = _merge_sums(square_x, groups, workers)
-            square_y = _merge_sums(square_y, groups, workers)
+        # The slots cannot simply be added, because each worker measured the
+        # group from wherever it first saw it. Worker zero's origin, or the
+        # first one that saw the group at all, becomes the group's, and every
+        # other worker's sums are moved onto it before they are folded in.
+        for g in range(groups):
+            var into = first.unsafe_offset(g * SLOT)
+            for w in range(1, workers):
+                var slot = first.unsafe_offset((w * groups + g) * SLOT)
+                var count = slot.unsafe_offset(COUNT).unsafe_load()
+                if count == 0.0:
+                    continue
+                if into.unsafe_offset(COUNT).unsafe_load() == 0.0:
+                    # Nobody before this worker saw the group, so its origin
+                    # becomes the group's and its sums move across untouched.
+                    for f in range(SLOT):
+                        into.unsafe_offset(f).unsafe_store(
+                            slot.unsafe_offset(f).unsafe_load()
+                        )
+                    continue
+                var shift_x = (
+                    slot.unsafe_offset(BASE_X).unsafe_load()
+                    - into.unsafe_offset(BASE_X).unsafe_load()
+                )
+                var shift_y = (
+                    slot.unsafe_offset(BASE_Y).unsafe_load()
+                    - into.unsafe_offset(BASE_Y).unsafe_load()
+                )
+                var mine_x = slot.unsafe_offset(DEV_X).unsafe_load()
+                var mine_y = slot.unsafe_offset(DEV_Y).unsafe_load()
+                # Shifting a sum of products by `d` adds `d` times the other
+                # column's sum to it, once each way, plus the count times the two
+                # shifts. The squares are the same identity with both columns the
+                # same one.
+                into.unsafe_offset(PROD).unsafe_store(
+                    into.unsafe_offset(PROD).unsafe_load()
+                    + slot.unsafe_offset(PROD).unsafe_load()
+                    + shift_x * mine_y
+                    + shift_y * mine_x
+                    + count * shift_x * shift_y
+                )
+                comptime if want_corr:
+                    into.unsafe_offset(SQUARE_X).unsafe_store(
+                        into.unsafe_offset(SQUARE_X).unsafe_load()
+                        + slot.unsafe_offset(SQUARE_X).unsafe_load()
+                        + 2.0 * shift_x * mine_x
+                        + count * shift_x * shift_x
+                    )
+                    into.unsafe_offset(SQUARE_Y).unsafe_store(
+                        into.unsafe_offset(SQUARE_Y).unsafe_load()
+                        + slot.unsafe_offset(SQUARE_Y).unsafe_load()
+                        + 2.0 * shift_y * mine_y
+                        + count * shift_y * shift_y
+                    )
+                into.unsafe_offset(DEV_X).unsafe_store(
+                    into.unsafe_offset(DEV_X).unsafe_load()
+                    + mine_x
+                    + count * shift_x
+                )
+                into.unsafe_offset(DEV_Y).unsafe_store(
+                    into.unsafe_offset(DEV_Y).unsafe_load()
+                    + mine_y
+                    + count * shift_y
+                )
+                into.unsafe_offset(COUNT).unsafe_store(
+                    into.unsafe_offset(COUNT).unsafe_load() + count
+                )
 
-    var out = prod^
-    var sxy = out.unsafe_ptr()
-    var xx = square_x.unsafe_ptr()
-    var yy = square_y.unsafe_ptr()
-
+    var out = Array[DType.float64](overwritten=groups)
     for g in range(groups):
-        var n = Int(n_at.unsafe_offset(g).unsafe_load())
+        var slot = first.unsafe_offset(g * SLOT)
+        var n = slot.unsafe_offset(COUNT).unsafe_load()
+        var mine_x = slot.unsafe_offset(DEV_X).unsafe_load()
+        var mine_y = slot.unsafe_offset(DEV_Y).unsafe_load()
         comptime if want_corr:
-            var spread = (
-                xx.unsafe_offset(g).unsafe_load()
-                * yy.unsafe_offset(g).unsafe_load()
+            if n < 2.0:
+                # Fewer than two complete pairs, so there is nothing to
+                # correlate. NaN and still valid, the way a pandas float column
+                # says missing. See #170.
+                out[g] = nan[DType.float64]()
+                continue
+            # The origin is not the mean, so the sums are moved onto the mean
+            # here, which is the same identity the merge above used with a shift
+            # of minus the average deviation. Both terms are the size of the
+            # group's spread, so this is the subtraction the raw sum form gets
+            # wrong and this one does not.
+            var pair = (
+                slot.unsafe_offset(PROD).unsafe_load() - mine_x * mine_y / n
             )
-            if n < 2 or not (spread > 0.0):
-                # No complete pairs to correlate, or a column that never moves,
-                # so there is no correlation to report. NaN and still valid, the
-                # way a pandas float column says missing. See #170.
-                sxy.unsafe_offset(g).unsafe_store(nan[DType.float64]())
+            var spread = (
+                slot.unsafe_offset(SQUARE_X).unsafe_load() - mine_x * mine_x / n
+            ) * (
+                slot.unsafe_offset(SQUARE_Y).unsafe_load() - mine_y * mine_y / n
+            )
+            if not (spread > 0.0):
+                # A column that never moves has no correlation to report.
+                out[g] = nan[DType.float64]()
                 continue
             # The quotient is one in exact arithmetic when the two columns are
             # the same column, and floating point reaches 1.0000000000000002
             # often enough that a caller squaring it or taking its arccosine
             # would notice. Clamping is cheaper than pretending it cannot
             # happen.
-            var r = sxy.unsafe_offset(g).unsafe_load() / sqrt(spread)
+            var r = pair / sqrt(spread)
             if r > 1.0:
                 r = 1.0
             elif r < -1.0:
                 r = -1.0
-            sxy.unsafe_offset(g).unsafe_store(r)
+            out[g] = r
         else:
-            var divisor = n - ddof
-            if divisor <= 0:
+            var divisor = Int(n) - ddof
+            if n == 0.0 or divisor <= 0:
                 # Too few complete pairs to have a covariance. NaN and still
                 # valid, which is what missing looks like here. See #170.
-                sxy.unsafe_offset(g).unsafe_store(nan[DType.float64]())
+                out[g] = nan[DType.float64]()
                 continue
-            sxy.unsafe_offset(g).unsafe_store(
-                sxy.unsafe_offset(g).unsafe_load() / Float64(divisor)
-            )
+            out[g] = (
+                slot.unsafe_offset(PROD).unsafe_load() - mine_x * mine_y / n
+            ) / Float64(divisor)
     return out^
 
 
