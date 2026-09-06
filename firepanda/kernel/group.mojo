@@ -141,6 +141,19 @@ five hundred and twelve megabytes, which buys all thirty two workers, made q5
 no faster than four here, because the scatter is waiting on memory either way,
 and what the extra cores buy is a merge over two hundred and fifty six megabytes
 instead of over thirty two. The starved looking route is the right one.
+
+The same thing was tried again from the other end and came out the same way. A
+fused pass holds an accumulator per group per reduction per worker and is charged
+this budget for all of them together, so asking for three reductions of a key
+buys a third of the workers that asking for one of it does, and past a million
+groups it buys fewer than two and the fused route hands the whole group by back
+to the unfused one. Sizing the workers as a single reduction would be sized
+instead, with a ceiling eight times this one on what the several of them add up
+to, made `group/frame_three_sums_wide` at ten million rows and a hundred thousand
+groups 1.8x slower, 21.8 ms against 39.2 ms with no run of either overlapping the
+other. It takes that case from six workers to thirty two and its tables from
+fourteen megabytes to seventy seven. Whatever the fused route is short of at a
+million groups, it is not workers, and the answer there is still partitioning.
 """
 
 comptime PRIVATE_ROWS = 1 << 16
@@ -3617,6 +3630,24 @@ def aggregate_group_many[
     its own private table per worker exactly as it did, and the tables are folded
     at the end exactly as they were, so a fused sum and an unfused sum add the
     same numbers in the same order.
+
+    A table per reduction is also the layout, and it stays that way, which is
+    worth writing down because the opposite reads like the obvious next step. A
+    pair reduction was measured at 1.38x from moving a group's eight accumulators
+    from eight tables into one sixty four byte slot, so the same was tried here:
+    one stretch per group with the reductions numbered inside it, in place of one
+    table per reduction. It made `group/frame_three_means` at ten million rows
+    0.84x, 7.14 ms against 8.51 ms with no run of either overlapping the other,
+    and `group/frame_three_sums_wide` a wash at 0.98x.
+
+    The difference is the loop, not the layout. The pair reduction updates all
+    eight of a group's accumulators on the row it is reading, so one slot means
+    one line. This loop runs each reduction over a whole block before starting the
+    next one, so a sweep touches one accumulator per group and interleaving makes
+    it pull three lines where it used to pull one, each a third useful. Sharing a
+    line only pays when the same row is what uses it. Making a row update every
+    reduction before moving on would need a loop that carries several dtypes at
+    once, and that has not been tried.
 
     Reductions the fused loops do not cover, and pair reductions, and columns of
     text, all fall through to `aggregate_group_any` one at a time. A group by

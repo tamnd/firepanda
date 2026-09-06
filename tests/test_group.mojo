@@ -358,26 +358,35 @@ def fused_float_column(rows: Int) raises -> Array[DType.float64]:
 
 def assert_same_column(left: AnyArray, right: AnyArray, what: String) raises:
     """Asserts two erased columns hold the same thing, whatever dtype that is.
+
+    The typed views are taken once rather than once per value. `as_typed` is a
+    deep copy of the whole column, so reading it inside the loop made this
+    quadratic, which was invisible at the thirty seven groups the tests around it
+    use and twenty minutes at four hundred thousand.
     """
     assert_equal(left.dtype(), right.dtype(), what + ": dtype")
     assert_equal(len(left), len(right), what + ": length")
+    if left.dtype() == DType.float64:
+        ref a = left.as_typed_view[DType.float64]()
+        ref b = right.as_typed_view[DType.float64]()
+        for g in range(len(left)):
+            assert_equal(
+                left.is_valid(g), right.is_valid(g), what + ": validity"
+            )
+            if not left.is_valid(g):
+                continue
+            if isnan(a[g]) or isnan(b[g]):
+                assert_true(isnan(a[g]) and isnan(b[g]), what + ": NaN")
+                continue
+            assert_almost_equal(a[g], b[g], msg=what + ": value")
+        return
+    ref a = left.as_typed_view[DType.int64]()
+    ref b = right.as_typed_view[DType.int64]()
     for g in range(len(left)):
         assert_equal(left.is_valid(g), right.is_valid(g), what + ": validity")
         if not left.is_valid(g):
             continue
-        if left.dtype() == DType.float64:
-            var a = left.as_typed[DType.float64]()[g]
-            var b = right.as_typed[DType.float64]()[g]
-            if isnan(a) or isnan(b):
-                assert_true(isnan(a) and isnan(b), what + ": NaN")
-                continue
-            assert_almost_equal(a, b, msg=what + ": value")
-        else:
-            assert_equal(
-                left.as_typed[DType.int64]()[g],
-                right.as_typed[DType.int64]()[g],
-                what + ": value",
-            )
+        assert_equal(a[g], b[g], what + ": value")
 
 
 def assert_fused_matches(
@@ -444,6 +453,70 @@ def test_a_fused_pass_carries_the_ones_it_cannot_fuse() raises:
     kinds.append(AggKind.SUM)
     kinds.append(AggKind.NUNIQUE)
     kinds.append(AggKind.MIN)
+    assert_fused_matches(cols, kinds, grouping)
+
+
+def test_a_fused_pass_of_integer_sums_touches_only_one_of_the_tables() raises:
+    """Three sums of integer columns leave the float64 tables untouched.
+
+    The fused pass carries a table of each dtype for every reduction and hands
+    both down, and the reduction picks which one it writes. The tests around this
+    one all mix the dtypes, so they never run the case where every reduction
+    picks the same side and the other side is written by nothing at all.
+    """
+    var rows = PRIVATE_ROWS + 1021
+    var grouping = fused_frame(rows)
+    var ints_col = AnyArray(fused_int_column(rows))
+    var cols = List[AnyArray]()
+    var kinds = List[AggKind]()
+    for k in [AggKind.SUM, AggKind.SUM, AggKind.SUM]:
+        cols.append(AnyArray(copy=ints_col))
+        kinds.append(k)
+    assert_fused_matches(cols, kinds, grouping)
+
+
+def test_a_wide_key_answers_what_one_reduction_at_a_time_answers() raises:
+    """Four hundred thousand groups is where the fused route declines itself.
+
+    A fused pass is charged `PRIVATE_BYTES` for every table it holds together, so
+    three reductions of a key this wide afford fewer than two workers and the
+    whole group by goes back to the unfused route one reduction at a time. Every
+    other test here is on a key of thirty seven values and takes the fused loops,
+    so this is the one that says the other side of that decision answers the same
+    thing. It is also the key shape db-benchmark q3 and q5 group on, which is why
+    it is this wide rather than merely wide enough.
+
+    Two integer columns and a float one, which is q5 again, and which is what
+    puts both dtypes in play at once.
+    """
+    var rows = 800_000
+    var groups = 400_000
+    var key = Array[DType.int64](rows)
+    for i in range(rows):
+        key[i] = Int64(i % groups)
+    var series = List[Series]()
+    series.append(Series("k", key^))
+    var frame = DataFrame.from_series(series^)
+    var one = List[Int]()
+    one.append(0)
+    var grouping = group_ordinals(frame.column_refs(), one, rows)
+    assert_equal(grouping.groups, groups)
+
+    var first = Array[DType.int64](rows)
+    var second = Array[DType.int64](rows)
+    var third = Array[DType.float64](rows)
+    for i in range(rows):
+        first[i] = Int64(i % 91) - 40
+        second[i] = Int64(i % 7)
+        third[i] = Float64(i % 53) * 0.25 - 3.0
+    var cols = List[AnyArray]()
+    cols.append(AnyArray(first^))
+    cols.append(AnyArray(second^))
+    cols.append(AnyArray(third^))
+    var kinds = List[AggKind]()
+    kinds.append(AggKind.SUM)
+    kinds.append(AggKind.SUM)
+    kinds.append(AggKind.SUM)
     assert_fused_matches(cols, kinds, grouping)
 
 
