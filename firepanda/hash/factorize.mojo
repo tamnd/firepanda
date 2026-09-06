@@ -802,6 +802,13 @@ range of a hundred takes every core and runs in two thirds of the serial time, a
 range of ten thousand wants six workers, and a range of sixty five thousand is
 better off on one thread. A quarter of a megabyte is the number that picks all
 three of those correctly.
+
+This bounds the merge and nothing else, which is worth saying because it used to
+decide more than that. A range too wide to merge sent the whole factorize to one
+thread, and the pass that reads every row and writes its ordinal has no merge in
+it and reads one table however wide the range is. `_factorize_direct_wide` is
+that case now: the discovery keeps one thread and the row numbering gets all of
+them.
 """
 
 comptime DIRECT_MIN_WORKERS = 4
@@ -836,15 +843,20 @@ def _factorize_direct[
     """
     var n = len(col)
     if n >= PARALLEL_ROWS and span > 0:
-        var affordable = DIRECT_MERGE_BYTES // (span * 4)
         var workers = min(worker_count(), n // PARALLEL_MIN_SLICE)
-        if affordable < workers:
-            workers = affordable
         # Four and not two. Two workers were slower than one thread on every
         # range measured, by about half again, because the split pays a second
         # read of the column and two cores are not enough to make that back.
         if workers >= DIRECT_MIN_WORKERS:
-            return _factorize_direct_parallel[dt](col, span, base, workers)
+            var affordable = DIRECT_MERGE_BYTES // (span * 4)
+            if affordable >= DIRECT_MIN_WORKERS:
+                return _factorize_direct_parallel[dt](
+                    col, span, base, min(workers, affordable)
+                )
+            # The merge is what a wide range cannot afford, and it is not the
+            # only pass. Discovering the groups stays on one thread and
+            # numbering the rows does not.
+            return _factorize_direct_wide[dt](col, span, base, workers)
     return _factorize_direct_serial[dt](col, span, base)
 
 
@@ -905,6 +917,95 @@ def _factorize_direct_serial[
     return Factorized[dt](codes^, firsts^, null_group)
 
 
+def _factorize_direct_wide[
+    dt: DType
+](
+    col: Array[dt], span: Int, base: Scalar[dt], workers: Int
+) raises -> Factorized[dt]:
+    """Finds the groups on one thread, then numbers the rows on every core.
+
+    `_factorize_direct_parallel` gives each worker its own table and merges them
+    afterwards, and `DIRECT_MERGE_BYTES` is the width past which that merge costs
+    more than the split buys, because it reads a slot out of every table at every
+    value in the range. Above that width the whole factorize used to run on one
+    thread, and that is more than the measurement asked for. The merge is what
+    cannot be afforded. The pass that reads each row and writes its ordinal never
+    touches more than one table, so the range's width does not bear on it at all,
+    and it is the pass that moves the column.
+
+    So the discovery keeps a single table and one thread, exactly as the serial
+    route does, and it writes no ordinals while it does so. Then every core reads
+    that table and numbers its own slice of the rows. What the split costs is a
+    second read of the key column and what it buys is that the write of the
+    ordinals, which is the same size as the column, happens on all of them.
+
+    The discovery loop stops as soon as the table is full, for the reason the
+    parallel route's does: a direct table has a slot for every value in the range,
+    so a full one means there is nothing left to find. That is worth little here
+    and a great deal on a narrow range, and this route does not see narrow ranges.
+
+    Args:
+        col: The column.
+        span: The table width, from `direct_plan`.
+        base: The value that indexes slot zero, which is the column's minimum.
+        workers: How many slices to number the rows in.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        The factorization, identical to what the serial route would have made.
+    """
+    var n = len(col)
+    var values = col.unsafe_ptr()
+    var has_null = col.null_count() > 0
+    var offset = 1 if has_null else 0
+
+    # Zero means unseen and the ordinal is stored plus one, which is what lets a
+    # zeroed buffer be a ready table. Same convention as the other two routes.
+    var seen = Buffer(span * 4)
+    var slots = seen.bitcast[DType.uint32]()
+    var firsts = List[Int]()
+
+    for i in range(n):
+        if has_null and not col.is_valid(i):
+            continue
+        var at = Int(values.unsafe_offset(i).unsafe_load()) - Int(base)
+        if slots.unsafe_offset(at).unsafe_load() == 0:
+            firsts.append(i)
+            slots.unsafe_offset(at).unsafe_write(UInt32(len(firsts) + offset))
+            if len(firsts) == span:
+                break
+
+    var bounds = List[Int](capacity=workers + 1)
+    for w in range(workers):
+        bounds.append(n * w // workers)
+    bounds.append(n)
+
+    # Every row below is written, the null ones with a zero, so the array does
+    # not need the pass that zeroes it first.
+    var codes = Array[DType.uint32](overwritten=n)
+
+    def assign(w: Int) raises {mut codes, imm}:
+        var table = seen.bitcast[DType.uint32]()
+        var out = codes.unsafe_ptr()
+        for i in range(bounds[w], bounds[w + 1]):
+            if has_null and not col.is_valid(i):
+                out.unsafe_offset(i).unsafe_write(UInt32(0))
+                continue
+            var at = Int(values.unsafe_offset(i).unsafe_load()) - Int(base)
+            out.unsafe_offset(i).unsafe_write(
+                table.unsafe_offset(at).unsafe_load() - 1
+            )
+
+    parallel_for(assign, workers)
+
+    var null_group = -1
+    if has_null:
+        null_group = 0
+    return Factorized[dt](codes^, firsts^, null_group)
+
+
 def _factorize_direct_parallel[
     dt: DType
 ](
@@ -943,6 +1044,17 @@ def _factorize_direct_parallel[
     has a slot for every value in the range by construction, so a full table
     means there is nothing left in the range to find, which a hash table can
     never know about itself.
+
+    Both passes are cut into the same number of slices, which is the merge's
+    number and not the row pass's, and that is deliberate rather than left over.
+    The row pass reads one table whose width it does not care about, so nothing
+    bounds it and it could have every core. Giving it every core was measured and
+    changes nothing: `group/ordinals_two_keys` packs to a range of eight thousand,
+    which is six workers by the merge's budget, and taking its row pass to thirty
+    two was 1.02x with no run under the old ones. A streaming read and write is at
+    memory bandwidth by four cores or so, which is what `DIRECT_MIN_WORKERS` is
+    about from the other side, and the whole of `_factorize_direct_wide`'s win is
+    that it goes from one core rather than from six.
 
     Args:
         col: The column.

@@ -1026,6 +1026,71 @@ def test_a_wide_direct_table_still_puts_the_nulls_at_ordinal_zero() raises:
     assert_equal(bad, -1, String("routes disagree at ", bad))
 
 
+def test_a_wide_direct_table_numbers_its_rows_on_every_core() raises:
+    """The route a range too wide to merge takes on a column long enough to split.
+
+    A direct factorize gives each worker a table and merges them afterwards, and a
+    range this wide cannot afford that, so the discovery stays on one thread. The
+    pass that numbers the rows does not, and this is the column shape that reaches
+    it: past `PARALLEL_ROWS`, and a span past what `DIRECT_MERGE_BYTES` will let
+    four workers hold. The two tests above are the same shape at an eighth of the
+    height, which is under the threshold, so nothing was running this before.
+
+    The same groups in the same order built far enough apart that no row count
+    could accept them pins the second column to the hash, and the two have to come
+    out with identical codes, because which route ran is not something a caller
+    can see.
+    """
+    var n = PARALLEL_ROWS + 1021
+    var near = Array[DType.int64](n)
+    var far = Array[DType.int64](n)
+    for i in range(n):
+        var value = Int64((i * 7919) % 90000)
+        near[i] = value
+        far[i] = value * Int64(1 << 20)
+
+    var direct = factorize(near)
+    var hashed = factorize(far)
+    assert_equal(direct.count(), 90000)
+    assert_equal(direct.count(), hashed.count())
+    var bad = -1
+    for i in range(n):
+        if direct.codes[i] != hashed.codes[i]:
+            bad = i
+            break
+    assert_equal(bad, -1, String("routes disagree at ", bad))
+
+
+def test_a_wide_direct_table_split_across_cores_keeps_nulls_at_zero() raises:
+    """Nulls on the route that discovers on one thread and numbers on all of them.
+
+    The two passes read the validity bitmap separately, the first to skip a null
+    and the second to write it a zero, so a null is the thing most likely to come
+    out differently on this route than on the one that does both at once.
+    """
+    var n = PARALLEL_ROWS + 1021
+    var near = Array[DType.int64](n)
+    var far = Array[DType.int64](n)
+    for i in range(n):
+        var value = Int64((i * 7919) % 90000)
+        near[i] = value
+        far[i] = value * Int64(1 << 20)
+        if i % 7 == 0:
+            near.set_null(i)
+            far.set_null(i)
+
+    var direct = factorize(near)
+    var hashed = factorize(far)
+    assert_equal(direct.null_group, 0)
+    assert_equal(direct.count(), hashed.count())
+    var bad = -1
+    for i in range(n):
+        if direct.codes[i] != hashed.codes[i]:
+            bad = i
+            break
+    assert_equal(bad, -1, String("routes disagree at ", bad))
+
+
 def test_the_two_routes_agree_on_the_same_data() raises:
     # The same 300 groups in the same order, once as small integers and once
     # shifted far enough apart to defeat the direct table. The codes have to come

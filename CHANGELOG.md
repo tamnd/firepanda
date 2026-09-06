@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A group by on a wide integer key numbers its rows on every core
+
+A factorize that indexes a table by the value itself gives each worker its own table and merges them afterwards, and the merge reads a slot out of every table at every value in the range, so a wide range makes it expensive. `DIRECT_MERGE_BYTES` is where that stops being worth it, and past that width the whole factorize ran on one thread.
+
+That was more than the measurement asked for. The merge is what a wide range cannot afford. The pass that reads each row and writes its ordinal reads one table, whose width it does not care about, and it is the pass that moves the column. So the discovery keeps one thread and a single table, and every core numbers its own slice of the rows afterwards. What it costs is a second read of the key column and what it buys is that the write of the ordinals, which is as big as the column, happens on all of them.
+
+`group/ordinals_one_key_wide` at ten million rows and a hundred thousand values went from 9.35 ms to 4.72 ms, with every one of four new runs below every one of four old ones. `group/ordinals_two_keys_declined`, which falls to a factorize per key, went 1.10x on the same terms. Every other row in the file is between 1.01x and 1.04x, which is the wash it should be. db-benchmark groups on a key this wide in q3, q5 and q7.
+
+One thing was tried alongside it and did nothing, so it is not here and the note is in the docstring instead. The route that can afford the merge sizes both of its passes with the merge's answer, so a range of ten thousand numbers its rows on six cores when it could use every one of them. Giving it every one of them was 1.02x on `group/ordinals_two_keys` with no run under the old ones. A streaming read and write is at memory bandwidth by about four cores, which is what `DIRECT_MIN_WORKERS` says from the other side, so the win here is going from one core and not from six.
+
 ### A Python number no longer drags a column up to int64
 
 `s + 2` on an int8 column answered int64. pandas 3 and NumPy 2 answer int8, and the difference is not a rounding of the rules, it is the rule: a Python integer has no width, so it takes the width of whatever it meets rather than bringing int64 along with it. NEP 50 settled this for NumPy 2 and pandas adopted it, and a library that claims the pandas API has to have it too. The old behaviour meant a frame read at the width it was stored at doubled in memory on the first arithmetic anybody did to it, and stayed doubled, because the widened column is what the next expression promotes against.
