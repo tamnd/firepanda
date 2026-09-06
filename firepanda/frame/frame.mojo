@@ -21,15 +21,15 @@ type and whether nulls are allowed. Keeping both means the two can disagree, so
 the constructor checks that they do not, and every operation that changes one
 changes the other in the same expression.
 
-There are row labels but nothing aligns on them. A frame carries an `Index`, and
-every operation that chooses rows carries the labels of the rows it chose, so
-`tail` and `sort_values` and `drop_nulls` report which rows they kept the way
-pandas does. What is still missing is the other half: nothing looks a row up by
-its label, `loc` does not exist, and two frames put together do not match their
-indexes first, so rows are still addressed by position and `filter` and `take`
-are still the only ways to address them. That half is the `Index` API in
-https://github.com/tamnd/firepanda/issues/154. The second divergence is that
-nothing mutates. Every method returns a new frame.
+The row labels are real and the operators use them. A frame carries an `Index`,
+every operation that chooses rows carries the labels of the rows it chose, and
+`a + b` matches rows by label and columns by name rather than by position, which
+is `firepanda/frame/align.mojo` and is the rule that catches everybody who adds
+two frames that came out of different filters. What is still missing is the
+lookup half: nothing addresses a row by its label, so `loc` does not exist and
+`filter` and `take` are still the only ways to pick rows out. That half is the
+`Index` API in https://github.com/tamnd/firepanda/issues/154. The other
+divergence is that nothing mutates. Every method returns a new frame.
 
 The third thing worth knowing is what a copy costs. `select` copies the columns it
 keeps, `filter` and `take` copy by construction because they build new columns
@@ -55,12 +55,21 @@ from std.collections import Optional
 from firepanda.array.any import AnyArray, ColumnRefs, borrow_columns
 from firepanda.array.array import Array
 from firepanda.array.chunked import ChunkedArray, Sortedness, wrap_columns
+from firepanda.array.strings import strings_from_list
+from firepanda.array.value import Value
+from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.frame.display import DisplayOptions, render_table
-from firepanda.frame.index import Index
+from firepanda.frame.index import NOT_FOUND, Index
 from firepanda.hash.grouping import group_ordinals
 from firepanda.join.pairs import JoinKind, join_indices, take_pair
+from firepanda.kernel.binary import (
+    BinaryOp,
+    all_null,
+    binary_any,
+    binary_value_any,
+)
 from firepanda.kernel.cast import cast_any
 from firepanda.kernel.chunked import (
     cast_chunked,
@@ -78,7 +87,16 @@ from firepanda.kernel.reduce import reduce_any
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.sort import argsort_any_into, identity_permutation
 from firepanda.kernel.topn import group_top_rows_any
+from firepanda.kernel.unary import UnaryOp, unary_any
 
+from .align import (
+    fill_one_sided,
+    keep_rows,
+    plan_columns,
+    plan_indexes,
+    reindex,
+    value_at,
+)
 from .groupby import AggSpec
 from .series import Series, _check_range, _head_end, _tail_start, _to_positions
 
@@ -1603,6 +1621,921 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         )
         return self.with_column(filled^)
 
+    def _rebuilt(
+        self, var columns: List[Series], var index: Index
+    ) raises -> Self:
+        """Assembles a result that is one column per name and one row per label.
+
+        Args:
+            columns: The result columns, in order.
+            index: The result's row labels.
+
+        Returns:
+            The frame.
+
+        Raises:
+            Error: If two columns share a name or their heights differ, which
+                would be a bug here rather than in the caller.
+        """
+        var rows = len(index)
+        var out = Self.from_series(columns^)
+        # A result with no columns left still has rows, because the labels are
+        # the union of two label sets and not a property of any column, and
+        # `from_series` has nothing to read the count off.
+        out.rows = rows
+        out.index = index^
+        return out^
+
+    def binary(
+        self,
+        other: Self,
+        op: BinaryOp,
+        fill_value: Optional[Value] = None,
+        flip: Bool = False,
+    ) raises -> Self:
+        """Applies an operation to two frames, matching rows and columns.
+
+        Both axes align. The rows go onto the union of the two indexes, which is
+        `plan_indexes`, and the columns go onto the union of the two name lists,
+        which is `plan_columns`. The row plan is worked out once and reused for
+        every column, since it is the same answer each time.
+
+        A column that only one of the two frames has still appears in the
+        result, holding nothing, because the other frame has no values for it to
+        combine with. That falls out of the alignment rather than being a case:
+        the missing side is built as a column of nulls in the present side's
+        type and goes to the kernel like any other, which also means a
+        `fill_value` fills it and turns it back into the column that was there.
+
+        Args:
+            other: The right operand.
+            op: The operation.
+            fill_value: What to put where exactly one of the two sides is
+                missing, whether it is missing because the alignment introduced
+                a gap or because the value was never there.
+            flip: True for `other op self`, which is what the reflected forms
+                need.
+
+        Returns:
+            A frame on the union of the two indexes and the union of the two
+            column name lists.
+
+        Raises:
+            Error: If the row labels differ and either index has a duplicate, or
+                the operation is not defined on some pair of column dtypes.
+        """
+        var plan = plan_indexes(self.index, other.index)
+        var rows = self.rows if plan.identical else len(plan.left)
+        var names = plan_columns(self.names(), other.names())
+
+        var made = List[Series](capacity=len(names))
+        for i in range(len(names)):
+            ref name = names[i]
+            var type = _paired_type(self, other, name)
+            var left = _operand(
+                self, name, plan.left, plan.identical, rows, type
+            )
+            var right = _operand(
+                other, name, plan.right, plan.identical, rows, type
+            )
+
+            var keep = Bitmap(0)
+            if fill_value:
+                keep = fill_one_sided(left, right, fill_value.value())
+
+            var col = binary_any(right, left, op) if flip else binary_any(
+                left, right, op
+            )
+            if fill_value:
+                keep_rows(col, keep)
+            made.append(Series(name, col^))
+
+        return self._rebuilt(made^, plan^.into_index())
+
+    def binary(
+        self, value: Value, op: BinaryOp, value_on_left: Bool = False
+    ) raises -> Self:
+        """Applies an operation to every cell of a frame and one constant.
+
+        Nothing aligns, because a constant has no labels to align against, and
+        every column gets the same treatment whatever its dtype is.
+
+        Args:
+            value: The constant.
+            op: The operation.
+            value_on_left: True for `5 - df` rather than `df - 5`.
+
+        Returns:
+            A frame of the same shape, on the same labels.
+
+        Raises:
+            Error: If the operation is not defined on some column's dtype and
+                the constant's type.
+        """
+        var made = List[Series](capacity=len(self.columns))
+        for i in range(len(self.columns)):
+            made.append(
+                Series(
+                    self.schema[i].name,
+                    binary_value_any(
+                        self.columns[i].only(), value, op, value_on_left
+                    ),
+                )
+            )
+        return self._rebuilt(made^, Index(copy=self.index))
+
+    def binary(
+        self, other: Series, op: BinaryOp, axis: Int = 1, flip: Bool = False
+    ) raises -> Self:
+        """Applies an operation to a frame and one series, broadcast along an
+        axis.
+
+        The default axis is the columns, which is what `df + s` does in pandas
+        and which surprises people, because the series looks like a column and
+        is used as a row. Its labels are matched against the column names and
+        each of its values is then a constant as far as the column it landed on
+        is concerned. `axis=0` is the other reading: the labels are matched
+        against the row labels and the series is used as a column, once per
+        column of the frame.
+
+        Args:
+            other: The series.
+            op: The operation.
+            axis: 1 to match the series labels against the column names, 0 to
+                match them against the row labels.
+            flip: True for `other op self`.
+
+        Returns:
+            A frame.
+
+        Raises:
+            Error: If the axis is neither 0 nor 1, if the series labels are not
+                text when broadcasting along the columns, or if the operation is
+                not defined on some pair of dtypes.
+        """
+        if axis == 0:
+            return self._along_index(other, op, flip)
+        if axis != 1:
+            raise Error(
+                "frame: axis must be 0 for the row labels or 1 for the column"
+                " names, and was "
+                + String(axis)
+            )
+        return self._along_columns(other, op, flip)
+
+    def _along_columns(
+        self, other: Series, op: BinaryOp, flip: Bool
+    ) raises -> Self:
+        """Broadcasts a series along the columns, one value per column name.
+
+        Args:
+            other: The series, whose labels name columns.
+            op: The operation.
+            flip: True for `other op self`.
+
+        Returns:
+            A frame on this frame's row labels, with the union of the column
+            names and the series labels for columns.
+
+        Raises:
+            Error: If the series labels are not text, or the operation is not
+                defined on some pair of dtypes.
+        """
+        var labels = _label_names(other.index)
+        var names = plan_columns(self.names(), labels)
+        var found = other.index.get_indexer(AnyArray(strings_from_list(names)))
+
+        var made = List[Series](capacity=len(names))
+        for i in range(len(names)):
+            ref name = names[i]
+            var at = Int(found[i])
+            var value = value_at(other.values, at) if at != Int(
+                NOT_FOUND
+            ) else Value(null=other.values.type)
+            var col = AnyArray(
+                copy=self.columns[self.index_of(name)].only()
+            ) if self.has(name) else all_null(other.values.type, self.rows)
+            made.append(Series(name, binary_value_any(col, value, op, flip)))
+        return self._rebuilt(made^, Index(copy=self.index))
+
+    def _along_index(
+        self, other: Series, op: BinaryOp, flip: Bool
+    ) raises -> Self:
+        """Broadcasts a series along the rows, using it as one more column.
+
+        Args:
+            other: The series, whose labels are row labels.
+            op: The operation.
+            flip: True for `other op self`.
+
+        Returns:
+            A frame with this frame's columns, on the union of the two sets of
+            row labels.
+
+        Raises:
+            Error: If the row labels differ and either side has a duplicate, or
+                the operation is not defined on some pair of dtypes.
+        """
+        var plan = plan_indexes(self.index, other.index)
+        var values = AnyArray(copy=other.values) if plan.identical else reindex(
+            other.values, plan.right
+        )
+
+        var made = List[Series](capacity=len(self.columns))
+        for i in range(len(self.columns)):
+            var col = AnyArray(
+                copy=self.columns[i].only()
+            ) if plan.identical else reindex(self.columns[i].only(), plan.left)
+            var out = binary_any(values, col, op) if flip else binary_any(
+                col, values, op
+            )
+            made.append(Series(self.schema[i].name, out^))
+        return self._rebuilt(made^, plan^.into_index())
+
+    def compare(self, other: Self, op: BinaryOp) raises -> Self:
+        """Compares two frames cell by cell, refusing to align them.
+
+        This is what `==` and its five relatives do, and it is deliberately not
+        what `+` does, for the reason written down on `Series.compare`: a
+        comparison has no answer for a row or a column that is only on one side,
+        and False would read as "these differ" rather than as "one of them is
+        not here". The flexible forms `eq` and the rest align, because a missing
+        answer is a thing they can express.
+
+        Args:
+            other: The right operand.
+            op: The comparison.
+
+        Returns:
+            A frame of booleans, same shape, same labels.
+
+        Raises:
+            Error: If the two frames do not have the same row labels and the
+                same column names in the same order, or the comparison is not
+                defined on some pair of dtypes.
+        """
+        if not self.index.equals(other.index) or self.names() != other.names():
+            raise Error(
+                "frame: can only compare identically-labeled (both index and"
+                " columns) DataFrame objects; use the eq, ne, lt, le, gt or ge"
+                " method to compare these two on the union of their labels"
+                " instead"
+            )
+        var made = List[Series](capacity=len(self.columns))
+        for i in range(len(self.columns)):
+            made.append(
+                Series(
+                    self.schema[i].name,
+                    binary_any(
+                        self.columns[i].only(), other.columns[i].only(), op
+                    ),
+                )
+            )
+        return self._rebuilt(made^, Index(copy=self.index))
+
+    def unary(self, op: UnaryOp) raises -> Self:
+        """Applies a one operand operation to every column.
+
+        Args:
+            op: The operation.
+
+        Returns:
+            A frame of the same shape, on the same labels, with the same column
+            names.
+
+        Raises:
+            Error: If the operation is not defined on some column's dtype.
+        """
+        var made = List[Series](capacity=len(self.columns))
+        for i in range(len(self.columns)):
+            made.append(
+                Series(
+                    self.schema[i].name, unary_any(self.columns[i].only(), op)
+                )
+            )
+        return self._rebuilt(made^, Index(copy=self.index))
+
+    def __add__(self, other: Self) raises -> Self:
+        """Adds two frames, matching rows by label and columns by name.
+
+        Args:
+            other: The right operand.
+
+        Returns:
+            The sums.
+
+        Raises:
+            Error: If the operands cannot be aligned or added.
+        """
+        return self.binary(other, BinaryOp.ADD)
+
+    def __add__(self, other: Series) raises -> Self:
+        """Adds a series to every row of a frame.
+
+        Args:
+            other: The series, whose labels name columns.
+
+        Returns:
+            The sums.
+
+        Raises:
+            Error: If the operands cannot be aligned or added.
+        """
+        return self.binary(other, BinaryOp.ADD)
+
+    def __add__(self, value: Value) raises -> Self:
+        """Adds a constant to every cell.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            The sums.
+
+        Raises:
+            Error: If some column cannot be added to.
+        """
+        return self.binary(value, BinaryOp.ADD)
+
+    def __radd__(self, value: Value) raises -> Self:
+        """Adds every cell to a constant.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            The sums.
+
+        Raises:
+            Error: If some column cannot be added to.
+        """
+        return self.binary(value, BinaryOp.ADD, value_on_left=True)
+
+    def __sub__(self, other: Self) raises -> Self:
+        """Subtracts one frame from another.
+
+        Args:
+            other: The right operand.
+
+        Returns:
+            The differences.
+
+        Raises:
+            Error: If the operands cannot be aligned or subtracted.
+        """
+        return self.binary(other, BinaryOp.SUB)
+
+    def __sub__(self, other: Series) raises -> Self:
+        """Subtracts a series from every row of a frame.
+
+        Args:
+            other: The series, whose labels name columns.
+
+        Returns:
+            The differences.
+
+        Raises:
+            Error: If the operands cannot be aligned or subtracted.
+        """
+        return self.binary(other, BinaryOp.SUB)
+
+    def __sub__(self, value: Value) raises -> Self:
+        """Subtracts a constant from every cell.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            The differences.
+
+        Raises:
+            Error: If some column cannot be subtracted from.
+        """
+        return self.binary(value, BinaryOp.SUB)
+
+    def __rsub__(self, value: Value) raises -> Self:
+        """Subtracts every cell from a constant.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            The differences.
+
+        Raises:
+            Error: If some column cannot be subtracted from.
+        """
+        return self.binary(value, BinaryOp.SUB, value_on_left=True)
+
+    def __mul__(self, other: Self) raises -> Self:
+        """Multiplies two frames.
+
+        Args:
+            other: The right operand.
+
+        Returns:
+            The products.
+
+        Raises:
+            Error: If the operands cannot be aligned or multiplied.
+        """
+        return self.binary(other, BinaryOp.MUL)
+
+    def __mul__(self, other: Series) raises -> Self:
+        """Multiplies every row of a frame by a series.
+
+        Args:
+            other: The series, whose labels name columns.
+
+        Returns:
+            The products.
+
+        Raises:
+            Error: If the operands cannot be aligned or multiplied.
+        """
+        return self.binary(other, BinaryOp.MUL)
+
+    def __mul__(self, value: Value) raises -> Self:
+        """Multiplies every cell by a constant.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            The products.
+
+        Raises:
+            Error: If some column cannot be multiplied.
+        """
+        return self.binary(value, BinaryOp.MUL)
+
+    def __rmul__(self, value: Value) raises -> Self:
+        """Multiplies a constant by every cell.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            The products.
+
+        Raises:
+            Error: If some column cannot be multiplied.
+        """
+        return self.binary(value, BinaryOp.MUL, value_on_left=True)
+
+    def __truediv__(self, other: Self) raises -> Self:
+        """Divides one frame by another.
+
+        Args:
+            other: The right operand.
+
+        Returns:
+            The quotients, in float64.
+
+        Raises:
+            Error: If the operands cannot be aligned or divided.
+        """
+        return self.binary(other, BinaryOp.DIV)
+
+    def __truediv__(self, other: Series) raises -> Self:
+        """Divides every row of a frame by a series.
+
+        Args:
+            other: The series, whose labels name columns.
+
+        Returns:
+            The quotients, in float64.
+
+        Raises:
+            Error: If the operands cannot be aligned or divided.
+        """
+        return self.binary(other, BinaryOp.DIV)
+
+    def __truediv__(self, value: Value) raises -> Self:
+        """Divides every cell by a constant.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            The quotients, in float64.
+
+        Raises:
+            Error: If some column cannot be divided.
+        """
+        return self.binary(value, BinaryOp.DIV)
+
+    def __rtruediv__(self, value: Value) raises -> Self:
+        """Divides a constant by every cell.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            The quotients, in float64.
+
+        Raises:
+            Error: If some column cannot be divided.
+        """
+        return self.binary(value, BinaryOp.DIV, value_on_left=True)
+
+    def __floordiv__(self, other: Self) raises -> Self:
+        """Divides one frame by another, rounding towards minus infinity.
+
+        Args:
+            other: The right operand.
+
+        Returns:
+            The quotients.
+
+        Raises:
+            Error: If the operands cannot be aligned or divided.
+        """
+        return self.binary(other, BinaryOp.FLOORDIV)
+
+    def __floordiv__(self, other: Series) raises -> Self:
+        """Divides every row of a frame by a series, rounding down.
+
+        Args:
+            other: The series, whose labels name columns.
+
+        Returns:
+            The quotients.
+
+        Raises:
+            Error: If the operands cannot be aligned or divided.
+        """
+        return self.binary(other, BinaryOp.FLOORDIV)
+
+    def __floordiv__(self, value: Value) raises -> Self:
+        """Divides every cell by a constant, rounding down.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            The quotients.
+
+        Raises:
+            Error: If some column cannot be divided.
+        """
+        return self.binary(value, BinaryOp.FLOORDIV)
+
+    def __rfloordiv__(self, value: Value) raises -> Self:
+        """Divides a constant by every cell, rounding down.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            The quotients.
+
+        Raises:
+            Error: If some column cannot be divided.
+        """
+        return self.binary(value, BinaryOp.FLOORDIV, value_on_left=True)
+
+    def __mod__(self, other: Self) raises -> Self:
+        """Takes the remainder of one frame divided by another.
+
+        Args:
+            other: The right operand.
+
+        Returns:
+            The remainders, which take the sign of the right operand.
+
+        Raises:
+            Error: If the operands cannot be aligned or divided.
+        """
+        return self.binary(other, BinaryOp.MOD)
+
+    def __mod__(self, other: Series) raises -> Self:
+        """Takes the remainder of every row divided by a series.
+
+        Args:
+            other: The series, whose labels name columns.
+
+        Returns:
+            The remainders.
+
+        Raises:
+            Error: If the operands cannot be aligned or divided.
+        """
+        return self.binary(other, BinaryOp.MOD)
+
+    def __mod__(self, value: Value) raises -> Self:
+        """Takes the remainder of every cell divided by a constant.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            The remainders.
+
+        Raises:
+            Error: If some column cannot be divided.
+        """
+        return self.binary(value, BinaryOp.MOD)
+
+    def __rmod__(self, value: Value) raises -> Self:
+        """Takes the remainder of a constant divided by every cell.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            The remainders.
+
+        Raises:
+            Error: If some column cannot be divided.
+        """
+        return self.binary(value, BinaryOp.MOD, value_on_left=True)
+
+    def __pow__(self, other: Self) raises -> Self:
+        """Raises one frame to the power of another.
+
+        Args:
+            other: The exponents.
+
+        Returns:
+            The powers.
+
+        Raises:
+            Error: If the operands cannot be aligned, or an integer is raised to
+                a negative integer power.
+        """
+        return self.binary(other, BinaryOp.POW)
+
+    def __pow__(self, other: Series) raises -> Self:
+        """Raises every row of a frame to the power of a series.
+
+        Args:
+            other: The exponents, whose labels name columns.
+
+        Returns:
+            The powers.
+
+        Raises:
+            Error: If the operands cannot be aligned, or an integer is raised to
+                a negative integer power.
+        """
+        return self.binary(other, BinaryOp.POW)
+
+    def __pow__(self, value: Value) raises -> Self:
+        """Raises every cell to a constant power.
+
+        Args:
+            value: The exponent.
+
+        Returns:
+            The powers.
+
+        Raises:
+            Error: If an integer is raised to a negative integer power.
+        """
+        return self.binary(value, BinaryOp.POW)
+
+    def __rpow__(self, value: Value) raises -> Self:
+        """Raises a constant to the power of every cell.
+
+        Args:
+            value: The base.
+
+        Returns:
+            The powers.
+
+        Raises:
+            Error: If an integer is raised to a negative integer power.
+        """
+        return self.binary(value, BinaryOp.POW, value_on_left=True)
+
+    def __eq__(self, other: Self) raises -> Self:
+        """Reports where two identically labelled frames agree.
+
+        Args:
+            other: The right operand.
+
+        Returns:
+            A frame of booleans.
+
+        Raises:
+            Error: If the labels or the column names differ.
+        """
+        return self.compare(other, BinaryOp.EQ)
+
+    def __eq__(self, value: Value) raises -> Self:
+        """Reports which cells equal a constant.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            A frame of booleans.
+
+        Raises:
+            Error: If some column cannot be compared with it.
+        """
+        return self.binary(value, BinaryOp.EQ)
+
+    def __ne__(self, other: Self) raises -> Self:
+        """Reports where two identically labelled frames differ.
+
+        Args:
+            other: The right operand.
+
+        Returns:
+            A frame of booleans.
+
+        Raises:
+            Error: If the labels or the column names differ.
+        """
+        return self.compare(other, BinaryOp.NE)
+
+    def __ne__(self, value: Value) raises -> Self:
+        """Reports which cells differ from a constant.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            A frame of booleans.
+
+        Raises:
+            Error: If some column cannot be compared with it.
+        """
+        return self.binary(value, BinaryOp.NE)
+
+    def __lt__(self, other: Self) raises -> Self:
+        """Reports where this frame is below another.
+
+        Args:
+            other: The right operand.
+
+        Returns:
+            A frame of booleans.
+
+        Raises:
+            Error: If the labels or the column names differ.
+        """
+        return self.compare(other, BinaryOp.LT)
+
+    def __lt__(self, value: Value) raises -> Self:
+        """Reports which cells are below a constant.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            A frame of booleans.
+
+        Raises:
+            Error: If some column cannot be compared with it.
+        """
+        return self.binary(value, BinaryOp.LT)
+
+    def __le__(self, other: Self) raises -> Self:
+        """Reports where this frame is at or below another.
+
+        Args:
+            other: The right operand.
+
+        Returns:
+            A frame of booleans.
+
+        Raises:
+            Error: If the labels or the column names differ.
+        """
+        return self.compare(other, BinaryOp.LE)
+
+    def __le__(self, value: Value) raises -> Self:
+        """Reports which cells are at or below a constant.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            A frame of booleans.
+
+        Raises:
+            Error: If some column cannot be compared with it.
+        """
+        return self.binary(value, BinaryOp.LE)
+
+    def __gt__(self, other: Self) raises -> Self:
+        """Reports where this frame is above another.
+
+        Args:
+            other: The right operand.
+
+        Returns:
+            A frame of booleans.
+
+        Raises:
+            Error: If the labels or the column names differ.
+        """
+        return self.compare(other, BinaryOp.GT)
+
+    def __gt__(self, value: Value) raises -> Self:
+        """Reports which cells are above a constant.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            A frame of booleans.
+
+        Raises:
+            Error: If some column cannot be compared with it.
+        """
+        return self.binary(value, BinaryOp.GT)
+
+    def __ge__(self, other: Self) raises -> Self:
+        """Reports where this frame is at or above another.
+
+        Args:
+            other: The right operand.
+
+        Returns:
+            A frame of booleans.
+
+        Raises:
+            Error: If the labels or the column names differ.
+        """
+        return self.compare(other, BinaryOp.GE)
+
+    def __ge__(self, value: Value) raises -> Self:
+        """Reports which cells are at or above a constant.
+
+        Args:
+            value: The constant.
+
+        Returns:
+            A frame of booleans.
+
+        Raises:
+            Error: If some column cannot be compared with it.
+        """
+        return self.binary(value, BinaryOp.GE)
+
+    def __neg__(self) raises -> Self:
+        """Negates every cell.
+
+        Returns:
+            The negated frame.
+
+        Raises:
+            Error: If some column cannot be negated.
+        """
+        return self.unary(UnaryOp.NEG)
+
+    def __pos__(self) raises -> Self:
+        """Returns the frame unchanged, having checked every column allows it.
+
+        Returns:
+            A copy.
+
+        Raises:
+            Error: If some column has no unary plus, which text does not.
+        """
+        return self.unary(UnaryOp.POS)
+
+    def abs(self) raises -> Self:
+        """Takes the absolute value of every cell.
+
+        This is a method rather than only the `abs` builtin for the reason given
+        on `Series.abs`: the builtin wants the `Absable` trait and a trait cannot
+        be conformed to by a method that raises.
+
+        Returns:
+            The absolute values.
+
+        Raises:
+            Error: If some column has no absolute value.
+        """
+        return self.unary(UnaryOp.ABS)
+
+    def __abs__(self) raises -> Self:
+        """Takes the absolute value of every cell.
+
+        Returns:
+            The absolute values.
+
+        Raises:
+            Error: If some column has no absolute value.
+        """
+        return self.abs()
+
+    def __invert__(self) raises -> Self:
+        """Inverts every cell, which negates a boolean column.
+
+        Returns:
+            The inverted frame.
+
+        Raises:
+            Error: If some column is not boolean or an integer.
+        """
+        return self.unary(UnaryOp.INVERT)
+
     def write_to(self, mut writer: Some[Writer]):
         """Writes the frame as a table.
 
@@ -1667,3 +2600,89 @@ def _has_name(fields: List[Field], name: String) -> Bool:
         if fields[i].name == name:
             return True
     return False
+
+
+def _paired_type(
+    left: DataFrame, right: DataFrame, name: String
+) raises -> LogicalType:
+    """Returns the type a column has, looking at whichever frame has it.
+
+    A name that came out of `plan_columns` is on at least one of the two sides,
+    so one of the two lookups always answers.
+
+    Args:
+        left: The left frame.
+        right: The right frame.
+        name: The column name.
+
+    Returns:
+        The left frame's type for that column, or the right frame's if the left
+        does not have it.
+
+    Raises:
+        Error: If neither frame has the column, which cannot happen for a name
+            the column plan produced.
+    """
+    if left.has(name):
+        return left.schema[left.index_of(name)].dtype
+    return right.schema[right.index_of(name)].dtype
+
+
+def _operand(
+    frame: DataFrame,
+    name: String,
+    positions: List[Int],
+    identical: Bool,
+    rows: Int,
+    type: LogicalType,
+) raises -> AnyArray:
+    """Gets one side of a column pair, reindexed onto the result's rows.
+
+    Args:
+        frame: The frame to take the column from.
+        name: The column name.
+        positions: One position per output row, from the row plan.
+        identical: Whether the two frames had the same row labels, in which case
+            no gather is needed.
+        rows: How many rows the result has.
+        type: The type to use if this frame does not have the column.
+
+    Returns:
+        A column of `rows` rows, all of them missing if the frame has no such
+        column.
+
+    Raises:
+        Error: If the type has no physical layout, which is what a text column
+            that only one of the two frames has comes to.
+    """
+    if not frame.has(name):
+        return all_null(type, rows)
+    ref col = frame.columns[frame.index_of(name)].only()
+    if identical:
+        return AnyArray(copy=col)
+    return reindex(col, positions)
+
+
+def _label_names(index: Index) raises -> List[String]:
+    """Reads an index's labels as column names.
+
+    Args:
+        index: The labels.
+
+    Returns:
+        One name per label.
+
+    Raises:
+        Error: If the labels are not text, since a column name is.
+    """
+    var labels = index.materialize()
+    if not labels.is_string():
+        raise Error(
+            "frame: a series broadcast along the columns is matched up by name,"
+            " so its row labels have to be text, and these are "
+            + String(labels.type)
+        )
+    var out = List[String](capacity=len(labels))
+    for i in range(len(labels)):
+        out.append(String(labels.strings()[i]))
+    return out^
