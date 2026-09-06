@@ -16,7 +16,7 @@ specification in the only form that runs.
 """
 
 from std.ffi import external_call
-from std.math import isnan, nan, sqrt
+from std.math import copysign, floor, isnan, nan, sqrt
 
 from firepanda.array.array import Array
 from firepanda.array.strings import StringArray
@@ -351,6 +351,107 @@ def divide_scalar[
     return out^
 
 
+def _c_remainder[dt: DType](x: Scalar[dt], y: Scalar[dt]) -> Scalar[dt]:
+    """The remainder C gives, which takes the sign of the numerator.
+
+    `fmod` rather than an expression, because it is exact for every pair of
+    finite floats however large they are and an expression is not. Everything
+    the two functions below do is a correction to what this returns.
+
+    Args:
+        x: The numerator.
+        y: The denominator.
+
+    Parameters:
+        dt: A floating point dtype.
+
+    Returns:
+        The truncated remainder.
+    """
+    comptime if dt == DType.float64:
+        return external_call["fmod", Float64](
+            x.cast[DType.float64](), y.cast[DType.float64]()
+        ).cast[dt]()
+    else:
+        return external_call["fmodf", Float32](
+            x.cast[DType.float32](), y.cast[DType.float32]()
+        ).cast[dt]()
+
+
+def _floored_remainder[dt: DType](x: Scalar[dt], y: Scalar[dt]) -> Scalar[dt]:
+    """The remainder Python and numpy give, which takes the sign of the divisor.
+
+    Two corrections to the C one and no more. Where the two signs disagree the
+    divisor is added back, which moves the answer into the divisor's half of the
+    number line. Where the remainder is zero there is no sign to take from it,
+    so it takes the divisor's, because a float has a negative zero and numpy
+    reports one for `6 % -3`.
+
+    A NaN takes neither correction. It is not equal to zero and it compares
+    false against zero from both sides, so both tests miss it and it comes back
+    as it arrived.
+
+    Args:
+        x: The numerator.
+        y: The denominator.
+
+    Parameters:
+        dt: A floating point dtype.
+
+    Returns:
+        The remainder, taking the sign of the divisor.
+    """
+    var mod = _c_remainder(x, y)
+    if mod == 0:
+        return copysign(Scalar[dt](0), y)
+    if (y < 0) != (mod < 0):
+        return mod + y
+    return mod
+
+
+def _floored_quotient[dt: DType](x: Scalar[dt], y: Scalar[dt]) -> Scalar[dt]:
+    """The quotient Python and numpy give, built from the remainder.
+
+    `x - _c_remainder(x, y)` is an exact multiple of `y`, so dividing it lands
+    on an integer or within a bit of one however large the two numbers were, and
+    that is the reason to go the long way round rather than take the floor of an
+    ordinary division. The floor of a value one bit below an integer is the
+    integer beneath it, which is why anything more than half a step above the
+    floor is snapped up.
+
+    Three cases are not the general one. A zero divisor has no remainder to
+    build anything from and answers the infinity or the NaN the division gives,
+    which is what a float column is for and is where the integer twin above
+    answers a null instead. A quotient of zero has a sign that the subtraction
+    cannot be trusted with and takes the sign of the plain division. And a
+    numerator that is infinite has a NaN for a remainder, so the whole
+    expression is a NaN, which is the answer numpy gives for `inf // 2` and is
+    not the infinity the obvious formula produces.
+
+    Args:
+        x: The numerator.
+        y: The denominator.
+
+    Parameters:
+        dt: A floating point dtype.
+
+    Returns:
+        The quotient, rounded towards minus infinity.
+    """
+    if y == 0:
+        return x / y
+    var mod = _c_remainder(x, y)
+    var div = (x - mod) / y
+    if mod != 0 and (y < 0) != (mod < 0):
+        div -= 1
+    if div == 0:
+        return copysign(Scalar[dt](0), x / y)
+    var snapped = floor(div)
+    if div - snapped > 0.5:
+        snapped += 1
+    return snapped
+
+
 def floor_divide_scalar[dt: DType](a: Array[dt], b: Array[dt]) -> Array[dt]:
     """Floor divides two columns, one element at a time.
 
@@ -359,6 +460,12 @@ def floor_divide_scalar[dt: DType](a: Array[dt], b: Array[dt]) -> Array[dt]:
     answer in the type, so the row is null; on a float dtype it is an infinity
     or a NaN and the row is present. That rule is decided here and the kernel
     follows it, which is the whole arrangement in this file.
+
+    On a float the quotient goes through `_floored_quotient` rather than through
+    Mojo's `//`, because Mojo's is the obvious expression and the obvious
+    expression is wrong on the infinities and on any pair of numbers whose
+    quotient is too large for a float to hold exactly. A twin is only a
+    specification while it is right.
 
     Args:
         a: The numerator column.
@@ -380,7 +487,9 @@ def floor_divide_scalar[dt: DType](a: Array[dt], b: Array[dt]) -> Array[dt]:
             if b[i] == 0:
                 out.set_null(i)
                 continue
-        out.set_valid(i, a[i] // b[i])
+            out.set_valid(i, a[i] // b[i])
+        else:
+            out.set_valid(i, _floored_quotient(a[i], b[i]))
     return out^
 
 
@@ -389,7 +498,8 @@ def modulo_scalar[dt: DType](a: Array[dt], b: Array[dt]) -> Array[dt]:
 
     Same rule about a zero divisor as the floor division above, for the same
     reason: the two come from one rounding and cannot disagree about which rows
-    have an answer.
+    have an answer. On a float it goes through `_floored_remainder` for the same
+    reason the quotient goes through `_floored_quotient`.
 
     Args:
         a: The numerator column.
@@ -411,7 +521,9 @@ def modulo_scalar[dt: DType](a: Array[dt], b: Array[dt]) -> Array[dt]:
             if b[i] == 0:
                 out.set_null(i)
                 continue
-        out.set_valid(i, a[i] % b[i])
+            out.set_valid(i, a[i] % b[i])
+        else:
+            out.set_valid(i, _floored_remainder(a[i], b[i]))
     return out^
 
 
