@@ -35,6 +35,7 @@ from std.time import perf_counter_ns
 from firepanda.array.array import Array
 from firepanda.kernel import (
     AggKind,
+    absolute,
     add,
     aggregate_group,
     argsort,
@@ -52,6 +53,7 @@ from firepanda.kernel import (
     floor_divide_const,
     greater,
     group_top_rows,
+    invert,
     less,
     max_of,
     mean_of,
@@ -59,6 +61,7 @@ from firepanda.kernel import (
     modulo,
     modulo_const,
     multiply,
+    negate,
     not_equal,
     power,
     power_const,
@@ -71,6 +74,7 @@ from firepanda.kernel.arith import OP_ADD, OP_MUL, OP_SUB
 from firepanda.kernel.compare import CMP_GE, CMP_LT
 from firepanda.kernel.nulls import fill_backward, fill_forward
 from firepanda.kernel.scalar import (
+    absolute_scalar,
     add_scalar,
     argsort_scalar,
     arith_const_scalar,
@@ -86,6 +90,7 @@ from firepanda.kernel.scalar import (
     floor_divide_scalar,
     group_scalar,
     group_top_scalar,
+    invert_scalar,
     less_scalar,
     max_scalar,
     mean_scalar,
@@ -93,6 +98,7 @@ from firepanda.kernel.scalar import (
     modulo_const_scalar,
     modulo_scalar,
     multiply_scalar,
+    negate_scalar,
     power_const_scalar,
     power_scalar,
     subtract_scalar,
@@ -884,6 +890,27 @@ def run_one[dt: DType](mut rng: Rng, step: Int, seed: UInt64) raises:
         seed,
         "compare_const greater or equal",
     )
+
+    # The unary loops want a column with negatives in it, which `random_column`
+    # never draws, so the sign is flipped on every third row of a column of its
+    # own. An unsigned column is left alone, since flipping a sign there wraps
+    # the value back into the same set of values and tests nothing the plain
+    # column does not already test.
+    var signed = random_column[dt](rng, length, rng.next_below(4))
+    comptime if dt.is_signed():
+        for i in range(length):
+            if i % 3 == 0 and signed.is_valid(i):
+                signed.set_valid(i, -signed[i])
+
+    same_column(negate(signed), negate_scalar(signed), step, seed, "negate")
+    same_column(
+        absolute(signed), absolute_scalar(signed), step, seed, "absolute"
+    )
+    # `~` on a float column raises on both sides rather than answering, so the
+    # comparison would have nothing to compare. `tests/test_unary.mojo` asserts
+    # the refusal instead.
+    comptime if not dt.is_floating_point():
+        same_column(invert(signed), invert_scalar(signed), step, seed, "invert")
 
     same_column(equal(a, b), equal_scalar(a, b), step, seed, "equal")
     same_column(less(a, b), less_scalar(a, b), step, seed, "less")

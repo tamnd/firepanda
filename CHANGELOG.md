@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### The unary operations follow pandas rather than numpy
+
+`-x`, `+x`, `abs(x)` and `~x` are in the kernel. There are four of them and three loops, because unary plus is the column unchanged on every type that has it at all and is answered by a copy rather than by a pass over the values. All four keep the operand type, so a plan can be told what an expression answers before a row moves.
+
+The interesting part is bool, where pandas and numpy disagree and pandas wins. `-Series([True, False])` is `[False, True]`, while numpy refuses the same expression outright and says the boolean negative is not supported. pandas catches that refusal and sends the column to the inversion instead, so firepanda does the same. `abs` on a bool column is the column unchanged, which follows from the values already being zero and one. `~` is two operations picked by the type, the logical not on bool and the bitwise not on an integer, so `~Series([1, 2])` is `[-2, -3]` and not `[False, False]`. On a float column it raises, because there is no bitwise not of a float and numpy says so first.
+
+Two of the three wrap rather than raising. Negating the most negative int8 answers the most negative int8 again, taking the absolute value of it does the same, and negating an unsigned column answers the wrapped complement, so `-Series([1], dtype='uint8')` is `[255]`. Every one of those was read off a running pandas rather than reasoned about here, and a checked version of any of them would be a divergence rather than a fix.
+
+Negation is a real loop and not a subtraction from zero. `-Series([0.0])` has the sign bit set in pandas and `0.0 - 0.0` does not, which is a difference between two values that compare equal and so would never have shown up in a test that only compared numbers. There is a test for it.
+
+The three loops have scalar twins and the differential fuzzer runs them on a column whose signs have been flipped on every third row, since the columns it draws are otherwise all positive and an absolute value that was secretly a copy would pass on those.
+
 ### Floor division, the remainder and the power
 
 The kernel had four arithmetic operations and pandas has seven, so `//`, `%` and `**` are in. They promote the way addition does and keep the operand type, which is what pandas does and is not what `/` does: an int64 column floor divided by an int64 column is still int64, while dividing the same pair is float64 whatever went in.

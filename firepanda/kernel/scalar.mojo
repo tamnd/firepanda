@@ -168,6 +168,90 @@ def mean_scalar[dt: DType](col: Array[dt]) -> Tuple[Float64, Bool]:
     return (total / Float64(present), True)
 
 
+def negate_scalar[dt: DType](a: Array[dt]) -> Array[dt]:
+    """Negates a column, one element at a time.
+
+    On a bool column this is the logical not, which is what pandas answers and
+    is not what numpy answers, since numpy refuses the expression outright. The
+    rule is decided here and the kernel follows it.
+
+    Args:
+        a: The column.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column of negated values, null wherever the input is null.
+    """
+    var out = Array[dt](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        comptime if dt == DType.bool:
+            out.set_valid(i, Scalar[dt](not a[i]))
+        else:
+            out.set_valid(i, -a[i])
+    return out^
+
+
+def absolute_scalar[dt: DType](a: Array[dt]) -> Array[dt]:
+    """Takes the absolute value of a column, one element at a time.
+
+    A value that is already its own absolute value is still copied through the
+    loop here rather than short circuited, which is the difference between this
+    and the kernel and is the reason the two are worth comparing.
+
+    Args:
+        a: The column.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column of absolute values, null wherever the input is null.
+    """
+    var out = Array[dt](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        comptime if dt == DType.bool or not dt.is_signed():
+            out.set_valid(i, a[i])
+        else:
+            out.set_valid(i, -a[i] if a[i] < 0 else a[i])
+    return out^
+
+
+def invert_scalar[dt: DType](a: Array[dt]) -> Array[dt]:
+    """Inverts a column, one element at a time.
+
+    The logical not on a bool column and the bitwise not on an integer one,
+    which is one operator in pandas and two here. A float column has no bitwise
+    not and never reaches this.
+
+    Args:
+        a: The column.
+
+    Parameters:
+        dt: The dtype. Must not be a floating point one.
+
+    Returns:
+        A column of inverted values, null wherever the input is null.
+    """
+    var out = Array[dt](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        comptime if dt == DType.bool:
+            out.set_valid(i, Scalar[dt](not a[i]))
+        else:
+            out.set_valid(i, ~a[i])
+    return out^
+
+
 def add_scalar[dt: DType](a: Array[dt], b: Array[dt]) -> Array[dt]:
     """Adds two columns, one element at a time.
 
