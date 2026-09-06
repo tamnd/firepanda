@@ -16,6 +16,7 @@ from std.memory import ArcPointer, Pointer
 from std.python import Python, PythonObject
 from std.python.bindings import check_arguments_arity
 
+from firepanda.dtype.logical import LogicalType
 from firepanda.frame.index import Index
 from firepanda.frame.series import Series
 from firepanda.py.args import flag, whole, words
@@ -24,7 +25,13 @@ from firepanda.io.arrow_export import export_array_borrowed, export_schema
 from firepanda.py.convert import array_capsule, schema_capsule
 from firepanda.py.index import PyIndex
 from firepanda.py.errors import DTYPE, UNSUPPORTED, VALUE, retagged, tagged
-from firepanda.py.ops import binary_op, constant, fill, unary_op
+from firepanda.py.ops import (
+    binary_op,
+    constant,
+    constant_tag,
+    fill,
+    unary_op,
+)
 from firepanda.py.values import python_list
 
 
@@ -319,7 +326,8 @@ struct PySeries(Movable, Writable):
 
         Raises:
             Error: Tagged `dtype`, if an argument is the wrong type or the
-                operation is not defined on the two types.
+                operation is not defined on the two types. Tagged `overflow`, if
+                the constant is a number too large for this series' dtype.
         """
         var right = constant(other, "other")
         var which = binary_op(words(op, "op"))
@@ -335,7 +343,9 @@ struct PySeries(Movable, Writable):
                 )
             )
         except cause:
-            raise retagged(DTYPE, cause)
+            var dtypes = List[LogicalType](capacity=1)
+            dtypes.append(Self._held(py_self)[].series[].logical())
+            raise retagged(constant_tag(dtypes, right, which), cause)
 
     @staticmethod
     def compare_series(

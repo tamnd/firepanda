@@ -104,6 +104,7 @@ from firepanda.kernel.binary import (
     binary_any,
     binary_type,
     binary_value_any,
+    resolve_constant,
 )
 from firepanda.kernel.cast import cast_any
 from firepanda.kernel.concat import concat_two_any
@@ -489,7 +490,14 @@ struct Compute(Movable):
         # two operand types are read one at a time.
         var a = out[self.left].dtype
         if self.constant:
-            var k = self.constant.value().type
+            # A Python scalar has no width of its own and takes one from the
+            # column, so it has to be resolved here for the same reason
+            # `binary_value_any` resolves it: this declares what that call will
+            # produce, and a rule applied in one and not the other is a plan
+            # whose stated dtype is not the dtype of the data it describes. It
+            # is also where a constant too large for the column is caught, at
+            # plan time, before a row moves.
+            var k = resolve_constant(a, self.constant.value(), self.op).type
             var left = a if not self.value_on_left else k
             var right = k if not self.value_on_left else a
             out.append(Field(self.name, binary_type(self.op, left, right)))

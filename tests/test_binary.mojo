@@ -31,6 +31,8 @@ from firepanda.kernel.binary import (
     binary_any,
     binary_type,
     binary_value_any,
+    resolve_constant,
+    weak_operand_type,
 )
 
 
@@ -774,6 +776,177 @@ def test_a_constant_cannot_be_added_to_a_bool_column() raises:
         _ = binary_value_any(
             typed[DType.bool]([True, False]), Value(True), BinaryOp.ADD
         )
+
+
+def test_a_weak_integer_takes_the_dtype_of_the_column() raises:
+    """`s + 2` on an int8 column stays int8, which is the whole rule in one line.
+
+    A Python integer has no width. NumPy 2 and pandas 3 stopped inventing one
+    for it and made it take the width of whatever it meets, so the column
+    decides and a small number never widens anything."""
+    var got = binary_value_any(
+        typed[DType.int8]([1, 2, 3]),
+        Value(Int64(2)).weakened(),
+        BinaryOp.ADD,
+    )
+    assert_true(got.type == LogicalType.INT8, "result type")
+    var values = read[DType.int8](got)
+    assert_equal(values[0], 3, "row 0")
+    assert_equal(values[2], 5, "row 2")
+
+
+def test_a_constant_that_arrived_with_a_dtype_still_promotes() raises:
+    """The flag is what changes the answer, so the same number without it does
+    not. This is the pair to the test above and the reason `Value.weak` is a
+    field rather than a guess made from the type: an int64 that a caller asked
+    for is an int64 and it widens the column the way it always did."""
+    var got = binary_value_any(
+        typed[DType.int8]([1, 2, 3]), Value(Int64(2)), BinaryOp.ADD
+    )
+    assert_true(got.type == LogicalType.INT64, "result type")
+
+
+def test_a_weak_integer_too_large_for_the_column_is_refused() raises:
+    """Taking the column's width means a number that does not fit has nowhere to
+    go, and pandas raises rather than widening. The message is pandas' own,
+    word for word, because that is the string somebody will search for."""
+    with assert_raises(contains="Python integer 200 out of bounds for int8"):
+        _ = binary_value_any(
+            typed[DType.int8]([1, 2, 3]),
+            Value(Int64(200)).weakened(),
+            BinaryOp.ADD,
+        )
+
+
+def test_a_comparison_against_a_weak_integer_never_narrows() raises:
+    """`s > 200` on an int8 column answers False rather than raising.
+
+    Comparisons are the exception to the rule above and they are the exception
+    in pandas too, which is not an inconsistency: asking whether a byte is
+    larger than two hundred has a perfectly good answer, and refusing to answer
+    it because the number does not fit would be useless."""
+    var got = binary_value_any(
+        typed[DType.int8]([1, 100, 127]),
+        Value(Int64(200)).weakened(),
+        BinaryOp.GT,
+    )
+    assert_true(got.type == LogicalType.BOOL, "result type")
+    var values = read[DType.bool](got)
+    assert_equal(values[0], False, "row 0")
+    assert_equal(values[2], False, "row 2, the largest int8 there is")
+
+
+def test_a_weak_float_takes_the_width_of_a_float_column() raises:
+    """A Python float is weak the same way a Python integer is, so a float32
+    column stays float32 rather than being pulled up to double by a literal."""
+    var got = binary_value_any(
+        typed[DType.float32]([1.0, 2.0]),
+        Value(Float64(1.5)).weakened(),
+        BinaryOp.ADD,
+    )
+    assert_true(got.type == LogicalType.FLOAT32, "result type")
+    var values = read[DType.float32](got)
+    assert_equal(values[0], Float32(2.5), "row 0")
+
+
+def test_a_weak_float_still_widens_an_integer_column() raises:
+    """Weak means it has no width of its own, not that it has no kind. A float
+    meeting an integer column has to become a float somewhere, and float64 is
+    where pandas puts it because there is no narrower float to pick from an
+    int64."""
+    var got = binary_value_any(
+        typed[DType.int64]([1, 2]),
+        Value(Float64(0.5)).weakened(),
+        BinaryOp.ADD,
+    )
+    assert_true(got.type == LogicalType.FLOAT64, "result type")
+
+
+def test_a_weak_float_too_large_for_a_float32_column_is_not_refused() raises:
+    """The bounds check is an integer thing, because a float has infinities to
+    overflow into and NumPy is content to let it. This is one of the two places
+    firepanda has to be careful not to be stricter than the thing it copies."""
+    var got = binary_value_any(
+        typed[DType.float32]([1.0, 2.0]),
+        Value(Float64(1.0e300)).weakened(),
+        BinaryOp.ADD,
+    )
+    assert_true(got.type == LogicalType.FLOAT32, "result type")
+
+
+def test_a_weak_bool_takes_the_dtype_of_a_number_column() raises:
+    """`True` is a Python `bool` and a Python `bool` is an `int`, so it lands on
+    the column the way `1` does rather than turning the answer into a bool."""
+    var got = binary_value_any(
+        typed[DType.int16]([1, 2]), Value(True).weakened(), BinaryOp.ADD
+    )
+    assert_true(got.type == LogicalType.INT16, "result type")
+    var values = read[DType.int16](got)
+    assert_equal(values[0], 2, "row 0")
+
+
+def test_a_weak_constant_against_text_is_left_alone() raises:
+    """There is no width to take from a text column, so the rule does not apply
+    and the failure is the one it always was."""
+    with assert_raises(contains="no common type"):
+        _ = binary_value_any(
+            AnyArray(strings_from_list(["a", "b"])),
+            Value(Int64(2)).weakened(),
+            BinaryOp.ADD,
+        )
+
+
+def test_which_dtype_a_weak_scalar_lands_on() raises:
+    """The rule on its own, without a column of data underneath it, because the
+    tests above each pin one row of it and this says what the table is."""
+    assert_true(
+        weak_operand_type(LogicalType.INT8, LogicalType.INT64)
+        == LogicalType.INT8,
+        "an integer takes the integer column",
+    )
+    assert_true(
+        weak_operand_type(LogicalType.FLOAT32, LogicalType.INT64)
+        == LogicalType.FLOAT32,
+        "an integer takes the float column",
+    )
+    assert_true(
+        weak_operand_type(LogicalType.INT8, LogicalType.FLOAT64)
+        == LogicalType.FLOAT64,
+        "a float on an integer column has no narrower float to pick",
+    )
+    assert_true(
+        weak_operand_type(LogicalType.FLOAT32, LogicalType.FLOAT64)
+        == LogicalType.FLOAT32,
+        "a float takes the float column",
+    )
+    assert_true(
+        weak_operand_type(LogicalType.INT16, LogicalType.BOOL)
+        == LogicalType.INT16,
+        "a bool is an integer and takes the column",
+    )
+    assert_true(
+        weak_operand_type(LogicalType.BOOL, LogicalType.INT64)
+        == LogicalType.INT64,
+        "a number on a bool column is the one case the column does not win",
+    )
+    assert_true(
+        weak_operand_type(LogicalType.STRING, LogicalType.INT64)
+        == LogicalType.INT64,
+        "a text column has no width to give",
+    )
+
+
+def test_resolving_a_constant_twice_is_the_same_answer() raises:
+    """`ComputeNode.schema` declares the dtype and `binary_value_any` produces
+    it, and they get there by calling this, so the answer has to be the one it
+    was the first time. It is a pure function of the dtype and the number and
+    this is the test that says so out loud."""
+    var value = Value(Int64(2)).weakened()
+    var once = resolve_constant(LogicalType.INT8, value, BinaryOp.ADD)
+    var twice = resolve_constant(LogicalType.INT8, once, BinaryOp.ADD)
+    assert_true(once.type == LogicalType.INT8, "once")
+    assert_true(twice.type == LogicalType.INT8, "twice")
+    assert_true(not once.weak, "a resolved constant is no longer weak")
 
 
 def main() raises:

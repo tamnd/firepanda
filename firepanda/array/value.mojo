@@ -47,6 +47,21 @@ struct Value(Copyable, Equatable, Movable, Writable):
     var present: Bool
     """Whether there is a value at all. False is a null and it is an answer."""
 
+    var weak: Bool
+    """Whether the value arrived without a dtype of its own.
+
+    A Python `2` has no type in the sense this struct means. It is an integer of
+    no particular width, and numpy 2 and pandas 3 both give it the width of
+    whatever array it meets rather than a width of its own. So a value read out
+    of a Python scalar is marked here, and `binary_value_any` resolves the width
+    against the column when it is applied. Everything built in Mojo is strongly
+    typed by construction and leaves this false.
+
+    It is a fact about where the value came from and not about what it holds,
+    which is why `__eq__` ignores it. A weak 2 and an int64 2 are the same
+    number, and a test that compares two answers is asking about the number.
+    """
+
     def __init__[dt: DType](out self, value: Scalar[dt]):
         """Constructs a value from an element whose dtype the caller has.
 
@@ -69,6 +84,7 @@ struct Value(Copyable, Equatable, Movable, Writable):
         self.text = None
         self.type = logical_for(dt)
         self.present = True
+        self.weak = False
 
     def __init__(out self, value: Bool):
         """Constructs a bool value.
@@ -84,6 +100,7 @@ struct Value(Copyable, Equatable, Movable, Writable):
         self.text = None
         self.type = LogicalType.BOOL
         self.present = True
+        self.weak = False
 
     def __init__(out self, var value: String):
         """Constructs a text value.
@@ -96,6 +113,7 @@ struct Value(Copyable, Equatable, Movable, Writable):
         self.text = value^
         self.type = LogicalType.STRING
         self.present = True
+        self.weak = False
 
     def __init__(out self, *, null: LogicalType):
         """Constructs the absent value of a type.
@@ -108,6 +126,7 @@ struct Value(Copyable, Equatable, Movable, Writable):
         self.text = None
         self.type = null
         self.present = False
+        self.weak = False
 
     def __init__(out self, *, copy: Self):
         """Copies a value.
@@ -120,6 +139,7 @@ struct Value(Copyable, Equatable, Movable, Writable):
         self.text = Optional[String](copy=copy.text)
         self.type = copy.type
         self.present = copy.present
+        self.weak = copy.weak
 
     def __eq__(self, other: Self) -> Bool:
         """Compares two values, type and all.
@@ -155,6 +175,20 @@ struct Value(Copyable, Equatable, Movable, Writable):
             True if they differ.
         """
         return not (self == other)
+
+    def weakened(self) -> Self:
+        """Returns the same value, marked as having arrived without a dtype.
+
+        Only the Python boundary calls this, because Python is the only place a
+        number arrives without one. Everything else in the library builds a
+        value out of a `Scalar[dt]` and therefore knows the width already.
+
+        Returns:
+            A copy with `weak` set.
+        """
+        var out = Self(copy=self)
+        out.weak = True
+        return out^
 
     def is_null(self) -> Bool:
         """Reports whether the value is absent.

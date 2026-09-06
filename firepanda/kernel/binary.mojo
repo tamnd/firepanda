@@ -32,12 +32,15 @@ integer column stays an integer column. What they do about a zero divisor is
 something pandas does not.
 
 A constant on either side goes through `binary_value_any`, which is the same
-three steps with a `Value` where the second column would be. It promotes against
-the constant's type rather than against its value, so `x + 1` on an int32 column
-stays int32 and does not widen because the literal happened to arrive as an
-int64. The column is the only thing that gets converted; the constant is read at
-the common type when the dtype is resolved, which costs nothing because it is one
-element.
+three steps with a `Value` where the second column would be, plus one step in
+front of them. A constant that came from Python has no width of its own, because
+a Python `2` does not have one, so it takes the column's: `x + 1` on an int32
+column stays int32 rather than widening because the literal arrived as an int64.
+`resolve_constant` is that step and the rule it applies is numpy's weak scalar
+rule, which pandas inherits whole. After it, the constant has a width and the
+three steps are the ones a second column would go through. The column is the only
+thing that gets converted; the constant is read at the common type when the dtype
+is resolved, which costs nothing because it is one element.
 
 A null constant is answered before any loop runs. Every row of the result is
 null, whatever the operation and whatever is in the column, so the loop would be
@@ -56,7 +59,7 @@ from firepanda.array.array import Array
 from firepanda.array.value import Value
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
-from firepanda.dtype.logical import LogicalType, promote
+from firepanda.dtype.logical import LogicalType, TypeKind, promote
 
 from .arith import (
     OP_ADD,
@@ -294,6 +297,178 @@ def binary_type(
     return common
 
 
+def weak_operand_type(column: LogicalType, scalar: LogicalType) -> LogicalType:
+    """The width a Python scalar takes when it meets a column.
+
+    A Python `2` has no width. numpy 2 calls it a weak scalar and pandas 3
+    inherits the rule whole, so this is the rule and not an interpretation of
+    one. A weak scalar has a kind, the kinds are ordered bool then integer then
+    float, and:
+
+    - if the scalar's kind is no higher than the column's, the operation runs in
+      the column's own dtype and the answer is the column's dtype;
+    - if the scalar's kind is higher, the answer is the default width of the
+      scalar's kind, which is int64 for an integer and float64 for a float.
+
+    There is no case where a scalar makes a column wider than the default of its
+    own kind, which is the whole point of it. An int8 column that becomes int64
+    the first time somebody adds one to it is eight times the memory for a range
+    of values that never needed it.
+
+    Every measured pandas answer falls out of those two sentences: `int8 + 2` is
+    int8, `int8 + True` is int8, `int8 + 2.5` is float64, `float32 + 2` is
+    float32, `bool + 2` is int64 and `bool + True` is bool.
+
+    Args:
+        column: The dtype of the column the scalar is being applied to.
+        scalar: The dtype the scalar was read as, which is the widest of its
+            kind because that is all a Python object can say.
+
+    Returns:
+        The width to run the operation in.
+    """
+    if not column.is_numeric():
+        return scalar
+    if scalar.is_float():
+        return column if column.is_float() else LogicalType.FLOAT64
+    if scalar.kind == TypeKind.BOOL:
+        return column
+    return LogicalType.INT64 if column.kind == TypeKind.BOOL else column
+
+
+def _fits[target: DType](value: Int64) -> Bool:
+    """Reports whether an integer survives being narrowed to a dtype.
+
+    The check is a round trip rather than a pair of bounds, because the bounds
+    of a dtype are exactly what a round trip measures and writing them out again
+    is a second copy of the same fact. The one case a round trip cannot see is a
+    negative number against an unsigned dtype, which wraps to a large positive
+    one and wraps back to the same negative one, so that is tested first.
+
+    Parameters:
+        target: The dtype to narrow to.
+
+    Args:
+        value: The number, read as an int64.
+
+    Returns:
+        True if narrowing loses nothing.
+    """
+    comptime if target == DType.bool:
+        return value == 0 or value == 1
+    comptime if not target.is_signed():
+        if value < 0:
+            return False
+    return value.cast[target]().cast[DType.int64]() == value
+
+
+def resolve_constant(
+    column: LogicalType, value: Value, op: BinaryOp
+) raises -> Value:
+    """Gives a Python scalar the width it takes against this column.
+
+    Called in two places and they have to agree: `binary_value_any` runs the
+    operation and `ComputeNode.schema` declares what the operation will produce,
+    so a rule applied in one and not the other is a plan whose declared dtype is
+    not the dtype of the data it describes.
+
+    A comparison is not an arithmetic operation here and the difference is
+    measured rather than assumed. pandas answers `int8 < 128` with a column of
+    True rather than raising, because that is a true statement about every int8
+    there is, and it answers `int8 == 128` with a column of False. So a
+    comparison against a value the column cannot hold is not an error and is not
+    a narrowing: it is answered at the value's own magnitude, which is what the
+    promotion already does. The narrowing still happens when it is exact, since
+    `s > 5` on an int8 column should not widen the column to compare against a
+    five.
+
+    Args:
+        column: The dtype of the column.
+        value: The constant, which is returned unchanged unless it arrived from
+            Python without a width.
+        op: The operation, because a comparison resolves differently.
+
+    Returns:
+        The constant, at the width the operation should run in.
+
+    Raises:
+        If the operation is arithmetic and the scalar does not fit the column's
+        dtype. The message is pandas' own, `Python integer {value} out of bounds
+        for {dtype}`, since that is what somebody who hits this will search for.
+        The binding turns it into an `OverflowError`.
+    """
+    if not value.weak or value.is_null() or not column.is_numeric():
+        return Value(copy=value)
+    var want = weak_operand_type(column, value.type)
+    if want == value.type:
+        return Value(copy=value)
+
+    if value.type.is_float():
+        # A float scalar only ever narrows into a float column, and a float
+        # column has no value it cannot hold: what does not fit becomes an
+        # infinity, which is what pandas stores too.
+        return _narrowed(value, want)
+
+    var number = value.as_scalar[DType.int64]()
+    if not _fits_type(want, number):
+        if op.is_comparison():
+            # Answered at full magnitude rather than refused. `int8 < 128` is
+            # true of every int8 there is and pandas says so.
+            return Value(copy=value)
+        raise Error(
+            String(
+                "Python integer ",
+                number,
+                " out of bounds for ",
+                want,
+            )
+        )
+    return _narrowed(value, want)
+
+
+def _fits_type(target: LogicalType, value: Int64) raises -> Bool:
+    """Resolves a runtime dtype to a parameter and asks `_fits`.
+
+    Args:
+        target: The dtype to narrow to.
+        value: The number.
+
+    Returns:
+        True if narrowing loses nothing.
+
+    Raises:
+        If the dtype has no physical layout here.
+    """
+    if target.is_float():
+        return True
+    comptime for t in ALL:
+        if target.physical == t:
+            return _fits[t](value)
+    raise Error("binary: unsupported dtype " + String(target))
+
+
+def _narrowed(value: Value, target: LogicalType) raises -> Value:
+    """Rebuilds a constant at another width.
+
+    The result is not weak. It has a width now, and asking the same question of
+    it twice has to give the same answer the second time.
+
+    Args:
+        value: The constant.
+        target: The width to rebuild it at.
+
+    Returns:
+        The constant at `target`.
+
+    Raises:
+        If the dtype has no physical layout here.
+    """
+    comptime for t in ALL:
+        if target.physical == t:
+            return Value(value.as_scalar[t]())
+    raise Error("binary: unsupported dtype " + String(target))
+
+
 def binary_any(a: AnyArray, b: AnyArray, op: BinaryOp) raises -> AnyArray:
     """Applies an operation elementwise to two columns of the same length.
 
@@ -452,33 +627,39 @@ def binary_value_any(
         value_on_left: True for `5 - x` rather than `x - 5`.
 
     Returns:
-        A column of `binary_type(op, a.type, b.type)` with as many rows as `a`,
-        null wherever `a` is null and null everywhere if the constant is null.
+        A column with as many rows as `a`, null wherever `a` is null and null
+        everywhere if the constant is null. The dtype is `binary_type` of the
+        column and the constant, after the constant has been given a width by
+        `resolve_constant`.
 
     Raises:
-        If the two types have no common type, or the operation is not defined on
-        that common type.
+        If the two types have no common type, if the operation is not defined on
+        that common type, or if the constant is an integer the column's dtype
+        cannot hold and the operation is arithmetic.
     """
-    var left = a.type if not value_on_left else b.type
-    var right = b.type if not value_on_left else a.type
+    # A Python scalar arrives without a width and takes the column's, so this
+    # runs before anything reads the constant's type.
+    var scalar = resolve_constant(a.type, b, op)
+    var left = a.type if not value_on_left else scalar.type
+    var right = scalar.type if not value_on_left else a.type
     var answer = binary_type(op, left, right)
 
-    if b.is_null():
+    if scalar.is_null():
         return all_null(answer, len(a))
 
-    var common = promote(a.type, b.type)
+    var common = promote(a.type, scalar.type)
     # The comparison with the constant on the left is turned round rather than
     # given loops of its own. Subtraction and division cannot be turned round, so
     # they carry the flag into the loop, where the branch on it sits outside.
     var applied = op.mirrored() if value_on_left and op.is_comparison() else op
     if common.is_variable_width():
-        return _compare_text_const_erased(a, b, applied)
+        return _compare_text_const_erased(a, scalar, applied)
 
     var column = AnyArray(copy=a) if a.type == common else cast_any(
         a, common.physical
     )
     var flip = value_on_left and not op.is_comparison()
-    return _binary_const_erased(column, b, applied, common.physical, flip)
+    return _binary_const_erased(column, scalar, applied, common.physical, flip)
 
 
 def all_null(type: LogicalType, rows: Int) raises -> AnyArray:

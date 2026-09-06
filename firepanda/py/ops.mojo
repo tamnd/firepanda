@@ -41,9 +41,10 @@ from std.collections import Optional
 from std.python import Python, PythonObject
 
 from firepanda.array.value import Value
-from firepanda.kernel.binary import BinaryOp
+from firepanda.dtype.logical import LogicalType
+from firepanda.kernel.binary import BinaryOp, resolve_constant
 from firepanda.kernel.unary import UnaryOp
-from firepanda.py.errors import DTYPE, VALUE, tagged
+from firepanda.py.errors import DTYPE, OVERFLOW, VALUE, tagged
 
 
 def binary_op(name: String) raises -> BinaryOp:
@@ -156,11 +157,11 @@ def constant(value: PythonObject, name: String) raises -> Value:
     """
     var builtins = Python.import_module("builtins")
     if Bool(builtins.isinstance(value, builtins.bool)):
-        return Value(Bool(py=value))
+        return Value(Bool(py=value)).weakened()
     if Bool(builtins.isinstance(value, builtins.int)):
-        return Value(Int64(Int(py=value)))
+        return Value(_as_int64(value)).weakened()
     if Bool(builtins.isinstance(value, builtins.float)):
-        return Value(Float64(py=value))
+        return Value(Float64(py=value)).weakened()
     if Bool(builtins.isinstance(value, builtins.str)):
         return Value(String(value))
     raise tagged(
@@ -173,6 +174,71 @@ def constant(value: PythonObject, name: String) raises -> Value:
             value.__repr__(),
         ),
     )
+
+
+def _as_int64(value: PythonObject) raises -> Int64:
+    """Reads a Python integer, refusing one that will not fit a machine word.
+
+    Python integers are unbounded and int64 is not, so there is a range where
+    the number is a perfectly good Python object and there is nothing here to
+    put it in. pandas answers the same way and its message is copied exactly,
+    because that is the string somebody who hits this will search for.
+
+    It is the narrowest of the three refusals a scalar can meet. This one is
+    about the machine and does not know what column the value is headed for; the
+    one in `resolve_constant` is about the column's dtype and has a different
+    message for that reason.
+
+    Args:
+        value: The Python integer.
+
+    Returns:
+        The number.
+
+    Raises:
+        Error: Tagged `overflow`, if it does not fit in an int64.
+    """
+    try:
+        return Int64(Int(py=value))
+    except:
+        raise tagged(OVERFLOW, "Python int too large to convert to C long")
+
+
+def constant_tag(
+    dtypes: List[LogicalType], value: Value, op: BinaryOp
+) -> String:
+    """Says which tag a failed constant operation should carry.
+
+    An operation against a constant has two ways to fail and they are different
+    kinds. The dtypes can have no answer between them, which is `dtype`, and the
+    constant can be a number too large for the column it was headed for, which
+    is `overflow`. The core knows which one happened and cannot say so, because
+    it raises untagged, which is the rule `firepanda/py/errors.mojo` states.
+
+    So the binding asks the question again on the failure path, the way
+    `PySeries.compare_series` compares its labels again to find out which of its
+    two failures it had. Resolving a constant is a handful of comparisons
+    against a dtype and no data is touched, so asking twice costs nothing, and
+    it is only ever reached once something has already gone wrong.
+
+    Args:
+        dtypes: The dtypes the constant would meet, which is one for a series
+            and one per column for a frame.
+        value: The constant, as `constant` built it.
+        op: The operation.
+
+    Returns:
+        The `overflow` prefix if resolving the constant against any of those
+        dtypes is what failed, and the `dtype` prefix otherwise. A frame that
+        fails on its third column is still an overflow, so any is the right
+        question rather than all.
+    """
+    for dtype in dtypes:
+        try:
+            _ = resolve_constant(dtype, value, op)
+        except:
+            return OVERFLOW
+    return DTYPE
 
 
 def fill(value: PythonObject) raises -> Optional[Value]:

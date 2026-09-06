@@ -52,6 +52,7 @@ from firepanda.py.errors import (
     COLUMN,
     DTYPE,
     IO,
+    OVERFLOW,
     POSITION,
     UNSUPPORTED,
     VALUE,
@@ -59,7 +60,13 @@ from firepanda.py.errors import (
     tagged,
 )
 from firepanda.py.index import PyIndex
-from firepanda.py.ops import binary_op, constant, fill, unary_op
+from firepanda.py.ops import (
+    binary_op,
+    constant,
+    constant_tag,
+    fill,
+    unary_op,
+)
 from firepanda.py.series import PySeries
 
 
@@ -434,7 +441,9 @@ struct PyDataFrame(Movable, Writable):
 
         Raises:
             Error: Tagged `dtype`, if an argument is the wrong type or the
-                operation is not defined on a column it reached.
+                operation is not defined on a column it reached. Tagged
+                `overflow`, if the constant is a number too large for a column
+                it reached.
         """
         var right = constant(other, "other")
         var which = binary_op(words(op, "op"))
@@ -450,7 +459,14 @@ struct PyDataFrame(Movable, Writable):
                 )
             )
         except cause:
-            raise retagged(DTYPE, cause)
+            # Every column, because one narrow column among wide ones is
+            # exactly the case that fails, and the frame stopped at the first
+            # one that had no answer without saying which it was.
+            ref frame = Self._frame(py_self)[].frame[]
+            var dtypes = List[LogicalType](capacity=frame.width())
+            for i in range(frame.width()):
+                dtypes.append(frame.columns[i].type)
+            raise retagged(constant_tag(dtypes, right, which), cause)
 
     @staticmethod
     def compare_frame(
@@ -891,6 +907,8 @@ def raise_for_test(kind: PythonObject) raises -> PythonObject:
         raise tagged(DTYPE, "cannot add int64 and float64")
     if which == "value":
         raise tagged(VALUE, "n must not be negative")
+    if which == "overflow":
+        raise tagged(OVERFLOW, "Python integer 128 out of bounds for int8")
     if which == "position":
         raise tagged(POSITION, "index 5 is out of bounds for an index of 2")
     if which == "io":
