@@ -3954,6 +3954,15 @@ def bench_join(mut harness: Harness) raises:
     counting, prefix and scatter passes are over the whole dimension and the
     bucket array is as wide as it is.
 
+    What does the build cost. Every row above builds a table of a thousand or a
+    hundred thousand entries against a fact table of millions, so the table sits
+    in cache, filling it is a rounding error and what they measure is the probe.
+    `join/inner_equal_sides` gives the build side the same height as the probe
+    side and a distinct key per row, so the table is as large as the input and
+    filling it is a pass over every row of it. That is the shape db-benchmark j5
+    has and it was the only common join shape with no row here, which meant the
+    one phase of a join that is still serial had nothing measuring it.
+
     What do the other kinds cost relative to inner. Semi and anti stop at the
     first match and gather nothing from the right, so they should be cheaper than
     inner on the same inputs. Outer has to track which right rows were hit, which
@@ -4058,6 +4067,30 @@ def bench_join(mut harness: Harness) raises:
         keep(out.rows)
 
     harness.record("join/inner_100k", "rows", rows, inner_wide)
+
+    # A build side as tall as the probe side, every probe row matching exactly
+    # one build row. Every other join row here builds a table of a thousand or a
+    # hundred thousand entries, which sits in cache and costs nothing to fill, so
+    # what they all measure is the probe. This is the row where the build is the
+    # work, and it is the shape db-benchmark j5 has.
+    var equal_dim = _dimension(rows, 0, "label")
+    var equal_key = Array[DType.int64](rows)
+    var equal_value = Array[DType.int64](rows)
+    for i in range(rows):
+        var draw = rng.next_u64()
+        equal_key[i] = Int64(draw % UInt64(rows if rows > 0 else 1))
+        equal_value[i] = Int64(draw % 1000)
+    var equal_series = List[Series]()
+    equal_series.append(Series("key", equal_key^))
+    equal_series.append(Series("value", equal_value^))
+    var equal_fact = DataFrame.from_series(equal_series^)
+
+    def inner_equal() raises {imm equal_fact, imm equal_dim, imm one}:
+        keep(equal_fact.rows)
+        var out = equal_fact.join(equal_dim, one)
+        keep(out.rows)
+
+    harness.record("join/inner_equal_sides", "rows", rows, inner_equal)
 
     def semi_partial() raises {imm fact, imm partial, imm one}:
         keep(fact.rows)
