@@ -2958,6 +2958,31 @@ def _factorize_strings_partitioned(
     does not do is `_merge_strings` rather than `_merge_hashed`, and the saving is
     the larger of the two.
 
+    Three things were measured after that and none of them is here, which is
+    worth writing down because all three read like the next thing to try.
+
+    The scatter in `assign` writes one four byte code per row to a position
+    nothing can predict, and making it write sequentially instead, which gives
+    the wrong answer, was worth 2.3 ms of 28.7 on a ten million row column with a
+    hundred thousand text groups. That is eight percent and it is real, but the
+    only way to get it honestly is to build the inverse of the permutation, and
+    building it costs the same scatter it would save.
+
+    The same trick does not work on `place`, and the result it gives is a trap.
+    Writing the rows out sequentially there does not just move the traffic, it
+    destroys the partitioning, so every partition's build then sees keys from the
+    whole column and the benchmark goes from 28.7 ms to 61. That number says
+    nothing about the scatter and everything about how much the route depends on
+    each partition being small. What the scatter costs was measured the other
+    way: adding the sixteen bytes of view per row cost about 7 ms on its own, so
+    the twenty eight bytes going out are plausibly a third of the whole route.
+
+    Fewer partitions do not help. Taking the count from a hundred and twenty
+    eight down to thirty two, which cuts each worker's write streams from three
+    hundred and eighty four to ninety six, measured 30.1 and 30.3 ms against 28.4
+    and 28.5. A partition's table is four times bigger at that point, and the
+    build loses more to that than the scatter gains.
+
     Args:
         col: The column.
         seed: The per-query hash seed.

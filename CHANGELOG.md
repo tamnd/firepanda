@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Three measurements on the partitioned text factorize, none of them shipped
+
+Nothing changes here except a docstring, and the docstring is the point. After the carried view took that route from 34.8 ms to 28.7 on ten million rows, three further ideas were measured and all three are recorded in the function rather than in a branch nobody will find again.
+
+The scatter at the end, which writes one four byte code per row to a position nothing can predict, is worth 2.3 ms of the 28.7. That was measured by writing sequentially instead, which gives the wrong answer. Eight percent is real, but collecting it honestly means building the inverse permutation, and that costs the same scatter it would save.
+
+The same trick applied to the scatter at the front is a trap, and the number it produces is worse than useless. Writing the rows out sequentially there does not move traffic around, it destroys the partitioning, so every partition's build then sees keys from across the whole column and the benchmark goes from 28.7 ms to 61. Anyone reading that as the cost of the scatter would conclude the opposite of the truth. What the front scatter costs was already known from the other direction: adding sixteen bytes of view per row cost about 7 ms on its own, so the twenty eight bytes a row going out are plausibly a third of the route.
+
+Fewer partitions do not help either. A hundred and twenty eight partitions on thirty two workers means each worker is writing three hundred and eighty four streams at once, which is well past what a store buffer or a TLB holds, and cutting that to thirty two partitions measured 30.1 and 30.3 ms against 28.4 and 28.5. A partition's table is four times larger at that point and the build loses more than the scatter gains, so the count that is there is the right one.
+
 ### A microbenchmark row for a join whose build side is as tall as its probe side
 
 Every join row in the benchmark file joins millions of fact rows against a dimension of a thousand or a hundred thousand. A table that size sits in cache and costs nothing to fill, so all of those rows measure the probe and none of them measures the build. That is the one phase of a join still running on a single thread, and nothing was pointed at it.
