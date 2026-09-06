@@ -133,3 +133,4 @@ from .sort import (
 )
 from .text import compare_text, compare_text_const
 from .topn import GroupTop, group_top_rows, group_top_rows_any
+from .unary import UnaryOp, absolute, invert, negate, unary_any, unary_type

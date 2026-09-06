@@ -24,6 +24,7 @@ from std.testing import (
 from firepanda.array.array import Array, from_list
 from firepanda.dtype.lists import NUMERIC
 from firepanda.kernel import (
+    absolute,
     add,
     cast_to,
     count_of,
@@ -32,6 +33,7 @@ from firepanda.kernel import (
     filter_rows,
     floor_divide,
     greater,
+    invert,
     less,
     less_equal,
     max_of,
@@ -39,6 +41,7 @@ from firepanda.kernel import (
     min_of,
     modulo,
     multiply,
+    negate,
     not_equal,
     power,
     subtract,
@@ -48,16 +51,19 @@ from firepanda.kernel import (
 from firepanda.kernel.accum import accumulator
 from firepanda.kernel.arith import OP_ADD, arith_const
 from firepanda.kernel.scalar import (
+    absolute_scalar,
     add_scalar,
     cast_scalar,
     equal_scalar,
     filter_scalar,
     floor_divide_scalar,
+    invert_scalar,
     max_scalar,
     mean_scalar,
     min_scalar,
     modulo_scalar,
     multiply_scalar,
+    negate_scalar,
     power_scalar,
     subtract_scalar,
     sum_scalar,
@@ -399,6 +405,37 @@ def test_a_negative_exponent_stops_the_integer_loops_and_not_the_float_ones() ra
     var got = power(floats, negative)
     assert_equal(got[0], 0.5)
     assert_equal(got[1], 0.5)
+
+
+def test_the_unary_operations_match_the_twin() raises:
+    """Every sign in the column is flipped on the signed dtypes first, because
+    `build` hands back positive values only and a negation that was silently a
+    copy would pass on those. The inversion is skipped on the float dtypes,
+    where both sides refuse it rather than answering.
+    """
+    comptime for dt in NUMERIC:
+        var a = build[dt](193, 5)
+        comptime if dt.is_signed():
+            for i in range(0, 193, 3):
+                if a.is_valid(i):
+                    a.set_valid(i, -a[i])
+
+        var negated = negate(a)
+        var negated_twin = negate_scalar(a)
+        var magnitude = absolute(a)
+        var magnitude_twin = absolute_scalar(a)
+        for i in range(193):
+            assert_equal(negated.is_valid(i), negated_twin.is_valid(i))
+            assert_equal(negated[i], negated_twin[i])
+            assert_equal(magnitude.is_valid(i), magnitude_twin.is_valid(i))
+            assert_equal(magnitude[i], magnitude_twin[i])
+
+        comptime if not dt.is_floating_point():
+            var inverted = invert(a)
+            var inverted_twin = invert_scalar(a)
+            for i in range(193):
+                assert_equal(inverted.is_valid(i), inverted_twin.is_valid(i))
+                assert_equal(inverted[i], inverted_twin[i])
 
 
 def test_subtraction_matches_the_twin_on_signed_values() raises:
