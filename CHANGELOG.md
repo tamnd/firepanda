@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.47] - 2026-09-06
+
+Built against Mojo 1.0.0 (ed45d567). A series and a frame both do arithmetic now, the kernel has the operators that were missing under them, and a grouped correlation stopped reading its columns twice.
+
+The four arithmetic entries are one piece of work in four layers. Floor division, the remainder and the power went into the kernel first, then the four unary operations, then the whole set was lifted onto `Series` where it aligns on the row labels the way pandas does, and then onto `DataFrame` where it aligns on the columns as well. All of it follows a running pandas rather than an idea of what pandas ought to do, which is why bool negation works, why unsigned negation wraps, and why negating a zero keeps its sign.
+
+The engine entry is the last db-benchmark query DuckDB was ahead on. A grouped correlation centres each group on its two means and had to find the means in a pass of its own, so it read both value columns twice. It centres on each group's first observed pair now, which is available on the first row, and the stability the two passes were protecting comes out the same. q9 at 5GB went from 0.2179 s to 0.1797 s, and against DuckDB in the same session it is now 0.1445 s against 0.1700 s. The surprise was that laying a group's eight accumulators out as one cache line rather than as eight tables mattered more than removing the pass did, and the first version of the change without that was slower than what it replaced.
+
 ### Arithmetic on a frame aligns on both axes
 
 `a + b` on two frames now matches rows by label and columns by name, which is the same rule the series operators got and one axis more of it. Two frames of two columns and two rows each can come back three by three: the rows land on the union of the two indexes, the columns land on the union of the two name lists, and a cell that only one side had holds nothing because there was nothing to combine it with. Seven operators are in, `+`, `-`, `*`, `/`, `//`, `%` and `**`, along with the seven reflected forms against a constant and the six comparisons, and the four unary operations mean `-df` and `~df` work as well.
