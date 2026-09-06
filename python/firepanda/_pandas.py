@@ -22,7 +22,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from . import _firepanda
-from .errors import translate
+from .errors import InvalidArgumentError, translate
 
 if TYPE_CHECKING:
     from ._frame import DataFrame, Index, Series
@@ -49,6 +49,93 @@ def _refuse(name: str, value: object, why: str) -> None:
     """
     if value is not None:
         raise NotImplementedError(f"{name}= is not supported yet, because {why}")
+
+
+def _no_level(level: Any) -> None:
+    """Refuses the `level` argument every named arithmetic form declares.
+
+    pandas takes a level to say which level of a MultiIndex to align on, and
+    firepanda has no MultiIndex yet, so there is nothing for it to name. It is
+    declared rather than left out for the reason `_refuse` gives: the signature
+    parity test compares the whole parameter list against a running pandas, and a
+    caller who passes one is told what is missing.
+
+    Args:
+        level: What was passed.
+
+    Raises:
+        NotImplementedError: If anything other than None was passed.
+    """
+    if level is not None:
+        raise NotImplementedError(
+            "level= is not supported yet, because aligning on one level of a"
+            " MultiIndex needs a MultiIndex, and there is not one yet"
+        )
+
+
+def _axis_number(axis: Any, owner: str, default: int, allowed: tuple[int, ...]) -> int:
+    """Turns the five spellings of an axis into the number the boundary takes.
+
+    pandas accepts `0`, `1`, `"index"`, `"columns"` and `"rows"` interchangeably,
+    and a series accepts only the ones that mean the rows since it has one axis.
+    What is allowed is passed in rather than decided here, because that is the
+    difference between the two classes and it is one line at each call site.
+
+    `None` is not an error and does not mean the first axis: pandas takes it as
+    the default for the call, which is the columns on a frame, and the message
+    and the default are therefore both passed in too. A `True` is not an error
+    either, which is measured rather than assumed. Python makes a bool an int and
+    pandas does nothing to undo that, so `axis=True` means the columns and this
+    says so as well, since a compatibility layer that is stricter than the thing
+    it copies is still incompatible with it.
+
+    Args:
+        axis: What was passed.
+        owner: The class name, for the message.
+        default: The axis a `None` means.
+        allowed: The axis numbers this class has.
+
+    Returns:
+        0 for the rows, 1 for the columns.
+
+    Raises:
+        InvalidArgumentError: If it is not one of the five, or is an axis this
+            class does not have.
+    """
+    if axis is None:
+        return default
+    numbers: dict[Any, int] = {0: 0, 1: 1, "index": 0, "columns": 1, "rows": 0}
+    try:
+        number = numbers[axis]
+    except (KeyError, TypeError):
+        raise InvalidArgumentError(f"No axis named {axis} for object type {owner}") from None
+    if number not in allowed:
+        raise InvalidArgumentError(f"No axis named {axis} for object type {owner}") from None
+    return number
+
+
+def _no_fill_against_a_series(fill_value: Any) -> None:
+    """Refuses a fill value between a frame and a series.
+
+    This looks like a gap and it is measured. A series is broadcast across the
+    rows rather than aligned against them cell by cell, so there is no second side
+    for a fill to stand in for, and pandas says `NotImplementedError: fill_value 0
+    not supported.` rather than picking a meaning for it. This says the same thing
+    at more length, because the pandas message names the value and not the reason.
+
+    Args:
+        fill_value: What was passed.
+
+    Raises:
+        NotImplementedError: If anything other than None was passed.
+    """
+    if fill_value is not None:
+        raise NotImplementedError(
+            f"fill_value {fill_value!r} not supported when the other operand is a"
+            " Series, because a Series is broadcast across the rows rather than"
+            " aligned against them cell by cell, so there is no second side for"
+            " the fill to stand in for"
+        )
 
 
 __all__ = ["DataFrameMixin", "IndexMixin", "SeriesMixin"]
@@ -119,6 +206,73 @@ class DataFrameMixin:
             " name or a list of column names"
         )
 
+    def _operator(self, other: Any, op: str, flip: bool, strict: bool) -> Any:
+        """Runs one of the twenty operators, on whichever of three operands it got.
+
+        What the operand is decides which of three calls this makes, which is the
+        rule for what belongs in this file rather than in the table. A frame
+        aligns on both axes, a series is broadcast along the columns because that
+        is the axis an operator has no way to choose, and anything else is a
+        constant.
+
+        `strict` is the difference between `==` and `eq`. Two frames that are not
+        labelled the same are refused by the operator and aligned by the named
+        form, which is pandas' rule and is not arbitrary: a cell only one side has
+        has no true or false answer, and only the named form has a `fill_value` to
+        say one with.
+        """
+        from ._frame import DataFrame
+
+        try:
+            if isinstance(other, DataFrameMixin):
+                if strict:
+                    return DataFrame._wrap(self._inner.compare_frame(other._inner, op))
+                return DataFrame._wrap(self._inner.binary_frame(other._inner, op, flip, None))
+            if isinstance(other, SeriesMixin):
+                return DataFrame._wrap(self._inner.binary_series(other._inner, op, 1, flip))
+            return DataFrame._wrap(self._inner.binary_value(other, op, flip))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _named(
+        self, other: Any, op: str, axis: Any, level: Any, fill_value: Any, flip: bool
+    ) -> Any:
+        """Runs one of the twenty named forms, which is the operator plus two arguments.
+
+        `axis` is the one the operators cannot reach. An operator has to pick an
+        axis and pandas picks the columns, so `df.add(s, axis=0)` is the only
+        spelling of adding a series down the rows there is. Between two frames it
+        is read, checked and then ignored, because two frames align on both axes
+        whatever it says.
+
+        `fill_value` has three behaviours and all three are pandas'. Between two
+        frames it stands in for the side a row or a column is missing from.
+        Against a constant it is accepted and ignored, since a constant is never
+        the missing side. Against a series it raises.
+        """
+        from ._frame import DataFrame
+
+        _no_level(level)
+        number = _axis_number(axis, "DataFrame", 1, (0, 1))
+        try:
+            if isinstance(other, DataFrameMixin):
+                return DataFrame._wrap(self._inner.binary_frame(other._inner, op, flip, fill_value))
+            if isinstance(other, SeriesMixin):
+                _no_fill_against_a_series(fill_value)
+                return DataFrame._wrap(self._inner.binary_series(other._inner, op, number, flip))
+            return DataFrame._wrap(self._inner.binary_value(other, op, flip))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _unary(self, op: str) -> Any:
+        """Runs one of the four unary operations over every column."""
+        from ._frame import DataFrame
+
+        try:
+            return DataFrame._wrap(self._inner.unary(op))
+        except Exception as error:
+            raise translate(error) from None
+
 
 class SeriesMixin:
     """The hand written half of `Series`."""
@@ -147,6 +301,76 @@ class SeriesMixin:
         _refuse("copy", copy, "there is exactly one behaviour and it always copies")
         try:
             self._inner = _firepanda.Series(data, "" if name is None else str(name))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _operator(self, other: Any, op: str, flip: bool, strict: bool) -> Any:
+        """Runs one of the twenty operators, on whichever of three operands it got.
+
+        A frame on the right is handed back rather than handled. `s + df` is a
+        frame in pandas and the frame is the side that knows how to build one, so
+        returning `NotImplemented` is what makes Python turn the expression round
+        and ask `DataFrame.__radd__` instead. Refusing here would break an
+        expression that has a perfectly good answer.
+
+        `strict` is the difference between `==` and `eq`, for the reason
+        `DataFrameMixin._operator` gives.
+        """
+        from ._frame import Series
+
+        if isinstance(other, DataFrameMixin):
+            return NotImplemented
+        try:
+            if isinstance(other, SeriesMixin):
+                if strict:
+                    return Series._wrap(self._inner.compare_series(other._inner, op))
+                return Series._wrap(self._inner.binary_series(other._inner, op, flip, None))
+            return Series._wrap(self._inner.binary_value(other, op, flip))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _named(
+        self, other: Any, op: str, axis: Any, level: Any, fill_value: Any, flip: bool
+    ) -> Any:
+        """Runs one of the twenty two named forms, which is the operator plus two arguments.
+
+        A series has one axis, so `axis` is read and checked and can only be the
+        rows. It is declared because pandas declares it and the signature parity
+        test compares the whole parameter list.
+
+        `fill_value` is honoured between two series and ignored against a
+        constant, which are two of the three behaviours the frame has. The third
+        does not arise, because a series has nothing to broadcast against.
+        """
+        from ._frame import Series
+
+        _no_level(level)
+        _axis_number(axis, "Series", 0, (0,))
+        try:
+            if isinstance(other, SeriesMixin):
+                return Series._wrap(self._inner.binary_series(other._inner, op, flip, fill_value))
+            return Series._wrap(self._inner.binary_value(other, op, flip))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _divmod(self, other: Any, axis: Any, level: Any, fill_value: Any, flip: bool) -> Any:
+        """The floor division and the remainder, as the pair Python asks for.
+
+        Two passes rather than one, here and in pandas both, because the pair
+        comes out of two operations run separately and a single pass would need a
+        kernel that writes two columns, which nothing in `firepanda/kernel` does.
+        """
+        return (
+            self._named(other, "floordiv", axis, level, fill_value, flip),
+            self._named(other, "mod", axis, level, fill_value, flip),
+        )
+
+    def _unary(self, op: str) -> Any:
+        """Runs one of the four unary operations over every row."""
+        from ._frame import Series
+
+        try:
+            return Series._wrap(self._inner.unary(op))
         except Exception as error:
             raise translate(error) from None
 

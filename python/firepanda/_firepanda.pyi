@@ -37,6 +37,23 @@ class DataFrame:
     def labels(self) -> Index:
         """The row labels, as an index."""
         ...
+    def binary_frame(
+        self, other: DataFrame, op: str, flip: bool, fill_value: object | None
+    ) -> DataFrame:
+        """An operation between two frames, aligning on both axes."""
+        ...
+    def binary_series(self, other: Series, op: str, axis: int, flip: bool) -> DataFrame:
+        """An operation between a frame and a series, along one axis."""
+        ...
+    def binary_value(self, other: object, op: str, flip: bool) -> DataFrame:
+        """An operation between every cell of a frame and one constant."""
+        ...
+    def compare_frame(self, other: DataFrame, op: str) -> DataFrame:
+        """A comparison between two frames labelled the same on both axes."""
+        ...
+    def unary(self, op: str) -> DataFrame:
+        """One of the four unary operations, over every column."""
+        ...
     def arrow_c_schema(self) -> object:
         """The frame's Arrow schema, in a capsule."""
         ...
@@ -75,6 +92,20 @@ class Series:
         ...
     def labels(self) -> Index:
         """The row labels, as an index."""
+        ...
+    def binary_series(
+        self, other: Series, op: str, flip: bool, fill_value: object | None
+    ) -> Series:
+        """An operation between two series, matching rows by label."""
+        ...
+    def binary_value(self, other: object, op: str, flip: bool) -> Series:
+        """An operation between every row of a series and one constant."""
+        ...
+    def compare_series(self, other: Series, op: str) -> Series:
+        """A comparison between two series labelled the same."""
+        ...
+    def unary(self, op: str) -> Series:
+        """One of the four unary operations, over every row."""
         ...
     def arrow_c_schema(self) -> object:
         """The column's Arrow schema, in a capsule."""

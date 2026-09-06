@@ -63,6 +63,30 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = dataframe.def_method[PyDataFrame.labels](
         "labels", docstring="The row labels, as an index."
     )
+    _ = dataframe.def_method[PyDataFrame.binary_frame](
+        "binary_frame",
+        docstring="An operation between two frames, aligning on both axes.",
+    )
+    _ = dataframe.def_method[PyDataFrame.binary_series](
+        "binary_series",
+        docstring="An operation between a frame and a series, along one axis.",
+    )
+    _ = dataframe.def_method[PyDataFrame.binary_value](
+        "binary_value",
+        docstring=(
+            "An operation between every cell of a frame and one constant."
+        ),
+    )
+    _ = dataframe.def_method[PyDataFrame.compare_frame](
+        "compare_frame",
+        docstring=(
+            "A comparison between two frames labelled the same on both axes."
+        ),
+    )
+    _ = dataframe.def_method[PyDataFrame.unary](
+        "unary",
+        docstring="One of the four unary operations, over every column.",
+    )
     _ = dataframe.def_method[PyDataFrame.arrow_c_schema](
         "arrow_c_schema", docstring="The frame's Arrow schema, in a capsule."
     )
@@ -96,6 +120,23 @@ def register(mut module: PythonModuleBuilder) raises:
     )
     _ = series.def_method[PySeries.labels](
         "labels", docstring="The row labels, as an index."
+    )
+    _ = series.def_method[PySeries.binary_series](
+        "binary_series",
+        docstring="An operation between two series, matching rows by label.",
+    )
+    _ = series.def_method[PySeries.binary_value](
+        "binary_value",
+        docstring=(
+            "An operation between every row of a series and one constant."
+        ),
+    )
+    _ = series.def_method[PySeries.compare_series](
+        "compare_series",
+        docstring="A comparison between two series labelled the same.",
+    )
+    _ = series.def_method[PySeries.unary](
+        "unary", docstring="One of the four unary operations, over every row."
     )
     _ = series.def_method[PySeries.arrow_c_schema](
         "arrow_c_schema", docstring="The column's Arrow schema, in a capsule."

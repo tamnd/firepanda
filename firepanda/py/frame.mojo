@@ -37,7 +37,7 @@ from firepanda.io.arrow_stream import (
     import_stream,
 )
 from firepanda.io.read import read_csv
-from firepanda.py.args import whole
+from firepanda.py.args import flag, whole, words
 from firepanda.py.build import frame_from
 from firepanda.py.convert import (
     array_capsule,
@@ -59,6 +59,7 @@ from firepanda.py.errors import (
     tagged,
 )
 from firepanda.py.index import PyIndex
+from firepanda.py.ops import binary_op, constant, fill, unary_op
 from firepanda.py.series import PySeries
 
 
@@ -279,6 +280,246 @@ struct PyDataFrame(Movable, Writable):
             )
         except cause:
             raise retagged(COLUMN, cause)
+
+    @staticmethod
+    def _other(
+        value: PythonObject, name: String
+    ) raises -> ArcPointer[DataFrame]:
+        """Recovers the frame out of an argument that should be one.
+
+        Args:
+            value: What Python passed.
+            name: The parameter name, for the message.
+
+        Returns:
+            A share of the other frame, so the caller can read it without
+            copying.
+
+        Raises:
+            Error: Tagged `dtype`, if the argument is not a frame.
+        """
+        try:
+            return value.downcast_value_ptr[Self]()[].frame
+        except:
+            raise tagged(
+                DTYPE,
+                String(
+                    name,
+                    " must be a DataFrame, got ",
+                    Python.type(value).__name__,
+                    " ",
+                    value.__repr__(),
+                ),
+            )
+
+    @staticmethod
+    def binary_frame(
+        py_self: PythonObject,
+        other: PythonObject,
+        op: PythonObject,
+        flip: PythonObject,
+        fill_value: PythonObject,
+    ) raises -> PythonObject:
+        """Applies an operation to two frames, aligning on both axes.
+
+        One entry point for twenty of the operators and named forms, with the
+        operation crossing as a word. `firepanda/py/ops.mojo` says why the
+        boundary is this shape rather than one bound method per operation.
+
+        There is no `axis` here. Two frames align on their rows and on their
+        columns whatever `axis` says, so pandas takes the argument and ignores
+        it, and the Python layer drops it rather than carrying it across.
+
+        Args:
+            py_self: The left operand.
+            other: The right operand, which has to be a frame.
+            op: The operation, such as `add` or `lt`.
+            flip: True for `other op self`, which is what a reflected form needs.
+            fill_value: What to put where exactly one of the two sides has a
+                row or a column, or `None`.
+
+        Returns:
+            A new frame, on the union of both axes.
+
+        Raises:
+            Error: Tagged `dtype`, if an argument is the wrong type or the
+                operation is not defined on a pair of columns it reached.
+        """
+        var right = Self._other(other, "other")
+        var which = binary_op(words(op, "op"))
+        var filled = fill(fill_value)
+        var flipped = flag(flip, "flip")
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        Self._frame(py_self)[]
+                        .frame[]
+                        .binary(right[], which, filled, flipped)
+                    )
+                )
+            )
+        except cause:
+            raise retagged(DTYPE, cause)
+
+    @staticmethod
+    def binary_series(
+        py_self: PythonObject,
+        other: PythonObject,
+        op: PythonObject,
+        axis: PythonObject,
+        flip: PythonObject,
+    ) raises -> PythonObject:
+        """Broadcasts a series across a frame, along one axis or the other.
+
+        `axis` is the argument that matters here and it is the only place the
+        operators cannot reach, because an operator has to pick an axis and
+        pandas picks the columns. `df.add(s, axis=0)` is the only spelling of
+        adding a series down the rows there is.
+
+        There is no `fill_value`. pandas raises `NotImplementedError` for one
+        here and so does the Python layer, before the call, because a series is
+        broadcast rather than aligned cell by cell so there is no second side a
+        fill could stand in for.
+
+        Args:
+            py_self: The frame.
+            other: The series to broadcast.
+            op: The operation, such as `add` or `lt`.
+            axis: 1 to match the series' labels against the column names, 0 to
+                match them against the row labels.
+            flip: True for `series op frame`.
+
+        Returns:
+            A new frame.
+
+        Raises:
+            Error: Tagged `dtype`, if an argument is the wrong type or the
+                operation is not defined on a pair it reached.
+        """
+        var right = PySeries._other(other, "other")
+        var which = binary_op(words(op, "op"))
+        var along = whole(axis, "axis")
+        var flipped = flag(flip, "flip")
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        Self._frame(py_self)[]
+                        .frame[]
+                        .binary(right[], which, along, flipped)
+                    )
+                )
+            )
+        except cause:
+            raise retagged(DTYPE, cause)
+
+    @staticmethod
+    def binary_value(
+        py_self: PythonObject,
+        other: PythonObject,
+        op: PythonObject,
+        flip: PythonObject,
+    ) raises -> PythonObject:
+        """Applies an operation to every cell of a frame and one constant.
+
+        Args:
+            py_self: The frame.
+            other: The constant.
+            op: The operation, such as `add` or `lt`.
+            flip: True for `constant op frame`, which is what `5 - df` needs.
+
+        Returns:
+            A new frame of the same shape, on the same labels.
+
+        Raises:
+            Error: Tagged `dtype`, if an argument is the wrong type or the
+                operation is not defined on a column it reached.
+        """
+        var right = constant(other, "other")
+        var which = binary_op(words(op, "op"))
+        var flipped = flag(flip, "flip")
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        Self._frame(py_self)[]
+                        .frame[]
+                        .binary(right, which, flipped)
+                    )
+                )
+            )
+        except cause:
+            raise retagged(DTYPE, cause)
+
+    @staticmethod
+    def compare_frame(
+        py_self: PythonObject, other: PythonObject, op: PythonObject
+    ) raises -> PythonObject:
+        """Compares two frames cell by cell, refusing to align them.
+
+        This is what the six comparison operators do between two frames, and the
+        refusal is pandas' rather than an implementation limit. The flexible
+        `eq` and its five relatives are the ones that align, and the error names
+        them.
+
+        Two failures and two classes, as in `PySeries.compare_series`, with the
+        difference that either axis can be the one that disagrees, so both are
+        compared again on the failure path.
+
+        Args:
+            py_self: The left operand.
+            other: The right operand, which has to be a frame.
+            op: The comparison, such as `eq` or `lt`.
+
+        Returns:
+            A new frame of booleans.
+
+        Raises:
+            Error: Tagged `value` if the two are not labelled identically on both
+                axes, and `dtype` if the comparison is not defined on a pair of
+                columns it reached.
+        """
+        var right = Self._other(other, "other")
+        var which = binary_op(words(op, "op"))
+        var held = Self._frame(py_self)
+        try:
+            return PythonObject(
+                alloc=Self(ArcPointer(held[].frame[].compare(right[], which)))
+            )
+        except cause:
+            var mine = held[].frame
+            if (
+                not mine[].index.equals(right[].index)
+                or mine[].names() != right[].names()
+            ):
+                raise retagged(VALUE, cause)
+            raise retagged(DTYPE, cause)
+
+    @staticmethod
+    def unary(py_self: PythonObject, op: PythonObject) raises -> PythonObject:
+        """Applies one of the four unary operations to every column.
+
+        Args:
+            py_self: The frame.
+            op: The operation, one of `neg`, `pos`, `abs` or `invert`.
+
+        Returns:
+            A new frame of the same shape, on the same labels.
+
+        Raises:
+            Error: Tagged `dtype`, if the operation is not defined on a column's
+                dtype.
+        """
+        var which = unary_op(words(op, "op"))
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(Self._frame(py_self)[].frame[].unary(which))
+                )
+            )
+        except cause:
+            raise retagged(DTYPE, cause)
 
     @staticmethod
     def _borrowed(
