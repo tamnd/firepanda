@@ -317,6 +317,54 @@ struct StringArray(Copyable, Movable, Sized):
             ),
         )
 
+    def views_equal(self, mine: StringView, other: StringView) -> Bool:
+        """Compares two views of elements of this column against each other.
+
+        `element_equals_view` reads one of the two views out of the column and
+        takes the other from the caller. A caller that has both of them does not
+        need the read, and on a partitioned build that read is the expensive one.
+        Its rows are scattered over the whole column, so a view load is a cache
+        miss per row of a buffer sixteen bytes a row wide, and skipping the
+        comparison entirely on a ten million row column with a hundred thousand
+        text groups took the factorize from 33 ms to 20 ms. That is what this
+        exists to get back without giving up the comparison.
+
+        Neither view is checked for validity, because a view does not carry it.
+        The caller has to have excluded the nulls itself, which a partitioned
+        build does by never putting one in a partition.
+
+        Both views have to have come from this same column, for the reason
+        `element_equals_view` gives: a long one carries a payload offset, and an
+        offset into another column's payload is not wrong in a way that can be
+        detected here.
+
+        Args:
+            mine: A view of an element of this column.
+            other: A view of another element of this column.
+
+        Returns:
+            True if the two are byte-identical.
+        """
+        if len(mine) != len(other) or mine.prefix() != other.prefix():
+            return False
+        if mine.is_inline():
+            return views_equal_short(mine, other)
+        var payload = self.payload.unsafe_ptr()
+        return _bytes_equal(
+            Span[UInt8, origin_of(self)](
+                unsafe_ptr=payload.unsafe_offset(
+                    mine.offset()
+                ).unsafe_origin_cast[origin_of(self)](),
+                length=len(mine),
+            ),
+            Span[UInt8, origin_of(self)](
+                unsafe_ptr=payload.unsafe_offset(
+                    other.offset()
+                ).unsafe_origin_cast[origin_of(self)](),
+                length=len(other),
+            ),
+        )
+
     def sort_prefix(self, i: Int) -> UInt64:
         """Returns the first eight bytes of an element as a comparable integer.
 
