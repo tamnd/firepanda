@@ -2841,6 +2841,14 @@ def bench_group(mut harness: Harness) raises:
     costs shows up here and not on the narrow row, where a hundred groups sit in
     L1 whatever the probe does.
 
+    `group/frame_correlation` is the last shape of the three. A pair reduction
+    reads two columns rather than one and reads them twice rather than once,
+    because the deviations it sums are taken around means it does not have until
+    a first pass has finished. Against `group/frame_one_key`, which is one column
+    and one pass over the same rows and the same key, it says what the second
+    column and the second pass cost. That is the whole of db-benchmark q9 and the
+    one query in that suite still slower than DuckDB.
+
     Args:
         harness: The harness.
 
@@ -3312,6 +3320,23 @@ def bench_group(mut harness: Harness) raises:
         keep(out.rows)
 
     harness.record("group/frame_three_means", "rows", rows, frame_three_means)
+
+    # db-benchmark q9 is a correlation of two columns per group, and it is the
+    # one query in that suite we are still behind DuckDB on. A pair reduction is
+    # also the one shape the fused pass cannot take, and on top of that it reads
+    # its two columns twice rather than once, because the deviations it sums are
+    # taken around means it does not have until the first pass has finished. So
+    # the query has no row of its own here and its cost has only ever been
+    # visible inside a whole benchmark suite run, which is not a place anything
+    # gets optimized from. This is that row.
+    def frame_correlation() raises {imm df}:
+        keep(df.rows)
+        var out = df.group_by(
+            ["key"], [AggSpec("value", "other", AggKind.CORR)]
+        )
+        keep(out.rows)
+
+    harness.record("group/frame_correlation", "rows", rows, frame_correlation)
 
     # The two rows below are the same query asked of the same rows through the
     # same driver, and the only thing that differs is which operator does the
