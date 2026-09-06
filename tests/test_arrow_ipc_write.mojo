@@ -41,6 +41,7 @@ from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
+from firepanda.dtype.temporal import TimeUnit, TimeZone
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.series import Series
 from firepanda.io.arrow_ipc import (
@@ -166,6 +167,64 @@ def _buffer_length(data: Span[UInt8, _], start: Int, index: Int) raises -> Int:
     var buffers = field_vector(data, batch.header, 2)
     var at = vector_element(data, buffers, index, BUFFER_SIZE)
     return Int(read_scalar[DType.int64](data, at + 8))
+
+
+def _temporal() raises -> DataFrame:
+    """Builds a frame of the three temporal types the writer can spell.
+
+    Returns:
+        Three rows of a second resolution timestamp, a microsecond one in New
+        York, and a date, with a null in the middle of each.
+    """
+    var seconds = Array[DType.int64](3)
+    var micros = Array[DType.int64](3)
+    var days = Array[DType.int32](3)
+    seconds.set_valid(0, Int64(1710034245))
+    seconds.set_null(1)
+    seconds.set_valid(2, Int64(-1))
+    micros.set_valid(0, Int64(1710034245000000))
+    micros.set_null(1)
+    micros.set_valid(2, Int64(-1000000))
+    days.set_valid(0, Int32(19792))
+    days.set_null(1)
+    days.set_valid(2, Int32(-1))
+
+    var second = AnyArray(seconds^)
+    second.type = LogicalType.timestamp(TimeUnit.SECOND)
+    var zoned = AnyArray(micros^)
+    zoned.type = LogicalType.timestamp(
+        TimeUnit.MICRO, TimeZone("America/New_York")
+    )
+    var date = AnyArray(days^)
+    date.type = LogicalType.DATE32
+
+    var columns = List[Series]()
+    columns.append(Series("second", second^))
+    columns.append(Series("zoned", zoned^))
+    columns.append(Series("day", date^))
+    return DataFrame.from_series(columns^)
+
+
+def test_a_temporal_frame_round_trips_with_its_units_and_its_zone() raises:
+    # The unit and the zone are the whole content of a timestamp type and
+    # neither is in the buffer, so a writer that dropped either would produce a
+    # file that reads back with the right integers and the wrong meaning. That
+    # is why this asserts the types before it asserts the values.
+    var bytes = write_ipc_stream_bytes(_temporal())
+    var frame = read_ipc_stream(Span(bytes))
+    assert_equal(frame.width(), 3)
+    assert_equal(len(frame), 3)
+    assert_equal(String(frame.schema[0].dtype), "datetime64[s]")
+    assert_equal(
+        String(frame.schema[1].dtype), "datetime64[us, America/New_York]"
+    )
+    assert_equal(String(frame.schema[2].dtype), "date32[day]")
+    assert_equal(frame[0].as_typed[DType.int64]()[0], Int64(1710034245))
+    assert_equal(frame[1].as_typed[DType.int64]()[2], Int64(-1000000))
+    assert_equal(frame[2].as_typed[DType.int32]()[0], Int32(19792))
+    assert_false(frame[0].is_valid(1))
+    assert_false(frame[1].is_valid(1))
+    assert_false(frame[2].is_valid(1))
 
 
 def test_a_stream_round_trips() raises:

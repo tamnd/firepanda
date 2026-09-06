@@ -8,6 +8,24 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A timestamp column and a date column can be read, written and named
+
+An Arrow file with a timestamp column in it could not be opened. The reader stopped at the first column it did not recognise and raised, so a frame with six good columns and one timestamp was a frame you could not have at all. Arrow type 10 is a timestamp and Arrow type 8 is a date, and both are now types firepanda has.
+
+The type carries its unit. Arrow stores a timestamp as an int64 counting seconds, milliseconds, microseconds or nanoseconds since the epoch, and which of the four it is lives on the type rather than in the values. pandas 3 does the same thing, which is why `datetime64[s]` and `datetime64[ns]` are two different dtypes there and not two spellings of one. The reader passes the unit through instead of normalising everything to nanoseconds. Normalising is the obvious implementation and it is wrong twice over: it multiplies every value in a second column by a billion, and it would report `datetime64[ns]` for a column pandas reports as `datetime64[s]`.
+
+The type also carries an optional time zone, and a naive column does not quietly acquire UTC. `LogicalType` is copied wherever a column type is mentioned, so the zone is stored as thirty two bytes and a length rather than as a `String`, which keeps a type copy free of an allocation. Thirty two is not a guess, it is the length of `America/Argentina/ComodRivadavia`, the longest name in the IANA database. A longer name is refused at the boundary rather than truncated, because a truncated zone name is a different zone and would be a wrong answer rather than an error.
+
+Two columns of the same kind whose units differ are not equal, and a naive column is not equal to a zoned one. `promote` refuses every mixture involving a temporal with its own sentence rather than falling through to the integer rules, which is what would otherwise have happened, since the physical type underneath is an int64 and the integer path would have accepted it. Adding a point in time to a number is not something pandas does either.
+
+A date is a count of days and firepanda spells it `date32[day]`, which is Arrow's name. pandas has no date dtype and reports `object` for such a column, so there is no pandas spelling to copy. Arrow's other date type, date64, counts milliseconds, and reading one as the other would divide every value by 86400000 without being asked, so it is refused by name and the message says which type it found.
+
+The C data interface handles the same types, which means `format_for` now returns a `String` rather than the `StaticString` it used to, since every other Arrow format string is a constant and a zoned timestamp's is not. The writer was checked against pyarrow rather than only against firepanda's own reader: a file firepanda wrote comes back as `timestamp[s]`, `timestamp[us, tz=America/New_York]` and `date32[day]`, and `to_pandas` on it gives `datetime64[s]`, `datetime64[us, America/New_York]` and `object`.
+
+Nothing operates on these columns yet. They read, they write, they round trip and they report a dtype, and a `dt` accessor is a separate piece of work.
+
+One toolchain bug was found on the way and is worth recording, because the shape of it is nothing like its cause. The zone was first stored as a single `SIMD[DType.uint8, 32]`. That type is aligned to thirty two bytes, the alignment travels up through `LogicalType` into `AnyArray`, and an `AnyArray` passed by value then arrives in the callee with the wrong bytes in it. Eight of the fifty four test files failed, none of them a temporal one: `Index.__init__` read a length of zero from a column of five rows, an `Optional[StringArray]` that was empty read as though it were full so an int64 column took the string branch of every dispatch, and the compiler segfaulted twice. Storing the same thirty two bytes as two halves of sixteen fixes all of it, and the file says so where the halves are declared so that nobody joins them back together.
+
 ## [0.6.49] - 2026-09-06
 
 Built against Mojo 1.0.0 (ed45d567).

@@ -46,6 +46,7 @@ from std.collections.span import Span
 from firepanda.array.any import AnyArray
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
+from firepanda.dtype.temporal import unit_for_code
 from firepanda.frame.frame import DataFrame
 
 from .arrow_c import ArrowArray, NullableVoidPtr, VoidPtr
@@ -56,6 +57,7 @@ from .flatbuf import (
     field_string,
     field_table,
     field_vector,
+    has_field,
     read_scalar,
     root_table,
     vector_element,
@@ -93,6 +95,8 @@ comptime TYPE_FLOATING_POINT = 3
 comptime TYPE_BINARY = 4
 comptime TYPE_UTF8 = 5
 comptime TYPE_BOOL = 6
+comptime TYPE_DATE = 8
+comptime TYPE_TIMESTAMP = 10
 comptime TYPE_LARGE_BINARY = 19
 comptime TYPE_LARGE_UTF8 = 20
 comptime TYPE_BINARY_VIEW = 23
@@ -308,6 +312,36 @@ def _format_for(
         raise Error(
             String("arrow ipc: column '", name, "' is a ", bits, " bit integer")
         )
+    if kind == TYPE_TIMESTAMP:
+        # Field 0 is the unit and field 1 is the zone name, absent when the
+        # column is naive. The unit is passed through rather than normalized to
+        # nanoseconds, which is the whole point: pandas 3 carries the resolution
+        # on the dtype, a file written at second resolution is a second column
+        # in pandas too, and a reader that multiplied on the way in would answer
+        # a different dtype for every temporal file anybody has.
+        var unit = unit_for_code(
+            Int(field_scalar[DType.int16](data, type, 0, 0))
+        )
+        var zone = String()
+        if has_field(data, type, 1):
+            zone = field_string(data, type, 1)
+        return String("ts", unit.code_letter(), ":", zone)
+    if kind == TYPE_DATE:
+        # The unit defaults to MILLISECOND when the field is absent, which is
+        # the flatbuffer default and not a choice this reader gets to make.
+        var date_unit = Int(field_scalar[DType.int16](data, type, 0, 1))
+        if date_unit != 0:
+            raise Error(
+                String(
+                    "arrow ipc: column '",
+                    name,
+                    (
+                        "' is a date64, and firepanda's date column counts days"
+                        " rather than milliseconds"
+                    ),
+                )
+            )
+        return "tdD"
     if kind == TYPE_FLOATING_POINT:
         var precision = Int(field_scalar[DType.int16](data, type, 0, 0))
         if precision == 0:

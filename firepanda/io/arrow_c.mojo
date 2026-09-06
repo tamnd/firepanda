@@ -49,7 +49,8 @@ Reference: https://arrow.apache.org/docs/format/CDataInterface.html
 
 from std.ffi import c_char
 
-from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.logical import LogicalType, TypeKind
+from firepanda.dtype.temporal import TimeUnit, TimeZone
 
 
 comptime CString = Pointer[c_char, MutUntrackedOrigin]
@@ -476,13 +477,18 @@ def release_array(mut array: ArrowArray):
     f(Pointer(to=array).unsafe_origin_cast[MutUntrackedOrigin]())
 
 
-def format_for(type: LogicalType) raises -> StaticString:
+def format_for(type: LogicalType) raises -> String:
     """Returns the Arrow format string for a firepanda type.
 
     The two string cases are the view formats rather than the offset ones,
     because firepanda's string columns are the variable size binary view layout
     and a producer that claimed `u` here would be handing out a buffer shaped
     nothing like what a consumer reading `u` expects.
+
+    A timestamp is the reason this returns a `String` rather than the
+    `StaticString` it used to. Every other format string in Arrow is a constant,
+    and a zoned timestamp's is not: it is `tsu:` with the zone name after it, so
+    there are as many of them as there are zones and the answer has to be built.
 
     Args:
         type: The column type.
@@ -495,6 +501,10 @@ def format_for(type: LogicalType) raises -> StaticString:
         Error: If the type has no format string, which today means only that it
             is a type this function has not been taught.
     """
+    if type.kind == TypeKind.TIMESTAMP:
+        return String("ts", type.unit.code_letter(), ":", type.zone)
+    if type.kind == TypeKind.DATE:
+        return String("tdD")
     if type == LogicalType.NULL:
         return "n"
     if type == LogicalType.BOOL:
@@ -547,6 +557,16 @@ def type_for_format(format: StringSlice) raises -> LogicalType:
     Raises:
         Error: If the format is one firepanda cannot represent.
     """
+    if format.startswith("ts"):
+        return _timestamp_for_format(format)
+    if format == "tdD":
+        return LogicalType.DATE32
+    if format == "tdm":
+        raise Error(
+            "arrow: a date64 counts milliseconds and firepanda's date column"
+            " counts days, so reading one as the other would divide every value"
+            " by 86400000 without being asked"
+        )
     if format == "n":
         return LogicalType.NULL
     if format == "b":
@@ -578,6 +598,60 @@ def type_for_format(format: StringSlice) raises -> LogicalType:
     if format == "vz":
         return LogicalType.BINARY
     raise Error(String("arrow: unsupported format string '", format, "'"))
+
+
+def _timestamp_for_format(format: StringSlice) raises -> LogicalType:
+    """Reads a timestamp format string into a type.
+
+    The shape is `ts` then one letter for the unit then a colon, and everything
+    after the colon is the zone name. The colon is always there. A naive column
+    is `tsu:` with nothing following it rather than `tsu`, which is a detail
+    worth checking rather than assuming, because a producer that drops the colon
+    is producing something Arrow does not define and reading it as naive would
+    be inventing an answer.
+
+    Args:
+        format: The format string, already known to start with `ts`.
+
+    Returns:
+        The timestamp type.
+
+    Raises:
+        Error: If the unit letter or the colon is not where Arrow puts it.
+    """
+    var raw = format.as_bytes()
+    if len(raw) < 4 or raw[3] != UInt8(ord(":")):
+        raise Error(
+            String(
+                "arrow: '",
+                format,
+                (
+                    "' is not a timestamp format string, which is 'ts', a unit"
+                    " letter and a colon, with the zone name after the colon"
+                ),
+            )
+        )
+    var letter = raw[2]
+    var unit = TimeUnit.SECOND
+    if letter == UInt8(ord("m")):
+        unit = TimeUnit.MILLI
+    elif letter == UInt8(ord("u")):
+        unit = TimeUnit.MICRO
+    elif letter == UInt8(ord("n")):
+        unit = TimeUnit.NANO
+    elif letter != UInt8(ord("s")):
+        raise Error(
+            String(
+                "arrow: '",
+                format,
+                "' has a unit letter that is none of s, m, u and n",
+            )
+        )
+    if len(raw) == 4:
+        return LogicalType.timestamp(unit)
+    return LogicalType.timestamp(
+        unit, TimeZone(StringSlice(unsafe_from_utf8=raw[4 : len(raw)]))
+    )
 
 
 def buffer_count(type: LogicalType) raises -> Int:

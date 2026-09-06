@@ -51,7 +51,7 @@ from std.memory import unsafe_memcpy
 from firepanda.array.strview import VIEW_SIZE
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer, round_up
-from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.logical import LogicalType, TypeKind
 from firepanda.dtype.lists import dtype_size
 from firepanda.frame.frame import DataFrame
 
@@ -66,8 +66,10 @@ from .arrow_ipc import (
     NODE_SIZE,
     TYPE_BINARY_VIEW,
     TYPE_BOOL,
+    TYPE_DATE,
     TYPE_FLOATING_POINT,
     TYPE_INT,
+    TYPE_TIMESTAMP,
     TYPE_UTF8_VIEW,
 )
 from .flatbuf import Builder
@@ -297,6 +299,10 @@ def _type_code(type: LogicalType) raises -> Int:
     Raises:
         Error: If the type has no Arrow spelling here yet.
     """
+    if type.kind == TypeKind.TIMESTAMP:
+        return TYPE_TIMESTAMP
+    if type.kind == TypeKind.DATE:
+        return TYPE_DATE
     if type == LogicalType.BOOL:
         return TYPE_BOOL
     if type == LogicalType.STRING:
@@ -337,6 +343,28 @@ def _type_table(mut b: Builder, type: LogicalType) raises -> Int:
         Error: If the type has no Arrow spelling here yet.
     """
     var code = _type_code(type)
+    if code == TYPE_TIMESTAMP:
+        # The zone string has to be created before the table is started, because
+        # a FlatBuffer builder fills the buffer from the end and a table cannot
+        # be open while anything else is written. A naive column leaves the
+        # field out rather than writing an empty string, which is what every
+        # other writer does and is also the honest encoding: no zone is not the
+        # same statement as a zone with no name in it.
+        var zone = 0
+        if not type.zone.is_naive():
+            zone = b.create_string(String(type.zone))
+        b.start_table(2)
+        b.add_scalar[DType.int16](0, Int16(Int(type.unit.code)), 0)
+        if zone != 0:
+            b.add_offset(1, zone)
+        return b.end_table()
+    if code == TYPE_DATE:
+        # DAY is zero and the flatbuffer default is MILLISECOND, so the default
+        # this is written against is one and the value is written rather than
+        # elided.
+        b.start_table(1)
+        b.add_scalar[DType.int16](0, 0, 1)
+        return b.end_table()
     if code == TYPE_INT:
         var signed = (
             type == LogicalType.INT8

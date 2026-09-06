@@ -10,6 +10,7 @@ See docs/specs/03-dtype-dispatch.md.
 """
 
 from .lists import ALL, FLOAT, INTEGER, SIGNED, UNSIGNED, contains, dtype_size
+from .temporal import TimeUnit, TimeZone
 
 
 @fieldwise_init
@@ -35,6 +36,15 @@ struct TypeKind(Equatable, ImplicitlyCopyable, Movable, Writable):
 
     comptime BINARY = Self(5)
     """Opaque bytes. Same physical layout as STRING, no encoding promise."""
+
+    comptime TIMESTAMP = Self(6)
+    """An instant, counted from the Unix epoch in the type's own unit. Stored
+    int64, which is the one place in this file where the physical layout says
+    nothing at all about the meaning: a count of microseconds since 1970 and a
+    count of apples are the same eight bytes."""
+
+    comptime DATE = Self(7)
+    """A calendar day, counted from the Unix epoch. Stored int32."""
 
     def __eq__(self, other: Self) -> Bool:
         """Compares two kinds.
@@ -74,8 +84,12 @@ struct TypeKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("float")
         elif self == Self.STRING:
             writer.write("string")
-        else:
+        elif self == Self.BINARY:
             writer.write("binary")
+        elif self == Self.TIMESTAMP:
+            writer.write("timestamp")
+        else:
+            writer.write("date")
 
 
 @fieldwise_init
@@ -87,6 +101,31 @@ struct LogicalType(Equatable, ImplicitlyCopyable, Movable, Writable):
 
     var physical: DType
     """How the values are laid out in memory."""
+
+    var unit: TimeUnit
+    """How many of the values make one second. Read only for a temporal type,
+    where it is part of the type in the sense that a microsecond column and a
+    nanosecond column are not the same type and never compare equal."""
+
+    var zone: TimeZone
+    """The wall clock a timestamp is read against, naive for everything else."""
+
+    def __init__(out self, kind: TypeKind, physical: DType):
+        """Constructs a type with no temporal meaning attached.
+
+        This is the two argument form every type but a timestamp and a date is
+        built with, and it exists so that the fifteen constants below and the
+        several hundred call sites that predate the temporal types read the way
+        they always did.
+
+        Args:
+            kind: What the values mean.
+            physical: How the values are laid out.
+        """
+        self.kind = kind
+        self.physical = physical
+        self.unit = TimeUnit.SECOND
+        self.zone = TimeZone()
 
     comptime NULL = Self(TypeKind.NULL, DType.bool)
     comptime BOOL = Self(TypeKind.BOOL, DType.bool)
@@ -103,17 +142,44 @@ struct LogicalType(Equatable, ImplicitlyCopyable, Movable, Writable):
     comptime FLOAT64 = Self(TypeKind.FLOAT_KIND, DType.float64)
     comptime STRING = Self(TypeKind.STRING, DType.uint8)
     comptime BINARY = Self(TypeKind.BINARY, DType.uint8)
+    comptime DATE32 = Self(TypeKind.DATE, DType.int32)
+
+    @staticmethod
+    def timestamp(unit: TimeUnit, zone: TimeZone = TimeZone()) -> Self:
+        """Constructs a timestamp type.
+
+        Args:
+            unit: How many of the column's integers make one second.
+            zone: The wall clock the instants are read against. Left out, the
+                column is naive, which is not the same promise as UTC.
+
+        Returns:
+            The type.
+        """
+        return Self(TypeKind.TIMESTAMP, DType.int64, unit, zone)
 
     def __eq__(self, other: Self) -> Bool:
         """Compares two logical types.
+
+        The unit and the zone are part of the comparison because they are part
+        of the type. A microsecond column and a nanosecond column hold different
+        instants for the same integer, and a New York column and a naive one are
+        different questions with the same answer only by accident, so neither
+        pair is allowed to compare equal and slip through a kernel that checks
+        whether two operands match.
 
         Args:
             other: The type to compare against.
 
         Returns:
-            True if both kind and physical layout match.
+            True if the kind, the physical layout, the unit and the zone match.
         """
-        return self.kind == other.kind and self.physical == other.physical
+        return (
+            self.kind == other.kind
+            and self.physical == other.physical
+            and self.unit == other.unit
+            and self.zone == other.zone
+        )
 
     def __ne__(self, other: Self) -> Bool:
         """Compares two logical types for inequality.
@@ -158,6 +224,14 @@ struct LogicalType(Equatable, ImplicitlyCopyable, Movable, Writable):
         """
         return self.kind == TypeKind.INT and contains[SIGNED](self.physical)
 
+    def is_temporal(self) -> Bool:
+        """Reports whether this type means a point in time.
+
+        Returns:
+            True for timestamps and dates.
+        """
+        return self.kind == TypeKind.TIMESTAMP or self.kind == TypeKind.DATE
+
     def is_variable_width(self) -> Bool:
         """Reports whether values are stored out of line behind an offsets array.
 
@@ -179,6 +253,13 @@ struct LogicalType(Equatable, ImplicitlyCopyable, Movable, Writable):
     def write_to(self, mut writer: Some[Writer]):
         """Writes the type in the form users see it.
 
+        The two temporal spellings are pandas' rather than Arrow's, because this
+        string is what `dtype` hands back and a user comparing it against
+        `datetime64[ns]` is comparing against pandas. The date is the exception
+        and is spelled the way Arrow spells it, since pandas on the numpy
+        backend has no date dtype at all and calls the column `object`, which is
+        a thing firepanda would be lying to say.
+
         Args:
             writer: The destination.
         """
@@ -188,6 +269,13 @@ struct LogicalType(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("string")
         elif self.kind == TypeKind.BINARY:
             writer.write("binary")
+        elif self.kind == TypeKind.TIMESTAMP:
+            writer.write("datetime64[", self.unit)
+            if not self.zone.is_naive():
+                writer.write(", ", self.zone)
+            writer.write("]")
+        elif self.kind == TypeKind.DATE:
+            writer.write("date32[day]")
         else:
             writer.write(self.physical)
 
@@ -242,6 +330,33 @@ def promote(a: LogicalType, b: LogicalType) raises -> LogicalType:
         return b
     if b.kind == TypeKind.NULL:
         return a
+
+    if a.is_temporal() or b.is_temporal():
+        # Two identical temporal types were returned above, so anything arriving
+        # here is either a timestamp against a number, which has no answer, or
+        # two timestamps that disagree about the unit or the zone, which has one
+        # and firepanda cannot spell it yet: the difference of two instants is a
+        # duration and there is no duration type. Both refuse, and the message
+        # says which of the two it was, because a user who wrote `a - b` on two
+        # microsecond columns in different zones has a different problem from
+        # one who wrote `a - 1`.
+        if a.is_temporal() and b.is_temporal():
+            raise Error(
+                "no common type for "
+                + String(a)
+                + " and "
+                + String(b)
+                + ", because the two differ in unit or in time zone and"
+                " reconciling them is a conversion rather than a promotion"
+            )
+        raise Error(
+            "no common type for "
+            + String(a)
+            + " and "
+            + String(b)
+            + ", because a point in time and a number are not the same kind of"
+            " thing and pandas will not add them either"
+        )
 
     if a.is_variable_width() or b.is_variable_width():
         if a.kind == b.kind:
