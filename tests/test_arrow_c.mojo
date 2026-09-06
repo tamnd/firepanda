@@ -31,6 +31,7 @@ from std.testing import (
 )
 
 from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.temporal import TimeUnit, TimeZone
 from firepanda.io.arrow_c import (
     ARROW_FLAG_DICTIONARY_ORDERED,
     ARROW_FLAG_MAP_KEYS_SORTED,
@@ -244,9 +245,43 @@ def test_every_format_string_round_trips() raises:
         LogicalType.FLOAT64,
         LogicalType.STRING,
         LogicalType.BINARY,
+        LogicalType.timestamp(TimeUnit.SECOND),
+        LogicalType.timestamp(TimeUnit.MILLI),
+        LogicalType.timestamp(TimeUnit.MICRO),
+        LogicalType.timestamp(TimeUnit.NANO),
+        LogicalType.timestamp(TimeUnit.MICRO, TimeZone("America/New_York")),
+        LogicalType.timestamp(TimeUnit.NANO, TimeZone("UTC")),
+        LogicalType.DATE32,
     ]
     for type in types:
         assert_equal(type_for_format(format_for(type)), type)
+
+
+def test_temporal_format_strings() raises:
+    # The colon is part of the format string whether or not a zone follows it,
+    # so a naive microsecond column is `tsu:` and not `tsu`.
+    assert_equal(format_for(LogicalType.timestamp(TimeUnit.SECOND)), "tss:")
+    assert_equal(format_for(LogicalType.timestamp(TimeUnit.MILLI)), "tsm:")
+    assert_equal(format_for(LogicalType.timestamp(TimeUnit.MICRO)), "tsu:")
+    assert_equal(format_for(LogicalType.timestamp(TimeUnit.NANO)), "tsn:")
+    assert_equal(
+        format_for(
+            LogicalType.timestamp(TimeUnit.MICRO, TimeZone("America/New_York"))
+        ),
+        "tsu:America/New_York",
+    )
+    assert_equal(format_for(LogicalType.DATE32), "tdD")
+
+
+def test_a_malformed_temporal_format_string_is_refused() raises:
+    # Reading `tsu` as naive would be inventing an answer for a producer that
+    # wrote something Arrow does not define.
+    with assert_raises(contains="not a timestamp format string"):
+        _ = type_for_format("tsu")
+    with assert_raises(contains="unit letter that is none of"):
+        _ = type_for_format("tsx:")
+    with assert_raises(contains="counts milliseconds"):
+        _ = type_for_format("tdm")
 
 
 def test_case_matters() raises:
@@ -268,8 +303,11 @@ def test_offset_string_formats_are_refused() raises:
 def test_unknown_formats_are_refused() raises:
     with assert_raises(contains="unsupported format string"):
         _ = type_for_format("+s")
+    # `tsm:` used to be here, as the example of a temporal type nothing could
+    # read. It reads now, so the example is a duration instead, which is the
+    # next temporal type and not this one.
     with assert_raises(contains="unsupported format string"):
-        _ = type_for_format("tsm:")
+        _ = type_for_format("tDu")
     with assert_raises(contains="unsupported format string"):
         _ = type_for_format("")
 

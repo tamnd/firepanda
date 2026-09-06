@@ -28,6 +28,7 @@ from firepanda.dtype.lists import (
     dtype_size,
 )
 from firepanda.dtype.logical import LogicalType, TypeKind, logical_for, promote
+from firepanda.dtype.temporal import TimeUnit, TimeZone, unit_for_code
 
 
 def test_list_membership() raises:
@@ -209,6 +210,122 @@ def test_types_print() raises:
     assert_equal(String(LogicalType.INT64), "int64")
     assert_equal(String(LogicalType.STRING), "string")
     assert_equal(String(LogicalType.NULL), "null")
+
+
+def test_a_timestamp_prints_the_way_pandas_spells_its_dtype() raises:
+    # This string is what `dtype` hands a user, and a user comparing it is
+    # comparing it against pandas, so the spelling is pandas' and not Arrow's.
+    assert_equal(
+        String(LogicalType.timestamp(TimeUnit.SECOND)), "datetime64[s]"
+    )
+    assert_equal(
+        String(LogicalType.timestamp(TimeUnit.MILLI)), "datetime64[ms]"
+    )
+    assert_equal(
+        String(LogicalType.timestamp(TimeUnit.MICRO)), "datetime64[us]"
+    )
+    assert_equal(String(LogicalType.timestamp(TimeUnit.NANO)), "datetime64[ns]")
+    assert_equal(
+        String(
+            LogicalType.timestamp(
+                TimeUnit.MICRO, TimeZone("Australia/Lord_Howe")
+            )
+        ),
+        "datetime64[us, Australia/Lord_Howe]",
+    )
+    assert_equal(String(LogicalType.DATE32), "date32[day]")
+
+
+def test_two_timestamps_differing_only_in_unit_are_not_the_same_type() raises:
+    # The buffers are identical and the meanings are a thousand apart, so this
+    # is the comparison that stops a microsecond column being handed to a kernel
+    # that was told it had nanoseconds.
+    var micro = LogicalType.timestamp(TimeUnit.MICRO)
+    var nano = LogicalType.timestamp(TimeUnit.NANO)
+    assert_true(micro != nano)
+    assert_true(micro == LogicalType.timestamp(TimeUnit.MICRO))
+
+
+def test_a_naive_timestamp_is_not_a_zoned_one() raises:
+    # A naive column has no answer to which wall clock it is on, which is a
+    # different statement from UTC and has to compare unequal to every zone.
+    var naive = LogicalType.timestamp(TimeUnit.MICRO)
+    var utc = LogicalType.timestamp(TimeUnit.MICRO, TimeZone("UTC"))
+    var york = LogicalType.timestamp(
+        TimeUnit.MICRO, TimeZone("America/New_York")
+    )
+    assert_true(naive != utc)
+    assert_true(utc != york)
+    assert_true(naive.zone.is_naive())
+    assert_false(utc.zone.is_naive())
+
+
+def test_the_longest_zone_name_there_is_fits_and_a_longer_one_does_not() raises:
+    # Thirty two characters, which is the longest name in the IANA database, so
+    # the capacity is a fact about the world rather than a guess about it.
+    var longest = "America/Argentina/ComodRivadavia"
+    assert_equal(String(TimeZone(longest)), longest)
+    with assert_raises(contains="no zone name is longer"):
+        _ = TimeZone("America/Argentina/ComodRivadavia_and_then_some_more")
+
+
+def test_a_temporal_type_promotes_with_nothing_but_itself() raises:
+    var micro = LogicalType.timestamp(TimeUnit.MICRO)
+    assert_true(promote(micro, micro) == micro)
+    with assert_raises(contains="not the same kind of thing"):
+        _ = promote(micro, LogicalType.INT64)
+    with assert_raises(contains="differ in unit or in time zone"):
+        _ = promote(micro, LogicalType.timestamp(TimeUnit.NANO))
+    with assert_raises(contains="differ in unit or in time zone"):
+        _ = promote(micro, LogicalType.DATE32)
+
+
+def test_a_temporal_type_promotes_with_null_the_way_everything_does() raises:
+    # The null type is the one exception, because a column of nothing but nulls
+    # has no meaning to disagree with.
+    var micro = LogicalType.timestamp(TimeUnit.MICRO)
+    assert_true(promote(micro, LogicalType.NULL) == micro)
+    assert_true(promote(LogicalType.NULL, micro) == micro)
+
+
+def test_a_temporal_type_is_not_numeric_even_though_it_holds_integers() raises:
+    var micro = LogicalType.timestamp(TimeUnit.MICRO)
+    assert_true(micro.is_temporal())
+    assert_true(LogicalType.DATE32.is_temporal())
+    assert_false(micro.is_numeric())
+    assert_false(micro.is_integer())
+    assert_false(LogicalType.INT64.is_temporal())
+    assert_equal(micro.bit_width(), 64)
+    assert_equal(LogicalType.DATE32.bit_width(), 32)
+
+
+def test_a_bare_int64_array_is_never_a_timestamp() raises:
+    # `logical_for` is what an array built from raw values gets, and eight bytes
+    # of integer is a number until somebody says otherwise.
+    assert_true(logical_for(DType.int64) == LogicalType.INT64)
+    assert_true(logical_for(DType.int32) == LogicalType.INT32)
+
+
+def test_a_time_unit_knows_how_many_of_it_make_a_second() raises:
+    assert_equal(TimeUnit.SECOND.per_second(), Int64(1))
+    assert_equal(TimeUnit.MILLI.per_second(), Int64(1_000))
+    assert_equal(TimeUnit.MICRO.per_second(), Int64(1_000_000))
+    assert_equal(TimeUnit.NANO.per_second(), Int64(1_000_000_000))
+
+
+def test_a_time_unit_is_spelled_one_way_in_a_dtype_and_another_in_a_format() raises:
+    # `ms` and `m` are the same unit, and using either spelling where the other
+    # belongs produces a format string nothing can read.
+    assert_equal(String(TimeUnit.MILLI), "ms")
+    assert_equal(TimeUnit.MILLI.code_letter(), "m")
+    assert_equal(String(TimeUnit.SECOND), "s")
+    assert_equal(TimeUnit.SECOND.code_letter(), "s")
+
+
+def test_an_unknown_time_unit_code_is_refused() raises:
+    assert_true(unit_for_code(3) == TimeUnit.NANO)
+    with assert_raises(contains="is not one of the four"):
+        _ = unit_for_code(4)
 
 
 def main() raises:

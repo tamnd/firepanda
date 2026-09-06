@@ -29,6 +29,7 @@ from std.testing import (
 from firepanda.array.array import Array
 from firepanda.array.strings import StringBuilder
 from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.temporal import TimeUnit, TimeZone
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.series import Series
 from firepanda.io.arrow_ipc import (
@@ -282,6 +283,87 @@ def test_a_file_on_disk_reads_through_the_mapping() raises:
     assert_equal(frame.width(), 3)
     assert_equal(len(frame), 3)
     assert_equal(frame[0].as_typed[DType.float64]()[2], Float64(3.25))
+
+
+def test_a_timestamp_column_reads_at_the_unit_the_file_says() raises:
+    # The same instant written four times at four resolutions, which is the one
+    # fixture that catches a reader that normalizes to nanoseconds on the way
+    # in. Such a reader gets every value right and every dtype wrong, and pandas
+    # 3 puts the resolution in the dtype, so wrong dtype is wrong answer.
+    var frame = read_ipc_stream(Span(_timestamp_stream()))
+    assert_equal(frame.width(), 4)
+    assert_equal(len(frame), 3)
+    assert_true(frame.schema[0].dtype == LogicalType.timestamp(TimeUnit.SECOND))
+    assert_true(frame.schema[1].dtype == LogicalType.timestamp(TimeUnit.MILLI))
+    assert_true(frame.schema[2].dtype == LogicalType.timestamp(TimeUnit.MICRO))
+    assert_true(frame.schema[3].dtype == LogicalType.timestamp(TimeUnit.NANO))
+    assert_equal(String(frame.schema[0].dtype), "datetime64[s]")
+    assert_equal(String(frame.schema[3].dtype), "datetime64[ns]")
+
+
+def test_a_timestamp_column_holds_the_integers_arrow_wrote() raises:
+    # 2024-03-10 01:30:45 and one second before the epoch, so the negative row
+    # checks that nothing here treats the count as unsigned.
+    var frame = read_ipc_stream(Span(_timestamp_stream()))
+    assert_equal(frame[0].as_typed[DType.int64]()[0], Int64(1710034245))
+    assert_equal(frame[0].as_typed[DType.int64]()[2], Int64(-1))
+    assert_equal(
+        frame[3].as_typed[DType.int64]()[0], Int64(1710034245000000000)
+    )
+    assert_equal(frame[3].as_typed[DType.int64]()[2], Int64(-1000000000))
+    assert_false(frame[0].is_valid(1))
+    assert_equal(frame[0].null_count(), 1)
+
+
+def test_a_zoned_timestamp_keeps_the_zone_and_a_naive_one_does_not_get_utc() raises:
+    # Two columns holding the same integers, and they are not the same type. A
+    # naive column is not UTC, it is a column with no answer to the question,
+    # and the day this reader starts filling that in is the day a user in Sydney
+    # gets different numbers out of the same file.
+    var frame = read_ipc_stream(Span(_zoned_stream()))
+    assert_equal(frame.width(), 2)
+    assert_true(frame.schema[0].dtype == LogicalType.timestamp(TimeUnit.MICRO))
+    assert_true(
+        frame.schema[1].dtype
+        == LogicalType.timestamp(TimeUnit.MICRO, TimeZone("America/New_York"))
+    )
+    var naive = frame.schema[0].dtype
+    var zoned = frame.schema[1].dtype
+    assert_true(naive != zoned)
+    assert_equal(
+        String(frame.schema[1].dtype), "datetime64[us, America/New_York]"
+    )
+    assert_equal(
+        frame[0].as_typed[DType.int64]()[0],
+        frame[1].as_typed[DType.int64]()[0],
+    )
+
+
+def test_a_date_column_reads_as_a_count_of_days() raises:
+    # 19792 days after the epoch is 2024-03-10, and the negative row is the day
+    # before it.
+    var frame = read_ipc_stream(Span(_date_stream()))
+    assert_equal(frame.width(), 1)
+    assert_true(frame.schema[0].dtype == LogicalType.DATE32)
+    assert_equal(String(frame.schema[0].dtype), "date32[day]")
+    assert_equal(frame[0].as_typed[DType.int32]()[0], Int32(19792))
+    assert_equal(frame[0].as_typed[DType.int32]()[2], Int32(-1))
+    assert_false(frame[0].is_valid(1))
+
+
+def test_a_date64_column_is_refused_by_name() raises:
+    # A date64 counts milliseconds and firepanda's date counts days. The two are
+    # a division apart and the reader will not do it silently.
+    with assert_raises(contains="date64"):
+        _ = read_ipc_stream(Span(_date64_stream()))
+
+
+def test_a_duration_column_is_refused_by_name() raises:
+    # Arrow type 18. The message names the type rather than saying no, because
+    # this is where the next piece of work starts and a user reading it should
+    # be able to tell that from a bug.
+    with assert_raises(contains="Arrow type 18"):
+        _ = read_ipc_stream(Span(_duration_stream()))
 
 
 def test_a_list_column_is_refused_by_name() raises:
@@ -563,6 +645,103 @@ def _large_string_stream() raises -> List[UInt8]:
         "0000000000000000050000000000000005000000000000002500000000000000"
         "616c706861616e206576656e206c6f6e67657220737472696e672076616c7565"
         "2068657265000000ffffffff00000000"
+    )
+
+
+def _timestamp_stream() raises -> List[UInt8]:
+    """680 bytes from pyarrow 25. Four columns, one instant, four units."""
+    return _from_hex(
+        "fffffffff80000001000000000000a000c000600050008000a00000000010400"
+        "0c0000000800080000000400080000000400000004000000a00000005c000000"
+        "300000000400000080ffffff0000010a10000000140000000400000000000000"
+        "020000006e730000aeffffff00000300a8ffffff0000010a1000000014000000"
+        "04000000000000000200000075730000d6ffffff00000200d0ffffff0000010a"
+        "100000001c0000000400000000000000020000006d7300000000060008000600"
+        "0600000000000100100014000800060007000c0000001000100000000000010a"
+        "1000000018000000040000000000000001000000730000000400040004000000"
+        "ffffffff1801000014000000000000000c0016000600050008000c000c000000"
+        "0003040018000000800000000000000000000a0018000c00040008000a000000"
+        "9c00000010000000030000000000000000000000080000000000000000000000"
+        "0100000000000000080000000000000018000000000000002000000000000000"
+        "0100000000000000280000000000000018000000000000004000000000000000"
+        "0100000000000000480000000000000018000000000000006000000000000000"
+        "0100000000000000680000000000000018000000000000000000000004000000"
+        "0300000000000000010000000000000003000000000000000100000000000000"
+        "0300000000000000010000000000000003000000000000000100000000000000"
+        "0500000000000000450ded65000000000000000000000000ffffffffffffffff"
+        "050000000000000088d5fb258e010000000000000000000018fcffffffffffff"
+        "0500000000000000401bba5f441306000000000000000000c0bdf0ffffffffff"
+        "05000000000000000072faee1543bb170000000000000000003665c4ffffffff"
+        "ffffffff00000000"
+    )
+
+
+def _zoned_stream() raises -> List[UInt8]:
+    """472 bytes from pyarrow 25. The same integers naive and in New York."""
+    return _from_hex(
+        "ffffffffc80000001000000000000a000c000600050008000a00000000010400"
+        "0c00000008000800000004000800000004000000020000006800000004000000"
+        "b0ffffff0000010a10000000200000000400000000000000050000007a6f6e65"
+        "6400000008000c000600080008000000000002000400000010000000416d6572"
+        "6963612f4e65775f596f726b00000000100014000800060007000c0000001000"
+        "100000000000010a100000001c0000000400000000000000050000006e616976"
+        "65000600080006000600000000000200ffffffffb80000001400000000000000"
+        "0c0016000600050008000c000c00000000030400180000004000000000000000"
+        "00000a0018000c00040008000a0000005c000000100000000300000000000000"
+        "0000000004000000000000000000000001000000000000000800000000000000"
+        "1800000000000000200000000000000001000000000000002800000000000000"
+        "1800000000000000000000000200000003000000000000000100000000000000"
+        "030000000000000001000000000000000500000000000000401bba5f44130600"
+        "0000000000000000c0bdf0ffffffffff0500000000000000401bba5f44130600"
+        "0000000000000000c0bdf0ffffffffffffffffff00000000"
+    )
+
+
+def _date_stream() raises -> List[UInt8]:
+    """304 bytes from pyarrow 25. One date32 column with a null in it."""
+    return _from_hex(
+        "ffffffff780000001000000000000a000c000600050008000a00000000010400"
+        "0c00000008000800000004000800000004000000010000001400000010001400"
+        "0800060007000c00000010001000000000000108100000001c00000004000000"
+        "0000000003000000646179000000060008000600060000000000000000000000"
+        "ffffffff8800000014000000000000000c0016000600050008000c000c000000"
+        "0003040018000000180000000000000000000a0018000c00040008000a000000"
+        "3c00000010000000030000000000000000000000020000000000000000000000"
+        "010000000000000008000000000000000c000000000000000000000001000000"
+        "030000000000000001000000000000000500000000000000504d000000000000"
+        "ffffffff00000000ffffffff00000000"
+    )
+
+
+def _date64_stream() raises -> List[UInt8]:
+    """304 bytes from pyarrow 25. The same three days, counted in milliseconds.
+    """
+    return _from_hex(
+        "ffffffff700000001000000000000a000c000600050008000a00000000010400"
+        "0c00000008000800000004000800000004000000010000001400000010001400"
+        "0800060007000c00000010001000000000000108100000001800000004000000"
+        "000000000300000064617900040004000400000000000000ffffffff88000000"
+        "14000000000000000c0016000600050008000c000c0000000003040018000000"
+        "200000000000000000000a0018000c00040008000a0000003c00000010000000"
+        "0300000000000000000000000200000000000000000000000100000000000000"
+        "0800000000000000180000000000000000000000010000000300000000000000"
+        "0100000000000000050000000000000000c0a8258e0100000000000000000000"
+        "00a4d9faffffffffffffffff00000000"
+    )
+
+
+def _duration_stream() raises -> List[UInt8]:
+    """288 bytes from pyarrow 25. One microsecond, as a duration."""
+    return _from_hex(
+        "ffffffff780000001000000000000a000c000600050008000a00000000010400"
+        "0c00000008000800000004000800000004000000010000001400000010001400"
+        "0800060007000c00000010001000000000000112100000001c00000004000000"
+        "000000000500000076616c756500060008000600060000000000020000000000"
+        "ffffffff8800000014000000000000000c0016000600050008000c000c000000"
+        "0003040018000000080000000000000000000a0018000c00040008000a000000"
+        "3c00000010000000010000000000000000000000020000000000000000000000"
+        "0000000000000000000000000000000008000000000000000000000001000000"
+        "010000000000000000000000000000000100000000000000ffffffff00000000"
     )
 
 
