@@ -1915,6 +1915,1294 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             )
         return self._rebuilt(made^, Index(copy=self.index))
 
+    def add(
+        self,
+        other: Self,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Adds two frames, matching rows by label and columns by name.
+
+        Args:
+            other: The other frame.
+            axis: Ignored between two frames, which align on both of their axes
+                whatever it says. It is a parameter because pandas has one.
+            fill_value: What to put where exactly one of the two sides is
+                missing.
+
+        Returns:
+            The sums.
+
+        Raises:
+            Error: If the operands cannot be aligned or added.
+        """
+        return self.binary(other, BinaryOp.ADD, fill_value)
+
+    def add(
+        self,
+        other: Series,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Adds a series to a frame, broadcast along one axis.
+
+        Args:
+            other: The series.
+            axis: 1 to match its labels against the column names, 0 to match
+                them against the row labels.
+            fill_value: Not supported against a series, which is what pandas
+                says as well, with a `NotImplementedError`.
+
+        Returns:
+            The sums.
+
+        Raises:
+            Error: If a fill value is given, or the operands cannot be
+                aligned or added.
+        """
+        _no_fill(fill_value)
+        return self.binary(other, BinaryOp.ADD, axis)
+
+    def add(
+        self,
+        value: Value,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Adds a constant to every cell.
+
+        Args:
+            value: The constant.
+            axis: Ignored, since a constant reaches every cell either way.
+            fill_value: Ignored, which is what pandas does too, since a constant
+                is never the side that is missing.
+
+        Returns:
+            The sums.
+
+        Raises:
+            Error: If some column cannot be added.
+        """
+        return self.binary(value, BinaryOp.ADD)
+
+    def radd(
+        self,
+        other: Self,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Adds two frames the other way round.
+
+        Args:
+            other: The other frame.
+            axis: Ignored between two frames, which align on both of their axes
+                whatever it says. It is a parameter because pandas has one.
+            fill_value: What to put where exactly one of the two sides is
+                missing.
+
+        Returns:
+            The sums.
+
+        Raises:
+            Error: If the operands cannot be aligned or added.
+        """
+        return self.binary(other, BinaryOp.ADD, fill_value, flip=True)
+
+    def radd(
+        self,
+        other: Series,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Adds a frame to a series, broadcast along one axis.
+
+        Args:
+            other: The series.
+            axis: 1 to match its labels against the column names, 0 to match
+                them against the row labels.
+            fill_value: Not supported against a series, which is what pandas
+                says as well, with a `NotImplementedError`.
+
+        Returns:
+            The sums.
+
+        Raises:
+            Error: If a fill value is given, or the operands cannot be
+                aligned or added.
+        """
+        _no_fill(fill_value)
+        return self.binary(other, BinaryOp.ADD, axis, flip=True)
+
+    def radd(
+        self,
+        value: Value,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Adds every cell to a constant.
+
+        Args:
+            value: The constant.
+            axis: Ignored, since a constant reaches every cell either way.
+            fill_value: Ignored, which is what pandas does too, since a constant
+                is never the side that is missing.
+
+        Returns:
+            The sums.
+
+        Raises:
+            Error: If some column cannot be added.
+        """
+        return self.binary(value, BinaryOp.ADD, value_on_left=True)
+
+    def sub(
+        self,
+        other: Self,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Subtracts one frame from another, matching rows and columns.
+
+        Args:
+            other: The other frame.
+            axis: Ignored between two frames, which align on both of their axes
+                whatever it says. It is a parameter because pandas has one.
+            fill_value: What to put where exactly one of the two sides is
+                missing.
+
+        Returns:
+            The differences.
+
+        Raises:
+            Error: If the operands cannot be aligned or subtracted.
+        """
+        return self.binary(other, BinaryOp.SUB, fill_value)
+
+    def sub(
+        self,
+        other: Series,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Subtracts a series from a frame, broadcast along one axis.
+
+        Args:
+            other: The series.
+            axis: 1 to match its labels against the column names, 0 to match
+                them against the row labels.
+            fill_value: Not supported against a series, which is what pandas
+                says as well, with a `NotImplementedError`.
+
+        Returns:
+            The differences.
+
+        Raises:
+            Error: If a fill value is given, or the operands cannot be
+                aligned or subtracted.
+        """
+        _no_fill(fill_value)
+        return self.binary(other, BinaryOp.SUB, axis)
+
+    def sub(
+        self,
+        value: Value,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Subtracts a constant from every cell.
+
+        Args:
+            value: The constant.
+            axis: Ignored, since a constant reaches every cell either way.
+            fill_value: Ignored, which is what pandas does too, since a constant
+                is never the side that is missing.
+
+        Returns:
+            The differences.
+
+        Raises:
+            Error: If some column cannot be subtracted.
+        """
+        return self.binary(value, BinaryOp.SUB)
+
+    def rsub(
+        self,
+        other: Self,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Subtracts this frame from another one.
+
+        Args:
+            other: The other frame.
+            axis: Ignored between two frames, which align on both of their axes
+                whatever it says. It is a parameter because pandas has one.
+            fill_value: What to put where exactly one of the two sides is
+                missing.
+
+        Returns:
+            The differences.
+
+        Raises:
+            Error: If the operands cannot be aligned or subtracted.
+        """
+        return self.binary(other, BinaryOp.SUB, fill_value, flip=True)
+
+    def rsub(
+        self,
+        other: Series,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Subtracts a frame from a series, broadcast along one axis.
+
+        Args:
+            other: The series.
+            axis: 1 to match its labels against the column names, 0 to match
+                them against the row labels.
+            fill_value: Not supported against a series, which is what pandas
+                says as well, with a `NotImplementedError`.
+
+        Returns:
+            The differences.
+
+        Raises:
+            Error: If a fill value is given, or the operands cannot be
+                aligned or subtracted.
+        """
+        _no_fill(fill_value)
+        return self.binary(other, BinaryOp.SUB, axis, flip=True)
+
+    def rsub(
+        self,
+        value: Value,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Subtracts every cell from a constant.
+
+        Args:
+            value: The constant.
+            axis: Ignored, since a constant reaches every cell either way.
+            fill_value: Ignored, which is what pandas does too, since a constant
+                is never the side that is missing.
+
+        Returns:
+            The differences.
+
+        Raises:
+            Error: If some column cannot be subtracted.
+        """
+        return self.binary(value, BinaryOp.SUB, value_on_left=True)
+
+    def mul(
+        self,
+        other: Self,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Multiplies two frames, matching rows by label and columns by name.
+
+        Args:
+            other: The other frame.
+            axis: Ignored between two frames, which align on both of their axes
+                whatever it says. It is a parameter because pandas has one.
+            fill_value: What to put where exactly one of the two sides is
+                missing.
+
+        Returns:
+            The products.
+
+        Raises:
+            Error: If the operands cannot be aligned or multiplied.
+        """
+        return self.binary(other, BinaryOp.MUL, fill_value)
+
+    def mul(
+        self,
+        other: Series,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Multiplies a frame by a series, broadcast along one axis.
+
+        Args:
+            other: The series.
+            axis: 1 to match its labels against the column names, 0 to match
+                them against the row labels.
+            fill_value: Not supported against a series, which is what pandas
+                says as well, with a `NotImplementedError`.
+
+        Returns:
+            The products.
+
+        Raises:
+            Error: If a fill value is given, or the operands cannot be
+                aligned or multiplied.
+        """
+        _no_fill(fill_value)
+        return self.binary(other, BinaryOp.MUL, axis)
+
+    def mul(
+        self,
+        value: Value,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Multiplies every cell by a constant.
+
+        Args:
+            value: The constant.
+            axis: Ignored, since a constant reaches every cell either way.
+            fill_value: Ignored, which is what pandas does too, since a constant
+                is never the side that is missing.
+
+        Returns:
+            The products.
+
+        Raises:
+            Error: If some column cannot be multiplied.
+        """
+        return self.binary(value, BinaryOp.MUL)
+
+    def rmul(
+        self,
+        other: Self,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Multiplies two frames the other way round.
+
+        Args:
+            other: The other frame.
+            axis: Ignored between two frames, which align on both of their axes
+                whatever it says. It is a parameter because pandas has one.
+            fill_value: What to put where exactly one of the two sides is
+                missing.
+
+        Returns:
+            The products.
+
+        Raises:
+            Error: If the operands cannot be aligned or multiplied.
+        """
+        return self.binary(other, BinaryOp.MUL, fill_value, flip=True)
+
+    def rmul(
+        self,
+        other: Series,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Multiplies a series by a frame, broadcast along one axis.
+
+        Args:
+            other: The series.
+            axis: 1 to match its labels against the column names, 0 to match
+                them against the row labels.
+            fill_value: Not supported against a series, which is what pandas
+                says as well, with a `NotImplementedError`.
+
+        Returns:
+            The products.
+
+        Raises:
+            Error: If a fill value is given, or the operands cannot be
+                aligned or multiplied.
+        """
+        _no_fill(fill_value)
+        return self.binary(other, BinaryOp.MUL, axis, flip=True)
+
+    def rmul(
+        self,
+        value: Value,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Multiplies a constant by every cell.
+
+        Args:
+            value: The constant.
+            axis: Ignored, since a constant reaches every cell either way.
+            fill_value: Ignored, which is what pandas does too, since a constant
+                is never the side that is missing.
+
+        Returns:
+            The products.
+
+        Raises:
+            Error: If some column cannot be multiplied.
+        """
+        return self.binary(value, BinaryOp.MUL, value_on_left=True)
+
+    def truediv(
+        self,
+        other: Self,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Divides one frame by another, matching rows and columns.
+
+        Args:
+            other: The other frame.
+            axis: Ignored between two frames, which align on both of their axes
+                whatever it says. It is a parameter because pandas has one.
+            fill_value: What to put where exactly one of the two sides is
+                missing.
+
+        Returns:
+            The quotients, in float64.
+
+        Raises:
+            Error: If the operands cannot be aligned or divided.
+        """
+        return self.binary(other, BinaryOp.DIV, fill_value)
+
+    def truediv(
+        self,
+        other: Series,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Divides a frame by a series, broadcast along one axis.
+
+        Args:
+            other: The series.
+            axis: 1 to match its labels against the column names, 0 to match
+                them against the row labels.
+            fill_value: Not supported against a series, which is what pandas
+                says as well, with a `NotImplementedError`.
+
+        Returns:
+            The quotients, in float64.
+
+        Raises:
+            Error: If a fill value is given, or the operands cannot be
+                aligned or divided.
+        """
+        _no_fill(fill_value)
+        return self.binary(other, BinaryOp.DIV, axis)
+
+    def truediv(
+        self,
+        value: Value,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Divides every cell by a constant.
+
+        Args:
+            value: The constant.
+            axis: Ignored, since a constant reaches every cell either way.
+            fill_value: Ignored, which is what pandas does too, since a constant
+                is never the side that is missing.
+
+        Returns:
+            The quotients, in float64.
+
+        Raises:
+            Error: If some column cannot be divided.
+        """
+        return self.binary(value, BinaryOp.DIV)
+
+    def rtruediv(
+        self,
+        other: Self,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Divides another frame by this one.
+
+        Args:
+            other: The other frame.
+            axis: Ignored between two frames, which align on both of their axes
+                whatever it says. It is a parameter because pandas has one.
+            fill_value: What to put where exactly one of the two sides is
+                missing.
+
+        Returns:
+            The quotients, in float64.
+
+        Raises:
+            Error: If the operands cannot be aligned or divided.
+        """
+        return self.binary(other, BinaryOp.DIV, fill_value, flip=True)
+
+    def rtruediv(
+        self,
+        other: Series,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Divides a series by a frame, broadcast along one axis.
+
+        Args:
+            other: The series.
+            axis: 1 to match its labels against the column names, 0 to match
+                them against the row labels.
+            fill_value: Not supported against a series, which is what pandas
+                says as well, with a `NotImplementedError`.
+
+        Returns:
+            The quotients, in float64.
+
+        Raises:
+            Error: If a fill value is given, or the operands cannot be
+                aligned or divided.
+        """
+        _no_fill(fill_value)
+        return self.binary(other, BinaryOp.DIV, axis, flip=True)
+
+    def rtruediv(
+        self,
+        value: Value,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Divides a constant by every cell.
+
+        Args:
+            value: The constant.
+            axis: Ignored, since a constant reaches every cell either way.
+            fill_value: Ignored, which is what pandas does too, since a constant
+                is never the side that is missing.
+
+        Returns:
+            The quotients, in float64.
+
+        Raises:
+            Error: If some column cannot be divided.
+        """
+        return self.binary(value, BinaryOp.DIV, value_on_left=True)
+
+    def floordiv(
+        self,
+        other: Self,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Divides one frame by another, rounding towards minus infinity.
+
+        Args:
+            other: The other frame.
+            axis: Ignored between two frames, which align on both of their axes
+                whatever it says. It is a parameter because pandas has one.
+            fill_value: What to put where exactly one of the two sides is
+                missing.
+
+        Returns:
+            The quotients.
+
+        Raises:
+            Error: If the operands cannot be aligned or divided.
+        """
+        return self.binary(other, BinaryOp.FLOORDIV, fill_value)
+
+    def floordiv(
+        self,
+        other: Series,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Divides a frame by a series, rounding down.
+
+        Args:
+            other: The series.
+            axis: 1 to match its labels against the column names, 0 to match
+                them against the row labels.
+            fill_value: Not supported against a series, which is what pandas
+                says as well, with a `NotImplementedError`.
+
+        Returns:
+            The quotients.
+
+        Raises:
+            Error: If a fill value is given, or the operands cannot be
+                aligned or divided.
+        """
+        _no_fill(fill_value)
+        return self.binary(other, BinaryOp.FLOORDIV, axis)
+
+    def floordiv(
+        self,
+        value: Value,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Divides every cell by a constant, rounding down.
+
+        Args:
+            value: The constant.
+            axis: Ignored, since a constant reaches every cell either way.
+            fill_value: Ignored, which is what pandas does too, since a constant
+                is never the side that is missing.
+
+        Returns:
+            The quotients.
+
+        Raises:
+            Error: If some column cannot be divided.
+        """
+        return self.binary(value, BinaryOp.FLOORDIV)
+
+    def rfloordiv(
+        self,
+        other: Self,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Divides another frame by this one, rounding towards minus infinity.
+
+        Args:
+            other: The other frame.
+            axis: Ignored between two frames, which align on both of their axes
+                whatever it says. It is a parameter because pandas has one.
+            fill_value: What to put where exactly one of the two sides is
+                missing.
+
+        Returns:
+            The quotients.
+
+        Raises:
+            Error: If the operands cannot be aligned or divided.
+        """
+        return self.binary(other, BinaryOp.FLOORDIV, fill_value, flip=True)
+
+    def rfloordiv(
+        self,
+        other: Series,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Divides a series by a frame, rounding down.
+
+        Args:
+            other: The series.
+            axis: 1 to match its labels against the column names, 0 to match
+                them against the row labels.
+            fill_value: Not supported against a series, which is what pandas
+                says as well, with a `NotImplementedError`.
+
+        Returns:
+            The quotients.
+
+        Raises:
+            Error: If a fill value is given, or the operands cannot be
+                aligned or divided.
+        """
+        _no_fill(fill_value)
+        return self.binary(other, BinaryOp.FLOORDIV, axis, flip=True)
+
+    def rfloordiv(
+        self,
+        value: Value,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Divides a constant by every cell, rounding down.
+
+        Args:
+            value: The constant.
+            axis: Ignored, since a constant reaches every cell either way.
+            fill_value: Ignored, which is what pandas does too, since a constant
+                is never the side that is missing.
+
+        Returns:
+            The quotients.
+
+        Raises:
+            Error: If some column cannot be divided.
+        """
+        return self.binary(value, BinaryOp.FLOORDIV, value_on_left=True)
+
+    def mod(
+        self,
+        other: Self,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Takes the remainder of one frame divided by another.
+
+        Args:
+            other: The other frame.
+            axis: Ignored between two frames, which align on both of their axes
+                whatever it says. It is a parameter because pandas has one.
+            fill_value: What to put where exactly one of the two sides is
+                missing.
+
+        Returns:
+            The remainders, which take the sign of the right operand.
+
+        Raises:
+            Error: If the operands cannot be aligned or divided.
+        """
+        return self.binary(other, BinaryOp.MOD, fill_value)
+
+    def mod(
+        self,
+        other: Series,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Takes the remainder of a frame divided by a series.
+
+        Args:
+            other: The series.
+            axis: 1 to match its labels against the column names, 0 to match
+                them against the row labels.
+            fill_value: Not supported against a series, which is what pandas
+                says as well, with a `NotImplementedError`.
+
+        Returns:
+            The remainders, which take the sign of the right operand.
+
+        Raises:
+            Error: If a fill value is given, or the operands cannot be
+                aligned or divided.
+        """
+        _no_fill(fill_value)
+        return self.binary(other, BinaryOp.MOD, axis)
+
+    def mod(
+        self,
+        value: Value,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Takes the remainder of every cell divided by a constant.
+
+        Args:
+            value: The constant.
+            axis: Ignored, since a constant reaches every cell either way.
+            fill_value: Ignored, which is what pandas does too, since a constant
+                is never the side that is missing.
+
+        Returns:
+            The remainders, which take the sign of the right operand.
+
+        Raises:
+            Error: If some column cannot be divided.
+        """
+        return self.binary(value, BinaryOp.MOD)
+
+    def rmod(
+        self,
+        other: Self,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Takes the remainder of another frame divided by this one.
+
+        Args:
+            other: The other frame.
+            axis: Ignored between two frames, which align on both of their axes
+                whatever it says. It is a parameter because pandas has one.
+            fill_value: What to put where exactly one of the two sides is
+                missing.
+
+        Returns:
+            The remainders, which take the sign of the right operand.
+
+        Raises:
+            Error: If the operands cannot be aligned or divided.
+        """
+        return self.binary(other, BinaryOp.MOD, fill_value, flip=True)
+
+    def rmod(
+        self,
+        other: Series,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Takes the remainder of a series divided by a frame.
+
+        Args:
+            other: The series.
+            axis: 1 to match its labels against the column names, 0 to match
+                them against the row labels.
+            fill_value: Not supported against a series, which is what pandas
+                says as well, with a `NotImplementedError`.
+
+        Returns:
+            The remainders, which take the sign of the right operand.
+
+        Raises:
+            Error: If a fill value is given, or the operands cannot be
+                aligned or divided.
+        """
+        _no_fill(fill_value)
+        return self.binary(other, BinaryOp.MOD, axis, flip=True)
+
+    def rmod(
+        self,
+        value: Value,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Takes the remainder of a constant divided by every cell.
+
+        Args:
+            value: The constant.
+            axis: Ignored, since a constant reaches every cell either way.
+            fill_value: Ignored, which is what pandas does too, since a constant
+                is never the side that is missing.
+
+        Returns:
+            The remainders, which take the sign of the right operand.
+
+        Raises:
+            Error: If some column cannot be divided.
+        """
+        return self.binary(value, BinaryOp.MOD, value_on_left=True)
+
+    def pow(
+        self,
+        other: Self,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Raises one frame to the power of another.
+
+        Args:
+            other: The other frame.
+            axis: Ignored between two frames, which align on both of their axes
+                whatever it says. It is a parameter because pandas has one.
+            fill_value: What to put where exactly one of the two sides is
+                missing.
+
+        Returns:
+            The powers.
+
+        Raises:
+            Error: If the operands cannot be aligned, or an integer is
+                raised to a negative integer power.
+        """
+        return self.binary(other, BinaryOp.POW, fill_value)
+
+    def pow(
+        self,
+        other: Series,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Raises a frame to the power of a series.
+
+        Args:
+            other: The series.
+            axis: 1 to match its labels against the column names, 0 to match
+                them against the row labels.
+            fill_value: Not supported against a series, which is what pandas
+                says as well, with a `NotImplementedError`.
+
+        Returns:
+            The powers.
+
+        Raises:
+            Error: If a fill value is given, if the operands cannot be
+                aligned, or an integer is raised to a negative integer power.
+        """
+        _no_fill(fill_value)
+        return self.binary(other, BinaryOp.POW, axis)
+
+    def pow(
+        self,
+        value: Value,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Raises every cell to a constant power.
+
+        Args:
+            value: The constant.
+            axis: Ignored, since a constant reaches every cell either way.
+            fill_value: Ignored, which is what pandas does too, since a constant
+                is never the side that is missing.
+
+        Returns:
+            The powers.
+
+        Raises:
+            Error: If an integer is raised to a negative integer power.
+        """
+        return self.binary(value, BinaryOp.POW)
+
+    def rpow(
+        self,
+        other: Self,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Raises another frame to the power of this one.
+
+        Args:
+            other: The other frame.
+            axis: Ignored between two frames, which align on both of their axes
+                whatever it says. It is a parameter because pandas has one.
+            fill_value: What to put where exactly one of the two sides is
+                missing.
+
+        Returns:
+            The powers.
+
+        Raises:
+            Error: If the operands cannot be aligned, or an integer is
+                raised to a negative integer power.
+        """
+        return self.binary(other, BinaryOp.POW, fill_value, flip=True)
+
+    def rpow(
+        self,
+        other: Series,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Raises a series to the power of a frame.
+
+        Args:
+            other: The series.
+            axis: 1 to match its labels against the column names, 0 to match
+                them against the row labels.
+            fill_value: Not supported against a series, which is what pandas
+                says as well, with a `NotImplementedError`.
+
+        Returns:
+            The powers.
+
+        Raises:
+            Error: If a fill value is given, if the operands cannot be
+                aligned, or an integer is raised to a negative integer power.
+        """
+        _no_fill(fill_value)
+        return self.binary(other, BinaryOp.POW, axis, flip=True)
+
+    def rpow(
+        self,
+        value: Value,
+        axis: Int = 1,
+        fill_value: Optional[Value] = None,
+    ) raises -> Self:
+        """Raises a constant to the power of every cell.
+
+        Args:
+            value: The constant.
+            axis: Ignored, since a constant reaches every cell either way.
+            fill_value: Ignored, which is what pandas does too, since a constant
+                is never the side that is missing.
+
+        Returns:
+            The powers.
+
+        Raises:
+            Error: If an integer is raised to a negative integer power.
+        """
+        return self.binary(value, BinaryOp.POW, value_on_left=True)
+
+    def eq(self, other: Self, axis: Int = 1) raises -> Self:
+        """Reports where two frames agree, on the union of their labels.
+
+        This is the flexible form and, unlike the operator, it aligns. A cell
+        that only one of the two sides has comes back missing rather than False,
+        which is the one place this differs from pandas.
+
+        Args:
+            other: The other frame.
+            axis: Ignored between two frames, which align on both of their axes
+                whatever it says.
+
+        Returns:
+            A frame of booleans on the union of the labels and the names.
+
+        Raises:
+            Error: If the operands cannot be aligned or compared.
+        """
+        return self.binary(other, BinaryOp.EQ)
+
+    def eq(self, other: Series, axis: Int = 1) raises -> Self:
+        """Reports where a frame agrees with a series, broadcast along one axis.
+
+        Args:
+            other: The series.
+            axis: 1 to match its labels against the column names, 0 to match
+                them against the row labels.
+
+        Returns:
+            A frame of booleans.
+
+        Raises:
+            Error: If the operands cannot be aligned or compared.
+        """
+        return self.binary(other, BinaryOp.EQ, axis)
+
+    def eq(self, value: Value, axis: Int = 1) raises -> Self:
+        """Reports which cells equal a constant.
+
+        Args:
+            value: The constant.
+            axis: Ignored, since a constant reaches every cell either way.
+
+        Returns:
+            A frame of booleans.
+
+        Raises:
+            Error: If some column cannot be compared with it.
+        """
+        return self.binary(value, BinaryOp.EQ)
+
+    def ne(self, other: Self, axis: Int = 1) raises -> Self:
+        """Reports where two frames differ, on the union of their labels.
+
+        This is the flexible form and, unlike the operator, it aligns. A cell
+        that only one of the two sides has comes back missing rather than False,
+        which is the one place this differs from pandas.
+
+        Args:
+            other: The other frame.
+            axis: Ignored between two frames, which align on both of their axes
+                whatever it says.
+
+        Returns:
+            A frame of booleans on the union of the labels and the names.
+
+        Raises:
+            Error: If the operands cannot be aligned or compared.
+        """
+        return self.binary(other, BinaryOp.NE)
+
+    def ne(self, other: Series, axis: Int = 1) raises -> Self:
+        """Reports where a frame differs from a series, broadcast along one axis.
+
+        Args:
+            other: The series.
+            axis: 1 to match its labels against the column names, 0 to match
+                them against the row labels.
+
+        Returns:
+            A frame of booleans.
+
+        Raises:
+            Error: If the operands cannot be aligned or compared.
+        """
+        return self.binary(other, BinaryOp.NE, axis)
+
+    def ne(self, value: Value, axis: Int = 1) raises -> Self:
+        """Reports which cells differ from a constant.
+
+        Args:
+            value: The constant.
+            axis: Ignored, since a constant reaches every cell either way.
+
+        Returns:
+            A frame of booleans.
+
+        Raises:
+            Error: If some column cannot be compared with it.
+        """
+        return self.binary(value, BinaryOp.NE)
+
+    def lt(self, other: Self, axis: Int = 1) raises -> Self:
+        """Reports where this frame is below another, aligning first.
+
+        This is the flexible form and, unlike the operator, it aligns. A cell
+        that only one of the two sides has comes back missing rather than False,
+        which is the one place this differs from pandas.
+
+        Args:
+            other: The other frame.
+            axis: Ignored between two frames, which align on both of their axes
+                whatever it says.
+
+        Returns:
+            A frame of booleans on the union of the labels and the names.
+
+        Raises:
+            Error: If the operands cannot be aligned or compared.
+        """
+        return self.binary(other, BinaryOp.LT)
+
+    def lt(self, other: Series, axis: Int = 1) raises -> Self:
+        """Reports where a frame is below a series, broadcast along one axis.
+
+        Args:
+            other: The series.
+            axis: 1 to match its labels against the column names, 0 to match
+                them against the row labels.
+
+        Returns:
+            A frame of booleans.
+
+        Raises:
+            Error: If the operands cannot be aligned or compared.
+        """
+        return self.binary(other, BinaryOp.LT, axis)
+
+    def lt(self, value: Value, axis: Int = 1) raises -> Self:
+        """Reports which cells are below a constant.
+
+        Args:
+            value: The constant.
+            axis: Ignored, since a constant reaches every cell either way.
+
+        Returns:
+            A frame of booleans.
+
+        Raises:
+            Error: If some column cannot be compared with it.
+        """
+        return self.binary(value, BinaryOp.LT)
+
+    def le(self, other: Self, axis: Int = 1) raises -> Self:
+        """Reports where this frame is at or below another, aligning first.
+
+        This is the flexible form and, unlike the operator, it aligns. A cell
+        that only one of the two sides has comes back missing rather than False,
+        which is the one place this differs from pandas.
+
+        Args:
+            other: The other frame.
+            axis: Ignored between two frames, which align on both of their axes
+                whatever it says.
+
+        Returns:
+            A frame of booleans on the union of the labels and the names.
+
+        Raises:
+            Error: If the operands cannot be aligned or compared.
+        """
+        return self.binary(other, BinaryOp.LE)
+
+    def le(self, other: Series, axis: Int = 1) raises -> Self:
+        """Reports where a frame is at or below a series, broadcast along one axis.
+
+        Args:
+            other: The series.
+            axis: 1 to match its labels against the column names, 0 to match
+                them against the row labels.
+
+        Returns:
+            A frame of booleans.
+
+        Raises:
+            Error: If the operands cannot be aligned or compared.
+        """
+        return self.binary(other, BinaryOp.LE, axis)
+
+    def le(self, value: Value, axis: Int = 1) raises -> Self:
+        """Reports which cells are at or below a constant.
+
+        Args:
+            value: The constant.
+            axis: Ignored, since a constant reaches every cell either way.
+
+        Returns:
+            A frame of booleans.
+
+        Raises:
+            Error: If some column cannot be compared with it.
+        """
+        return self.binary(value, BinaryOp.LE)
+
+    def gt(self, other: Self, axis: Int = 1) raises -> Self:
+        """Reports where this frame is above another, aligning first.
+
+        This is the flexible form and, unlike the operator, it aligns. A cell
+        that only one of the two sides has comes back missing rather than False,
+        which is the one place this differs from pandas.
+
+        Args:
+            other: The other frame.
+            axis: Ignored between two frames, which align on both of their axes
+                whatever it says.
+
+        Returns:
+            A frame of booleans on the union of the labels and the names.
+
+        Raises:
+            Error: If the operands cannot be aligned or compared.
+        """
+        return self.binary(other, BinaryOp.GT)
+
+    def gt(self, other: Series, axis: Int = 1) raises -> Self:
+        """Reports where a frame is above a series, broadcast along one axis.
+
+        Args:
+            other: The series.
+            axis: 1 to match its labels against the column names, 0 to match
+                them against the row labels.
+
+        Returns:
+            A frame of booleans.
+
+        Raises:
+            Error: If the operands cannot be aligned or compared.
+        """
+        return self.binary(other, BinaryOp.GT, axis)
+
+    def gt(self, value: Value, axis: Int = 1) raises -> Self:
+        """Reports which cells are above a constant.
+
+        Args:
+            value: The constant.
+            axis: Ignored, since a constant reaches every cell either way.
+
+        Returns:
+            A frame of booleans.
+
+        Raises:
+            Error: If some column cannot be compared with it.
+        """
+        return self.binary(value, BinaryOp.GT)
+
+    def ge(self, other: Self, axis: Int = 1) raises -> Self:
+        """Reports where this frame is at or above another, aligning first.
+
+        This is the flexible form and, unlike the operator, it aligns. A cell
+        that only one of the two sides has comes back missing rather than False,
+        which is the one place this differs from pandas.
+
+        Args:
+            other: The other frame.
+            axis: Ignored between two frames, which align on both of their axes
+                whatever it says.
+
+        Returns:
+            A frame of booleans on the union of the labels and the names.
+
+        Raises:
+            Error: If the operands cannot be aligned or compared.
+        """
+        return self.binary(other, BinaryOp.GE)
+
+    def ge(self, other: Series, axis: Int = 1) raises -> Self:
+        """Reports where a frame is at or above a series, broadcast along one axis.
+
+        Args:
+            other: The series.
+            axis: 1 to match its labels against the column names, 0 to match
+                them against the row labels.
+
+        Returns:
+            A frame of booleans.
+
+        Raises:
+            Error: If the operands cannot be aligned or compared.
+        """
+        return self.binary(other, BinaryOp.GE, axis)
+
+    def ge(self, value: Value, axis: Int = 1) raises -> Self:
+        """Reports which cells are at or above a constant.
+
+        Args:
+            value: The constant.
+            axis: Ignored, since a constant reaches every cell either way.
+
+        Returns:
+            A frame of booleans.
+
+        Raises:
+            Error: If some column cannot be compared with it.
+        """
+        return self.binary(value, BinaryOp.GE)
+
     def __add__(self, other: Self) raises -> Self:
         """Adds two frames, matching rows by label and columns by name.
 
@@ -2686,3 +3974,24 @@ def _label_names(index: Index) raises -> List[String]:
     for i in range(len(labels)):
         out.append(String(labels.strings()[i]))
     return out^
+
+
+def _no_fill(fill_value: Optional[Value]) raises:
+    """Refuses a fill value against a series operand.
+
+    pandas raises `NotImplementedError: fill_value 0 not supported.` here, and
+    the reason is that a series is broadcast rather than aligned cell by cell,
+    so there is no second side for the fill to stand in for.
+
+    Args:
+        fill_value: What the caller passed.
+
+    Raises:
+        Error: If a fill value was given.
+    """
+    if fill_value:
+        raise Error(
+            "frame: fill_value has nothing to fill when the other operand is a"
+            " series, because a series is broadcast across the rows rather than"
+            " aligned against them cell by cell; pandas refuses this too"
+        )

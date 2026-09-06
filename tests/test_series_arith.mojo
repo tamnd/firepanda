@@ -368,6 +368,101 @@ def test_a_text_column_has_no_arithmetic() raises:
         _ = s + Value(Int64(1))
 
 
+def words(name: String, values: List[String], at: List[Int64]) raises -> Series:
+    """A text series under the given row labels."""
+    var out = Series(name, strings_from_list(values))
+    out.index = Index(AnyArray(from_list[DType.int64](at)), unnamed())
+    return out^
+
+
+def test_comparing_a_text_column_with_a_string() raises:
+    """A text column has no arithmetic and it does have an ordering, so `<`
+    against a string is a real question with a real answer. pandas compares
+    lexicographically and answers a boolean column, and this is four of the
+    conformance failures #238 counted."""
+    var s = words("t", ["a", "b", "c"], [1, 2, 3])
+    var below = s.binary(Value(String("b")), BinaryOp.LT)
+    assert_equal(flags(below)[0], True, "a is below b")
+    assert_equal(flags(below)[1], False, "b is not below itself")
+    assert_equal(flags(below)[2], False, "c is above b")
+
+
+def test_the_six_comparisons_against_a_string() raises:
+    """All six, because the ordering is the thing being tested rather than the
+    dispatch, and an ordering that got one of them backwards would still pass a
+    test of the other five."""
+    var s = words("t", ["a", "b", "c"], [1, 2, 3])
+    var b = Value(String("b"))
+    assert_equal(flags(s.binary(b, BinaryOp.EQ))[1], True, "eq")
+    assert_equal(flags(s.binary(b, BinaryOp.NE))[1], False, "ne")
+    assert_equal(flags(s.binary(b, BinaryOp.LE))[1], True, "le")
+    assert_equal(flags(s.binary(b, BinaryOp.GT))[2], True, "gt")
+    assert_equal(flags(s.binary(b, BinaryOp.GE))[1], True, "ge")
+
+
+def test_a_string_on_the_left_turns_the_comparison_round() raises:
+    """`"b" > s` is `s < "b"` and not `s > "b"`, which is the whole reason the
+    constant carries a side rather than being assumed to be on the right."""
+    var s = words("t", ["a", "b", "c"], [1, 2, 3])
+    var b = Value(String("b"))
+    var got = s.binary(b, BinaryOp.GT, value_on_left=True)
+    assert_equal(flags(got)[0], True, "b is above a")
+    assert_equal(flags(got)[2], False, "b is not above c")
+
+
+def test_comparing_two_text_columns_is_row_by_row() raises:
+    """The column form of the same thing, which goes down a different loop."""
+    var s = words("t", ["a", "b", "c"], [1, 2, 3])
+    var t = words("t", ["a", "x", "b"], [1, 2, 3])
+    assert_equal(flags(s.compare(t, BinaryOp.EQ))[0], True, "row 0")
+    assert_equal(flags(s.compare(t, BinaryOp.LT))[1], True, "row 1")
+    assert_equal(flags(s.compare(t, BinaryOp.LT))[2], False, "row 2")
+
+
+def test_adding_two_text_columns_is_refused_for_now() raises:
+    """Concatenation is the one arithmetic operation a text column does have in
+    pandas, where `["a", "b"] + ["x", "y"]` is `["ax", "by"]`, and the kernel
+    does not have it. The alignment above it is ready, so this is a loop in
+    `firepanda/kernel/text.mojo` and not a design question, and the test says
+    which of the two it is rather than leaving the gap unrecorded."""
+    var s = words("t", ["a", "b"], [1, 2])
+    var t = words("t", ["x", "y"], [1, 2])
+    with assert_raises(contains="+ is not defined on string"):
+        _ = s + t
+
+
+def test_dividing_two_series_answers_a_pair() raises:
+    """`divmod` is on a series in pandas and not on a frame, and it is two
+    passes there as well, so this is two calls with one name on them rather
+    than a kernel that writes two columns."""
+    var a = series("v", [7, -7], [1, 2])
+    var pair = a.__divmod__(Value(Int64(3)))
+    assert_equal(ints(pair[0])[0], Int64(2), "7 // 3")
+    assert_equal(ints(pair[0])[1], Int64(-3), "-7 // 3, Python's sign rule")
+    assert_equal(ints(pair[1])[0], Int64(1), "7 % 3")
+    assert_equal(ints(pair[1])[1], Int64(2), "-7 % 3")
+
+
+def test_dividing_a_constant_by_a_series_answers_a_pair() raises:
+    """The reflected form, measured the same way."""
+    var a = series("v", [7, -7], [1, 2])
+    var pair = a.__rdivmod__(Value(Int64(3)))
+    assert_equal(ints(pair[0])[0], Int64(0), "3 // 7")
+    assert_equal(ints(pair[0])[1], Int64(-1), "3 // -7")
+    assert_equal(ints(pair[1])[0], Int64(3), "3 % 7")
+    assert_equal(ints(pair[1])[1], Int64(-4), "3 % -7")
+
+
+def test_dividing_two_series_by_each_other_answers_a_pair() raises:
+    """The column form, which aligns on the labels the way every other pair of
+    columns does."""
+    var a = series("v", [7, -7], [1, 2])
+    var b = series("v", [3, 3], [1, 2])
+    var pair = a.__divmod__(b)
+    assert_equal(ints(pair[0])[1], Int64(-3), "-7 // 3")
+    assert_equal(ints(pair[1])[1], Int64(2), "-7 % 3")
+
+
 def test_a_cast_keeps_the_row_labels() raises:
     """Every operation that answers one row per input row keeps the labels, and
     the cast is the one that used to drop them. It matters here rather than in
