@@ -345,12 +345,18 @@ def test_a_result_keeps_a_name_only_when_both_sides_agree_on_it(
 
 
 def test_the_dtype_of_a_result_follows_the_operation(firepanda: ModuleType) -> None:
-    """Division widens, a comparison is boolean, and addition stays where it was.
+    """Division widens an integer, a comparison is boolean, addition stays put.
 
     `truediv` is the one worth pinning. It is the only arithmetic operation that
-    answers a different type from the one it was given, and a floor division
+    can answer a different type from the one it was given, and a floor division
     beside it that widened the same way would be wrong in a manner nothing about
     values would catch on this fixture.
+
+    Division widens an integer and not a float, and this fixture only has
+    integers, so what is pinned here is half the rule. The other half is that a
+    float32 divided by anything it promotes against stays a float32, which no
+    test in this file can reach because a `Series` takes no dtype and a CSV only
+    produces the four wide types. `tests/test_binary.mojo` has it.
     """
     left, _ = _pair(firepanda)
     assert (left + 2).dtype == "int64"

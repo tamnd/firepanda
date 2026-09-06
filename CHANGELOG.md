@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Division stops widening a float column to double
+
+`binary_type` answered float64 for every division regardless of what it was dividing, so `float32 / float32` came out as a double where pandas keeps it at float32, and `float32 / int8` did the same. Dividing two integers still answers float64, which is right and is not changed, because there is no integer answer to `7 / 2` and something has to widen. The bug was doing that when nothing needed widening.
+
+`promote` had already worked out the common type of the two operands and division was throwing that answer away. Once one side is a float there is nothing left to decide: `float32 / float32` is float32, and `float32 / int8` is float32 as well, since `promote` has already ruled that an int8 is representable in a float32. `binary_type` now keeps `promote`'s answer when it is already a float and widens only when it is not.
+
+The declared type was the smaller half of it. The `divide` loop was hardwired to allocate a float64 column and cast each register into it, so declaring float32 and running that loop would have produced a column whose stated type and stored bytes disagreed, which is worse than the bug being fixed. A Mojo function has one return type, so the float division is a second entry point rather than a branch inside the first: `divide_float` and `divide_float_const` answer at the dtype they were given and go through the ordinary arithmetic loops under a new operation code, and `divide` and `divide_const` keep the widening loops for the integer case. The caller picks between them at compile time from the dtype it is already dispatching on, so neither pays for the choice.
+
+What makes this an over strong special case rather than a design gap is that floor division was already correct. `float32 // float32` gives float32 here and in pandas, and always did, because `FLOORDIV` was never given the widening that `DIV` was. The two operators sit next to each other in the same function doing different things, and only one of them was wrong.
+
+The cost of the old answer was memory. A float32 column that gets divided becomes twice the size for a precision nobody asked for, and it stays twice the size for every operation after it, since the widened column is what the next expression promotes against.
+
+Five tests in `tests/test_binary.mojo` pin the cases: two integers giving float64, a float32 pair staying float32, a float32 over an int8 staying float32, an int64 over a float32 giving float64, and the same column against a constant, both ways round. The last one earned its place immediately. The constant path is a separate loop with its own compile time switch on the operation code, and the first version of this change added the new code to one switch and not the other, so a float32 column divided by 2 fell through to the branch that raises to a power and answered 49 instead of 3.5. Nothing about the declared type would have caught that.
+
 ### Arithmetic reaches Python, and stops answering `RuntimeError` when it fails
 
 The operators and the named forms are now on the Python types rather than only on the Mojo ones. That is 94 new members across `Series` and `DataFrame`, and every one of them is generated from `tools/bindings.py` and checked against a live pandas signature by `python/tests/test_bindings.py`, so none of them was written into `_frame.py` by hand and none can drift from the signature it is copying.
