@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A group by on a wide text key stops chasing its rows back into the column
+
+A text factorize on a key with too many values to fit a table per worker cuts the rows into partitions by hash, so each key is discovered once rather than once per worker. What a partition holds is rows from all over the column, and settling a hash match means comparing the row against the row that first produced that ordinal, so the build was reading a view back out of the column at a scattered position for every row. The views buffer is sixteen bytes a row, a hundred and sixty megabytes at ten million, and a load into it at a position nothing can predict is a cache miss that no prefetch reaches.
+
+Taking the comparison out altogether says what that costs. It is wrong and it was never going to ship, but on ten million rows with a hundred thousand text groups it took the factorize from 33 ms to 20 ms, so two fifths of the work was the load and not the comparison.
+
+The fix is that the view travels with the row. The pass that scatters the hash and the row into the partitions is already walking its slice of the column in order, so it reads the view sequentially and writes it out beside them, and the build settles its matches against two views it was handed. It costs sixteen bytes a row more in the scatter and the buffer is dropped as soon as the partitions are built.
+
+`group/ordinals_one_wide_text_key` at ten million rows went from a median of 34.8 ms to 28.7 ms, four runs a side in separate sessions, with every other row in the file holding still because no other row takes this route. Two of the eight sessions ran degraded, and normalising every run against `group/ordinals_one_text_key`, which does not take this route, separates the two sides four out of four with no overlap.
+
+db-benchmark q3 and q7 both group on a text key of this shape and both moved 1.15x at 0.5GB, q3 from a median of 47.0 ms to 41.0 ms with every new run below every old one, and q7 from 45.6 ms to 39.7 ms. The answers' checksums are identical on all sixteen runs. The same comparison at 5GB was not worth reporting: the peak resident set there is twelve gigabytes against a twenty four gigabyte limit, and runs on both sides blew up to three and five times their neighbours often enough that nothing could be read off it.
+
+What it costs is memory. The buffer is sixteen bytes per non-null row and it lives from the scatter to the end of the build, which took q3's peak resident set at 0.5GB from 1.08 GB to 1.24 GB, about fifteen percent. That is the trade and it is worth naming rather than burying: the route is already the one chosen for keys too numerous to hold a table per worker, so it is the route running on the largest inputs, and this makes it hold more of them. DuckDB's peak on the same query is roughly twice ours either way.
+
 ### Float floor division and the remainder answer what pandas answers
 
 `//` and `%` on a float column were Mojo's SIMD operators, which compute `floor(x / y)` and `x - floor(x / y) * y`. That is the expression everybody reaches for and it is wrong in three ways, all of which a conformance case caught on its first run against pandas 3.0.3.

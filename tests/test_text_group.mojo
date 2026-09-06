@@ -441,6 +441,31 @@ def repeating_text(n: Int, groups: Int) raises -> StringArray:
     return builder^.finish()
 
 
+def repeating_long_text(n: Int, groups: Int) raises -> StringArray:
+    """Builds `n` rows cycling through `groups` keys too long to sit in a view.
+
+    `repeating_text` makes keys of eight bytes or fewer, which the view holds
+    inline, so the comparison settles inside sixteen bytes and never reads the
+    payload at all. A key of more than twelve bytes does not fit, and the view
+    holds a length, a four byte prefix and an offset into the payload instead.
+    The keys here share their first sixteen bytes, so neither the length nor the
+    prefix separates them and the comparison has to go to the payload for every
+    one of them, which is the branch a route that carries views rather than rows
+    reaches differently from one that does not.
+
+    Args:
+        n: How many rows.
+        groups: How many distinct keys to cycle through.
+
+    Returns:
+        The column.
+    """
+    var builder = StringBuilder(capacity=n)
+    for i in range(n):
+        builder.append(String("a_long_key_here_", (i * 37) % groups).as_bytes())
+    return builder^.finish()
+
+
 def same_string_routes(col: StringArray, workers: Int, what: String) raises:
     """Runs the slice route over one column and asserts it lands on the serial.
 
@@ -658,6 +683,38 @@ def test_the_partitioned_string_route_agrees_on_all_distinct_keys() raises:
     # case where the numbering has to merge blocks rather than sort one.
     var rows = RANK_BLOCK + 4096
     same_partitioned_string_routes(repeating_text(rows, rows), 8, "distinct")
+
+
+def test_the_partitioned_string_route_agrees_on_keys_too_long_to_inline() raises:
+    """Keys past twelve bytes, which the comparison cannot settle inside a view.
+
+    Every other partitioned test here uses keys short enough to live inside the
+    view, so the comparison reads a length and a prefix and twelve inline bytes
+    and stops. These share their first sixteen bytes and are longer than that, so
+    every probe that matches on the hash has to go to the payload, and it has to
+    get there from the view rather than from the row, because that is what this
+    route hands the build now. An offset read out of the wrong place would still
+    be a byte comparison against something, and on keys this similar it would
+    still agree often enough to pass a smaller test.
+    """
+    same_partitioned_string_routes(
+        repeating_long_text(24000, 3000), 7, "long keys"
+    )
+
+
+def test_the_partitioned_string_route_agrees_on_long_keys_all_distinct() raises:
+    """The same keys with nothing repeated, so every row creates a group.
+
+    A repeating column settles most of its probes against a key the same
+    partition put in a moment ago, which tends to be in cache whatever it is
+    read through. This one never matches, so the comparison runs at every row
+    against a group it has not touched since it made it, which is where reading
+    the key through a row rather than carrying it costs the most.
+    """
+    var rows = RANK_BLOCK + 4096
+    same_partitioned_string_routes(
+        repeating_long_text(rows, rows), 8, "long distinct"
+    )
 
 
 def test_the_partitioned_string_route_agrees_with_nulls_scattered() raises:

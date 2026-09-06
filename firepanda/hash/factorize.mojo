@@ -2941,6 +2941,19 @@ def _factorize_strings_partitioned(
     the only difference between this and the numeric partitioned route, and it is
     two lines of `build_strings`.
 
+    The row is what the build needs and the view is what it reads, and reading a
+    view through a row is the expensive part. A partition's rows are spread over
+    the whole column, so the load lands in a buffer sixteen bytes a row wide with
+    no locality and no prefetch, which is a cache miss for every row of the
+    column. That was measured by taking the comparison out altogether, which is
+    wrong but says what it costs: a ten million row column with a hundred
+    thousand text groups went from 33 ms to 20 ms. So the view is scattered into
+    the partitions beside the hash and the row, by the pass that is already
+    walking the column in order and can read it sequentially, and the build
+    settles its matches against two views it was handed rather than one it has to
+    fetch. What it costs is sixteen bytes a row more in the scatter, and the
+    buffer is dropped as soon as the partitions are built.
+
     The keys are compared as bytes when they collide, so the merge this route
     does not do is `_merge_strings` rather than `_merge_hashed`, and the saving is
     the larger of the two.
@@ -3002,13 +3015,22 @@ def _factorize_strings_partitioned(
 
     var rows_at = Buffer(overwritten=valid * 4)
     var keys = Buffer(overwritten=valid * 8)
+    # The view travels with the row for the same reason the hash does. A
+    # partition holds rows from all over the column, so settling a hash match by
+    # reading the row's view back out of the column is a scattered load into a
+    # buffer sixteen bytes a row wide, which is a cache miss a row and cannot be
+    # prefetched. Reading it here instead is sequential, because this pass walks
+    # its slice in order. It costs sixteen bytes a row of scatter on top of the
+    # twelve already going out, and it takes the whole probe off the column.
+    var views = Buffer(overwritten=valid * 16)
 
-    def place(w: Int) raises {mut rows_at, mut keys, imm}:
+    def place(w: Int) raises {mut rows_at, mut keys, mut views, imm}:
         var start = bounds[w]
         var stop = bounds[w + 1]
         var hash = hashes[w].bitcast[DType.uint64]()
         var row = rows_at.bitcast[DType.uint32]()
         var key = keys.bitcast[DType.uint64]()
+        var view = views.unsafe_ptr().unsafe_bitcast[StringView]()
         var at = List[Int](capacity=parts)
         for p in range(parts):
             at.append(counts[w * parts + p])
@@ -3019,6 +3041,7 @@ def _factorize_strings_partitioned(
             var p = Int(found >> shift)
             row.unsafe_offset(at[p]).unsafe_write(UInt32(start + k))
             key.unsafe_offset(at[p]).unsafe_write(found)
+            view.unsafe_offset(at[p])[] = col.view(start + k)
             at[p] += 1
 
     parallel_for(place, workers)
@@ -3041,7 +3064,7 @@ def _factorize_strings_partitioned(
         var base = start
         while base < stop:
             var count = min(CHUNK_ROWS, stop - base)
-            table.build_strings[True](
+            table.build_strings[True, True](
                 keys,
                 col,
                 False,
@@ -3055,11 +3078,14 @@ def _factorize_strings_partitioned(
                 keyviews,
                 base,
                 rows_at,
+                views,
             )
             base += count
         founds[p] = seen^
 
     parallel_for(dig, parts)
+    # Sixteen bytes a row, and nothing after this reads a key again.
+    _ = views^
 
     var starts = List[Int](capacity=parts + 1)
     var total = 0

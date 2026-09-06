@@ -647,7 +647,7 @@ struct HashTable(Movable, Sized):
         return absent
 
     def build_strings[
-        indirect: Bool = False
+        indirect: Bool = False, carried: Bool = False
     ](
         mut self,
         hashes: Buffer,
@@ -663,6 +663,7 @@ struct HashTable(Movable, Sized):
         mut reps: List[StringView],
         hash_at: Int = 0,
         rows_at: Buffer = Buffer(0),
+        views_at: Buffer = Buffer(0),
     ):
         """Inserts a chunk of a string column's keys in one call.
 
@@ -720,13 +721,21 @@ struct HashTable(Movable, Sized):
             rows_at: The absolute row each position stands for, as uint32. Read
                 only when `indirect`, and it is the whole partition's worth
                 rather than the chunk's, indexed the same way `base` is.
+            views_at: One `StringView` per position, in the same order and
+                indexed the same way `base` is. Read only when `carried`.
 
         Parameters:
             indirect: True when the positions are partition entries rather than
                 rows and `rows_at` says which row each of them is.
+            carried: True when the caller brought each position's view along
+                with it in `views_at`, so the comparison does not have to read
+                it back out of the column. Only useful with `indirect`, because
+                a build over a contiguous stretch reads its views in order
+                anyway and has nothing to gain.
         """
         var hash = hashes.bitcast[DType.uint64]().unsafe_offset(hash_at)
         var lookup = rows_at.bitcast[DType.uint32]()
+        var brought = views_at.unsafe_ptr().unsafe_bitcast[StringView]()
         var out = codes.unsafe_ptr()
         var slots = self._slots.bitcast[DType.uint64]()
         var mask = self._mask
@@ -779,6 +788,10 @@ struct HashTable(Movable, Sized):
             comptime if indirect:
                 row = Int(lookup.unsafe_offset(i).unsafe_load())
 
+            var key = StringView()
+            comptime if carried:
+                key = brought.unsafe_offset(i)[]
+
             if has_null and not col.is_valid(row):
                 out.unsafe_offset(i).unsafe_write(UInt32(0))
                 continue
@@ -810,11 +823,21 @@ struct HashTable(Movable, Sized):
                     )
                     out.unsafe_offset(i).unsafe_write(UInt32(found + offset))
                     firsts.append(row)
-                    reps.append(col.view(row))
+                    comptime if carried:
+                        reps.append(key)
+                    else:
+                        reps.append(col.view(row))
                     found += 1
                     break
                 if slots.unsafe_offset(slot).unsafe_load() == wanted:
-                    if col.element_equals_view(row, reps[Int(ordinal) - 1]):
+                    var same: Bool
+                    comptime if carried:
+                        same = col.views_equal(key, reps[Int(ordinal) - 1])
+                    else:
+                        same = col.element_equals_view(
+                            row, reps[Int(ordinal) - 1]
+                        )
+                    if same:
                         out.unsafe_offset(i).unsafe_write(
                             UInt32(Int(ordinal) - 1 + offset)
                         )
