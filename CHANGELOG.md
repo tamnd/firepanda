@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.50] - 2026-09-07
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A small release. One feature, one benchmark row and one set of notes about work that was measured and not shipped.
+
+The feature is that Arrow timestamp and date columns can be read, written and named. The reader used to stop at the first column it did not recognise and raise, so a frame with six good columns and one timestamp was a frame you could not open at all.
+
+The rest is groundwork for the join queries. Every join row in the microbenchmark file joined millions of fact rows against a dimension of a thousand or a hundred thousand, which is a table small enough to sit in cache, so all of them measured the probe and none of them measured the build. `join/inner_equal_sides` gives the build side the same height as the probe side and a distinct key per row, which is the shape db-benchmark j5 has and the join query furthest from where it should be. It measures 52.2 ms on ten million rows where the hundred thousand row dimension measures 24.4 on the same fact rows.
+
+The notes are three measurements on the partitioned text factorize, none of which became a change. Two of them are ideas that do not pay, and the third is a probe whose result points the opposite way from the truth, which is the one most worth having written down.
+
 ### Three measurements on the partitioned text factorize, none of them shipped
 
 Nothing changes here except a docstring, and the docstring is the point. After the carried view took that route from 34.8 ms to 28.7 on ten million rows, three further ideas were measured and all three are recorded in the function rather than in a branch nobody will find again.
