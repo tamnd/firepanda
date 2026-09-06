@@ -48,14 +48,20 @@ from firepanda.kernel import (
     equal,
     filter_range,
     filter_rows,
+    floor_divide,
+    floor_divide_const,
     greater,
     group_top_rows,
     less,
     max_of,
     mean_of,
     min_of,
+    modulo,
+    modulo_const,
     multiply,
     not_equal,
+    power,
+    power_const,
     subtract,
     sum_of,
     take_range,
@@ -76,13 +82,19 @@ from firepanda.kernel.scalar import (
     equal_scalar,
     fill_scalar,
     filter_scalar,
+    floor_divide_const_scalar,
+    floor_divide_scalar,
     group_scalar,
     group_top_scalar,
     less_scalar,
     max_scalar,
     mean_scalar,
     min_scalar,
+    modulo_const_scalar,
+    modulo_scalar,
     multiply_scalar,
+    power_const_scalar,
+    power_scalar,
     subtract_scalar,
     sum_scalar,
     take_scalar,
@@ -192,6 +204,44 @@ def random_column[
                 for i in range(at, stop):
                     out.set_null(i)
             at = stop
+    return out^
+
+
+def bounded_column[
+    dt: DType
+](mut rng: Rng, length: Int, shape: Int, low: Int, high: Int) -> Array[dt]:
+    """Builds a column like `random_column` over a different range of values.
+
+    `random_column` draws from one upwards and stops short of sixty, which suits
+    every kernel that was here before floor division arrived. Two of the new ones
+    want something else. The divisor of a floor division or a remainder has to be
+    zero sometimes, because the rule about a zero divisor is the only rule in the
+    kernel that depends on a value rather than on a type and it never fires on a
+    column drawn from one upwards. And both operands of a power have to be
+    smaller than sixty, because an int8 raised to anything in that range wraps,
+    and two wrapped answers agreeing proves nothing about either of them.
+
+    The null shape is drawn first and the values are written over the top of it,
+    so a null row can end up with a zero underneath it. That is on purpose: it is
+    the case where the kernel has to tell a divisor that is not there from a
+    divisor that is zero.
+
+    Args:
+        rng: The generator.
+        length: The number of rows.
+        shape: One of the `NULLS_` constants.
+        low: The smallest value to draw.
+        high: One past the largest value to draw.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        The column.
+    """
+    var out = random_column[dt](rng, length, shape)
+    for i in range(length):
+        out[i] = Scalar[dt](rng.next_range(low, high))
     return out^
 
 
@@ -449,6 +499,12 @@ def same_column[
                     twin.is_valid(i),
                 ),
             )
+        # A float remainder by zero is a NaN on both sides, and a NaN is not
+        # equal to itself, so the plain comparison below would read two kernels
+        # agreeing as a disagreement. Nothing else in here can produce one.
+        comptime if dt.is_floating_point():
+            if isnan(fast[i]) and isnan(twin[i]):
+                continue
         if fast[i] != twin[i]:
             fail(
                 step,
@@ -674,6 +730,41 @@ def run_one[dt: DType](mut rng: Rng, step: Int, seed: UInt64) raises:
     same_column(multiply(a, b), multiply_scalar(a, b), step, seed, "multiply")
     same_column(divide(a, b), divide_scalar(a, b), step, seed, "divide")
 
+    # Floor division and the remainder get a divisor column of their own rather
+    # than reusing `b`. Their one interesting rule is what happens on a zero
+    # divisor and `b` never holds a zero, so run against it they would only ever
+    # check the arithmetic, which is the part of them least likely to be wrong.
+    var divisors = bounded_column[dt](rng, length, rng.next_below(4), 0, 12)
+    same_column(
+        floor_divide(a, divisors),
+        floor_divide_scalar(a, divisors),
+        step,
+        seed,
+        "floor_divide",
+    )
+    same_column(
+        modulo(a, divisors),
+        modulo_scalar(a, divisors),
+        step,
+        seed,
+        "modulo",
+    )
+
+    # The power gets two columns of its own for the reason in `bounded_column`,
+    # which is that five cubed is the largest thing that fits in an int8 and the
+    # other columns are nowhere near that small. Neither column can hold a
+    # negative exponent, so the refusal is left to `tests/test_kernel.mojo`,
+    # where it can be asserted rather than merely not happening.
+    var bases = bounded_column[dt](rng, length, rng.next_below(4), 0, 6)
+    var exponents = bounded_column[dt](rng, length, rng.next_below(4), 0, 4)
+    same_column(
+        power(bases, exponents),
+        power_scalar(bases, exponents),
+        step,
+        seed,
+        "power",
+    )
+
     # The constant forms take the same path through `apply_validity` and a
     # different path to the operand, so they are checked separately rather than
     # assumed to follow from the two column forms agreeing. The constant is drawn
@@ -722,6 +813,62 @@ def run_one[dt: DType](mut rng: Rng, step: Int, seed: UInt64) raises:
         step,
         seed,
         "divide_const flipped",
+    )
+
+    # A constant divisor gets its own draw, from a range that includes zero, so
+    # that one call in twelve lands on the branch the kernel answers without
+    # looking at the column at all. The flipped calls run against the column
+    # that holds zeros, because there the divisor comes back out of the column
+    # and the kernel is walking a register at a time again.
+    var kd = Scalar[dt](rng.next_range(0, 12))
+    same_column(
+        floor_divide_const(a, kd),
+        floor_divide_const_scalar(a, kd),
+        step,
+        seed,
+        "floor_divide_const",
+    )
+    same_column(
+        floor_divide_const(divisors, kd, True),
+        floor_divide_const_scalar(divisors, kd, True),
+        step,
+        seed,
+        "floor_divide_const flipped",
+    )
+    same_column(
+        modulo_const(a, kd),
+        modulo_const_scalar(a, kd),
+        step,
+        seed,
+        "modulo_const",
+    )
+    same_column(
+        modulo_const(divisors, kd, True),
+        modulo_const_scalar(divisors, kd, True),
+        step,
+        seed,
+        "modulo_const flipped",
+    )
+
+    # The power constant is the exponent one way round and the base the other,
+    # so it is drawn twice from the two ranges the columns came from rather than
+    # once. Both calls have to be handed the same constant the twin gets, which
+    # is why these are named and not drawn inline.
+    var ke = Scalar[dt](rng.next_range(0, 4))
+    var kb = Scalar[dt](rng.next_range(0, 6))
+    same_column(
+        power_const(bases, ke),
+        power_const_scalar(bases, ke),
+        step,
+        seed,
+        "power_const",
+    )
+    same_column(
+        power_const(exponents, kb, True),
+        power_const_scalar(exponents, kb, True),
+        step,
+        seed,
+        "power_const flipped",
     )
     same_column(
         compare_const[dt, CMP_LT](a, k),

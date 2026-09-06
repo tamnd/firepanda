@@ -11,6 +11,12 @@ The type is asserted separately from the values in most of these, because the
 whole point of promoting on the types is that the answer's type does not depend
 on what is in the column. A test that only looked at values would pass on int32
 plus int32 overflowing into the right int64 answer by accident.
+
+Floor division, the remainder and the power are the exception to the first
+paragraph, because their values are the argument. Every number asserted about
+them was read off a running pandas 3.0 rather than worked out here, and the one
+place the two disagree is written down as a disagreement with pandas' own four
+answers next to it.
 """
 
 from std.testing import TestSuite, assert_equal, assert_raises, assert_true
@@ -115,6 +121,200 @@ def test_division_always_answers_float64() raises:
     var values = read[DType.float64](got)
     assert_equal(values[0], Float64(3.5), "an integer division does not floor")
     assert_equal(values[1], Float64(2.0), "row 1")
+
+
+def test_floor_division_keeps_the_operand_type_and_floors() raises:
+    """`pd.Series([-7, 7, -7, 7]) // pd.Series([3, 3, -3, -3])` is int64 and
+    `[-3, 2, 2, -3]`, which is the Python rounding and not the C one."""
+    var got = binary_any(
+        typed[DType.int64]([-7, 7, -7, 7]),
+        typed[DType.int64]([3, 3, -3, -3]),
+        BinaryOp.FLOORDIV,
+    )
+    assert_true(got.type == LogicalType.INT64, "result type")
+    var values = read[DType.int64](got)
+    assert_equal(values[0], Int64(-3), "-7 // 3 rounds away from zero")
+    assert_equal(values[1], Int64(2), "7 // 3")
+    assert_equal(values[2], Int64(2), "-7 // -3")
+    assert_equal(values[3], Int64(-3), "7 // -3 rounds away from zero")
+
+
+def test_the_remainder_takes_the_sign_of_the_divisor() raises:
+    """The same pair through `%` in pandas is int64 and `[2, 1, -1, -2]`, which
+    is the remainder that goes with the floor above."""
+    var got = binary_any(
+        typed[DType.int64]([-7, 7, -7, 7]),
+        typed[DType.int64]([3, 3, -3, -3]),
+        BinaryOp.MOD,
+    )
+    assert_true(got.type == LogicalType.INT64, "result type")
+    var values = read[DType.int64](got)
+    assert_equal(values[0], Int64(2), "-7 % 3 is positive")
+    assert_equal(values[1], Int64(1), "7 % 3")
+    assert_equal(values[2], Int64(-1), "-7 % -3 is negative")
+    assert_equal(values[3], Int64(-2), "7 % -3 is negative")
+
+
+def test_an_integer_divided_by_zero_is_null_and_stays_an_integer() raises:
+    """This is the registered divergence, and it is registered because pandas
+    has four answers to it and none of them is a function of the types alone.
+
+    A numpy backed series widens the column to float64 and puts an infinity
+    there, a masked Int64 series answers zero and says nothing, an Arrow backed
+    series raises `ArrowInvalid`, and `%` on an Arrow backed series raises
+    `NotImplementedError` instead. firepanda answers a null and keeps int64."""
+    var divisors = typed[DType.int64]([3, 0, 3, 0])
+    var quotient = binary_any(
+        typed[DType.int64]([-7, 7, -7, 7]), divisors, BinaryOp.FLOORDIV
+    )
+    assert_true(quotient.type == LogicalType.INT64, "the type does not widen")
+    assert_true(quotient.is_valid(0), "row 0 divides")
+    assert_true(not quotient.is_valid(1), "row 1 has a zero divisor")
+    assert_equal(quotient.null_count(), 2, "nulls")
+    assert_equal(read[DType.int64](quotient)[0], Int64(-3), "row 0")
+    assert_equal(
+        read[DType.int64](quotient)[1], Int64(0), "a null holds a zero"
+    )
+
+    var remainder = binary_any(
+        typed[DType.int64]([-7, 7, -7, 7]), divisors, BinaryOp.MOD
+    )
+    assert_true(remainder.type == LogicalType.INT64, "the type does not widen")
+    assert_equal(remainder.null_count(), 2, "nulls")
+    assert_equal(read[DType.int64](remainder)[0], Int64(2), "row 0")
+
+
+def test_a_zero_divisor_past_the_last_full_register_is_still_found() raises:
+    """The loop reads a whole register at the end of the column and the padding
+    behind it is zero, so the row that clears the bits has to stop at the length
+    and the rows before it still have to be checked. Nine rows is a partial tail
+    at every register width the loop is compiled for."""
+    var numerators = typed[DType.int64]([1, 2, 3, 4, 5, 6, 7, 8, 9])
+    var divisors = typed[DType.int64]([1, 1, 1, 1, 1, 1, 1, 1, 0])
+    var got = binary_any(numerators, divisors, BinaryOp.FLOORDIV)
+    assert_equal(got.null_count(), 1, "only the last row is null")
+    assert_true(not got.is_valid(8), "the last row")
+    assert_equal(read[DType.int64](got)[7], Int64(8), "the row before it")
+
+
+def test_a_zero_divisor_is_found_in_every_morsel_of_a_long_column() raises:
+    """A column past the morsel size is divided on several cores at once and
+    each of them writes to the same validity bitmap. A morsel boundary is a
+    multiple of sixty four rows, so no two of them share a byte, and this is the
+    test that would fail if that ever stopped being true."""
+    var rows = 300000
+    var numerators = Array[DType.int64](rows)
+    var divisors = Array[DType.int64](rows)
+    for i in range(rows):
+        numerators.set_valid(i, Int64(i))
+        divisors.set_valid(i, Int64(0) if i % 100000 == 7 else Int64(2))
+
+    var got = binary_any(
+        AnyArray(numerators^), AnyArray(divisors^), BinaryOp.FLOORDIV
+    )
+    assert_equal(got.null_count(), 3, "one null per hundred thousand rows")
+    assert_true(not got.is_valid(7), "the first")
+    assert_true(not got.is_valid(200007), "the last")
+    assert_true(got.is_valid(200008), "the row after it")
+    assert_equal(read[DType.int64](got)[9], Int64(4), "9 // 2")
+
+
+def test_a_float_divided_by_zero_is_an_infinity_rather_than_a_null() raises:
+    """A float column has somewhere to put an infinity, so there is nothing to
+    diverge about. pandas answers `[-3.0, inf, inf, nan]` and so does this."""
+    var got = binary_any(
+        typed[DType.float64]([-7.0, 7.0, 1.0, 0.0]),
+        typed[DType.float64]([3.0, 0.0, 0.0, 0.0]),
+        BinaryOp.FLOORDIV,
+    )
+    assert_true(got.type == LogicalType.FLOAT64, "result type")
+    assert_equal(got.null_count(), 0, "no nulls")
+    var values = read[DType.float64](got)
+    assert_equal(values[0], Float64(-3.0), "-7.0 // 3.0")
+    assert_true(values[1] > Float64(1e308), "7.0 // 0.0 is an infinity")
+    assert_true(values[3] != values[3], "0.0 // 0.0 is a NaN")
+
+
+def test_a_float_remainder_by_zero_is_a_nan_rather_than_a_null() raises:
+    var got = binary_any(
+        typed[DType.float64]([-7.0, 7.0]),
+        typed[DType.float64]([3.0, 0.0]),
+        BinaryOp.MOD,
+    )
+    assert_equal(got.null_count(), 0, "no nulls")
+    var values = read[DType.float64](got)
+    assert_equal(values[0], Float64(2.0), "-7.0 % 3.0 takes the divisor's sign")
+    assert_true(values[1] != values[1], "7.0 % 0.0 is a NaN")
+
+
+def test_a_power_keeps_the_operand_type() raises:
+    """`pd.Series([2, 3, 0, -2]) ** pd.Series([3, 0, 0, 3])` is int64 and
+    `[8, 1, 1, -8]`, so zero to the zero is one and the type does not widen."""
+    var got = binary_any(
+        typed[DType.int64]([2, 3, 0, -2]),
+        typed[DType.int64]([3, 0, 0, 3]),
+        BinaryOp.POW,
+    )
+    assert_true(got.type == LogicalType.INT64, "result type")
+    var values = read[DType.int64](got)
+    assert_equal(values[0], Int64(8), "2 ** 3")
+    assert_equal(values[1], Int64(1), "anything to the zero")
+    assert_equal(values[2], Int64(1), "zero to the zero")
+    assert_equal(values[3], Int64(-8), "a negative base keeps its sign")
+
+
+def test_a_negative_integer_exponent_is_refused() raises:
+    """There is no integer answer, and numpy raises rather than truncating to
+    zero, so the loop raises rather than answering the zero Mojo would give."""
+    with assert_raises(contains="negative integer powers"):
+        _ = binary_any(
+            typed[DType.int64]([2, 2]),
+            typed[DType.int64]([-1, -1]),
+            BinaryOp.POW,
+        )
+
+
+def test_a_negative_float_exponent_is_a_fraction_and_not_an_error() raises:
+    var got = binary_any(
+        typed[DType.float64]([2.0, 4.0]),
+        typed[DType.float64]([-1.0, -0.5]),
+        BinaryOp.POW,
+    )
+    var values = read[DType.float64](got)
+    assert_equal(values[0], Float64(0.5), "2.0 ** -1.0")
+    assert_equal(values[1], Float64(0.5), "4.0 ** -0.5")
+
+
+def test_a_float_power_is_the_answer_numpy_gives_to_the_last_bit() raises:
+    """The vector power instruction answers `1.4142135623734946` for the square
+    root of two, which is out by six hundred of the last bits and would show up
+    as a failure against pandas rather than as a rounding nobody notices. These
+    three are what numpy prints, and the third is the one that catches a loop
+    that quietly computed in single precision."""
+    var got = binary_any(
+        typed[DType.float64]([2.0, 10.0, 3.0]),
+        typed[DType.float64]([0.5, 3.0, 0.3]),
+        BinaryOp.POW,
+    )
+    var values = read[DType.float64](got)
+    assert_equal(values[0], Float64(1.4142135623730951), "2.0 ** 0.5")
+    assert_equal(values[1], Float64(1000.0), "10.0 ** 3.0")
+    assert_equal(values[2], Float64(1.3903891703159093), "3.0 ** 0.3")
+
+
+def test_a_null_row_does_not_look_like_a_zero_divisor() raises:
+    """A null holds a zero underneath, so the divisor check sees one there. The
+    row is null either way, and what this is checking is that a null on the
+    other side has not turned the whole column into nulls."""
+    var got = binary_any(
+        typed[DType.int64]([10, 20, 30]),
+        holes[DType.int64]([2, 2, 2], [True, False, True]),
+        BinaryOp.FLOORDIV,
+    )
+    assert_equal(got.null_count(), 1, "only the null row")
+    var values = read[DType.int64](got)
+    assert_equal(values[0], Int64(5), "row 0")
+    assert_equal(values[2], Int64(15), "row 2")
 
 
 def test_a_comparison_answers_bool_whatever_went_in() raises:
@@ -237,8 +437,25 @@ def test_the_result_type_is_known_without_a_column() raises:
         == LogicalType.INT32,
         "signed with unsigned of the same width goes up a width",
     )
+    assert_true(
+        binary_type(BinaryOp.FLOORDIV, LogicalType.INT8, LogicalType.INT8)
+        == LogicalType.INT8,
+        "floor division keeps the operand type where division does not",
+    )
+    assert_true(
+        binary_type(BinaryOp.MOD, LogicalType.INT32, LogicalType.FLOAT32)
+        == LogicalType.FLOAT64,
+        "the remainder promotes the same way addition does",
+    )
+    assert_true(
+        binary_type(BinaryOp.POW, LogicalType.INT16, LogicalType.INT16)
+        == LogicalType.INT16,
+        "a power keeps the operand type",
+    )
     with assert_raises(contains="is not defined on"):
         _ = binary_type(BinaryOp.MUL, LogicalType.BOOL, LogicalType.BOOL)
+    with assert_raises(contains="is not defined on"):
+        _ = binary_type(BinaryOp.FLOORDIV, LogicalType.BOOL, LogicalType.BOOL)
 
 
 def test_every_operation_prints_as_the_symbol_it_is_written_with() raises:
@@ -246,6 +463,9 @@ def test_every_operation_prints_as_the_symbol_it_is_written_with() raises:
     assert_equal(String(BinaryOp.SUB), "-", "subtract")
     assert_equal(String(BinaryOp.MUL), "*", "multiply")
     assert_equal(String(BinaryOp.DIV), "/", "divide")
+    assert_equal(String(BinaryOp.FLOORDIV), "//", "floor divide")
+    assert_equal(String(BinaryOp.MOD), "%", "remainder")
+    assert_equal(String(BinaryOp.POW), "**", "power")
     assert_equal(String(BinaryOp.EQ), "==", "equal")
     assert_equal(String(BinaryOp.NE), "!=", "not equal")
     assert_equal(String(BinaryOp.LT), "<", "less")
@@ -255,9 +475,22 @@ def test_every_operation_prints_as_the_symbol_it_is_written_with() raises:
 
 
 def test_only_the_six_comparisons_say_they_are_comparisons() raises:
+    """`is_comparison` is one integer test against the first comparison's code,
+    so an operation added on the wrong side of that line would answer this
+    wrongly rather than fail to compile. Every arithmetic code is named here for
+    that reason."""
     assert_true(not BinaryOp.ADD.is_comparison(), "add")
+    assert_true(not BinaryOp.SUB.is_comparison(), "subtract")
+    assert_true(not BinaryOp.MUL.is_comparison(), "multiply")
     assert_true(not BinaryOp.DIV.is_comparison(), "divide")
+    assert_true(not BinaryOp.FLOORDIV.is_comparison(), "floor divide")
+    assert_true(not BinaryOp.MOD.is_comparison(), "remainder")
+    assert_true(not BinaryOp.POW.is_comparison(), "power")
     assert_true(BinaryOp.EQ.is_comparison(), "equal")
+    assert_true(BinaryOp.NE.is_comparison(), "not equal")
+    assert_true(BinaryOp.LT.is_comparison(), "less than")
+    assert_true(BinaryOp.LE.is_comparison(), "less or equal")
+    assert_true(BinaryOp.GT.is_comparison(), "greater than")
     assert_true(BinaryOp.GE.is_comparison(), "greater or equal")
 
 
@@ -321,6 +554,81 @@ def test_division_knows_which_side_the_constant_is_on() raises:
     assert_true(right.type == LogicalType.FLOAT64, "result type")
     assert_equal(read[DType.float64](right)[0], Float64(0.25), "1 / 4")
     assert_equal(read[DType.float64](left)[0], Float64(4.0), "4 / 1")
+
+
+def test_floor_division_knows_which_side_the_constant_is_on() raises:
+    var right = binary_value_any(
+        typed[DType.int64]([7, 8]), Value(Int64(2)), BinaryOp.FLOORDIV
+    )
+    var left = binary_value_any(
+        typed[DType.int64]([2, 3]), Value(Int64(7)), BinaryOp.FLOORDIV, True
+    )
+    assert_true(right.type == LogicalType.INT64, "result type")
+    assert_equal(read[DType.int64](right)[0], Int64(3), "7 // 2")
+    assert_equal(read[DType.int64](left)[0], Int64(3), "7 // 2 the other way")
+    assert_equal(read[DType.int64](left)[1], Int64(2), "7 // 3")
+
+
+def test_the_remainder_knows_which_side_the_constant_is_on() raises:
+    var right = binary_value_any(
+        typed[DType.int64]([7, 8]), Value(Int64(3)), BinaryOp.MOD
+    )
+    var left = binary_value_any(
+        typed[DType.int64]([3, 5]), Value(Int64(7)), BinaryOp.MOD, True
+    )
+    assert_equal(read[DType.int64](right)[0], Int64(1), "7 % 3")
+    assert_equal(read[DType.int64](right)[1], Int64(2), "8 % 3")
+    assert_equal(read[DType.int64](left)[0], Int64(1), "7 % 3 the other way")
+    assert_equal(read[DType.int64](left)[1], Int64(2), "7 % 5")
+
+
+def test_a_constant_zero_divisor_makes_every_row_null() raises:
+    """It is one test rather than one per register, and there is no loop left to
+    run once it fires."""
+    var got = binary_value_any(
+        typed[DType.int64]([1, 2, 3]), Value(Int64(0)), BinaryOp.FLOORDIV
+    )
+    assert_true(got.type == LogicalType.INT64, "the type does not widen")
+    assert_equal(len(got), 3, "rows")
+    assert_equal(got.null_count(), 3, "nulls")
+
+
+def test_a_zero_in_the_column_nulls_a_row_of_a_flipped_division() raises:
+    """Flipped, the divisor is the column, so the check that could be hoisted
+    above the loop for `x // 5` has to happen inside it for `5 // x`."""
+    var got = binary_value_any(
+        typed[DType.int64]([3, 0, 4]), Value(Int64(12)), BinaryOp.FLOORDIV, True
+    )
+    assert_equal(got.null_count(), 1, "one null")
+    assert_true(not got.is_valid(1), "the zero row")
+    var values = read[DType.int64](got)
+    assert_equal(values[0], Int64(4), "12 // 3")
+    assert_equal(values[2], Int64(3), "12 // 4")
+
+
+def test_a_constant_negative_exponent_is_refused_on_either_side() raises:
+    with assert_raises(contains="negative integer powers"):
+        _ = binary_value_any(
+            typed[DType.int64]([2, 3]), Value(Int64(-2)), BinaryOp.POW
+        )
+    with assert_raises(contains="negative integer powers"):
+        _ = binary_value_any(
+            typed[DType.int64]([1, -2]), Value(Int64(3)), BinaryOp.POW, True
+        )
+
+
+def test_a_constant_power_applies_to_every_row() raises:
+    var right = binary_value_any(
+        typed[DType.int64]([2, 3, 0]), Value(Int64(2)), BinaryOp.POW
+    )
+    var left = binary_value_any(
+        typed[DType.int64]([3, 0]), Value(Int64(2)), BinaryOp.POW, True
+    )
+    assert_true(right.type == LogicalType.INT64, "result type")
+    assert_equal(read[DType.int64](right)[0], Int64(4), "2 ** 2")
+    assert_equal(read[DType.int64](right)[2], Int64(0), "0 ** 2")
+    assert_equal(read[DType.int64](left)[0], Int64(8), "2 ** 3")
+    assert_equal(read[DType.int64](left)[1], Int64(1), "2 ** 0")
 
 
 def test_a_constant_on_the_left_of_a_comparison_is_turned_round() raises:

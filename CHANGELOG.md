@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Floor division, the remainder and the power
+
+The kernel had four arithmetic operations and pandas has seven, so `//`, `%` and `**` are in. They promote the way addition does and keep the operand type, which is what pandas does and is not what `/` does: an int64 column floor divided by an int64 column is still int64, while dividing the same pair is float64 whatever went in.
+
+Dividing an integer by zero is where this stops being a transcription. pandas has four answers to it and they depend on which array is under the series rather than on the expression: a numpy backed column widens itself to float64 and puts an infinity there, a masked `Int64` column answers zero and says nothing at all, an Arrow backed column raises `ArrowInvalid`, and `%` on an Arrow backed column raises `NotImplementedError` because it is not implemented. There is no behaviour to copy here, only four to choose between.
+
+firepanda answers a null and keeps the operand type. That is the only one of the four that is total and is a function of the operand types alone, which is the property the whole kernel is built on and the one that lets a plan know an expression's type before a row moves. It is the same argument `Index.insert` already made: a numpy array has nowhere to record absence and an Arrow column does, so the thing pandas has to widen for is the thing we can just say. It is a registered divergence and not a quiet difference. A float column divided by zero still holds an infinity, because a float column can hold one.
+
+A negative exponent on an integer column raises rather than answering the zero the instruction would give, which is what numpy does with the same expression.
+
+The float power does not use the vector power instruction. That instruction answers `1.4142135623734946` for the square root of two where the correctly rounded answer ends `30951`, which is out by about six hundred of the last bits. It is invisible in a plot and very visible in a test that compares a column against pandas, so the float path calls the same `pow` in the C library that numpy calls and the answers are identical rather than close. It costs a call per element instead of an instruction per register, which is the cost numpy pays for the same reason.
+
+All six of the new entry points have a scalar twin in `firepanda/kernel/scalar.mojo` and the differential fuzzer runs them on every case. It draws a divisor column with zeros in it rather than reusing the operand column, because the operand column never holds a zero and the zero divisor is the only rule in the kernel that depends on a value rather than on a type. The power gets two columns of its own drawn small enough that an int8 does not wrap, since two wrapped answers agreeing proves nothing about either of them.
+
+Everything here is the kernel layer. `s // 2` on a series is the next entry and not this one.
+
 ## [0.6.46] - 2026-09-06
 
 Built against Mojo 1.0.0 (ed45d567). DuckDB can now read a firepanda frame without a copy, the row labels are a type Python can hold and edit, and a text key of few values stopped being factorized once per core.

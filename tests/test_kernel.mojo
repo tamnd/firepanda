@@ -17,6 +17,7 @@ from std.testing import (
     assert_almost_equal,
     assert_equal,
     assert_false,
+    assert_raises,
     assert_true,
 )
 
@@ -29,14 +30,17 @@ from firepanda.kernel import (
     divide,
     equal,
     filter_rows,
+    floor_divide,
     greater,
     less,
     less_equal,
     max_of,
     mean_of,
     min_of,
+    modulo,
     multiply,
     not_equal,
+    power,
     subtract,
     sum_of,
     take_rows,
@@ -48,10 +52,13 @@ from firepanda.kernel.scalar import (
     cast_scalar,
     equal_scalar,
     filter_scalar,
+    floor_divide_scalar,
     max_scalar,
     mean_scalar,
     min_scalar,
+    modulo_scalar,
     multiply_scalar,
+    power_scalar,
     subtract_scalar,
     sum_scalar,
     take_scalar,
@@ -326,6 +333,72 @@ def test_arithmetic_matches_the_twin() raises:
         for i in range(193):
             assert_equal(products.is_valid(i), products_twin.is_valid(i))
             assert_equal(products[i], products_twin[i])
+
+
+def test_floor_division_and_the_remainder_match_the_twin() raises:
+    """The divisors cycle through zero, which is the row where the two dtype
+    families part company: an integer column gets a null there and a float
+    column gets an infinity or a NaN and stays present. The twin decides which,
+    and this is what says the vector loop agreed."""
+    comptime for dt in NUMERIC:
+        var a = build[dt](193, 5)
+        var b = Array[dt](193)
+        for i in range(193):
+            # Zero at every ninetieth row, so three of them and none of them on
+            # a register boundary.
+            b[i] = Scalar[dt]((i * 7) % 90)
+        b.set_null(11)
+
+        var quotients = floor_divide(a, b)
+        var quotients_twin = floor_divide_scalar(a, b)
+        var remainders = modulo(a, b)
+        var remainders_twin = modulo_scalar(a, b)
+        for i in range(193):
+            assert_equal(quotients.is_valid(i), quotients_twin.is_valid(i))
+            assert_equal(remainders.is_valid(i), remainders_twin.is_valid(i))
+            # A NaN is not equal to itself, so the rows a float remainder by
+            # zero produces are checked for being a NaN on both sides instead.
+            comptime if dt.is_floating_point():
+                assert_equal(isnan(quotients[i]), isnan(quotients_twin[i]))
+                assert_equal(isnan(remainders[i]), isnan(remainders_twin[i]))
+                if isnan(quotients[i]):
+                    continue
+            assert_equal(quotients[i], quotients_twin[i])
+            if not isnan(remainders[i]):
+                assert_equal(remainders[i], remainders_twin[i])
+
+
+def test_the_power_matches_the_twin() raises:
+    """The exponents stay under four so that the answer is a number rather than
+    an overflow on int8, which would be testing the wrap rather than the loop.
+    """
+    comptime for dt in NUMERIC:
+        var a = build[dt](193, 5)
+        var b = Array[dt](193)
+        for i in range(193):
+            b[i] = Scalar[dt](i % 4)
+        b.set_null(11)
+
+        var powers = power(a, b)
+        var powers_twin = power_scalar(a, b)
+        for i in range(193):
+            assert_equal(powers.is_valid(i), powers_twin.is_valid(i))
+            assert_equal(powers[i], powers_twin[i])
+
+
+def test_a_negative_exponent_stops_the_integer_loops_and_not_the_float_ones() raises:
+    var bases = from_list[DType.int64]([2, 3, 4])
+    var down = from_list[DType.int64]([1, -1, 1])
+    with assert_raises(contains="negative integer powers"):
+        _ = power(bases, down)
+    with assert_raises(contains="negative integer powers"):
+        _ = power_scalar(bases, down)
+
+    var floats = from_list[DType.float64]([2.0, 4.0])
+    var negative = from_list[DType.float64]([-1.0, -0.5])
+    var got = power(floats, negative)
+    assert_equal(got[0], 0.5)
+    assert_equal(got[1], 0.5)
 
 
 def test_subtraction_matches_the_twin_on_signed_values() raises:

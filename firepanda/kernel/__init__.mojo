@@ -39,7 +39,20 @@ from .agg import (
     sum_of,
     sum_over,
 )
-from .arith import add, arith_const, divide, divide_const, multiply, subtract
+from .arith import (
+    add,
+    arith_const,
+    divide,
+    divide_const,
+    floor_divide,
+    floor_divide_const,
+    modulo,
+    modulo_const,
+    multiply,
+    power,
+    power_const,
+    subtract,
+)
 from .binary import BinaryOp, binary_any, binary_type, binary_value_any
 from .cast import cast_any, cast_strings_to, cast_to, cast_to_strings
 from .compare import (
