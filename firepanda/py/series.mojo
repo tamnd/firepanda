@@ -18,12 +18,13 @@ from std.python.bindings import check_arguments_arity
 
 from firepanda.frame.index import Index
 from firepanda.frame.series import Series
-from firepanda.py.args import whole
+from firepanda.py.args import flag, whole, words
 from firepanda.py.build import column_from, empty_column
 from firepanda.io.arrow_export import export_array_borrowed, export_schema
 from firepanda.py.convert import array_capsule, schema_capsule
 from firepanda.py.index import PyIndex
-from firepanda.py.errors import UNSUPPORTED, retagged, tagged
+from firepanda.py.errors import DTYPE, UNSUPPORTED, VALUE, retagged, tagged
+from firepanda.py.ops import binary_op, constant, fill, unary_op
 from firepanda.py.values import python_list
 
 
@@ -215,6 +216,194 @@ struct PySeries(Movable, Writable):
             A list with one element per row, with `None` for the missing ones.
         """
         return python_list(Self._held(py_self)[].series[].values)
+
+    @staticmethod
+    def _other(value: PythonObject, name: String) raises -> ArcPointer[Series]:
+        """Recovers the series out of an argument that should be one.
+
+        Args:
+            value: What Python passed.
+            name: The parameter name, for the message.
+
+        Returns:
+            A share of the other series, so the caller can read it without
+            copying.
+
+        Raises:
+            Error: Tagged `dtype`, if the argument is not a series.
+        """
+        try:
+            return value.downcast_value_ptr[Self]()[].series
+        except:
+            raise tagged(
+                DTYPE,
+                String(
+                    name,
+                    " must be a Series, got ",
+                    Python.type(value).__name__,
+                    " ",
+                    value.__repr__(),
+                ),
+            )
+
+    @staticmethod
+    def binary_series(
+        py_self: PythonObject,
+        other: PythonObject,
+        op: PythonObject,
+        flip: PythonObject,
+        fill_value: PythonObject,
+    ) raises -> PythonObject:
+        """Applies an operation to two series, matching rows by label.
+
+        One entry point for twenty six operators and named forms, with the
+        operation crossing as a word. `firepanda/py/ops.mojo` says why the
+        boundary is this shape rather than one bound method per operation.
+
+        Args:
+            py_self: The left operand.
+            other: The right operand, which has to be a series.
+            op: The operation, such as `add` or `lt`.
+            flip: True for `other op self`, which is what a reflected form needs
+                and which swapping the two arguments cannot express, because the
+                result keeps this series' name.
+            fill_value: What to put where exactly one of the two sides is
+                missing, or `None`.
+
+        Returns:
+            A new series, on the union of the two indexes.
+
+        Raises:
+            Error: Tagged `dtype`, if an argument is the wrong type or the
+                operation is not defined on the two dtypes.
+        """
+        var right = Self._other(other, "other")
+        var which = binary_op(words(op, "op"))
+        var filled = fill(fill_value)
+        var flipped = flag(flip, "flip")
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        Self._held(py_self)[]
+                        .series[]
+                        .binary(right[], which, filled, flipped)
+                    )
+                )
+            )
+        except cause:
+            raise retagged(DTYPE, cause)
+
+    @staticmethod
+    def binary_value(
+        py_self: PythonObject,
+        other: PythonObject,
+        op: PythonObject,
+        flip: PythonObject,
+    ) raises -> PythonObject:
+        """Applies an operation to every row of a series and one constant.
+
+        There is no `fill_value` here and that is not an omission. pandas accepts
+        one and ignores it, because a constant is never the side a row is missing
+        from, so the Python layer drops it before the call rather than carrying an
+        argument across the boundary that has nothing to do.
+
+        Args:
+            py_self: The series.
+            other: The constant.
+            op: The operation, such as `add` or `lt`.
+            flip: True for `constant op series`, which is what `5 - s` needs.
+
+        Returns:
+            A new series of the same height, on the same labels.
+
+        Raises:
+            Error: Tagged `dtype`, if an argument is the wrong type or the
+                operation is not defined on the two types.
+        """
+        var right = constant(other, "other")
+        var which = binary_op(words(op, "op"))
+        var flipped = flag(flip, "flip")
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        Self._held(py_self)[]
+                        .series[]
+                        .binary(right, which, flipped)
+                    )
+                )
+            )
+        except cause:
+            raise retagged(DTYPE, cause)
+
+    @staticmethod
+    def compare_series(
+        py_self: PythonObject, other: PythonObject, op: PythonObject
+    ) raises -> PythonObject:
+        """Compares two series row by row, refusing to align them.
+
+        This is what the six comparison operators do and it is deliberately not
+        what `binary_series` does. The core method says why at length: pandas
+        aligns arithmetic and refuses to align a comparison, because a row only
+        one side has has no true or false answer, and the flexible `eq` and its
+        five relatives are the ones that align.
+
+        This is the one call here that can fail two ways, and pandas raises a
+        different class for each: a `ValueError` when the labels disagree and a
+        `TypeError` when the dtypes do. The core raises one untagged error for
+        both, so the labels are compared again on the failure path to tell them
+        apart. Doing it there rather than up front costs nothing on the call that
+        succeeds, which is every call but one.
+
+        Args:
+            py_self: The left operand.
+            other: The right operand, which has to be a series.
+            op: The comparison, such as `eq` or `lt`.
+
+        Returns:
+            A new boolean series.
+
+        Raises:
+            Error: Tagged `value` if the two are not labelled identically, and
+                `dtype` if the comparison is not defined on the two dtypes.
+        """
+        var right = Self._other(other, "other")
+        var which = binary_op(words(op, "op"))
+        var held = Self._held(py_self)
+        try:
+            return PythonObject(
+                alloc=Self(ArcPointer(held[].series[].compare(right[], which)))
+            )
+        except cause:
+            if not held[].series[].index.equals(right[].index):
+                raise retagged(VALUE, cause)
+            raise retagged(DTYPE, cause)
+
+    @staticmethod
+    def unary(py_self: PythonObject, op: PythonObject) raises -> PythonObject:
+        """Applies one of the four unary operations to a column.
+
+        Args:
+            py_self: The series.
+            op: The operation, one of `neg`, `pos`, `abs` or `invert`.
+
+        Returns:
+            A new series of the same height, on the same labels.
+
+        Raises:
+            Error: Tagged `dtype`, if the operation is not defined on the
+                column's dtype.
+        """
+        var which = unary_op(words(op, "op"))
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(Self._held(py_self)[].series[].unary(which))
+                )
+            )
+        except cause:
+            raise retagged(DTYPE, cause)
 
     @staticmethod
     def arrow_c_schema(py_self: PythonObject) raises -> PythonObject:

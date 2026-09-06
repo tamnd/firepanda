@@ -226,6 +226,212 @@ class Exposed:
     would be code in a table."""
 
 
+ARITHMETIC: tuple[tuple[str, str], ...] = (
+    ("add", "+"),
+    ("sub", "-"),
+    ("mul", "*"),
+    ("truediv", "/"),
+    ("floordiv", "//"),
+    ("mod", "%"),
+    ("pow", "**"),
+)
+"""The seven arithmetic operations, as pandas names them and as Python spells
+them. The name is what crosses the boundary and the symbol is only ever used in a
+docstring."""
+
+COMPARISON: tuple[tuple[str, str], ...] = (
+    ("eq", "=="),
+    ("ne", "!="),
+    ("lt", "<"),
+    ("le", "<="),
+    ("gt", ">"),
+    ("ge", ">="),
+)
+"""The six comparisons, the same way."""
+
+UNARY: tuple[tuple[str, str, str], ...] = (
+    ("__neg__", "neg", "`-a`, which on a boolean column is the logical not."),
+    ("__pos__", "pos", "`+a`, which copies and refuses a boolean column, as pandas does."),
+    ("__abs__", "abs", "`abs(a)`, so the builtin works."),
+    ("__invert__", "invert", "`~a`, the bitwise not, which needs an integer or a boolean."),
+)
+"""The four unary operations, as Python names them, as the boundary does and as
+they read to somebody who has not read the kernel."""
+
+
+def _operators(py: str) -> tuple[Member, ...]:
+    """Writes the arithmetic and comparison members for one class.
+
+    This is the one place in this file that builds rows in a loop rather than
+    writing them out, and it is worth saying why, because the note at the top
+    asks that the table stay a table. There are ninety four of these members
+    between the two classes and they differ from each other in three letters. A
+    literal table of ninety four rows is not more reviewable than fourteen names
+    and a shape, it is less: nobody reads ninety four near identical rows closely
+    enough to notice that one of them says `sub` where it means `rsub`, and a
+    generator cannot make that mistake at all.
+
+    What the loop is not allowed to do is decide behaviour. Every member here is
+    still one expression against a mixin helper, the difference between a frame
+    and a series is a parameter order rather than a branch, and the three
+    behaviours `fill_value` has live in `_pandas.py` where they can be read.
+
+    Args:
+        py: The class name, `DataFrame` or `Series`, which is also what a member
+            returns and how its signature is ordered.
+
+    Returns:
+        The members, in the order they should be written out.
+    """
+    thing = "frame" if py == "DataFrame" else "series"
+    operands = "a frame, a series or a constant" if py == "DataFrame" else "a series or a constant"
+    out: list[Member] = []
+
+    for name, symbol in ARITHMETIC:
+        out.append(
+            Member(
+                name=f"__{name}__",
+                kind="dunder",
+                signature="other: Any",
+                body=f'self._operator(other, "{name}", False, False)',
+                doc=f"`a {symbol} b`, against {operands}.",
+                returns="Any",
+            )
+        )
+        out.append(
+            Member(
+                name=f"__r{name}__",
+                kind="dunder",
+                signature="other: Any",
+                body=f'self._operator(other, "{name}", True, False)',
+                doc=f"`b {symbol} a`, which is what Python calls when the left side declines.",
+                returns="Any",
+            )
+        )
+
+    # No reflected forms here. Python has no `__req__`: a comparison reflects
+    # onto its mirror image, so `a == b` falls back to `b == a` and `a < b` falls
+    # back to `b > a`, and both of those are members this already writes.
+    for name, symbol in COMPARISON:
+        out.append(
+            Member(
+                name=f"__{name}__",
+                kind="dunder",
+                signature="other: Any",
+                body=f'self._operator(other, "{name}", False, True)',
+                doc=f"`a {symbol} b`, which refuses two {thing}s that are not labelled the same.",
+                returns="Any",
+            )
+        )
+
+    for name, _, doc in UNARY:
+        out.append(
+            Member(
+                name=name,
+                kind="dunder",
+                body=f'self._unary("{name.strip("_")}")',
+                doc=doc,
+                returns="Any",
+            )
+        )
+    out.append(
+        Member(
+            name="abs",
+            kind="method",
+            body='self._unary("abs")',
+            doc="Every value with its sign removed.",
+            returns="Any",
+        )
+    )
+
+    for name, symbol in ARITHMETIC:
+        for prefix, side in (("", "b"), ("r", "a")):
+            flip = "True" if prefix else "False"
+            out.append(
+                Member(
+                    name=f"{prefix}{name}",
+                    kind="method",
+                    signature=_named_signature(py, fill_value=True),
+                    body=f'self._named(other, "{name}", axis, level, fill_value, {flip})',
+                    doc=(
+                        f"`{'a' if side == 'b' else 'b'} {symbol} {side}`, by"
+                        " name, so it can take a fill value."
+                    ),
+                    returns="Any",
+                )
+            )
+
+    for name, symbol in COMPARISON:
+        out.append(
+            Member(
+                name=name,
+                kind="method",
+                signature=_named_signature(py, fill_value=py == "Series"),
+                body=(
+                    f'self._named(other, "{name}", axis, level, fill_value, False)'
+                    if py == "Series"
+                    else f'self._named(other, "{name}", axis, level, None, False)'
+                ),
+                doc=f"`a {symbol} b`, by name, which aligns where the operator refuses to.",
+                returns="Any",
+            )
+        )
+
+    if py == "Series":
+        for prefix, flip in (("", "False"), ("r", "True")):
+            out.append(
+                Member(
+                    name=f"__{prefix}divmod__",
+                    kind="dunder",
+                    signature="other: Any",
+                    body=f"self._divmod(other, 0, None, None, {flip})",
+                    doc="The floor division and the remainder, as a pair.",
+                    returns="Any",
+                )
+            )
+            out.append(
+                Member(
+                    name=f"{prefix}divmod",
+                    kind="method",
+                    signature=_named_signature(py, fill_value=True),
+                    body=f"self._divmod(other, axis, level, fill_value, {flip})",
+                    doc="The floor division and the remainder, as a pair, by name.",
+                    returns="Any",
+                )
+            )
+
+    return tuple(out)
+
+
+def _named_signature(py: str, fill_value: bool) -> str:
+    """Writes the parameter list of a named form, in the order pandas has it.
+
+    The two classes order these differently and the difference is not cosmetic,
+    because the signature parity test compares parameter names in order against
+    a running pandas. A frame puts `axis` first and defaults it to the string
+    `columns`, a series puts it last and defaults it to `0`.
+
+    Args:
+        py: The class name.
+        fill_value: Whether the form takes one. Every arithmetic form does. A
+            comparison does on a series and does not on a frame, which is pandas'
+            own split rather than something chosen here.
+
+    Returns:
+        The parameter list after `self`.
+    """
+    if py == "DataFrame":
+        parts = ["other: Any", 'axis: Any = "columns"', "level: Any = None"]
+        if fill_value:
+            parts.append("fill_value: Any = None")
+        return ", ".join(parts)
+    parts = ["other: Any", "level: Any = None"]
+    if fill_value:
+        parts.append("fill_value: Any = None")
+    parts.append("axis: Any = 0")
+    return ", ".join(parts)
+
+
 FRAME = Exposed(
     mojo="PyDataFrame",
     name="DataFrame",
@@ -287,6 +493,51 @@ FRAME = Exposed(
             name="labels",
             doc="The row labels, as an index.",
             returns="Index",
+        ),
+        Binding(
+            mojo="PyDataFrame.binary_frame",
+            name="binary_frame",
+            doc="An operation between two frames, aligning on both axes.",
+            params=(
+                ("other", "DataFrame"),
+                ("op", "str"),
+                ("flip", "bool"),
+                ("fill_value", "object | None"),
+            ),
+            returns="DataFrame",
+        ),
+        Binding(
+            mojo="PyDataFrame.binary_series",
+            name="binary_series",
+            doc="An operation between a frame and a series, along one axis.",
+            params=(
+                ("other", "Series"),
+                ("op", "str"),
+                ("axis", "int"),
+                ("flip", "bool"),
+            ),
+            returns="DataFrame",
+        ),
+        Binding(
+            mojo="PyDataFrame.binary_value",
+            name="binary_value",
+            doc="An operation between every cell of a frame and one constant.",
+            params=(("other", "object"), ("op", "str"), ("flip", "bool")),
+            returns="DataFrame",
+        ),
+        Binding(
+            mojo="PyDataFrame.compare_frame",
+            name="compare_frame",
+            doc="A comparison between two frames labelled the same on both axes.",
+            params=(("other", "DataFrame"), ("op", "str")),
+            returns="DataFrame",
+        ),
+        Binding(
+            mojo="PyDataFrame.unary",
+            name="unary",
+            doc="One of the four unary operations, over every column.",
+            params=(("op", "str"),),
+            returns="DataFrame",
         ),
         Binding(
             mojo="PyDataFrame.arrow_c_schema",
@@ -394,6 +645,7 @@ FRAME = Exposed(
             doc="The frame as a stream of one batch, as an arrow_array_stream PyCapsule.",
             returns="object",
         ),
+        *_operators("DataFrame"),
     ),
 )
 
@@ -457,6 +709,39 @@ SERIES = Exposed(
             name="labels",
             doc="The row labels, as an index.",
             returns="Index",
+        ),
+        Binding(
+            mojo="PySeries.binary_series",
+            name="binary_series",
+            doc="An operation between two series, matching rows by label.",
+            params=(
+                ("other", "Series"),
+                ("op", "str"),
+                ("flip", "bool"),
+                ("fill_value", "object | None"),
+            ),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.binary_value",
+            name="binary_value",
+            doc="An operation between every row of a series and one constant.",
+            params=(("other", "object"), ("op", "str"), ("flip", "bool")),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.compare_series",
+            name="compare_series",
+            doc="A comparison between two series labelled the same.",
+            params=(("other", "Series"), ("op", "str")),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.unary",
+            name="unary",
+            doc="One of the four unary operations, over every row.",
+            params=(("op", "str"),),
+            returns="Series",
         ),
         Binding(
             mojo="PySeries.arrow_c_schema",
@@ -584,6 +869,7 @@ SERIES = Exposed(
             doc="The column's Arrow data, as an arrow_schema and an arrow_array PyCapsule.",
             returns="tuple[object, ...]",
         ),
+        *_operators("Series"),
     ),
 )
 
@@ -1108,6 +1394,45 @@ BANNER_PY = (
 
 MOJO_COLUMNS = 80
 
+PYTHON_COLUMNS = 100
+"""What `ruff format` wraps at, which is the `line-length` in `pyproject.toml`.
+Both numbers are here rather than read out of the config, because the layouts
+below reproduce a formatter's output by hand and a config change should fail
+loudly rather than quietly produce a file that no longer matches."""
+
+
+def _python_def(indent: str, name: str, params: list[str], returns: str) -> list[str]:
+    """Writes one `def` line the way `ruff format` would have written it.
+
+    Same problem as `_register_call` on the Mojo side and the same reason for
+    solving it here: `ruff format --check` runs over the generated files, so a
+    signature that is merely valid is not enough, it has to be the text the
+    formatter produces. ruff has three layouts and takes the first that fits: all
+    on one line, then the parameters together on one continuation line, then one
+    parameter per line with a trailing comma.
+
+    Args:
+        indent: The indent the `def` sits at.
+        name: The function name.
+        params: The parameters, `self` included, each already annotated.
+        returns: The return annotation.
+
+    Returns:
+        The lines up to and including the colon.
+    """
+    joined = ", ".join(params)
+    one = f"{indent}def {name}({joined}) -> {returns}:"
+    if len(one) <= PYTHON_COLUMNS:
+        return [one]
+    together = f"{indent}    {joined}"
+    if len(together) <= PYTHON_COLUMNS:
+        return [f"{indent}def {name}(", together, f"{indent}) -> {returns}:"]
+    return (
+        [f"{indent}def {name}("]
+        + [f"{indent}    {part}," for part in params]
+        + [f"{indent}) -> {returns}:"]
+    )
+
 
 def _register_call(opener: str, name: str, doc: str) -> list[str]:
     """Writes one registration call the way `mojo format` would have written it.
@@ -1248,8 +1573,8 @@ def stubs() -> str:
             out.append("        ...")
             out.append("")
         for b in t.bindings:
-            args = "".join(f", {name}: {kind}" for name, kind in b.params)
-            out.append(f"    def {b.name}(self{args}) -> {b.returns}:")
+            args = ["self"] + [f"{name}: {kind}" for name, kind in b.params]
+            out.extend(_python_def("    ", b.name, args, b.returns))
             out.append(f'        """{b.doc}"""')
             out.append("        ...")
         out.append("")
@@ -1288,8 +1613,14 @@ def wrapper() -> str:
     out.append("from __future__ import annotations\n")
     # Only emitted when something in the table actually asks for it, since an
     # import nothing uses is a lint failure rather than a harmless extra line.
+    standard = []
     if any("Sequence[" in (m.signature or "") for t in TYPES for m in t.members):
-        out.append("from collections.abc import Sequence\n")
+        standard.append("from collections.abc import Sequence")
+    if any("Any" in (m.signature or "") or m.returns == "Any" for t in TYPES for m in t.members):
+        standard.append("from typing import Any")
+    if standard:
+        out.extend(standard)
+        out.append("")
     out.append("from . import _firepanda")
     mixins = sorted({t.mixin for t in TYPES if t.mixin})
     if mixins:
@@ -1331,8 +1662,8 @@ def wrapper() -> str:
                 out.append("    @property")
                 out.append(f"    def {m.name}(self) -> {m.returns}:")
             else:
-                sig = f", {m.signature}" if m.signature else ""
-                out.append(f"    def {m.name}(self{sig}) -> {m.returns}:")
+                params = ["self"] + (m.signature.split(", ") if m.signature else [])
+                out.extend(_python_def("    ", m.name, params, m.returns))
             out.append(f'        """{m.doc}"""')
             body = f"{m.wraps}._wrap({m.body})" if m.wraps else m.body
             out.extend(_guarded(f"return {body}", "        "))

@@ -18,6 +18,7 @@ nothing when nothing raises, which is measured in document 14.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
 from . import _firepanda
 from ._pandas import DataFrameMixin, IndexMixin, SeriesMixin
@@ -122,6 +123,349 @@ class DataFrame(DataFrameMixin):
         """The frame as a stream of one batch, as an arrow_array_stream PyCapsule."""
         try:
             return self._inner.arrow_c_stream(requested_schema)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __add__(self, other: Any) -> Any:
+        """`a + b`, against a frame, a series or a constant."""
+        try:
+            return self._operator(other, "add", False, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __radd__(self, other: Any) -> Any:
+        """`b + a`, which is what Python calls when the left side declines."""
+        try:
+            return self._operator(other, "add", True, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __sub__(self, other: Any) -> Any:
+        """`a - b`, against a frame, a series or a constant."""
+        try:
+            return self._operator(other, "sub", False, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __rsub__(self, other: Any) -> Any:
+        """`b - a`, which is what Python calls when the left side declines."""
+        try:
+            return self._operator(other, "sub", True, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __mul__(self, other: Any) -> Any:
+        """`a * b`, against a frame, a series or a constant."""
+        try:
+            return self._operator(other, "mul", False, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __rmul__(self, other: Any) -> Any:
+        """`b * a`, which is what Python calls when the left side declines."""
+        try:
+            return self._operator(other, "mul", True, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __truediv__(self, other: Any) -> Any:
+        """`a / b`, against a frame, a series or a constant."""
+        try:
+            return self._operator(other, "truediv", False, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __rtruediv__(self, other: Any) -> Any:
+        """`b / a`, which is what Python calls when the left side declines."""
+        try:
+            return self._operator(other, "truediv", True, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __floordiv__(self, other: Any) -> Any:
+        """`a // b`, against a frame, a series or a constant."""
+        try:
+            return self._operator(other, "floordiv", False, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __rfloordiv__(self, other: Any) -> Any:
+        """`b // a`, which is what Python calls when the left side declines."""
+        try:
+            return self._operator(other, "floordiv", True, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __mod__(self, other: Any) -> Any:
+        """`a % b`, against a frame, a series or a constant."""
+        try:
+            return self._operator(other, "mod", False, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __rmod__(self, other: Any) -> Any:
+        """`b % a`, which is what Python calls when the left side declines."""
+        try:
+            return self._operator(other, "mod", True, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __pow__(self, other: Any) -> Any:
+        """`a ** b`, against a frame, a series or a constant."""
+        try:
+            return self._operator(other, "pow", False, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __rpow__(self, other: Any) -> Any:
+        """`b ** a`, which is what Python calls when the left side declines."""
+        try:
+            return self._operator(other, "pow", True, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __eq__(self, other: Any) -> Any:
+        """`a == b`, which refuses two frames that are not labelled the same."""
+        try:
+            return self._operator(other, "eq", False, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __ne__(self, other: Any) -> Any:
+        """`a != b`, which refuses two frames that are not labelled the same."""
+        try:
+            return self._operator(other, "ne", False, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __lt__(self, other: Any) -> Any:
+        """`a < b`, which refuses two frames that are not labelled the same."""
+        try:
+            return self._operator(other, "lt", False, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __le__(self, other: Any) -> Any:
+        """`a <= b`, which refuses two frames that are not labelled the same."""
+        try:
+            return self._operator(other, "le", False, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __gt__(self, other: Any) -> Any:
+        """`a > b`, which refuses two frames that are not labelled the same."""
+        try:
+            return self._operator(other, "gt", False, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __ge__(self, other: Any) -> Any:
+        """`a >= b`, which refuses two frames that are not labelled the same."""
+        try:
+            return self._operator(other, "ge", False, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __neg__(self) -> Any:
+        """`-a`, which on a boolean column is the logical not."""
+        try:
+            return self._unary("neg")
+        except Exception as error:
+            raise translate(error) from None
+
+    def __pos__(self) -> Any:
+        """`+a`, which copies and refuses a boolean column, as pandas does."""
+        try:
+            return self._unary("pos")
+        except Exception as error:
+            raise translate(error) from None
+
+    def __abs__(self) -> Any:
+        """`abs(a)`, so the builtin works."""
+        try:
+            return self._unary("abs")
+        except Exception as error:
+            raise translate(error) from None
+
+    def __invert__(self) -> Any:
+        """`~a`, the bitwise not, which needs an integer or a boolean."""
+        try:
+            return self._unary("invert")
+        except Exception as error:
+            raise translate(error) from None
+
+    def abs(self) -> Any:
+        """Every value with its sign removed."""
+        try:
+            return self._unary("abs")
+        except Exception as error:
+            raise translate(error) from None
+
+    def add(
+        self, other: Any, axis: Any = "columns", level: Any = None, fill_value: Any = None
+    ) -> Any:
+        """`a + b`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "add", axis, level, fill_value, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def radd(
+        self, other: Any, axis: Any = "columns", level: Any = None, fill_value: Any = None
+    ) -> Any:
+        """`b + a`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "add", axis, level, fill_value, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def sub(
+        self, other: Any, axis: Any = "columns", level: Any = None, fill_value: Any = None
+    ) -> Any:
+        """`a - b`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "sub", axis, level, fill_value, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def rsub(
+        self, other: Any, axis: Any = "columns", level: Any = None, fill_value: Any = None
+    ) -> Any:
+        """`b - a`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "sub", axis, level, fill_value, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def mul(
+        self, other: Any, axis: Any = "columns", level: Any = None, fill_value: Any = None
+    ) -> Any:
+        """`a * b`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "mul", axis, level, fill_value, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def rmul(
+        self, other: Any, axis: Any = "columns", level: Any = None, fill_value: Any = None
+    ) -> Any:
+        """`b * a`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "mul", axis, level, fill_value, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def truediv(
+        self, other: Any, axis: Any = "columns", level: Any = None, fill_value: Any = None
+    ) -> Any:
+        """`a / b`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "truediv", axis, level, fill_value, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def rtruediv(
+        self, other: Any, axis: Any = "columns", level: Any = None, fill_value: Any = None
+    ) -> Any:
+        """`b / a`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "truediv", axis, level, fill_value, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def floordiv(
+        self, other: Any, axis: Any = "columns", level: Any = None, fill_value: Any = None
+    ) -> Any:
+        """`a // b`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "floordiv", axis, level, fill_value, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def rfloordiv(
+        self, other: Any, axis: Any = "columns", level: Any = None, fill_value: Any = None
+    ) -> Any:
+        """`b // a`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "floordiv", axis, level, fill_value, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def mod(
+        self, other: Any, axis: Any = "columns", level: Any = None, fill_value: Any = None
+    ) -> Any:
+        """`a % b`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "mod", axis, level, fill_value, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def rmod(
+        self, other: Any, axis: Any = "columns", level: Any = None, fill_value: Any = None
+    ) -> Any:
+        """`b % a`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "mod", axis, level, fill_value, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def pow(
+        self, other: Any, axis: Any = "columns", level: Any = None, fill_value: Any = None
+    ) -> Any:
+        """`a ** b`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "pow", axis, level, fill_value, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def rpow(
+        self, other: Any, axis: Any = "columns", level: Any = None, fill_value: Any = None
+    ) -> Any:
+        """`b ** a`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "pow", axis, level, fill_value, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def eq(self, other: Any, axis: Any = "columns", level: Any = None) -> Any:
+        """`a == b`, by name, which aligns where the operator refuses to."""
+        try:
+            return self._named(other, "eq", axis, level, None, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def ne(self, other: Any, axis: Any = "columns", level: Any = None) -> Any:
+        """`a != b`, by name, which aligns where the operator refuses to."""
+        try:
+            return self._named(other, "ne", axis, level, None, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def lt(self, other: Any, axis: Any = "columns", level: Any = None) -> Any:
+        """`a < b`, by name, which aligns where the operator refuses to."""
+        try:
+            return self._named(other, "lt", axis, level, None, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def le(self, other: Any, axis: Any = "columns", level: Any = None) -> Any:
+        """`a <= b`, by name, which aligns where the operator refuses to."""
+        try:
+            return self._named(other, "le", axis, level, None, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def gt(self, other: Any, axis: Any = "columns", level: Any = None) -> Any:
+        """`a > b`, by name, which aligns where the operator refuses to."""
+        try:
+            return self._named(other, "gt", axis, level, None, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def ge(self, other: Any, axis: Any = "columns", level: Any = None) -> Any:
+        """`a >= b`, by name, which aligns where the operator refuses to."""
+        try:
+            return self._named(other, "ge", axis, level, None, False)
         except Exception as error:
             raise translate(error) from None
 
@@ -251,6 +595,351 @@ class Series(SeriesMixin):
         """The column's Arrow data, as an arrow_schema and an arrow_array PyCapsule."""
         try:
             return tuple(self._inner.arrow_c_array(requested_schema))
+        except Exception as error:
+            raise translate(error) from None
+
+    def __add__(self, other: Any) -> Any:
+        """`a + b`, against a series or a constant."""
+        try:
+            return self._operator(other, "add", False, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __radd__(self, other: Any) -> Any:
+        """`b + a`, which is what Python calls when the left side declines."""
+        try:
+            return self._operator(other, "add", True, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __sub__(self, other: Any) -> Any:
+        """`a - b`, against a series or a constant."""
+        try:
+            return self._operator(other, "sub", False, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __rsub__(self, other: Any) -> Any:
+        """`b - a`, which is what Python calls when the left side declines."""
+        try:
+            return self._operator(other, "sub", True, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __mul__(self, other: Any) -> Any:
+        """`a * b`, against a series or a constant."""
+        try:
+            return self._operator(other, "mul", False, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __rmul__(self, other: Any) -> Any:
+        """`b * a`, which is what Python calls when the left side declines."""
+        try:
+            return self._operator(other, "mul", True, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __truediv__(self, other: Any) -> Any:
+        """`a / b`, against a series or a constant."""
+        try:
+            return self._operator(other, "truediv", False, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __rtruediv__(self, other: Any) -> Any:
+        """`b / a`, which is what Python calls when the left side declines."""
+        try:
+            return self._operator(other, "truediv", True, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __floordiv__(self, other: Any) -> Any:
+        """`a // b`, against a series or a constant."""
+        try:
+            return self._operator(other, "floordiv", False, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __rfloordiv__(self, other: Any) -> Any:
+        """`b // a`, which is what Python calls when the left side declines."""
+        try:
+            return self._operator(other, "floordiv", True, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __mod__(self, other: Any) -> Any:
+        """`a % b`, against a series or a constant."""
+        try:
+            return self._operator(other, "mod", False, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __rmod__(self, other: Any) -> Any:
+        """`b % a`, which is what Python calls when the left side declines."""
+        try:
+            return self._operator(other, "mod", True, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __pow__(self, other: Any) -> Any:
+        """`a ** b`, against a series or a constant."""
+        try:
+            return self._operator(other, "pow", False, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __rpow__(self, other: Any) -> Any:
+        """`b ** a`, which is what Python calls when the left side declines."""
+        try:
+            return self._operator(other, "pow", True, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __eq__(self, other: Any) -> Any:
+        """`a == b`, which refuses two seriess that are not labelled the same."""
+        try:
+            return self._operator(other, "eq", False, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __ne__(self, other: Any) -> Any:
+        """`a != b`, which refuses two seriess that are not labelled the same."""
+        try:
+            return self._operator(other, "ne", False, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __lt__(self, other: Any) -> Any:
+        """`a < b`, which refuses two seriess that are not labelled the same."""
+        try:
+            return self._operator(other, "lt", False, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __le__(self, other: Any) -> Any:
+        """`a <= b`, which refuses two seriess that are not labelled the same."""
+        try:
+            return self._operator(other, "le", False, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __gt__(self, other: Any) -> Any:
+        """`a > b`, which refuses two seriess that are not labelled the same."""
+        try:
+            return self._operator(other, "gt", False, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __ge__(self, other: Any) -> Any:
+        """`a >= b`, which refuses two seriess that are not labelled the same."""
+        try:
+            return self._operator(other, "ge", False, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __neg__(self) -> Any:
+        """`-a`, which on a boolean column is the logical not."""
+        try:
+            return self._unary("neg")
+        except Exception as error:
+            raise translate(error) from None
+
+    def __pos__(self) -> Any:
+        """`+a`, which copies and refuses a boolean column, as pandas does."""
+        try:
+            return self._unary("pos")
+        except Exception as error:
+            raise translate(error) from None
+
+    def __abs__(self) -> Any:
+        """`abs(a)`, so the builtin works."""
+        try:
+            return self._unary("abs")
+        except Exception as error:
+            raise translate(error) from None
+
+    def __invert__(self) -> Any:
+        """`~a`, the bitwise not, which needs an integer or a boolean."""
+        try:
+            return self._unary("invert")
+        except Exception as error:
+            raise translate(error) from None
+
+    def abs(self) -> Any:
+        """Every value with its sign removed."""
+        try:
+            return self._unary("abs")
+        except Exception as error:
+            raise translate(error) from None
+
+    def add(self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0) -> Any:
+        """`a + b`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "add", axis, level, fill_value, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def radd(self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0) -> Any:
+        """`b + a`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "add", axis, level, fill_value, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def sub(self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0) -> Any:
+        """`a - b`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "sub", axis, level, fill_value, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def rsub(self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0) -> Any:
+        """`b - a`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "sub", axis, level, fill_value, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def mul(self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0) -> Any:
+        """`a * b`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "mul", axis, level, fill_value, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def rmul(self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0) -> Any:
+        """`b * a`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "mul", axis, level, fill_value, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def truediv(self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0) -> Any:
+        """`a / b`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "truediv", axis, level, fill_value, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def rtruediv(self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0) -> Any:
+        """`b / a`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "truediv", axis, level, fill_value, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def floordiv(self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0) -> Any:
+        """`a // b`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "floordiv", axis, level, fill_value, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def rfloordiv(
+        self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0
+    ) -> Any:
+        """`b // a`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "floordiv", axis, level, fill_value, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def mod(self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0) -> Any:
+        """`a % b`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "mod", axis, level, fill_value, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def rmod(self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0) -> Any:
+        """`b % a`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "mod", axis, level, fill_value, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def pow(self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0) -> Any:
+        """`a ** b`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "pow", axis, level, fill_value, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def rpow(self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0) -> Any:
+        """`b ** a`, by name, so it can take a fill value."""
+        try:
+            return self._named(other, "pow", axis, level, fill_value, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def eq(self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0) -> Any:
+        """`a == b`, by name, which aligns where the operator refuses to."""
+        try:
+            return self._named(other, "eq", axis, level, fill_value, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def ne(self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0) -> Any:
+        """`a != b`, by name, which aligns where the operator refuses to."""
+        try:
+            return self._named(other, "ne", axis, level, fill_value, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def lt(self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0) -> Any:
+        """`a < b`, by name, which aligns where the operator refuses to."""
+        try:
+            return self._named(other, "lt", axis, level, fill_value, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def le(self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0) -> Any:
+        """`a <= b`, by name, which aligns where the operator refuses to."""
+        try:
+            return self._named(other, "le", axis, level, fill_value, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def gt(self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0) -> Any:
+        """`a > b`, by name, which aligns where the operator refuses to."""
+        try:
+            return self._named(other, "gt", axis, level, fill_value, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def ge(self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0) -> Any:
+        """`a >= b`, by name, which aligns where the operator refuses to."""
+        try:
+            return self._named(other, "ge", axis, level, fill_value, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __divmod__(self, other: Any) -> Any:
+        """The floor division and the remainder, as a pair."""
+        try:
+            return self._divmod(other, 0, None, None, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def divmod(self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0) -> Any:
+        """The floor division and the remainder, as a pair, by name."""
+        try:
+            return self._divmod(other, axis, level, fill_value, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __rdivmod__(self, other: Any) -> Any:
+        """The floor division and the remainder, as a pair."""
+        try:
+            return self._divmod(other, 0, None, None, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def rdivmod(self, other: Any, level: Any = None, fill_value: Any = None, axis: Any = 0) -> Any:
+        """The floor division and the remainder, as a pair, by name."""
+        try:
+            return self._divmod(other, axis, level, fill_value, True)
         except Exception as error:
             raise translate(error) from None
 
