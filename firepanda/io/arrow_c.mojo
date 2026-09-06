@@ -505,6 +505,8 @@ def format_for(type: LogicalType) raises -> String:
         return String("ts", type.unit.code_letter(), ":", type.zone)
     if type.kind == TypeKind.DATE:
         return String("tdD")
+    if type.kind == TypeKind.DURATION:
+        return String("tD", type.unit.code_letter())
     if type == LogicalType.NULL:
         return "n"
     if type == LogicalType.BOOL:
@@ -559,6 +561,8 @@ def type_for_format(format: StringSlice) raises -> LogicalType:
     """
     if format.startswith("ts"):
         return _timestamp_for_format(format)
+    if format.startswith("tD"):
+        return _duration_for_format(format)
     if format == "tdD":
         return LogicalType.DATE32
     if format == "tdm":
@@ -631,26 +635,73 @@ def _timestamp_for_format(format: StringSlice) raises -> LogicalType:
                 ),
             )
         )
-    var letter = raw[2]
-    var unit = TimeUnit.SECOND
-    if letter == UInt8(ord("m")):
-        unit = TimeUnit.MILLI
-    elif letter == UInt8(ord("u")):
-        unit = TimeUnit.MICRO
-    elif letter == UInt8(ord("n")):
-        unit = TimeUnit.NANO
-    elif letter != UInt8(ord("s")):
-        raise Error(
-            String(
-                "arrow: '",
-                format,
-                "' has a unit letter that is none of s, m, u and n",
-            )
-        )
+    var unit = _unit_for_letter(raw[2], format)
     if len(raw) == 4:
         return LogicalType.timestamp(unit)
     return LogicalType.timestamp(
         unit, TimeZone(StringSlice(unsafe_from_utf8=raw[4 : len(raw)]))
+    )
+
+
+def _duration_for_format(format: StringSlice) raises -> LogicalType:
+    """Reads a duration format string into a type.
+
+    Three characters and no more: `tD` and one letter for the unit. There is no
+    colon and nothing after it, because a duration carries no zone, so anything
+    longer is not a duration format string however much it looks like one.
+
+    Args:
+        format: The format string, already known to start with `tD`.
+
+    Returns:
+        The duration type.
+
+    Raises:
+        Error: If the string is the wrong length or the unit letter is not one
+            of the four.
+    """
+    var raw = format.as_bytes()
+    if len(raw) != 3:
+        raise Error(
+            String(
+                "arrow: '",
+                format,
+                (
+                    "' is not a duration format string, which is 'tD' and a"
+                    " single unit letter with nothing after it"
+                ),
+            )
+        )
+    return LogicalType.duration(_unit_for_letter(raw[2], format))
+
+
+def _unit_for_letter(letter: UInt8, format: StringSlice) raises -> TimeUnit:
+    """Turns the unit letter out of a temporal format string into a unit.
+
+    Args:
+        letter: The letter.
+        format: The whole format string, for the message.
+
+    Returns:
+        The unit.
+
+    Raises:
+        Error: If the letter is none of the four Arrow uses.
+    """
+    if letter == UInt8(ord("s")):
+        return TimeUnit.SECOND
+    if letter == UInt8(ord("m")):
+        return TimeUnit.MILLI
+    if letter == UInt8(ord("u")):
+        return TimeUnit.MICRO
+    if letter == UInt8(ord("n")):
+        return TimeUnit.NANO
+    raise Error(
+        String(
+            "arrow: '",
+            format,
+            "' has a unit letter that is none of s, m, u and n",
+        )
     )
 
 

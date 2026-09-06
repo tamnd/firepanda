@@ -46,6 +46,12 @@ struct TypeKind(Equatable, ImplicitlyCopyable, Movable, Writable):
     comptime DATE = Self(7)
     """A calendar day, counted from the Unix epoch. Stored int32."""
 
+    comptime DURATION = Self(8)
+    """An elapsed amount of time in the type's own unit, stored int64. Not an
+    instant and not counted from anything: it is what you get by subtracting two
+    timestamps, and adding two of them is a sensible thing to do where adding
+    two instants is not."""
+
     def __eq__(self, other: Self) -> Bool:
         """Compares two kinds.
 
@@ -88,8 +94,10 @@ struct TypeKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("binary")
         elif self == Self.TIMESTAMP:
             writer.write("timestamp")
-        else:
+        elif self == Self.DATE:
             writer.write("date")
+        else:
+            writer.write("duration")
 
 
 @fieldwise_init
@@ -158,6 +166,22 @@ struct LogicalType(Equatable, ImplicitlyCopyable, Movable, Writable):
         """
         return Self(TypeKind.TIMESTAMP, DType.int64, unit, zone)
 
+    @staticmethod
+    def duration(unit: TimeUnit) -> Self:
+        """Constructs a duration type.
+
+        There is no zone argument and there is no zone. An elapsed amount of
+        time is the same amount of time wherever it is read, which is the whole
+        difference between this type and a timestamp.
+
+        Args:
+            unit: How many of the column's integers make one second.
+
+        Returns:
+            The type.
+        """
+        return Self(TypeKind.DURATION, DType.int64, unit, TimeZone())
+
     def __eq__(self, other: Self) -> Bool:
         """Compares two logical types.
 
@@ -225,12 +249,21 @@ struct LogicalType(Equatable, ImplicitlyCopyable, Movable, Writable):
         return self.kind == TypeKind.INT and contains[SIGNED](self.physical)
 
     def is_temporal(self) -> Bool:
-        """Reports whether this type means a point in time.
+        """Reports whether this type is about time rather than about a number.
+
+        Two of the three are a point in time and the third is a length of one,
+        which is a real difference and not one this predicate makes. What it is
+        for is keeping all three out of the paths that would otherwise treat
+        them as the integers they are stored as.
 
         Returns:
-            True for timestamps and dates.
+            True for timestamps, dates and durations.
         """
-        return self.kind == TypeKind.TIMESTAMP or self.kind == TypeKind.DATE
+        return (
+            self.kind == TypeKind.TIMESTAMP
+            or self.kind == TypeKind.DATE
+            or self.kind == TypeKind.DURATION
+        )
 
     def is_variable_width(self) -> Bool:
         """Reports whether values are stored out of line behind an offsets array.
@@ -253,12 +286,13 @@ struct LogicalType(Equatable, ImplicitlyCopyable, Movable, Writable):
     def write_to(self, mut writer: Some[Writer]):
         """Writes the type in the form users see it.
 
-        The two temporal spellings are pandas' rather than Arrow's, because this
-        string is what `dtype` hands back and a user comparing it against
-        `datetime64[ns]` is comparing against pandas. The date is the exception
-        and is spelled the way Arrow spells it, since pandas on the numpy
-        backend has no date dtype at all and calls the column `object`, which is
-        a thing firepanda would be lying to say.
+        The timestamp and the duration are spelled pandas' way rather than
+        Arrow's, because this string is what `dtype` hands back and a user
+        comparing it against `datetime64[ns]` or `timedelta64[ns]` is comparing
+        against pandas. The date is the exception and is spelled the way Arrow
+        spells it, since pandas on the numpy backend has no date dtype at all
+        and calls the column `object`, which is a thing firepanda would be lying
+        to say.
 
         Args:
             writer: The destination.
@@ -276,6 +310,8 @@ struct LogicalType(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("]")
         elif self.kind == TypeKind.DATE:
             writer.write("date32[day]")
+        elif self.kind == TypeKind.DURATION:
+            writer.write("timedelta64[", self.unit, "]")
         else:
             writer.write(self.physical)
 
@@ -332,22 +368,36 @@ def promote(a: LogicalType, b: LogicalType) raises -> LogicalType:
         return a
 
     if a.is_temporal() or b.is_temporal():
-        # Two identical temporal types were returned above, so anything arriving
-        # here is either a timestamp against a number, which has no answer, or
-        # two timestamps that disagree about the unit or the zone, which has one
-        # and firepanda cannot spell it yet: the difference of two instants is a
-        # duration and there is no duration type. Both refuse, and the message
-        # says which of the two it was, because a user who wrote `a - b` on two
-        # microsecond columns in different zones has a different problem from
-        # one who wrote `a - 1`.
+        # Two identical temporal types were returned above, so everything
+        # arriving here is a mixture, and there are three of them. Two temporals
+        # that disagree about the kind, the unit or the zone have an answer and
+        # it is a conversion rather than a promotion, since reconciling a second
+        # column with a nanosecond one means multiplying every value. A duration
+        # against a number has an answer too and pandas gives it, because
+        # scaling an elapsed time by a factor is a sensible thing to do, and
+        # firepanda has no arithmetic on these columns to give it with yet. An
+        # instant against a number has no answer at all. The three messages are
+        # separate because a user who wrote `a - b` on two microsecond columns
+        # in different zones has a different problem from one who wrote `a - 1`.
         if a.is_temporal() and b.is_temporal():
             raise Error(
                 "no common type for "
                 + String(a)
                 + " and "
                 + String(b)
-                + ", because the two differ in unit or in time zone and"
+                + ", because the two differ in kind, in unit or in time"
+                " zone and"
                 " reconciling them is a conversion rather than a promotion"
+            )
+        if a.kind == TypeKind.DURATION or b.kind == TypeKind.DURATION:
+            raise Error(
+                "no common type for "
+                + String(a)
+                + " and "
+                + String(b)
+                + ", because pandas scales an elapsed time by a number rather"
+                " than promoting the two to something they have in common, and"
+                " firepanda has no arithmetic on a duration column yet"
             )
         raise Error(
             "no common type for "

@@ -170,15 +170,17 @@ def _buffer_length(data: Span[UInt8, _], start: Int, index: Int) raises -> Int:
 
 
 def _temporal() raises -> DataFrame:
-    """Builds a frame of the three temporal types the writer can spell.
+    """Builds a frame of the four temporal types the writer can spell.
 
     Returns:
         Three rows of a second resolution timestamp, a microsecond one in New
-        York, and a date, with a null in the middle of each.
+        York, a date and a second resolution duration, with a null in the middle
+        of each.
     """
     var seconds = Array[DType.int64](3)
     var micros = Array[DType.int64](3)
     var days = Array[DType.int32](3)
+    var elapsed = Array[DType.int64](3)
     seconds.set_valid(0, Int64(1710034245))
     seconds.set_null(1)
     seconds.set_valid(2, Int64(-1))
@@ -188,6 +190,9 @@ def _temporal() raises -> DataFrame:
     days.set_valid(0, Int32(19792))
     days.set_null(1)
     days.set_valid(2, Int32(-1))
+    elapsed.set_valid(0, Int64(90))
+    elapsed.set_null(1)
+    elapsed.set_valid(2, Int64(-90))
 
     var second = AnyArray(seconds^)
     second.type = LogicalType.timestamp(TimeUnit.SECOND)
@@ -197,11 +202,18 @@ def _temporal() raises -> DataFrame:
     )
     var date = AnyArray(days^)
     date.type = LogicalType.DATE32
+    # A second and not a millisecond on purpose. Arrow's duration table defaults
+    # its unit to millisecond, so a second resolution column is the one that has
+    # to write a zero the reader would otherwise never see, and a writer that
+    # left the field out would round trip every unit except this one.
+    var span = AnyArray(elapsed^)
+    span.type = LogicalType.duration(TimeUnit.SECOND)
 
     var columns = List[Series]()
     columns.append(Series("second", second^))
     columns.append(Series("zoned", zoned^))
     columns.append(Series("day", date^))
+    columns.append(Series("elapsed", span^))
     return DataFrame.from_series(columns^)
 
 
@@ -212,19 +224,22 @@ def test_a_temporal_frame_round_trips_with_its_units_and_its_zone() raises:
     # is why this asserts the types before it asserts the values.
     var bytes = write_ipc_stream_bytes(_temporal())
     var frame = read_ipc_stream(Span(bytes))
-    assert_equal(frame.width(), 3)
+    assert_equal(frame.width(), 4)
     assert_equal(len(frame), 3)
     assert_equal(String(frame.schema[0].dtype), "datetime64[s]")
     assert_equal(
         String(frame.schema[1].dtype), "datetime64[us, America/New_York]"
     )
     assert_equal(String(frame.schema[2].dtype), "date32[day]")
+    assert_equal(String(frame.schema[3].dtype), "timedelta64[s]")
     assert_equal(frame[0].as_typed[DType.int64]()[0], Int64(1710034245))
     assert_equal(frame[1].as_typed[DType.int64]()[2], Int64(-1000000))
     assert_equal(frame[2].as_typed[DType.int32]()[0], Int32(19792))
+    assert_equal(frame[3].as_typed[DType.int64]()[2], Int64(-90))
     assert_false(frame[0].is_valid(1))
     assert_false(frame[1].is_valid(1))
     assert_false(frame[2].is_valid(1))
+    assert_false(frame[3].is_valid(1))
 
 
 def test_a_stream_round_trips() raises:

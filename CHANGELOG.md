@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A duration column can be read, written and named
+
+Arrow type 18 is a duration, an int64 counting an elapsed amount of time in the type's own unit, and it is now a type firepanda has. firepanda spells it `timedelta64[us]` the way pandas does, and the four units are the same four a timestamp has.
+
+A duration is not an instant and it is not counted from anything. It is what you get by subtracting two timestamps, and it is the reason it comes next rather than later: subtraction on a timestamp column has to produce something, and until there was a type for elapsed time there was nothing for it to produce.
+
+The type takes no zone, because an elapsed time has no wall clock to be read against. Ninety seconds is ninety seconds in New York and in Sydney, and it is the instants at either end of it that need a zone, not the span between them.
+
+`promote` refuses a duration against anything but itself, and it refuses it with its own sentence rather than the one an instant gets. Mixing a duration with a number is a thing pandas does, but it does it by scaling the elapsed time rather than by finding a type the two have in common, so a promotion is the wrong answer to give even though a scaling is a reasonable thing to want. Mixing a duration with a timestamp is refused too, and it is the mixture most likely to look as though it should work, since both are an int64 and adding an elapsed time to an instant is exactly what a user means. That also needs arithmetic rather than a promotion.
+
+One thing about the Arrow encoding is worth writing down. A duration's unit field defaults to millisecond in the flatbuffer schema, where every other table here defaults its first field to zero. A writer that leaves the field out because the value is zero produces a second resolution column that reads back as a millisecond one, off by a factor of a thousand and with nothing in the file to say so. The writer passes the default explicitly for that reason, and the round trip test uses a second resolution column rather than the millisecond one it would otherwise have reached for.
+
+The reader and the writer were both checked against pyarrow in all four units. A file firepanda wrote comes back as `duration[s]`, `duration[ms]`, `duration[us]` and `duration[ns]`, and `to_pandas` on it gives the four `timedelta64` dtypes. A file pyarrow wrote reads here with the same units and the same integers.
+
 ## [0.6.50] - 2026-09-07
 
 Built against Mojo 1.0.0 (ed45d567).
