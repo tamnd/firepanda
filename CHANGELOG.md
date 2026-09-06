@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Arithmetic on a frame aligns on both axes
+
+`a + b` on two frames now matches rows by label and columns by name, which is the same rule the series operators got and one axis more of it. Two frames of two columns and two rows each can come back three by three: the rows land on the union of the two indexes, the columns land on the union of the two name lists, and a cell that only one side had holds nothing because there was nothing to combine it with. Seven operators are in, `+`, `-`, `*`, `/`, `//`, `%` and `**`, along with the seven reflected forms against a constant and the six comparisons, and the four unary operations mean `-df` and `~df` work as well.
+
+What the result's columns are called is worth stating, because it has a case in it that is easy to miss. Two frames whose names are the same list in the same order keep that order, which is the case where a reordering would be most surprising and is what runs when a program adds two frames it built the same way. Anything else is the sorted union, so two frames holding the same names in a different order come back sorted rather than in either operand's order. That is measured off pandas rather than chosen.
+
+The row plan is worked out once and used for every column. Unioning two label sets and looking each side up in the union is the expensive half of an aligned operation, and doing it per column would do that work once per column for the same answer every time, so `plan_indexes` in `firepanda/frame/align.mojo` does it once and every column is gathered with the result. The short circuit for two frames that have the same labels is still there underneath, so two frames that came out of the same file pay one integer comparison and then hand every column pair to the kernel exactly as it arrived.
+
+A column that only one of the two frames has is not a special case in the implementation, which is what makes `fill_value` work on it. The missing side is built as a column of nulls in the other side's type and goes through the kernel like anything else, so `a.add(b, fill_value=0)` fills it row by row and the column that was only on one side comes back whole. Writing it as a branch that skipped the kernel would have answered nothing there instead.
+
+`df + s` is in and it is the operation that reads like one thing and does another. The series labels are matched against the column names rather than the row labels, so the series is broadcast across the rows and each of its values acts as one constant for the column it landed on. That is what pandas does with the default axis and it catches people, so the other reading is available as `df.binary(s, op, axis=0)`, where the labels are row labels and every column of the frame meets the same series. A series broadcast along the columns needs text labels, since a column name is text, and says so rather than answering a frame of nothing.
+
+`==` between two frames raises unless both the row labels and the column names match exactly, in the same order, which is pandas down to the wording of the message. The reason is the same one the series operators have: a cell that only one side has cannot be compared, and answering False would read as "these differ" rather than as "one of them is not here". The aligning version is reachable through `df.binary(other, BinaryOp.EQ)` until the flexible named forms land.
+
+Two divergences carry over from the series work unchanged. An aligned integer result stays an integer with nulls in it where pandas widens the whole column to float64 to make room for a NaN, and a comparison that aligned answers a missing value where pandas answers False. Both are the same argument: an Arrow column has a validity bitmap to record absence in, so it does not need the workaround a numpy array needs.
+
 ### A correlation or covariance per group reads its columns once
 
 A grouped correlation used to read both of its columns twice. It centres each group on that group's two means, and it does not have the means until a pass has finished, so finding them was a pass of its own. At a hundred million rows that is an extra eight hundred megabytes read for arithmetic that has already been done once.
@@ -1111,7 +1127,6 @@ Parquet stopped converting. Reading DuckDB's vectors directly is about eleven pe
 There is a JSON reader now, `read_ndjson`, one object per line, sixteen times faster than pandas 3.0.5 on a 166 MB file and not yet where it needs to be against Polars or pyarrow. Its scanner decodes nothing on the first pass and refuses everything malformed rather than guessing, which is half of what its tests are about.
 
 Underneath all of it is `parallel_morsels`, a work stealing scheduler that hands out 128k row morsels from an atomic cursor instead of cutting a job into one piece per worker up front. On skewed work it is 3.9 times faster than the static split and on even work it costs nothing, and it is the shape every kernel in the new engine is being moved onto. `take` and the join emit are on it already, neither of them faster for it, both of them measured and written down here anyway, because the point of the move is the loop body's shape and not this quarter's number.
-
 
 ### Added
 

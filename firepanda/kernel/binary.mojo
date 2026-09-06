@@ -440,7 +440,7 @@ def binary_value_any(
     var answer = binary_type(op, left, right)
 
     if b.is_null():
-        return _all_null(answer, len(a))
+        return all_null(answer, len(a))
 
     var common = promote(a.type, b.type)
     # The comparison with the constant on the left is turned round rather than
@@ -457,7 +457,7 @@ def binary_value_any(
     return _binary_const_erased(column, b, applied, common.physical, flip)
 
 
-def _all_null(type: LogicalType, rows: Int) raises -> AnyArray:
+def all_null(type: LogicalType, rows: Int) raises -> AnyArray:
     """Builds a column of a given type with every row missing.
 
     The values buffer starts zeroed and a null holds a zero, so this only has to

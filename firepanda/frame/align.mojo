@@ -33,6 +33,15 @@ a special case to bolt on here. It is #244. Until it exists, two differing
 indexes with a duplicate in either of them are turned away with a message saying
 so.
 
+A frame goes through `plan_indexes` rather than `align_pair`, because it has
+many columns and one pair of indexes. The union and the two lookups are one
+answer that every column is gathered with, so doing them per column would repeat
+the expensive half of the operation once per column and get the same list of
+positions back every time. `plan_columns` is the other axis a frame has and the
+one a series does not: two frames whose column names are the same list in the
+same order keep that order, and anything else is the sorted union, which is
+measured off pandas rather than picked.
+
 `fill_value` is the other rule in here and it is not the one people expect. It
 fills a row where exactly one of the two sides is missing, and leaves a row where
 both are missing alone, so `a.add(b, fill_value=0)` on `abc` and `bcd` answers a
@@ -94,6 +103,89 @@ struct Aligned(Movable):
         return self.index^
 
 
+struct IndexPlan(Movable):
+    """Where each output row comes from on each side.
+
+    A frame needs this rather than `align_pair`, because the two indexes are
+    worked out once and then every pair of columns is gathered with the same
+    answer. Doing it per column would union the same two label sets once per
+    column and get the same result every time.
+    """
+
+    var index: Index
+    """The labels the result is on."""
+
+    var left: List[Int]
+    """One left position per output row, negative for a row the left side does
+    not have. Empty when `identical` is set."""
+
+    var right: List[Int]
+    """One right position per output row, negative for a row the right side does
+    not have. Empty when `identical` is set."""
+
+    var identical: Bool
+    """Whether the two indexes held the same labels, in which case no gather is
+    needed at all and the two columns go through untouched."""
+
+    def __init__(
+        out self,
+        var index: Index,
+        var left: List[Int],
+        var right: List[Int],
+        identical: Bool,
+    ):
+        """Constructs the plan.
+
+        Args:
+            index: The output labels.
+            left: The left positions.
+            right: The right positions.
+            identical: Whether the two indexes were the same.
+        """
+        self.index = index^
+        self.left = left^
+        self.right = right^
+        self.identical = identical
+
+    def into_index(deinit self) -> Index:
+        """Gives up the labels, dropping the two position lists.
+
+        Returns:
+            The labels.
+        """
+        return self.index^
+
+
+def plan_indexes(left_index: Index, right_index: Index) raises -> IndexPlan:
+    """Works out where each output row comes from, without touching a column.
+
+    Args:
+        left_index: The left labels.
+        right_index: The right labels.
+
+    Returns:
+        The plan.
+
+    Raises:
+        Error: If the labels differ and either index holds a duplicate, or if
+            the two label dtypes cannot be unioned.
+    """
+    if left_index.equals(right_index):
+        return IndexPlan(Index(copy=left_index), List[Int](), List[Int](), True)
+
+    _no_duplicates(left_index, "left")
+    _no_duplicates(right_index, "right")
+
+    var union = left_index.union(right_index)
+    var labels = union.materialize()
+    return IndexPlan(
+        union^,
+        _positions(left_index.get_indexer(labels)),
+        _positions(right_index.get_indexer(labels)),
+        False,
+    )
+
+
 def align_pair(
     left_index: Index,
     left: AnyArray,
@@ -115,21 +207,31 @@ def align_pair(
         Error: If the labels differ and either index holds a duplicate, or if
             the two label dtypes cannot be unioned.
     """
-    if left_index.equals(right_index):
+    var plan = plan_indexes(left_index, right_index)
+    if plan.identical:
         return Aligned(
-            AnyArray(copy=left), AnyArray(copy=right), Index(copy=left_index)
+            AnyArray(copy=left), AnyArray(copy=right), plan^.into_index()
         )
+    var moved_left = take_any(left, plan.left)
+    var moved_right = take_any(right, plan.right)
+    return Aligned(moved_left^, moved_right^, plan^.into_index())
 
-    _no_duplicates(left_index, "left")
-    _no_duplicates(right_index, "right")
 
-    var union = left_index.union(right_index)
-    var labels = union.materialize()
-    return Aligned(
-        _reindex(left, left_index.get_indexer(labels)),
-        _reindex(right, right_index.get_indexer(labels)),
-        union^,
-    )
+def reindex(col: AnyArray, positions: List[Int]) raises -> AnyArray:
+    """Gathers a column onto a set of positions worked out by a plan.
+
+    Args:
+        col: The column.
+        positions: One position per output row, negative for a row this column
+            does not have.
+
+    Returns:
+        A column with as many rows as there were positions.
+
+    Raises:
+        Error: If the column's dtype has no physical layout.
+    """
+    return take_any(col, positions)
 
 
 def fill_one_sided(
@@ -190,6 +292,77 @@ def keep_rows(mut col: AnyArray, keep: Bitmap) raises:
     raise Error("align: unsupported dtype")
 
 
+def plan_columns(left: List[String], right: List[String]) -> List[String]:
+    """Works out what columns a result of two frames has, and in what order.
+
+    Two frames whose columns are the same names in the same order keep that
+    order, which is the case that runs when a program adds two frames it built
+    the same way and is the one where a reordering would be most surprising.
+    Anything else is the sorted union, including two frames that have the same
+    names in a different order, which pandas sorts rather than picking a side.
+
+    Args:
+        left: The left frame's column names.
+        right: The right frame's column names.
+
+    Returns:
+        The output column names.
+    """
+    if left == right:
+        return List[String](left)
+
+    var names = List[String](left)
+    for i in range(len(right)):
+        var seen = False
+        for j in range(len(names)):
+            if names[j] == right[i]:
+                seen = True
+                break
+        if not seen:
+            names.append(right[i])
+
+    # An insertion sort, because a frame has tens of columns and not millions,
+    # and because the radix sort in `firepanda/kernel/sort.mojo` wants a column
+    # rather than a list of names.
+    for i in range(1, len(names)):
+        var name = names[i]
+        var j = i - 1
+        while j >= 0 and names[j] > name:
+            names[j + 1] = names[j]
+            j -= 1
+        names[j + 1] = name^
+    return names^
+
+
+def value_at(col: AnyArray, i: Int) raises -> Value:
+    """Reads one row out of a column as a type erased scalar.
+
+    This is what makes `df + s` along the columns work. The series holds one
+    value per column name rather than one per row, so each of its rows is a
+    constant as far as the column it lands on is concerned, and the constant
+    path in the kernel is the one that runs.
+
+    Args:
+        col: The column.
+        i: Which row.
+
+    Returns:
+        The value, or a null of the column's type if the row is missing.
+
+    Raises:
+        Error: If the column's dtype has no physical layout.
+    """
+    if not col.is_valid(i):
+        return Value(null=col.type)
+    if col.is_string():
+        return Value(String(col.strings()[i]))
+    comptime for target in ALL:
+        if col.dtype() == target:
+            ref typed = col.as_typed_view[target]()
+            return Value(typed[i])
+    raise Error("align: unsupported dtype")
+
+
 def _no_duplicates(index: Index, side: String) raises:
     """Refuses an index that cannot be looked up in.
 
@@ -211,28 +384,24 @@ def _no_duplicates(index: Index, side: String) raises:
         )
 
 
-def _reindex(col: AnyArray, positions: Array[DType.int64]) raises -> AnyArray:
-    """Gathers a column onto a new set of positions.
+def _positions(found: Array[DType.int64]) raises -> List[Int]:
+    """Turns a lookup's answers into the positions a gather wants.
 
     Args:
-        col: The column.
-        positions: One position per output row, `NOT_FOUND` for a label this
-            column does not have.
+        found: One answer per output row, `NOT_FOUND` for a label the index
+            being looked up in does not have.
 
     Returns:
-        A column with as many rows as there were positions.
-
-    Raises:
-        Error: If the column's dtype has no physical layout.
+        The same answers as a list of positions.
     """
-    var rows = List[Int](capacity=len(positions))
-    for i in range(len(positions)):
-        var at = positions[i]
+    var rows = List[Int](capacity=len(found))
+    for i in range(len(found)):
+        var at = found[i]
         # `take_any` reads any negative position as a row that is not there,
         # which is what `NOT_FOUND` already is, so the two agree without a
         # translation step.
         rows.append(Int(at) if at != NOT_FOUND else -1)
-    return take_any(col, rows)
+    return rows^
 
 
 def _constant(value: Value, rows: Int, type: LogicalType) raises -> AnyArray:
