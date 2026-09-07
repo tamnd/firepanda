@@ -1657,6 +1657,85 @@ def _month_length_scalar(year: Int64, month: Int) -> Int:
     return 31
 
 
+def _first_weekday_scalar(year: Int64) -> Int64:
+    """Returns which day of the week the first of January falls on.
+
+    The count is Monday zero, and it comes out of the ordinary formula for the
+    day of the week of a year's first day rather than out of a day count, which
+    is the point: the kernel gets the ISO calendar by converting the Thursday of
+    the row's week, and a twin that did the same would agree with it for the
+    same reason rather than for an independent one.
+
+    Args:
+        year: The calendar year.
+
+    Returns:
+        Zero for a Monday through six for a Sunday.
+    """
+    return _floored_int_remainder(
+        year
+        + _floored_int_quotient(year, 4)
+        - _floored_int_quotient(year, 100)
+        + _floored_int_quotient(year, 400),
+        7,
+    )
+
+
+def _iso_weeks_in_scalar(year: Int64) -> Int64:
+    """Returns how many ISO weeks a year has, which is 52 or 53.
+
+    A year has 53 of them when it starts on a Thursday, or when it is a leap
+    year that starts on a Wednesday. Everything else has 52.
+
+    Args:
+        year: The calendar year.
+
+    Returns:
+        52 or 53.
+    """
+    var starts = _first_weekday_scalar(year)
+    var before = _first_weekday_scalar(year - 1)
+    return 52 + Int64(starts == 4 or before == 3)
+
+
+def _iso_week_scalar(year: Int64, day_of_year: Int64, weekday: Int64) -> Int64:
+    """Returns the ISO week number of a date, by the ordinal date formula.
+
+    Args:
+        year: The calendar year.
+        day_of_year: The day of the year, from one.
+        weekday: The day of the week, Monday being one.
+
+    Returns:
+        The week number, from one.
+    """
+    var week = _floored_int_quotient(day_of_year - weekday + 10, 7)
+    if week < 1:
+        return _iso_weeks_in_scalar(year - 1)
+    if week > _iso_weeks_in_scalar(year):
+        return 1
+    return week
+
+
+def _iso_year_scalar(year: Int64, day_of_year: Int64, weekday: Int64) -> Int64:
+    """Returns the ISO year of a date, which is not always its calendar year.
+
+    Args:
+        year: The calendar year.
+        day_of_year: The day of the year, from one.
+        weekday: The day of the week, Monday being one.
+
+    Returns:
+        The calendar year, or the one either side of it.
+    """
+    var week = _floored_int_quotient(day_of_year - weekday + 10, 7)
+    if week < 1:
+        return year - 1
+    if week > _iso_weeks_in_scalar(year):
+        return year + 1
+    return year
+
+
 @fieldwise_init
 struct CivilScalar(ImplicitlyCopyable, Movable):
     """A calendar date, arrived at by counting."""
@@ -1799,8 +1878,22 @@ def temporal_field_scalar[
             )
         elif field == 17:
             answer = Int64(civil.day == 1 and civil.month == 1)
-        else:
+        elif field == 18:
             answer = Int64(civil.day == 31 and civil.month == 12)
+        elif field == 19:
+            answer = _iso_year_scalar(
+                civil.year,
+                Int64(civil.day_of_year),
+                _floored_int_remainder(days + 3, 7) + 1,
+            )
+        elif field == 20:
+            answer = _iso_week_scalar(
+                civil.year,
+                Int64(civil.day_of_year),
+                _floored_int_remainder(days + 3, 7) + 1,
+            )
+        else:
+            answer = _floored_int_remainder(days + 3, 7) + 1
 
         comptime if dst == DType.bool:
             out.set_valid(i, Scalar[DType.bool](answer != 0).cast[dst]())

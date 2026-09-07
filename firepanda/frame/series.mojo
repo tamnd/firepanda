@@ -58,9 +58,12 @@ from firepanda.kernel.temporal import (
     field_named,
     temporal_as_unit,
     temporal_date,
+    temporal_day_name,
     temporal_field,
+    temporal_month_name,
     temporal_normalize,
     temporal_round,
+    temporal_strftime,
     unit_named,
 )
 from firepanda.kernel.unary import UnaryOp, unary_any
@@ -726,6 +729,71 @@ struct Series(Copyable, Movable, Sized, Writable):
         """
         return self._relabelled(
             self.name, temporal_as_unit(self.values, unit_named(unit))
+        )
+
+    def dt_day_name(self, locale: StringSlice = "") raises -> Self:
+        """Returns the name of the day of the week of every row.
+
+        The names are the English ones, and a locale other than the default is
+        refused rather than answered in English. pandas hands the locale to the
+        C library, so its answer for a French one depends on which machine the
+        program runs on and whether that locale is installed. Refusing is the
+        only answer that is the same everywhere.
+
+        Args:
+            locale: Which language. Only the default is accepted.
+
+        Returns:
+            A text series of the same height, null where this one is null.
+
+        Raises:
+            If the series is not a date or a naive timestamp, or if a locale is
+            named.
+        """
+        return self._relabelled(
+            self.name, AnyArray(temporal_day_name(self.values, locale))
+        )
+
+    def dt_month_name(self, locale: StringSlice = "") raises -> Self:
+        """Returns the name of the month of every row.
+
+        Args:
+            locale: Which language. Only the default is accepted, for the reason
+                `dt_day_name` gives.
+
+        Returns:
+            A text series of the same height, null where this one is null.
+
+        Raises:
+            If the series is not a date or a naive timestamp, or if a locale is
+            named.
+        """
+        return self._relabelled(
+            self.name, AnyArray(temporal_month_name(self.values, locale))
+        )
+
+    def dt_strftime(self, fmt: StringSlice) raises -> Self:
+        """Returns every row written through a format string.
+
+        The directives are the twenty nine whose answer is the same on every
+        machine, plus the four compound ones that stand for a group of them.
+        The ones pandas inherits from the C library and firepanda does not have,
+        such as `%c` and `%x` and `%s`, are refused by name, because their
+        answer depends on the machine's locale and time zone rather than on the
+        row.
+
+        Args:
+            fmt: The format.
+
+        Returns:
+            A text series of the same height, null where this one is null.
+
+        Raises:
+            If the series is not a date or a naive timestamp, or if the format
+            has a directive this does not have.
+        """
+        return self._relabelled(
+            self.name, AnyArray(temporal_strftime(self.values, fmt))
         )
 
     def _relabelled(self, name: String, var values: AnyArray) raises -> Self:

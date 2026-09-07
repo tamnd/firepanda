@@ -34,6 +34,6 @@ from .dtype import (
     logical_for,
     promote,
 )
-from .frame import DataFrame, Series, concat, concat_series
+from .frame import DataFrame, Series, concat, concat_series, dt_isocalendar
 from .join import JoinIndices, JoinKind, join_indices
 from .version import VERSION, version

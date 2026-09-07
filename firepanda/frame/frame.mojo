@@ -86,6 +86,7 @@ from firepanda.kernel.nulls import all_valid_mask, coalesce_any
 from firepanda.kernel.reduce import reduce_any
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.sort import argsort_any_into, identity_permutation
+from firepanda.kernel.temporal import TemporalField, temporal_field
 from firepanda.kernel.topn import group_top_rows_any
 from firepanda.kernel.unary import UnaryOp, unary_any
 
@@ -3995,3 +3996,45 @@ def _no_fill(fill_value: Optional[Value]) raises:
             " series, because a series is broadcast across the rows rather than"
             " aligned against them cell by cell; pandas refuses this too"
         )
+
+
+def dt_isocalendar(s: Series) raises -> DataFrame:
+    """Returns the ISO year, week and day of every row of a datetime series.
+
+    This is the one member of the `dt` accessor that answers a frame rather than
+    a column, which is why it lives out here rather than on `Series`. A method
+    on a series cannot name a frame, the frame being the thing that imports the
+    series and not the other way round.
+
+    The three columns are `year`, `week` and `day`, in that order and under
+    those names, and all three are uint32, which is what pandas gives them. The
+    row labels come across from the series, because `from_series` starts a frame
+    at a fresh range index and losing the labels here would make the answer
+    impossible to line up against the input.
+
+    An ISO week belongs to the year its Thursday falls in, so the last days of
+    December are often in the following ISO year and the first days of January
+    are often in the previous one. 1969-12-31 answers 1970 week 1 day 3.
+
+    Args:
+        s: A date or a naive timestamp series.
+
+    Returns:
+        A three column frame of the same height, carrying this series' labels.
+
+    Raises:
+        Error: If the series is not a date or a naive timestamp.
+    """
+    var columns = List[Series](capacity=3)
+    columns.append(
+        Series("year", temporal_field(s.values, TemporalField.ISO_YEAR))
+    )
+    columns.append(
+        Series("week", temporal_field(s.values, TemporalField.ISO_WEEK))
+    )
+    columns.append(
+        Series("day", temporal_field(s.values, TemporalField.ISO_DAY))
+    )
+    var out = DataFrame.from_series(columns^)
+    out.index = Index(copy=s.index)
+    return out^

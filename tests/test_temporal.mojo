@@ -4,7 +4,7 @@ Every expected value in this file was read off a running pandas 3.0.3 rather tha
 worked out here, and the whole kernel was checked against pandas a second way
 before any of it was written down: five hundred random timestamps between the
 year 1 and the year 2262, at all four resolutions, put through all nineteen
-fields plus `dt.date` and `dt.normalize`, and the two outputs diffed. They were
+named fields plus `dt.date` and `dt.normalize`, and the two outputs diffed. They were
 identical. What is in this file is the subset of that a reader can check by eye
 and that names why each row is here.
 
@@ -43,6 +43,7 @@ from firepanda.kernel.scalar import civil_scalar, temporal_field_scalar
 from firepanda.kernel.temporal import (
     FIELD_CODES,
     FIELD_IS_LEAP_YEAR,
+    FIELD_ISO_YEAR,
     TemporalField,
     civil_from_days,
     extract_field,
@@ -91,6 +92,24 @@ def numbers(col: AnyArray, field: TemporalField) raises -> List[Int]:
     """
     var answer = temporal_field(col, field)
     ref view = answer.as_typed_view[DType.int32]()
+    var out = List[Int](capacity=len(view))
+    for i in range(len(view)):
+        out.append(Int(view[i]))
+    return out^
+
+
+def counts(col: AnyArray, field: TemporalField) raises -> List[Int]:
+    """Reads one of the three ISO fields out of a column as plain integers.
+
+    Args:
+        col: The column.
+        field: The field, which must be one of the three that are unsigned.
+
+    Returns:
+        One integer per row, with a null row reading as zero.
+    """
+    var answer = temporal_field(col, field)
+    ref view = answer.as_typed_view[DType.uint32]()
     var out = List[Int](capacity=len(view))
     for i in range(len(view)):
         out.append(Int(view[i]))
@@ -241,7 +260,24 @@ def test_the_same_instant_reads_the_same_at_all_four_resolutions() raises:
 
     comptime for code in FIELD_CODES:
         var name = String(TemporalField(code))
-        comptime if code >= FIELD_IS_LEAP_YEAR:
+        comptime if code >= FIELD_ISO_YEAR:
+            var want = counts(second, TemporalField(code))[0]
+            assert_equal(
+                counts(milli, TemporalField(code))[0],
+                want,
+                String("milli ", name),
+            )
+            assert_equal(
+                counts(micro, TemporalField(code))[0],
+                want,
+                String("micro ", name),
+            )
+            assert_equal(
+                counts(nano, TemporalField(code))[0],
+                want,
+                String("nano ", name),
+            )
+        elif code >= FIELD_IS_LEAP_YEAR:
             var want = flags(second, TemporalField(code))[0]
             assert_equal(
                 flags(milli, TemporalField(code))[0],
@@ -446,11 +482,11 @@ def test_a_column_that_is_not_temporal_has_no_calendar_in_it() raises:
 
 
 def test_a_field_code_that_is_not_a_field_is_refused() raises:
-    """The dispatch is a compile time walk over nineteen codes, so a twentieth
-    falls off the end of it rather than reaching a loop."""
+    """The dispatch is a compile time walk over twenty two codes, so a twenty
+    third falls off the end of it rather than reaching a loop."""
     var col = stamps([Int64(0)], TimeUnit.SECOND)
     with assert_raises(contains="is not a field code"):
-        _ = temporal_field(col, TemporalField(19))
+        _ = temporal_field(col, TemporalField(22))
 
 
 def test_every_field_prints_under_the_name_pandas_gives_it() raises:
@@ -465,8 +501,9 @@ def test_every_field_prints_under_the_name_pandas_gives_it() raises:
     assert_equal(
         String(TemporalField.IS_YEAR_END), "is_year_end", "is_year_end"
     )
+    assert_equal(String(TemporalField.ISO_YEAR), "isoyear", "isoyear")
     assert_equal(
-        String(TemporalField(19)), "field 19", "a code that is not one"
+        String(TemporalField(22)), "field 22", "a code that is not one"
     )
 
 

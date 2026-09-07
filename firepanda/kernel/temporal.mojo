@@ -4,7 +4,9 @@ A timestamp column is a column of integers and a count of them per second. Every
 name on the pandas `dt` accessor that answers a number is a function of those two
 things and of nothing else, so the whole of `dt.year`, `dt.month`, `dt.day`,
 `dt.dayofweek`, `dt.quarter` and the six `is_` predicates is one calendar
-conversion written once and read nineteen ways.
+conversion written once and read twenty two ways, the last three of those being
+the ISO calendar, which is the same conversion applied to a different day of the
+same week.
 
 The conversion is Howard Hinnant's `civil_from_days`, which turns a count of days
 since 1970-01-01 into a year, a month and a day with no table, no loop and no
@@ -50,6 +52,7 @@ from std.sys.info import simd_width_of
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
+from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.logical import LogicalType, TypeKind
 from firepanda.dtype.temporal import TimeUnit
@@ -124,7 +127,8 @@ comptime FIELD_DAYS_IN_MONTH = 11
 
 comptime FIELD_IS_LEAP_YEAR = 12
 """Field code for `dt.is_leap_year`, and the first of the predicates. Every code
-at or above this one answers bool and every code below it answers int32."""
+from here up to `FIELD_IS_YEAR_END` answers bool and every code below it answers
+int32."""
 
 comptime FIELD_IS_MONTH_START = 13
 """Field code for `dt.is_month_start`."""
@@ -142,7 +146,19 @@ comptime FIELD_IS_YEAR_START = 17
 """Field code for `dt.is_year_start`."""
 
 comptime FIELD_IS_YEAR_END = 18
-"""Field code for `dt.is_year_end`."""
+"""Field code for `dt.is_year_end`, and the last of the predicates."""
+
+comptime FIELD_ISO_YEAR = 19
+"""Field code for the year column of `dt.isocalendar`, and the first of the
+three. Every code at or above this one answers uint32, which is what pandas
+gives that frame, and none of the three is a name on `dt`."""
+
+comptime FIELD_ISO_WEEK = 20
+"""Field code for the week column of `dt.isocalendar`, from 1 to 53."""
+
+comptime FIELD_ISO_DAY = 21
+"""Field code for the day column of `dt.isocalendar`, from 1 for Monday, which
+is the ISO numbering and not the one `dt.dayofweek` uses."""
 
 comptime FIELD_CODES = [
     FIELD_YEAR,
@@ -164,6 +180,9 @@ comptime FIELD_CODES = [
     FIELD_IS_QUARTER_END,
     FIELD_IS_YEAR_START,
     FIELD_IS_YEAR_END,
+    FIELD_ISO_YEAR,
+    FIELD_ISO_WEEK,
+    FIELD_ISO_DAY,
 ]
 """Every field code, in order, for the dispatch to walk at compile time."""
 
@@ -175,9 +194,12 @@ def field_dtype(field: Int) -> DType:
         field: The field code.
 
     Returns:
-        `DType.bool` for the predicates and `DType.int32` for the rest, which is
-        what pandas answers and is compared exactly.
+        `DType.bool` for the seven predicates, `DType.uint32` for the three
+        columns of `isocalendar` and `DType.int32` for the rest, which is what
+        pandas answers and is compared exactly.
     """
+    if field >= FIELD_ISO_YEAR:
+        return DType.uint32
     return DType.bool if field >= FIELD_IS_LEAP_YEAR else DType.int32
 
 
@@ -191,7 +213,7 @@ struct TemporalField(Equatable, ImplicitlyCopyable, Movable, Writable):
     """
 
     var code: Int
-    """The field, as one of the nineteen values below."""
+    """The field, as one of the twenty two values below."""
 
     comptime YEAR = Self(FIELD_YEAR)
     """The calendar year, negative before the year zero."""
@@ -255,6 +277,17 @@ struct TemporalField(Equatable, ImplicitlyCopyable, Movable, Writable):
     comptime IS_YEAR_END = Self(FIELD_IS_YEAR_END)
     """Whether this row is the thirty first of December."""
 
+    comptime ISO_YEAR = Self(FIELD_ISO_YEAR)
+    """The year the row's ISO week belongs to, which is not always the calendar
+    year: the last days of December can be in the next ISO year and the first
+    days of January can be in the previous one."""
+
+    comptime ISO_WEEK = Self(FIELD_ISO_WEEK)
+    """The ISO week, from 1 to 53."""
+
+    comptime ISO_DAY = Self(FIELD_ISO_DAY)
+    """The ISO day of the week, from 1 for Monday to 7 for Sunday."""
+
     def __eq__(self, other: Self) -> Bool:
         """Compares two fields.
 
@@ -316,8 +349,16 @@ comptime NAMES = [
     StaticString("is_quarter_end"),
     StaticString("is_year_start"),
     StaticString("is_year_end"),
+    StaticString("isoyear"),
+    StaticString("isoweek"),
+    StaticString("isoday"),
 ]
-"""The pandas name of each field, in code order, for error messages."""
+"""The pandas name of each field, in code order, for error messages.
+
+The last three are not pandas names. `isocalendar` returns a frame whose columns
+are called year, week and day, and two of those already mean something else on
+`dt`, so the three carry a spelling of their own here and `field_named` refuses
+it. They are dispatchable and not nameable, which is what they are in pandas."""
 
 
 @fieldwise_init
@@ -531,6 +572,30 @@ def extract_field[
                     target.unsafe_offset(i).unsafe_store(
                         ((days + 3) % 7).cast[dst]()
                     )
+                elif field >= FIELD_ISO_YEAR:
+                    # The whole of the ISO calendar is one sentence: a week
+                    # belongs to the year its Thursday falls in. So find that
+                    # Thursday, convert it, and read the answer off the ordinary
+                    # calendar fields of a different day. That is why the last
+                    # day of 1969 is in ISO year 1970 without a single special
+                    # case, and why none of this needs a table of year lengths.
+                    var weekday = (days + 3) % 7
+                    var thursday = civil_from_days(days - weekday + 3)
+
+                    comptime if field == FIELD_ISO_YEAR:
+                        target.unsafe_offset(i).unsafe_store(
+                            thursday.year.cast[dst]()
+                        )
+                    elif field == FIELD_ISO_WEEK:
+                        # The Thursday of week one is always in the first seven
+                        # days of its year, so this division needs no offset.
+                        target.unsafe_offset(i).unsafe_store(
+                            ((thursday.day_of_year - 1) // 7 + 1).cast[dst]()
+                        )
+                    else:
+                        target.unsafe_offset(i).unsafe_store(
+                            (weekday + 1).cast[dst]()
+                        )
                 else:
                     var civil = civil_from_days(days)
 
@@ -655,7 +720,14 @@ def field_named(name: StringSlice) raises -> TemporalField:
     Here so that a caller holding a string does not have to keep its own copy of
     the table. The Python layer will hold one of those strings and the
     conformance driver holds another, and two copies of a nineteen row table is
-    two chances to spell `days_in_month` differently.
+    two chances to spell `days_in_month` differently. Nineteen rather than
+    twenty two, because the three ISO fields below have no name on `dt`.
+
+    The three `isocalendar` fields are deliberately not reachable from here.
+    They are columns of a frame rather than names on `dt`, and two of the three
+    are spelled the same as fields that already exist, so a caller that asked
+    for `year` and got the ISO year would be wrong for eleven months of the
+    year and right for the twelfth, which is the worst way to be wrong.
 
     Args:
         name: The pandas spelling, so `dayofweek` rather than `day_of_week`.
@@ -667,9 +739,10 @@ def field_named(name: StringSlice) raises -> TemporalField:
         Error: If nothing is called that.
     """
     comptime for code in FIELD_CODES:
-        comptime spelling = NAMES[code]
-        if name == spelling:
-            return TemporalField(code)
+        comptime if code < FIELD_ISO_YEAR:
+            comptime spelling = NAMES[code]
+            if name == spelling:
+                return TemporalField(code)
     raise Error(
         "temporal: there is no field called " + String(name) + " on a datetime"
     )
@@ -683,12 +756,13 @@ def temporal_field(a: AnyArray, field: TemporalField) raises -> AnyArray:
         field: Which field.
 
     Returns:
-        An int32 column for the twelve fields that are numbers and a bool column
-        for the seven that are predicates, null wherever the input is null.
+        An int32 column for the twelve fields that are numbers, a bool column
+        for the seven that are predicates and a uint32 column for the three that
+        make up the ISO calendar, null wherever the input is null.
 
     Raises:
         Error: If the column is not temporal, if it carries a time zone, or if
-            the field code is not one of the nineteen.
+            the field code is not one of the twenty two.
     """
     var per_day = _units_per_day(a.type)
     var per_second = _units_per_second(a.type)
@@ -1325,3 +1399,768 @@ def temporal_as_unit(a: AnyArray, unit: TimeUnit) raises -> AnyArray:
             " which is the range pandas calls out of bounds"
         )
     return AnyArray(_rescale[True](stamps, ratio).into_data(), result)
+
+
+comptime DAY_NAMES = StaticString(
+    "MondayTuesdayWednesdayThursdayFridaySaturdaySunday"
+)
+"""The seven day names, back to back, in the order `dt.dayofweek` numbers them.
+
+Packed rather than held as a list because a `comptime` list cannot be indexed by
+a runtime value, and a chain of seven comparisons per row is a chain of seven
+comparisons per row. The offsets are in `day_name_bounds`."""
+
+comptime DAY_ABBREVS = StaticString("MonTueWedThuFriSatSun")
+"""The seven abbreviations, which are all three bytes, so this one needs no
+offsets at all."""
+
+comptime MONTH_NAMES = StaticString(
+    "JanuaryFebruaryMarchAprilMayJuneJulyAugustSeptemberOctoberNovemberDecember"
+)
+"""The twelve month names, back to back, January first."""
+
+comptime MONTH_ABBREVS = StaticString("JanFebMarAprMayJunJulAugSepOctNovDec")
+"""The twelve abbreviations, all three bytes."""
+
+
+def day_name_bounds() -> List[Int]:
+    """Returns where each day name starts in `DAY_NAMES`.
+
+    Eight numbers for seven names, so that a name is the span between two of
+    them and the last one needs no special case.
+
+    Returns:
+        The offsets, Monday first.
+    """
+    return [0, 6, 13, 22, 30, 36, 44, 50]
+
+
+def month_name_bounds() -> List[Int]:
+    """Returns where each month name starts in `MONTH_NAMES`.
+
+    Thirteen numbers for twelve names. Index zero is January, so a caller
+    holding a month from 1 subtracts one first.
+
+    Returns:
+        The offsets, January first.
+    """
+    return [0, 7, 15, 20, 25, 28, 32, 36, 42, 51, 58, 66, 74]
+
+
+def _check_nameable(t: LogicalType) raises:
+    """Refuses a column that has no calendar in it, or has one in another zone.
+
+    The same two refusals `temporal_field` makes, in one place, because the
+    three text producing entry points below all make them and a fourth copy of
+    the sentence is a fourth chance to word it differently.
+
+    Args:
+        t: The column type.
+
+    Raises:
+        Error: If the column is not a date or a timestamp, or if it is zoned.
+    """
+    if t.kind != TypeKind.TIMESTAMP and t.kind != TypeKind.DATE:
+        raise Error(
+            "temporal: a name or a format comes off a date or a timestamp"
+            " column, and this one is "
+            + String(t)
+        )
+    if not t.zone.is_naive():
+        raise Error(
+            "temporal: writing a column in "
+            + String(t.zone)
+            + " needs a time zone database firepanda does not have yet, because"
+            " the name of the day depends on the local reading and the stored"
+            " instants are UTC"
+        )
+
+
+def _named_column[
+    src: DType, month: Bool
+](
+    a: Array[src], per_day: Int64, offsets: List[Int], packed: StringSlice
+) raises -> StringArray:
+    """Writes the day name or the month name of every row.
+
+    One row at a time, which is what text is. The conversion underneath is the
+    same vector one every other field uses, called on a register of one lane,
+    because a second scalar copy of Hinnant's algorithm is a second place for it
+    to be wrong.
+
+    Args:
+        a: The column.
+        per_day: How many of the column's units make a day.
+        offsets: Where each name starts in `packed`.
+        packed: The names, back to back.
+
+    Parameters:
+        src: The physical dtype of the column.
+        month: Whether the month name is wanted rather than the day name.
+
+    Returns:
+        A text column, null wherever the input is null.
+
+    Raises:
+        Error: Only what the builder raises.
+    """
+    var n = len(a)
+    var out = StringBuilder(capacity=n)
+
+    for i in range(n):
+        if not a.is_valid(i):
+            out.append_null()
+            continue
+
+        var days = Int64(a[i]) // per_day
+
+        var at: Int
+        comptime if month:
+            at = Int(civil_from_days[1](days).month[0]) - 1
+        else:
+            # 1970-01-01 was a Thursday, which is index 3 counting from Monday.
+            at = Int((days + 3) % 7)
+
+        var start = offsets[at]
+        var stop = offsets[at + 1]
+        out.append(packed[byte=start:stop].as_bytes())
+
+    return out^.finish()
+
+
+def temporal_day_name(a: AnyArray, locale: StringSlice) raises -> StringArray:
+    """Writes the name of the day of the week of every row.
+
+    Args:
+        a: A date or a naive timestamp column.
+        locale: Which language. Only the empty string, meaning English, is
+            accepted.
+
+    Returns:
+        A text column, null wherever the input is null.
+
+    Raises:
+        Error: If the column is not temporal, if it carries a time zone, or if
+            a locale other than English is asked for.
+    """
+    _check_nameable(a.type)
+    _check_locale(locale)
+
+    var per_day = _units_per_day(a.type)
+    var bounds = day_name_bounds()
+
+    if a.type.kind == TypeKind.DATE:
+        ref days = a.as_typed_view[DType.int32]()
+        return _named_column[DType.int32, False](
+            days, per_day, bounds, DAY_NAMES
+        )
+    ref stamps = a.as_typed_view[DType.int64]()
+    return _named_column[DType.int64, False](stamps, per_day, bounds, DAY_NAMES)
+
+
+def temporal_month_name(a: AnyArray, locale: StringSlice) raises -> StringArray:
+    """Writes the name of the month of every row.
+
+    Args:
+        a: A date or a naive timestamp column.
+        locale: Which language. Only the empty string, meaning English, is
+            accepted.
+
+    Returns:
+        A text column, null wherever the input is null.
+
+    Raises:
+        Error: If the column is not temporal, if it carries a time zone, or if
+            a locale other than English is asked for.
+    """
+    _check_nameable(a.type)
+    _check_locale(locale)
+
+    var per_day = _units_per_day(a.type)
+    var bounds = month_name_bounds()
+
+    if a.type.kind == TypeKind.DATE:
+        ref days = a.as_typed_view[DType.int32]()
+        return _named_column[DType.int32, True](
+            days, per_day, bounds, MONTH_NAMES
+        )
+    ref stamps = a.as_typed_view[DType.int64]()
+    return _named_column[DType.int64, True](
+        stamps, per_day, bounds, MONTH_NAMES
+    )
+
+
+def _check_locale(locale: StringSlice) raises:
+    """Refuses any locale but the default one.
+
+    pandas takes a locale here and hands it to the C library, so what
+    `day_name('de_DE')` answers depends on which locales the machine running it
+    has installed. firepanda carries the English names and nothing else, and the
+    honest way to say so is to refuse the argument rather than to accept it and
+    answer in English anyway, which would be a wrong answer wearing the shape of
+    a right one.
+
+    Args:
+        locale: What the caller asked for.
+
+    Raises:
+        Error: If it is not the empty string.
+    """
+    if locale.byte_length() != 0:
+        raise Error(
+            "temporal: firepanda has the English day and month names and no"
+            " others, so the locale '"
+            + String(locale)
+            + "' is refused rather than answered in English"
+        )
+
+
+comptime STEP_SLICE = UInt8(0)
+"""A step that copies a run of bytes out of the format string itself."""
+
+comptime STEP_BYTE = UInt8(1)
+"""A step that emits one byte held in the step, which is what the compound
+directives expand into: `%F` is a year, a hyphen, a month, a hyphen and a day,
+and the two hyphens are not anywhere in the format the caller passed."""
+
+
+@fieldwise_init
+struct Step(Copyable, ImplicitlyCopyable, Movable):
+    """One thing to do once per row while formatting.
+
+    The format is taken apart into these once, before any row is looked at, so
+    that the row loop is a walk over a small list rather than a parse. On a
+    column of a million rows that is one parse instead of a million, and it is
+    also where an unknown directive is caught: the caller finds out that `%c` is
+    refused before the first row is written rather than after the last one.
+    """
+
+    var code: UInt8
+    """`STEP_SLICE`, `STEP_BYTE`, or the directive letter."""
+
+    var pad: UInt8
+    """The byte to emit for `STEP_BYTE`, or the padding flag for a directive,
+    or zero for the directive's own default padding."""
+
+    var start: Int
+    """Where the slice starts, for `STEP_SLICE`."""
+
+    var stop: Int
+    """Where the slice ends, for `STEP_SLICE`."""
+
+
+def _is_directive(letter: UInt8) -> Bool:
+    """Says whether a letter is one of the directives this formatter knows.
+
+    The list is the directives whose answer is the same on every machine.
+    Everything else is refused, and what is refused is worth naming: `%c`, `%x`
+    and `%X` are whatever the C library's locale says they are, `%s` is the
+    epoch second and on a machine measured here it answered the local time
+    rather than UTC, and `%P` is a GNU extension that answers the letter P on a
+    machine that does not have it. pandas hands the format to the platform and
+    inherits all of that. A conformance library that did the same would answer
+    differently on two computers and call both of them correct.
+
+    Args:
+        letter: The byte after the percent sign.
+
+    Returns:
+        True if it is supported.
+    """
+    return (
+        letter == UInt8(ord("Y"))
+        or letter == UInt8(ord("y"))
+        or letter == UInt8(ord("C"))
+        or letter == UInt8(ord("G"))
+        or letter == UInt8(ord("g"))
+        or letter == UInt8(ord("m"))
+        or letter == UInt8(ord("B"))
+        or letter == UInt8(ord("b"))
+        or letter == UInt8(ord("h"))
+        or letter == UInt8(ord("d"))
+        or letter == UInt8(ord("e"))
+        or letter == UInt8(ord("j"))
+        or letter == UInt8(ord("A"))
+        or letter == UInt8(ord("a"))
+        or letter == UInt8(ord("u"))
+        or letter == UInt8(ord("w"))
+        or letter == UInt8(ord("V"))
+        or letter == UInt8(ord("U"))
+        or letter == UInt8(ord("W"))
+        or letter == UInt8(ord("H"))
+        or letter == UInt8(ord("k"))
+        or letter == UInt8(ord("I"))
+        or letter == UInt8(ord("l"))
+        or letter == UInt8(ord("M"))
+        or letter == UInt8(ord("S"))
+        or letter == UInt8(ord("f"))
+        or letter == UInt8(ord("p"))
+        or letter == UInt8(ord("z"))
+        or letter == UInt8(ord("Z"))
+    )
+
+
+def _takes_pad_flag(letter: UInt8) -> Bool:
+    """Says whether a padding flag in front of a directive changes anything.
+
+    Thirteen directives write a number that has a width the flag can move.
+    Everywhere else pandas ignores the flag, which is what this makes it do:
+    `%-A` is `%A`, `%-Y` is `%Y` even for the year five, and `%-u` is `%u`
+    because a weekday is one digit wide however it is padded. All of that was
+    measured rather than assumed, directive by directive.
+
+    Args:
+        letter: The directive letter.
+
+    Returns:
+        True for the thirteen where the flag has work to do.
+    """
+    return (
+        letter == UInt8(ord("m"))
+        or letter == UInt8(ord("d"))
+        or letter == UInt8(ord("e"))
+        or letter == UInt8(ord("j"))
+        or letter == UInt8(ord("V"))
+        or letter == UInt8(ord("U"))
+        or letter == UInt8(ord("W"))
+        or letter == UInt8(ord("H"))
+        or letter == UInt8(ord("k"))
+        or letter == UInt8(ord("I"))
+        or letter == UInt8(ord("l"))
+        or letter == UInt8(ord("M"))
+        or letter == UInt8(ord("S"))
+    )
+
+
+def _expand(letter: UInt8, mut steps: List[Step]):
+    """Pushes the steps a compound directive stands for.
+
+    POSIX defines four of these as abbreviations for other directives, and
+    writing them out here rather than in the row loop keeps the row loop with
+    one kind of step in it.
+
+    Args:
+        letter: `F`, `T`, `R` or `D`.
+        steps: Where to push.
+    """
+    if letter == UInt8(ord("F")):
+        steps.append(Step(UInt8(ord("Y")), 0, 0, 0))
+        steps.append(Step(STEP_BYTE, UInt8(ord("-")), 0, 0))
+        steps.append(Step(UInt8(ord("m")), 0, 0, 0))
+        steps.append(Step(STEP_BYTE, UInt8(ord("-")), 0, 0))
+        steps.append(Step(UInt8(ord("d")), 0, 0, 0))
+    elif letter == UInt8(ord("T")):
+        steps.append(Step(UInt8(ord("H")), 0, 0, 0))
+        steps.append(Step(STEP_BYTE, UInt8(ord(":")), 0, 0))
+        steps.append(Step(UInt8(ord("M")), 0, 0, 0))
+        steps.append(Step(STEP_BYTE, UInt8(ord(":")), 0, 0))
+        steps.append(Step(UInt8(ord("S")), 0, 0, 0))
+    elif letter == UInt8(ord("R")):
+        steps.append(Step(UInt8(ord("H")), 0, 0, 0))
+        steps.append(Step(STEP_BYTE, UInt8(ord(":")), 0, 0))
+        steps.append(Step(UInt8(ord("M")), 0, 0, 0))
+    else:
+        steps.append(Step(UInt8(ord("m")), 0, 0, 0))
+        steps.append(Step(STEP_BYTE, UInt8(ord("/")), 0, 0))
+        steps.append(Step(UInt8(ord("d")), 0, 0, 0))
+        steps.append(Step(STEP_BYTE, UInt8(ord("/")), 0, 0))
+        steps.append(Step(UInt8(ord("y")), 0, 0, 0))
+
+
+def parse_format(fmt: StringSlice) raises -> List[Step]:
+    """Takes a format string apart into the steps that render one row.
+
+    Args:
+        fmt: The format.
+
+    Returns:
+        The steps, in order.
+
+    Raises:
+        Error: If the format ends in a bare percent sign, if a directive is one
+            this formatter refuses, or if a padding flag is put in front of
+            `%f`.
+    """
+    var bytes = fmt.as_bytes()
+    var n = len(bytes)
+    var steps = List[Step]()
+    var at = 0
+    var run = 0
+
+    while at < n:
+        if bytes[at] != UInt8(ord("%")):
+            at += 1
+            continue
+
+        # Everything since the last directive is one slice step, however long.
+        if at > run:
+            steps.append(Step(STEP_SLICE, 0, run, at))
+
+        var cursor = at + 1
+        if cursor >= n:
+            raise Error(
+                "temporal: the format '"
+                + String(fmt)
+                + "' ends in a percent sign with nothing after it"
+            )
+
+        var flag = UInt8(0)
+        if (
+            bytes[cursor] == UInt8(ord("-"))
+            or bytes[cursor] == UInt8(ord("_"))
+            or bytes[cursor] == UInt8(ord("0"))
+        ):
+            flag = bytes[cursor]
+            cursor += 1
+            if cursor >= n:
+                raise Error(
+                    "temporal: the format '"
+                    + String(fmt)
+                    + "' ends in a padding flag with no directive after it"
+                )
+
+        var letter = bytes[cursor]
+
+        # A flag that cannot move a width is dropped rather than refused,
+        # because that is what pandas does with it. `%-A` is `%A` there and it
+        # is `%A` here. The exception is `%f`, below, where pandas answers the
+        # letter f and loses the microseconds, which is a thing to refuse
+        # rather than a thing to copy.
+        if flag != 0 and not _takes_pad_flag(letter):
+            if letter == UInt8(ord("f")):
+                raise Error(
+                    "temporal: pandas answers a padding flag on '%f' with the"
+                    " letter f and no microseconds at all, so firepanda refuses"
+                    " the format rather than writing a column of that"
+                )
+            flag = 0
+
+        if (
+            letter == UInt8(ord("%"))
+            or letter == UInt8(ord("n"))
+            or letter == UInt8(ord("t"))
+        ):
+            var literal = letter
+            if letter == UInt8(ord("n")):
+                literal = 10
+            elif letter == UInt8(ord("t")):
+                literal = 9
+            steps.append(Step(STEP_BYTE, literal, 0, 0))
+        elif (
+            letter == UInt8(ord("F"))
+            or letter == UInt8(ord("T"))
+            or letter == UInt8(ord("R"))
+            or letter == UInt8(ord("D"))
+        ):
+            _expand(letter, steps)
+        elif _is_directive(letter):
+            steps.append(Step(letter, flag, 0, 0))
+        else:
+            raise Error(
+                "temporal: '%"
+                + chr(Int(letter))
+                + "' is not a directive firepanda knows; pandas passes the"
+                " format to the C library and the ones left out here are the"
+                " ones whose answer depends on the machine or on its locale"
+            )
+
+        at = cursor + 1
+        run = at
+
+    if n > run:
+        steps.append(Step(STEP_SLICE, 0, run, n))
+    return steps^
+
+
+def _append_digits(mut out: List[UInt8], value: Int64, width: Int, pad: UInt8):
+    """Appends one number, padded on the left to a minimum width.
+
+    Args:
+        out: Where to append.
+        value: The number. A negative one gets its sign in front of the padding,
+            which is where a year before the year one wants it.
+        width: The minimum number of digits, before the sign.
+        pad: The byte to pad with. Zero means no padding at all, which is what
+            a `-` flag asks for.
+    """
+    var digits = List[UInt8](capacity=20)
+    var rest = value if value >= 0 else -value
+
+    if rest == 0:
+        digits.append(UInt8(48))
+    while rest > 0:
+        digits.append(UInt8(48 + Int(rest % 10)))
+        rest //= 10
+
+    if value < 0:
+        out.append(UInt8(45))
+    if pad != 0:
+        for _ in range(width - len(digits)):
+            out.append(pad)
+
+    for i in range(len(digits)):
+        out.append(digits[len(digits) - 1 - i])
+
+
+def _pad_for(flag: UInt8, default: UInt8) -> UInt8:
+    """Turns a padding flag into the byte to pad with.
+
+    Args:
+        flag: What the format asked for, or zero for the directive's default.
+        default: The directive's default.
+
+    Returns:
+        The byte, or zero for no padding.
+    """
+    if flag == 0:
+        return default
+    if flag == 45:
+        return 0
+    if flag == 95:
+        return 32
+    return 48
+
+
+def _render_row(
+    mut out: List[UInt8],
+    steps: List[Step],
+    fmt: StringSlice,
+    value: Int64,
+    per_day: Int64,
+    per_second: Int64,
+) raises:
+    """Renders one row into a byte buffer.
+
+    Both calendar conversions are done whether or not the format asks for them.
+    One is the day this row falls in and the other is the Thursday of its ISO
+    week, and doing them unconditionally costs two dozen integer instructions on
+    a path that is about to write digits one at a time into a buffer. The
+    formatting is the expensive part here, not the calendar.
+
+    Args:
+        out: The buffer, already cleared.
+        steps: The parsed format.
+        fmt: The format string the slice steps point into.
+        value: The row, in whole units since the epoch.
+        per_day: How many of the column's units make a day.
+        per_second: How many of them make a second, or 1 for a date column.
+
+    Raises:
+        Error: Never, in practice. `parse_format` has already refused every
+            directive this cannot render, so the trailing case below is
+            unreachable and is here so that a directive added to one list and
+            not the other fails loudly instead of writing nothing.
+    """
+    var days = value // per_day
+    var rest = value - days * per_day
+    var civil = civil_from_days[1](days)
+    var weekday = Int((days + 3) % 7)
+    var thursday = civil_from_days[1](days - Int64(weekday) + 3)
+
+    var year = civil.year[0]
+    var month = Int(civil.month[0])
+    var day_of_year = civil.day_of_year[0]
+    # A date column answers zero per second, because it has no clock in it, and
+    # its remainder above is zero too. One rather than zero here is what stops
+    # `%H` on a date column from dividing by zero on its way to the answer it
+    # was always going to give.
+    var rate = max(per_second, 1)
+    var hour = rest // (rate * 3600)
+    var minute = (rest // (rate * 60)) % 60
+    var second = (rest // rate) % 60
+    var micro = (rest % rate) * 1_000_000 // rate
+
+    var days_bounds = day_name_bounds()
+    var months_bounds = month_name_bounds()
+
+    for i in range(len(steps)):
+        ref step = steps[i]
+        var code = step.code
+
+        if code == STEP_SLICE:
+            var bytes = fmt.as_bytes()
+            for at in range(step.start, step.stop):
+                out.append(bytes[at])
+        elif code == STEP_BYTE:
+            out.append(step.pad)
+        elif code == UInt8(ord("Y")):
+            _append_digits(out, year, 4, _pad_for(step.pad, 48))
+        elif code == UInt8(ord("y")):
+            _append_digits(out, year % 100, 2, _pad_for(step.pad, 48))
+        elif code == UInt8(ord("C")):
+            _append_digits(out, year // 100, 2, _pad_for(step.pad, 48))
+        elif code == UInt8(ord("G")):
+            _append_digits(out, thursday.year[0], 4, _pad_for(step.pad, 48))
+        elif code == UInt8(ord("g")):
+            _append_digits(
+                out, thursday.year[0] % 100, 2, _pad_for(step.pad, 48)
+            )
+        elif code == UInt8(ord("m")):
+            _append_digits(out, Int64(month), 2, _pad_for(step.pad, 48))
+        elif code == UInt8(ord("d")):
+            _append_digits(out, civil.day[0], 2, _pad_for(step.pad, 48))
+        elif code == UInt8(ord("e")):
+            _append_digits(out, civil.day[0], 2, _pad_for(step.pad, 32))
+        elif code == UInt8(ord("j")):
+            _append_digits(out, day_of_year, 3, _pad_for(step.pad, 48))
+        elif code == UInt8(ord("H")):
+            _append_digits(out, hour, 2, _pad_for(step.pad, 48))
+        elif code == UInt8(ord("k")):
+            _append_digits(out, hour, 2, _pad_for(step.pad, 32))
+        elif code == UInt8(ord("I")):
+            var half = hour % 12
+            _append_digits(
+                out, 12 if half == 0 else half, 2, _pad_for(step.pad, 48)
+            )
+        elif code == UInt8(ord("l")):
+            var half = hour % 12
+            _append_digits(
+                out, 12 if half == 0 else half, 2, _pad_for(step.pad, 32)
+            )
+        elif code == UInt8(ord("M")):
+            _append_digits(out, minute, 2, _pad_for(step.pad, 48))
+        elif code == UInt8(ord("S")):
+            _append_digits(out, second, 2, _pad_for(step.pad, 48))
+        elif code == UInt8(ord("f")):
+            # Six digits whatever the column's resolution is, which is what
+            # pandas writes: a second column answers 000000 and a nanosecond
+            # column drops its last three digits rather than writing nine.
+            _append_digits(out, micro, 6, _pad_for(step.pad, 48))
+        elif code == UInt8(ord("u")):
+            _append_digits(out, Int64(weekday + 1), 1, _pad_for(step.pad, 48))
+        elif code == UInt8(ord("w")):
+            # C numbers the week from Sunday here and ISO numbers it from
+            # Monday, and this is the one line where the two disagree.
+            _append_digits(
+                out, Int64((weekday + 1) % 7), 1, _pad_for(step.pad, 48)
+            )
+        elif code == UInt8(ord("V")):
+            _append_digits(
+                out,
+                (thursday.day_of_year[0] - 1) // 7 + 1,
+                2,
+                _pad_for(step.pad, 48),
+            )
+        elif code == UInt8(ord("U")):
+            _append_digits(
+                out,
+                (day_of_year + 6 - Int64((weekday + 1) % 7)) // 7,
+                2,
+                _pad_for(step.pad, 48),
+            )
+        elif code == UInt8(ord("W")):
+            _append_digits(
+                out,
+                (day_of_year + 6 - Int64(weekday)) // 7,
+                2,
+                _pad_for(step.pad, 48),
+            )
+        elif code == UInt8(ord("p")):
+            out.append(UInt8(65) if hour < 12 else UInt8(80))
+            out.append(UInt8(77))
+        elif code == UInt8(ord("A")):
+            var bytes = DAY_NAMES.as_bytes()
+            for at in range(days_bounds[weekday], days_bounds[weekday + 1]):
+                out.append(bytes[at])
+        elif code == UInt8(ord("a")):
+            var bytes = DAY_ABBREVS.as_bytes()
+            for at in range(weekday * 3, weekday * 3 + 3):
+                out.append(bytes[at])
+        elif code == UInt8(ord("B")):
+            var bytes = MONTH_NAMES.as_bytes()
+            for at in range(months_bounds[month - 1], months_bounds[month]):
+                out.append(bytes[at])
+        elif code == UInt8(ord("b")) or code == UInt8(ord("h")):
+            var bytes = MONTH_ABBREVS.as_bytes()
+            for at in range((month - 1) * 3, (month - 1) * 3 + 3):
+                out.append(bytes[at])
+        elif code == UInt8(ord("z")) or code == UInt8(ord("Z")):
+            # A naive column has no offset and no zone name, and pandas writes
+            # nothing for both. A zoned one never reaches here.
+            pass
+        else:
+            raise Error(
+                "temporal: '%"
+                + chr(Int(code))
+                + "' passed the format parser and has no renderer, which is a"
+                " bug in firepanda rather than in the format"
+            )
+
+
+def _formatted_column[
+    src: DType
+](
+    a: Array[src],
+    steps: List[Step],
+    fmt: StringSlice,
+    per_day: Int64,
+    per_second: Int64,
+) raises -> StringArray:
+    """Renders every row of a column through an already parsed format.
+
+    Args:
+        a: The column.
+        steps: The parsed format.
+        fmt: The format string the slice steps point into.
+        per_day: How many of the column's units make a day.
+        per_second: How many of them make a second.
+
+    Parameters:
+        src: The physical dtype of the column.
+
+    Returns:
+        A text column, null wherever the input is null.
+
+    Raises:
+        Error: Only what the renderer raises.
+    """
+    var n = len(a)
+    var out = StringBuilder(capacity=n)
+    var row = List[UInt8](capacity=64)
+
+    for i in range(n):
+        if not a.is_valid(i):
+            out.append_null()
+            continue
+        row.clear()
+        _render_row(row, steps, fmt, Int64(a[i]), per_day, per_second)
+        out.append(Span(row))
+
+    return out^.finish()
+
+
+def temporal_strftime(a: AnyArray, fmt: StringSlice) raises -> StringArray:
+    """Writes every row of a temporal column through a format string.
+
+    The format is parsed once, here, and not once per row. That is worth saying
+    out loud because it is also where the error comes from: a format with a
+    directive this refuses fails before the first row is looked at, so the
+    caller gets the message rather than a column that is wrong in a million
+    places.
+
+    Args:
+        a: A date or a naive timestamp column.
+        fmt: The format.
+
+    Returns:
+        A text column, null wherever the input is null.
+
+    Raises:
+        Error: If the column is not temporal, if it carries a time zone, or if
+            the format has something in it this cannot render.
+    """
+    _check_nameable(a.type)
+
+    var steps = parse_format(fmt)
+    var per_day = _units_per_day(a.type)
+    var per_second = _units_per_second(a.type)
+
+    if a.type.kind == TypeKind.DATE:
+        ref days = a.as_typed_view[DType.int32]()
+        return _formatted_column[DType.int32](
+            days, steps, fmt, per_day, per_second
+        )
+    ref stamps = a.as_typed_view[DType.int64]()
+    return _formatted_column[DType.int64](
+        stamps, steps, fmt, per_day, per_second
+    )
