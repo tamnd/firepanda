@@ -27,12 +27,20 @@ allocated, and then the columns are allocated once and filled in place.
 The copy itself is `assemble`, next door, because a Parquet reader and a query
 result want exactly the same thing done with the arrays they produce.
 
-What is not read yet is anything nested, dictionary encoded or compressed. A
-record batch that says its body is compressed is refused by name rather than by
-reading it as raw bytes, because lz4 framed data read as int64 is not an error
-that shows up anywhere near here. Dictionary batches are refused for now too:
-supporting them means holding a dictionary across messages and rewriting the
-codes, and firepanda has no dictionary encoded column to put the result in.
+What is not read yet is anything nested or compressed. A record batch that says
+its body is compressed is refused by name rather than by reading it as raw bytes,
+because lz4 framed data read as int64 is not an error that shows up anywhere near
+here.
+
+Dictionary encoded columns are read, and they are the one type whose description
+does not fit in the schema message. The schema says which columns are encoded and
+under what id, the categories arrive later in dictionary batch messages of their
+own, and the record batches carry codes. So the schema pass records what to
+expect, the dictionary batches fill it in, and the codes are copied by the same
+path as any other integer column with the categories attached at the end. A
+column whose categories never arrive is refused rather than handed back as the
+integers it physically is, because that is the one way this path could produce an
+answer instead of an error.
 
 The reader is strict about the parts a file could lie about. Every buffer is
 checked against the length of the body it is supposed to sit in, every node
@@ -44,6 +52,7 @@ next column's data.
 from std.collections.span import Span
 
 from firepanda.array.any import AnyArray
+from firepanda.array.strings import StringArray
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.dtype.temporal import unit_for_code
@@ -51,7 +60,12 @@ from firepanda.frame.frame import DataFrame
 
 from .arrow_c import ArrowArray, NullableVoidPtr, VoidPtr
 from .arrow_import import build_column
-from .assemble import ArrowLayout, assemble
+from .assemble import (
+    ArrowDictionary,
+    ArrowLayout,
+    assemble,
+    attach_dictionary,
+)
 from .flatbuf import (
     field_scalar,
     field_string,
@@ -234,10 +248,49 @@ def read_message(data: Span[UInt8, _], pos: Int) raises -> IpcMessage:
     return out^
 
 
+def _int_format(data: Span[UInt8, _], type: Int, name: String) raises -> String:
+    """Turns an `Int` type table into a format string.
+
+    Read from two places, because a dictionary's index type is an `Int` table
+    exactly like an integer column's own type and neither is allowed to accept a
+    width the other refuses.
+
+    Args:
+        data: The buffer holding the schema message.
+        type: The position of the `Int` table.
+        name: The column name, for the error message.
+
+    Returns:
+        The format string.
+
+    Raises:
+        Error: If the width is not one of 8, 16, 32 and 64.
+    """
+    var bits = Int(field_scalar[DType.int32](data, type, 0, 0))
+    var signed = Bool(field_scalar[DType.bool](data, type, 1, False))
+    if bits == 8:
+        return "c" if signed else "C"
+    if bits == 16:
+        return "s" if signed else "S"
+    if bits == 32:
+        return "i" if signed else "I"
+    if bits == 64:
+        return "l" if signed else "L"
+    raise Error(
+        String("arrow ipc: column '", name, "' is a ", bits, " bit integer")
+    )
+
+
 def _format_for(
     data: Span[UInt8, _], field: Int, name: String
 ) raises -> String:
-    """Turns one schema field into the format string the importer speaks.
+    """Turns one schema field's own type into the format string the importer
+    speaks.
+
+    A dictionary encoded field's own type is the type of its categories rather
+    than of what the record batches carry, so this is not on its own the answer
+    for one of those. `_dictionary_for` is, and calls this for the half of the
+    answer that lives here.
 
     Args:
         data: The buffer holding the schema message.
@@ -259,18 +312,6 @@ def _format_for(
                 "' is a nested type, and nested columns are not read yet",
             )
         )
-    if field_table(data, field, 4) >= 0:
-        raise Error(
-            String(
-                "arrow ipc: column '",
-                name,
-                (
-                    "' is dictionary encoded, and firepanda has no dictionary"
-                    " encoded column to read it into"
-                ),
-            )
-        )
-
     var kind = Int(field_scalar[DType.uint8](data, field, 2, 0))
     var type = field_table(data, field, 3)
     if kind == TYPE_NULL:
@@ -300,19 +341,7 @@ def _format_for(
             )
         )
     if kind == TYPE_INT:
-        var bits = Int(field_scalar[DType.int32](data, type, 0, 0))
-        var signed = Bool(field_scalar[DType.bool](data, type, 1, False))
-        if bits == 8:
-            return "c" if signed else "C"
-        if bits == 16:
-            return "s" if signed else "S"
-        if bits == 32:
-            return "i" if signed else "I"
-        if bits == 64:
-            return "l" if signed else "L"
-        raise Error(
-            String("arrow ipc: column '", name, "' is a ", bits, " bit integer")
-        )
+        return _int_format(data, type, name)
     if kind == TYPE_TIMESTAMP:
         # Field 0 is the unit and field 1 is the zone name, absent when the
         # column is naive. The unit is passed through rather than normalized to
@@ -378,12 +407,111 @@ def _format_for(
     )
 
 
-def read_schema(data: Span[UInt8, _], schema: Int) raises -> ArrowLayout:
+@fieldwise_init
+struct _Encoding(Copyable, Movable):
+    """What a schema says about one dictionary encoded column, before the
+    categories themselves have arrived."""
+
+    var column: Int
+    """Which column of the layout this belongs to."""
+
+    var id: Int64
+    """The number the dictionary batch carrying the categories will name."""
+
+    var values: String
+    """The format string of the categories, which is what the dictionary batch
+    carries and not what the record batches do."""
+
+    var index: String
+    """The format string of the codes, which is what the record batches carry and
+    what the layout holds for this column."""
+
+    var ordered: Bool
+    """Whether the categories have a meaningful order."""
+
+
+def _dictionary_for(
+    data: Span[UInt8, _], field: Int, name: String, column: Int
+) raises -> _Encoding:
+    """Reads one field's `DictionaryEncoding` table.
+
+    Args:
+        data: The buffer holding the schema message.
+        field: The position of the `Field` table.
+        name: The column name, for the error message.
+        column: The column position, carried into the result.
+
+    Returns:
+        What the schema says about the encoding.
+
+    Raises:
+        Error: If the categories are not strings, or the index type is not one
+            firepanda reads.
+
+    Notes:
+        The three string spellings accepted are the three firepanda has a string
+        column for. The view one is there because firepanda's own writer emits
+        it, for the same reason it emits it for an ordinary string column: the
+        view layout is what a string column already is, and writing offsets
+        would mean building a second copy of every category on the way out.
+    """
+    var encoding = field_table(data, field, 4)
+    var format = _format_for(data, field, name)
+    if format != "u" and format != "U" and format != "vu":
+        raise Error(
+            String(
+                "arrow ipc: column '",
+                name,
+                "' is dictionary encoded over ",
+                format,
+                (
+                    " values, and firepanda's categories are strings the way"
+                    " pandas' are"
+                ),
+            )
+        )
+    # Field 3 is the dictionary kind, and DenseArray is the only one Arrow has
+    # ever defined. Checking it costs nothing and means a file written against a
+    # later spec is refused rather than read as though the extra kind did not
+    # change anything.
+    var kind = Int(field_scalar[DType.int16](data, encoding, 3, 0))
+    if kind != 0:
+        raise Error(
+            String(
+                "arrow ipc: column '",
+                name,
+                "' has dictionary kind ",
+                kind,
+                ", and the dense array is the only kind there is",
+            )
+        )
+    var index = field_table(data, encoding, 1)
+    # Absent, the index type is a signed int32, which is the flatbuffer comment's
+    # default rather than a table default, so it has to be spelled here.
+    var codes = String("i")
+    if index >= 0:
+        codes = _int_format(data, index, name)
+    return _Encoding(
+        column,
+        field_scalar[DType.int64](data, encoding, 0, 0),
+        format,
+        codes,
+        Bool(field_scalar[DType.bool](data, encoding, 2, False)),
+    )
+
+
+def read_schema(
+    data: Span[UInt8, _], schema: Int, mut encodings: List[_Encoding]
+) raises -> ArrowLayout:
     """Reads a schema message's header table.
 
     Args:
         data: The buffer holding the message.
         schema: The position of the `Schema` table.
+        encodings: Filled with one entry per dictionary encoded column. The
+            categories are not in the schema and arrive in their own messages,
+            so what the caller gets here is what to expect rather than what to
+            use.
 
     Returns:
         The names and format strings.
@@ -409,7 +537,12 @@ def read_schema(data: Span[UInt8, _], schema: Int) raises -> ArrowLayout:
         var field = vector_table(data, fields, i)
         var name = field_string(data, field, 0)
         out.names.append(name)
-        out.formats.append(_format_for(data, field, name))
+        if field_table(data, field, 4) >= 0:
+            var encoding = _dictionary_for(data, field, name, i)
+            out.formats.append(encoding.index)
+            encodings.append(encoding^)
+        else:
+            out.formats.append(_format_for(data, field, name))
         out.nullable.append(
             Bool(field_scalar[DType.bool](data, field, 1, True))
         )
@@ -658,6 +791,122 @@ def _decode_batch(
     return out^
 
 
+def _read_dictionary(
+    data: Span[UInt8, _],
+    message: IpcMessage,
+    encodings: List[_Encoding],
+    mut layout: ArrowLayout,
+) raises:
+    """Reads one dictionary batch and gives its categories to their columns.
+
+    A dictionary batch is a record batch of one column wearing an id, so the
+    ordinary batch decoder does the work and the only thing added here is
+    finding out whose categories these are.
+
+    Args:
+        data: The buffer holding the message.
+        message: The framed dictionary batch message.
+        encodings: What the schema said about every dictionary column.
+        layout: The layout the categories are attached to.
+
+    Raises:
+        Error: If the batch is a delta, if its id belongs to no column, if the
+            categories arrive twice for one id, or if the batch is malformed.
+    """
+    var header = message.header
+    if header < 0:
+        raise Error("arrow ipc: a dictionary batch message with no batch in it")
+    var id = field_scalar[DType.int64](data, header, 0, 0)
+    if Bool(field_scalar[DType.bool](data, header, 2, False)):
+        raise Error(
+            String(
+                "arrow ipc: the categories of dictionary ",
+                id,
+                (
+                    " arrive as a delta, and firepanda reads a dictionary that"
+                    " comes whole"
+                ),
+            )
+        )
+
+    var wanted = List[Int]()
+    var format = String()
+    var ordered = False
+    for i in range(len(encodings)):
+        if encodings[i].id != id:
+            continue
+        # Two columns may name one dictionary and then they share it, so this
+        # gathers every column rather than stopping at the first.
+        if layout.dictionary_at(encodings[i].column) >= 0:
+            raise Error(
+                String(
+                    "arrow ipc: the categories of dictionary ",
+                    id,
+                    (
+                        " arrive twice, and every batch of one frame has to"
+                        " read against the same categories"
+                    ),
+                )
+            )
+        wanted.append(encodings[i].column)
+        format = encodings[i].values
+        ordered = encodings[i].ordered
+    if len(wanted) == 0:
+        raise Error(
+            String(
+                "arrow ipc: a dictionary batch carries id ",
+                id,
+                ", which no column in the schema asked for",
+            )
+        )
+
+    var mini = ArrowLayout()
+    mini.names.append(String("categories"))
+    mini.formats.append(format)
+    mini.nullable.append(True)
+
+    # The message header is the `DictionaryBatch` table and the batch decoder
+    # wants the `RecordBatch` inside it, which is field 1.
+    var inner = message.copy()
+    inner.header = field_table(data, header, 1)
+    var refs = _decode_batch(data, mini, inner)
+    var column = build_column(refs[0].array(), format)
+    _ = refs^
+
+    var categories = column^.into_strings()
+    for i in range(len(wanted)):
+        layout.dictionaries.append(
+            ArrowDictionary(wanted[i], ordered, StringArray(copy=categories))
+        )
+
+
+def _check_dictionaries(encodings: List[_Encoding], layout: ArrowLayout) raises:
+    """Raises unless every dictionary column got its categories.
+
+    A column whose categories never arrived would otherwise assemble as a plain
+    integer column of codes, which is the one failure mode of this whole path
+    that produces an answer rather than an error.
+
+    Args:
+        encodings: What the schema said about every dictionary column.
+        layout: The layout after every dictionary batch has been read.
+
+    Raises:
+        Error: If a declared dictionary column has no categories.
+    """
+    for i in range(len(encodings)):
+        if layout.dictionary_at(encodings[i].column) < 0:
+            raise Error(
+                String(
+                    "arrow ipc: column '",
+                    layout.names[encodings[i].column],
+                    "' is dictionary ",
+                    encodings[i].id,
+                    ", and no dictionary batch carried its categories",
+                )
+            )
+
+
 def _arrays(refs: List[List[_ColumnRef]]) raises -> List[List[ArrowArray]]:
     """Turns the decoded batches into the arrays the assembler takes.
 
@@ -752,6 +1001,14 @@ def _empty_frame(data: Span[UInt8, _], schema: ArrowLayout) raises -> DataFrame:
         _ = pointers^
         _ = sizes^
 
+        # A stream may carry its categories and then no rows at all, and the
+        # answer to that is a categorical column of no rows rather than an
+        # integer one. There are no codes to range check, so this is only the
+        # attachment.
+        var at = schema.dictionary_at(i)
+        if at >= 0:
+            attach_dictionary(column, schema.dictionaries[at], schema.names[i])
+
         var field = Field(schema.names[i], column.type)
         field.nullable = schema.nullable[i]
         fields.append(field^)
@@ -777,7 +1034,8 @@ def read_ipc_stream(data: Span[UInt8, _]) raises -> DataFrame:
             "arrow ipc: a stream begins with a schema message, and this one"
             " does not"
         )
-    var schema = read_schema(data, message.header)
+    var encodings = List[_Encoding]()
+    var schema = read_schema(data, message.header, encodings)
 
     var batches = List[List[_ColumnRef]]()
     var pos = message.next
@@ -786,10 +1044,9 @@ def read_ipc_stream(data: Span[UInt8, _]) raises -> DataFrame:
         if next.header_type == MESSAGE_NONE:
             break
         if next.header_type == MESSAGE_DICTIONARY_BATCH:
-            raise Error(
-                "arrow ipc: the stream carries a dictionary batch, and"
-                " dictionary encoded columns are not read yet"
-            )
+            _read_dictionary(data, next, encodings, schema)
+            pos = next.next
+            continue
         if next.header_type != MESSAGE_RECORD_BATCH:
             raise Error(
                 String(
@@ -801,6 +1058,7 @@ def read_ipc_stream(data: Span[UInt8, _]) raises -> DataFrame:
         batches.append(_decode_batch(data, schema, next))
         pos = next.next
 
+    _check_dictionaries(encodings, schema)
     if len(batches) == 0:
         return _empty_frame(data, schema)
     return _assemble(schema, batches^)
@@ -848,7 +1106,35 @@ def read_ipc_file(data: Span[UInt8, _]) raises -> DataFrame:
             )
         )
     var footer = root_table(data, length_at - footer_length)
-    var schema = read_schema(data, field_table(data, footer, 1))
+    var encodings = List[_Encoding]()
+    var schema = read_schema(data, field_table(data, footer, 1), encodings)
+
+    # Field 2 is the dictionaries, in their own list of blocks ahead of the
+    # record batches in field 3. A file is not walked in order, so the categories
+    # are fetched by the footer saying where they are rather than by meeting them
+    # on the way past, and a file with no dictionary columns has an empty vector
+    # here and does no work.
+    var dictionaries = field_vector(data, footer, 2)
+    var dictionary_count = 0 if dictionaries < 0 else vector_length(
+        data, dictionaries
+    )
+    for i in range(dictionary_count):
+        var block = vector_element(data, dictionaries, i, BLOCK_SIZE)
+        var at = Int(read_scalar[DType.int64](data, block))
+        var message = read_message(data, at)
+        if message.header_type != MESSAGE_DICTIONARY_BATCH:
+            raise Error(
+                String(
+                    (
+                        "arrow ipc: the footer's dictionaries point at a"
+                        " message of kind "
+                    ),
+                    message.header_type,
+                    " where a dictionary batch should be",
+                )
+            )
+        _read_dictionary(data, message, encodings, schema)
+    _check_dictionaries(encodings, schema)
 
     var blocks = field_vector(data, footer, 3)
     var count = 0 if blocks < 0 else vector_length(data, blocks)

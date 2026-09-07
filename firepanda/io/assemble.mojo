@@ -33,13 +33,29 @@ wanted has been copied.
 """
 
 from firepanda.array.any import AnyArray
+from firepanda.array.strings import StringArray
 from firepanda.bitmap.bitmap import Bitmap
+from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.exec import parallel_for
 from firepanda.frame.frame import DataFrame
 
 from .arrow_c import ArrowArray
 from .arrow_import import ColumnSink, fill_column, payload_for
+
+
+@fieldwise_init
+struct ArrowDictionary(Copyable, Movable):
+    """The categories of one dictionary encoded column, once they are known."""
+
+    var column: Int
+    """Which column of the layout these belong to."""
+
+    var ordered: Bool
+    """Whether the categories have a meaningful order."""
+
+    var values: StringArray
+    """The categories themselves, one entry each rather than one per row."""
 
 
 struct ArrowLayout(Copyable, Movable, Sized):
@@ -50,16 +66,34 @@ struct ArrowLayout(Copyable, Movable, Sized):
     """The column names, in order."""
 
     var formats: List[String]
-    """One C Data Interface format string per column, in the same order."""
+    """One C Data Interface format string per column, in the same order.
+
+    A dictionary encoded column puts its index type here and not its value type,
+    which is what makes the whole assembly below work on one unchanged: the codes
+    are an ordinary int32 column and are copied by the same path as any other,
+    and the categories are attached at the end. Arrow's own C interface makes the
+    same choice, where the schema's format is the index type and the values hang
+    off a separate member.
+    """
 
     var nullable: List[Bool]
     """Whether each column was declared nullable."""
+
+    var dictionaries: List[ArrowDictionary]
+    """The categories of whichever columns are dictionary encoded.
+
+    One entry per dictionary column rather than one per column, because almost
+    every layout has none and the ones that do have one or two. Looked up by
+    scanning, which over a list this short beats a map by more than the code it
+    saves.
+    """
 
     def __init__(out self):
         """Constructs a layout of no columns."""
         self.names = List[String]()
         self.formats = List[String]()
         self.nullable = List[Bool]()
+        self.dictionaries = List[ArrowDictionary]()
 
     def __len__(self) -> Int:
         """Returns the column count.
@@ -68,6 +102,21 @@ struct ArrowLayout(Copyable, Movable, Sized):
             How many columns the layout has.
         """
         return len(self.names)
+
+    def dictionary_at(self, column: Int) -> Int:
+        """Finds the categories belonging to a column.
+
+        Args:
+            column: The column position.
+
+        Returns:
+            The position in `dictionaries`, or -1 if the column is not
+            dictionary encoded.
+        """
+        for i in range(len(self.dictionaries)):
+            if self.dictionaries[i].column == column:
+                return i
+        return -1
 
 
 comptime PIECE_ROWS = 65536
@@ -119,6 +168,101 @@ def _slice(array: ArrowArray, start: Int, rows: Int) -> ArrowArray:
     out.release = None
     out.private_data = None
     return out^
+
+
+def _check_codes[
+    dt: DType
+](column: AnyArray, categories: Int, name: String) raises:
+    """Raises if any code points outside the categories.
+
+    Nothing downstream can do this check for itself. A code is read to reach a
+    category, and by then a bad one is an out of bounds read rather than a
+    question anybody asks, so the one pass to rule them out happens here where
+    the column is built and once.
+
+    A null row's code is not read and is not checked. Arrow says nothing about
+    what a writer puts there and pandas writes a negative number, so a valid
+    file would be rejected for a byte that means nothing.
+
+    Args:
+        column: The finished codes column.
+        categories: How many categories there are.
+        name: The column name, for the error message.
+
+    Parameters:
+        dt: The index dtype.
+
+    Raises:
+        Error: If a code of a non-null row is negative or too large.
+    """
+    ref codes = column.as_typed_view[dt]()
+    for i in range(len(column)):
+        if not column.is_valid(i):
+            continue
+        var code = Int(codes[i])
+        if code < 0 or code >= categories:
+            raise Error(
+                String(
+                    "arrow: column '",
+                    name,
+                    "' has a code of ",
+                    code,
+                    " at row ",
+                    i,
+                    " against ",
+                    categories,
+                    " categories",
+                )
+            )
+
+
+def attach_dictionary(
+    mut column: AnyArray, entry: ArrowDictionary, name: String
+) raises:
+    """Turns a finished codes column into a dictionary column.
+
+    Args:
+        column: The codes, as an ordinary integer column. Left as a dictionary
+            column over the same buffer.
+        entry: The categories and the ordered flag.
+        name: The column name, for the error message.
+
+    Raises:
+        Error: If the index type is not an integer, or a code is out of range.
+    """
+    var size = len(entry.values)
+    var index = column.type.physical
+    # Arrow allows any signed integer width for an index and says unsigned ones
+    # are permitted too, so all eight are read rather than the int32 that
+    # everything in practice writes.
+    if index == DType.int8:
+        _check_codes[DType.int8](column, size, name)
+    elif index == DType.int16:
+        _check_codes[DType.int16](column, size, name)
+    elif index == DType.int32:
+        _check_codes[DType.int32](column, size, name)
+    elif index == DType.int64:
+        _check_codes[DType.int64](column, size, name)
+    elif index == DType.uint8:
+        _check_codes[DType.uint8](column, size, name)
+    elif index == DType.uint16:
+        _check_codes[DType.uint16](column, size, name)
+    elif index == DType.uint32:
+        _check_codes[DType.uint32](column, size, name)
+    elif index == DType.uint64:
+        _check_codes[DType.uint64](column, size, name)
+    else:
+        raise Error(
+            String(
+                "arrow: column '",
+                name,
+                "' is dictionary encoded with an index type of ",
+                index,
+                ", and an index is an integer",
+            )
+        )
+    column.dict_values = StringArray(copy=entry.values)
+    column.type = LogicalType.dictionary(index, entry.ordered)
 
 
 def assemble(
@@ -211,6 +355,9 @@ def assemble(
     var columns = List[AnyArray](capacity=width)
     for c in range(width):
         var column = sinks.pop(0).finish()
+        var at = layout.dictionary_at(c)
+        if at >= 0:
+            attach_dictionary(column, layout.dictionaries[at], layout.names[c])
         var field = Field(layout.names[c], column.type)
         field.nullable = layout.nullable[c]
         fields.append(field^)

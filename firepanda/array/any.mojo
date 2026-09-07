@@ -73,6 +73,18 @@ struct AnyArray(Copyable, Movable, Sized):
     var text: Optional[StringArray]
     """The variable width elements, present only for a string column."""
 
+    var dict_values: Optional[StringArray]
+    """The categories a dictionary column's codes refer to, present only for a
+    dictionary column.
+
+    Kept apart from `text` rather than reusing it, and the separation is the
+    point. These are one entry per category and `text` is one entry per row, so
+    a dictionary column sharing the field would answer `is_string` yes and hand
+    four categories back to a caller that asked for a million rows of values.
+    Two fields cost an eight byte discriminant on a struct that is already three
+    buffers wide, and they make that mistake impossible to write.
+    """
+
     def __init__(out self, var data: ColumnData, type: LogicalType):
         """Constructs a type-erased column over storage the caller built.
 
@@ -83,6 +95,7 @@ struct AnyArray(Copyable, Movable, Sized):
         self.data = data^
         self.type = type
         self.text = None
+        self.dict_values = None
 
     def __init__[dt: DType](out self, var typed: Array[dt]):
         """Erases the dtype of a typed array, taking ownership of its buffers.
@@ -96,6 +109,7 @@ struct AnyArray(Copyable, Movable, Sized):
         self.data = typed^.into_data()
         self.type = logical_for(dt)
         self.text = None
+        self.dict_values = None
 
     def __init__(out self, var strings: StringArray):
         """Erases a string column, taking ownership of its buffers.
@@ -107,6 +121,36 @@ struct AnyArray(Copyable, Movable, Sized):
         self.data = ColumnData(Buffer(0), Bitmap(copy=strings.validity), length)
         self.type = LogicalType.STRING
         self.text = strings^
+        self.dict_values = None
+
+    @staticmethod
+    def dictionary[
+        dt: DType
+    ](
+        var codes: Array[dt], var categories: StringArray, ordered: Bool = False
+    ) -> Self:
+        """Builds a dictionary column from its codes and its categories.
+
+        Nothing here checks that every code is in range. The check costs a pass
+        over the column, and a caller that built the codes itself already knows
+        they are good. The one caller that does not is the Arrow reader, which
+        is handed them by somebody else, and it does the pass itself in
+        `attach_dictionary`.
+
+        Args:
+            codes: One position per row, pointing into the categories.
+            categories: The distinct values, held once each.
+            ordered: Whether the categories have a meaningful order.
+
+        Parameters:
+            dt: The dtype of the codes.
+
+        Returns:
+            The column.
+        """
+        var out = Self(codes^.into_data(), LogicalType.dictionary(dt, ordered))
+        out.dict_values = categories^
+        return out^
 
     def __init__(out self, *, copy: Self):
         """Deep-copies a column.
@@ -117,6 +161,7 @@ struct AnyArray(Copyable, Movable, Sized):
         self.data = ColumnData(copy=copy.data)
         self.type = copy.type
         self.text = Optional[StringArray](copy=copy.text)
+        self.dict_values = Optional[StringArray](copy=copy.dict_values)
 
     def __len__(self) -> Int:
         """Returns the number of values.
@@ -174,6 +219,19 @@ struct AnyArray(Copyable, Movable, Sized):
         if self.text:
             ref held = self.text.value()
             return out + len(held.views) + len(held.payload)
+        if self.dict_values:
+            # Codes and categories both, which is what pandas counts for a
+            # categorical. It is also the number that makes the type worth
+            # having: a million rows over four categories is four megabytes of
+            # codes and a few dozen bytes of text, and reporting only one half
+            # would make the saving look either imaginary or free.
+            ref held = self.dict_values.value()
+            return (
+                out
+                + len(self.data.values)
+                + len(held.views)
+                + len(held.payload)
+            )
         return out + len(self.data.values)
 
     def is_string(self) -> Bool:
@@ -219,25 +277,70 @@ struct AnyArray(Copyable, Movable, Sized):
         var held = self.text^
         return held.take()
 
-    def check_dtype[dt: DType](self) raises:
-        """Raises unless the column has a given dtype.
+    def is_dictionary(self) -> Bool:
+        """Reports whether the column stores positions into a category list.
 
-        A string column fails this for every `dt`. Its physical dtype is uint8,
-        so without the first check `as_typed[DType.uint8]()` would hand back a
-        column over the views buffer, whose values are not the column's values.
+        Returns:
+            True for a dictionary column.
+        """
+        return Bool(self.dict_values)
+
+    def categories(
+        ref self,
+    ) raises -> ref[self.dict_values.value()] StringArray:
+        """Returns the values a dictionary column's codes refer to.
+
+        The length of what comes back is the number of categories and not the
+        number of rows, which is the whole difference between this and
+        `strings`.
+
+        Returns:
+            A reference to the categories, valid as long as this column is.
+
+        Raises:
+            If the column is not a dictionary column.
+        """
+        if not self.dict_values:
+            raise Error(
+                "column is " + String(self.type) + ", not a dictionary column"
+            )
+        return self.dict_values.value()
+
+    def codes[dt: DType](self) raises -> Array[dt]:
+        """Returns a dictionary column's codes as a typed array.
+
+        This is the deliberate way past the refusal in `check_dtype`, and every
+        caller of it is saying it knows the numbers are positions rather than
+        values. Reading a categorical's codes without meaning to is the mistake
+        `check_dtype` exists to stop, so the way to do it on purpose is spelled
+        differently rather than being the same call with a comment.
+
+        Parameters:
+            dt: The dtype of the codes, which must match the index type.
+
+        Returns:
+            A typed copy of the codes, the same deep copy `as_typed` makes.
+
+        Raises:
+            If the column is not a dictionary column, or if the index dtype
+            differs from the requested one.
+        """
+        if not self.dict_values:
+            raise Error(
+                "column is " + String(self.type) + ", not a dictionary column"
+            )
+        self._check_physical[dt]()
+        return Array[dt](ColumnData(copy=self.data))
+
+    def _check_physical[dt: DType](self) raises:
+        """Raises unless the values buffer is laid out as a given dtype.
 
         Parameters:
             dt: The expected dtype.
 
         Raises:
-            If the column's dtype differs, or if it is a string column.
+            If the column's physical dtype differs.
         """
-        if self.is_string():
-            raise Error(
-                "column is "
-                + String(self.type)
-                + " and has no fixed width values; use strings() instead"
-            )
         if self.type.physical != dt:
             raise Error(
                 "dtype mismatch: column is "
@@ -245,6 +348,44 @@ struct AnyArray(Copyable, Movable, Sized):
                 + ", requested "
                 + String(dt)
             )
+
+    def check_dtype[dt: DType](self) raises:
+        """Raises unless the column has a given dtype.
+
+        A string column fails this for every `dt`. Its physical dtype is uint8,
+        so without the first check `as_typed[DType.uint8]()` would hand back a
+        column over the views buffer, whose values are not the column's values.
+
+        A dictionary column fails it for the same reason and a worse one. Its
+        physical dtype is the index type, which is a perfectly ordinary int32,
+        so the check below would pass and hand back a column of category
+        positions that a mean or a sum would then happily compute over and
+        return a number for. There is no wrong dtype to catch it: the answer is
+        wrong and nothing about it looks wrong. Every kernel that reads values
+        goes through here, which is why one refusal in this function covers all
+        of them rather than nineteen files each remembering to ask.
+
+        Parameters:
+            dt: The expected dtype.
+
+        Raises:
+            If the column's dtype differs, or if it is a string or dictionary
+            column.
+        """
+        if self.is_string():
+            raise Error(
+                "column is "
+                + String(self.type)
+                + " and has no fixed width values; use strings() instead"
+            )
+        if self.is_dictionary():
+            raise Error(
+                "column is "
+                + String(self.type)
+                + " and stores positions into its categories rather than"
+                " values; use categories() and codes() instead"
+            )
+        self._check_physical[dt]()
 
     def as_typed[dt: DType](self) raises -> Array[dt]:
         """Returns a typed copy of the column.
