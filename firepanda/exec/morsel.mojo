@@ -44,6 +44,34 @@ comptime MORSEL_ROWS = 128 * 1024
 
 One chunk's worth, so a morsel and a chunk are the same thing and a kernel that
 was written to walk one walks the other.
+
+This number came from DuckDB rounded to a power of two rather than from a
+measurement, which is exactly how the join driver ended up handing the join a
+chunk four times too big, so it was measured. Against thirty two thousand, the
+size that turned out to be right there, on twenty eight `kernel/` rows at forty
+million rows on an i9-13900K, three runs a side in ABBA order: seventeen rows
+come out faster, eleven slower, one of the twenty eight is separated in the
+sense that every run of the new is below every run of the old, and that one has
+no mechanism behind it. So this number is not wrong the way the other one was,
+and it stays.
+
+The reason the two are not the same question is worth keeping. A join makes
+several passes over its chunk, probing the key and then bucketing and then
+gathering, so the chunk has to survive in a private cache between them and the
+right size is a cache size. A morsel here is one pass over a range, so nothing
+has to survive anything, and the only thing the size buys is the balance
+between fork and join overhead and a straggler holding the last piece. Both of
+those are flat across a wide range of sizes, which is what twenty eight rows
+going nowhere looks like.
+
+Measuring it at ten million rows first gave the opposite answer, thirteen of
+fourteen rows faster, and that was wrong for a reason worth writing down. Those
+reductions run in well under a millisecond at ten million rows, and all fourteen
+were read out of the same six sessions, so a session that happened to be a few
+percent quick moved all fourteen of its rows together. Fourteen rows agreeing is
+not fourteen pieces of evidence when they share a session. Forty million rows
+gives the reductions about four and a half milliseconds each and the agreement
+disappears.
 """
 
 
