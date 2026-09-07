@@ -8,6 +8,17 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.51] - 2026-09-07
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Two Arrow types and a join that had been running on one core.
+
+The join is the one worth reading. An outer join was the only kind that would not spread across cores, because it has to remember which built side rows paired and it remembered them in a bitmap, whose set is a read modify write of a word that eight rows share. That was a real constraint on the bitmap and not on the remembering, and marking a byte per key code instead takes it away. Reading the byte before writing it is worth as much again, because a store is what takes a cache line off the other cores and a load is not. Together they are just under three times on `join/outer`.
+
+The types are dictionary and duration columns, which the Arrow reader and writer now handle in every unit and every index width. A dictionary is how Arrow spells a categorical, so this is the type a text column with few distinct values arrives as from Polars and pyarrow, and reading it was previously an error that stopped the whole file.
+
+
 ### An outer join runs on every core, three times faster
 
 An outer join was the one kind that would not spread across cores. Every other kind cut the probe side into morsels and paired them at once; an outer join walked ten million rows on one thread of thirty two. On the microbenchmark that shows it, `join/outer` took 105 ms against 24 ms for an inner join over the same fact table producing a result of the same height, and there is nothing about an outer join that should cost four times an inner one.
