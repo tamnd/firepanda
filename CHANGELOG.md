@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### An outer join runs on every core, three times faster
+
+An outer join was the one kind that would not spread across cores. Every other kind cut the probe side into morsels and paired them at once; an outer join walked ten million rows on one thread of thirty two. On the microbenchmark that shows it, `join/outer` took 105 ms against 24 ms for an inner join over the same fact table producing a result of the same height, and there is nothing about an outer join that should cost four times an inner one.
+
+The reason it stayed serial was real. An outer join has to emit the built side rows that nothing paired with, so it has to remember which ones did pair, and it remembered them in a bitmap. Setting one bit is a read modify write of a word that eight neighbouring rows share, so two workers marking at once would lose each other's marks and the join would invent unmatched rows.
+
+That is a fact about the bitmap rather than about the remembering. What it marks now is a byte per key code, and two threads storing to two bytes are storing to two memory locations however close together they sit, so the worst they share is a cache line, which costs speed and never an answer. Marking the code rather than the row also takes the mark out of the inner loop, because a code is paired whole or not at all, so a probe row landing on a bucket of nine rows marks once instead of nine times. One walk of the built side after the emit turns the marked codes back into marked rows, and it is exact for the same reason.
+
+Half the win is in a line that looks like a wasted load. The emit reads the byte before writing it. A store is what takes a cache line away from the other cores and a load is not, so a join onto a thousand keys, whose marks are a thousand bytes sitting in sixteen cache lines, is thirty two cores passing those lines around ten million times if it stores every time and is a thousand stores in total if it looks first. Two workers both reading zero and both storing one write the same value twice, so there is nothing there to protect.
+
+Measured on an i9-13900K at ten million rows, three runs a side alternating between the two binaries, `join/outer` goes from 104.5, 109.8 and 115.3 ms to 34.9, 37.1 and 37.1. Storing the byte unconditionally instead of looking first lands in between at 56.3, 58.5 and 60.0, which is the difference between splitting the work and splitting the work while the cores fight over the marks. `join/inner_1000` at 25.0 ms and `join/left_1000` at 25.7 ms do not move in any of it, which is what says the sessions were comparable.
+
+The parallel outer path could not be reached before, so nothing covered it. It has a test now that pairs a hundred and thirty one thousand probe rows against a built side holding duplicate keys and unmatched keys, once on every core and once on one, and checks that the two agree about the pairs and about the marks. The marks are also checked against the pairs that came back rather than against the walk that set them, because two routes agreeing with each other is not worth much if both are wrong.
+
 ### A dictionary column can be read, written and named
 
 A dictionary encoded column holds its values once in a separate array and holds one small integer per row saying which of them that row has. pandas calls it a categorical, Arrow calls it a dictionary, and it is the same arrangement under both names. firepanda now reads one, writes one and spells its type `category` the way pandas does.

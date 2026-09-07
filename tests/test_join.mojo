@@ -1075,5 +1075,94 @@ def test_pairing_on_one_core_gives_what_pairing_on_all_of_them_gives() raises:
     assert_equal(bad, -1, String("pair ", bad))
 
 
+def test_an_outer_join_marks_the_same_built_rows_however_many_cores_it_used() raises:
+    """The parallel emit and the serial one mark the same built side rows.
+
+    An outer join used to refuse to spread at all, because its emit set a bit
+    per paired built row and eight neighbouring rows share a word. It marks a
+    byte per group now and turns the groups back into rows once at the end, so
+    both routes run the same marking over a probe side long enough to be cut
+    into morsels, and this is what says they agree about it.
+
+    The marks are checked against the pairs as well, because two routes agreeing
+    with each other would not be worth much if both of them were wrong.
+    """
+    var rows = (1 << 17) + 11
+    var probe = List[Scalar[DType.int64]](capacity=rows)
+    for i in range(rows):
+        probe.append(Int64(i % 9))
+    var left = one_column(Series("k", ints(probe)))
+
+    # Two of the built keys are held twice, so the pairing goes through buckets
+    # rather than through the unique table, and two of them are held by nobody
+    # on the left, so there are unmatched right rows for the marks to get wrong.
+    var right = one_column(Series("k", ints([1, 3, 3, 5, 5, 11, 12])))
+    var other = 7
+
+    var aligned = align_keys(
+        left.column_refs(), keys(0), rows, right.column_refs(), keys(0), other
+    )
+    var table = bucket_side(
+        aligned.codes,
+        rows,
+        other,
+        aligned.absent,
+        rows,
+        aligned.has_nulls,
+        aligned.groups,
+    )
+
+    var spread_marks = Bitmap(other, all_valid=False)
+    var spread = pair_probe(
+        table,
+        aligned.codes,
+        0,
+        rows,
+        aligned.absent,
+        0,
+        aligned.has_nulls,
+        JoinKind.OUTER,
+        spread_marks,
+    )
+    var alone_marks = Bitmap(other, all_valid=False)
+    var alone = pair_probe(
+        table,
+        aligned.codes,
+        0,
+        rows,
+        aligned.absent,
+        0,
+        aligned.has_nulls,
+        JoinKind.OUTER,
+        alone_marks,
+        False,
+    )
+
+    assert_equal(len(alone), len(spread), "the same number of pairs")
+    var bad = -1
+    for r in range(len(spread)):
+        if (
+            spread.left_at[r] != alone.left_at[r]
+            or spread.right_at[r] != alone.right_at[r]
+        ):
+            bad = r
+            break
+    assert_equal(bad, -1, String("pair ", bad))
+
+    # What the marks are supposed to say, read off the pairs that came back
+    # rather than off the walk that set them.
+    var want = List[Bool](length=other, fill=False)
+    for r in range(len(spread)):
+        var b = spread.right_at[r]
+        if b >= 0:
+            want[b] = True
+    var wrong = -1
+    for b in range(other):
+        if spread_marks.get(b) != want[b] or alone_marks.get(b) != want[b]:
+            wrong = b
+            break
+    assert_equal(wrong, -1, String("built row ", wrong))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
