@@ -67,6 +67,7 @@ from .arrow_ipc import (
     TYPE_BINARY_VIEW,
     TYPE_BOOL,
     TYPE_DATE,
+    TYPE_DURATION,
     TYPE_FLOATING_POINT,
     TYPE_INT,
     TYPE_TIMESTAMP,
@@ -303,6 +304,8 @@ def _type_code(type: LogicalType) raises -> Int:
         return TYPE_TIMESTAMP
     if type.kind == TypeKind.DATE:
         return TYPE_DATE
+    if type.kind == TypeKind.DURATION:
+        return TYPE_DURATION
     if type == LogicalType.BOOL:
         return TYPE_BOOL
     if type == LogicalType.STRING:
@@ -364,6 +367,14 @@ def _type_table(mut b: Builder, type: LogicalType) raises -> Int:
         # elided.
         b.start_table(1)
         b.add_scalar[DType.int16](0, 0, 1)
+        return b.end_table()
+    if code == TYPE_DURATION:
+        # Same shape as the timestamp's first field and the same reason the
+        # default is one: the flatbuffer default for a duration's unit is
+        # MILLISECOND, so a second column has to write its zero rather than
+        # leave it out.
+        b.start_table(1)
+        b.add_scalar[DType.int16](0, Int16(Int(type.unit.code)), 1)
         return b.end_table()
     if code == TYPE_INT:
         var signed = (

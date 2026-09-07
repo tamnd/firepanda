@@ -274,10 +274,18 @@ def test_a_temporal_type_promotes_with_nothing_but_itself() raises:
     assert_true(promote(micro, micro) == micro)
     with assert_raises(contains="not the same kind of thing"):
         _ = promote(micro, LogicalType.INT64)
-    with assert_raises(contains="differ in unit or in time zone"):
+    with assert_raises(contains="differ in kind, in unit or in time zone"):
         _ = promote(micro, LogicalType.timestamp(TimeUnit.NANO))
-    with assert_raises(contains="differ in unit or in time zone"):
+    with assert_raises(contains="differ in kind, in unit or in time zone"):
         _ = promote(micro, LogicalType.DATE32)
+    # A duration against an instant of the same unit is the mixture that looks
+    # most like it should work and is the one pandas answers with a timestamp,
+    # so it is worth pinning that firepanda refuses it rather than promoting
+    # one to the other on the strength of both being an int64.
+    with assert_raises(contains="differ in kind, in unit or in time zone"):
+        _ = promote(micro, LogicalType.duration(TimeUnit.MICRO))
+    with assert_raises(contains="scales an elapsed time by a number"):
+        _ = promote(LogicalType.duration(TimeUnit.MICRO), LogicalType.INT64)
 
 
 def test_a_temporal_type_promotes_with_null_the_way_everything_does() raises:
@@ -292,6 +300,7 @@ def test_a_temporal_type_is_not_numeric_even_though_it_holds_integers() raises:
     var micro = LogicalType.timestamp(TimeUnit.MICRO)
     assert_true(micro.is_temporal())
     assert_true(LogicalType.DATE32.is_temporal())
+    assert_true(LogicalType.duration(TimeUnit.MICRO).is_temporal())
     assert_false(micro.is_numeric())
     assert_false(micro.is_integer())
     assert_false(LogicalType.INT64.is_temporal())

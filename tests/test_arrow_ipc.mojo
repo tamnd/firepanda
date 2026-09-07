@@ -358,12 +358,15 @@ def test_a_date64_column_is_refused_by_name() raises:
         _ = read_ipc_stream(Span(_date64_stream()))
 
 
-def test_a_duration_column_is_refused_by_name() raises:
-    # Arrow type 18. The message names the type rather than saying no, because
-    # this is where the next piece of work starts and a user reading it should
-    # be able to tell that from a bug.
-    with assert_raises(contains="Arrow type 18"):
-        _ = read_ipc_stream(Span(_duration_stream()))
+def test_a_duration_column_reads_as_an_elapsed_count() raises:
+    # Arrow type 18, and the one temporal type whose unit field defaults to
+    # millisecond rather than to zero, so a microsecond column only reads
+    # correctly if the reader asks for the field instead of taking the default.
+    var frame = read_ipc_stream(Span(_duration_stream()))
+    assert_equal(frame.width(), 1)
+    assert_true(frame.schema[0].dtype == LogicalType.duration(TimeUnit.MICRO))
+    assert_equal(String(frame.schema[0].dtype), "timedelta64[us]")
+    assert_equal(frame[0].as_typed[DType.int64]()[0], Int64(1))
 
 
 def test_a_list_column_is_refused_by_name() raises:

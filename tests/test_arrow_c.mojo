@@ -252,6 +252,10 @@ def test_every_format_string_round_trips() raises:
         LogicalType.timestamp(TimeUnit.MICRO, TimeZone("America/New_York")),
         LogicalType.timestamp(TimeUnit.NANO, TimeZone("UTC")),
         LogicalType.DATE32,
+        LogicalType.duration(TimeUnit.SECOND),
+        LogicalType.duration(TimeUnit.MILLI),
+        LogicalType.duration(TimeUnit.MICRO),
+        LogicalType.duration(TimeUnit.NANO),
     ]
     for type in types:
         assert_equal(type_for_format(format_for(type)), type)
@@ -271,6 +275,10 @@ def test_temporal_format_strings() raises:
         "tsu:America/New_York",
     )
     assert_equal(format_for(LogicalType.DATE32), "tdD")
+    # The capital D is the whole difference between a duration and a date, so
+    # `tDs` is an elapsed count of seconds and `tds` is nothing at all.
+    assert_equal(format_for(LogicalType.duration(TimeUnit.SECOND)), "tDs")
+    assert_equal(format_for(LogicalType.duration(TimeUnit.NANO)), "tDn")
 
 
 def test_a_malformed_temporal_format_string_is_refused() raises:
@@ -282,6 +290,10 @@ def test_a_malformed_temporal_format_string_is_refused() raises:
         _ = type_for_format("tsx:")
     with assert_raises(contains="counts milliseconds"):
         _ = type_for_format("tdm")
+    with assert_raises(contains="unit letter that is none of"):
+        _ = type_for_format("tDx")
+    with assert_raises(contains="not a duration format string"):
+        _ = type_for_format("tDus")
 
 
 def test_case_matters() raises:
@@ -303,11 +315,11 @@ def test_offset_string_formats_are_refused() raises:
 def test_unknown_formats_are_refused() raises:
     with assert_raises(contains="unsupported format string"):
         _ = type_for_format("+s")
-    # `tsm:` used to be here, as the example of a temporal type nothing could
-    # read. It reads now, so the example is a duration instead, which is the
-    # next temporal type and not this one.
+    # `tsm:` used to be here, and then `tDu` was. Both read now, so the example
+    # is an interval, which is the temporal type after the duration and is not
+    # one integer per row the way all of these are.
     with assert_raises(contains="unsupported format string"):
-        _ = type_for_format("tDu")
+        _ = type_for_format("tiM")
     with assert_raises(contains="unsupported format string"):
         _ = type_for_format("")
 

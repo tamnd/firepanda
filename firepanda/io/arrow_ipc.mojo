@@ -97,6 +97,7 @@ comptime TYPE_UTF8 = 5
 comptime TYPE_BOOL = 6
 comptime TYPE_DATE = 8
 comptime TYPE_TIMESTAMP = 10
+comptime TYPE_DURATION = 18
 comptime TYPE_LARGE_BINARY = 19
 comptime TYPE_LARGE_UTF8 = 20
 comptime TYPE_BINARY_VIEW = 23
@@ -342,6 +343,14 @@ def _format_for(
                 )
             )
         return "tdD"
+    if kind == TYPE_DURATION:
+        # One field, the unit, and its flatbuffer default is MILLISECOND rather
+        # than the zero the other tables default to, which is why the default
+        # argument here is 1 the way the date's is.
+        var span = unit_for_code(
+            Int(field_scalar[DType.int16](data, type, 0, 1))
+        )
+        return String("tD", span.code_letter())
     if kind == TYPE_FLOATING_POINT:
         var precision = Int(field_scalar[DType.int16](data, type, 0, 0))
         if precision == 0:
