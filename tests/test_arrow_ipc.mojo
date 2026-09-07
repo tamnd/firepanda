@@ -476,7 +476,7 @@ def test_a_nested_column_in_more_than_one_batch_is_refused_by_name() raises:
     # Joining two batches of a list means shifting the second one's offsets by
     # the first one's element count, at every level. Until that is written the
     # reader says so rather than handing back the first batch and calling it the
-    # file.
+    # file. Issue #285 is the join.
     with assert_raises(contains="spread across 2 record batches"):
         _ = read_ipc_stream(Span(_two_batch_list_stream()))
 
@@ -486,6 +486,7 @@ def test_a_nested_column_cannot_be_written_back_out_yet() raises:
     # table per column and no child fields to put under it, so it says the type
     # has no spelling here rather than writing the offsets buffer out as though
     # it were a column of integers, which is what a reader would get back.
+    # Issue #284 is the writer.
     var frame = read_ipc_stream(Span(_list_stream()))
     with assert_raises(contains="cannot write a column of type list"):
         _ = write_ipc_stream_bytes(frame)

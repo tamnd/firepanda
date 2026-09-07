@@ -129,6 +129,9 @@ struct AnyArray(Copyable, Movable, Sized):
     that make it 480 and land on the boundary. `test_a_column_has_no_trailing
     _padding` fails if a later field breaks that again, which is the only warning
     there is: nothing about the miscompile happens at compile time.
+
+    Issue #286 carries the bisection and takes this field back out when a
+    toolchain lands that does not need it.
     """
 
     def __init__(out self, var data: ColumnData, type: LogicalType):
