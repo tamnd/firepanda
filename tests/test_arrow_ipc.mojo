@@ -12,9 +12,15 @@ with an element too long to inline, a large string column, a string view column,
 a float column, a bool column, an int32 column, and a schema with no batches
 behind it.
 
-The rest of the tests are the refusals. A list column and a file whose magic
-number is wrong both have to be named rather than misread, because either is a
-shape this reader could otherwise walk into and produce numbers from. The
+The nested fixtures are their own group, because a list and a struct keep their
+values in child columns and the batch describes those as field nodes of their
+own. There is a list, a large list with the wider offsets, a struct of two
+fields, and a struct of a list, which is the one that says whether the reader
+walks a tree or only its first two levels.
+
+The rest of the tests are the refusals. A file whose magic number is wrong has
+to be named rather than misread, because it is a shape this reader could
+otherwise walk into and produce numbers from. The
 dictionary refusals are the sharpest of these: a categorical column read as its
 codes is an integer column that looks completely ordinary and is wrong, so a
 dictionary whose categories never arrived, whose codes point past the end of
@@ -372,9 +378,118 @@ def test_a_duration_column_reads_as_an_elapsed_count() raises:
     assert_equal(frame[0].as_typed[DType.int64]()[0], Int64(1))
 
 
-def test_a_list_column_is_refused_by_name() raises:
-    with assert_raises(contains="nested"):
-        _ = read_ipc_stream(Span(_list_stream()))
+def test_a_list_column_reads_with_its_elements_in_a_child() raises:
+    # [[1, 2], [3]]. Two rows and three elements, which is the whole of what a
+    # list type is: the child column has no idea where a row ends and the
+    # offsets are the only thing that says.
+    var frame = read_ipc_stream(Span(_list_stream()))
+    assert_equal(frame.width(), 1)
+    assert_equal(len(frame), 2)
+    assert_true(frame[0].is_nested())
+    assert_equal(frame[0].type_name(), "list<item: int64>")
+    assert_equal(frame[0].child_count(), 1)
+
+    var offsets = frame[0].offsets[DType.int32]()
+    assert_equal(offsets[0], Int32(0))
+    assert_equal(offsets[1], Int32(2))
+
+    var elements = frame[0].child(0)
+    assert_equal(len(elements), 3)
+    assert_equal(elements.as_typed[DType.int64]()[0], Int64(1))
+    assert_equal(elements.as_typed[DType.int64]()[2], Int64(3))
+
+
+def test_the_offsets_of_a_list_are_not_reachable_as_values() raises:
+    # The same trap the codes of a categorical are. An int32 buffer of 0, 2, 3
+    # is a perfectly good column of numbers and none of those numbers is a row
+    # of this one, so the way to them is spelled differently.
+    var frame = read_ipc_stream(Span(_list_stream()))
+    with assert_raises(contains="child columns"):
+        _ = frame[0].as_typed[DType.int32]()
+
+
+def test_a_struct_column_reads_one_child_per_field() raises:
+    # {'a': 1, 'b': 'x'}, {'a': 2, 'b': None}, None. Three kinds of absence in
+    # one column: a null field of a present row, and a null row, which Arrow
+    # marks on the struct and leaves the fields to say whatever they say.
+    var frame = read_ipc_stream(Span(_struct_stream()))
+    assert_equal(frame.width(), 1)
+    assert_equal(len(frame), 3)
+    assert_equal(frame[0].type_name(), "struct<a: int64, b: string>")
+    assert_equal(frame[0].child_count(), 2)
+    assert_false(frame[0].is_valid(2))
+
+    var a = frame[0].field("a")
+    assert_equal(len(a), 3)
+    assert_equal(a.as_typed[DType.int64]()[0], Int64(1))
+    assert_equal(a.as_typed[DType.int64]()[1], Int64(2))
+
+    var b = frame[0].field("b")
+    assert_equal(len(b), 3)
+    assert_equal(b.strings()[0], "x")
+    assert_false(b.is_valid(1))
+
+
+def test_a_large_list_keeps_the_wider_offsets_the_file_wrote() raises:
+    # [[1.5, 2.5], None, []]. A large list's offsets are int64 and a list's are
+    # int32, and reading one as the other would give a row of nothing followed
+    # by a row of everything.
+    var frame = read_ipc_stream(Span(_large_list_stream()))
+    assert_equal(frame[0].type_name(), "large_list<item: float64>")
+    assert_equal(len(frame), 3)
+    assert_false(frame[0].is_valid(1))
+
+    var offsets = frame[0].offsets[DType.int64]()
+    assert_equal(offsets[0], Int64(0))
+    assert_equal(offsets[1], Int64(2))
+    assert_equal(offsets[2], Int64(2))
+
+    var elements = frame[0].child(0)
+    assert_equal(len(elements), 2)
+    assert_equal(elements.as_typed[DType.float64]()[1], Float64(2.5))
+
+    with assert_raises(contains="int64"):
+        _ = frame[0].offsets[DType.int32]()
+
+
+def test_a_struct_of_a_list_keeps_both_levels() raises:
+    # A column two levels deep, which is where the flat node list earns itself:
+    # the batch writes struct, list, item as three field nodes in a row and the
+    # column holds them the same way.
+    var frame = read_ipc_stream(Span(_deep_stream()))
+    assert_equal(frame[0].type_name(), "struct<inner: list<item: int32>>")
+    assert_equal(frame[0].child_count(), 1)
+
+    var inner = frame[0].field("inner")
+    assert_true(inner.type.is_list())
+    assert_equal(inner.child_count(), 1)
+    assert_equal(inner.type_name(), "list<item: int32>")
+    assert_equal(inner.offsets[DType.int32]()[1], Int32(2))
+
+    var items = inner.child(0)
+    assert_equal(len(items), 2)
+    assert_equal(items.as_typed[DType.int32]()[0], Int32(1))
+    assert_equal(items.as_typed[DType.int32]()[1], Int32(2))
+
+
+def test_a_nested_column_in_more_than_one_batch_is_refused_by_name() raises:
+    # Joining two batches of a list means shifting the second one's offsets by
+    # the first one's element count, at every level. Until that is written the
+    # reader says so rather than handing back the first batch and calling it the
+    # file. Issue #285 is the join.
+    with assert_raises(contains="spread across 2 record batches"):
+        _ = read_ipc_stream(Span(_two_batch_list_stream()))
+
+
+def test_a_nested_column_cannot_be_written_back_out_yet() raises:
+    # Reading a list is half of a round trip. The writer still has one type
+    # table per column and no child fields to put under it, so it says the type
+    # has no spelling here rather than writing the offsets buffer out as though
+    # it were a column of integers, which is what a reader would get back.
+    # Issue #284 is the writer.
+    var frame = read_ipc_stream(Span(_list_stream()))
+    with assert_raises(contains="cannot write a column of type list"):
+        _ = write_ipc_stream_bytes(frame)
 
 
 def test_a_dictionary_encoded_column_reads_as_a_categorical() raises:
@@ -694,6 +809,97 @@ def _list_stream() raises -> List[UInt8]:
         "1800000000000000000000000200000002000000000000000000000000000000"
         "0300000000000000000000000000000000000000020000000300000000000000"
         "010000000000000002000000000000000300000000000000ffffffff00000000"
+    )
+
+
+def _two_batch_list_stream() raises -> List[UInt8]:
+    """648 bytes from pyarrow 25, the same list written twice."""
+    return _from_hex(
+        "ffffffffa80000001000000000000a000c000600050008000a00000000010400"
+        "0c000000080008000000040008000000040000000100000004000000d4ffffff"
+        "0000010c140000001c000000040000000100000024000000010000006c000000"
+        "0400040004000000100014000800060007000c00000010001000000000000102"
+        "10000000200000000400000000000000040000006974656d0000000008000c00"
+        "08000700080000000000000140000000ffffffffb80000001400000000000000"
+        "0c0016000600050008000c000c00000000030400180000002800000000000000"
+        "00000a0018000c00040008000a0000005c000000100000000200000000000000"
+        "0000000004000000000000000000000000000000000000000000000000000000"
+        "0c00000000000000100000000000000000000000000000001000000000000000"
+        "1800000000000000000000000200000002000000000000000000000000000000"
+        "0300000000000000000000000000000000000000020000000300000000000000"
+        "010000000000000002000000000000000300000000000000ffffffffb8000000"
+        "14000000000000000c0016000600050008000c000c0000000003040018000000"
+        "280000000000000000000a0018000c00040008000a0000005c00000010000000"
+        "0200000000000000000000000400000000000000000000000000000000000000"
+        "00000000000000000c0000000000000010000000000000000000000000000000"
+        "1000000000000000180000000000000000000000020000000200000000000000"
+        "0000000000000000030000000000000000000000000000000000000002000000"
+        "0300000000000000010000000000000002000000000000000300000000000000"
+        "ffffffff00000000"
+    )
+
+
+def _struct_stream() raises -> List[UInt8]:
+    """528 bytes from pyarrow 25."""
+    return _from_hex(
+        "ffffffffd00000001000000000000a000c000600050008000a00000000010400"
+        "0c000000080008000000040008000000040000000100000004000000acffffff"
+        "0000010d180000001c00000004000000020000004c0000001000000001000000"
+        "73000000dcffffffd8ffffff0000010510000000180000000400000000000000"
+        "01000000620000000400040004000000100014000800060007000c0000001000"
+        "1000000000000102100000001c00000004000000000000000100000061000000"
+        "08000c000800070008000000000000014000000000000000ffffffffe8000000"
+        "14000000000000000c0016000600050008000c000c0000000003040018000000"
+        "400000000000000000000a0018000c00040008000a0000007c00000010000000"
+        "0300000000000000000000000600000000000000000000000100000000000000"
+        "0800000000000000000000000000000008000000000000001800000000000000"
+        "2000000000000000010000000000000028000000000000001000000000000000"
+        "3800000000000000010000000000000000000000030000000300000000000000"
+        "0100000000000000030000000000000000000000000000000300000000000000"
+        "0100000000000000030000000000000001000000000000000200000000000000"
+        "0000000000000000050000000000000000000000010000000100000001000000"
+        "7800000000000000ffffffff00000000"
+    )
+
+
+def _large_list_stream() raises -> List[UInt8]:
+    """424 bytes from pyarrow 25."""
+    return _from_hex(
+        "ffffffffa00000001000000000000a000c000600050008000a00000000010400"
+        "0c000000080008000000040008000000040000000100000004000000d4ffffff"
+        "00000115140000001c000000040000000100000024000000010000006c000000"
+        "0400040004000000100014000800060007000c00000010001000000000000103"
+        "100000001c0000000400000000000000040000006974656d0000060008000600"
+        "0600000000000200ffffffffb800000014000000000000000c00160006000500"
+        "08000c000c0000000003040018000000380000000000000000000a0018000c00"
+        "040008000a0000005c0000001000000003000000000000000000000004000000"
+        "0000000000000000010000000000000008000000000000002000000000000000"
+        "2800000000000000000000000000000028000000000000001000000000000000"
+        "0000000002000000030000000000000001000000000000000200000000000000"
+        "0000000000000000050000000000000000000000000000000200000000000000"
+        "02000000000000000200000000000000000000000000f83f0000000000000440"
+        "ffffffff00000000"
+    )
+
+
+def _deep_stream() raises -> List[UInt8]:
+    """480 bytes from pyarrow 25."""
+    return _from_hex(
+        "ffffffffd80000001000000000000a000c000600050008000a00000000010400"
+        "0c000000080008000000040008000000040000000100000004000000a8ffffff"
+        "0000010d14000000180000000400000001000000100000000100000064000000"
+        "d4ffffffd0ffffff0000010c1400000020000000040000000100000028000000"
+        "05000000696e6e65720000000400040004000000100014000800060007000c00"
+        "0000100010000000000001021000000020000000040000000000000004000000"
+        "6974656d0000000008000c000800070008000000000000012000000000000000"
+        "ffffffffd800000014000000000000000c0016000600050008000c000c000000"
+        "0003040018000000180000000000000000000a0018000c00040008000a000000"
+        "6c00000010000000020000000000000000000000050000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0c00000000000000100000000000000000000000000000001000000000000000"
+        "0800000000000000000000000300000002000000000000000000000000000000"
+        "0200000000000000000000000000000002000000000000000000000000000000"
+        "000000000200000002000000000000000100000002000000ffffffff00000000"
     )
 
 

@@ -32,6 +32,19 @@ The two are not the same question, which is the part worth keeping. A join makes
 
 Measuring it at ten million rows first gave the opposite answer, thirteen of fourteen rows faster, and the reason that was wrong is recorded too. Those reductions run in well under a millisecond at ten million rows, and all fourteen rows were read out of the same six sessions, so a session that happened to be a few percent quick moved all fourteen of its rows at once. Fourteen rows agreeing is not fourteen pieces of evidence when they share a session. At forty million rows each reduction takes about four and a half milliseconds and the agreement disappears.
 
+### A list or a struct column can be read from Arrow
+
+A nested column is the first type here whose values are not in it. A list row is a run of values in a child column, marked out by one offset per row, and a struct row is one row of each of its fields. The Arrow reader now reads both, at any depth, and a column that comes back knows its whole type: `frame[0].type_name()` answers `struct<inner: list<item: int32>>` rather than stopping at `struct`, and `child()` and `field()` hand back the levels under it as columns in their own right.
+
+The tree is held flat. A column carries a list of nodes, each naming its parent, because Mojo will not let a struct hold a `List` of itself: working out the list's destructor needs the layout of the type being defined. That turned out to be the shape worth having anyway, since Arrow describes a record batch as a pre-order vector of field nodes and a vector of buffers laid end to end, so reading one is a walk down this list in step with those vectors and a tree of heap nodes would have to be built on the way in and taken apart on the way out.
+
+Nested columns skip the parallel assembly the other columns go through, because a row range of a list does not name a row range of its child without reading the offsets first. They are built whole and handed to the frame instead. Two things are refused by name rather than guessed at: a nested column spread across more than one record batch, which needs the second batch's offsets rebased against the first batch's elements at every level, and writing a nested column back out, which needs child fields in the schema the writer does not build yet. Slicing one is refused for the same reason as the first of those.
+
+What the refusals are protecting is that a list column's offsets are a sorted run of small integers. Handing them to a kernel as though they were the column's values gives back a number, and nothing about the number looks wrong, so `as_typed`, `slice` and everything that goes through the dtype check now say that the values are one level down instead of reading the offsets.
+
+### A workaround for a Mojo miscompile on optionals
+
+`AnyArray` carries a `_slack` field that nothing reads. It is there because Mojo 1.0.0 miscompiles `Optional[T]` when `T` has trailing padding: a value stored in the optional reports absent when it is asked for. Adding the nested node list to the column left it with eight bytes of tail padding, and the symptom was every `Index` in the library quietly becoming the range 0, 1, 2 and eight test files failing a long way from the change. The field pads the struct back to a whole number of its own alignment. Two tests guard it, one that round-trips a column through an optional and one that checks the fields still sum to the size of the struct, so the next field added here fails a test rather than breaking indexes.
 
 ## [0.6.51] - 2026-09-07
 

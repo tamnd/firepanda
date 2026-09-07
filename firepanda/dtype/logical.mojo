@@ -58,6 +58,20 @@ struct TypeKind(Equatable, ImplicitlyCopyable, Movable, Writable):
     which makes this the one kind where reading the buffer as its dtype gives a
     number that is not the value the user put there."""
 
+    comptime LIST = Self(10)
+    """A run of values per row, held end to end in a child column with one offset
+    per row saying where each run begins. The physical dtype is the width of
+    those offsets, int32 for Arrow's list and int64 for its large list, so this
+    is the second kind whose buffer read as its dtype gives numbers that are not
+    the values."""
+
+    comptime STRUCT = Self(11)
+    """A fixed set of named fields, each a column of its own with the same number
+    of rows as the column they sit in. There is no values buffer at all: a struct
+    row is the row of that number in every one of its fields, and the only buffer
+    the column itself owns is the validity bitmap that says whether the row is
+    there."""
+
     def __eq__(self, other: Self) -> Bool:
         """Compares two kinds.
 
@@ -104,8 +118,12 @@ struct TypeKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("date")
         elif self == Self.DURATION:
             writer.write("duration")
-        else:
+        elif self == Self.DICTIONARY:
             writer.write("dictionary")
+        elif self == Self.LIST:
+            writer.write("list")
+        else:
+            writer.write("struct")
 
 
 @fieldwise_init
@@ -185,6 +203,17 @@ struct LogicalType(Equatable, ImplicitlyCopyable, Movable, Writable):
     comptime BINARY = Self(TypeKind.BINARY, DType.uint8)
     comptime DATE32 = Self(TypeKind.DATE, DType.int32)
 
+    comptime STRUCT = Self(TypeKind.STRUCT, DType.bool)
+    """A struct of any set of fields, since the fields are not here.
+
+    The physical dtype is a placeholder and is never read. A struct column has no
+    values buffer of its own, so there is no layout to describe, and `bool` is
+    what the null type uses for the same reason. Two struct columns with
+    different fields carry types that compare equal, exactly as two dictionary
+    columns over different categories do, and for the same reason: the part that
+    differs is held by the column.
+    """
+
     @staticmethod
     def timestamp(unit: TimeUnit, zone: TimeZone = TimeZone()) -> Self:
         """Constructs a timestamp type.
@@ -239,6 +268,26 @@ struct LogicalType(Equatable, ImplicitlyCopyable, Movable, Writable):
         return Self(
             TypeKind.DICTIONARY, index, TimeUnit.SECOND, ordered, TimeZone()
         )
+
+    @staticmethod
+    def list_of(offsets: DType) -> Self:
+        """Constructs a list type.
+
+        The element type is not here, for the same reason a dictionary's
+        categories are not: it is a column, and a `LogicalType` owns no memory.
+        It lives on the column beside the offsets, which means two list columns
+        over different element types carry types that compare equal and anything
+        that needs to know whether they can be combined has to ask the columns.
+
+        Args:
+            offsets: The width of the offsets, which is what the column stores
+                per row. Arrow's list has int32 offsets and its large list has
+                int64, and that is the whole difference between the two.
+
+        Returns:
+            The type.
+        """
+        return Self(TypeKind.LIST, offsets)
 
     def __eq__(self, other: Self) -> Bool:
         """Compares two logical types.
@@ -340,6 +389,37 @@ struct LogicalType(Equatable, ImplicitlyCopyable, Movable, Writable):
         """
         return self.kind == TypeKind.DICTIONARY
 
+    def is_list(self) -> Bool:
+        """Reports whether each row is a run of values in a child column.
+
+        Returns:
+            True for a list type.
+        """
+        return self.kind == TypeKind.LIST
+
+    def is_struct(self) -> Bool:
+        """Reports whether each row is one row of every one of a set of fields.
+
+        Returns:
+            True for a struct type.
+        """
+        return self.kind == TypeKind.STRUCT
+
+    def is_nested(self) -> Bool:
+        """Reports whether the column's values live in child columns.
+
+        This is the predicate that keeps a list or a struct out of every kernel
+        that reads a values buffer. A list needs it as much as a dictionary does
+        and for the same reason: its buffer is offsets and reading it as int32 is
+        a plausible looking answer made of the wrong numbers. A struct needs it
+        more, because it has no values buffer at all and what a kernel would read
+        is whatever the empty buffer happens to hold.
+
+        Returns:
+            True for a list or a struct type.
+        """
+        return self.kind == TypeKind.LIST or self.kind == TypeKind.STRUCT
+
     def is_variable_width(self) -> Bool:
         """Reports whether values are stored out of line behind an offsets array.
 
@@ -392,6 +472,17 @@ struct LogicalType(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("timedelta64[", self.unit, "]")
         elif self.kind == TypeKind.DICTIONARY:
             writer.write("category")
+        elif self.kind == TypeKind.LIST:
+            # The element type belongs in here and is not reachable from a type,
+            # so what a nested column prints in full is written by
+            # `nested_type_name` in `firepanda/array/nested.mojo`, which has the
+            # column and can walk its children. This is the part that is true of
+            # every list of this width, and the two spellings are Arrow's own.
+            writer.write(
+                "large_list" if self.physical == DType.int64 else "list"
+            )
+        elif self.kind == TypeKind.STRUCT:
+            writer.write("struct")
         else:
             writer.write(self.physical)
 
@@ -430,6 +521,7 @@ def promote(a: LogicalType, b: LogicalType) raises -> LogicalType:
     - bool with anything numeric gives the numeric type.
     - string only promotes with string.
     - a dictionary promotes with nothing, itself included.
+    - a list and a struct promote with nothing either, for the same reason.
 
     Args:
         a: The left operand type.
@@ -460,6 +552,24 @@ def promote(a: LogicalType, b: LogicalType) raises -> LogicalType:
             + ", because what two categoricals promote to depends on their"
             " categories and the categories are held by the column rather than"
             " by the type"
+        )
+
+    if a.is_nested() or b.is_nested():
+        # Ahead of the equality check for the same reason the dictionary refusal
+        # is. Two list types of the same offset width compare equal whatever
+        # their elements are, and two struct types compare equal whatever their
+        # fields are, so letting the fast path answer here would say a list of
+        # strings and a list of timestamps have a common type. pandas has an
+        # answer for arithmetic on these and it is a loop over the elements
+        # rather than a promotion, and firepanda has neither yet.
+        raise Error(
+            "no common type for "
+            + String(a)
+            + " and "
+            + String(b)
+            + ", because what a nested column combines with depends on its"
+            " element types and those are held by the column rather than by the"
+            " type"
         )
 
     if a == b:

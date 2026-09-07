@@ -58,6 +58,34 @@ struct ArrowDictionary(Copyable, Movable):
     """The categories themselves, one entry each rather than one per row."""
 
 
+@fieldwise_init
+struct ArrowNested(Movable):
+    """One list or struct column, already built, waiting for its place.
+
+    Everything else here is copied a row range at a time on whatever cores are
+    free, and a nested column cannot be. A range of rows of a list is not a range
+    of rows of the column its elements are in, and which range it is cannot be
+    known without reading the offsets first, so the piecewise plan that makes the
+    rest of the read parallel has nothing to say about one. The producer builds
+    these whole and hands them over finished, and the assembly drops them into
+    place at the end next to the columns it did copy.
+    """
+
+    var column: Int
+    """Which column of the layout this is."""
+
+    var value: AnyArray
+    """The column, complete with its children."""
+
+    def take(deinit self) -> AnyArray:
+        """Hands the column over without copying it.
+
+        Returns:
+            The column.
+        """
+        return self.value^
+
+
 struct ArrowLayout(Copyable, Movable, Sized):
     """What a producer says about its columns, which is all three things a frame
     needs and none of the data."""
@@ -266,7 +294,9 @@ def attach_dictionary(
 
 
 def assemble(
-    layout: ArrowLayout, batches: List[List[ArrowArray]]
+    layout: ArrowLayout,
+    batches: List[List[ArrowArray]],
+    var nested: List[ArrowNested] = List[ArrowNested](),
 ) raises -> DataFrame:
     """Copies every array into its place in a frame allocated once.
 
@@ -274,6 +304,9 @@ def assemble(
         layout: The names, formats and nullability the producer declared.
         batches: One list of arrays per batch, each holding one array per column
             in the layout's order. Every array in a batch has the same length.
+        nested: Whichever columns the producer built itself, because they are
+            list or struct columns and do not come apart into row ranges. The
+            arrays sitting in `batches` at those positions are not read.
 
     Returns:
         The frame, holding its own copy of everything.
@@ -285,6 +318,20 @@ def assemble(
     var width = len(layout)
     if width == 0:
         return DataFrame(Schema(List[Field]()), List[AnyArray]())
+
+    # The columns that are copied here, which is all of them unless the producer
+    # brought a nested one along. Everything below counts in these rather than in
+    # columns, so that a task index still maps onto a piece of real work.
+    var plain = List[Int](capacity=width)
+    for c in range(width):
+        var found = False
+        for n in range(len(nested)):
+            if nested[n].column == c:
+                found = True
+                break
+        if not found:
+            plain.append(c)
+    var taken = len(plain)
 
     var pieces = List[_Piece]()
     var rows = 0
@@ -300,10 +347,10 @@ def assemble(
             pieces.append(_Piece(b, 0, 0, rows, True))
     var count = len(pieces)
 
-    var payload = List[Int](length=width * count, fill=0)
+    var payload = List[Int](length=taken * count, fill=0)
 
     def plan(task: Int) raises {mut payload, imm}:
-        var c = task // count
+        var c = plain[task // count]
         ref piece = pieces[task % count]
         payload[task] = payload_for(
             _slice(batches[piece.batch][c], piece.start, piece.rows),
@@ -311,24 +358,25 @@ def assemble(
             piece.whole,
         )
 
-    parallel_for(plan, width * count)
+    parallel_for(plan, taken * count)
 
-    var sinks = List[ColumnSink](capacity=width)
-    for c in range(width):
+    var sinks = List[ColumnSink](capacity=taken)
+    for k in range(taken):
         var total = 0
         for p in range(count):
-            var here = payload[c * count + p]
-            payload[c * count + p] = total
+            var here = payload[k * count + p]
+            payload[k * count + p] = total
             total += here
-        sinks.append(ColumnSink(layout.formats[c], rows, total))
+        sinks.append(ColumnSink(layout.formats[plain[k]], rows, total))
 
-    var validity = List[Bitmap](length=width * count, fill=Bitmap(0))
+    var validity = List[Bitmap](length=taken * count, fill=Bitmap(0))
 
     def fill(task: Int) raises {mut sinks, mut validity, imm}:
-        var c = task // count
+        var k = task // count
+        var c = plain[k]
         ref piece = pieces[task % count]
         validity[task] = fill_column(
-            sinks[c],
+            sinks[k],
             piece.at,
             payload[task],
             _slice(batches[piece.batch][c], piece.start, piece.rows),
@@ -336,25 +384,34 @@ def assemble(
             piece.whole,
         )
 
-    parallel_for(fill, width * count)
+    parallel_for(fill, taken * count)
 
     # Validity is pasted here rather than inside the fill, because a piece
     # boundary need not fall on a byte of the bitmap and two threads writing the
     # byte either side of one would lose each other's bits. One pass over a bit
     # per row does not show up next to the copy it follows.
-    for c in range(width):
+    for k in range(taken):
         for p in range(count):
             ref piece = pieces[p]
-            if batches[piece.batch][c].null_count == 0:
+            if batches[piece.batch][plain[k]].null_count == 0:
                 continue
-            sinks[c].validity.paste(
-                piece.at, validity[c * count + p], piece.rows
+            sinks[k].validity.paste(
+                piece.at, validity[k * count + p], piece.rows
             )
 
     var fields = List[Field](capacity=width)
     var columns = List[AnyArray](capacity=width)
     for c in range(width):
-        var column = sinks.pop(0).finish()
+        var column: AnyArray
+        var brought = -1
+        for n in range(len(nested)):
+            if nested[n].column == c:
+                brought = n
+                break
+        if brought >= 0:
+            column = nested.pop(brought).take()
+        else:
+            column = sinks.pop(0).finish()
         var at = layout.dictionary_at(c)
         if at >= 0:
             attach_dictionary(column, layout.dictionaries[at], layout.names[c])
