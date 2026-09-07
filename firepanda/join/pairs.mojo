@@ -72,9 +72,16 @@ Morsels cost a longer prefix sum, over the morsel count rather than the worker
 count, and that is a few hundred additions on a join large enough to be split at
 all.
 
-An outer join is the exception and stays on one thread. It has to remember which
+An outer join splits too, which took a second look. It has to remember which
 right rows were paired so that it can emit the rest afterwards, and that memory
-is a bitmap, whose set is a read modify write of a word eight rows share.
+was a bitmap, whose set is a read modify write of a word eight rows share, so
+two workers marking at once would drop marks and invent unmatched rows. That is
+a fact about the bitmap and not about the remembering. What it marks now is a
+byte per code, and two threads storing to two bytes are storing to two memory
+locations however close together they sit, so what they share is a cache line,
+which costs speed and never an answer. The codes are turned back into rows by
+one walk of the built side after the emit, which is exact because a code is
+paired whole or not at all.
 
 ## Two halves, kept apart
 
@@ -605,13 +612,45 @@ def pair_probe(
     # between two morsels except where each of them writes, which the counts
     # settle before any of them writes anything.
     #
-    # An outer join stays on one thread. Its emit marks every built side row it
-    # pairs in `matched`, and setting a bit is a read modify write of a word that
-    # eight neighbouring rows share, so two workers doing it at once would drop
-    # marks and invent unmatched rows. No other kind touches anything shared.
-    var parallel = (
-        spread and probe_rows >= PARALLEL_LEFT_ROWS and not wants_right
+    # An outer join used to stay on one thread, because its emit marks every
+    # built side row it pairs and setting a bit is a read modify write of a word
+    # that eight neighbouring rows share, so two workers doing it at once would
+    # drop marks and invent unmatched rows. That was true of the bitmap and not
+    # of the marking, and the marking is what the emit has to do. A byte per
+    # group is written instead, below, and two threads storing to two bytes are
+    # storing to two memory locations however close together they are, so the
+    # only thing they share is a cache line, which costs speed and never an
+    # answer. Nothing else in either pass is shared except where each morsel
+    # writes, which the counts settle before any of them writes anything.
+    var parallel = spread and probe_rows >= PARALLEL_LEFT_ROWS
+
+    # The marks go against the group rather than against the row that group
+    # holds, which is both what makes them safe and what takes them out of the
+    # inner loop: a group is either paired or not, so a probe row that lands on
+    # a bucket of nine marks once instead of nine times. Turning the groups back
+    # into rows afterwards is one walk of the built side, against the ten million
+    # bit writes it replaces.
+    #
+    # The emit reads the byte before writing it, which looks like a wasted load
+    # and is the opposite. A store is what takes a cache line away from the other
+    # cores, and a load is not, so a join onto a thousand keys whose marks are a
+    # thousand bytes is thirty two cores fighting over sixteen lines ten million
+    # times if it stores every time, and marking each of a thousand groups once
+    # if it looks first. Two workers reading zero and both storing one is a race
+    # that writes the same value twice, so there is nothing to protect.
+    #
+    # `join/outer` at ten million rows on an i9-13900K, three runs a side in ABBA
+    # order, is 104.5, 109.8 and 115.3 ms on one thread against 34.9, 37.1 and
+    # 37.1 with all of this, so just under three times. Storing the byte every
+    # time instead of looking first lands at 56.3, 58.5 and 60.0, which is the
+    # difference between splitting the work and splitting the work while thirty
+    # two cores pass sixteen cache lines around. `join/inner_1000` at 25 ms and
+    # `join/left_1000` at 25.7 ms are unmoved by any of it, which is what says
+    # the sessions were comparable.
+    var groups = len(table.only) if table.unique else max(
+        len(table.starts) - 1, 0
     )
+    var hit = List[UInt8](length=groups if wants_right else 0, fill=0)
     var chunk = LEFT_MORSEL_ROWS if parallel else max(probe_rows, 1)
     var pieces = (probe_rows + chunk - 1) // chunk
     if pieces == 0:
@@ -696,16 +735,18 @@ def pair_probe(
     # look up where the bucket started.
     def spill_one(
         start: Int, stop: Int
-    ) raises {mut out_left, mut out_right, mut matched, imm}:
+    ) raises {mut out_left, mut out_right, mut hit, imm}:
         var code_at = codes.unsafe_ptr()
         var seat = table.only.unsafe_ptr()
         var left_out = out_left.unsafe_ptr()
         var right_out = out_right.unsafe_ptr()
+        var mark = hit.unsafe_ptr()
         var put = counts[start // chunk]
         for i in range(start, stop):
             var r = -1
+            var g = -1
             if not has_nulls or not absent[absent_at + i]:
-                var g = Int(code_at.unsafe_offset(probe_at + i).unsafe_load())
+                g = Int(code_at.unsafe_offset(probe_at + i).unsafe_load())
                 r = Int(seat.unsafe_offset(g).unsafe_load())
 
             if r < 0:
@@ -726,21 +767,23 @@ def pair_probe(
             left_out.unsafe_offset(put).unsafe_write(i)
             right_out.unsafe_offset(put).unsafe_write(r)
             put += 1
-            if wants_right:
-                matched.set(r, True)
+            if wants_right and mark.unsafe_offset(g).unsafe_load() == 0:
+                mark.unsafe_offset(g).unsafe_write(1)
 
     def spill(
         start: Int, stop: Int
-    ) raises {mut out_left, mut out_right, mut matched, imm}:
+    ) raises {mut out_left, mut out_right, mut hit, imm}:
         var code_at = codes.unsafe_ptr()
         var left_out = out_left.unsafe_ptr()
         var right_out = out_right.unsafe_ptr()
+        var mark = hit.unsafe_ptr()
         var put = counts[start // chunk]
         for i in range(start, stop):
             var first = -1
             var last = -1
+            var g = -1
             if not has_nulls or not absent[absent_at + i]:
-                var g = Int(code_at.unsafe_offset(probe_at + i).unsafe_load())
+                g = Int(code_at.unsafe_offset(probe_at + i).unsafe_load())
                 first = table.starts[g]
                 last = table.starts[g + 1]
 
@@ -763,8 +806,8 @@ def pair_probe(
                 left_out.unsafe_offset(put).unsafe_write(i)
                 right_out.unsafe_offset(put).unsafe_write(table.bucket[p])
                 put += 1
-                if wants_right:
-                    matched.set(table.bucket[p], True)
+            if wants_right and mark.unsafe_offset(g).unsafe_load() == 0:
+                mark.unsafe_offset(g).unsafe_write(1)
 
     if not parallel:
         if table.unique:
@@ -775,6 +818,28 @@ def pair_probe(
         parallel_morsels(spill_one, probe_rows, chunk)
     else:
         parallel_morsels(spill, probe_rows, chunk)
+
+    # Turn the paired groups back into paired rows. A group is emitted whole or
+    # not at all, every row in its bucket going out against the probe row that
+    # landed on it, so a marked group means every row it holds paired and an
+    # unmarked one means none of them did. That is what makes this exact rather
+    # than approximate, and it is why the mark could move off the row in the
+    # first place.
+    #
+    # It is one thread, but it is one thread over the built side rather than
+    # over the output, and it only writes where a group was hit.
+    if wants_right:
+        var mark = hit.unsafe_ptr()
+        if table.unique:
+            var seat = table.only.unsafe_ptr()
+            for g in range(groups):
+                if mark.unsafe_offset(g).unsafe_load() != 0:
+                    matched.set(Int(seat.unsafe_offset(g).unsafe_load()), True)
+        else:
+            for g in range(groups):
+                if mark.unsafe_offset(g).unsafe_load() != 0:
+                    for p in range(table.starts[g], table.starts[g + 1]):
+                        matched.set(table.bucket[p], True)
 
     return JoinIndices(out_left^, out_right^)
 
