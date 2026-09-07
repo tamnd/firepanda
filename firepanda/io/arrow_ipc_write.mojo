@@ -48,11 +48,12 @@ rather than as an error.
 from std.collections.span import Span
 from std.memory import unsafe_memcpy
 
+from firepanda.array.strings import StringArray
 from firepanda.array.strview import VIEW_SIZE
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer, round_up
 from firepanda.dtype.logical import LogicalType, TypeKind
-from firepanda.dtype.lists import dtype_size
+from firepanda.dtype.lists import INTEGER, SIGNED, contains, dtype_size
 from firepanda.frame.frame import DataFrame
 
 from .arrow_export import pack_bools
@@ -61,6 +62,7 @@ from .arrow_ipc import (
     BUFFER_SIZE,
     CONTINUATION,
     MAGIC,
+    MESSAGE_DICTIONARY_BATCH,
     MESSAGE_RECORD_BATCH,
     MESSAGE_SCHEMA,
     NODE_SIZE,
@@ -306,6 +308,13 @@ def _type_code(type: LogicalType) raises -> Int:
         return TYPE_DATE
     if type.kind == TypeKind.DURATION:
         return TYPE_DURATION
+    if type.kind == TypeKind.DICTIONARY:
+        # A dictionary encoded field states the type of its categories here and
+        # says that it is encoded in a separate table, so the code is the code
+        # of a string column and the index width is written next to it. Getting
+        # this backwards produces a file that says the column is int32 and hands
+        # a reader the codes as though they were the values.
+        return TYPE_UTF8_VIEW
     if type == LogicalType.BOOL:
         return TYPE_BOOL
     if type == LogicalType.STRING:
@@ -377,16 +386,7 @@ def _type_table(mut b: Builder, type: LogicalType) raises -> Int:
         b.add_scalar[DType.int16](0, Int16(Int(type.unit.code)), 1)
         return b.end_table()
     if code == TYPE_INT:
-        var signed = (
-            type == LogicalType.INT8
-            or type == LogicalType.INT16
-            or type == LogicalType.INT32
-            or type == LogicalType.INT64
-        )
-        b.start_table(2)
-        b.add_scalar[DType.int32](0, Int32(8 * dtype_size(type.physical)), 0)
-        b.add_scalar[DType.bool](1, signed, False)
-        return b.end_table()
+        return _int_table(b, type.physical)
     if code == TYPE_FLOATING_POINT:
         var precision = PRECISION_HALF
         if type == LogicalType.FLOAT32:
@@ -400,6 +400,51 @@ def _type_table(mut b: Builder, type: LogicalType) raises -> Int:
     # tag is the whole description, and the table exists so that a later version
     # of the format has somewhere to put a field.
     b.start_table(0)
+    return b.end_table()
+
+
+def _int_table(mut b: Builder, dt: DType) raises -> Int:
+    """Builds an `Int` type table for an integer dtype.
+
+    Args:
+        b: The builder.
+        dt: The dtype.
+
+    Returns:
+        The offset of the table.
+
+    Raises:
+        Error: If the dtype is not an integer.
+    """
+    if not contains[INTEGER](dt):
+        raise Error(String("arrow ipc: ", dt, " is not an integer type"))
+    b.start_table(2)
+    b.add_scalar[DType.int32](0, Int32(8 * dtype_size(dt)), 0)
+    b.add_scalar[DType.bool](1, contains[SIGNED](dt), False)
+    return b.end_table()
+
+
+def _dictionary_table(mut b: Builder, type: LogicalType, id: Int) raises -> Int:
+    """Builds the `DictionaryEncoding` table hanging off a categorical field.
+
+    Args:
+        b: The builder.
+        type: The column type, for the index width and the ordered flag.
+        id: The number the dictionary batch carrying the categories will name.
+
+    Returns:
+        The offset of the table.
+
+    Raises:
+        Error: If the index type is not an integer.
+    """
+    var index = _int_table(b, type.physical)
+    b.start_table(4)
+    b.add_scalar[DType.int64](0, Int64(id), 0)
+    b.add_offset(1, index)
+    b.add_scalar[DType.bool](2, type.ordered, False)
+    # Field 3 is the dictionary kind and the dense array is zero, which is the
+    # default, so it is left out the way every other writer leaves it out.
     return b.end_table()
 
 
@@ -424,17 +469,28 @@ def _schema_table(mut b: Builder, frame: DataFrame) raises -> Int:
         ref column = frame[c]
         var name = b.create_string(frame.schema.fields[c].name)
         var type = _type_table(b, column.type)
+        # Built before the field table is started, like everything else here,
+        # because the builder fills from the end and only one table may be open.
+        # The id is the column position, which is unique by construction and
+        # gives up the sharing a writer could do between two columns over the
+        # same categories. Detecting that means comparing every pair of category
+        # lists, and the saving is the categories rather than the codes.
+        var encoding = 0
+        if column.type.is_dictionary():
+            encoding = _dictionary_table(b, column.type, c)
         # A column that holds nulls is written nullable whatever the schema
         # says, because the two disagreeing is a file that describes itself
         # wrongly, and the values are the part a reader cannot argue with.
         var nullable = (
             frame.schema.fields[c].nullable or column.null_count() > 0
         )
-        b.start_table(4)
+        b.start_table(5)
         b.add_offset(0, name)
         b.add_scalar[DType.bool](1, nullable, False)
         b.add_scalar[DType.uint8](2, UInt8(_type_code(column.type)), 0)
         b.add_offset(3, type)
+        if encoding != 0:
+            b.add_offset(4, encoding)
         fields.append(b.end_table())
 
     var vector = b.create_offsets(fields)
@@ -528,7 +584,13 @@ def _plan(frame: DataFrame) raises -> _Batch:
             out.buffers[len(out.buffers) - 1].length, ALIGNMENT
         )
 
-        var code = _type_code(column.type)
+        # A dictionary column's type code is the code of its categories, and its
+        # buffers in a record batch are the codes. So the dispatch below is on
+        # what the column stores rather than on what it means, which is the one
+        # place in this file where those two come apart.
+        var code = TYPE_INT if column.type.is_dictionary() else _type_code(
+            column.type
+        )
         if code == TYPE_BOOL:
             # The one copy in this file. firepanda stores a bool as a byte and
             # Arrow stores it as a bit, so this is the same packing pass the
@@ -566,22 +628,95 @@ def _plan(frame: DataFrame) raises -> _Batch:
     return out^
 
 
-def _batch_message(batch: _Batch, rows: Int) raises -> List[UInt8]:
-    """Builds the record batch message describing a plan.
+def _plan_categories(imm categories: StringArray) raises -> _Batch:
+    """Works out the one column batch that carries a dictionary's categories.
+
+    Args:
+        categories: The categories.
+
+    Returns:
+        The plan.
+
+    Raises:
+        Error: If the builder rejects what it is given.
+    """
+    var out = _Batch(1)
+    var rows = len(categories)
+    out.lengths.append(Int64(rows))
+    # Categories have no nulls. pandas keeps a missing value out of the category
+    # list and spells it as a null code, and a category that is itself null is a
+    # thing Arrow allows and nothing here produces.
+    out.nulls.append(Int64(0))
+    out.buffers.append(_Buf(_bits_of(categories.validity), 0, out.body))
+
+    out.buffers.append(
+        _Buf(_bytes_of(categories.views), rows * VIEW_SIZE, out.body)
+    )
+    out.body += round_up(rows * VIEW_SIZE, ALIGNMENT)
+    var payload = len(categories.payload)
+    out.buffers.append(_Buf(_bytes_of(categories.payload), payload, out.body))
+    out.body += round_up(payload, ALIGNMENT)
+    out.variadic.append(1)
+    return out^
+
+
+def _dictionary_message(
+    batch: _Batch, rows: Int, id: Int
+) raises -> List[UInt8]:
+    """Builds the dictionary batch message carrying one column's categories.
+
+    A dictionary batch is a record batch of one column with an id in front of
+    it, so this is the record batch message with two tables around it rather
+    than a shape of its own.
 
     Args:
         batch: The plan.
-        rows: How many rows the batch holds.
+        rows: How many categories there are.
+        id: The number the schema's field gave this dictionary.
 
     Returns:
         The FlatBuffer, without the framing in front of it.
 
     Raises:
-        Error: If the builder rejects what it is given, which would be a bug
-            here rather than anything about the frame.
+        Error: If the builder rejects what it is given.
     """
     var b = Builder(1024)
+    var record = _record_table(b, batch, rows)
 
+    b.start_table(3)
+    b.add_scalar[DType.int64](0, Int64(id), 0)
+    b.add_offset(1, record)
+    # Field 2 is isDelta and false is the default, so it is left out. This
+    # writer sends the categories whole and once.
+    var dictionary = b.end_table()
+
+    b.start_table(4)
+    b.add_scalar[DType.int16](0, Int16(METADATA_V5), 0)
+    b.add_scalar[DType.uint8](1, UInt8(MESSAGE_DICTIONARY_BATCH), 0)
+    b.add_offset(2, dictionary)
+    b.add_scalar[DType.int64](3, Int64(batch.body), 0)
+    var message = b.end_table()
+    return b.finish(message)
+
+
+def _record_table(mut b: Builder, batch: _Batch, rows: Int) raises -> Int:
+    """Builds the `RecordBatch` table describing a plan.
+
+    Read from two places, because a dictionary batch carries a record batch and
+    the two have to describe their buffers identically or the reader that walks
+    one will misread the other.
+
+    Args:
+        b: The builder.
+        batch: The plan.
+        rows: How many rows the batch holds.
+
+    Returns:
+        The offset of the table.
+
+    Raises:
+        Error: If the builder rejects what it is given.
+    """
     # Both of these are vectors of structs, which FlatBuffers writes inline and
     # in reverse: the last element first, and within an element the last field
     # first, because the builder fills the buffer from the end.
@@ -612,7 +747,25 @@ def _batch_message(batch: _Batch, rows: Int) raises -> List[UInt8]:
     b.add_offset(1, nodes)
     b.add_offset(2, buffers)
     b.add_offset(4, variadic)
-    var record = b.end_table()
+    return b.end_table()
+
+
+def _batch_message(batch: _Batch, rows: Int) raises -> List[UInt8]:
+    """Builds the record batch message describing a plan.
+
+    Args:
+        batch: The plan.
+        rows: How many rows the batch holds.
+
+    Returns:
+        The FlatBuffer, without the framing in front of it.
+
+    Raises:
+        Error: If the builder rejects what it is given, which would be a bug
+            here rather than anything about the frame.
+    """
+    var b = Builder(1024)
+    var record = _record_table(b, batch, rows)
 
     b.start_table(4)
     b.add_scalar[DType.int16](0, Int16(METADATA_V5), 0)
@@ -623,28 +776,22 @@ def _batch_message(batch: _Batch, rows: Int) raises -> List[UInt8]:
     return b.finish(message)
 
 
-def _footer(frame: DataFrame, blocks: List[_Block]) raises -> List[UInt8]:
-    """Builds the footer of a file.
+def _block_vector(mut b: Builder, blocks: List[_Block]) raises -> Int:
+    """Builds one of a footer's two vectors of blocks.
+
+    An empty vector rather than a missing field, so that the two a footer has
+    are written the same way whether or not there is anything in them.
 
     Args:
-        frame: The frame, for the schema the footer repeats.
-        blocks: Where each record batch begins.
+        b: The builder.
+        blocks: Where each message begins.
 
     Returns:
-        The FlatBuffer, which a file carries without any framing in front of it.
+        The offset of the vector.
 
     Raises:
-        Error: If a column has a type that cannot be written.
+        Error: If the builder rejects what it is given.
     """
-    var b = Builder(1024)
-    var schema = _schema_table(b, frame)
-
-    # An empty vector rather than a missing field, so that the two block vectors
-    # a footer has are written the same way whether or not there is anything in
-    # them.
-    b.start_vector(BLOCK_SIZE, 0, ALIGNMENT)
-    var dictionaries = b.end_vector(0)
-
     var count = len(blocks)
     b.start_vector(BLOCK_SIZE, count, ALIGNMENT)
     for i in range(count - 1, -1, -1):
@@ -655,7 +802,29 @@ def _footer(frame: DataFrame, blocks: List[_Block]) raises -> List[UInt8]:
         b.prepend(Int32(0))
         b.prepend(Int32(blocks[i].meta))
         b.prepend(Int64(blocks[i].offset))
-    var batches = b.end_vector(count)
+    return b.end_vector(count)
+
+
+def _footer(
+    frame: DataFrame, dictionary_blocks: List[_Block], blocks: List[_Block]
+) raises -> List[UInt8]:
+    """Builds the footer of a file.
+
+    Args:
+        frame: The frame, for the schema the footer repeats.
+        dictionary_blocks: Where each dictionary batch begins.
+        blocks: Where each record batch begins.
+
+    Returns:
+        The FlatBuffer, which a file carries without any framing in front of it.
+
+    Raises:
+        Error: If a column has a type that cannot be written.
+    """
+    var b = Builder(1024)
+    var schema = _schema_table(b, frame)
+    var dictionaries = _block_vector(b, dictionary_blocks)
+    var batches = _block_vector(b, blocks)
 
     b.start_table(4)
     b.add_scalar[DType.int16](0, Int16(METADATA_V5), 0)
@@ -752,6 +921,48 @@ def _put_batch(mut sink: _Sink, frame: DataFrame) raises -> _Block:
     return _Block(at, length, batch.body)
 
 
+def _put_dictionaries(mut sink: _Sink, frame: DataFrame) raises -> List[_Block]:
+    """Writes one dictionary batch per categorical column.
+
+    These go out after the schema and before the first record batch, which is
+    what the format requires: a reader meeting a batch of codes has to already
+    know what they stand for.
+
+    Args:
+        sink: Where the bytes go.
+        frame: The frame.
+
+    Returns:
+        Where each dictionary batch began, for a file's footer. Empty when the
+        frame has no categorical columns, which is almost every frame.
+
+    Raises:
+        Error: If a categorical column has no categories, or the destination
+            cannot be written.
+    """
+    var out = List[_Block]()
+    for c in range(frame.width()):
+        ref column = frame[c]
+        if not column.type.is_dictionary():
+            continue
+        if not column.dict_values:
+            raise Error(
+                String(
+                    "arrow ipc: column '",
+                    frame.schema.fields[c].name,
+                    "' is a categorical with no categories behind it",
+                )
+            )
+        ref categories = column.dict_values.value()
+        var at = sink.written
+        var batch = _plan_categories(categories)
+        var meta = _dictionary_message(batch, len(categories), c)
+        var length = _put_message(sink, Span(meta))
+        _put_body(sink, batch)
+        out.append(_Block(at, length, batch.body))
+    return out^
+
+
 def _put_end(mut sink: _Sink) raises:
     """Writes the end of stream marker, which is a message of no length.
 
@@ -788,6 +999,7 @@ def _write(
 
     var schema = _schema_message(frame)
     _ = _put_message(sink, Span(schema))
+    var dictionaries = _put_dictionaries(sink, frame)
 
     var rows = len(frame)
     var step = options.rows_per_batch
@@ -812,7 +1024,7 @@ def _write(
     _put_end(sink)
 
     if as_file:
-        var footer = _footer(frame, blocks)
+        var footer = _footer(frame, dictionaries, blocks)
         sink.put(Span(footer))
         sink.put_word(UInt32(len(footer)))
         sink.put(MAGIC.as_bytes())

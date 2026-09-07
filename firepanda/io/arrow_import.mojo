@@ -608,7 +608,17 @@ def _check(array: ArrowArray, format: StringSlice) raises:
             " read as anything else"
         )
     if array.dictionary:
-        raise Error("arrow: dictionary encoded columns are not supported yet")
+        # Read from an IPC file and not through this interface, and the
+        # difference is where the categories live. IPC carries them in messages
+        # of their own, once for the whole stream, which is what a firepanda
+        # column holds. Here every array carries its own, so two batches of one
+        # column may disagree about what the codes mean and reconciling them is
+        # work this path has not done yet.
+        raise Error(
+            "arrow: a dictionary encoded column arrives here with its own"
+            " categories per array, and firepanda reads one set per column;"
+            " read it from an IPC file or stream instead"
+        )
 
     var expected: Int64
     if format == "vu" or format == "vz":

@@ -204,6 +204,11 @@ def test_promote_string_with_number_raises() raises:
 def test_type_kind_equality() raises:
     assert_true(TypeKind.INT == TypeKind.INT)
     assert_true(TypeKind.INT != TypeKind.FLOAT_KIND)
+    assert_true(TypeKind.DICTIONARY != TypeKind.INT)
+    # The last two kinds, and the ones a new kind added without a branch in
+    # `write_to` would silently be printed as.
+    assert_equal(String(TypeKind.DURATION), "duration")
+    assert_equal(String(TypeKind.DICTIONARY), "dictionary")
 
 
 def test_types_print() raises:
@@ -306,6 +311,60 @@ def test_a_temporal_type_is_not_numeric_even_though_it_holds_integers() raises:
     assert_false(LogicalType.INT64.is_temporal())
     assert_equal(micro.bit_width(), 64)
     assert_equal(LogicalType.DATE32.bit_width(), 32)
+
+
+def test_a_dictionary_is_spelled_the_way_pandas_spells_a_categorical() raises:
+    var label = LogicalType.dictionary(DType.int32)
+    assert_equal(String(label), "category")
+    # The index width and the categories are both absent from the spelling,
+    # which is what pandas prints too, so two categorical columns holding
+    # nothing in common print the same dtype in both libraries.
+    assert_equal(String(LogicalType.dictionary(DType.int8, True)), "category")
+    assert_true(label.is_dictionary())
+    assert_false(label.is_numeric())
+    assert_false(label.is_integer())
+    assert_false(label.is_temporal())
+    assert_false(label.is_variable_width())
+    # The physical dtype is the index and is a perfectly ordinary int32, which
+    # is exactly why nothing is allowed to reach the buffer through it.
+    assert_equal(label.physical, DType.int32)
+    assert_equal(label.bit_width(), 32)
+    assert_false(LogicalType.INT32.is_dictionary())
+
+
+def test_two_dictionaries_differing_in_index_or_in_order_are_not_one_type() raises:
+    assert_true(
+        LogicalType.dictionary(DType.int32)
+        != LogicalType.dictionary(DType.int8)
+    )
+    assert_true(
+        LogicalType.dictionary(DType.int32, True)
+        != LogicalType.dictionary(DType.int32, False)
+    )
+    assert_true(
+        LogicalType.dictionary(DType.int32)
+        == LogicalType.dictionary(DType.int32)
+    )
+    # And the one that is not a type question at all. Two columns over different
+    # categories carry the same type, because the categories are held by the
+    # column, so anything that needs to know has to ask the arrays.
+    assert_true(LogicalType.dictionary(DType.int32) != LogicalType.INT32)
+
+
+def test_a_dictionary_promotes_with_nothing_including_itself() raises:
+    var label = LogicalType.dictionary(DType.int32)
+    # Itself included, and that is the unusual one. Every other type in this
+    # file promotes with a copy of itself, and this refuses because two equal
+    # dictionary types say nothing about whether the two columns share their
+    # categories, which is the question pandas actually answers.
+    with assert_raises(contains="held by the column rather than by the type"):
+        _ = promote(label, label)
+    with assert_raises(contains="held by the column rather than by the type"):
+        _ = promote(label, LogicalType.INT32)
+    with assert_raises(contains="held by the column rather than by the type"):
+        _ = promote(LogicalType.STRING, label)
+    with assert_raises(contains="held by the column rather than by the type"):
+        _ = promote(label, LogicalType.NULL)
 
 
 def test_a_bare_int64_array_is_never_a_timestamp() raises:
