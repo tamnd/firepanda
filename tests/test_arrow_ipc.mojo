@@ -12,10 +12,13 @@ with an element too long to inline, a large string column, a string view column,
 a float column, a bool column, an int32 column, and a schema with no batches
 behind it.
 
-The rest of the tests are the refusals. A list column, a dictionary encoded
-column and a file whose magic number is wrong all have to be named rather than
-misread, because every one of them is a shape this reader could otherwise walk
-into and produce numbers from.
+The rest of the tests are the refusals. A list column and a file whose magic
+number is wrong both have to be named rather than misread, because either is a
+shape this reader could otherwise walk into and produce numbers from. The
+dictionary refusals are the sharpest of these: a categorical column read as its
+codes is an integer column that looks completely ordinary and is wrong, so a
+dictionary whose categories never arrived, whose codes point past the end of
+them, or that arrives in pieces is refused by name.
 """
 
 from std.testing import (
@@ -374,9 +377,93 @@ def test_a_list_column_is_refused_by_name() raises:
         _ = read_ipc_stream(Span(_list_stream()))
 
 
-def test_a_dictionary_encoded_column_is_refused_by_name() raises:
-    with assert_raises(contains="dictionary"):
-        _ = read_ipc_stream(Span(_dictionary_stream()))
+def test_a_dictionary_encoded_column_reads_as_a_categorical() raises:
+    # The categories are not in the schema message. They arrive in a message of
+    # their own between the schema and the batch that uses them, which is the
+    # only type in this file whose description is spread across two messages.
+    var frame = read_ipc_stream(Span(_dictionary_stream()))
+    assert_equal(frame.width(), 1)
+    assert_equal(String(frame.schema[0].dtype), "category")
+    assert_true(frame.schema[0].dtype == LogicalType.dictionary(DType.int32))
+    assert_equal(len(frame[0]), 3)
+    assert_equal(len(frame[0].categories()), 2)
+    assert_equal(frame[0].categories()[0], "a")
+    assert_equal(frame[0].categories()[1], "b")
+    var codes = frame[0].codes[DType.int32]()
+    assert_equal(codes[0], Int32(0))
+    assert_equal(codes[1], Int32(1))
+    assert_equal(codes[2], Int32(0))
+
+
+def test_the_codes_of_a_categorical_are_not_reachable_as_values() raises:
+    # The point of the whole type. The codes are a perfectly good int32 buffer
+    # and reading them as one gives 0, 1, 0 for a column whose values are 'a',
+    # 'b', 'a', so the way to them has to be a different call rather than the
+    # ordinary one.
+    var frame = read_ipc_stream(Span(_dictionary_stream()))
+    with assert_raises(contains="positions into its categories"):
+        _ = frame[0].as_typed[DType.int32]()
+    with assert_raises(contains="not a string column"):
+        _ = frame[0].strings()
+
+
+def test_an_ordered_dictionary_in_a_file_keeps_its_order_and_its_index_width() raises:
+    # A file rather than a stream, so the categories are found through the
+    # footer's own list of dictionary blocks rather than by meeting the message
+    # on the way past. The index is an int8 and the categories are large
+    # strings, neither of which is what pyarrow writes by default, because the
+    # reader reads the width the file states rather than the width it expects.
+    var frame = read_ipc_file(Span(_ordered_dictionary_file()))
+    assert_equal(frame.width(), 1)
+    assert_true(
+        frame.schema[0].dtype == LogicalType.dictionary(DType.int8, True)
+    )
+    assert_true(frame.schema[0].dtype.ordered)
+    assert_equal(len(frame[0]), 4)
+    assert_equal(len(frame[0].categories()), 3)
+    assert_equal(frame[0].categories()[0], "low")
+    assert_equal(frame[0].categories()[1], "high")
+    assert_equal(frame[0].categories()[2], "medium")
+    var codes = frame[0].codes[DType.int8]()
+    assert_equal(codes[0], Int8(0))
+    assert_equal(codes[3], Int8(2))
+
+
+def test_an_ordered_dictionary_is_not_the_same_type_as_an_unordered_one() raises:
+    # pandas puts the flag in the dtype and so does this, because it decides
+    # whether `<` on two categorical columns is an answer or an error.
+    assert_true(
+        LogicalType.dictionary(DType.int32, True)
+        != LogicalType.dictionary(DType.int32, False)
+    )
+
+
+def test_a_dictionary_over_something_other_than_strings_is_refused() raises:
+    # Arrow allows a dictionary over any type. pandas' categories are an index
+    # of objects and firepanda's are strings, so an integer dictionary is
+    # refused rather than read as the integer column it decodes to, which would
+    # be a different dtype from the one the file names.
+    with assert_raises(contains="dictionary encoded over"):
+        _ = read_ipc_stream(Span(_integer_dictionary_stream()))
+
+
+def test_a_code_that_points_past_the_categories_is_refused() raises:
+    # Nothing downstream can catch this. A code is read in order to reach a
+    # category, and by then a bad one is a read off the end of the categories
+    # rather than a question anybody is in a position to ask.
+    with assert_raises(
+        contains="has a code of 5 at row 1 against 2 categories"
+    ):
+        _ = read_ipc_stream(Span(_out_of_range_dictionary_stream()))
+
+
+def test_categories_that_arrive_in_pieces_are_refused() raises:
+    # A delta dictionary adds categories partway through a stream, so the second
+    # batch reads against a longer list than the first. Every batch here becomes
+    # one frame with one set of categories, so the two would have to be merged
+    # and the codes of one side rewritten, which is not something to do quietly.
+    with assert_raises(contains="arrive as a delta"):
+        _ = read_ipc_stream(Span(_delta_dictionary_stream()))
 
 
 def test_a_file_without_the_magic_number_is_refused() raises:
@@ -629,6 +716,116 @@ def _dictionary_stream() raises -> List[UInt8]:
         "3c00000010000000030000000000000000000000020000000000000000000000"
         "000000000000000000000000000000000c000000000000000000000001000000"
         "0300000000000000000000000000000000000000010000000000000000000000"
+        "ffffffff00000000"
+    )
+
+
+def _ordered_dictionary_file() raises -> List[UInt8]:
+    """794 bytes from pyarrow 25."""
+    return _from_hex(
+        "4152524f57310000ffffffffa00000001000000000000a000c00060005000800"
+        "0a000000000104000c0000000800080000000400080000000400000001000000"
+        "14000000100018000800060007000c0010001400100000000000011414000000"
+        "48000000200000000400000000000000050000006772616465000a000c000000"
+        "080007000a000000000000010c00000008000c00080007000800000000000001"
+        "08000000040004000400000000000000ffffffffa80000001400000000000000"
+        "0c0014000600050008000c000c00000000020400140000003000000000000000"
+        "08000a0000000400080000001000000000000a0018000c00040008000a000000"
+        "4c00000010000000030000000000000000000000030000000000000000000000"
+        "0000000000000000000000000000000020000000000000002000000000000000"
+        "0d00000000000000000000000100000003000000000000000000000000000000"
+        "0000000000000000030000000000000007000000000000000d00000000000000"
+        "6c6f77686967686d656469756d000000ffffffff880000001400000000000000"
+        "0c0016000600050008000c000c00000000030400180000000800000000000000"
+        "00000a0018000c00040008000a0000003c000000100000000400000000000000"
+        "0000000002000000000000000000000000000000000000000000000000000000"
+        "0400000000000000000000000100000004000000000000000000000000000000"
+        "0001000200000000ffffffff00000000100000000c001400060008000c001000"
+        "0c00000000000400500000002800000004000000010000009001000000000000"
+        "900000000000000008000000000000000000000001000000b000000000000000"
+        "b000000000000000300000000000000008000800000004000800000004000000"
+        "0100000014000000100018000800060007000c00100014001000000000000114"
+        "1400000048000000200000000400000000000000050000006772616465000a00"
+        "0c000000080007000a000000000000010c00000008000c000800070008000000"
+        "00000001080000000400040004000000e00000004152524f5731"
+    )
+
+
+def _integer_dictionary_stream() raises -> List[UInt8]:
+    """496 bytes from pyarrow 25."""
+    return _from_hex(
+        "ffffffff900000001000000000000a000c000600050008000a00000000010400"
+        "04000000bcffffff040000000100000014000000100018000800060007000c00"
+        "100014001000000000000102140000003c0000001c0000000400000000000000"
+        "010000006e00000008000800000004000800000004000000f4ffffff00000001"
+        "2000000008000c0008000700080000000000000140000000ffffffff98000000"
+        "14000000000000000c0014000600050008000c000c0000000002040014000000"
+        "100000000000000008000a0000000400080000001000000000000a0018000c00"
+        "040008000a0000003c0000001000000002000000000000000000000002000000"
+        "0000000000000000000000000000000000000000000000001000000000000000"
+        "0000000001000000020000000000000000000000000000000a00000000000000"
+        "1400000000000000ffffffff8800000014000000000000000c00160006000500"
+        "08000c000c0000000003040018000000100000000000000000000a0018000c00"
+        "040008000a0000003c0000001000000003000000000000000000000002000000"
+        "0000000000000000000000000000000000000000000000000c00000000000000"
+        "0000000001000000030000000000000000000000000000000000000001000000"
+        "0000000000000000ffffffff00000000"
+    )
+
+
+def _out_of_range_dictionary_stream() raises -> List[UInt8]:
+    """520 bytes from pyarrow 25."""
+    return _from_hex(
+        "ffffffff900000001000000000000a000c000600050008000a00000000010400"
+        "04000000bcffffff040000000100000014000000100018000800060007000c00"
+        "10001400100000000000010514000000400000001c0000000400000000000000"
+        "01000000640000000800080000000400080000000c00000008000c0008000700"
+        "080000000000000120000000040004000400000000000000ffffffffa8000000"
+        "14000000000000000c0014000600050008000c000c0000000002040014000000"
+        "180000000000000008000a0000000400080000001000000000000a0018000c00"
+        "040008000a0000004c0000001000000002000000000000000000000003000000"
+        "0000000000000000000000000000000000000000000000000c00000000000000"
+        "1000000000000000020000000000000000000000010000000200000000000000"
+        "0000000000000000000000000100000002000000000000006162000000000000"
+        "ffffffff8800000014000000000000000c0016000600050008000c000c000000"
+        "0003040018000000100000000000000000000a0018000c00040008000a000000"
+        "3c00000010000000030000000000000000000000020000000000000000000000"
+        "000000000000000000000000000000000c000000000000000000000001000000"
+        "0300000000000000000000000000000000000000050000000100000000000000"
+        "ffffffff00000000"
+    )
+
+
+def _delta_dictionary_stream() raises -> List[UInt8]:
+    """872 bytes from pyarrow 25."""
+    return _from_hex(
+        "ffffffff900000001000000000000a000c000600050008000a00000000010400"
+        "04000000bcffffff040000000100000014000000100018000800060007000c00"
+        "10001400100000000000010514000000400000001c0000000400000000000000"
+        "01000000640000000800080000000400080000000c00000008000c0008000700"
+        "080000000000000120000000040004000400000000000000ffffffffa8000000"
+        "14000000000000000c0014000600050008000c000c0000000002040014000000"
+        "180000000000000008000a0000000400080000001000000000000a0018000c00"
+        "040008000a0000004c0000001000000002000000000000000000000003000000"
+        "0000000000000000000000000000000000000000000000000c00000000000000"
+        "1000000000000000020000000000000000000000010000000200000000000000"
+        "0000000000000000000000000100000002000000000000007879000000000000"
+        "ffffffff8800000014000000000000000c0016000600050008000c000c000000"
+        "0003040018000000080000000000000000000a0018000c00040008000a000000"
+        "3c00000010000000020000000000000000000000020000000000000000000000"
+        "0000000000000000000000000000000008000000000000000000000001000000"
+        "020000000000000000000000000000000000000001000000ffffffffb0000000"
+        "14000000000000000c0016000600050008000c000c0000000002040018000000"
+        "100000000000000000000a000e000000080007000a0000000000000110000000"
+        "00000a0018000c00040008000a0000004c000000100000000100000000000000"
+        "0000000003000000000000000000000000000000000000000000000000000000"
+        "0800000000000000080000000000000001000000000000000000000001000000"
+        "0100000000000000000000000000000000000000010000007a00000000000000"
+        "ffffffff8800000014000000000000000c0016000600050008000c000c000000"
+        "0003040018000000100000000000000000000a0018000c00040008000a000000"
+        "3c00000010000000030000000000000000000000020000000000000000000000"
+        "000000000000000000000000000000000c000000000000000000000001000000"
+        "0300000000000000000000000000000000000000010000000200000000000000"
         "ffffffff00000000"
     )
 

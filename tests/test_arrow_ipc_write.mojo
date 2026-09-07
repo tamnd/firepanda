@@ -242,6 +242,112 @@ def test_a_temporal_frame_round_trips_with_its_units_and_its_zone() raises:
     assert_false(frame[3].is_valid(1))
 
 
+def _categorical() raises -> DataFrame:
+    """Builds a frame of two categorical columns and a plain one between them.
+
+    Returns:
+        Four rows of an unordered category over three values with a null, an
+        int64, and an ordered category over two values with a narrow index.
+    """
+    var codes = Array[DType.int32](4)
+    codes.set_valid(0, Int32(2))
+    codes.set_valid(1, Int32(0))
+    codes.set_null(2)
+    codes.set_valid(3, Int32(2))
+    var names = StringBuilder()
+    names.append(String("alpha").as_bytes())
+    names.append(String("beta").as_bytes())
+    names.append(String("gamma").as_bytes())
+
+    var counts = Array[DType.int64](4)
+    for i in range(4):
+        counts.set_valid(i, Int64(10 * i))
+
+    var grades = Array[DType.int8](4)
+    grades.set_valid(0, Int8(1))
+    grades.set_valid(1, Int8(0))
+    grades.set_valid(2, Int8(1))
+    grades.set_valid(3, Int8(0))
+    var levels = StringBuilder()
+    levels.append(String("low").as_bytes())
+    levels.append(String("high").as_bytes())
+
+    var columns = List[Series]()
+    columns.append(
+        Series(
+            "label",
+            AnyArray.dictionary[DType.int32](codes^, names^.finish()),
+        )
+    )
+    columns.append(Series("count", AnyArray(counts^)))
+    columns.append(
+        Series(
+            "grade",
+            AnyArray.dictionary[DType.int8](grades^, levels^.finish(), True),
+        )
+    )
+    return DataFrame.from_series(columns^)
+
+
+def test_a_categorical_frame_round_trips_with_its_categories() raises:
+    # The categories are not in the schema message and not in the record batch
+    # either, so a writer that emitted only the two of those would produce a
+    # file whose columns are codes and whose meaning is gone. That is the whole
+    # of what this checks, in both directions.
+    var bytes = write_ipc_stream_bytes(_categorical())
+    var frame = read_ipc_stream(Span(bytes))
+    assert_equal(frame.width(), 3)
+    assert_equal(len(frame), 4)
+    assert_equal(String(frame.schema[0].dtype), "category")
+    assert_equal(String(frame.schema[1].dtype), "int64")
+    assert_equal(String(frame.schema[2].dtype), "category")
+
+    assert_true(frame.schema[0].dtype == LogicalType.dictionary(DType.int32))
+    assert_equal(len(frame[0].categories()), 3)
+    assert_equal(frame[0].categories()[2], "gamma")
+    assert_equal(frame[0].codes[DType.int32]()[0], Int32(2))
+    assert_false(frame[0].is_valid(2))
+
+    # An int8 index and the ordered flag, neither of which the reader would
+    # arrive at by guessing, since int32 and unordered are what everything
+    # writes by default.
+    assert_true(
+        frame.schema[2].dtype == LogicalType.dictionary(DType.int8, True)
+    )
+    assert_equal(len(frame[2].categories()), 2)
+    assert_equal(frame[2].categories()[1], "high")
+    assert_equal(frame[2].codes[DType.int8]()[3], Int8(0))
+
+
+def test_a_categorical_file_round_trips_through_its_footer() raises:
+    # A file finds its categories through the footer's own list of dictionary
+    # blocks rather than by meeting them on the way past, so a writer that put
+    # the messages in the stream and left that list empty would produce a file
+    # only the stream reader could read.
+    var bytes = write_ipc_file_bytes(_categorical())
+    var frame = read_ipc_file(Span(bytes))
+    assert_equal(frame.width(), 3)
+    assert_equal(frame[0].categories()[1], "beta")
+    assert_equal(frame[2].categories()[0], "low")
+    assert_true(frame.schema[2].dtype.ordered)
+
+
+def test_a_categorical_column_with_no_categories_is_refused() raises:
+    # Reachable only by building the type by hand, which is exactly why it is
+    # worth a message: the alternative is writing a schema that promises a
+    # dictionary and a stream that never carries one.
+    var codes = Array[DType.int32](2)
+    codes.set_valid(0, Int32(0))
+    codes.set_valid(1, Int32(0))
+    var bare = AnyArray(codes^)
+    bare.type = LogicalType.dictionary(DType.int32)
+    var columns = List[Series]()
+    columns.append(Series("label", bare^))
+    var frame = DataFrame.from_series(columns^)
+    with assert_raises(contains="no categories behind it"):
+        _ = write_ipc_stream_bytes(frame)
+
+
 def test_a_stream_round_trips() raises:
     var bytes = write_ipc_stream_bytes(_sample())
     _assert_matches_the_sample(read_ipc_stream(Span(bytes)))

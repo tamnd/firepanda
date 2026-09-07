@@ -52,6 +52,12 @@ struct TypeKind(Equatable, ImplicitlyCopyable, Movable, Writable):
     timestamps, and adding two of them is a sensible thing to do where adding
     two instants is not."""
 
+    comptime DICTIONARY = Self(9)
+    """Values held once in a separate array and referred to by position. The
+    physical dtype is the index type and says nothing about what the values are,
+    which makes this the one kind where reading the buffer as its dtype gives a
+    number that is not the value the user put there."""
+
     def __eq__(self, other: Self) -> Bool:
         """Compares two kinds.
 
@@ -96,8 +102,10 @@ struct TypeKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("timestamp")
         elif self == Self.DATE:
             writer.write("date")
-        else:
+        elif self == Self.DURATION:
             writer.write("duration")
+        else:
+            writer.write("dictionary")
 
 
 @fieldwise_init
@@ -118,6 +126,13 @@ struct LogicalType(Equatable, ImplicitlyCopyable, Movable, Writable):
     var zone: TimeZone
     """The wall clock a timestamp is read against, naive for everything else."""
 
+    var ordered: Bool
+    """Whether the values of a dictionary have a meaning to their order, so that
+    one category is less than another. False for every other kind, where the
+    question does not arise. It lives on the type and not on the array because
+    pandas puts it in the dtype, where it decides whether `<` on two categorical
+    columns is an error or an answer."""
+
     def __init__(out self, kind: TypeKind, physical: DType):
         """Constructs a type with no temporal meaning attached.
 
@@ -134,6 +149,7 @@ struct LogicalType(Equatable, ImplicitlyCopyable, Movable, Writable):
         self.physical = physical
         self.unit = TimeUnit.SECOND
         self.zone = TimeZone()
+        self.ordered = False
 
     comptime NULL = Self(TypeKind.NULL, DType.bool)
     comptime BOOL = Self(TypeKind.BOOL, DType.bool)
@@ -164,7 +180,7 @@ struct LogicalType(Equatable, ImplicitlyCopyable, Movable, Writable):
         Returns:
             The type.
         """
-        return Self(TypeKind.TIMESTAMP, DType.int64, unit, zone)
+        return Self(TypeKind.TIMESTAMP, DType.int64, unit, zone, False)
 
     @staticmethod
     def duration(unit: TimeUnit) -> Self:
@@ -180,7 +196,32 @@ struct LogicalType(Equatable, ImplicitlyCopyable, Movable, Writable):
         Returns:
             The type.
         """
-        return Self(TypeKind.DURATION, DType.int64, unit, TimeZone())
+        return Self(TypeKind.DURATION, DType.int64, unit, TimeZone(), False)
+
+    @staticmethod
+    def dictionary(index: DType, ordered: Bool = False) -> Self:
+        """Constructs a dictionary type.
+
+        The categories are not here and cannot be. A `LogicalType` is copied
+        around by value everywhere in the library and owns no memory, and the
+        categories are a string array. They live on the column instead, which
+        means two dictionary columns over different categories carry types that
+        compare equal, and anything that needs to know whether two categorical
+        columns can be compared has to ask the arrays and not the types. Pandas
+        does not have this split, because its dtype is heap allocated and holds
+        the categories itself.
+
+        Args:
+            index: The dtype of the codes, which is what the column stores per
+                row. Arrow allows any signed integer width here.
+            ordered: Whether the categories have a meaningful order.
+
+        Returns:
+            The type.
+        """
+        return Self(
+            TypeKind.DICTIONARY, index, TimeUnit.SECOND, TimeZone(), ordered
+        )
 
     def __eq__(self, other: Self) -> Bool:
         """Compares two logical types.
@@ -190,19 +231,24 @@ struct LogicalType(Equatable, ImplicitlyCopyable, Movable, Writable):
         instants for the same integer, and a New York column and a naive one are
         different questions with the same answer only by accident, so neither
         pair is allowed to compare equal and slip through a kernel that checks
-        whether two operands match.
+        whether two operands match. The categories of a dictionary are the one
+        part of a type that is not compared here, because they are not stored
+        here, so two categorical columns over different categories do compare
+        equal at this level and the array layer has to do the real check.
 
         Args:
             other: The type to compare against.
 
         Returns:
-            True if the kind, the physical layout, the unit and the zone match.
+            True if the kind, the physical layout, the unit, the zone and the
+            ordered flag all match.
         """
         return (
             self.kind == other.kind
             and self.physical == other.physical
             and self.unit == other.unit
             and self.zone == other.zone
+            and self.ordered == other.ordered
         )
 
     def __ne__(self, other: Self) -> Bool:
@@ -265,6 +311,18 @@ struct LogicalType(Equatable, ImplicitlyCopyable, Movable, Writable):
             or self.kind == TypeKind.DURATION
         )
 
+    def is_dictionary(self) -> Bool:
+        """Reports whether the stored values are positions into a category list.
+
+        This is the predicate that keeps a categorical column out of the kernels
+        that would otherwise take its codes for its values and cheerfully sum
+        them.
+
+        Returns:
+            True for a dictionary type.
+        """
+        return self.kind == TypeKind.DICTIONARY
+
     def is_variable_width(self) -> Bool:
         """Reports whether values are stored out of line behind an offsets array.
 
@@ -292,7 +350,10 @@ struct LogicalType(Equatable, ImplicitlyCopyable, Movable, Writable):
         against pandas. The date is the exception and is spelled the way Arrow
         spells it, since pandas on the numpy backend has no date dtype at all
         and calls the column `object`, which is a thing firepanda would be lying
-        to say.
+        to say. The dictionary is spelled `category` and says nothing about its
+        index width or its categories, which is also what pandas prints, and it
+        is the reason two categorical columns that hold different things print
+        the same dtype in both libraries.
 
         Args:
             writer: The destination.
@@ -312,6 +373,8 @@ struct LogicalType(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("date32[day]")
         elif self.kind == TypeKind.DURATION:
             writer.write("timedelta64[", self.unit, "]")
+        elif self.kind == TypeKind.DICTIONARY:
+            writer.write("category")
         else:
             writer.write(self.physical)
 
@@ -349,6 +412,7 @@ def promote(a: LogicalType, b: LogicalType) raises -> LogicalType:
       does and is lossy for values above 2^53.
     - bool with anything numeric gives the numeric type.
     - string only promotes with string.
+    - a dictionary promotes with nothing, itself included.
 
     Args:
         a: The left operand type.
@@ -360,6 +424,27 @@ def promote(a: LogicalType, b: LogicalType) raises -> LogicalType:
     Raises:
         If no common type exists, for example string with int64.
     """
+    if a.is_dictionary() or b.is_dictionary():
+        # Ahead of the equality check below, and deliberately, because two
+        # dictionary types comparing equal does not mean the two columns hold
+        # the same categories. What two categoricals combine to in pandas is
+        # decided by their categories: matching ones keep the category type and
+        # differing ones fall back to object, and the categories are not in the
+        # type here. Answering that with half the information would be worse
+        # than not answering, so this refuses every mixture, itself included,
+        # and says which half is missing. A dictionary against anything else has
+        # an answer in pandas too, which is to work against the decoded values,
+        # and firepanda has no decode to do it with yet.
+        raise Error(
+            "no common type for "
+            + String(a)
+            + " and "
+            + String(b)
+            + ", because what two categoricals promote to depends on their"
+            " categories and the categories are held by the column rather than"
+            " by the type"
+        )
+
     if a == b:
         return a
     if a.kind == TypeKind.NULL:
