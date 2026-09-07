@@ -138,11 +138,17 @@ from .sort import (
     sort_rows,
 )
 from .temporal import (
+    ROUND_DOWN,
+    ROUND_HALF_EVEN,
+    ROUND_UP,
     TemporalField,
     field_named,
+    temporal_as_unit,
     temporal_date,
     temporal_field,
     temporal_normalize,
+    temporal_round,
+    unit_named,
 )
 from .text import compare_text, compare_text_const
 from .topn import GroupTop, group_top_rows, group_top_rows_any

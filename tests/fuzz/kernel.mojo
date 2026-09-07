@@ -101,6 +101,7 @@ from firepanda.kernel.scalar import (
     negate_scalar,
     power_const_scalar,
     power_scalar,
+    round_to_period_scalar,
     subtract_scalar,
     sum_scalar,
     take_scalar,
@@ -108,9 +109,13 @@ from firepanda.kernel.scalar import (
 )
 from firepanda.kernel.temporal import (
     FIELD_CODES,
+    ROUND_DOWN,
+    ROUND_HALF_EVEN,
+    ROUND_UP,
     TemporalField,
     extract_field,
     field_dtype,
+    round_to_period,
 )
 from firepanda.testing.rng import Rng
 
@@ -1108,33 +1113,29 @@ def _per_second_of(which: Int) -> Int64:
     return 1_000_000_000
 
 
-def run_temporal(mut rng: Rng, step: Int, seed: UInt64) raises:
-    """Draws a random temporal column and reads every field off it twice.
+def _temporal_column(
+    mut rng: Rng, per_second: Int64
+) raises -> Array[DType.int64]:
+    """Draws a random column of instants at one of the four resolutions.
 
-    This is not folded into `run_one` because the calendar fields are not a
-    per dtype operation. The column is always int64 and what rotates instead is
-    the resolution, so the four divisors below all get exercised over a run.
-
-    The values are drawn over the whole range a second resolution timestamp can
-    hold rather than over the small range the arithmetic kernels use, because
-    the small range is entirely inside 1970 and the thing most likely to be
-    wrong is a year that is not.
+    The values are drawn as a count of seconds and then scaled, so that a
+    nanosecond column gets instants spread over centuries rather than over the
+    four hours that sixty four random bits of nanoseconds would cover. The range
+    is the whole of what a second resolution timestamp holds, because the small
+    range the arithmetic kernels use is entirely inside 1970 and a year that is
+    not 1970 is the thing most likely to be wrong.
 
     Args:
         rng: The generator.
-        step: The case number.
-        seed: The seed.
+        per_second: How many of the stored unit make a second.
+
+    Returns:
+        The column, with one of the four null shapes over it.
 
     Raises:
-        If the kernel disagrees with its twin on any field.
+        If the generator does.
     """
     var length = rng.next_below(MAX_LENGTH)
-    var per_second = _per_second_of(step % 4)
-    var per_day = per_second * 86400
-
-    # Drawn as a count of seconds and then scaled, so that a nanosecond column
-    # gets instants spread over centuries rather than over the four hours
-    # sixty four random bits of nanoseconds would cover.
     var col = Array[DType.int64](length)
     var shape = rng.next_below(4)
     for i in range(length):
@@ -1159,6 +1160,81 @@ def run_temporal(mut rng: Rng, step: Int, seed: UInt64) raises:
                 for i in range(at, stop):
                     col.set_null(i)
             at = stop
+    return col^
+
+
+def run_rounding(mut rng: Rng, step: Int, seed: UInt64) raises:
+    """Rounds a random temporal column to a random period, twice.
+
+    The period is drawn rather than parsed, so that the run covers periods the
+    frequency grammar has no spelling for as well as the ones it has, and it is
+    allowed to be negative because pandas allows a negative frequency. Zero is
+    the one value excluded, because the callers above turn that into a copy
+    before either of these is reached.
+
+    Args:
+        rng: The generator.
+        step: The case number.
+        seed: The seed.
+
+    Raises:
+        If a kernel disagrees with its twin.
+    """
+    var per_second = _per_second_of(step % 4)
+    var col = _temporal_column(rng, per_second)
+
+    var period = Int64(rng.next_u64() % 100_000) + 1
+    if rng.next_bool():
+        period = period * per_second
+    if rng.next_bool():
+        period = -period
+
+    same_column(
+        round_to_period[ROUND_DOWN](col, period),
+        round_to_period_scalar[ROUND_DOWN](col, period),
+        step,
+        seed,
+        String("floor by ", period),
+    )
+    same_column(
+        round_to_period[ROUND_UP](col, period),
+        round_to_period_scalar[ROUND_UP](col, period),
+        step,
+        seed,
+        String("ceil by ", period),
+    )
+    same_column(
+        round_to_period[ROUND_HALF_EVEN](col, period),
+        round_to_period_scalar[ROUND_HALF_EVEN](col, period),
+        step,
+        seed,
+        String("round by ", period),
+    )
+
+
+def run_temporal(mut rng: Rng, step: Int, seed: UInt64) raises:
+    """Draws a random temporal column and reads every field off it twice.
+
+    This is not folded into `run_one` because the calendar fields are not a
+    per dtype operation. The column is always int64 and what rotates instead is
+    the resolution, so the four divisors below all get exercised over a run.
+
+    The values are drawn over the whole range a second resolution timestamp can
+    hold rather than over the small range the arithmetic kernels use, because
+    the small range is entirely inside 1970 and the thing most likely to be
+    wrong is a year that is not.
+
+    Args:
+        rng: The generator.
+        step: The case number.
+        seed: The seed.
+
+    Raises:
+        If the kernel disagrees with its twin on any field.
+    """
+    var per_second = _per_second_of(step % 4)
+    var per_day = per_second * 86400
+    var col = _temporal_column(rng, per_second)
 
     comptime for code in FIELD_CODES:
         comptime result = field_dtype(code)
@@ -1215,6 +1291,11 @@ def main() raises:
         # other kernels for coverage of one of them.
         if step % 8 == 0:
             run_temporal(rng, step, options.seed)
+
+        # The other half of the rotation, so that the two temporal families get
+        # one case in eight each rather than sharing one.
+        if step % 8 == 4:
+            run_rounding(rng, step, options.seed)
 
         applied += 1
 
