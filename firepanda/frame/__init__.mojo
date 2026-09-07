@@ -21,6 +21,6 @@ without a cycle.
 
 from .concat import concat, concat_series
 from .display import DisplayOptions, render_column, render_table
-from .frame import DataFrame
+from .frame import DataFrame, dt_isocalendar
 from .groupby import AggSpec
 from .series import Series

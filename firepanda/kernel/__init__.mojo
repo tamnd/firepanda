@@ -143,11 +143,15 @@ from .temporal import (
     ROUND_UP,
     TemporalField,
     field_named,
+    parse_format,
     temporal_as_unit,
     temporal_date,
+    temporal_day_name,
     temporal_field,
+    temporal_month_name,
     temporal_normalize,
     temporal_round,
+    temporal_strftime,
     unit_named,
 )
 from .text import compare_text, compare_text_const

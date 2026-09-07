@@ -32,6 +32,7 @@ from std.math import isnan, nan
 from std.sys import argv
 from std.time import perf_counter_ns
 
+from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.kernel import (
     AggKind,
@@ -70,6 +71,8 @@ from firepanda.kernel import (
     take_range,
     take_rows,
 )
+from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.temporal import TimeUnit
 from firepanda.kernel.arith import OP_ADD, OP_MUL, OP_SUB
 from firepanda.kernel.compare import CMP_GE, CMP_LT
 from firepanda.kernel.nulls import fill_backward, fill_forward
@@ -116,6 +119,9 @@ from firepanda.kernel.temporal import (
     extract_field,
     field_dtype,
     round_to_period,
+    temporal_day_name,
+    temporal_month_name,
+    temporal_strftime,
 )
 from firepanda.testing.rng import Rng
 
@@ -1247,6 +1253,211 @@ def run_temporal(mut rng: Rng, step: Int, seed: UInt64) raises:
         )
 
 
+def _unit_of(which: Int) -> TimeUnit:
+    """The resolution `_per_second_of` counts in, as a type rather than a
+    divisor.
+
+    Args:
+        which: 0 for seconds, 1 for milliseconds, 2 for microseconds and
+            anything else for nanoseconds.
+
+    Returns:
+        The unit.
+    """
+    if which == 0:
+        return TimeUnit.SECOND
+    if which == 1:
+        return TimeUnit.MILLI
+    if which == 2:
+        return TimeUnit.MICRO
+    return TimeUnit.NANO
+
+
+def _padded(value: Int64, width: Int) -> String:
+    """Writes a number with leading zeroes to a minimum width.
+
+    Args:
+        value: The number, never negative here.
+        width: The minimum number of digits.
+
+    Returns:
+        The digits.
+    """
+    var digits = String(value)
+    var out = String()
+    for _ in range(width - digits.byte_length()):
+        out += "0"
+    return out + digits
+
+
+def _weekday_names() -> List[String]:
+    """The seven names, in the order the ISO day numbers them.
+
+    Returns:
+        Monday first.
+    """
+    return [
+        String("Monday"),
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+    ]
+
+
+def _month_names() -> List[String]:
+    """The twelve names, in the order the calendar numbers them.
+
+    Returns:
+        January first.
+    """
+    return [
+        String("January"),
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ]
+
+
+def run_names(mut rng: Rng, step: Int, seed: UInt64) raises:
+    """Names and formats a random temporal column, and checks the text by hand.
+
+    The expected text is assembled out of `temporal_field_scalar`, which is the
+    one row at a time twin the calendar fields are already checked against, so
+    this is the formatter against a different implementation of the calendar
+    rather than against itself. The names are looked up in a list written out
+    here, so a table that is rotated by one day shows up as a disagreement.
+
+    Args:
+        rng: The generator.
+        step: The case number.
+        seed: The seed.
+
+    Raises:
+        If the text disagrees with the fields it is supposed to be made of.
+    """
+    var which = step % 4
+    var per_second = _per_second_of(which)
+    var per_day = per_second * 86400
+    var col = _temporal_column(rng, per_second)
+
+    var years = temporal_field_scalar[0, DType.int32](col, per_day, per_second)
+    var months = temporal_field_scalar[1, DType.int32](col, per_day, per_second)
+    var days = temporal_field_scalar[2, DType.int32](col, per_day, per_second)
+    var hours = temporal_field_scalar[3, DType.int32](col, per_day, per_second)
+    var minutes = temporal_field_scalar[4, DType.int32](
+        col, per_day, per_second
+    )
+    var seconds = temporal_field_scalar[5, DType.int32](
+        col, per_day, per_second
+    )
+    var doys = temporal_field_scalar[9, DType.int32](col, per_day, per_second)
+    var iso_years = temporal_field_scalar[19, DType.uint32](
+        col, per_day, per_second
+    )
+    var iso_weeks = temporal_field_scalar[20, DType.uint32](
+        col, per_day, per_second
+    )
+    var iso_days = temporal_field_scalar[21, DType.uint32](
+        col, per_day, per_second
+    )
+
+    var height = len(col)
+    var any = AnyArray(col^.into_data(), LogicalType.timestamp(_unit_of(which)))
+    var text = temporal_strftime(any, "%Y-%m-%d %H:%M:%S %j %G %V %u")
+    var day_names = temporal_day_name(any, "")
+    var month_names = temporal_month_name(any, "")
+    var weekdays = _weekday_names()
+    var calendar = _month_names()
+
+    for i in range(height):
+        if not years.is_valid(i):
+            if text.is_valid(i) or day_names.is_valid(i):
+                raise Error(
+                    String(
+                        "names: row ",
+                        i,
+                        " of case ",
+                        step,
+                        " at seed ",
+                        seed,
+                        " has no calendar and has text",
+                    )
+                )
+            continue
+
+        var want = _padded(Int64(years[i]), 4)
+        want += "-" + _padded(Int64(months[i]), 2)
+        want += "-" + _padded(Int64(days[i]), 2)
+        want += " " + _padded(Int64(hours[i]), 2)
+        want += ":" + _padded(Int64(minutes[i]), 2)
+        want += ":" + _padded(Int64(seconds[i]), 2)
+        want += " " + _padded(Int64(doys[i]), 3)
+        want += " " + _padded(Int64(iso_years[i]), 4)
+        want += " " + _padded(Int64(iso_weeks[i]), 2)
+        want += " " + String(Int64(iso_days[i]))
+        if text[i] != want:
+            raise Error(
+                String(
+                    "names: row ",
+                    i,
+                    " of case ",
+                    step,
+                    " at seed ",
+                    seed,
+                    " formatted as '",
+                    text[i],
+                    "' and the fields say '",
+                    want,
+                    "'",
+                )
+            )
+
+        var want_day = weekdays[Int(iso_days[i]) - 1]
+        if day_names[i] != want_day:
+            raise Error(
+                String(
+                    "names: row ",
+                    i,
+                    " of case ",
+                    step,
+                    " at seed ",
+                    seed,
+                    " is a ",
+                    day_names[i],
+                    " and the ISO day says ",
+                    want_day,
+                )
+            )
+
+        var want_month = calendar[Int(months[i]) - 1]
+        if month_names[i] != want_month:
+            raise Error(
+                String(
+                    "names: row ",
+                    i,
+                    " of case ",
+                    step,
+                    " at seed ",
+                    seed,
+                    " is in ",
+                    month_names[i],
+                    " and the month says ",
+                    want_month,
+                )
+            )
+
+
 def main() raises:
     var options = parse_options()
     print(
@@ -1292,10 +1503,13 @@ def main() raises:
         if step % 8 == 0:
             run_temporal(rng, step, options.seed)
 
-        # The other half of the rotation, so that the two temporal families get
-        # one case in eight each rather than sharing one.
+        # The other half of the rotation, so that the temporal families get one
+        # case in eight each rather than sharing one.
         if step % 8 == 4:
             run_rounding(rng, step, options.seed)
+
+        if step % 8 == 2:
+            run_names(rng, step, options.seed)
 
         applied += 1
 
