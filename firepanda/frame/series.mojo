@@ -51,11 +51,17 @@ from firepanda.kernel.nulls import (
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.sort import argsort_any, is_sorted_any
 from firepanda.kernel.temporal import (
+    ROUND_DOWN,
+    ROUND_HALF_EVEN,
+    ROUND_UP,
     TemporalField,
     field_named,
+    temporal_as_unit,
     temporal_date,
     temporal_field,
     temporal_normalize,
+    temporal_round,
+    unit_named,
 )
 from firepanda.kernel.unary import UnaryOp, unary_any
 
@@ -645,6 +651,82 @@ struct Series(Copyable, Movable, Sized, Writable):
             If the series is not a date or a naive timestamp.
         """
         return self._relabelled(self.name, temporal_normalize(self.values))
+
+    def dt_floor(self, freq: StringSlice) raises -> Self:
+        """Returns the series with every instant moved back to a whole period.
+
+        Args:
+            freq: The frequency, so `h` for the hour, `min` for the minute, and
+                any of `D`, `s`, `ms`, `us` and `ns`, each with an optional
+                count in front of it.
+
+        Returns:
+            A timestamp series of the same type and height.
+
+        Raises:
+            If the series is not a naive timestamp, or if the frequency is not
+            one that has a fixed length.
+        """
+        return self._relabelled(
+            self.name, temporal_round(self.values, freq, ROUND_DOWN)
+        )
+
+    def dt_ceil(self, freq: StringSlice) raises -> Self:
+        """Returns the series with every instant moved on to a whole period.
+
+        Args:
+            freq: The frequency, spelled as `dt_floor` spells it.
+
+        Returns:
+            A timestamp series of the same type and height.
+
+        Raises:
+            If the series is not a naive timestamp, or if the frequency is not
+            one that has a fixed length.
+        """
+        return self._relabelled(
+            self.name, temporal_round(self.values, freq, ROUND_UP)
+        )
+
+    def dt_round(self, freq: StringSlice) raises -> Self:
+        """Returns the series with every instant moved to the nearest period.
+
+        A row exactly halfway between two periods goes to the even one, which is
+        the same rule the numeric round uses and is not the rule anyone expects
+        from a clock. Rounded to the hour, 00:30 answers midnight and 01:30
+        answers two, because both of those are even hours and one is above the
+        row and the other below it.
+
+        Args:
+            freq: The frequency, spelled as `dt_floor` spells it.
+
+        Returns:
+            A timestamp series of the same type and height.
+
+        Raises:
+            If the series is not a naive timestamp, or if the frequency is not
+            one that has a fixed length.
+        """
+        return self._relabelled(
+            self.name, temporal_round(self.values, freq, ROUND_HALF_EVEN)
+        )
+
+    def dt_as_unit(self, unit: StringSlice) raises -> Self:
+        """Returns the series restated at another resolution.
+
+        Args:
+            unit: One of `s`, `ms`, `us` and `ns`.
+
+        Returns:
+            A timestamp series at that resolution, of the same height.
+
+        Raises:
+            If the series is not a timestamp, if the name is not one of the
+            four, or if going up in precision would put an instant out of range.
+        """
+        return self._relabelled(
+            self.name, temporal_as_unit(self.values, unit_named(unit))
+        )
 
     def _relabelled(self, name: String, var values: AnyArray) raises -> Self:
         """Builds a result that has this series' row labels.

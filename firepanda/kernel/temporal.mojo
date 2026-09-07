@@ -52,9 +52,27 @@ from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.logical import LogicalType, TypeKind
+from firepanda.dtype.temporal import TimeUnit
 from firepanda.exec import parallel_morsels
 
 from .mask import repair_range
+
+comptime NANOS_PER_SECOND = Int64(1_000_000_000)
+"""How many nanoseconds are in a second. The frequency parser works in these
+because a nanosecond is the finest thing Arrow counts, so every frequency any of
+the four resolutions can name is a whole number of them."""
+
+comptime ROUND_DOWN = 0
+"""Rounding mode for `dt.floor`, which moves an instant to the multiple at or
+below it."""
+
+comptime ROUND_UP = 1
+"""Rounding mode for `dt.ceil`, which moves an instant to the multiple at or
+above it."""
+
+comptime ROUND_HALF_EVEN = 2
+"""Rounding mode for `dt.round`, which moves an instant to whichever multiple is
+nearer and settles a tie on the even one."""
 
 comptime SECONDS_PER_DAY = 86400
 """How many seconds are in a day, with no leap seconds, which is what Arrow and
@@ -819,3 +837,491 @@ def temporal_normalize(a: AnyArray) raises -> AnyArray:
         _midnights_of(a.as_typed_view[DType.int64](), per_day).into_data(),
         a.type,
     )
+
+
+comptime MAX_COUNT = Int64(922_337_203_685_477_580)
+"""The largest count a frequency can carry before one more digit would leave the
+range of an int64. It is `Int64.MAX // 10`, written out so the check in front of
+the multiply reads as a comparison rather than as arithmetic."""
+
+comptime MAX_SCALE = Int64(100_000_000)
+"""The largest power of ten the digits after a decimal point may reach before
+one more of them would put the divisor out of range."""
+
+
+def _nanos_per_unit(t: LogicalType) raises -> Int64:
+    """Returns how many nanoseconds one of a timestamp column's integers is.
+
+    Args:
+        t: The column type.
+
+    Returns:
+        1000000000 for a second column, down to 1 for a nanosecond one.
+
+    Raises:
+        Error: If the column is not a timestamp, or if it carries a time zone.
+    """
+    if t.kind != TypeKind.TIMESTAMP:
+        raise Error(
+            "temporal: rounding to a frequency is only defined on a timestamp"
+            " column, and this one is "
+            + String(t)
+        )
+    if not t.zone.is_naive():
+        # pandas rounds the reading on the local clock and the stored integers
+        # are UTC, and in a zone that is not on a whole hour offset those are
+        # two different answers rather than the same answer written twice.
+        raise Error(
+            "temporal: rounding a column in "
+            + String(t.zone)
+            + " needs a time zone database firepanda does not have yet,"
+            " because pandas rounds the local reading and the stored instants"
+            " are UTC"
+        )
+    return NANOS_PER_SECOND // t.unit.per_second()
+
+
+def _alias_nanos(spelling: StringSlice) raises -> Int64:
+    """Returns how many nanoseconds long one of the fixed frequencies is.
+
+    These seven are the whole list pandas will round to. Everything else it
+    knows about, a week, a month end, a quarter, is a non fixed frequency whose
+    length depends on where in the calendar it lands, and pandas refuses those
+    rather than picking an average, so they are refused here too.
+
+    Args:
+        spelling: The letters after the count, so `h` rather than `2h`.
+
+    Returns:
+        The length in nanoseconds.
+
+    Raises:
+        Error: If the alias is not one of the seven.
+    """
+    if spelling == "D":
+        return Int64(SECONDS_PER_DAY) * NANOS_PER_SECOND
+    if spelling == "h":
+        return Int64(3_600) * NANOS_PER_SECOND
+    if spelling == "min":
+        return Int64(60) * NANOS_PER_SECOND
+    if spelling == "s":
+        return NANOS_PER_SECOND
+    if spelling == "ms":
+        return 1_000_000
+    if spelling == "us":
+        return 1_000
+    if spelling == "ns":
+        return 1
+    raise Error(
+        "temporal: '"
+        + String(spelling)
+        + "' is not a fixed frequency; the ones that can be rounded to are D,"
+        " h, min, s, ms, us and ns, each with an optional count in front of it"
+    )
+
+
+def _is_blank(byte: UInt8) -> Bool:
+    """Says whether a byte is one pandas trims off the ends of a frequency.
+
+    Args:
+        byte: The byte.
+
+    Returns:
+        True for a space and for a tab.
+    """
+    return byte == 32 or byte == 9
+
+
+def _is_digit(byte: UInt8) -> Bool:
+    """Says whether a byte is one of the ten decimal digits.
+
+    Args:
+        byte: The byte.
+
+    Returns:
+        True for `0` through `9`.
+    """
+    return byte >= 48 and byte <= 57
+
+
+def frequency_period(freq: StringSlice, t: LogicalType) raises -> Int64:
+    """Turns a pandas frequency string into a count of the column's own units.
+
+    A frequency is an optional sign, an optional count, and one of the seven
+    fixed aliases, so `h`, `15min`, `2D` and `1.5h` are all of them. Spaces at
+    either end are trimmed, which is what pandas does, and nothing in the middle
+    is allowed.
+
+    The count is kept as a whole number over a power of ten rather than as a
+    float, so `1.5h` on a second column is fifteen times an hour over ten and
+    comes out as exactly 5400 rather than as whatever 1.5 times 3.6e12 rounds
+    to. The last division is the one that turns nanoseconds into the column's
+    unit and it rounds down, which is why a frequency finer than the column
+    itself comes back as zero. That is not an error. pandas answers `floor('ms')`
+    on a second column with the column unchanged, and so does the caller here,
+    for the same reason: there is nothing below a second in it to remove.
+
+    Args:
+        freq: The frequency, as pandas spells it.
+        t: The column type, which decides what unit the answer is in.
+
+    Returns:
+        The length of one period in the column's own integers, which may be zero
+        and may be negative if the frequency carried a minus sign.
+
+    Raises:
+        Error: If the column is not a naive timestamp, if the alias is not one
+            of the seven, or if the count is too long to be a number.
+    """
+    var per_unit = _nanos_per_unit(t)
+    var raw = freq.as_bytes()
+    var start = 0
+    var stop = len(raw)
+    while start < stop and _is_blank(raw[start]):
+        start += 1
+    while stop > start and _is_blank(raw[stop - 1]):
+        stop -= 1
+
+    var at = start
+    var negative = False
+    if at < stop and (raw[at] == 43 or raw[at] == 45):
+        negative = raw[at] == 45
+        at += 1
+
+    var count = Int64(0)
+    var scale = Int64(1)
+    var digits = 0
+    while at < stop and _is_digit(raw[at]):
+        if count > MAX_COUNT:
+            raise Error(
+                "temporal: the count in frequency '"
+                + String(freq)
+                + "' has more digits than a whole number can hold"
+            )
+        count = count * 10 + Int64(Int(raw[at]) - 48)
+        digits += 1
+        at += 1
+    if at < stop and raw[at] == 46:
+        at += 1
+        while at < stop and _is_digit(raw[at]):
+            if scale > MAX_SCALE:
+                raise Error(
+                    "temporal: frequency '"
+                    + String(freq)
+                    + "' has more than nine digits after the point, and a"
+                    " nanosecond is the smallest thing there is to divide"
+                )
+            count = count * 10 + Int64(Int(raw[at]) - 48)
+            scale = scale * 10
+            digits += 1
+            at += 1
+    if digits == 0:
+        count = 1
+    if negative:
+        count = -count
+
+    var nanos = _alias_nanos(freq[byte=at:stop])
+    var magnitude = count if count >= 0 else -count
+    if magnitude > Int64.MAX // nanos:
+        raise Error(
+            "temporal: frequency '"
+            + String(freq)
+            + "' is longer than the number of nanoseconds that fit in an int64"
+        )
+    return (count * nanos) // (scale * per_unit)
+
+
+def round_to_period[
+    mode: Int
+](a: Array[DType.int64], period: Int64) raises -> Array[DType.int64]:
+    """Moves every instant in a column onto a multiple of a period.
+
+    All three modes start from the same floored quotient and differ only in
+    whether they step it on by one, which is what lets them share a loop. Floor
+    keeps it. Ceiling steps it whenever the multiple it names is not the value
+    itself. Round steps it when twice the remainder is past the period, and on
+    the exact halfway row it steps only from an odd quotient, which is what
+    sends a tie to the even multiple.
+
+    The comparison in the round case is against the signed period rather than
+    against half of its size, which matters because pandas accepts a negative
+    frequency and its own answer for one does not agree with its floor. The
+    signed form reproduces both, so there is one rule here and not two.
+
+    Args:
+        a: The column, holding whole units since the epoch.
+        period: The length of one period in those same units, never zero.
+
+    Parameters:
+        mode: `ROUND_DOWN`, `ROUND_UP` or `ROUND_HALF_EVEN`.
+
+    Returns:
+        The same unit, null wherever the input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    comptime width = simd_width_of[DType.int64]()
+
+    var n = len(a)
+    var out = Array[DType.int64](overwritten=n)
+    var validity = Bitmap(copy=a.data.validity)
+
+    # Broadcast once outside the loop, and compare with the named methods. `>`
+    # and `!=` on a register are the whole-vector forms, which answer one `Bool`
+    # for all the lanes at once and are not what any of this wants.
+    var span = SIMD[DType.int64, width](period)
+    var odd = SIMD[DType.int64, width](1)
+    var none = SIMD[DType.int64, width](0)
+
+    def compute(start: Int, stop: Int) raises {mut out, imm}:
+        var source = a.unsafe_ptr()
+        var target = out.unsafe_ptr()
+        var i = start
+        while i < stop:
+            var value = source.unsafe_offset(i).unsafe_load[width=width]()
+            var quotient = value // span
+            comptime if mode == ROUND_UP:
+                var landed = quotient * span
+                quotient += landed.ne(value).cast[DType.int64]()
+            elif mode == ROUND_HALF_EVEN:
+                var rest = value - quotient * span
+                var twice = rest + rest
+                var past = twice.gt(span)
+                var tie = twice.eq(span) & (quotient & odd).ne(none)
+                quotient += (past | tie).cast[DType.int64]()
+            target.unsafe_offset(i).unsafe_store(quotient * span)
+            i += width
+        repair_range(out, validity, start, stop)
+
+    parallel_morsels(compute, n)
+    out.data.validity = validity^
+    return out^
+
+
+def temporal_round(
+    a: AnyArray, freq: StringSlice, mode: Int
+) raises -> AnyArray:
+    """Rounds a timestamp column to a multiple of a frequency.
+
+    This is `dt.floor`, `dt.ceil` and `dt.round`, which are one kernel at three
+    settings. The type does not change, including the resolution, so rounding a
+    millisecond column to the hour answers milliseconds that happen to be whole
+    hours.
+
+    Args:
+        a: A naive timestamp column.
+        freq: The frequency, as pandas spells it.
+        mode: `ROUND_DOWN`, `ROUND_UP` or `ROUND_HALF_EVEN`.
+
+    Returns:
+        A column of the same type, null wherever the input is null.
+
+    Raises:
+        Error: If the column is not a naive timestamp, if the frequency does not
+            parse, or if the mode is not one of the three.
+    """
+    var period = frequency_period(freq, a.type)
+    if period == 0:
+        # A frequency finer than the column's own unit, and a count of zero,
+        # both land here, and pandas answers both with the column unchanged.
+        return AnyArray(copy=a)
+
+    ref stamps = a.as_typed_view[DType.int64]()
+    if mode == ROUND_DOWN:
+        return AnyArray(
+            round_to_period[ROUND_DOWN](stamps, period).into_data(), a.type
+        )
+    if mode == ROUND_UP:
+        return AnyArray(
+            round_to_period[ROUND_UP](stamps, period).into_data(), a.type
+        )
+    if mode == ROUND_HALF_EVEN:
+        return AnyArray(
+            round_to_period[ROUND_HALF_EVEN](stamps, period).into_data(), a.type
+        )
+    raise Error("temporal: " + String(mode) + " is not a rounding mode")
+
+
+def unit_named(name: StringSlice) raises -> TimeUnit:
+    """Looks a resolution up by the name pandas gives it.
+
+    Args:
+        name: One of `s`, `ms`, `us` and `ns`.
+
+    Returns:
+        The unit.
+
+    Raises:
+        Error: If nothing is called that.
+    """
+    if name == "s":
+        return TimeUnit.SECOND
+    if name == "ms":
+        return TimeUnit.MILLI
+    if name == "us":
+        return TimeUnit.MICRO
+    if name == "ns":
+        return TimeUnit.NANO
+    raise Error(
+        "temporal: '"
+        + String(name)
+        + "' is not a resolution; the four Arrow has are s, ms, us and ns"
+    )
+
+
+def _any_beyond(a: Array[DType.int64], limit: Int64) -> Bool:
+    """Says whether any row at all sits outside plus or minus a limit.
+
+    This reads the null rows too, which is deliberate and is why the caller does
+    not act on the answer directly. A null row usually holds zero and sometimes
+    holds whatever the file that produced it left there, so this is a cheap
+    vector scan that is allowed to be wrong in one direction and the caller
+    settles the rows it flags one at a time. The point is that a column that is
+    nowhere near the limit, which is every real column, pays one pass and no
+    branches.
+
+    Args:
+        a: The column.
+        limit: The distance from zero to stay inside.
+
+    Returns:
+        True if some row is outside it.
+    """
+    comptime width = simd_width_of[DType.int64]()
+
+    var n = len(a)
+    var source = a.unsafe_ptr()
+    var high = SIMD[DType.int64, width](limit)
+    var low = SIMD[DType.int64, width](-limit)
+    var found = SIMD[DType.bool, width](fill=False)
+    var i = 0
+    while i + width <= n:
+        var value = source.unsafe_offset(i).unsafe_load[width=width]()
+        found |= value.gt(high) | value.lt(low)
+        i += width
+    if found.reduce_or():
+        return True
+    while i < n:
+        if a[i] > limit or a[i] < -limit:
+            return True
+        i += 1
+    return False
+
+
+def _beyond_and_there(a: Array[DType.int64], limit: Int64) -> Bool:
+    """Says whether any row that is really there sits outside a limit.
+
+    Args:
+        a: The column.
+        limit: The distance from zero to stay inside.
+
+    Returns:
+        True if some row that is not null is outside it.
+    """
+    if not _any_beyond(a, limit):
+        return False
+    for i in range(len(a)):
+        if a.is_valid(i) and (a[i] > limit or a[i] < -limit):
+            return True
+    return False
+
+
+def _rescale[
+    up: Bool
+](a: Array[DType.int64], ratio: Int64) raises -> Array[DType.int64]:
+    """Moves a column of instants between two resolutions.
+
+    Args:
+        a: The column, holding whole units since the epoch.
+        ratio: How many of the finer unit make one of the coarser.
+
+    Parameters:
+        up: True to go to the finer unit, which multiplies, and False to go to
+            the coarser one, which divides.
+
+    Returns:
+        The values in the other unit, null wherever the input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    comptime width = simd_width_of[DType.int64]()
+
+    var n = len(a)
+    var out = Array[DType.int64](overwritten=n)
+    var validity = Bitmap(copy=a.data.validity)
+
+    def compute(start: Int, stop: Int) raises {mut out, imm}:
+        var source = a.unsafe_ptr()
+        var target = out.unsafe_ptr()
+        var i = start
+        while i < stop:
+            var value = source.unsafe_offset(i).unsafe_load[width=width]()
+            comptime if up:
+                target.unsafe_offset(i).unsafe_store(value * ratio)
+            else:
+                target.unsafe_offset(i).unsafe_store(value // ratio)
+            i += width
+        repair_range(out, validity, start, stop)
+
+    parallel_morsels(compute, n)
+    out.data.validity = validity^
+    return out^
+
+
+def temporal_as_unit(a: AnyArray, unit: TimeUnit) raises -> AnyArray:
+    """Restates a timestamp column at a different resolution.
+
+    This is `dt.as_unit`. Going down in precision throws away what will not fit
+    and rounds down while doing it, so the last second of 1969 in nanoseconds is
+    still the last second of 1969 in seconds and not the epoch. Going up is a
+    multiply and does not recover what an earlier trip down removed.
+
+    The zone comes through untouched and a zoned column is allowed, because
+    nothing here reads the calendar. Which second an instant is does not depend
+    on which clock it is being read against, so there is no zone database in the
+    way of this one.
+
+    Args:
+        a: A timestamp column.
+        unit: The resolution to restate it at.
+
+    Returns:
+        A timestamp column at the new resolution, null wherever the input is
+        null.
+
+    Raises:
+        Error: If the column is not a timestamp, or if going up in precision
+            would put an instant outside the range of an int64.
+    """
+    if a.type.kind != TypeKind.TIMESTAMP:
+        raise Error(
+            "temporal: a resolution is something only a timestamp column has,"
+            " and this one is "
+            + String(a.type)
+        )
+
+    var have = a.type.unit.per_second()
+    var want = unit.per_second()
+    if have == want:
+        return AnyArray(copy=a)
+
+    ref stamps = a.as_typed_view[DType.int64]()
+    var result = LogicalType.timestamp(unit, a.type.zone)
+    if want < have:
+        return AnyArray(
+            _rescale[False](stamps, have // want).into_data(), result
+        )
+
+    var ratio = want // have
+    if _beyond_and_there(stamps, Int64.MAX // ratio):
+        raise Error(
+            "temporal: restating this column in "
+            + String(unit)
+            + " multiplies every instant by "
+            + String(ratio)
+            + ", and at least one of them does not fit in an int64 afterwards,"
+            " which is the range pandas calls out of bounds"
+        )
+    return AnyArray(_rescale[True](stamps, ratio).into_data(), result)

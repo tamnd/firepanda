@@ -25,6 +25,7 @@ from .accum import accumulator
 from .arith import OP_ADD, OP_MUL, OP_SUB
 from .compare import CMP_EQ, CMP_GE, CMP_GT, CMP_LE, CMP_LT, CMP_NE
 from .group import AggKind
+from .temporal import ROUND_HALF_EVEN, ROUND_UP
 
 
 def _is_there[dt: DType](col: Array[dt], i: Int) -> Bool:
@@ -1805,4 +1806,81 @@ def temporal_field_scalar[
             out.set_valid(i, Scalar[DType.bool](answer != 0).cast[dst]())
         else:
             out.set_valid(i, Scalar[dst](answer))
+    return out^
+
+
+def round_to_period_scalar[
+    mode: Int
+](a: Array[DType.int64], period: Int64) -> Array[DType.int64]:
+    """The one row at a time twin of `round_to_period`.
+
+    Built out of `_floored_int_quotient`, which is a truncating division with a
+    correction after it, rather than out of `//`. The fast kernel uses `//` and
+    is correct because `//` rounds down, so a twin that also used `//` would
+    agree with it for the same reason rather than for an independent one, and
+    agreement of that kind is worth nothing.
+
+    The three modes are written as branches here and as masks there, which is
+    the other half of the point: a lane that is selected wrongly, or a tail that
+    is handled wrongly, shows up as a disagreement rather than as two identical
+    wrong answers.
+
+    Args:
+        a: The column, holding whole units since the epoch.
+        period: The length of one period in those same units, never zero.
+
+    Parameters:
+        mode: `ROUND_DOWN`, `ROUND_UP` or `ROUND_HALF_EVEN`.
+
+    Returns:
+        The same unit, null wherever the input is null.
+    """
+    var out = Array[DType.int64](len(a))
+    for i in range(len(a)):
+        if not _is_there(a, i):
+            out.set_null(i)
+            continue
+        var value = a[i]
+        var quotient = _floored_int_quotient(value, period)
+        comptime if mode == ROUND_UP:
+            if quotient * period != value:
+                quotient += 1
+        elif mode == ROUND_HALF_EVEN:
+            var twice = 2 * _floored_int_remainder(value, period)
+            if twice > period:
+                quotient += 1
+            elif twice == period and _floored_int_remainder(quotient, 2) == 1:
+                quotient += 1
+        out.set_valid(i, quotient * period)
+    return out^
+
+
+def rescale_scalar[
+    up: Bool
+](a: Array[DType.int64], ratio: Int64) -> Array[DType.int64]:
+    """The one row at a time twin of `_rescale`.
+
+    The division here rounds down for the same reason and by the same route as
+    the one above, which is what makes a nanosecond column restated in seconds
+    stay in 1969 rather than jump to the epoch.
+
+    Args:
+        a: The column, holding whole units since the epoch.
+        ratio: How many of the finer unit make one of the coarser.
+
+    Parameters:
+        up: True to go to the finer unit and False to go to the coarser one.
+
+    Returns:
+        The values in the other unit, null wherever the input is null.
+    """
+    var out = Array[DType.int64](len(a))
+    for i in range(len(a)):
+        if not _is_there(a, i):
+            out.set_null(i)
+            continue
+        comptime if up:
+            out.set_valid(i, a[i] * ratio)
+        else:
+            out.set_valid(i, _floored_int_quotient(a[i], ratio))
     return out^
