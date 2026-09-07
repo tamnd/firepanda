@@ -21,6 +21,7 @@ from firepanda.array.any import AnyArray
 from firepanda.array.array import Array, from_list
 from firepanda.array.data import ColumnData
 from firepanda.array.chunked import ChunkedArray
+from firepanda.array.strings import StringBuilder
 from firepanda.dtype.lists import ALL, NUMERIC
 from firepanda.dtype.logical import LogicalType, logical_for
 
@@ -172,6 +173,86 @@ def test_any_array_carries_its_logical_type() raises:
     var erased = AnyArray(Array[DType.float32](2))
     assert_equal(erased.type, LogicalType.FLOAT32)
     assert_equal(erased.dtype(), DType.float32)
+
+
+def _grades() raises -> AnyArray:
+    """Builds a four row categorical over three categories, one of them unused.
+
+    Returns:
+        The column.
+    """
+    var codes = Array[DType.int8](4)
+    codes.set_valid(0, Int8(1))
+    codes.set_valid(1, Int8(0))
+    codes.set_null(2)
+    codes.set_valid(3, Int8(1))
+    var levels = StringBuilder()
+    levels.append(String("low").as_bytes())
+    levels.append(String("high").as_bytes())
+    levels.append(String("unused").as_bytes())
+    return AnyArray.dictionary[DType.int8](codes^, levels^.finish(), True)
+
+
+def test_a_dictionary_column_holds_its_categories_apart_from_its_values() raises:
+    var column = _grades()
+    assert_true(column.is_dictionary())
+    assert_equal(len(column), 4)
+    # Four rows and three categories, and the two numbers being different is
+    # the whole point of the type.
+    assert_equal(len(column.categories()), 3)
+    assert_equal(column.categories()[2], "unused")
+    assert_equal(column.codes[DType.int8]()[0], Int8(1))
+    assert_false(column.is_valid(2))
+    assert_equal(String(column.type), "category")
+    assert_true(column.type.ordered)
+
+
+def test_a_dictionary_column_is_not_a_string_column() raises:
+    # Both hold text and only one of them holds a value per row, so a
+    # categorical answering yes here would let `strings()` hand three
+    # categories back to a caller that asked for four rows.
+    var column = _grades()
+    assert_false(column.is_string())
+    with assert_raises(contains="not a string column"):
+        _ = column.strings()
+
+
+def test_the_codes_of_a_dictionary_column_are_not_its_values() raises:
+    # The refusal that makes the type safe. The codes are a valid int8 buffer,
+    # so without this a mean over a categorical would return the average of the
+    # category positions and nothing about the answer would look wrong.
+    var column = _grades()
+    with assert_raises(contains="positions into its categories"):
+        _ = column.as_typed[DType.int8]()
+    with assert_raises(contains="positions into its categories"):
+        _ = column.as_typed_view[DType.int8]()
+    with assert_raises(contains="dtype mismatch"):
+        _ = column.codes[DType.int32]()
+
+
+def test_a_dictionary_column_counts_both_halves_of_itself() raises:
+    # pandas counts the codes and the categories for a categorical, and so does
+    # this, because a million rows over four categories is four megabytes of
+    # codes next to a few dozen bytes of text and reporting either half alone
+    # makes the saving look imaginary or free.
+    var column = _grades()
+    ref categories = column.categories()
+    var expected = (
+        column.data.validity.byte_length()
+        + len(column.data.values)
+        + len(categories.views)
+        + len(categories.payload)
+    )
+    assert_equal(column.nbytes(), expected)
+    assert_true(column.nbytes() > 4)
+
+
+def test_copying_a_dictionary_column_copies_its_categories() raises:
+    var column = _grades()
+    var duplicate = AnyArray(copy=column)
+    assert_equal(len(duplicate.categories()), 3)
+    assert_equal(duplicate.categories()[0], "low")
+    assert_true(duplicate.type.ordered)
 
 
 def test_chunked_lengths_add_up() raises:

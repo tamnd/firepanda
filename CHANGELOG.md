@@ -8,6 +8,28 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A dictionary column can be read, written and named
+
+A dictionary encoded column holds its values once in a separate array and holds one small integer per row saying which of them that row has. pandas calls it a categorical, Arrow calls it a dictionary, and it is the same arrangement under both names. firepanda now reads one, writes one and spells its type `category` the way pandas does.
+
+It is the first type here whose physical dtype says nothing about what the column holds. An int32 column of codes and an int32 column of counts are the same buffer of the same width, and the difference between them is entirely in the type. That is what makes the type worth being careful about rather than just another entry in a list.
+
+The categories live on the column and not on the type. Two categorical columns can have the same index width, the same ordered flag and the same type in every respect while meaning completely different things, because one of them is over three colours and the other is over three cities. `promote` therefore refuses a dictionary against everything including another dictionary, and the refusal sits ahead of the equality fast path for exactly that reason. What two categoricals combine to is a question about their categories, and the type is not where the categories are.
+
+Getting at a categorical's contents takes a different call from getting at a numeric column's. `categories()` gives the values and `codes[dtype]()` gives the positions, and the ordinary `as_typed` path refuses a categorical by name rather than handing back the codes. The codes are a perfectly valid integer buffer, so a sum over them returns a number, and nothing about that number looks wrong until somebody acts on it. Refusing at the one door every typed read goes through is cheaper than hoping each caller checks.
+
+An ordered categorical is a different type from an unordered one with the same categories, because in pandas the flag is on the dtype and it decides whether `<` between two categorical columns is an answer or an error.
+
+On the Arrow side the codes travel as an ordinary integer column and the categories arrive in dictionary batch messages of their own, once for the whole stream rather than once per batch. A file carries a second block vector in its footer pointing at them, which the reader now walks before it walks the record batches. Deltas are refused, a repeated id is refused, an id nothing declared is refused, and a code that points past the end of its categories is refused with the row and the code in the message. A null row's code is not checked, since Arrow says nothing about what a writer puts there and pandas writes a negative number.
+
+Categories are strings, which is what pandas' are, and a dictionary over anything else is refused by name. firepanda writes string columns in the view layout, so the categories go out as `vu` and the reader accepts `u`, `U` and `vu` alike. pyarrow and pandas both read a `dictionary<values=string_view>` field without complaint, and writing offsets instead would mean a second copy of every category for no gain.
+
+The Arrow C Data Interface still refuses a dictionary column, and the refusal now says why rather than saying that the type is unknown. Categories arrive per array on that interface rather than per stream, so two batches of one column can disagree about what a code means, and reconciling them is work that path has not done.
+
+One thing about the layout is worth writing down, because it cost an afternoon. The ordered flag is declared among the one byte fields of `LogicalType` and not at the end where a new field naturally goes. The zone is two sixteen byte SIMD vectors and is aligned to sixteen, so a byte after it starts a second block of padding and takes the type from sixty four bytes to eighty. That alone would be reason enough, since a type is copied into every field of every schema. The reason it is now a test is that the eighty byte version was miscompiled: a value built as a temporary and passed to a constructor with a defaulted trailing argument arrived with the flag reading as a byte of stack, two float64 types then compared unequal, and five pipeline tests failed without naming anything to do with categoricals. `test_a_logical_type_stays_one_cache_line` fails if the layout ever grows back.
+
+The reader and the writer were both checked against pyarrow and pandas, in the file format and the stream format, with an int32 unordered categorical and an int8 ordered one. A file firepanda writes comes back as `dictionary<values=string_view, indices=int8, ordered=1>`, and `to_pandas` on it reconstructs the `CategoricalDtype` with its categories in order, its ordered flag and its unused category still present.
+
 ### A duration column can be read, written and named
 
 Arrow type 18 is a duration, an int64 counting an elapsed amount of time in the type's own unit, and it is now a type firepanda has. firepanda spells it `timedelta64[us]` the way pandas does, and the four units are the same four a timestamp has.

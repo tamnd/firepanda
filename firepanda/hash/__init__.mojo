@@ -34,9 +34,12 @@ taking it as proof, which is the one place in this package where a probe does
 more than compare two integers.
 
 What is not here yet: the dictionary encoded bypass and the parallel build. The
-bypass needs dictionary encoded columns to exist, and the parallel build needs
-the executor. `partition.mojo` is the piece the parallel build will stand on and
-it is written and tested now because the layout it produces constrains the rest.
+bypass was waiting on dictionary encoded columns and is no longer, since a
+column can now hold its categories apart from its codes, so what is left is
+grouping on the codes and decoding once at the end. The parallel build still
+needs the executor. `partition.mojo` is the piece the parallel build will stand
+on and it is written and tested now because the layout it produces constrains
+the rest.
 
 Every function here has a twin in `scalar.mojo`, on the same terms as
 `firepanda/kernel`: the twin is the specification, and when the two disagree the
