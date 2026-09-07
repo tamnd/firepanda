@@ -3963,6 +3963,15 @@ def bench_join(mut harness: Harness) raises:
     has and it was the only common join shape with no row here, which meant the
     one phase of a join that is still serial had nothing measuring it.
 
+    What does the key type cost. Every row above joins on an integer, and an
+    integer key whose values span the row count takes the direct route in the
+    factorizer, which is an array index and a store per row. All five
+    db-benchmark join queries join on text, where every key is hashed, compared
+    against whatever else landed in its slot and stored in a map.
+    `join/inner_equal_sides_text` is `join/inner_equal_sides` with both key
+    columns turned into text and nothing else changed, so the gap between the two
+    is what the key type costs on top of the pairing they share.
+
     What do the other kinds cost relative to inner. Semi and anti stop at the
     first match and gather nothing from the right, so they should be cheaper than
     inner on the same inputs. Outer has to track which right rows were hit, which
@@ -4092,6 +4101,34 @@ def bench_join(mut harness: Harness) raises:
 
     harness.record("join/inner_equal_sides", "rows", rows, inner_equal)
 
+    # The same shape again with the key as text, which is what db-benchmark j4
+    # and j5 join on and what no row here had. The keys are `id` and a number,
+    # the same values the row above uses and the same values db-benchmark writes
+    # into id3, so the two rows differ in the key type and in nothing else.
+    var text_dim = _text_dimension(rows, "label")
+    var text_key = List[String](capacity=rows)
+    var text_value = Array[DType.int64](rows)
+    for i in range(rows):
+        var draw = rng.next_u64()
+        text_key.append(String("id", draw % UInt64(rows if rows > 0 else 1)))
+        text_value[i] = Int64(draw % 1000)
+    var text_series = List[Series]()
+    text_series.append(Series("key", strings_from_list(text_key)))
+    text_series.append(Series("value", text_value^))
+    var text_fact = DataFrame.from_series(text_series^)
+    # Ten million small strings held twice is most of a gigabyte, and the column
+    # has its own copy by now, so the list goes before the timing starts.
+    _ = text_key^
+
+    def inner_equal_text() raises {imm text_fact, imm text_dim, imm one}:
+        keep(text_fact.rows)
+        var out = text_fact.join(text_dim, one)
+        keep(out.rows)
+
+    harness.record(
+        "join/inner_equal_sides_text", "rows", rows, inner_equal_text
+    )
+
     def semi_partial() raises {imm fact, imm partial, imm one}:
         keep(fact.rows)
         var out = fact.join(partial, one, JoinKind.SEMI)
@@ -4197,6 +4234,34 @@ def _dimension(rows: Int, base: Int, label: String) raises -> DataFrame:
         payload[i] = Int64(i * 7)
     var series = List[Series]()
     series.append(Series("key", key^))
+    series.append(Series(label, payload^))
+    return DataFrame.from_series(series^)
+
+
+def _text_dimension(rows: Int, label: String) raises -> DataFrame:
+    """Builds a dimension table keyed by text, with one row per key.
+
+    `_dimension` above with the key column written as `id` and the number rather
+    than as the number, which is the form db-benchmark uses for id1, id2 and id3
+    and therefore the form all five of its join queries pair on.
+
+    Args:
+        rows: The height, which is also the number of distinct keys.
+        label: The name of the payload column.
+
+    Returns:
+        A two column frame keyed by `key`.
+
+    Raises:
+        If the frame cannot be built.
+    """
+    var key = List[String](capacity=rows)
+    var payload = Array[DType.int64](rows)
+    for i in range(rows):
+        key.append(String("id", i))
+        payload[i] = Int64(i * 7)
+    var series = List[Series]()
+    series.append(Series("key", strings_from_list(key)))
     series.append(Series(label, payload^))
     return DataFrame.from_series(series^)
 
