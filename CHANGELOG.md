@@ -8,6 +8,19 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### The morsel size was measured and is staying where it is
+
+Nothing changes here except a docstring, and the docstring is the point.
+
+`MORSEL_ROWS` is a hundred and twenty eight thousand because that is DuckDB's number rounded to a power of two, which is not a measurement. That is exactly how the benchmark driver ended up handing the join a chunk four times too big and running every pipelined join query at half speed, so the same question was put to this one.
+
+It is not wrong. Against thirty two thousand, the size that turned out to be right for the join chunk, on twenty eight `kernel/` rows at forty million rows on an i9-13900K with three runs a side alternating between the binaries, seventeen rows come out faster and eleven slower. One row of the twenty eight is separated in the sense that every run of the new build is below every run of the old, and that one is `kernel/add_sparse`, which goes through a file that does not use morsels at all, so it has no mechanism behind it and joins the code layout swings.
+
+The two are not the same question, which is the part worth keeping. A join makes several passes over its chunk, probing the key and then bucketing the matches and then gathering the columns, so the chunk has to survive in a core's private cache between one pass and the next, and the right size is a cache size. A morsel here is one pass over a range, so nothing has to survive anything, and the only thing the size buys is the balance between fork and join overhead at one end and a straggler holding the last piece at the other. Both are flat over a wide range, which is what twenty eight rows going nowhere looks like.
+
+Measuring it at ten million rows first gave the opposite answer, thirteen of fourteen rows faster, and the reason that was wrong is recorded too. Those reductions run in well under a millisecond at ten million rows, and all fourteen rows were read out of the same six sessions, so a session that happened to be a few percent quick moved all fourteen of its rows at once. Fourteen rows agreeing is not fourteen pieces of evidence when they share a session. At forty million rows each reduction takes about four and a half milliseconds and the agreement disappears.
+
+
 ## [0.6.51] - 2026-09-07
 
 Built against Mojo 1.0.0 (ed45d567).
