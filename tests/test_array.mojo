@@ -21,7 +21,8 @@ from firepanda.array.any import AnyArray
 from firepanda.array.array import Array, from_list
 from firepanda.array.data import ColumnData
 from firepanda.array.chunked import ChunkedArray
-from firepanda.array.strings import StringBuilder
+from firepanda.array.nested import NestedNode
+from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.dtype.lists import ALL, NUMERIC
 from firepanda.dtype.logical import LogicalType, logical_for
 
@@ -463,6 +464,35 @@ def test_a_typed_view_refuses_the_wrong_dtype() raises:
     var column = AnyArray(typed^)
     with assert_raises(contains="dtype mismatch"):
         ref view = column.as_typed_view[DType.float64]()
+
+
+def test_a_column_survives_being_put_in_an_optional() raises:
+    # Mojo miscompiles an `Optional` of a struct whose fields stop short of its
+    # alignment: the value goes in and the `Optional` still says it is empty.
+    # A frame's index holds its labels as exactly that, so the symptom is every
+    # index in the library quietly becoming the range 0, 1, 2 and no error
+    # anywhere. `AnyArray` carries eight bytes of slack to land on the boundary
+    # and this is what says whether it still does.
+    var column = AnyArray(Array[DType.int64](3))
+    var held = Optional[AnyArray](column^)
+    assert_true(Bool(held))
+    assert_equal(len(held.value()), 3)
+
+
+def test_a_column_has_no_trailing_padding() raises:
+    # The other half of the test above, and the one that says why it failed.
+    # The compiler rounds a struct up to its alignment, so a struct whose fields
+    # add up to less than its size is one with padding on the end, which is the
+    # shape the miscompile needs. Adding a field here without minding the total
+    # is what put it there, and this is the sum that says so.
+    var fields = (
+        size_of[ColumnData]()
+        + size_of[LogicalType]()
+        + 2 * size_of[Optional[StringArray]]()
+        + size_of[List[NestedNode]]()
+        + size_of[UInt64]()
+    )
+    assert_equal(fields, size_of[AnyArray]())
 
 
 def main() raises:

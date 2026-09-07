@@ -52,17 +52,25 @@ next column's data.
 from std.collections.span import Span
 
 from firepanda.array.any import AnyArray
+from firepanda.array.data import ColumnData
+from firepanda.array.nested import ITEM, ROOT, NestedNode
 from firepanda.array.strings import StringArray
+from firepanda.buffer.buffer import Buffer
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.dtype.temporal import unit_for_code
 from firepanda.frame.frame import DataFrame
 
-from .arrow_c import ArrowArray, NullableVoidPtr, VoidPtr
-from .arrow_import import build_column
+from .arrow_c import STRUCT_FORMAT, ArrowArray, NullableVoidPtr, VoidPtr
+from .arrow_import import (
+    build_column,
+    import_list_offsets,
+    import_validity,
+)
 from .assemble import (
     ArrowDictionary,
     ArrowLayout,
+    ArrowNested,
     assemble,
     attach_dictionary,
 )
@@ -111,11 +119,22 @@ comptime TYPE_UTF8 = 5
 comptime TYPE_BOOL = 6
 comptime TYPE_DATE = 8
 comptime TYPE_TIMESTAMP = 10
+comptime TYPE_LIST = 12
+comptime TYPE_STRUCT = 13
 comptime TYPE_DURATION = 18
 comptime TYPE_LARGE_BINARY = 19
 comptime TYPE_LARGE_UTF8 = 20
+comptime TYPE_LARGE_LIST = 21
 comptime TYPE_BINARY_VIEW = 23
 comptime TYPE_UTF8_VIEW = 24
+
+comptime LIST_FORMAT = "+l"
+"""What the C Data Interface calls a list, whose offsets are int32."""
+
+comptime LARGE_LIST_FORMAT = "+L"
+"""What it calls a large list, whose offsets are int64. The corpus the
+conformance suite reads is written this way, because pyarrow builds a large list
+from Python lists by default."""
 
 
 @fieldwise_init
@@ -281,8 +300,115 @@ def _int_format(data: Span[UInt8, _], type: Int, name: String) raises -> String:
     )
 
 
+@fieldwise_init
+struct _Child(Copyable, Movable):
+    """One field node below a nested column, in the order Arrow writes them.
+
+    A schema is a tree and a record batch is a flat vector of nodes walked in
+    pre-order, so the reader keeps the tree the same way the batch does: a flat
+    list, each entry naming the entry it hangs off. That is also the shape a
+    finished nested column holds its children in, so building one is a copy of
+    this list with the buffers filled in rather than a shape change.
+    """
+
+    var column: Int
+    """Which top level column this belongs to."""
+
+    var parent: Int
+    """The position in this list of the node above, or `ROOT` when the node hangs
+    off the column itself."""
+
+    var name: String
+    """The field name, and `item` for a list's child."""
+
+    var format: String
+    """The C Data Interface format string for this node's own type."""
+
+
+def _nested_children(
+    data: Span[UInt8, _],
+    field: Int,
+    name: String,
+    kind: Int,
+    column: Int,
+    parent: Int,
+    mut children: List[_Child],
+) raises -> String:
+    """Reads the children of a list or a struct field into the flat list.
+
+    Each child is appended before its own children are read, which is what makes
+    the list pre-order and lets a grandchild name its parent by a position that
+    already exists.
+
+    Args:
+        data: The buffer holding the schema message.
+        field: The position of the `Field` table.
+        name: The field's name, for the error message.
+        kind: Which Arrow type table the field carries.
+        column: The top level column this field belongs to.
+        parent: The position of this field in `children`, or `ROOT` when it is
+            the column itself.
+        children: Filled with one entry per node below this field.
+
+    Returns:
+        The format string for this field's own type.
+
+    Raises:
+        Error: If a list does not have exactly one child, or a child holds a
+            type firepanda cannot read.
+    """
+    var kids = field_vector(data, field, 5)
+    var count = 0 if kids < 0 else vector_length(data, kids)
+    if kind != TYPE_STRUCT and count != 1:
+        raise Error(
+            String(
+                "arrow ipc: column '",
+                name,
+                "' is a list with ",
+                count,
+                " children, and a list has one",
+            )
+        )
+
+    for i in range(count):
+        var kid = vector_table(data, kids, i)
+        var kid_name = field_string(data, kid, 0)
+        if field_table(data, kid, 4) >= 0:
+            # A dictionary encoded child would need its categories attached
+            # inside the tree, and the categories arrive in messages of their own
+            # against an id the assembler matches against a top level column.
+            # Refused by name rather than read as the codes it physically is.
+            raise Error(
+                String(
+                    "arrow ipc: field '",
+                    kid_name,
+                    "' inside column '",
+                    name,
+                    (
+                        "' is dictionary encoded, and firepanda reads a"
+                        " dictionary at the top level of a frame only"
+                    ),
+                )
+            )
+        children.append(_Child(column, parent, kid_name, String()))
+        var at = len(children) - 1
+        var format = _format_for(data, kid, kid_name, column, at, children)
+        children[at].format = format^
+
+    if kind == TYPE_STRUCT:
+        return String(STRUCT_FORMAT)
+    if kind == TYPE_LARGE_LIST:
+        return String(LARGE_LIST_FORMAT)
+    return String(LIST_FORMAT)
+
+
 def _format_for(
-    data: Span[UInt8, _], field: Int, name: String
+    data: Span[UInt8, _],
+    field: Int,
+    name: String,
+    column: Int,
+    parent: Int,
+    mut children: List[_Child],
 ) raises -> String:
     """Turns one schema field's own type into the format string the importer
     speaks.
@@ -292,10 +418,19 @@ def _format_for(
     for one of those. `_dictionary_for` is, and calls this for the half of the
     answer that lives here.
 
+    A nested field's own type says only that it is a list or a struct. What is
+    inside it goes into `children`, which is why this takes the position of the
+    field being read and a list to add to rather than returning a type on its
+    own.
+
     Args:
         data: The buffer holding the schema message.
         field: The position of the `Field` table.
         name: The column name, for the error message.
+        column: The top level column this field belongs to.
+        parent: The position of this field in `children`, or `ROOT` when it is
+            the column itself.
+        children: Filled with one entry per node below this field, if it has any.
 
     Returns:
         The Arrow C Data Interface format string.
@@ -303,16 +438,23 @@ def _format_for(
     Raises:
         Error: If the type is one firepanda has no column for.
     """
-    var children = field_vector(data, field, 5)
-    if children >= 0 and vector_length(data, children) != 0:
+    var kind = Int(field_scalar[DType.uint8](data, field, 2, 0))
+    if kind == TYPE_LIST or kind == TYPE_LARGE_LIST or kind == TYPE_STRUCT:
+        return _nested_children(
+            data, field, name, kind, column, parent, children
+        )
+
+    var kids = field_vector(data, field, 5)
+    if kids >= 0 and vector_length(data, kids) != 0:
         raise Error(
             String(
                 "arrow ipc: column '",
                 name,
-                "' is a nested type, and nested columns are not read yet",
+                "' has Arrow type ",
+                kind,
+                ", which has children and is not a list or a struct",
             )
         )
-    var kind = Int(field_scalar[DType.uint8](data, field, 2, 0))
     var type = field_table(data, field, 3)
     if kind == TYPE_NULL:
         return "n"
@@ -456,7 +598,12 @@ def _dictionary_for(
         would mean building a second copy of every category on the way out.
     """
     var encoding = field_table(data, field, 4)
-    var format = _format_for(data, field, name)
+    # A dictionary's own type is the type of its categories, and those are a
+    # string column. A nested one comes back as `+l` or `+s` and is refused by
+    # the check below along with every other type that is not text, so the
+    # children this fills in are thrown away with it.
+    var inside = List[_Child]()
+    var format = _format_for(data, field, name, column, ROOT, inside)
     if format != "u" and format != "U" and format != "vu":
         raise Error(
             String(
@@ -501,7 +648,10 @@ def _dictionary_for(
 
 
 def read_schema(
-    data: Span[UInt8, _], schema: Int, mut encodings: List[_Encoding]
+    data: Span[UInt8, _],
+    schema: Int,
+    mut encodings: List[_Encoding],
+    mut children: List[_Child],
 ) raises -> ArrowLayout:
     """Reads a schema message's header table.
 
@@ -512,6 +662,8 @@ def read_schema(
             categories are not in the schema and arrive in their own messages,
             so what the caller gets here is what to expect rather than what to
             use.
+        children: Filled with one entry per node below a nested column, in
+            Arrow's own order, and left empty by a schema of flat columns.
 
     Returns:
         The names and format strings.
@@ -542,7 +694,9 @@ def read_schema(
             out.formats.append(encoding.index)
             encodings.append(encoding^)
         else:
-            out.formats.append(_format_for(data, field, name))
+            out.formats.append(
+                _format_for(data, field, name, i, ROOT, children)
+            )
         out.nullable.append(
             Bool(field_scalar[DType.bool](data, field, 1, True))
         )
@@ -561,6 +715,11 @@ def _fixed_buffers(format: StringSlice) -> Int:
     """
     if format == "n":
         return 0
+    if format == STRUCT_FORMAT:
+        # A struct owns nothing but the bitmap saying which of its rows are
+        # there. Every value is in a field, and every field is a node of its own
+        # further along the batch.
+        return 1
     if format == "u" or format == "U" or format == "z" or format == "Z":
         return 3
     return 2
@@ -635,21 +794,73 @@ struct _ColumnRef(Movable):
         return out^
 
 
+@fieldwise_init
+struct _Step(Copyable, Movable):
+    """One field node of the schema, in the order a record batch writes them.
+
+    Arrow's node vector is the schema walked depth first, so a frame of a plain
+    int64 column and a struct of two fields has four nodes and not two. This is
+    that walk, worked out once from the schema and then used to read every batch.
+    """
+
+    var name: String
+    """The name, for an error message."""
+
+    var format: String
+    """The C Data Interface format string for this node's own type."""
+
+    var column: Int
+    """The top level column this node belongs to."""
+
+    var child: Int
+    """The position in the children list, or -1 when the node is the column
+    itself."""
+
+
+def _steps(schema: ArrowLayout, children: List[_Child]) -> List[_Step]:
+    """Works out the node order a batch of this schema is written in.
+
+    Args:
+        schema: The schema the stream declared.
+        children: The nodes below the nested columns, in Arrow's order.
+
+    Returns:
+        One entry per field node, columns in order and each column's own nodes
+        following it.
+    """
+    var out = List[_Step]()
+    for c in range(len(schema)):
+        out.append(
+            _Step(String(schema.names[c]), String(schema.formats[c]), c, -1)
+        )
+        for j in range(len(children)):
+            if children[j].column == c:
+                out.append(
+                    _Step(
+                        String(children[j].name),
+                        String(children[j].format),
+                        c,
+                        j,
+                    )
+                )
+    return out^
+
+
 def _decode_batch(
-    data: Span[UInt8, _], schema: ArrowLayout, message: IpcMessage
+    data: Span[UInt8, _], steps: List[_Step], message: IpcMessage
 ) raises -> List[_ColumnRef]:
     """Reads one record batch's metadata and locates every buffer in its body.
 
-    Nothing is copied here. What comes out is one `_ColumnRef` per column, which
-    is an `ArrowArray` in everything but where it came from.
+    Nothing is copied here. What comes out is one `_ColumnRef` per field node,
+    each an `ArrowArray` in everything but where it came from.
 
     Args:
         data: The buffer holding the message.
-        schema: The schema the stream declared.
+        steps: The node order the schema implies.
         message: The framed message, already located.
 
     Returns:
-        One entry per column.
+        One entry per field node, in the same order as `steps`.
 
     Raises:
         Error: If the batch does not match the schema, or a buffer runs outside
@@ -671,29 +882,34 @@ def _decode_batch(
     var buffers = field_vector(data, batch, 2)
     var variadic = field_vector(data, batch, 4)
     var node_count = 0 if nodes < 0 else vector_length(data, nodes)
-    if node_count != len(schema):
+    if node_count != len(steps):
         raise Error(
             String(
                 "arrow ipc: a batch with ",
                 node_count,
-                " columns against a schema of ",
-                len(schema),
+                " field nodes against a schema of ",
+                len(steps),
             )
         )
 
-    var out = List[_ColumnRef](capacity=len(schema))
+    var out = List[_ColumnRef](capacity=len(steps))
     var taken = 0
     var variadic_taken = 0
-    for i in range(len(schema)):
-        ref format = schema.formats[i]
+    for i in range(len(steps)):
+        ref format = steps[i].format
         var node = vector_element(data, nodes, i, NODE_SIZE)
         var length = Int(read_scalar[DType.int64](data, node))
         var nulls = Int(read_scalar[DType.int64](data, node + 8))
-        if length != rows:
+        # A column has the batch's row count and a node inside one need not. A
+        # list's element column holds every element of every row and is as long
+        # as the last offset says, so the check is on the columns alone and the
+        # length of a child is checked against its parent's offsets instead,
+        # where the two can be compared.
+        if steps[i].child < 0 and length != rows:
             raise Error(
                 String(
                     "arrow ipc: column '",
-                    schema.names[i],
+                    steps[i].name,
                     "' has ",
                     length,
                     " rows in a batch of ",
@@ -704,7 +920,7 @@ def _decode_batch(
             raise Error(
                 String(
                     "arrow ipc: column '",
-                    schema.names[i],
+                    steps[i].name,
                     "' claims ",
                     nulls,
                     " nulls in ",
@@ -760,7 +976,7 @@ def _decode_batch(
                     raise Error(
                         String(
                             "arrow ipc: column '",
-                            schema.names[i],
+                            steps[i].name,
                             "' claims ",
                             nulls,
                             " nulls and carries no validity bitmap",
@@ -869,7 +1085,7 @@ def _read_dictionary(
     # wants the `RecordBatch` inside it, which is field 1.
     var inner = message.copy()
     inner.header = field_table(data, header, 1)
-    var refs = _decode_batch(data, mini, inner)
+    var refs = _decode_batch(data, _steps(mini, List[_Child]()), inner)
     var column = build_column(refs[0].array(), format)
     _ = refs^
 
@@ -907,72 +1123,290 @@ def _check_dictionaries(encodings: List[_Encoding], layout: ArrowLayout) raises:
             )
 
 
-def _arrays(refs: List[List[_ColumnRef]]) raises -> List[List[ArrowArray]]:
+def _is_nested_format(format: StringSlice) -> Bool:
+    """Says whether a format string is one of the two nested types.
+
+    Args:
+        format: A C Data Interface format string.
+
+    Returns:
+        True for a list, a large list or a struct.
+    """
+    return (
+        format == STRUCT_FORMAT
+        or format == LIST_FORMAT
+        or format == LARGE_LIST_FORMAT
+    )
+
+
+def _column_step(steps: List[_Step], column: Int) -> Int:
+    """Finds the node that is a column itself rather than something inside one.
+
+    Args:
+        steps: The node order the schema implies.
+        column: The column position.
+
+    Returns:
+        The position in `steps`, or -1 if the schema has no such column.
+    """
+    for i in range(len(steps)):
+        if steps[i].column == column and steps[i].child < 0:
+            return i
+    return -1
+
+
+def _child_steps(
+    steps: List[_Step], children: List[_Child], at: Int
+) -> List[Int]:
+    """Finds the nodes hanging directly off one node.
+
+    Args:
+        steps: The node order the schema implies.
+        children: The nodes below the nested columns, in Arrow's order.
+        at: The position in `steps` of the node to look under.
+
+    Returns:
+        The positions in `steps` of its children, left to right.
+    """
+    var out = List[Int]()
+    for i in range(len(steps)):
+        if steps[i].column != steps[at].column or steps[i].child < 0:
+            continue
+        if children[steps[i].child].parent == steps[at].child:
+            out.append(i)
+    return out^
+
+
+def _build_nodes(
+    refs: List[_ColumnRef],
+    steps: List[_Step],
+    children: List[_Child],
+    at: Int,
+    parent: Int,
+    mut nodes: List[NestedNode],
+) raises:
+    """Copies one node of a nested column and then everything below it.
+
+    The node is appended before its children are, so the list comes out in the
+    same pre-order the batch wrote its field nodes in, which is the order a
+    finished column holds its children in and the order a writer walks them in
+    again.
+
+    Args:
+        refs: The decoded batch, one entry per field node.
+        steps: The node order the schema implies.
+        children: The nodes below the nested columns, in Arrow's order.
+        at: The position in `steps` of the node to build.
+        parent: The position in `nodes` of the node it hangs off, or `ROOT`.
+        nodes: Filled with this node and every node below it.
+
+    Raises:
+        Error: If a list does not have exactly one child, if a struct's field
+            has a different row count from the struct, or if a buffer inside is
+            malformed.
+    """
+    var kids = _child_steps(steps, children, at)
+    var here = len(nodes)
+    ref format = steps[at].format
+    var rows = refs[at].length
+
+    if format == STRUCT_FORMAT:
+        for i in range(len(kids)):
+            if refs[kids[i]].length != rows:
+                raise Error(
+                    String(
+                        "arrow ipc: field '",
+                        steps[kids[i]].name,
+                        "' has ",
+                        refs[kids[i]].length,
+                        " rows in a struct of ",
+                        rows,
+                    )
+                )
+        nodes.append(
+            NestedNode(
+                String(steps[at].name),
+                LogicalType.STRUCT,
+                parent,
+                ColumnData(
+                    Buffer(0), import_validity(refs[at].array(), rows), rows
+                ),
+            )
+        )
+    elif format == LIST_FORMAT or format == LARGE_LIST_FORMAT:
+        if len(kids) != 1:
+            raise Error(
+                String(
+                    "arrow ipc: '",
+                    steps[at].name,
+                    "' is a list with ",
+                    len(kids),
+                    " children, and a list has one",
+                )
+            )
+        var elements = refs[kids[0]].length
+        var index = DType.int32 if format == LIST_FORMAT else DType.int64
+        var data: ColumnData
+        if format == LIST_FORMAT:
+            data = import_list_offsets[DType.int32](
+                refs[at].array(), rows, elements
+            )
+        else:
+            data = import_list_offsets[DType.int64](
+                refs[at].array(), rows, elements
+            )
+        nodes.append(
+            NestedNode(
+                String(steps[at].name),
+                LogicalType.list_of(index),
+                parent,
+                data^,
+            )
+        )
+    else:
+        var leaf = build_column(refs[at].array(), format)
+        nodes.append(leaf^.into_node(String(steps[at].name), parent))
+
+    for i in range(len(kids)):
+        _build_nodes(refs, steps, children, kids[i], here, nodes)
+
+
+def _nested_column(
+    refs: List[_ColumnRef],
+    steps: List[_Step],
+    children: List[_Child],
+    at: Int,
+) raises -> AnyArray:
+    """Builds one whole list or struct column out of a decoded batch.
+
+    Args:
+        refs: The decoded batch, one entry per field node.
+        steps: The node order the schema implies.
+        children: The nodes below the nested columns, in Arrow's order.
+        at: The position in `steps` of the column.
+
+    Returns:
+        The column, children and all.
+
+    Raises:
+        Error: If the batch does not describe the shape the schema declared, or
+            a buffer inside is malformed.
+    """
+    var nodes = List[NestedNode]()
+    _build_nodes(refs, steps, children, at, ROOT, nodes)
+    return AnyArray.nested_from(nodes^)
+
+
+def _arrays(
+    refs: List[List[_ColumnRef]], steps: List[_Step]
+) raises -> List[List[ArrowArray]]:
     """Turns the decoded batches into the arrays the assembler takes.
+
+    The refs are one per field node and the assembler works in columns, so this
+    is also where the nodes inside a nested column are left behind. Those are
+    read whole elsewhere and the array standing in for one here is only ever
+    asked its row count.
 
     The refs have to outlive the call this feeds, because each array points at
     the buffer list its ref owns and nothing in the array says so.
 
     Args:
         refs: One decoded batch per record batch, in order.
+        steps: The node order the schema implies.
 
     Returns:
-        The same thing as Arrow arrays.
+        The same thing as Arrow arrays, one per column of each batch.
     """
+    var roots = List[Int]()
+    for i in range(len(steps)):
+        if steps[i].child < 0:
+            roots.append(i)
+
     var out = List[List[ArrowArray]](capacity=len(refs))
     for b in range(len(refs)):
-        var row = List[ArrowArray](capacity=len(refs[b]))
-        for c in range(len(refs[b])):
-            row.append(refs[b][c].array())
+        var row = List[ArrowArray](capacity=len(roots))
+        for c in range(len(roots)):
+            row.append(refs[b][roots[c]].array())
         out.append(row^)
     return out^
 
 
 def _assemble(
-    schema: ArrowLayout, var refs: List[List[_ColumnRef]]
+    schema: ArrowLayout,
+    steps: List[_Step],
+    children: List[_Child],
+    var refs: List[List[_ColumnRef]],
 ) raises -> DataFrame:
     """Builds the frame from every batch of a file.
 
     Args:
         schema: The schema the stream declared.
+        steps: The node order the schema implies.
+        children: The nodes below the nested columns, in Arrow's order.
         refs: One decoded batch per record batch message, in order.
 
     Returns:
         The frame.
 
     Raises:
-        Error: If a column holds a type firepanda cannot read, or a buffer is
-            malformed.
+        Error: If a column holds a type firepanda cannot read, if a nested
+            column arrives in more than one batch, or if a buffer is malformed.
     """
-    var arrays = _arrays(refs)
-    var frame = assemble(schema, arrays)
+    var nested = List[ArrowNested]()
+    for c in range(len(schema)):
+        var at = _column_step(steps, c)
+        if not _is_nested_format(steps[at].format):
+            continue
+        if len(refs) != 1:
+            # Joining two batches of a nested column means shifting the second
+            # one's offsets by the first one's element count and stacking the
+            # children under them, at every level. Refused by name until that is
+            # written, rather than read as a frame missing most of its rows.
+            raise Error(
+                String(
+                    "arrow ipc: column '",
+                    schema.names[c],
+                    "' is a nested type spread across ",
+                    len(refs),
+                    (
+                        " record batches, and firepanda reads a nested column"
+                        " that arrives in one"
+                    ),
+                )
+            )
+        nested.append(
+            ArrowNested(c, _nested_column(refs[0], steps, children, at))
+        )
+
+    var arrays = _arrays(refs, steps)
+    var frame = assemble(schema, arrays, nested^)
     # The refs own the buffer lists the arrays point at, and their last use above
     # is where they would otherwise be destroyed.
     _ = refs^
     return frame^
 
 
-def _empty_frame(data: Span[UInt8, _], schema: ArrowLayout) raises -> DataFrame:
-    """Builds a frame of no rows with the schema's types.
+def _empty_refs(
+    data: Span[UInt8, _], steps: List[_Step]
+) raises -> List[_ColumnRef]:
+    """Builds a batch of no rows, one entry per field node.
 
-    A stream may carry a schema and no batches, which is what an empty query
-    result looks like, and the answer to that is a frame with the right columns
-    rather than a frame with none. The columns are built by the ordinary import
-    path with every buffer pointing at the start of the message and a length of
-    zero, so there is one construction of a column rather than two.
+    Every buffer points at the start of the message and every length is zero, so
+    nothing here is ever read. It exists so that a stream with no batches goes
+    through the same column builder as a stream with one, which is what keeps an
+    empty frame's types the types a full one would have had.
 
     Args:
         data: Any buffer at least eight bytes long, used only for an address no
             read will reach.
-        schema: The schema.
+        steps: The node order the schema implies.
 
     Returns:
-        An empty frame with the schema's columns.
+        One empty ref per field node.
     """
-    var fields = List[Field](capacity=len(schema))
-    var columns = List[AnyArray](capacity=len(schema))
-    for i in range(len(schema)):
-        ref format = schema.formats[i]
+    var out = List[_ColumnRef](capacity=len(steps))
+    for i in range(len(steps)):
+        ref format = steps[i].format
         var count = _fixed_buffers(format)
         var view = format == "vu" or format == "vz"
         if view:
@@ -988,31 +1422,62 @@ def _empty_frame(data: Span[UInt8, _], schema: ArrowLayout) raises -> DataFrame:
                     VoidPtr(unsafe_from_address=Int(sizes.unsafe_ptr()))
                 )
             )
+        out.append(_ColumnRef(pointers^, sizes^, 0, 0))
+    return out^
 
-        var array = ArrowArray()
-        array.length = 0
-        array.null_count = 0
-        array.offset = 0
-        array.n_buffers = Int64(len(pointers))
-        array.buffers = pointers.unsafe_ptr().unsafe_origin_cast[
-            MutUntrackedOrigin
-        ]()
-        var column = build_column(array, format)
-        _ = pointers^
-        _ = sizes^
+
+def _empty_frame(
+    data: Span[UInt8, _],
+    schema: ArrowLayout,
+    steps: List[_Step],
+    children: List[_Child],
+) raises -> DataFrame:
+    """Builds a frame of no rows with the schema's types.
+
+    A stream may carry a schema and no batches, which is what an empty query
+    result looks like, and the answer to that is a frame with the right columns
+    rather than a frame with none. The columns are built by the ordinary import
+    path with every buffer pointing at the start of the message and a length of
+    zero, so there is one construction of a column rather than two.
+
+    Args:
+        data: Any buffer at least eight bytes long, used only for an address no
+            read will reach.
+        schema: The schema.
+        steps: The node order the schema implies.
+        children: The nodes below the nested columns, in Arrow's order.
+
+    Returns:
+        An empty frame with the schema's columns.
+    """
+    var refs = _empty_refs(data, steps)
+    var fields = List[Field](capacity=len(schema))
+    var columns = List[AnyArray](capacity=len(schema))
+    for i in range(len(schema)):
+        var at = _column_step(steps, i)
+        var column: AnyArray
+        if _is_nested_format(steps[at].format):
+            column = _nested_column(refs, steps, children, at)
+        else:
+            column = build_column(refs[at].array(), steps[at].format)
 
         # A stream may carry its categories and then no rows at all, and the
         # answer to that is a categorical column of no rows rather than an
         # integer one. There are no codes to range check, so this is only the
         # attachment.
-        var at = schema.dictionary_at(i)
-        if at >= 0:
-            attach_dictionary(column, schema.dictionaries[at], schema.names[i])
+        var have = schema.dictionary_at(i)
+        if have >= 0:
+            attach_dictionary(
+                column, schema.dictionaries[have], schema.names[i]
+            )
 
         var field = Field(schema.names[i], column.type)
         field.nullable = schema.nullable[i]
         fields.append(field^)
         columns.append(column^)
+
+    # The refs own the buffer lists the arrays above pointed at.
+    _ = refs^
     return DataFrame(Schema(fields^), columns^)
 
 
@@ -1035,7 +1500,9 @@ def read_ipc_stream(data: Span[UInt8, _]) raises -> DataFrame:
             " does not"
         )
     var encodings = List[_Encoding]()
-    var schema = read_schema(data, message.header, encodings)
+    var children = List[_Child]()
+    var schema = read_schema(data, message.header, encodings, children)
+    var steps = _steps(schema, children)
 
     var batches = List[List[_ColumnRef]]()
     var pos = message.next
@@ -1055,13 +1522,13 @@ def read_ipc_stream(data: Span[UInt8, _]) raises -> DataFrame:
                     " where a record batch was expected",
                 )
             )
-        batches.append(_decode_batch(data, schema, next))
+        batches.append(_decode_batch(data, steps, next))
         pos = next.next
 
     _check_dictionaries(encodings, schema)
     if len(batches) == 0:
-        return _empty_frame(data, schema)
-    return _assemble(schema, batches^)
+        return _empty_frame(data, schema, steps, children)
+    return _assemble(schema, steps, children, batches^)
 
 
 def read_ipc_file(data: Span[UInt8, _]) raises -> DataFrame:
@@ -1107,7 +1574,11 @@ def read_ipc_file(data: Span[UInt8, _]) raises -> DataFrame:
         )
     var footer = root_table(data, length_at - footer_length)
     var encodings = List[_Encoding]()
-    var schema = read_schema(data, field_table(data, footer, 1), encodings)
+    var children = List[_Child]()
+    var schema = read_schema(
+        data, field_table(data, footer, 1), encodings, children
+    )
+    var steps = _steps(schema, children)
 
     # Field 2 is the dictionaries, in their own list of blocks ahead of the
     # record batches in field 3. A file is not walked in order, so the categories
@@ -1139,7 +1610,7 @@ def read_ipc_file(data: Span[UInt8, _]) raises -> DataFrame:
     var blocks = field_vector(data, footer, 3)
     var count = 0 if blocks < 0 else vector_length(data, blocks)
     if count == 0:
-        return _empty_frame(data, schema)
+        return _empty_frame(data, schema, steps, children)
 
     var batches = List[List[_ColumnRef]](capacity=count)
     for i in range(count):
@@ -1154,9 +1625,9 @@ def read_ipc_file(data: Span[UInt8, _]) raises -> DataFrame:
                     " where a record batch should be",
                 )
             )
-        batches.append(_decode_batch(data, schema, message))
+        batches.append(_decode_batch(data, steps, message))
 
-    return _assemble(schema, batches^)
+    return _assemble(schema, steps, children, batches^)
 
 
 def read_arrow_bytes(data: Span[UInt8, _]) raises -> DataFrame:

@@ -30,6 +30,13 @@ What does need a string case is anything that reads values, because
 `LogicalType.STRING` has physical dtype uint8 and would otherwise match the `uint8`
 arm of a dispatch and read the first byte of a 16 byte view as the value. Every one
 of those call sites asks `is_string()` first.
+
+A list or a struct column does not fit either, and it goes further than a string
+does: its values are not in this struct at all. They are in the child columns in
+`nested`, and what `data` holds is one offset per row for a list and nothing but
+the validity for a struct. `check_dtype` refuses both, so the call sites that ask
+`is_string()` need no nested case, and the ones that want the children ask for
+them by name through `child` and `field`.
 """
 
 from std.memory import unsafe_memcpy
@@ -41,6 +48,13 @@ from firepanda.dtype.logical import LogicalType, TypeKind, logical_for
 
 from .array import Array
 from .data import ColumnData
+from .nested import (
+    ROOT,
+    NestedNode,
+    field_named,
+    nested_type_name,
+    subtree_of,
+)
 from .strings import StringArray
 
 
@@ -85,6 +99,38 @@ struct AnyArray(Copyable, Movable, Sized):
     buffers wide, and they make that mistake impossible to write.
     """
 
+    var nested: List[NestedNode]
+    """The child columns of a list or a struct, flattened, and empty for every
+    other type.
+
+    A plain list rather than an `Optional` of one, because a list already has an
+    empty state and it means exactly what absent would mean here. `is_nested`
+    asks the type rather than this field, so that a struct with no fields at all,
+    which Arrow allows, is still a struct.
+
+    The tree is read back through the helpers in `nested.mojo`. The column itself
+    is the root and is not in here: a list column's offsets are in `data.values`
+    and its row count in `data.length`, the same fields any other column uses,
+    and these are the nodes below it.
+    """
+
+    var _slack: UInt64
+    """Eight bytes nothing reads, here to keep the fields above from stopping
+    short of the struct's own alignment.
+
+    Mojo miscompiles an `Optional` of a struct that has trailing padding. The
+    value goes in and the `Optional` still answers that it is empty, so a column
+    put in one comes back as though it had never been there. A frame's index
+    holds its labels in exactly that shape, which is how this was found: every
+    index in the library silently became the range 0, 1, 2 the moment this struct
+    grew a field that left it eight bytes short of sixteen.
+
+    The fields above come to 472 bytes and the alignment is 16, so this is the 8
+    that make it 480 and land on the boundary. `test_a_column_has_no_trailing
+    _padding` fails if a later field breaks that again, which is the only warning
+    there is: nothing about the miscompile happens at compile time.
+    """
+
     def __init__(out self, var data: ColumnData, type: LogicalType):
         """Constructs a type-erased column over storage the caller built.
 
@@ -96,6 +142,8 @@ struct AnyArray(Copyable, Movable, Sized):
         self.type = type
         self.text = None
         self.dict_values = None
+        self.nested = List[NestedNode]()
+        self._slack = 0
 
     def __init__[dt: DType](out self, var typed: Array[dt]):
         """Erases the dtype of a typed array, taking ownership of its buffers.
@@ -110,6 +158,8 @@ struct AnyArray(Copyable, Movable, Sized):
         self.type = logical_for(dt)
         self.text = None
         self.dict_values = None
+        self.nested = List[NestedNode]()
+        self._slack = 0
 
     def __init__(out self, var strings: StringArray):
         """Erases a string column, taking ownership of its buffers.
@@ -122,6 +172,8 @@ struct AnyArray(Copyable, Movable, Sized):
         self.type = LogicalType.STRING
         self.text = strings^
         self.dict_values = None
+        self.nested = List[NestedNode]()
+        self._slack = 0
 
     @staticmethod
     def dictionary[
@@ -152,6 +204,76 @@ struct AnyArray(Copyable, Movable, Sized):
         out.dict_values = categories^
         return out^
 
+    @staticmethod
+    def nested_from(var nodes: List[NestedNode]) raises -> Self:
+        """Turns a flattened tree whose root is node zero into a column.
+
+        This is how a reader builds a list or a struct. It walks the Arrow field
+        nodes in order, which is the order this list is in, and hands the whole
+        thing over at the end rather than building a column and adding children
+        to it, because a list node cannot be finished until its element column is
+        known and that node comes later in the walk.
+
+        Dropping the root shifts every position down by one, and a node whose
+        parent was the root lands on `ROOT` by the same subtraction, since `ROOT`
+        is minus one. So the renumbering is one pass and one operation.
+
+        Args:
+            nodes: The tree, root first, each node naming its parent by position.
+
+        Returns:
+            The root as a column, carrying the rest as its children.
+
+        Raises:
+            If the list is empty, which is a caller that built nothing.
+        """
+        if len(nodes) == 0:
+            raise Error("a nested column needs at least the node it is")
+        var root = nodes.pop(0)
+        for i in range(len(nodes)):
+            nodes[i].parent -= 1
+        var type = root.type
+        var strings = Bool(root.text)
+        var out: Self
+        if strings:
+            out = Self(root^.take_text())
+            out.type = type
+        else:
+            out = Self(root^.take_data(), type)
+        out.nested = nodes^
+        return out^
+
+    def into_node(
+        deinit self, var name: String, parent: Int
+    ) raises -> NestedNode:
+        """Turns a finished column into a node of some other column's tree.
+
+        The buffers are moved rather than copied, so a leaf that was just built
+        by the ordinary import path costs nothing to put in its place.
+
+        Args:
+            name: The field name the node takes.
+            parent: The node it hangs off, or `ROOT`.
+
+        Returns:
+            The node.
+
+        Raises:
+            If the column is nested or dictionary encoded, neither of which fits
+            in one node and both of which the caller has to take apart itself.
+        """
+        if self.is_nested() or self.is_dictionary():
+            raise Error(
+                "column is "
+                + String(self.type)
+                + " and does not fit in one node of a nested column"
+            )
+        var type = self.type
+        if self.text:
+            var held = self.text^
+            return NestedNode(name^, parent, held.take(), type)
+        return NestedNode(name^, type, parent, self.data^)
+
     def __init__(out self, *, copy: Self):
         """Deep-copies a column.
 
@@ -162,6 +284,8 @@ struct AnyArray(Copyable, Movable, Sized):
         self.type = copy.type
         self.text = Optional[StringArray](copy=copy.text)
         self.dict_values = Optional[StringArray](copy=copy.dict_values)
+        self.nested = List[NestedNode](copy=copy.nested)
+        self._slack = 0
 
     def __len__(self) -> Int:
         """Returns the number of values.
@@ -232,7 +356,20 @@ struct AnyArray(Copyable, Movable, Sized):
                 + len(held.views)
                 + len(held.payload)
             )
-        return out + len(self.data.values)
+        out += len(self.data.values)
+        # A nested column's own buffers are its validity and, for a list, its
+        # offsets. Everything a user would call the data is one level down, so a
+        # count that stopped here would report a column of a million lists as a
+        # few megabytes of offsets and nothing else.
+        for i in range(len(self.nested)):
+            ref node = self.nested[i]
+            out += node.data.validity.byte_length()
+            if node.text:
+                ref held = node.text.value()
+                out += len(held.views) + len(held.payload)
+            else:
+                out += len(node.data.values)
+        return out
 
     def is_string(self) -> Bool:
         """Reports whether the column holds variable width elements.
@@ -332,6 +469,175 @@ struct AnyArray(Copyable, Movable, Sized):
         self._check_physical[dt]()
         return Array[dt](ColumnData(copy=self.data))
 
+    def offsets[dt: DType](self) raises -> Array[dt]:
+        """Returns a list column's offsets as a typed array.
+
+        The same deliberate way past `check_dtype` that `codes` is, and for the
+        same reason: the numbers are positions in the element column rather than
+        anything a row of this column is. There is one more of them than there
+        are rows, because a row is the gap between two.
+
+        Parameters:
+            dt: The width of the offsets, int32 for a list and int64 for a large
+                one.
+
+        Returns:
+            A typed copy of the offsets.
+
+        Raises:
+            If the column is not a list column, or if the offsets are not the
+            requested width.
+        """
+        if not self.type.is_list():
+            raise Error(
+                "column is " + String(self.type) + ", not a list column"
+            )
+        self._check_physical[dt]()
+        return Array[dt](ColumnData(copy=self.data))
+
+    def is_nested(self) -> Bool:
+        """Reports whether the column's values live in child columns.
+
+        Asked of the type and not of the child list, so that a struct with no
+        fields, which Arrow allows and which has an empty list here, is still a
+        struct rather than an ordinary column with a strange dtype.
+
+        Returns:
+            True for a list or a struct column.
+        """
+        return self.type.is_nested()
+
+    def type_name(self) raises -> String:
+        """Returns the column's dtype as a name, children and all.
+
+        `String(column.type)` gets as far as `list` or `struct` and stops, since
+        what is inside a nested type is in the column rather than in the type.
+        This is the whole of it, and for an ordinary column it is the same string
+        the type prints on its own.
+
+        Returns:
+            The dtype name.
+
+        Raises:
+            If the column is a list without exactly one child, which is a column
+            built wrong.
+        """
+        if not self.is_nested():
+            return String(self.type)
+        return nested_type_name(self.type, self.nested)
+
+    def child_count(self) -> Int:
+        """Returns how many child columns hang off this one directly.
+
+        One for a list, one per field for a struct, and none for anything else.
+        The children of those children are not counted.
+
+        Returns:
+            The number of top level children.
+        """
+        var out = 0
+        for i in range(len(self.nested)):
+            if self.nested[i].parent == ROOT:
+                out += 1
+        return out
+
+    def child(self, at: Int) raises -> Self:
+        """Returns one child column, with everything under it.
+
+        A list's element column is child zero, and a struct's fields are its
+        children in schema order. What comes back is a column in its own right,
+        which for a nested child means it carries the part of the tree that was
+        below it with the positions renumbered against its own list.
+
+        The row count of a struct's field is the struct's own. The row count of a
+        list's element column is not: it holds every element of every row laid
+        end to end, and which of them belong to a row is what the offsets say.
+
+        Args:
+            at: The position of the child, counting the direct children only.
+
+        Returns:
+            The child as a column.
+
+        Raises:
+            If the column is not nested, or has no child at that position.
+        """
+        if not self.is_nested():
+            raise Error(
+                "column is " + String(self.type) + ", not a nested column"
+            )
+        var direct = List[Int]()
+        for i in range(len(self.nested)):
+            if self.nested[i].parent == ROOT:
+                direct.append(i)
+        if at < 0 or at >= len(direct):
+            raise Error(
+                String(
+                    "column has ",
+                    len(direct),
+                    " children and child ",
+                    at,
+                    " was asked for",
+                )
+            )
+        return self._subtree(direct[at])
+
+    def field(self, name: StringSlice) raises -> Self:
+        """Returns one field of a struct column by name.
+
+        Args:
+            name: The field name.
+
+        Returns:
+            The field as a column.
+
+        Raises:
+            If the column is not a struct, or has no field of that name.
+        """
+        if not self.type.is_struct():
+            raise Error(
+                "column is " + String(self.type) + ", not a struct column"
+            )
+        var at = field_named(self.nested, name)
+        if at < 0:
+            raise Error(String("struct column has no field named '", name, "'"))
+        return self._subtree(at)
+
+    def _subtree(self, root: Int) raises -> Self:
+        """Lifts one node and everything under it into a column of its own.
+
+        The nodes come back in the order they are stored, which puts a parent
+        before its children, so renumbering is a lookup in the list built so far
+        and never a forward reference.
+
+        Args:
+            root: The node to lift.
+
+        Returns:
+            The subtree as a column.
+
+        Raises:
+            If a node's storage cannot be copied.
+        """
+        var picked = subtree_of(self.nested, root)
+        ref top = self.nested[root]
+        var out: Self
+        if top.text:
+            out = Self(StringArray(copy=top.text.value()))
+            out.type = top.type
+        else:
+            out = Self(ColumnData(copy=top.data), top.type)
+        for k in range(1, len(picked)):
+            var moved = NestedNode(copy=self.nested[picked[k]])
+            var parent = ROOT
+            for j in range(1, len(picked)):
+                if picked[j] == moved.parent:
+                    parent = j - 1
+                    break
+            moved.parent = parent
+            out.nested.append(moved^)
+        return out^
+
     def _check_physical[dt: DType](self) raises:
         """Raises unless the values buffer is laid out as a given dtype.
 
@@ -369,8 +675,8 @@ struct AnyArray(Copyable, Movable, Sized):
             dt: The expected dtype.
 
         Raises:
-            If the column's dtype differs, or if it is a string or dictionary
-            column.
+            If the column's dtype differs, or if it is a string, dictionary,
+            list or struct column.
         """
         if self.is_string():
             raise Error(
@@ -384,6 +690,19 @@ struct AnyArray(Copyable, Movable, Sized):
                 + String(self.type)
                 + " and stores positions into its categories rather than"
                 " values; use categories() and codes() instead"
+            )
+        if self.is_nested():
+            # A list is the dictionary's trap again with different numbers. Its
+            # physical dtype is int32, the check below would pass, and what came
+            # back would be the offsets, which are a sorted run of small integers
+            # that a sum or a mean will answer for without complaint. A struct is
+            # worse in the other direction: it has no values buffer at all, so
+            # what a kernel would read is an empty one.
+            raise Error(
+                "column is "
+                + String(self.type)
+                + " and keeps its values in child columns rather than in a"
+                " buffer of its own; use child() or field() instead"
             )
         self._check_physical[dt]()
 
@@ -472,6 +791,19 @@ struct AnyArray(Copyable, Movable, Sized):
         """
         if self.is_string():
             return Self(self.strings().slice(start, end))
+        if self.is_nested():
+            # A struct slices by slicing every field, and a list does not slice
+            # that way at all: the rows it keeps name a run of the element column
+            # that the offsets have to be rebased against. Both are worth having
+            # and neither is here yet, and the refusal is by name because the
+            # loop below would otherwise cut a list column's offsets and hand
+            # back something that looks like a column and reads the wrong
+            # elements.
+            raise Error(
+                "column is "
+                + String(self.type)
+                + " and slicing a nested column is not implemented yet"
+            )
         var width = dtype_size(self.type.physical)
         var n = end - start
         var values = Buffer(n * width)

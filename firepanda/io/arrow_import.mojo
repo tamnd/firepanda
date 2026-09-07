@@ -184,8 +184,13 @@ def _sizes_at(
     return _bytes_at(array, Int(array.n_buffers) - 1).unsafe_bitcast[Int64]()
 
 
-def _import_validity(array: ArrowArray, length: Int) raises -> Bitmap:
+def import_validity(array: ArrowArray, length: Int) raises -> Bitmap:
     """Builds a firepanda validity bitmap from Arrow's.
+
+    Public because the IPC reader builds the interior of a nested column itself,
+    where a struct node has a validity bitmap and nothing else and there is no
+    values buffer for `build_column` to work from. Everything else about that
+    path still comes through this file.
 
     The two conventions agree bit for bit, so with no offset this is a byte copy
     and a tail mask. With an offset it is a shift, and the bit at a time loop is
@@ -264,8 +269,101 @@ def _import_fixed(
             src=_bytes_at(array, 1).unsafe_offset(Int(array.offset) * width),
             count=length * width,
         )
-    var validity = _import_validity(array, length)
+    var validity = import_validity(array, length)
     return AnyArray(ColumnData(values^, validity^, length), type)
+
+
+def import_list_offsets[
+    index: DType
+](array: ArrowArray, rows: Int, elements: Int) raises -> ColumnData:
+    """Copies a list node's offsets and checks every one of them.
+
+    A list has one more offset than it has rows, because a row is the gap
+    between two of them, and the last one is where the elements end. So the copy
+    is `rows + 1` values wide while the validity is `rows` bits, which is why
+    this is not `_import_fixed` with a different length.
+
+    The checks are here rather than at the point of use for the same reason a
+    dictionary's codes are checked as the column is built: an offset is followed
+    to reach a value, and a bad one is an out of bounds read rather than a
+    question anybody asks. Three things have to hold, and a file that gets any of
+    them wrong would otherwise produce rows made of somebody else's elements.
+
+    Args:
+        array: The node, for its offsets buffer and its validity.
+        rows: How many rows the list column has.
+        elements: How many elements its child column holds, which is what the
+            last offset has to come to.
+
+    Parameters:
+        index: The width of the offsets, int32 for a list and int64 for a large
+            one.
+
+    Returns:
+        The offsets and the validity, ready to be a column's storage.
+
+    Raises:
+        Error: If the offsets buffer is missing, if the first offset is not
+            zero, if they do not increase, or if the last one is not the length
+            of the child.
+    """
+    var width = dtype_size(index)
+    if rows == 0:
+        # Arrow lets a list of no rows carry no offsets buffer at all, since
+        # there is no row for the one offset it would hold to bound. The single
+        # zero is written here rather than read, so that every list column comes
+        # out of this with the same shape.
+        return ColumnData(Buffer(width), Bitmap(0), 0)
+    var values = Buffer(overwritten=(rows + 1) * width)
+    var source = _bytes_at(array, 1).unsafe_offset(Int(array.offset) * width)
+    unsafe_memcpy(
+        dest=values.unsafe_ptr(), src=source, count=(rows + 1) * width
+    )
+
+    var read = values.bitcast[index]()
+    var previous = Int(read.unsafe_offset(0).unsafe_load())
+    if previous != 0:
+        # Arrow allows a sliced array to start anywhere, and the slice's own
+        # first offset is then not zero. Nothing here produces one and the
+        # element column would have to be shifted to match, so it is refused
+        # rather than read as though the elements began where they do not.
+        raise Error(
+            String(
+                "arrow: a list column whose first offset is ",
+                previous,
+                (
+                    " rather than zero is a slice, and firepanda reads a list"
+                    " that starts at its own beginning"
+                ),
+            )
+        )
+    for i in range(1, rows + 1):
+        var here = Int(read.unsafe_offset(i).unsafe_load())
+        if here < previous:
+            raise Error(
+                String(
+                    "arrow: a list column's offsets go from ",
+                    previous,
+                    " down to ",
+                    here,
+                    " at row ",
+                    i - 1,
+                )
+            )
+        previous = here
+    if previous != elements:
+        raise Error(
+            String(
+                "arrow: a list column's last offset is ",
+                previous,
+                " and its element column holds ",
+                elements,
+                " elements",
+            )
+        )
+
+    var validity = import_validity(array, rows)
+    return ColumnData(values^, validity^, rows)
 
 
 def _import_bool(array: ArrowArray, length: Int) raises -> AnyArray:
@@ -293,7 +391,7 @@ def _import_bool(array: ArrowArray, length: Int) raises -> AnyArray:
             var bit = offset + i
             var byte = bits.unsafe_offset(bit >> 3).unsafe_load()
             out.unsafe_offset(i).unsafe_write((byte >> UInt8(bit & 7)) & 1)
-    var validity = _import_validity(array, length)
+    var validity = import_validity(array, length)
     return AnyArray(ColumnData(values^, validity^, length), LogicalType.BOOL)
 
 
@@ -335,7 +433,7 @@ def _import_views(
         Error: If a view names a data buffer the array does not have.
     """
     var variadic = Int(array.n_buffers) - 3
-    var validity = _import_validity(array, length)
+    var validity = import_validity(array, length)
     var source = (
         _bytes_at(array, 1)
         .unsafe_bitcast[StringView]()
@@ -467,7 +565,7 @@ def _import_offsets[
     Raises:
         Error: If a buffer is missing.
     """
-    var validity = _import_validity(array, length)
+    var validity = import_validity(array, length)
     var views = Buffer(length * VIEW_SIZE)
     if length == 0:
         return _as_text(views^, Buffer(0), validity^, length, type)
@@ -816,7 +914,7 @@ def _plan_views(array: ArrowArray, length: Int, whole: Bool) raises -> Int:
             past the end of it.
     """
     var variadic = Int(array.n_buffers) - 3
-    var validity = _import_validity(array, length)
+    var validity = import_validity(array, length)
     var source = (
         _bytes_at(array, 1)
         .unsafe_bitcast[StringView]()
@@ -886,7 +984,7 @@ def _plan_offsets[index: DType](array: ArrowArray, length: Int) raises -> Int:
     """
     if length == 0:
         return 0
-    var validity = _import_validity(array, length)
+    var validity = import_validity(array, length)
     var offsets = (
         _bytes_at(array, 1)
         .unsafe_bitcast[Scalar[index]]()
@@ -967,7 +1065,7 @@ def _fill_views(
         Error: If a buffer is missing.
     """
     var length = Int(array.length)
-    var validity = _import_validity(array, length)
+    var validity = import_validity(array, length)
     var variadic = Int(array.n_buffers) - 3
     var target = (
         sink.values.unsafe_ptr().unsafe_bitcast[StringView]().unsafe_offset(at)
@@ -1064,7 +1162,7 @@ def _fill_offsets[
         Error: If a buffer is missing.
     """
     var length = Int(array.length)
-    var validity = _import_validity(array, length)
+    var validity = import_validity(array, length)
     if length == 0:
         return validity^
 
@@ -1146,7 +1244,7 @@ def fill_column(
                 var bit = offset + i
                 var byte = bits.unsafe_offset(bit >> 3).unsafe_load()
                 out.unsafe_offset(i).unsafe_write((byte >> UInt8(bit & 7)) & 1)
-        return _import_validity(array, length)
+        return import_validity(array, length)
     var width = dtype_size(sink.type.physical)
     if length > 0:
         unsafe_memcpy(
@@ -1154,7 +1252,7 @@ def fill_column(
             src=_bytes_at(array, 1).unsafe_offset(Int(array.offset) * width),
             count=length * width,
         )
-    return _import_validity(array, length)
+    return import_validity(array, length)
 
 
 def import_array(
