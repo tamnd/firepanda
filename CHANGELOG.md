@@ -8,6 +8,29 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A join on a text key can build a table on the small side and read it, instead of copying both sides
+
+A join with one key column pairs its rows by building a table over the smaller side and asking it one read only question per row of the larger side. Nothing is copied, and every core probes at once. A text key was excluded from that and went down a second route instead, which concatenates both key columns, factorizes the whole thing, and slices the codes back apart.
+
+The exclusion had a reason. The table stores a hash rather than a key, which is exact for a fixed width key because the mix is a bijection on sixty four bits, and is not exact for a string, because sixteen bytes of name do not fit in eight bytes of hash. So a string has to have its bytes compared when two hashes agree, and the bytes to compare against belong to the side the table was built from, which is not the column the probe is reading.
+
+What it cost is easy to state, because all five db-benchmark join queries join on text. Against a dimension table of a hundred thousand rows, ten million probe rows meant ten million strings copied and ten million keys inserted to learn a hundred thousand of them. The table route inserts the hundred thousand and reads the other ten million without writing anything.
+
+The comparison the table was missing already existed for the factorize, where both sides of it happen to be the same column. This adds the piece that was not there, which is telling the probe which column the views it kept belong to, since a long view carries an offset into its own payload and means nothing against anyone else's. A key of twelve bytes or fewer lives inside its own view and never reaches a payload at all, which is every key db-benchmark writes into id1, id2 and id3, so on that data the new comparison is the old one.
+
+Measured on an i9-13900K at ten million probe rows, three sessions a side in ABBA order, with four integer rows carried alongside that did not move:
+
+| build rows | before | after | ratio |
+| --- | --- | --- | --- |
+| a thousand | 41.1 ms | 26.4 ms | 1.56 |
+| a hundred thousand | 66.2 ms | 29.1 ms | 2.28 |
+
+Both are separated, with every run of one side below every run of the other. After the change `join/inner_1000_text` at 26.4 ms is ten percent above the integer row it is a twin of, and `join/inner_100k_text` at 29.1 is seventeen percent above its own, where before they were seventy and a hundred and seventy percent above.
+
+Two sides of the same height are the shape this does not fix, and that is j4 and j5. There the build is nearly all of the work, this route does it on one thread, and the route it would replace factorizes both sides on every core, so it measured at 0.78 times and is not taken. The line is drawn at a probe side eight times the build side, which is inside the region measured to win rather than next to an estimate of where winning stops. Moving it is not the fix. A build that spreads is, and then the line goes away instead.
+
+Nothing about the result changes. The two routes hand out different ordinals, because each numbers its own groups, and they agree on which rows pair with which, which is the only thing anything downstream reads.
+
 ### The name of the day, the ISO calendar, and the format string
 
 `s.dt.day_name()`, `s.dt.month_name()`, `s.dt.isocalendar()` and `s.dt.strftime()` are the four names on the accessor that answer text or answer a frame, and they are the third group of the datetime work. `Series.dt_day_name`, `Series.dt_month_name` and `Series.dt_strftime` are the three that answer a column, and `firepanda.dt_isocalendar` is a free function rather than a method because a series cannot name a frame: the frame imports the series and not the other way round.
