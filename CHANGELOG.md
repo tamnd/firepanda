@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A join microbenchmark that joins on text, which is what the join queries actually do
+
+Every row in the `join/` family joined on an integer. All five db-benchmark join queries join on text: j1 on id1, j2 and j3 on id2, j4 and j5 on id3. So the family measured the pairing and nothing in it measured the part of a real join that comes before the pairing.
+
+`join/inner_equal_sides_text` is the existing `join/inner_equal_sides` with both key columns written as `id` and a number instead of as a number, which is the form db-benchmark uses, and with nothing else changed. Both sides are the same height, every probe row matches exactly one build row, and the only difference between the two rows is the type of the key.
+
+At ten million rows on an i9-13900K the integer row is 52.5, 50.8 and 57.1 milliseconds over three sessions and the text row is 228.8, 238.2 and 239.4. That is four and a half times, with the fastest text run still four times the slowest integer run, so there is nothing to argue about in the separation.
+
+The number matters because of what was about to be worked on. The plan was to go after the forty milliseconds of `join/inner_equal_sides` that the build side and the bucketing do not account for, on the grounds that it was the closest thing to j4 and j5 in the suite. It is the closest thing, and it turns out to be about a fifth of what those queries spend. An integer key whose values span the row count takes the direct route in the factorizer, which is an array index and a store per row. A text key is hashed, compared against whatever else landed in its slot, and stored in a map. That difference, not the pairing, is where the j4 and j5 time is.
+
+Nothing outside `benchmarks/` changes.
+
 ### The morsel size was measured and is staying where it is
 
 Nothing changes here except a docstring, and the docstring is the point.
