@@ -14,7 +14,7 @@ A join with one key column pairs its rows by building a table over the smaller s
 
 The exclusion had a reason. The table stores a hash rather than a key, which is exact for a fixed width key because the mix is a bijection on sixty four bits, and is not exact for a string, because sixteen bytes of name do not fit in eight bytes of hash. So a string has to have its bytes compared when two hashes agree, and the bytes to compare against belong to the side the table was built from, which is not the column the probe is reading.
 
-What it cost is easy to state, because all five db-benchmark join queries join on text. Against a dimension table of a hundred thousand rows, ten million probe rows meant ten million strings copied and ten million keys inserted to learn a hundred thousand of them. The table route inserts the hundred thousand and reads the other ten million without writing anything.
+What it cost is easy to state. Against a dimension table of a hundred thousand rows, ten million probe rows meant ten million strings copied and ten million keys inserted in order to learn a hundred thousand of them. The table route inserts the hundred thousand and reads the other ten million without writing anything.
 
 The comparison the table was missing already existed for the factorize, where both sides of it happen to be the same column. This adds the piece that was not there, which is telling the probe which column the views it kept belong to, since a long view carries an offset into its own payload and means nothing against anyone else's. A key of twelve bytes or fewer lives inside its own view and never reaches a payload at all, which is every key db-benchmark writes into id1, id2 and id3, so on that data the new comparison is the old one.
 
@@ -27,7 +27,9 @@ Measured on an i9-13900K at ten million probe rows, three sessions a side in ABB
 
 Both are separated, with every run of one side below every run of the other. After the change `join/inner_1000_text` at 26.4 ms is ten percent above the integer row it is a twin of, and `join/inner_100k_text` at 29.1 is seventeen percent above its own, where before they were seventy and a hundred and seventy percent above.
 
-Two sides of the same height are the shape this does not fix, and that is j4 and j5. There the build is nearly all of the work, this route does it on one thread, and the route it would replace factorizes both sides on every core, so it measured at 0.78 times and is not taken. The line is drawn at a probe side eight times the build side, which is inside the region measured to win rather than next to an estimate of where winning stops. Moving it is not the fix. A build that spreads is, and then the line goes away instead.
+Two sides of the same height are the shape this does not fix. There the build is nearly all of the work, this route does it on one thread, and the route it would replace factorizes both sides on every core, so it measured at 0.78 times and is not taken. The line is drawn at a probe side eight times the build side, which is inside the region measured to win rather than next to an estimate of where winning stops. Moving it is not the fix. A build that spreads is, and then the line goes away instead.
+
+None of the five db-benchmark join queries in firepanda-bench moves, and that was checked rather than assumed. All five were run at the five gigabyte size on the same machine, old against new in ABBA order, and every one of them landed inside its own run to run spread, in the streaming mode they use by default and in the whole frame mode as well. The reason is that the suite generates id1, id2 and id3 as integers, so none of its joins has a text key for this to apply to. Upstream db-benchmark does have one, the fourth query, which joins on id5 against the medium table. Its shape is a build side a thousandth of the probe side, which is past the line here by a wide margin and near the row above that measured 2.28 times.
 
 Nothing about the result changes. The two routes hand out different ordinals, because each numbers its own groups, and they agree on which rows pair with which, which is the only thing anything downstream reads.
 
@@ -77,15 +79,17 @@ A column carrying a time zone is refused rather than answered. The stored intege
 
 Checked against pandas 3.0.3 two ways before any of it was written down: fourteen hand picked extremes and then five hundred random instants between the year 1 and the year 2262, each across all four resolutions and all twenty one outputs, byte identical both times. `tests/fuzz/kernel.mojo` now runs the kernel against its twin on a random temporal column one case in eight.
 
-### A join microbenchmark that joins on text, which is what the join queries actually do
+### A join microbenchmark that joins on text
 
-Every row in the `join/` family joined on an integer. All five db-benchmark join queries join on text: j1 on id1, j2 and j3 on id2, j4 and j5 on id3. So the family measured the pairing and nothing in it measured the part of a real join that comes before the pairing.
+Every row in the `join/` family joined on an integer, so the family measured the pairing and nothing in it measured what a text key costs before the pairing.
 
-`join/inner_equal_sides_text` is the existing `join/inner_equal_sides` with both key columns written as `id` and a number instead of as a number, which is the form db-benchmark uses, and with nothing else changed. Both sides are the same height, every probe row matches exactly one build row, and the only difference between the two rows is the type of the key.
+`join/inner_equal_sides_text` is the existing `join/inner_equal_sides` with both key columns written as `id` and a number instead of as a number, and with nothing else changed. Both sides are the same height, every probe row matches exactly one build row, and the only difference between the two rows is the type of the key.
 
 At ten million rows on an i9-13900K the integer row is 52.5, 50.8 and 57.1 milliseconds over three sessions and the text row is 228.8, 238.2 and 239.4. That is four and a half times, with the fastest text run still four times the slowest integer run, so there is nothing to argue about in the separation.
 
-The number matters because of what was about to be worked on. The plan was to go after the forty milliseconds of `join/inner_equal_sides` that the build side and the bucketing do not account for, on the grounds that it was the closest thing to j4 and j5 in the suite. It is the closest thing, and it turns out to be about a fifth of what those queries spend. An integer key whose values span the row count takes the direct route in the factorizer, which is an array index and a store per row. A text key is hashed, compared against whatever else landed in its slot, and stored in a map. That difference, not the pairing, is where the j4 and j5 time is.
+An integer key whose values span the row count takes the direct route in the factorizer, which is an array index and a store per row. A text key is hashed, compared against whatever else landed in its slot, and stored in a map. That difference, and not the pairing, is what the new row measures.
+
+The entry this replaces said that all five db-benchmark join queries join on text and that this row was therefore the closest thing in the suite to j4 and j5. That was wrong and it is corrected here rather than left standing. Upstream db-benchmark joins on an integer in four of the five, and the queries are named for it: small inner on int, medium inner on int, medium outer on int, medium inner on factor, big inner on int. Only the fourth joins on text, on id5 against the medium table. The suite in firepanda-bench does not have that query yet. It generates id1, id2 and id3 as integers, has no id4, id5 or id6 at all, and runs a big left join on id3 in the place where upstream runs the character join, so at the moment none of its five joins on a text key.
 
 Nothing outside `benchmarks/` changes.
 

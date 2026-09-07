@@ -49,18 +49,18 @@ both sides of it are the same column; the piece that was missing was telling the
 probe which column the kept views belong to, because a long view carries an
 offset into its own payload and means nothing against anyone else's.
 
-What the exclusion cost is easy to state. All five db-benchmark join queries join
-on text, so all five took the concatenating route: a copy of both key columns and
-then a dictionary over every distinct key on both sides. Against a dimension
-table of a hundred thousand rows that is ten million strings copied and ten
-million keys inserted to learn a hundred thousand of them, and this route inserts
-the hundred thousand and reads the rest without writing anything. It is 2.28
-times on that shape and 1.56 times against a dimension of a thousand.
+What the exclusion cost is easy to state. Every text key took the concatenating
+route: a copy of both key columns and then a dictionary over every distinct key
+on both sides. Against a dimension table of a hundred thousand rows that is ten
+million strings copied and ten million keys inserted to learn a hundred thousand
+of them, and this route inserts the hundred thousand and reads the rest without
+writing anything. It is 2.28 times on that shape and 1.56 times against a
+dimension of a thousand.
 
-What it does not cover yet is two sides of the same height, which is j4 and j5.
-There the build is the work, this route does it on one thread and the route it
-replaced does it on every core, so it loses and is not taken. Fixing that means a
-build that spreads rather than a better line to draw.
+What it does not cover yet is two sides of the same height. There the build is the
+work, this route does it on one thread and the route it replaced does it on every
+core, so it loses and is not taken. Fixing that means a build that spreads rather
+than a better line to draw.
 
 ## Which side is built
 

@@ -3966,17 +3966,16 @@ def bench_join(mut harness: Harness) raises:
     What does the key type cost. Every integer row above has a text twin:
     `join/inner_1000_text`, `join/inner_100k_text` and
     `join/inner_equal_sides_text` are the same joins with both key columns
-    written as `id` and a number, which is what db-benchmark puts in id1, id2 and
-    id3 and therefore what all five of its join queries pair on. Each pair
-    differs in the key type and in nothing else, so the gap within a pair is what
-    text costs.
+    written as `id` and a number, which is the form db-benchmark's character
+    columns use. Each pair differs in the key type and in nothing else, so the
+    gap within a pair is what text costs.
 
     The three text rows are a ladder rather than three samples of one thing. The
     probe is the same read on all three; what changes is how much of the run is
     building the dictionary, from almost none at a thousand keys to almost all of
-    it at one key per row. That is the axis a route decision has to be made on,
-    and j1 sits at the bottom of the ladder, j2 and j3 in the middle, j4 and j5
-    at the top.
+    it at one key per row. That is the axis a route decision has to be made on.
+    db-benchmark's one join on a character key is its fourth query, on id5
+    against the medium table, and it sits at the second rung.
 
     What do the other kinds cost relative to inner. Semi and anti stop at the
     first match and gather nothing from the right, so they should be cheaper than
@@ -4107,10 +4106,10 @@ def bench_join(mut harness: Harness) raises:
 
     harness.record("join/inner_equal_sides", "rows", rows, inner_equal)
 
-    # The same shape again with the key as text, which is what db-benchmark j4
-    # and j5 join on and what no row here had. The keys are `id` and a number,
-    # the same values the row above uses and the same values db-benchmark writes
-    # into id3, so the two rows differ in the key type and in nothing else.
+    # The same shape again with the key as text, which no row here had. The keys
+    # are `id` and a number, the same values the row above uses written the way
+    # db-benchmark writes its character columns, so the two rows differ in the
+    # key type and in nothing else.
     var text_dim = _text_dimension(rows, "label")
     var text_fact = _text_fact(rows, rows, rng)
 
@@ -4127,8 +4126,8 @@ def bench_join(mut harness: Harness) raises:
     # the integer side has: a thousand distinct keys, a hundred thousand, and one
     # per row. What separates them is not the probe, which is the same read on
     # all three, but how much of the work is building the dictionary and how much
-    # of that build can be spread. j1 sits at the bottom of this ladder, j2 and
-    # j3 in the middle, j4 and j5 at the top.
+    # of that build can be spread. db-benchmark's character join is a build side
+    # a thousandth of the probe side, which is the middle rung.
     var small_text_dim = _text_dimension(dim_rows, "label")
     var small_text_fact = _text_fact(rows, dim_rows, rng)
 
@@ -4266,8 +4265,8 @@ def _text_dimension(rows: Int, label: String) raises -> DataFrame:
     """Builds a dimension table keyed by text, with one row per key.
 
     `_dimension` above with the key column written as `id` and the number rather
-    than as the number, which is the form db-benchmark uses for id1, id2 and id3
-    and therefore the form all five of its join queries pair on.
+    than as the number, which is the form db-benchmark uses for its character
+    columns and the form its one join on a character key pairs on.
 
     Args:
         rows: The height, which is also the number of distinct keys.
