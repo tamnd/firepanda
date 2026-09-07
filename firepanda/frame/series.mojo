@@ -50,6 +50,13 @@ from firepanda.kernel.nulls import (
 )
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.sort import argsort_any, is_sorted_any
+from firepanda.kernel.temporal import (
+    TemporalField,
+    field_named,
+    temporal_date,
+    temporal_field,
+    temporal_normalize,
+)
 from firepanda.kernel.unary import UnaryOp, unary_any
 
 
@@ -559,6 +566,85 @@ struct Series(Copyable, Movable, Sized, Writable):
         return self._relabelled(
             self.name, fill_backward_any(self.values, limit)
         )
+
+    def dt(self, field: TemporalField) raises -> Self:
+        """Returns one calendar or clock field of a datetime series.
+
+        This is the whole of the pandas `dt` accessor that answers a number or a
+        flag, reached through a field rather than through nineteen methods. The
+        pandas spelling `s.dt.year` is the Python layer's job and this is what it
+        calls.
+
+        The result keeps the row labels and the name, which is what pandas does.
+        A null row stays null rather than becoming the epoch.
+
+        Args:
+            field: Which field.
+
+        Returns:
+            An int32 series for the twelve fields that are numbers and a bool
+            series for the seven that are predicates.
+
+        Raises:
+            If the series is not a date or a naive timestamp. A column carrying
+            a time zone is refused rather than answered in UTC, because the
+            stored instants are UTC and reading an hour off them would give the
+            wrong hour under the right name.
+        """
+        return self._relabelled(self.name, temporal_field(self.values, field))
+
+    def dt(self, name: StringSlice) raises -> Self:
+        """Returns one part of a datetime series, looked up by its pandas name.
+
+        The twenty one names are the nineteen fields plus `date` and
+        `normalize`, which are the two that answer a temporal column rather than
+        a number.
+
+        Args:
+            name: The pandas spelling, so `dayofweek` rather than `day_of_week`.
+
+        Returns:
+            The series that name asks for.
+
+        Raises:
+            If nothing is called that, or whatever the field itself raises.
+        """
+        if name == "date":
+            return self.dt_date()
+        if name == "normalize":
+            return self.dt_normalize()
+        return self.dt(field_named(name))
+
+    def dt_date(self) raises -> Self:
+        """Returns the date part of a datetime series, with the clock dropped.
+
+        pandas answers this with an object column of Python `date` values,
+        because its numpy backend has no date dtype to put them in. firepanda
+        has one, so the answer is a `date32` series and the conformance suite
+        records the difference rather than this library pretending otherwise.
+
+        Returns:
+            A date32 series, or a copy of this one if it is already dates.
+
+        Raises:
+            If the series is not a date or a naive timestamp.
+        """
+        return self._relabelled(self.name, temporal_date(self.values))
+
+    def dt_normalize(self) raises -> Self:
+        """Returns the series with every clock moved back to midnight.
+
+        The difference between this and `dt_date` is the type. The dates are the
+        same dates and this one is still a timestamp series in the same
+        resolution, which is what makes it the one you can still subtract.
+
+        Returns:
+            A timestamp series of the same type and height.
+
+        Raises:
+            If the series is not a date or a naive timestamp.
+        """
+        return self._relabelled(self.name, temporal_normalize(self.values))
 
     def _relabelled(self, name: String, var values: AnyArray) raises -> Self:
         """Builds a result that has this series' row labels.

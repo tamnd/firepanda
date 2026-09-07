@@ -1582,3 +1582,227 @@ def group_top_scalar[
             if best < 0:
                 break
     return picked^
+
+
+def _floored_int_quotient(x: Int64, y: Int64) -> Int64:
+    """Divides two whole numbers, rounding towards minus infinity.
+
+    Written out of a truncating division and a correction rather than out of
+    Mojo's `//`, because the argument this twin exists to check is that the
+    kernel's `//` rounds down. A twin that asked the same operator the same
+    question would agree with the kernel whether or not either of them was
+    right. Mojo's `/` on a pair of whole numbers rounds towards zero, which was
+    measured, so the correction below is the only thing standing between the two
+    roundings and it is visible.
+
+    Args:
+        x: The numerator.
+        y: The denominator, which is never zero on the path that reaches here.
+
+    Returns:
+        The quotient, rounded towards minus infinity.
+    """
+    var truncated = x / y
+    var left_over = x - truncated * y
+    if left_over != 0 and (left_over < 0) != (y < 0):
+        return truncated - 1
+    return truncated
+
+
+def _floored_int_remainder(x: Int64, y: Int64) -> Int64:
+    """The remainder that goes with `_floored_int_quotient`.
+
+    Args:
+        x: The numerator.
+        y: The denominator.
+
+    Returns:
+        A value with the sign of `y`, so never negative for the divisors used
+        here.
+    """
+    return x - _floored_int_quotient(x, y) * y
+
+
+def _leap_scalar(year: Int64) -> Bool:
+    """Reports whether a year has a 29 February in it, the way anybody says it.
+
+    Args:
+        year: The calendar year.
+
+    Returns:
+        True if the year is a leap year.
+    """
+    if year % 400 == 0:
+        return True
+    if year % 100 == 0:
+        return False
+    return year % 4 == 0
+
+
+def _month_length_scalar(year: Int64, month: Int) -> Int:
+    """Returns how many days are in a month, out of the rhyme.
+
+    Args:
+        year: The calendar year, which only February needs.
+        month: The month from 1 to 12.
+
+    Returns:
+        28, 29, 30 or 31.
+    """
+    if month == 2:
+        return 29 if _leap_scalar(year) else 28
+    if month == 4 or month == 6 or month == 9 or month == 11:
+        return 30
+    return 31
+
+
+@fieldwise_init
+struct CivilScalar(ImplicitlyCopyable, Movable):
+    """A calendar date, arrived at by counting."""
+
+    var year: Int64
+    """The calendar year."""
+
+    var month: Int
+    """The month from 1 to 12."""
+
+    var day: Int
+    """The day of the month from 1."""
+
+    var day_of_year: Int
+    """The day of the year from 1."""
+
+
+def civil_scalar(days: Int64) -> CivilScalar:
+    """Turns days since 1970-01-01 into a calendar date, one year at a time.
+
+    The twin for `civil_from_days`, and deliberately not the same algorithm.
+    Hinnant's version is four divisions and no branches over a four hundred year
+    cycle, which is fast and is not obvious. This one starts at 1 January 1970
+    and walks, a year at a time until the remaining days fit inside a year and
+    then a month at a time until they fit inside a month. It is slower than the
+    kernel by whatever distance the date is from 1970 and it is right for a
+    reason a reader can check in one sitting.
+
+    Args:
+        days: Days since the epoch, negative before it.
+
+    Returns:
+        The date those days name.
+    """
+    var year = Int64(1970)
+    var left = days
+
+    # Walk backwards first, because a negative count of days is a count into
+    # years that have not started yet and the forward loop has nothing to take.
+    while left < 0:
+        year -= 1
+        left += Int64(366) if _leap_scalar(year) else Int64(365)
+
+    while True:
+        var length = Int64(366 if _leap_scalar(year) else 365)
+        if left < length:
+            break
+        left -= length
+        year += 1
+
+    var day_of_year = Int(left) + 1
+    var month = 1
+    while Int(left) >= _month_length_scalar(year, month):
+        left -= Int64(_month_length_scalar(year, month))
+        month += 1
+    return CivilScalar(year, month, Int(left) + 1, day_of_year)
+
+
+def temporal_field_scalar[
+    field: Int, dst: DType
+](a: Array[DType.int64], per_day: Int64, per_second: Int64) -> Array[dst]:
+    """Reads one field out of a temporal column, one row at a time.
+
+    The twin for `extract_field`. Everything is computed with
+    `_floored_int_quotient` and `_floored_int_remainder` rather than with `//` and `%`, because the whole
+    correctness argument in `temporal.mojo` rests on those two rounding down and
+    a twin that used the same operators would agree with the kernel for the same
+    reason rather than for an independent one.
+
+    Args:
+        a: The column, holding whole units since the epoch.
+        per_day: How many of that unit make a day.
+        per_second: How many of that unit make a second.
+
+    Parameters:
+        field: The field code, as `temporal.mojo` numbers them.
+        dst: The dtype that field answers with.
+
+    Returns:
+        A column of `dst`, null wherever the input is null.
+    """
+    var out = Array[dst](len(a))
+    for i in range(len(a)):
+        if not _is_there(a, i):
+            out.set_null(i)
+            continue
+        var value = a[i]
+        var days = _floored_int_quotient(value, per_day)
+        var rest = _floored_int_remainder(value, per_day)
+        var rate = per_second if per_second > 0 else Int64(1)
+        var civil = civil_scalar(days)
+        var answer: Int64
+
+        comptime if field == 0:
+            answer = civil.year
+        elif field == 1:
+            answer = Int64(civil.month)
+        elif field == 2:
+            answer = Int64(civil.day)
+        elif field == 3:
+            answer = _floored_int_quotient(rest, rate * 3600)
+        elif field == 4:
+            answer = _floored_int_remainder(
+                _floored_int_quotient(rest, rate * 60), 60
+            )
+        elif field == 5:
+            answer = _floored_int_remainder(
+                _floored_int_quotient(rest, rate), 60
+            )
+        elif field == 6:
+            answer = (
+                _floored_int_remainder(rest, rate) * 1_000_000_000 // rate
+            ) // 1_000
+        elif field == 7:
+            answer = (
+                _floored_int_remainder(rest, rate) * 1_000_000_000 // rate
+            ) % 1_000
+        elif field == 8:
+            answer = _floored_int_remainder(days + 3, 7)
+        elif field == 9:
+            answer = Int64(civil.day_of_year)
+        elif field == 10:
+            answer = Int64((civil.month - 1) // 3 + 1)
+        elif field == 11:
+            answer = Int64(_month_length_scalar(civil.year, civil.month))
+        elif field == 12:
+            answer = Int64(_leap_scalar(civil.year))
+        elif field == 13:
+            answer = Int64(civil.day == 1)
+        elif field == 14:
+            answer = Int64(
+                civil.day == _month_length_scalar(civil.year, civil.month)
+            )
+        elif field == 15:
+            answer = Int64(civil.day == 1 and (civil.month - 1) % 3 == 0)
+        elif field == 16:
+            answer = Int64(
+                civil.day == _month_length_scalar(civil.year, civil.month)
+                and civil.month % 3 == 0
+            )
+        elif field == 17:
+            answer = Int64(civil.day == 1 and civil.month == 1)
+        else:
+            answer = Int64(civil.day == 31 and civil.month == 12)
+
+        comptime if dst == DType.bool:
+            out.set_valid(i, Scalar[DType.bool](answer != 0).cast[dst]())
+        else:
+            out.set_valid(i, Scalar[dst](answer))
+    return out^
