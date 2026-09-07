@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### The calendar and clock fields of a datetime column
+
+`s.dt.year` is nineteen names in pandas and it is one calendar conversion here. A timestamp column is a column of integers and a count of them per second, and the year, the month, the day, the hour, the minute, the second, the microsecond, the nanosecond, the day of the week, the day of the year, the quarter, the length of the month and the six `is_` predicates are all functions of those two things and of nothing else. So there is one kernel, `extract_field`, parameterised on which of the nineteen is wanted, and the field is folded away at compile time rather than branched on per row.
+
+The conversion is Howard Hinnant's `civil_from_days`, which turns a count of days since the epoch into a year, a month and a day with no table, no loop and no branch, by moving the start of the year to March so the leap day falls at the end where it stops disturbing the month lengths, and then dividing into the four hundred year cycle over which the Gregorian calendar repeats exactly.
+
+The whole of it rests on division rounding down rather than towards zero, and that is a real hazard rather than a pedantic one. The last second of 1969 is timestamp -1. Rounded down it is the day before the epoch, which is right. Rounded towards zero it is the epoch itself, and the answer comes back as the first of January 1970, off by a day and a year. Mojo's `//` rounds down on a register, which was measured rather than assumed, so the first test in `tests/test_temporal.mojo` is the 1969 row and it fails the moment that stops being true. The scalar twin deliberately does not use `//` at all: it builds its floored division out of a truncating one and a correction, so that the two sides agree for independent reasons instead of for the same one.
+
+The results are int32 for the twelve fields that are numbers and bool for the seven that are predicates, which is what pandas answers, and the width is not a matter of taste because the conformance suite compares integer widths exactly.
+
+Two more names come with them. `Series.dt_date` drops the clock and answers a `date32` column, where pandas answers an object column of Python `date` values because its numpy backend has no date dtype to put them in. `Series.dt_normalize` moves the clock back to midnight and keeps the timestamp type and the resolution, which is the difference between the two and is what makes the second one the one you can still subtract.
+
+A column carrying a time zone is refused rather than answered. The stored integers are UTC, so reading an hour off them would give the right number under the wrong name, seven hours out in New York. That waits on a time zone database, which firepanda does not have yet.
+
+Checked against pandas 3.0.3 two ways before any of it was written down: fourteen hand picked extremes and then five hundred random instants between the year 1 and the year 2262, each across all four resolutions and all twenty one outputs, byte identical both times. `tests/fuzz/kernel.mojo` now runs the kernel against its twin on a random temporal column one case in eight.
+
 ### A join microbenchmark that joins on text, which is what the join queries actually do
 
 Every row in the `join/` family joined on an integer. All five db-benchmark join queries join on text: j1 on id1, j2 and j3 on id2, j4 and j5 on id3. So the family measured the pairing and nothing in it measured the part of a real join that comes before the pairing.

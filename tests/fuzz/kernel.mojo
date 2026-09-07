@@ -104,6 +104,13 @@ from firepanda.kernel.scalar import (
     subtract_scalar,
     sum_scalar,
     take_scalar,
+    temporal_field_scalar,
+)
+from firepanda.kernel.temporal import (
+    FIELD_CODES,
+    TemporalField,
+    extract_field,
+    field_dtype,
 )
 from firepanda.testing.rng import Rng
 
@@ -1078,6 +1085,92 @@ def run_one[dt: DType](mut rng: Rng, step: Int, seed: UInt64) raises:
                 fail(step, seed, "slice", String("row ", i))
 
 
+def _per_second_of(which: Int) -> Int64:
+    """How many of the stored unit make a second, for the four resolutions.
+
+    Written as four branches rather than as a list because a `comptime` list
+    does not become a runtime value, and four branches on a value in a register
+    is what the list would have compiled to anyway.
+
+    Args:
+        which: 0 for seconds, 1 for milliseconds, 2 for microseconds and
+            anything else for nanoseconds.
+
+    Returns:
+        The divisor.
+    """
+    if which == 0:
+        return 1
+    if which == 1:
+        return 1_000
+    if which == 2:
+        return 1_000_000
+    return 1_000_000_000
+
+
+def run_temporal(mut rng: Rng, step: Int, seed: UInt64) raises:
+    """Draws a random temporal column and reads every field off it twice.
+
+    This is not folded into `run_one` because the calendar fields are not a
+    per dtype operation. The column is always int64 and what rotates instead is
+    the resolution, so the four divisors below all get exercised over a run.
+
+    The values are drawn over the whole range a second resolution timestamp can
+    hold rather than over the small range the arithmetic kernels use, because
+    the small range is entirely inside 1970 and the thing most likely to be
+    wrong is a year that is not.
+
+    Args:
+        rng: The generator.
+        step: The case number.
+        seed: The seed.
+
+    Raises:
+        If the kernel disagrees with its twin on any field.
+    """
+    var length = rng.next_below(MAX_LENGTH)
+    var per_second = _per_second_of(step % 4)
+    var per_day = per_second * 86400
+
+    # Drawn as a count of seconds and then scaled, so that a nanosecond column
+    # gets instants spread over centuries rather than over the four hours
+    # sixty four random bits of nanoseconds would cover.
+    var col = Array[DType.int64](length)
+    var shape = rng.next_below(4)
+    for i in range(length):
+        var seconds = Int64(rng.next_u64() % 17_179_869_184) - 8_589_934_592
+        col[i] = seconds * per_second
+    if shape == NULLS_ALL:
+        for i in range(length):
+            col.set_null(i)
+    elif shape == NULLS_SPRINKLED:
+        for i in range(length):
+            if rng.next_below(4) == 0:
+                col.set_null(i)
+    elif shape == NULLS_RUNS:
+        var at = 0
+        while at < length:
+            var run = rng.next_range(1, 100)
+            var null_run = rng.next_bool()
+            var stop = at + run
+            if stop > length:
+                stop = length
+            if null_run:
+                for i in range(at, stop):
+                    col.set_null(i)
+            at = stop
+
+    comptime for code in FIELD_CODES:
+        comptime result = field_dtype(code)
+        var fast = extract_field[DType.int64, code, result](
+            col, per_day, per_second
+        )
+        var twin = temporal_field_scalar[code, result](col, per_day, per_second)
+        same_column(
+            fast, twin, step, seed, String("temporal ", TemporalField(code))
+        )
+
+
 def main() raises:
     var options = parse_options()
     print(
@@ -1116,6 +1209,12 @@ def main() raises:
             run_one[DType.float32](rng, step, options.seed)
         else:
             run_one[DType.float64](rng, step, options.seed)
+
+        # One case in eight, because nineteen fields over a column is nineteen
+        # passes and running it every time would take the run away from the
+        # other kernels for coverage of one of them.
+        if step % 8 == 0:
+            run_temporal(rng, step, options.seed)
 
         applied += 1
 
