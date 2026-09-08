@@ -60,6 +60,7 @@ from firepanda.array.value import Value
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
 from firepanda.dtype.logical import LogicalType, TypeKind, promote
+from firepanda.dtype.temporal import TimeUnit, TimeZone, finer_unit
 
 from .arith import (
     OP_ADD,
@@ -100,6 +101,7 @@ from .compare import (
     less_equal,
     not_equal,
 )
+from .temporal import temporal_as_unit
 from .text import compare_text, compare_text_const
 
 
@@ -292,6 +294,9 @@ def binary_type(
         If the two types have no common type, or the operation is arithmetic and
         the common type is not a number.
     """
+    if a.is_temporal() or b.is_temporal():
+        return temporal_binary_type(op, a, b)
+
     var common = promote(a, b)
     if op.is_comparison():
         return LogicalType.BOOL
@@ -304,6 +309,127 @@ def binary_type(
     if op == BinaryOp.DIV:
         return common if common.is_float() else LogicalType.FLOAT64
     return common
+
+
+def temporal_binary_type(
+    op: BinaryOp, a: LogicalType, b: LogicalType
+) raises -> LogicalType:
+    """Returns the type an operation answers when a temporal column is in it.
+
+    Four pairs have an answer and the rest do not. Two instants subtract to an
+    elapsed time. An instant and an elapsed time add to an instant, either way
+    round, and an instant minus an elapsed time is an instant too. Two elapsed
+    times add and subtract to an elapsed time. And any two of the same kind
+    compare, which is the one case where the answer is a bool and the units stop
+    mattering.
+
+    Every one of those is stated at the finer of the two resolutions, which is
+    `promote`'s rule and is applied here by asking it. A second column minus a
+    nanosecond column is a nanosecond duration, and it is a nanosecond duration
+    whichever side the second column is on, because the rule is about what
+    reconciling them loses rather than about which operand came first.
+
+    What is refused is refused because pandas refuses it or because firepanda
+    has not written it. Two instants do not add, and pandas says so in as many
+    words: there is no instant halfway between two instants that is their sum. A
+    duration times or divided by a number is a duration and is a real pandas
+    answer that firepanda has no loop for yet, and a duration divided by a
+    duration is a float and is the same. Those are absences and say so.
+
+    Args:
+        op: The operation.
+        a: The left operand type.
+        b: The right operand type.
+
+    Returns:
+        Bool for a comparison, a duration for a difference of instants, a
+        timestamp for an instant shifted by an elapsed time, and a duration for
+        a sum or difference of elapsed times.
+
+    Raises:
+        Error: If the pair has no answer, or has one that firepanda has not
+            written yet.
+    """
+    var instants = a.kind == TypeKind.TIMESTAMP and b.kind == TypeKind.TIMESTAMP
+    var spans = a.kind == TypeKind.DURATION and b.kind == TypeKind.DURATION
+
+    if op.is_comparison():
+        # `promote` refuses a mixture of kinds and a mixture of zones, which is
+        # what decides this, so the comparison rule is one line and the message
+        # for a pair that cannot compare is the promotion's own.
+        _ = promote(a, b)
+        return LogicalType.BOOL
+
+    if instants:
+        if op == BinaryOp.SUB:
+            return LogicalType.duration(promote(a, b).unit)
+        raise Error(
+            "binary: "
+            + String(op)
+            + " is not defined on "
+            + String(a)
+            + " and "
+            + String(b)
+            + ", because two points in time have a difference and nothing"
+            " else, and pandas will not add them either"
+        )
+
+    if spans:
+        if op == BinaryOp.ADD or op == BinaryOp.SUB:
+            return promote(a, b)
+        raise Error(
+            "binary: "
+            + String(op)
+            + " is not defined on "
+            + String(a)
+            + " and "
+            + String(b)
+            + ", because two elapsed times add and subtract and pandas gives"
+            " their quotient as a plain number, which firepanda has not"
+            " written yet"
+        )
+
+    var shift_left = a.kind == TypeKind.TIMESTAMP and b.kind == (
+        TypeKind.DURATION
+    )
+    var shift_right = a.kind == TypeKind.DURATION and b.kind == (
+        TypeKind.TIMESTAMP
+    )
+    if shift_left or shift_right:
+        var stamp = a if shift_left else b
+        var span = b if shift_left else a
+        if op == BinaryOp.ADD or (shift_left and op == BinaryOp.SUB):
+            return LogicalType.timestamp(
+                finer_unit(stamp.unit, span.unit), TimeZone(copy=stamp.zone)
+            )
+        if op == BinaryOp.SUB:
+            raise Error(
+                "binary: an elapsed time minus a point in time has no answer,"
+                " because the point in time is the thing being subtracted from"
+                " and there is nothing on the left to subtract it from"
+            )
+        raise Error(
+            "binary: "
+            + String(op)
+            + " is not defined on "
+            + String(a)
+            + " and "
+            + String(b)
+            + ", because a point in time and an elapsed time add and subtract"
+            " and do nothing else"
+        )
+
+    # One temporal and something that is not temporal at all. `promote` has the
+    # three messages for this, separated by which mixture it is, so it says it.
+    _ = promote(a, b)
+    raise Error(
+        "binary: "
+        + String(op)
+        + " is not defined on "
+        + String(a)
+        + " and "
+        + String(b)
+    )
 
 
 def unsupported_on_bool(op: BinaryOp) -> Bool:
@@ -605,6 +731,9 @@ def binary_any(a: AnyArray, b: AnyArray, op: BinaryOp) raises -> AnyArray:
     # a common type and that the operation is defined on it.
     var answer = binary_type(op, a.type, b.type)
 
+    if a.type.is_temporal() or b.type.is_temporal():
+        return _temporal_erased(a, b, op, answer)
+
     # The common type is the promotion in all four shapes, including division.
     # A float division answers at the common type, so there is nothing else to
     # convert to. An integer division answers float64, and its loop reads the
@@ -667,6 +796,49 @@ def _compare_text_erased(
     if op == BinaryOp.GT:
         return AnyArray(compare_text[CMP_GT](x, y))
     return AnyArray(compare_text[CMP_GE](x, y))
+
+
+def _temporal_erased(
+    a: AnyArray, b: AnyArray, op: BinaryOp, answer: LogicalType
+) raises -> AnyArray:
+    """Runs an operation on a pair where at least one side is temporal.
+
+    This is the temporal twin of the three steps at the top of `binary_any` and
+    it differs in exactly one of them. Reconciling two temporal columns is a
+    rescale and not a cast: a second column read in nanoseconds is every value
+    times a thousand million, where a cast from int32 to int64 is the same
+    number in a wider box. So the conversion goes through `temporal_as_unit`,
+    which multiplies and refuses a column that will not fit afterwards, and the
+    loop underneath is the ordinary int64 one.
+
+    A pair of dates is the exception and needs no rescale at all, because a day
+    is a day. They only compare, since `binary_type` refuses everything else on
+    them, so they go straight to the int32 loop.
+
+    Args:
+        a: The left column.
+        b: The right column.
+        op: The operation, already known to have an answer on this pair.
+        answer: The type that answer carries, from `binary_type`.
+
+    Returns:
+        The result, tagged with `answer` rather than with the int64 the loop
+        worked in.
+
+    Raises:
+        Error: If reconciling the two resolutions puts a value outside an int64,
+            or the loop cannot run.
+    """
+    if a.type.kind == TypeKind.DATE:
+        return _binary_erased(a, b, op, DType.int32)
+
+    var working = finer_unit(a.type.unit, b.type.unit)
+    var left = temporal_as_unit(a, working)
+    var right = temporal_as_unit(b, working)
+    var out = _binary_erased(left, right, op, DType.int64)
+    if op.is_comparison():
+        return out^
+    return AnyArray(out^.into_typed[DType.int64]().into_data(), answer)
 
 
 def _binary_erased(
@@ -772,6 +944,9 @@ def binary_value_any(
     if scalar.is_null():
         return all_null(answer, len(a))
 
+    if a.type.is_temporal() or scalar.type.is_temporal():
+        return _temporal_const_erased(a, scalar, op, answer, value_on_left)
+
     var common = promote(a.type, scalar.type)
     # The same widening `binary_any` does, and the same reason. A Python `True`
     # against a bool column is the only way to reach it here, and writing it the
@@ -851,6 +1026,59 @@ def _compare_text_const_erased(
     if op == BinaryOp.GT:
         return AnyArray(compare_text_const[CMP_GT](x, probe))
     return AnyArray(compare_text_const[CMP_GE](x, probe))
+
+
+def _temporal_const_erased(
+    a: AnyArray,
+    b: Value,
+    op: BinaryOp,
+    answer: LogicalType,
+    value_on_left: Bool,
+) raises -> AnyArray:
+    """Runs an operation between a temporal column and one temporal constant.
+
+    The constant side of `_temporal_erased`, and the same one difference from
+    the ordinary path: reconciling two resolutions is a multiply rather than a
+    cast. The column goes through `temporal_as_unit` and the constant is one
+    multiplication, which is where a constant earns its keep, since the column
+    is the only thing that has to be walked.
+
+    The constant is the side that is more likely to move, because a
+    `Timedelta(hours=1)` is microseconds whatever column it meets, so an hour
+    added to a column of seconds drags the whole column up to microseconds. That
+    is pandas' answer and it is a surprising one, and it is surprising in pandas
+    rather than here.
+
+    Args:
+        a: The column.
+        b: The constant, present and temporal, or a temporal column met by a
+            constant of some other kind, which `binary_type` has already refused.
+        op: The operation.
+        answer: The type the answer carries, from `binary_type`.
+        value_on_left: True for `Timedelta(...) + s` rather than `s + ...`.
+
+    Returns:
+        The result, tagged with `answer`.
+
+    Raises:
+        Error: If reconciling the two resolutions puts a value outside an int64,
+            or the loop cannot run.
+    """
+    var applied = op.mirrored() if value_on_left and op.is_comparison() else op
+    var flip = value_on_left and not op.is_comparison()
+    if a.type.kind == TypeKind.DATE:
+        return _binary_const_erased(a, b, applied, DType.int32, flip)
+
+    var working = finer_unit(a.type.unit, b.type.unit)
+    var column = temporal_as_unit(a, working)
+    var count = b.as_scalar[DType.int64]() * (
+        working.per_second() // b.type.unit.per_second()
+    )
+    var scalar = Value(count)
+    var out = _binary_const_erased(column, scalar, applied, DType.int64, flip)
+    if op.is_comparison():
+        return out^
+    return AnyArray(out^.into_typed[DType.int64]().into_data(), answer)
 
 
 def _binary_const_erased(

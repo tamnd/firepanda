@@ -59,11 +59,14 @@ from firepanda.kernel.temporal import (
     temporal_as_unit,
     temporal_date,
     temporal_day_name,
+    temporal_duration_days,
     temporal_field,
     temporal_month_name,
     temporal_normalize,
     temporal_round,
     temporal_strftime,
+    temporal_to_duration,
+    temporal_total_seconds,
     unit_named,
 )
 from firepanda.kernel.unary import UnaryOp, unary_any
@@ -605,9 +608,12 @@ struct Series(Copyable, Movable, Sized, Writable):
     def dt(self, name: StringSlice) raises -> Self:
         """Returns one part of a datetime series, looked up by its pandas name.
 
-        The twenty one names are the nineteen fields plus `date` and
+        The twenty two names are the nineteen fields plus `date` and
         `normalize`, which are the two that answer a temporal column rather than
-        a number.
+        a number, and `days`, which is the one of the twenty two that belongs to
+        a duration series rather than to a datetime one. pandas keeps them on
+        the same accessor and answers whichever the column's type has, so this
+        does too and lets the kernel refuse the wrong pairing.
 
         Args:
             name: The pandas spelling, so `dayofweek` rather than `day_of_week`.
@@ -622,6 +628,8 @@ struct Series(Copyable, Movable, Sized, Writable):
             return self.dt_date()
         if name == "normalize":
             return self.dt_normalize()
+        if name == "days":
+            return self.dt_days()
         return self.dt(field_named(name))
 
     def dt_date(self) raises -> Self:
@@ -794,6 +802,61 @@ struct Series(Copyable, Movable, Sized, Writable):
         """
         return self._relabelled(
             self.name, AnyArray(temporal_strftime(self.values, fmt))
+        )
+
+    def dt_total_seconds(self) raises -> Self:
+        """Returns every elapsed time counted in seconds.
+
+        The answer is float64 and the fraction is kept, so a span of one
+        millisecond answers 0.001 rather than zero. It is float64 even on a
+        column of whole seconds, because that is the dtype pandas gives and the
+        number a caller compares against came from there.
+
+        Returns:
+            A float64 series of the same height, null where this one is null.
+
+        Raises:
+            If the series is not a duration.
+        """
+        return self._relabelled(self.name, temporal_total_seconds(self.values))
+
+    def dt_days(self) raises -> Self:
+        """Returns the number of whole days in every elapsed time.
+
+        The rounding is downward and not toward zero, so a span of minus one
+        microsecond is minus one day. That is what pandas answers and it is the
+        rule that keeps `days` and the remainder adding back up to the original
+        span.
+
+        Returns:
+            An int64 series of the same height, null where this one is null.
+
+        Raises:
+            If the series is not a duration.
+        """
+        return self._relabelled(self.name, temporal_duration_days(self.values))
+
+    def to_timedelta(self, unit: StringSlice = "ns") raises -> Self:
+        """Reads a series of whole numbers as a series of elapsed times.
+
+        This is `pandas.to_timedelta`, which is a free function there and a
+        method here for the same reason `astype` is: the series is the thing
+        being converted and there is nowhere else to hang it that does not need
+        the caller to import a second name.
+
+        Args:
+            unit: What the numbers are counts of, as one of `s`, `ms`, `us` and
+                `ns`.
+
+        Returns:
+            A duration series of the same height, null where this one is null.
+
+        Raises:
+            If the series is neither whole numbers nor already durations, or if
+            the unit is not one of the four.
+        """
+        return self._relabelled(
+            self.name, temporal_to_duration(self.values, unit_named(unit))
         )
 
     def _relabelled(self, name: String, var values: AnyArray) raises -> Self:

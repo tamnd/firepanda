@@ -76,6 +76,7 @@ from firepanda.dtype.temporal import TimeUnit
 from firepanda.kernel.arith import OP_ADD, OP_MUL, OP_SUB
 from firepanda.kernel.compare import CMP_GE, CMP_LT
 from firepanda.kernel.nulls import fill_backward, fill_forward
+from firepanda.kernel.reduce import reduce_any
 from firepanda.kernel.scalar import (
     absolute_scalar,
     add_scalar,
@@ -89,6 +90,7 @@ from firepanda.kernel.scalar import (
     equal_scalar,
     fill_scalar,
     filter_scalar,
+    duration_days_scalar,
     floor_divide_const_scalar,
     floor_divide_scalar,
     group_scalar,
@@ -109,6 +111,7 @@ from firepanda.kernel.scalar import (
     sum_scalar,
     take_scalar,
     temporal_field_scalar,
+    total_seconds_scalar,
 )
 from firepanda.kernel.temporal import (
     FIELD_CODES,
@@ -120,8 +123,10 @@ from firepanda.kernel.temporal import (
     field_dtype,
     round_to_period,
     temporal_day_name,
+    temporal_duration_days,
     temporal_month_name,
     temporal_strftime,
+    temporal_total_seconds,
 )
 from firepanda.testing.rng import Rng
 
@@ -1273,6 +1278,135 @@ def _unit_of(which: Int) -> TimeUnit:
     return TimeUnit.NANO
 
 
+def _duration_column(mut rng: Rng) raises -> Array[DType.int64]:
+    """Draws a random column of elapsed times.
+
+    Not `_temporal_column`, and the difference is the point. That one draws a
+    whole number of seconds and then scales it, which is right for an instant
+    and wrong here, because every value it produced would be a whole second and
+    the two readers below both round. What is drawn instead is a magnitude with
+    a random number of bits in it, so a run sees spans of a few units beside
+    spans of a few centuries, and the sign is drawn separately so that the
+    negative side of the rounding gets the same coverage as the positive one.
+
+    The width is capped at fifty six bits rather than sixty three so that the
+    sum over a column of them does not wrap. That is not a case being avoided,
+    since the wrap is what the hardware does and both sides do it, it is a case
+    that would tell nobody anything.
+
+    Args:
+        rng: The generator.
+
+    Returns:
+        The column, with one of the four null shapes over it.
+
+    Raises:
+        If the generator does.
+    """
+    var length = rng.next_below(MAX_LENGTH)
+    var col = Array[DType.int64](length)
+    var shape = rng.next_below(4)
+    for i in range(length):
+        var bits = rng.next_below(57)
+        var magnitude = Int64(rng.next_u64() >> UInt64(63 - bits))
+        col[i] = -magnitude if rng.next_bool() else magnitude
+    if shape == NULLS_ALL:
+        for i in range(length):
+            col.set_null(i)
+    elif shape == NULLS_SPRINKLED:
+        for i in range(length):
+            if rng.next_below(4) == 0:
+                col.set_null(i)
+    elif shape == NULLS_RUNS:
+        var at = 0
+        while at < length:
+            var run = rng.next_range(1, 100)
+            var null_run = rng.next_bool()
+            var stop = at + run
+            if stop > length:
+                stop = length
+            if null_run:
+                for i in range(at, stop):
+                    col.set_null(i)
+            at = stop
+    return col^
+
+
+def run_durations(mut rng: Rng, step: Int, seed: UInt64) raises:
+    """Reads a random column of elapsed times two ways and reduces it three.
+
+    The two readers are the new loops and are what this case is for. `dt.days`
+    rounds downward, which is the property the twin is written not to share, and
+    `dt.total_seconds` divides into float64, which is where a column of whole
+    milliseconds either keeps its fraction or quietly loses it.
+
+    The three reductions are here for the type and not for the arithmetic. The
+    adding and the comparing are the same loops `run_one` already fuzzes over
+    every dtype, so what is being checked is that the temporal route through
+    `reduce_any` reaches them at all and hands back an answer that is still a
+    length of time rather than the int64 it is stored in.
+
+    The arithmetic between two duration columns is deliberately not here. It is
+    `temporal_as_unit` followed by the same add and subtract loops, and both
+    halves are fuzzed already, so a case for the pair would be drawing operands
+    small enough that the rescale cannot overflow and then testing nothing that
+    is not tested twice over.
+
+    Args:
+        rng: The generator.
+        step: The case number.
+        seed: The seed.
+
+    Raises:
+        If a kernel disagrees with its twin.
+    """
+    var which = step % 4
+    var per_second = _per_second_of(which)
+    var per_day = per_second * 86400
+    var col = _duration_column(rng)
+    var any = AnyArray(
+        Array[DType.int64](copy=col).into_data(),
+        LogicalType.duration(_unit_of(which)),
+    )
+
+    var days = temporal_duration_days(any)
+    same_column(
+        days.as_typed_view[DType.int64](),
+        duration_days_scalar(col, per_day),
+        step,
+        seed,
+        "duration days",
+    )
+    var seconds = temporal_total_seconds(any)
+    same_column(
+        seconds.as_typed_view[DType.float64](),
+        total_seconds_scalar(col, per_second),
+        step,
+        seed,
+        "total seconds",
+    )
+
+    var total = reduce_any(any, AggKind.SUM)
+    if String(total.type) != String(any.type):
+        fail(step, seed, "duration sum", String("answered ", total.type))
+    if total.as_typed_view[DType.int64]()[0] != Int64(sum_scalar(col)):
+        fail(step, seed, "duration sum", "disagrees with the twin")
+
+    var least = reduce_any(any, AggKind.MIN)
+    var low = min_scalar(col)
+    if String(least.type) != String(any.type):
+        fail(step, seed, "duration min", String("answered ", least.type))
+    if least.data.validity.get(0) != low[1]:
+        fail(step, seed, "duration min", "disagrees about finding anything")
+    if low[1] and least.as_typed_view[DType.int64]()[0] != low[0]:
+        fail(step, seed, "duration min", "disagrees with the twin")
+
+    var most = reduce_any(any, AggKind.MAX)
+    var high = max_scalar(col)
+    if high[1] and most.as_typed_view[DType.int64]()[0] != high[0]:
+        fail(step, seed, "duration max", "disagrees with the twin")
+
+
 def _padded(value: Int64, width: Int) -> String:
     """Writes a number with leading zeroes to a minimum width.
 
@@ -1510,6 +1644,9 @@ def main() raises:
 
         if step % 8 == 2:
             run_names(rng, step, options.seed)
+
+        if step % 8 == 6:
+            run_durations(rng, step, options.seed)
 
         applied += 1
 

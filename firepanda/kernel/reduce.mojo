@@ -35,6 +35,7 @@ from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
+from firepanda.dtype.logical import LogicalType, TypeKind
 
 from .accum import accumulator
 from .agg import extreme_over, mean_over, sum_over
@@ -92,6 +93,9 @@ def reduce_any(col: AnyArray, kind: AggKind) raises -> AnyArray:
         counted[0] = Int64(len(col) - missing_count_any(col))
         return AnyArray(counted^)
 
+    if col.type.is_temporal():
+        return _reduce_temporal(col, kind)
+
     # As in `aggregate_group_any`: uint8 is in ALL, so a string column would
     # match it and a sum over a column of names would return a number taken from
     # the first byte of every view rather than an error. The grouped path already
@@ -109,6 +113,113 @@ def reduce_any(col: AnyArray, kind: AggKind) raises -> AnyArray:
 
     var codes = Array[DType.uint32](len(col))
     return aggregate_group_any(col, kind, codes^, 1, trusted=True)
+
+
+def _reduce_temporal(col: AnyArray, kind: AggKind) raises -> AnyArray:
+    """Reduces a column of instants, dates or elapsed times.
+
+    The arithmetic is the arithmetic the loops below already do, because all
+    three types are an integer count underneath and the smallest of a set of
+    counts is the smallest of the instants they stand for. What is different is
+    the answer type. `_reduce_core` builds its result out of the physical dtype
+    and would hand back an int64, so the extreme of a timestamp column would
+    stop being a time on the way out. Every branch here therefore ends by
+    putting the column's own type back on the result.
+
+    Which reductions exist at all is pandas' answer and not a choice. A sum of
+    elapsed times is an elapsed time and pandas gives it. A sum of instants is
+    refused, because adding two points in time is refused and a total is
+    additions in a row. A mean is given for both, since the average of a set of
+    instants is an instant that pandas will name for you.
+
+    The mean is the one that costs something. pandas computes it in float64 and
+    then truncates toward zero at both signs, so the mean of one and two seconds
+    is one second and the mean of minus two and minus one is minus one second,
+    and above 2**53 in the column's own unit the float has run out of mantissa
+    and the answer drifts. The same route is taken here on purpose. Doing the
+    division in int64 would be more accurate and would disagree with pandas on
+    columns nobody has, which is the trade `binary.mojo` makes at the top of its
+    own file and the same trade is right here.
+
+    A date is refused for both the sum and the mean. pandas has no date dtype,
+    so there is no answer to copy, and the two that a date does have an obvious
+    answer for are the two that are given.
+
+    Args:
+        col: The column.
+        kind: Which reduction.
+
+    Returns:
+        A column of one row, carrying the column's own logical type.
+
+    Raises:
+        If the reduction has no meaning on this type, or if the reduction is one
+        the fast route does not cover, since none of the remaining ones has a
+        temporal spelling yet.
+    """
+    var t = col.type
+    var sum_or_mean = kind == AggKind.SUM or kind == AggKind.MEAN
+    if kind == AggKind.SUM and t.kind != TypeKind.DURATION:
+        raise Error(
+            "reduce: a sum over "
+            + String(t)
+            + " has no answer, because adding two points in time has none"
+            " either and a total is additions in a row"
+        )
+    if sum_or_mean and t.kind == TypeKind.DATE:
+        raise Error(
+            "reduce: "
+            + ("a sum" if kind == AggKind.SUM else "a mean")
+            + " over "
+            + String(t)
+            + " is not defined, because pandas has no date dtype to copy an"
+            " answer from"
+        )
+    if not _takes_fast_route(kind):
+        raise Error("reduce: that aggregation is not defined on " + String(t))
+
+    comptime for candidate in ALL:
+        if col.dtype() == candidate:
+            var raw = _reduce_core(
+                col.unsafe_ptr[candidate](),
+                col.data.validity,
+                len(col) - col.null_count(),
+                len(col),
+                kind,
+            )
+            if kind == AggKind.MEAN:
+                return _truncated(raw^, t)
+            return AnyArray(raw^.into_typed[candidate]().into_data(), t)
+    raise Error("reduce: unsupported dtype")
+
+
+def _truncated(var raw: AnyArray, t: LogicalType) raises -> AnyArray:
+    """Turns the float64 mean of a temporal column back into a time.
+
+    The truncation is toward zero rather than downward, which is what a cast
+    does and what pandas does, and the two agreeing is why this is a cast and
+    not a floor. A mean that found nothing is a NaN here, because that is how
+    `_place` spells a missing float, and it leaves as a null of the column's own
+    type, because that is how a missing instant is spelled.
+
+    Args:
+        raw: The one row float64 result. Consumed.
+        t: The type the answer should carry.
+
+    Returns:
+        A column of one row.
+
+    Raises:
+        If the result is not the float64 one row column this expects.
+    """
+    var average = raw.as_typed_view[DType.float64]()[0]
+    var out = Array[DType.int64](1)
+    if average != average:
+        out[0] = 0
+        out.data.validity.set(0, False)
+    else:
+        out[0] = average.cast[DType.int64]()
+    return AnyArray(out^.into_data(), t)
 
 
 def _reduce_core[

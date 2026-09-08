@@ -27,6 +27,7 @@ difference is lost before anybody can look at it.
 
 from firepanda.dtype.lists import FLOAT, SIGNED, contains
 from firepanda.dtype.logical import LogicalType, TypeKind, logical_for
+from firepanda.dtype.temporal import TimeUnit, TimeZone
 
 
 struct Value(Copyable, Equatable, Movable, Writable):
@@ -114,6 +115,52 @@ struct Value(Copyable, Equatable, Movable, Writable):
         self.type = LogicalType.STRING
         self.present = True
         self.weak = False
+
+    @staticmethod
+    def duration(count: Int64, unit: TimeUnit) -> Self:
+        """Constructs an elapsed time of `count` units.
+
+        This is `pandas.Timedelta`, and the resolution is part of it rather than
+        being a detail of how it is stored. pandas says the same thing three
+        ways and gets three resolutions: `Timedelta(1, unit='D')` is a second, so
+        adding it to a second column leaves a second column, while
+        `Timedelta(days=1)` and `Timedelta('1h')` are both microseconds and
+        adding either of them to a second column gives a microsecond one. Same
+        amount of time, different answer type, and the difference is in the
+        spelling.
+
+        Args:
+            count: How many of the unit.
+            unit: Which unit.
+
+        Returns:
+            The value.
+        """
+        var out = Self(count)
+        out.type = LogicalType.duration(unit)
+        return out^
+
+    @staticmethod
+    def timestamp(
+        count: Int64, unit: TimeUnit, zone: TimeZone = TimeZone()
+    ) -> Self:
+        """Constructs an instant, counted from the epoch in `unit`.
+
+        This is `pandas.Timestamp`. It exists for the same reason the duration
+        above does, which is that a temporal constant carries a resolution and
+        the resolution is what decides the answer's type.
+
+        Args:
+            count: How many of the unit since the epoch.
+            unit: Which unit.
+            zone: The wall clock it is read against, naive by default.
+
+        Returns:
+            The value.
+        """
+        var out = Self(count)
+        out.type = LogicalType.timestamp(unit, zone)
+        return out^
 
     def __init__(out self, *, null: LogicalType):
         """Constructs the absent value of a type.

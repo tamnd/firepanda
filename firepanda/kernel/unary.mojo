@@ -42,7 +42,7 @@ from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
-from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.logical import LogicalType, TypeKind
 from firepanda.exec import parallel_morsels
 
 from .mask import repair_range
@@ -127,6 +127,15 @@ def unary_type(op: UnaryOp, t: LogicalType) raises -> LogicalType:
     float column has no answer before it starts reading rows, and because the
     binary side has the same function and the two are read together.
 
+    A duration is the one temporal type any of these has an answer for, and it
+    has an answer for three of the four. An elapsed time has a magnitude and a
+    sign, so `abs` and unary minus mean what they say on it and pandas gives
+    both. An instant has neither: there is no point in time whose magnitude is
+    another point in time, and pandas refuses `-s` and `abs(s)` on a datetime
+    column. The inversion is refused on a duration too, because a bitwise not of
+    a count of nanoseconds is a number rather than a duration and nobody wants
+    it.
+
     Args:
         op: The operation.
         t: The operand type.
@@ -135,9 +144,13 @@ def unary_type(op: UnaryOp, t: LogicalType) raises -> LogicalType:
         The operand type.
 
     Raises:
-        If the type is not a number or a bool, or the operation is an inversion
-        of a floating point column.
+        If the type is not a number, a bool or a duration, or the operation is
+        an inversion of a floating point or duration column.
     """
+    if t.kind == TypeKind.DURATION:
+        if op == UnaryOp.INVERT:
+            raise Error("unary: ~ is not defined on " + String(t))
+        return t
     if not t.is_numeric() and t != LogicalType.BOOL:
         raise Error("unary: " + String(op) + " is not defined on " + String(t))
     if op == UnaryOp.INVERT and t.physical.is_floating_point():
@@ -296,9 +309,20 @@ def unary_any(a: AnyArray, op: UnaryOp) raises -> AnyArray:
     comptime for target in ALL:
         if a.type.physical == target:
             ref x = a.as_typed_view[target]()
+            var out: AnyArray
             if op == UnaryOp.NEG:
-                return AnyArray(negate(x))
-            if op == UnaryOp.ABS:
-                return AnyArray(absolute(x))
-            return AnyArray(invert(x))
+                out = AnyArray(negate(x))
+            elif op == UnaryOp.ABS:
+                out = AnyArray(absolute(x))
+            else:
+                out = AnyArray(invert(x))
+            # The loop worked in the physical dtype and the answer is the
+            # logical one, which is only a difference for a duration: the
+            # magnitude of an elapsed time is an elapsed time and not the int64
+            # it is stored in.
+            if a.type.kind == TypeKind.DURATION:
+                return AnyArray(
+                    out^.into_typed[DType.int64]().into_data(), a.type
+                )
+            return out^
     raise Error("unary: unsupported dtype")

@@ -10,7 +10,7 @@ See docs/specs/03-dtype-dispatch.md.
 """
 
 from .lists import ALL, FLOAT, INTEGER, SIGNED, UNSIGNED, contains, dtype_size
-from .temporal import TimeUnit, TimeZone
+from .temporal import TimeUnit, TimeZone, finer_unit
 
 
 @fieldwise_init
@@ -581,23 +581,37 @@ def promote(a: LogicalType, b: LogicalType) raises -> LogicalType:
 
     if a.is_temporal() or b.is_temporal():
         # Two identical temporal types were returned above, so everything
-        # arriving here is a mixture, and there are three of them. Two temporals
-        # that disagree about the kind, the unit or the zone have an answer and
-        # it is a conversion rather than a promotion, since reconciling a second
-        # column with a nanosecond one means multiplying every value. A duration
-        # against a number has an answer too and pandas gives it, because
-        # scaling an elapsed time by a factor is a sensible thing to do, and
-        # firepanda has no arithmetic on these columns to give it with yet. An
-        # instant against a number has no answer at all. The three messages are
-        # separate because a user who wrote `a - b` on two microsecond columns
-        # in different zones has a different problem from one who wrote `a - 1`.
+        # arriving here is a mixture. Two of the same kind in the same zone
+        # differ only in resolution, and pandas reconciles those at the finer of
+        # the two: a second column against a nanosecond one is read in
+        # nanoseconds, because that is the only direction that loses nothing.
+        # Everything else is refused. Two temporals that disagree about the kind
+        # or the zone have an answer that is not a promotion, since a point in
+        # time and an elapsed time are not two spellings of one thing and two
+        # zones are two readings of one instant. A duration against a number has
+        # an answer too and pandas gives it, because scaling an elapsed time by
+        # a factor is a sensible thing to do, and firepanda has no arithmetic on
+        # these columns to give it with yet. An instant against a number has no
+        # answer at all. The messages are separate because a user who wrote
+        # `a - b` on two microsecond columns in different zones has a different
+        # problem from one who wrote `a - 1`.
         if a.is_temporal() and b.is_temporal():
+            if a.kind == TypeKind.DURATION and b.kind == TypeKind.DURATION:
+                return LogicalType.duration(finer_unit(a.unit, b.unit))
+            if (
+                a.kind == TypeKind.TIMESTAMP
+                and b.kind == TypeKind.TIMESTAMP
+                and a.zone == b.zone
+            ):
+                return LogicalType.timestamp(
+                    finer_unit(a.unit, b.unit), TimeZone(copy=a.zone)
+                )
             raise Error(
                 "no common type for "
                 + String(a)
                 + " and "
                 + String(b)
-                + ", because the two differ in kind, in unit or in time"
+                + ", because the two differ in kind or in time"
                 " zone and"
                 " reconciling them is a conversion rather than a promotion"
             )

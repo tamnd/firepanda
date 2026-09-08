@@ -275,21 +275,37 @@ def test_the_longest_zone_name_there_is_fits_and_a_longer_one_does_not() raises:
         _ = TimeZone("America/Argentina/ComodRivadavia_and_then_some_more")
 
 
-def test_a_temporal_type_promotes_with_nothing_but_itself() raises:
+def test_a_temporal_type_promotes_with_itself_at_the_finer_unit() raises:
     var micro = LogicalType.timestamp(TimeUnit.MICRO)
+    var nano = LogicalType.timestamp(TimeUnit.NANO)
     assert_true(promote(micro, micro) == micro)
+    # Two instants of the same kind and the same zone reconcile at whichever of
+    # the two resolutions is finer, which is the rule pandas applies to a
+    # comparison and to a subtraction alike, and it is the same answer whichever
+    # way round the pair is handed over.
+    assert_true(promote(micro, nano) == nano)
+    assert_true(promote(nano, micro) == nano)
+    var span = LogicalType.duration(TimeUnit.SECOND)
+    assert_true(
+        promote(span, LogicalType.duration(TimeUnit.MILLI))
+        == LogicalType.duration(TimeUnit.MILLI)
+    )
+
     with assert_raises(contains="not the same kind of thing"):
         _ = promote(micro, LogicalType.INT64)
-    with assert_raises(contains="differ in kind, in unit or in time zone"):
-        _ = promote(micro, LogicalType.timestamp(TimeUnit.NANO))
-    with assert_raises(contains="differ in kind, in unit or in time zone"):
+    with assert_raises(contains="differ in kind or in time zone"):
         _ = promote(micro, LogicalType.DATE32)
     # A duration against an instant of the same unit is the mixture that looks
     # most like it should work and is the one pandas answers with a timestamp,
-    # so it is worth pinning that firepanda refuses it rather than promoting
-    # one to the other on the strength of both being an int64.
-    with assert_raises(contains="differ in kind, in unit or in time zone"):
+    # so it is worth pinning that firepanda refuses it here rather than
+    # promoting one to the other on the strength of both being an int64. The
+    # addition that does have an answer is arranged in `binary.mojo`, which does
+    # not go through a common type because there is no common type to go
+    # through.
+    with assert_raises(contains="differ in kind or in time zone"):
         _ = promote(micro, LogicalType.duration(TimeUnit.MICRO))
+    with assert_raises(contains="differ in kind or in time zone"):
+        _ = promote(micro, LogicalType.timestamp(TimeUnit.MICRO, TimeZone("UTC")))
     with assert_raises(contains="scales an elapsed time by a number"):
         _ = promote(LogicalType.duration(TimeUnit.MICRO), LogicalType.INT64)
 
