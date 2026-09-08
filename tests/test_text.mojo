@@ -234,6 +234,63 @@ def test_a_null_in_the_mask_drops_the_row() raises:
     assert_equal(kept.text(0), "a")
 
 
+def test_a_pattern_filter_is_a_mask_and_then_a_filter() raises:
+    # The four `str_` methods hand back a mask rather than a series, the way
+    # `is_null` does, because a mask is what `filter` takes and turning it into
+    # a series first would only mean turning it back.
+    var s = Series(
+        "part",
+        strings_from_list(
+            ["SMALL BRASS BOX", "LARGE PLATED TIN", "SMALL BRUSHED BRASS"]
+        ),
+    )
+    var kept = s.filter(s.str_contains("BRASS"))
+    assert_equal(len(kept), 2)
+    assert_equal(kept.text(0), "SMALL BRASS BOX")
+    assert_equal(kept.text(1), "SMALL BRUSHED BRASS")
+
+    var front = s.filter(s.str_starts_with("SMALL"))
+    assert_equal(len(front), 2)
+
+    var back = s.filter(s.str_ends_with("BRASS"))
+    assert_equal(len(back), 1)
+    assert_equal(back.text(0), "SMALL BRUSHED BRASS")
+
+    var both = s.filter(s.str_contains_in_order("SMALL", "BRASS"))
+    assert_equal(len(both), 2)
+
+
+def test_two_substrings_in_order_are_not_two_substrings() raises:
+    # `LIKE '%BRASS%SMALL%'` is false of a row that holds both the other way
+    # round, which is the whole reason the pair is one call rather than two.
+    var s = Series("part", strings_from_list(["SMALL BRASS BOX"]))
+    assert_true(s.str_contains("BRASS")[0])
+    assert_true(s.str_contains("SMALL")[0])
+    assert_false(s.str_contains_in_order("BRASS", "SMALL")[0])
+    assert_true(s.str_contains_in_order("SMALL", "BRASS")[0])
+
+
+def test_a_pattern_on_a_number_column_is_refused() raises:
+    var s = Series("n", Array[DType.int64](3))
+    with assert_raises(contains="not a string column"):
+        _ = s.str_contains("7")
+
+
+def test_a_null_row_matches_nothing_and_stays_null() raises:
+    var builder = StringBuilder(capacity=3)
+    builder.append("brass".as_bytes())
+    builder.append_null()
+    builder.append("tin".as_bytes())
+    var s = Series("part", builder^.finish())
+    var mask = s.str_contains("brass")
+    assert_true(mask[0])
+    assert_false(mask.is_valid(1))
+    assert_false(mask[2])
+    # And a null row is dropped by the filter rather than kept, which is what a
+    # null in a mask means everywhere else in the library.
+    assert_equal(len(s.filter(s.str_contains("s"))), 1)
+
+
 def test_slice_head_and_tail_cut_text() raises:
     var s = Series("s", strings_from_list(["a", long_text("bb"), "c", "d"]))
     assert_equal(s.slice(1, 3).text(0), long_text("bb"))

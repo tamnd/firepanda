@@ -119,6 +119,13 @@ from .nulls import (
     present_bitmap,
     present_bitmap_any,
 )
+from .pattern import (
+    find_bytes,
+    text_contains,
+    text_contains_in_order,
+    text_ends_with,
+    text_starts_with,
+)
 from .reduce import reduce_any
 from .select import (
     filter_any,

@@ -8,6 +8,46 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Four ways to ask whether a text column holds a run of bytes
+
+`Series` grew `str_contains`, `str_starts_with`, `str_ends_with` and `str_contains_in_order`, and `kernel/pattern.mojo` holds the search behind them. Between them they cover every `LIKE` pattern the twenty two TPC-H queries use: `%x%` is a contains, `x%` is a starts with, `%x` is an ends with, and `%a%b%` is the pair. They return a mask rather than a series, the way `is_null` does, because a mask is what `filter` takes.
+
+The pair is one call and not two on purpose. `LIKE '%a%b%'` requires the second run to begin after the first one ends, so `'abc'` does not match `'%bc%a%'` even though it holds both runs, and a conjunction of two independent searches would say it does.
+
+The search is a two ended filter with a vectorized skip. The needle's first and last bytes are each broadcast across a register, two sixteen byte blocks of the row are loaded a needle apart, and a candidate survives only where both agree. A block with no survivor moves the cursor by the whole block, and a block with one compares the middle bytes of that candidate. That beats a two way or a Boyer Moore search on the shapes that turn up here, needles of five to twenty bytes against rows of ten to eighty, because those spend their setup on tables a short needle never earns back.
+
+The width and the second end are both there because the first version did not have them and was measured. That version compared thirty two bytes at a time and filtered on the first byte only, and on a thirty two byte column it never entered the block loop once: a block starting at `i` reads through where the last candidate's needle would end, so it needs a row of at least `width + m - 1` bytes, which at thirty two is thirty six for a five byte needle. TPC-H's part type is about twenty five bytes and its name about forty. Sixteen puts the threshold at twenty, which those columns clear, and the second load costs one instruction and takes the survivors from one position in twenty odd down to one in five hundred.
+
+Nanoseconds a row on an i9-13900K over a million rows of thirty two bytes, first version against this one, with `text/equal_constant` alongside as a control that neither version touches.
+
+| row | first version | now |
+| --- | --- | --- |
+| contains_hit | 6.521 | 1.923 |
+| contains_miss | 12.149 | 1.595 |
+| contains_short | 2.793 | 1.730 |
+| contains_pair | 7.579 | 3.080 |
+| starts_with | 2.611 | 1.385 |
+| ends_with | 0.903 | 0.953 |
+| equal_constant (control) | 1.891 | 1.872 |
+
+Most of that is the block loop finally running. The last of it is one `@parameter for`: when a block has survivors, the loop over its lanes was indexing a register with a runtime value, which is a store and a reload, and unrolling it took the row that finds its needle from 2.903 to 1.923 and the pair from 3.803 to 3.080. That is why the row with a hit used to cost twice the row without one, which is backwards.
+
+Against the same column on the same machine, with polars 1.44.1, pandas 3.0.5 and duckdb 1.5.5 all producing the same mask. Polars and pandas hand back a materialized boolean, which is what firepanda does, so those columns compare directly. DuckDB has no way to hand back a column without either copying it to Python or fusing it into something, so it gets two columns: `fetchnumpy`, which pays a materialization tax firepanda also pays, and a `sum` over the mask inside the engine, which pays none and is the harder number to beat.
+
+| row | firepanda | polars | pandas | duckdb fetch | duckdb fused |
+| --- | --- | --- | --- | --- | --- |
+| contains_hit | 1.923 | 9.028 | 47.462 | 3.328 | 1.921 |
+| contains_miss | 1.595 | 9.253 | 45.674 | 4.528 | 2.270 |
+| starts_with | 1.385 | 3.234 | 47.635 | 3.518 | 1.950 |
+| ends_with | 0.953 | 3.390 | 44.286 | 2.523 | 1.179 |
+| constant equality (control) | 1.872 | 0.630 | 31.512 | 2.424 | 1.382 |
+
+Read honestly that says three things. Against polars, which is the like for like comparison, it is 2.3 to 5.8 times. Against DuckDB copying out, 1.7 to 2.8 times. Against DuckDB fused, it is a tie on contains with a hit and 1.2 to 1.4 times on the rest, and the control row explains why the margin narrows: DuckDB never writes the mask to memory in that form and firepanda always does, so a megabyte of stores is in every firepanda number and in none of the fused ones. Subtract each engine's own control and what is left is the search itself, and there firepanda's is the cheapest of the four by some distance.
+
+Starts with and ends with do not search at all. Both know where to look, so both are a length test and one run of bytes compared at a fixed offset, which is what `text/starts_with` and `text/ends_with` are in the benchmark suite to confirm: if they are ever close to `text/contains_hit` then the skipping has stopped working.
+
+There is no general pattern compiler and this is not a step towards one before it is needed. A matcher with a wildcard alphabet is a different piece of work, it would be slower on all four of these, and none of the queries ask for it.
+
 ### DuckDB's grammar is in the tree, and a table is generated from it
 
 DuckDB replaced its Bison parser with a hand written PEG parser and shipped the grammar as data. Forty `.gram` files, five keyword lists, 61,190 bytes, MIT licensed, and executed by the reference implementation itself rather than being a description of it. That is the artifact the whole SQL milestone rests on, and it is now vendored at `firepanda/sql/grammar/` with a `VENDOR` file recording the upstream commit and a SHA-256 for each of the 47 files.

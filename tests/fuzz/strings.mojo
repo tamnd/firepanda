@@ -41,7 +41,19 @@ from firepanda.kernel.compare import (
     CMP_NE,
 )
 from firepanda.kernel.group import AggKind, aggregate_group_any
+from firepanda.kernel.pattern import (
+    text_contains,
+    text_contains_in_order,
+    text_ends_with,
+    text_starts_with,
+)
 from firepanda.kernel.sort import argsort_any
+from firepanda.kernel.scalar import (
+    text_contains_in_order_scalar,
+    text_contains_scalar,
+    text_ends_with_scalar,
+    text_starts_with_scalar,
+)
 from firepanda.kernel.text import compare_text, compare_text_const
 from firepanda.testing.rng import Rng
 
@@ -416,6 +428,170 @@ def reference_compare(pick: Int, a: String, b: String) -> Bool:
     return a >= b
 
 
+def random_run(mut rng: Rng, values: List[String]) -> String:
+    """Draws a needle, usually one that is somewhere in the column.
+
+    Half the needles are a run of bytes lifted out of an element and half are
+    drawn the way an element is. A needle drawn freely almost never occurs, and
+    a search that answered no to everything would pass a run made only of those.
+
+    Args:
+        rng: The generator.
+        values: The reference elements.
+
+    Returns:
+        The needle, which may be empty.
+    """
+    if len(values) == 0 or rng.next_bool():
+        return random_text(rng)
+    var text = values[rng.next_below(len(values))]
+    var length = text.byte_length()
+    if length == 0:
+        return String("")
+    var start = rng.next_below(length)
+    var count = rng.next_below(length - start) + 1
+    var out = String("")
+    for k in range(count):
+        out += text[byte=start + k]
+    return out
+
+
+def agree(
+    got: Array[DType.bool],
+    want: Array[DType.bool],
+    step: Int,
+    seed: UInt64,
+    what: String,
+) raises:
+    """Asserts a pattern kernel and its twin gave the same column.
+
+    Args:
+        got: The kernel's answer.
+        want: The twin's answer.
+        step: The case number, for the failure message.
+        seed: The seed, for the failure message.
+        what: Which kernel and which needle, for the failure message.
+
+    Raises:
+        If they differ anywhere, in validity or in value.
+    """
+    if len(got) != len(want):
+        raise Error(
+            String(
+                "case ",
+                step,
+                " seed ",
+                seed,
+                ": ",
+                what,
+                " gave ",
+                len(got),
+                " rows against ",
+                len(want),
+            )
+        )
+    for i in range(len(got)):
+        if got.is_valid(i) != want.is_valid(i):
+            raise Error(
+                String(
+                    "case ",
+                    step,
+                    " seed ",
+                    seed,
+                    ": ",
+                    what,
+                    " row ",
+                    i,
+                    " validity ",
+                    got.is_valid(i),
+                    " against ",
+                    want.is_valid(i),
+                )
+            )
+        if got.is_valid(i) and got[i] != want[i]:
+            raise Error(
+                String(
+                    "case ",
+                    step,
+                    " seed ",
+                    seed,
+                    ": ",
+                    what,
+                    " row ",
+                    i,
+                    " is ",
+                    got[i],
+                    " against ",
+                    want[i],
+                )
+            )
+
+
+def check_text_pattern(
+    column: StringArray,
+    values: List[String],
+    mut rng: Rng,
+    step: Int,
+    seed: UInt64,
+) raises:
+    """Runs one of the four pattern kernels against its twin.
+
+    The twin tries every position and compares every byte. The kernel tests
+    sixteen positions at once and skips almost all of them, and which sixteen
+    depends on where in the row it is and how long the row is, so the lengths
+    this file already draws are exactly what is wanted: a row shorter than one
+    block takes the byte path, a longer one takes the block path, and the block
+    that runs off the end overlaps the one before it.
+
+    Args:
+        column: The column under test.
+        values: The reference elements, used only to draw needles that occur.
+        rng: The generator.
+        step: The case number, for the failure message.
+        seed: The seed, for the failure message.
+
+    Raises:
+        If a kernel and its twin disagree anywhere.
+    """
+    var needle = random_run(rng, values)
+    var pick = rng.next_below(4)
+    if pick == 0:
+        agree(
+            text_contains(column, needle.as_bytes()),
+            text_contains_scalar(column, needle),
+            step,
+            seed,
+            "contains " + needle,
+        )
+    elif pick == 1:
+        agree(
+            text_starts_with(column, needle.as_bytes()),
+            text_starts_with_scalar(column, needle),
+            step,
+            seed,
+            "starts_with " + needle,
+        )
+    elif pick == 2:
+        agree(
+            text_ends_with(column, needle.as_bytes()),
+            text_ends_with_scalar(column, needle),
+            step,
+            seed,
+            "ends_with " + needle,
+        )
+    else:
+        var second = random_run(rng, values)
+        agree(
+            text_contains_in_order(
+                column, needle.as_bytes(), second.as_bytes()
+            ),
+            text_contains_in_order_scalar(column, needle, second),
+            step,
+            seed,
+            "in_order " + needle + " " + second,
+        )
+
+
 def check_text_compare(
     column: StringArray,
     values: List[String],
@@ -744,8 +920,11 @@ def main() raises:
                             )
                         )
 
-        elif op < 90 and len(values) > 0:
+        elif op < 85 and len(values) > 0:
             check_text_compare(column, values, present, rng, step, options.seed)
+
+        elif op < 90 and len(values) > 0:
+            check_text_pattern(column, values, rng, step, options.seed)
 
         elif op < 95 and len(values) > 0:
             # The permutation is compared position by position rather than the
