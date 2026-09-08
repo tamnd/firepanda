@@ -113,15 +113,14 @@ def take_any(
         return AnyArray(_take_strings(col.strings(), indices, spread))
     comptime for candidate in ALL:
         if col.dtype() == candidate:
-            return AnyArray(
-                _take_core(
-                    col.unsafe_ptr[candidate](),
-                    col.data.validity,
-                    col.null_count() > 0,
-                    indices,
-                    spread,
-                )
+            var moved = _take_core(
+                col.unsafe_ptr[candidate](),
+                col.data.validity,
+                col.null_count() > 0,
+                indices,
+                spread,
             )
+            return AnyArray(moved^.into_data(), col.type)
     raise Error("take: unsupported dtype")
 
 
@@ -415,14 +414,13 @@ def filter_any(col: AnyArray, mask: Array[DType.bool]) raises -> AnyArray:
         return AnyArray(_filter_strings(col.strings(), mask))
     comptime for candidate in ALL:
         if col.dtype() == candidate:
-            return AnyArray(
-                _filter_core(
-                    col.unsafe_ptr[candidate](),
-                    col.data.validity,
-                    col.null_count() > 0,
-                    mask,
-                )
+            var kept = _filter_core(
+                col.unsafe_ptr[candidate](),
+                col.data.validity,
+                col.null_count() > 0,
+                mask,
             )
+            return AnyArray(kept^.into_data(), col.type)
     raise Error("filter: unsupported dtype")
 
 

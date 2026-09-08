@@ -166,6 +166,24 @@ def concat_refs_any(
                 + " and "
                 + String(parts[p][].type)
             )
+        # A column of times is an integer count of units underneath, so two of
+        # them at different resolutions agree on `dtype()` and are not the same
+        # column at all. Stacking a second column onto a millisecond one without
+        # noticing would put every value of one of them out by a factor of a
+        # thousand, silently, which is the worst answer available. pandas
+        # reconciles the two at the finer unit here; firepanda refuses for now
+        # and says so, because a wrong answer costs more than a missing one.
+        if (
+            parts[0][].type.is_temporal() or parts[p][].type.is_temporal()
+        ) and parts[p][].type != parts[0][].type:
+            raise Error(
+                "concat: "
+                + String(parts[0][].type)
+                + " and "
+                + String(parts[p][].type)
+                + " are counts of different things and stacking them would put"
+                " one of the two out by the ratio between their units"
+            )
         total += len(parts[p][])
 
     if parts[0][].is_string():
@@ -195,7 +213,8 @@ def concat_refs_any(
 
     comptime for candidate in ALL:
         if dt == candidate:
-            return AnyArray(_stack_fixed[candidate](fixed, total))
+            var stacked = _stack_fixed[candidate](fixed, total)
+            return AnyArray(stacked^.into_data(), parts[0][].type)
     raise Error("concat: unsupported dtype " + String(dt))
 
 
@@ -230,6 +249,18 @@ def concat_two_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
             + " and "
             + String(b.type)
         )
+    # As in `concat_refs_any`: two resolutions share a physical dtype and are
+    # not the same column, and a join stacking one onto the other would be out
+    # by the ratio between the units with nothing to show for it.
+    if (a.type.is_temporal() or b.type.is_temporal()) and a.type != b.type:
+        raise Error(
+            "concat: "
+            + String(a.type)
+            + " and "
+            + String(b.type)
+            + " are counts of different things and stacking them would put one"
+            " of the two out by the ratio between their units"
+        )
     if a.is_string():
         var out = _StringStack(
             len(a) + len(b),
@@ -245,7 +276,8 @@ def concat_two_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
 
     comptime for candidate in ALL:
         if a.dtype() == candidate:
-            return AnyArray(_stack_fixed[candidate](fixed, len(a) + len(b)))
+            var stacked = _stack_fixed[candidate](fixed, len(a) + len(b))
+            return AnyArray(stacked^.into_data(), a.type)
     raise Error("concat: unsupported dtype " + String(a.dtype()))
 
 

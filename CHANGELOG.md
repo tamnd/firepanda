@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A column of times stays a column of times
+
+Sorting a datetime column gave back a column of numbers. The order was right and every value was right, and the type was gone, because the kernels underneath are written against the physical dtype and a timestamp is an int64 to every one of them. `take_any`, `filter_any`, `concat_refs_any`, `concat_two_any`, `coalesce_any`, `fill_forward_any` and `fill_backward_any` now carry the incoming column's logical type onto the outgoing one. Sorting goes through `take_any` and needed nothing of its own. No loop changed and no value changed.
+
+Reductions are the half that is not a relabelling, since a reduction is allowed to answer a different type than it read, and which ones exist over a temporal column was measured against a running pandas 3.0.3 rather than worked out. Three of the answers are not what working them out would give. A standard deviation of instants is a duration, because how far apart a set of points in time are is a length of time and not a point in it. A variance is refused while its own square root is given, because the variance is in units of time multiplied by itself and there is no dtype to hold that. And a standard error raises for a whole column and answers a duration inside a group by, on the same column, which is an inconsistency in pandas rather than a rule and is copied in both directions on purpose.
+
+All of that is one function, `temporal_agg_type`, which both the grouped path and the whole column path read, so the two cannot drift apart. It lives in `group.mojo` because that is where `AggKind` is defined and the other arrangement would be an import cycle. Relabelling a result decides from the raw result's physical dtype rather than from a second table of what each core returns, so a mean that comes back as a float64 is truncated toward zero into the answer's integer type and a minimum that is already in the right type is retagged without a value being touched.
+
+This also restores the median, the quantile and the distinct count over a temporal column. The previous entry left `_reduce_temporal` raising for every kind not on its fast route, which took those three away; they fall through to the grouped path over a single group again, and the refusals now happen before the fall through rather than after it.
+
+Concatenating or coalescing two temporal columns at different resolutions now raises. The two share a physical dtype, so the old behaviour was a silent factor of a thousand on half the rows, which is the worst answer available: right in shape, right in dtype, wrong by three orders of magnitude in the values. pandas reconciles the two at the finer unit and firepanda does not yet, and refusing is the smaller answer on purpose, because a missing feature costs less than one nobody reading the output can detect.
+
 ### The elapsed time, and the arithmetic between two temporal columns
 
 Subtracting one datetime column from another now answers a duration column, adding a duration to a datetime answers a datetime, and adding two durations answers a duration. None of the three fitted the machinery that was there, which is why this is a larger change than the four accessor members that come with it.

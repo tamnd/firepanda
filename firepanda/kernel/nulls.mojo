@@ -606,21 +606,33 @@ def coalesce_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
             + " and "
             + String(b.type)
         )
+    # As in `concat_refs_any`: two resolutions share a physical dtype and are
+    # not the same column, so filling a second column's gaps from a millisecond
+    # one would put every filled row out by a factor of a thousand and leave the
+    # rest alone, which is worse than either being wrong throughout or refusing.
+    if (a.type.is_temporal() or b.type.is_temporal()) and a.type != b.type:
+        raise Error(
+            "coalesce: "
+            + String(a.type)
+            + " and "
+            + String(b.type)
+            + " are counts of different things, so a row filled from the second"
+            " would be out by the ratio between their units"
+        )
     if a.is_string():
         return AnyArray(_coalesce_strings(a.strings(), b.strings()))
 
     comptime for candidate in ALL:
         if a.dtype() == candidate:
-            return AnyArray(
-                _coalesce_core(
-                    a.unsafe_ptr[candidate](),
-                    a.data.validity,
-                    len(a),
-                    b.unsafe_ptr[candidate](),
-                    b.data.validity,
-                    len(b),
-                )
+            var picked = _coalesce_core(
+                a.unsafe_ptr[candidate](),
+                a.data.validity,
+                len(a),
+                b.unsafe_ptr[candidate](),
+                b.data.validity,
+                len(b),
             )
+            return AnyArray(picked^.into_data(), a.type)
     raise Error("coalesce: unsupported dtype " + String(a.dtype()))
 
 
@@ -781,14 +793,13 @@ def fill_forward_any(col: AnyArray, limit: Int = 0) raises -> AnyArray:
 
     comptime for candidate in ALL:
         if col.dtype() == candidate:
-            return AnyArray(
-                _fill_core[forward=True](
-                    col.unsafe_ptr[candidate](),
-                    col.data.validity,
-                    len(col),
-                    limit,
-                )
+            var filled = _fill_core[forward=True](
+                col.unsafe_ptr[candidate](),
+                col.data.validity,
+                len(col),
+                limit,
             )
+            return AnyArray(filled^.into_data(), col.type)
     raise Error("fill_forward: unsupported dtype " + String(col.dtype()))
 
 
@@ -810,14 +821,13 @@ def fill_backward_any(col: AnyArray, limit: Int = 0) raises -> AnyArray:
 
     comptime for candidate in ALL:
         if col.dtype() == candidate:
-            return AnyArray(
-                _fill_core[forward=False](
-                    col.unsafe_ptr[candidate](),
-                    col.data.validity,
-                    len(col),
-                    limit,
-                )
+            var filled = _fill_core[forward=False](
+                col.unsafe_ptr[candidate](),
+                col.data.validity,
+                len(col),
+                limit,
             )
+            return AnyArray(filled^.into_data(), col.type)
     raise Error("fill_backward: unsupported dtype " + String(col.dtype()))
 
 

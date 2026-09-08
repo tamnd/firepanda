@@ -113,6 +113,7 @@ from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer
 from firepanda.dtype.lists import ALL
+from firepanda.dtype.logical import LogicalType, TypeKind
 from firepanda.exec.parallel import parallel_for, worker_count
 from firepanda.hash.factorize import factorize_strings
 from firepanda.kernel.accum import accumulator, highest, lowest
@@ -3768,6 +3769,162 @@ def aggregate_group_many[
     return out^
 
 
+def temporal_agg_type(
+    t: LogicalType, kind: AggKind, whole_column: Bool
+) raises -> LogicalType:
+    """Says what type a reduction over a column of times answers.
+
+    This is the whole table, in one place, because the grouped path and the
+    whole column path have to agree and the only way to be sure of that is for
+    them to be reading the same thing. Every row of it was measured against a
+    running pandas 3.0.3 rather than reasoned about, and three of the rows are
+    not what reasoning would have produced.
+
+    The first is that a standard deviation of instants is an elapsed time. That
+    is obviously right once said out loud, since the spread of a set of points
+    in time is a length of time and not a point in it, and it is not what a
+    reimplementation does by default because every other reduction here answers
+    the type it read. The same goes for the standard error.
+
+    The second is that pandas refuses a variance and gives a standard deviation,
+    which is the square root of the thing it just refused. The reason is that a
+    variance of times is in units of time squared and there is no such dtype, so
+    there is nowhere to put the answer, while the square root is back in units
+    of time and there is. That is a better reason than it first looks like.
+
+    The third is an inconsistency rather than a rule. `s.sem()` raises on a
+    column of times and `df.groupby(k)[c].sem()` answers an elapsed time on the
+    same column, so which of the two a caller wrote decides whether they get an
+    answer. firepanda copies both halves, which is what `whole_column` is for,
+    because a user comparing the two libraries is comparing whichever one they
+    wrote and not the rule behind it.
+
+    The counting reductions are not in the table at all. A count, a size and a
+    distinct count are numbers about the column rather than values out of it, so
+    they answer int64 for a column of times exactly as they do for a column of
+    anything else, and they come back as `INT64` here meaning leave the result
+    alone.
+
+    Args:
+        t: The column's type.
+        kind: Which reduction.
+        whole_column: True when there is no grouping, which changes one answer.
+
+    Returns:
+        The type the answer carries, or `LogicalType.INT64` for the three that
+        count rather than measure.
+
+    Raises:
+        If pandas has no answer for this reduction on this type, with the reason
+        rather than with the dtype.
+    """
+    if kind == AggKind.COUNT or kind == AggKind.SIZE or kind == AggKind.NUNIQUE:
+        return LogicalType.INT64
+
+    if kind == AggKind.SUM and t.kind != TypeKind.DURATION:
+        raise Error(
+            "reduce: a sum over "
+            + String(t)
+            + " has no answer, because adding two points in time has none"
+            " either and a total is additions in a row"
+        )
+
+    if kind == AggKind.STD or (kind == AggKind.SEM and not whole_column):
+        if t.kind == TypeKind.DATE:
+            raise Error(
+                "reduce: a spread of "
+                + String(t)
+                + " has no answer, because the answer would be a length of time"
+                " and pandas has no date dtype to measure one against"
+            )
+        return LogicalType.duration(t.unit)
+
+    if kind == AggKind.SEM:
+        raise Error(
+            "reduce: a standard error over "
+            + String(t)
+            + " is refused for a whole column, which is what pandas does, even"
+            " though the same reduction inside a group by answers a length of"
+            " time"
+        )
+
+    if (
+        kind == AggKind.VAR
+        or kind == AggKind.SKEW
+        or kind == AggKind.CORR
+        or kind == AggKind.COV
+    ):
+        raise Error(
+            "reduce: that aggregation over "
+            + String(t)
+            + " would be in units of time multiplied by itself, and there is no"
+            " dtype to put such an answer in"
+        )
+
+    if t.kind == TypeKind.DATE and (
+        kind == AggKind.SUM or kind == AggKind.MEAN
+    ):
+        raise Error(
+            "reduce: "
+            + ("a sum" if kind == AggKind.SUM else "a mean")
+            + " over "
+            + String(t)
+            + " is not defined, because pandas has no date dtype to copy an"
+            " answer from"
+        )
+
+    return t
+
+
+def retag_temporal(var raw: AnyArray, answer: LogicalType) raises -> AnyArray:
+    """Puts a temporal type back on a result that was computed as a number.
+
+    Two shapes arrive here. A minimum kept the column's own dtype and needs the
+    label and nothing else, which is a move and not a pass over the values. A
+    mean, a median, a quantile and a spread went through float64, because that
+    is what those cores answer for every dtype, and have to come back to an
+    integer count of units.
+
+    The way back is a truncation toward zero rather than a floor, at both signs,
+    which is what pandas does and is why this is a cast and not a rounding. A
+    result that found nothing is a NaN on the way in, because that is how the
+    cores spell a missing float, and it leaves as a null of the answer's own
+    type, because that is how a missing time is spelled. See #170.
+
+    Args:
+        raw: The computed result. Consumed.
+        answer: The type it should carry.
+
+    Returns:
+        A column of the same length carrying `answer`.
+
+    Raises:
+        If the result is neither the answer's own physical dtype nor the float64
+        the averaging cores produce, which would mean this table and the cores
+        disagree about what was computed.
+    """
+    if raw.dtype() != answer.physical and raw.dtype() != DType.float64:
+        raise Error("reduce: cannot label a " + String(raw.type) + " as a time")
+
+    var rows = len(raw)
+    comptime for candidate in ALL:
+        if answer.physical == candidate:
+            if raw.dtype() == candidate:
+                return AnyArray(
+                    raw^.into_typed[candidate]().into_data(), answer
+                )
+            var out = Array[candidate](rows)
+            for i in range(rows):
+                var value = raw.as_typed_view[DType.float64]()[i]
+                if value != value:
+                    out[i] = Scalar[candidate](0)
+                    out.data.validity.set(i, False)
+                else:
+                    out[i] = value.cast[candidate]()
+            return AnyArray(out^.into_data(), answer)
+    raise Error("reduce: " + String(answer) + " has no integer count under it")
+
+
 def aggregate_group_any(
     col: AnyArray,
     kind: AggKind,
@@ -3834,9 +3991,19 @@ def aggregate_group_any(
     if col.is_string():
         return aggregate_group_strings(col.strings(), kind, codes, groups)
 
+    # A column of times is an integer count of units underneath, so the cores
+    # below already compute the right numbers and the only thing missing is the
+    # label on the way out. `temporal_agg_type` also decides which reductions
+    # exist at all, since pandas refuses several of them, and it is the same
+    # table `reduce_any` reads so the grouped and whole column answers cannot
+    # drift apart.
+    var wanted = LogicalType.INT64
+    if col.type.is_temporal():
+        wanted = temporal_agg_type(col.type, kind, whole_column=False)
+
     comptime for candidate in ALL:
         if col.dtype() == candidate:
-            return _dispatch_core(
+            var raw = _dispatch_core(
                 col.unsafe_ptr[candidate](),
                 col.data.validity,
                 col.null_count() > 0,
@@ -3844,6 +4011,9 @@ def aggregate_group_any(
                 codes,
                 groups,
             )
+            if not col.type.is_temporal() or not wanted.is_temporal():
+                return raw^
+            return retag_temporal(raw^, wanted)
     raise Error("group by: unsupported dtype")
 
 
