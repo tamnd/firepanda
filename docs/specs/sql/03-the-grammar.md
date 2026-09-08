@@ -49,7 +49,11 @@ Uppercase bare words are keywords. Single quoted strings are literal punctuation
 
 **Take verbatim, byte for byte:** `src/parser/peg/grammar/statements/*.gram` and `src/parser/peg/grammar/keywords/*.list`. These are checked into `firepanda/sql/grammar/` under a `VENDOR` file recording the upstream ref, the commit SHA, the retrieval date and the SHA-256 of each file.
 
-**Take the one list we cannot derive:** `packrat_memoized_rules` out of `scripts/parser/grammar_types.yml`, which is the twenty two rules DuckDB memoizes, all of them on the expression chain from `Expression` down to `FunctionExpression`. That list is a performance decision somebody made with a profiler, and document 04 copies it rather than choosing its own, so it is vendored beside the grammar with its own checksum.
+**Take the two lists we cannot derive**, both out of `scripts/parser/grammar_types.yml`, both vendored beside the grammar with their own checksums.
+
+`packrat_memoized_rules` is the twenty two rules DuckDB memoizes, all of them on the expression chain from `Expression` down to `FunctionExpression`. That list is a performance decision somebody made with a profiler, and document 04 copies it rather than choosing its own.
+
+`matcher_rule_overrides` is the twenty four rules whose bodies the matcher does not walk, because it matches them itself. This one is not an optimization and skipping it would be a correctness bug. `OperatorLiteral <- Identifier` is what the grammar text says, so a matcher that believed the body would read a bare `+` as an identifier, and the same goes for `NumberLiteral`, `StringLiteral` and the twenty one name rules. The bodies stay in the generated table even though nothing walks them, because the round trip check in section 5 is what proves we read the grammar text correctly and it can only check text that is still there. Each rule carries the name of its matcher as a column instead.
 
 **Take as reference, do not vendor:** the rest of `grammar_types.yml`, which is DuckDB's map from rule name to the C++ node type its transformer produces, plus its `excluded_rules` list. It is a C++ artifact and useless to us directly, but it is the best available index of which rules a transformer actually has to handle and which are pure syntax. Document 05 uses it to order the work.
 

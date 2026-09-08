@@ -17,6 +17,7 @@ docs/specs/sql/03-the-grammar.md section 5.
 
 from .generated.keywords import KEYWORD_COUNT, KEYWORDS
 from .generated.rules import (
+    MATCHER_COUNT,
     MEMOIZED_COUNT,
     NODE_CAPTURE,
     NODE_CHOICE,
@@ -30,6 +31,7 @@ from .generated.rules import (
     NODE_REF,
     NODE_SEQ,
     NODE_STAR,
+    OVERRIDDEN_COUNT,
     RULE_COUNT,
     STRING_COUNT,
     TABLE,
@@ -89,6 +91,15 @@ struct Grammar(Movable):
     var memoized: List[Bool]
     """Whether each rule is on DuckDB's packrat list. See document 04."""
 
+    var matchers: List[UInt8]
+    """Which hand written matcher each rule uses, 0 for none.
+
+    Nearly every rule is matched by walking its body. Twenty four are not,
+    because their bodies are placeholders that upstream's matcher never reads.
+    The body is still in the table, so that the generator can check it round
+    trips against the grammar text, and the matcher skips it.
+    """
+
     var keywords: List[String]
     """Every keyword, lower case and sorted, so a lookup can bisect."""
 
@@ -108,6 +119,7 @@ struct Grammar(Movable):
         self.names = List[String]()
         self.roots = List[UInt32]()
         self.memoized = List[Bool]()
+        self.matchers = List[UInt8]()
         self.keywords = List[String]()
         self.keyword_classes = List[UInt8]()
 
@@ -145,9 +157,17 @@ struct Grammar(Movable):
         self.names.reserve(rule_count)
         self.roots.reserve(rule_count)
         self.memoized.reserve(rule_count)
+        self.matchers.reserve(rule_count)
         for _ in range(rule_count):
             self.roots.append(UInt32(reader.number()))
             self.memoized.append(reader.number() == 1)
+            var matcher = UInt8(reader.number())
+            if Int(matcher) >= MATCHER_COUNT:
+                raise Error(
+                    "grammar table: a rule names a matcher this build does not"
+                    " have"
+                )
+            self.matchers.append(matcher)
             self.names.append(reader.rest_of_line())
 
         reader.expect_end()
@@ -308,6 +328,34 @@ def memoized_rules(grammar: Grammar) raises -> List[Int]:
     if len(out) != MEMOIZED_COUNT:
         raise Error(
             "grammar table: memoized rule count disagrees with the table"
+        )
+    return out^
+
+
+def overridden_rules(grammar: Grammar) raises -> List[Int]:
+    """Lists the rules the matcher matches itself instead of walking.
+
+    Also copied from DuckDB, and for a harder reason than the memoized list: the
+    bodies of these rules are wrong on purpose. `OperatorLiteral <- Identifier`
+    is how upstream writes down that the matcher handles it, and a matcher that
+    took the body at its word would read a bare `+` as an identifier.
+
+    Args:
+        grammar: A loaded grammar.
+
+    Returns:
+        The rule indices, ascending.
+
+    Raises:
+        Error: If the count disagrees with the generated constant.
+    """
+    var out = List[Int]()
+    for i in range(len(grammar.matchers)):
+        if grammar.matchers[i] != 0:
+            out.append(i)
+    if len(out) != OVERRIDDEN_COUNT:
+        raise Error(
+            "grammar table: overridden rule count disagrees with the table"
         )
     return out^
 

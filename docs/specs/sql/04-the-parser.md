@@ -63,6 +63,8 @@ struct ParseNode:
 
 Twenty bytes, arena allocated, index linked. No owning pointers, for the same reason document 02 gave for the AST: an ownership tree in Mojo is a fight with no payoff.
 
+Twenty four rules are the exception, and they are where the tokenizer and the matcher meet. Their bodies in the grammar text are placeholders, `OperatorLiteral <- Identifier` being the one that shows why it matters, and upstream matches them from code instead. The list is `matcher_rule_overrides` in `grammar_types.yml`, it is vendored the same way the memoized list is, and the generated table carries it as a column on each rule. When the matcher reaches one it asks the token at the current position whether it is that kind of token, in constant time, and never looks at the body. Twenty of the twenty four are identifier rules, twelve that accept an unreserved keyword in place of a name and eight that do not, so this is also the whole of how the grammar's five keyword classes turn into a decision about whether a word can be a name in this position.
+
 The matcher is generic over the rule kinds and knows nothing about SQL. Sequence matches children in order and fails as a unit. Ordered choice tries alternatives left to right, resetting the token position on each failure, and takes the first success, with no longest match, no ambiguity and no conflict. Repetition is greedy with no backtracking into it, which is standard PEG and is a real semantic difference from a regex or a context free grammar that the grammar is written to expect. Lookahead matches without consuming.
 
 ## 4. Memoization

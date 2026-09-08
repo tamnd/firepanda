@@ -72,6 +72,21 @@ KEYWORD_CLASSES = [
 # real rule and a named constant in the generated file.
 BUILTIN_RULES = ["EndOfInput"]
 
+# The matchers DuckDB's matcher_rule_overrides can name. Index 0 is "no
+# override, walk the body", so the list order is also the wire encoding. The
+# names are upstream's. Adding one here without writing the matcher for it in
+# firepanda/sql/ is how a rule silently starts matching nothing, so the loader
+# checks the count.
+MATCHERS = [
+    "",
+    "identifier",
+    "reserved_identifier",
+    "identifier_string",
+    "number_literal",
+    "string_literal",
+    "operator",
+]
+
 # Defined in common.gram, but applied implicitly between tokens rather than by
 # reference, so the matcher has to be told which rule it is.
 WHITESPACE_RULE = "%whitespace"
@@ -387,6 +402,7 @@ class Rule:
     body: Node
     source: str
     memoized: bool = False
+    matcher: str = ""
 
 
 def load_rules() -> tuple[dict[str, Rule], dict[str, RawRule], dict[str, list[str]]]:
@@ -528,6 +544,34 @@ def check_references(rules: dict[str, Rule]) -> None:
         raise GrammarError("\n".join(sorted(set(missing))))
 
 
+def mark_matchers(rules: dict[str, Rule]) -> dict[str, str]:
+    """Attaches DuckDB's matcher overrides to the rules they belong to.
+
+    An override says the matcher does not walk this rule's body. It is not a
+    convenience: `OperatorLiteral <- Identifier` in the grammar text, so without
+    the override a bare `+` parses as an identifier. The body is kept anyway, so
+    that the round trip below still compares the table against the grammar.
+    """
+    path = GRAMMAR / "matcher_overrides.list"
+    pairs: dict[str, str] = {}
+    for line in path.read_text().splitlines():
+        if not line.strip():
+            continue
+        name, _, matcher = line.partition(" ")
+        matcher = matcher.strip()
+        if name not in rules:
+            raise GrammarError(f"matcher_overrides.list names a rule that does not exist: {name}")
+        if matcher not in MATCHERS:
+            raise GrammarError(
+                f"{name} wants matcher {matcher!r}, which this generator does not"
+                f" know. Known matchers: {MATCHERS[1:]}. Read"
+                " docs/specs/sql/04-the-parser.md section 2 before adding one."
+            )
+        pairs[name] = matcher
+        rules[name].matcher = matcher
+    return pairs
+
+
 def mark_memoized(rules: dict[str, Rule]) -> list[str]:
     path = GRAMMAR / "memoized_rules.list"
     names = [line.strip() for line in path.read_text().splitlines() if line.strip()]
@@ -586,6 +630,7 @@ class Flat:
     rule_names: list[str]
     rule_roots: list[int]
     rule_memoized: list[bool]
+    rule_matcher: list[int]
 
 
 def flatten(rules: dict[str, Rule], order: list[str]) -> Flat:
@@ -639,6 +684,7 @@ def flatten(rules: dict[str, Rule], order: list[str]) -> Flat:
         order,
         roots,
         [rules[name].memoized for name in order],
+        [MATCHERS.index(rules[name].matcher) for name in order],
     )
 
 
@@ -807,6 +853,17 @@ def render_rules(flat: Flat, grammar_sha: str) -> str:
         "# chosen, see docs/specs/sql/04-the-parser.md.",
         f"comptime MEMOIZED_COUNT: Int = {sum(flat.rule_memoized)}",
         "",
+        "# Rules the matcher matches itself rather than by walking the body, and",
+        "# how many rules carry each. Vendored from DuckDB's",
+        "# matcher_rule_overrides, because OperatorLiteral reads `Identifier` in",
+        "# the grammar text and a bare `+` is not an identifier.",
+    ] + [
+        f"comptime MATCHER_{(name or 'none').upper()}: UInt8 = {i}"
+        for i, name in enumerate(MATCHERS)
+    ] + [
+        f"comptime MATCHER_COUNT: Int = {len(MATCHERS)}",
+        f"comptime OVERRIDDEN_COUNT: Int = {sum(1 for m in flat.rule_matcher if m)}",
+        "",
         "# Two rules the matcher supplies itself. EndOfInput is referenced by the",
         "# grammar and defined nowhere in it, and gets the index one past the last",
         "# real rule. %whitespace is defined but never referenced, because it is",
@@ -827,8 +884,10 @@ def render_rules(flat: Flat, grammar_sha: str) -> str:
     for text in flat.strings:
         body.append(f"{len(text.encode())} {text}")
     body.append("R " + str(len(flat.rule_names)))
-    for name, root, memoized in zip(flat.rule_names, flat.rule_roots, flat.rule_memoized):
-        body.append(f"{root} {1 if memoized else 0} {name}")
+    for name, root, memoized, matcher in zip(
+        flat.rule_names, flat.rule_roots, flat.rule_memoized, flat.rule_matcher
+    ):
+        body.append(f"{root} {1 if memoized else 0} {matcher} {name}")
 
     lines.append('comptime TABLE: StaticString = """')
     lines.extend(escape_table(line) for line in body)
@@ -911,6 +970,7 @@ def build() -> tuple[dict[str, str], Flat, dict[str, Rule]]:
     rules, raw, words = load_rules()
     expand_calls(rules, raw)
     check_references(rules)
+    mark_matchers(rules)
     mark_memoized(rules)
     order = sorted(rules)
     flat = flatten(rules, order)
@@ -933,7 +993,9 @@ def build() -> tuple[dict[str, str], Flat, dict[str, Rule]]:
             "    KEYWORDS,\n"
             ")\n"
             "from .rules import (\n"
+            "    MATCHER_COUNT,\n"
             "    MEMOIZED_COUNT,\n"
+            "    OVERRIDDEN_COUNT,\n"
             "    NODE_COUNT,\n"
             "    RULE_COUNT,\n"
             "    RULE_END_OF_INPUT,\n"
@@ -978,9 +1040,12 @@ def main() -> int:
     if args.stats:
         print(f"rules      {len(flat.rule_names)}")
         print(f"memoized   {sum(flat.rule_memoized)}")
+        print(f"overridden {sum(1 for m in flat.rule_matcher if m)}")
         print(f"nodes      {len(flat.nodes)}")
         print(f"strings    {len(flat.strings)}")
-        print(f"table      {sum(len(t) for t in files.values())} bytes of Mojo")
+        for name in sorted(files):
+            print(f"{name:<10} {len(files[name])} bytes")
+        print(f"generated  {sum(len(t) for t in files.values())} bytes of Mojo")
         return 0
 
     GENERATED.mkdir(parents=True, exist_ok=True)

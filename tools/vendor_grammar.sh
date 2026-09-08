@@ -80,6 +80,25 @@ if [ ! -s "$staged/memoized_rules.list" ]; then
   exit 1
 fi
 
+# matcher_rule_overrides names the rules whose bodies the matcher ignores in
+# favour of a hand written matcher. It is not derivable from the grammar and it
+# is not optional: OperatorLiteral reads `Identifier` in the grammar text, so
+# without the override a bare `+` parses as an identifier. Same argument as
+# above for awk over a YAML parser, and the same guard below.
+awk '
+  /^matcher_rule_overrides:/ { collecting = 1; next }
+  collecting && /^  [A-Za-z_][A-Za-z0-9_]*:[[:space:]]*$/ {
+    rule = $1; sub(/:$/, "", rule); next
+  }
+  collecting && /^    matcher:[[:space:]]/ { print rule, $2; next }
+  collecting && /^[[:alpha:]]/ { collecting = 0 }
+' "$work/duckdb/scripts/parser/grammar_types.yml" | sort > "$staged/matcher_overrides.list"
+
+if [ ! -s "$staged/matcher_overrides.list" ]; then
+  echo "matcher_rule_overrides is empty or has moved in grammar_types.yml" >&2
+  exit 1
+fi
+
 {
   echo "# DuckDB's PEG grammar, vendored verbatim. Do not edit anything in this"
   echo "# directory. Run tools/vendor_grammar.sh to change it."
@@ -113,7 +132,8 @@ fi
 mkdir -p "$DEST"
 rm -rf "$DEST/statements" "$DEST/keywords"
 cp -R "$staged/statements" "$staged/keywords" "$DEST/"
-cp "$staged/LICENSE.duckdb" "$staged/memoized_rules.list" "$staged/VENDOR" "$DEST/"
+cp "$staged/LICENSE.duckdb" "$staged/memoized_rules.list" \
+  "$staged/matcher_overrides.list" "$staged/VENDOR" "$DEST/"
 
 echo "vendored $ref ($sha) into $DEST"
 echo "next: python tools/gen_grammar.py, then read the diff"

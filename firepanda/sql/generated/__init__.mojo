@@ -12,7 +12,9 @@ from .keywords import (
     KEYWORDS,
 )
 from .rules import (
+    MATCHER_COUNT,
     MEMOIZED_COUNT,
+    OVERRIDDEN_COUNT,
     NODE_COUNT,
     RULE_COUNT,
     RULE_END_OF_INPUT,
