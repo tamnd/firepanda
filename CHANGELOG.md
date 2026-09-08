@@ -8,6 +8,24 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A join in a pipeline can take a text key, and whether it should depends on cache
+
+The streaming join node refused a text key and the refusal was written down as a fact about streams: a text key needs the ordinal space that comes from concatenating both key columns, and having both columns at once is the one thing a stream has not got. That was true of the route it had. It stopped being true when the join learned to build a table over one side and read it from the other, because that route never concatenates anything, and the refusal outlived its reason by one release.
+
+So it is gone. The node builds its table from the right frame the way it always did, and for text it also keeps one view per ordinal and hands the probe the right frame's key column back, because a view longer than twelve bytes is an offset into the payload of the column it came from and means nothing against anyone else's. The probe is read only, so every core still runs it, and a chunk still answers exactly what the whole frame would.
+
+What that is worth turns out to depend entirely on whether the table fits in cache, and the character join in db-benchmark is measured on both sides of that line. At a hundred million rows the build side is a million text keys, which is a thirty two megabyte table plus sixteen megabytes of kept views against a thirty six megabyte L3, and the pipeline loses: 0.37 s at its best chunk size out of four against 0.30 s for the whole frame route, and 28.4 CPU seconds against 21.5. At ten million rows the build side is a hundred thousand keys, about five megabytes all told, and the same comparison turns over: six pipeline medians between 17.6 and 20.9 ms against six whole frame medians between 25.3 and 25.9, with 2.1 CPU seconds against 2.8. Peak memory is lower on the pipeline at both sizes.
+
+That is the same thing the two big integer joins say, and it is not a statement about text. A pipeline wins when the thing it probes stays warm between chunks and loses when it does not, and which side of that a query falls on is a build side size question that belongs in an optimizer rather than in a comment. Until there is one, the benchmark driver keeps the character join on the whole frame route and a flag puts it on the pipeline, which is how the two big joins are already handled.
+
+### The parallel string build was tried and does not do anything
+
+The note beside the threshold that keeps a text key off the table route when the two sides are near the same height said the fix was a build that spreads across cores. Half of that is easy: the build hashes a row and then inserts it, hashing a row reads that row and writes eight bytes nobody else writes, so any number of threads can do it, while the insert reads and writes one shared table and cannot be split without partitioning it.
+
+The easy half was built and measured and it is worth nothing. On the shape the threshold excludes, ten million rows against ten million, hashing the whole build side on every core and then inserting serially gives 280 ms against the whole frame route's 226, where the interleaved build gives 0.78 of that route and this gives 0.80. On the shape already on the table route, a hundred thousand build rows against ten million probe rows, it does not move at all: six runs a side, fully interleaved, between 28.4 and 29.3 ms.
+
+So the hash was never the part that costs anything. The insert is, and spreading that means several tables built independently and a probe that knows which one to ask, which is a different piece of work. The code is not kept and the note beside the threshold now says what was measured rather than what was expected.
+
 ## [0.6.52] - 2026-09-08
 
 Built against Mojo 1.0.0 (ed45d567).
