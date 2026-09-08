@@ -164,9 +164,20 @@ between two points on a curve that is bending, so the line is put at an eighth
 instead, which is inside the region that was measured to win rather than next to
 the estimate of where winning stops.
 
-The right fix is a build that spreads, since the route this loses to is only
-winning by using every core on the phase this does on one. Then the line goes
-away rather than moving.
+A build that spreads is what would remove the line rather than move it, and the
+cheap half of that was tried and is not enough. The build has two phases and only
+one of them has to be serial: hashing a row reads that row and writes eight bytes
+nobody else writes, while inserting reads and writes one shared table. Hashing
+the whole build side at once on every core and then inserting the answers
+serially measured 280 ms against the whole frame route's 226 on the last row
+above, which is 0.80 where the interleaved build measured 0.78. Both are
+separated and both lose. The rung at a hundred thousand did not move at all, six
+runs a side fully interleaved between 28.4 and 29.3 ms.
+
+So the hash was never the serial part that costs anything. The insert is, and
+spreading that means several tables built independently and a probe that knows
+which one to ask, which is a different piece of work rather than a variation on
+this one.
 """
 
 comptime PROBE_MORSEL_ROWS = 1 << 16
@@ -474,19 +485,10 @@ def _build_and_probe_strings(
 ) raises -> Int:
     """Builds the smaller text side's table and asks it about every other row.
 
-    `_build_hashed` and `_probe_hashed` with the key comparison put back, which
-    is the same relationship `build_strings` and `probe_strings` have to `build`
-    and `probe`. There is no direct route here because a string has no value to
-    index a table by.
-
-    The build writes into a list of its own and the result is copied across, for
-    the reason `_build_hashed` gives: the build indexes its output by the row it
-    is reading and cannot be told to write somewhere else. The copy is over the
-    smaller side and is sequential.
-
-    The views the table kept belong to `build`, and the probe rows belong to
-    `probe`, so the comparison is across two columns and `probe_strings` is told
-    which column the views came from. Nothing else about it differs.
+    The two halves in one call, for the whole frame caller that has both sides in
+    front of it and wants the ordinals and nothing else. A streaming caller uses
+    `build_side_strings` and `probe_side_strings`, which is the same work with the
+    table kept between the two.
 
     Args:
         build: The smaller side's key column.
@@ -500,6 +502,37 @@ def _build_and_probe_strings(
 
     Raises:
         Error: If the build or the parallel probe raises.
+    """
+    var built = build_side_strings(build, build_at, codes)
+    probe_side_strings(built, build, probe, probe_at, codes)
+    return built.groups()
+
+
+def build_side_strings(
+    build: StringArray, build_at: Int, mut codes: Array[DType.uint32]
+) raises -> BuildSide:
+    """Fills the text key's table and the build side's own codes.
+
+    `_build_hashed` with the key comparison put back, which is the same
+    relationship `build_strings` has to `build`. There is no direct route here
+    because a string has no value to index a table by.
+
+    The build writes into a list of its own and the result is copied across, for
+    the reason `_build_hashed` gives: the build indexes its output by the row it
+    is reading and cannot be told to write somewhere else. The copy is over the
+    smaller side and is sequential.
+
+    Args:
+        build: The smaller side's key column.
+        build_at: Where its codes start.
+        codes: The build side's stretch is filled with its ordinals.
+
+    Returns:
+        The table, ready to probe. Every probe of it has to be handed `build`
+        back, because the views it kept point into that column.
+
+    Raises:
+        Error: If the build raises.
     """
     var build_rows = len(build)
     var build_nulls = build.null_count() > 0
@@ -536,8 +569,68 @@ def _build_and_probe_strings(
         )
 
     var miss = UInt32(len(table))
-    _probe_strings(table, build, miss, probe, probe_at, reps, codes)
-    return Int(miss) + 1
+    _ = hashes^
+    return BuildSide(
+        DType.bool,
+        False,
+        Buffer(0),
+        0,
+        UInt64(0),
+        table^,
+        miss,
+        True,
+        reps^,
+    )
+
+
+def probe_side_strings(
+    built: BuildSide,
+    source: StringArray,
+    probe: StringArray,
+    probe_at: Int,
+    mut codes: Array[DType.uint32],
+    spread: Bool = True,
+) raises:
+    """Asks a built text side about every row of a probe side.
+
+    `probe_side` for text, and the same promise: it reads the table and writes
+    nothing to it, so every core can do this at once and a streaming join can
+    call it once per chunk with the one built side.
+
+    The one thing it needs that `probe_side` does not is `source`. The views the
+    table kept belong to the column the build read, the probe rows belong to
+    another column, so the comparison is across two columns and it has to be told
+    which one the views came from.
+
+    Args:
+        built: The table the build side filled.
+        source: The column the build read, which the kept views point into.
+        probe: The probe side's key column.
+        probe_at: Where its codes start.
+        codes: The probe side's stretch is filled with its ordinals.
+        spread: Whether this probe may use more than one core. False when the
+            caller is already running on a worker.
+
+    Raises:
+        Error: If the built side is not a text one, or if the parallel probe
+            raises.
+    """
+    if not built.text:
+        raise Error(
+            "join: the table was built from a "
+            + String(built.key)
+            + " key and the probe column is text"
+        )
+    _probe_strings(
+        built.table,
+        source,
+        built.miss,
+        probe,
+        probe_at,
+        built.reps,
+        codes,
+        spread,
+    )
 
 
 def _probe_strings(
@@ -607,17 +700,32 @@ struct BuildSide(Movable):
     so the table has to be a thing that outlives the pass that filled it. That
     is all this is, the state the probe reads, kept.
 
-    Both routes live in one struct rather than two, because a `List` of trait
-    objects is not expressible in Mojo 1.0 and a `Variant` here would be two
-    branches in the probe either way. The unused route costs one empty `Buffer`
-    or one empty `HashTable`, which is a 64-byte block and a few words.
+    There are three routes, not two. A fixed width key gets a table indexed by
+    its own value when the values sit close enough together, and a hash table
+    otherwise. Text gets a hash table with the byte comparison put back, which is
+    the same table with a different probe and one more thing kept.
+
+    All three live in one struct rather than three, because a `List` of trait
+    objects is not expressible in Mojo 1.0 and a `Variant` here would be a branch
+    in the probe either way. An unused route costs one empty `Buffer`, one empty
+    `HashTable` or one empty `List`, which is a 64-byte block and a few words.
     """
 
     var key: DType
-    """The dtype of the key column this was built from.
+    """The dtype of the key column this was built from, or `bool` for text.
 
     A probe with any other dtype would read the same slots meaning something
-    else, so `probe_side` refuses one.
+    else, so `probe_side` refuses one. Text has no dtype to record here and is
+    told apart by `text` instead.
+    """
+
+    var text: Bool
+    """Whether the key was a string column.
+
+    Separate from `key` rather than a dtype value of its own, because a string
+    column's elements are not scalars and nothing else in this struct is
+    parameterized on them. `probe_side` refuses a side with this set and
+    `probe_side_strings` refuses one without it, so the two cannot be crossed.
     """
 
     var direct: Bool
@@ -644,6 +752,15 @@ struct BuildSide(Movable):
     var table: HashTable
     """The hashed route's table, or an empty one."""
 
+    var reps: List[StringView]
+    """The text route's kept view per ordinal, or an empty list.
+
+    A view rather than the bytes, so the build copies nothing. It points into the
+    column the build read, which is why every text probe has to be handed that
+    column back: a long view carries an offset into its own payload and means
+    nothing against anyone else's.
+    """
+
     var miss: UInt32
     """The ordinal a probe row that matched nothing is given.
 
@@ -659,6 +776,8 @@ struct BuildSide(Movable):
         base: UInt64,
         var table: HashTable,
         miss: UInt32,
+        text: Bool = False,
+        var reps: List[StringView] = List[StringView](),
     ):
         """Constructs a built side.
 
@@ -670,6 +789,8 @@ struct BuildSide(Movable):
             base: The bits of the value indexing slot zero.
             table: The hashed route's table, or an empty one.
             miss: The ordinal for a row that matches nothing.
+            text: Whether the key was a string column.
+            reps: The text route's kept view per ordinal, or an empty list.
         """
         self.key = key
         self.direct = direct
@@ -677,7 +798,9 @@ struct BuildSide(Movable):
         self.span = span
         self.base = base
         self.table = table^
+        self.reps = reps^
         self.miss = miss
+        self.text = text
 
     def __init__(out self):
         """Constructs a table with nothing in it.
@@ -694,7 +817,9 @@ struct BuildSide(Movable):
         self.span = 0
         self.base = UInt64(0)
         self.table = HashTable(0, DEFAULT_SEED)
+        self.reps = List[StringView]()
         self.miss = UInt32(0)
+        self.text = False
 
     def groups(self) -> Int:
         """How many ordinals this side hands out, counting the miss one.
@@ -953,10 +1078,10 @@ def probe_side[
         Error: If the probe column's dtype is not the one the table was built
             from, or if the parallel probe raises.
     """
-    if built.key != dt:
+    if built.text or built.key != dt:
         raise Error(
             "join: the table was built from a "
-            + String(built.key)
+            + ("text" if built.text else String(built.key))
             + " key and the probe column is "
             + String(dt)
         )
