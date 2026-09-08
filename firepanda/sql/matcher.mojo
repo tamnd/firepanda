@@ -96,6 +96,12 @@ comptime NO_NODE: UInt32 = 0
 comptime _NO_SLOT: UInt8 = 255
 """The memo slot of a rule that is not memoized. There are 22 that are."""
 
+comptime _MEMO_UNKNOWN: UInt32 = 0
+"""A memo entry for a rule that has not been tried at this position yet."""
+
+comptime _MEMO_FAILED: UInt32 = 1
+"""A memo entry for a rule that failed at this position."""
+
 comptime _KEY_IDENTIFIER = 512
 comptime _KEY_QUOTED_IDENTIFIER = 513
 comptime _KEY_NUMBER = 514
@@ -139,7 +145,8 @@ struct ParseNode(ImplicitlyCopyable, Movable):
     Children are a first child index and a next sibling index rather than a list,
     so that a whole parse is one arena and one allocation. A parent is always
     built after its children, so a parent's index is always greater than its
-    children's, which is what makes discarding a failed attempt a truncation.
+    children's, which is what lets a failed attempt walk away from what it built
+    without unlinking anything.
     """
 
     var rule: UInt16
@@ -335,14 +342,21 @@ struct _Run[
     """The current token."""
 
     var nodes: List[ParseNode]
-    """The arena, growing as rules succeed and truncating as they fail."""
+    """The arena. Append only, including across a failure.
+
+    A failed attempt leaves its nodes here rather than rolling them back, because
+    the memo table points at them and a later attempt may adopt them. They are
+    unreachable from the tree either way. The arena runs about half again the
+    size of the tree it holds, which for TPC-H q1 is 1,376 nodes against a tree
+    of 838.
+    """
 
     var pending: List[UInt32]
     """Nodes that have matched but have not been given a parent yet.
 
     A rule adopts everything above its own mark when it succeeds, so this is a
-    stack and not a queue, and a failed rule truncates it back to the mark rather
-    than unlinking anything.
+    stack and not a queue, and a failed rule drops back to the mark. This is the
+    only thing a failure unwinds.
     """
 
     var furthest: Int
@@ -360,18 +374,26 @@ struct _Run[
     var depth: Int
     """How many rules deep we are, against MAX_DEPTH."""
 
-    var memo: List[UInt8]
-    """One bit per memoized rule per token position, set when it failed there.
+    var memo: List[UInt32]
+    """What each memoized rule did at each token position, or nothing yet.
 
-    Failures only. A PEG rule is a pure function of the grammar and the position,
-    so a rule that failed once at a position fails every time, and that is the
-    whole of the exponential blowup DuckDB measured, which was 10.640 seconds for
-    nineteen unmatched parentheses. Successes are not memoized, because a
-    memoized success is a subtree in the arena and a failing ancestor may have
-    truncated it away since.
+    A PEG rule is a pure function of the grammar and the position, so whatever it
+    did once at a position it does every time. `_MEMO_UNKNOWN` means it has not
+    been tried there, `_MEMO_FAILED` means it failed, and anything else is the
+    arena index of the node it produced, plus one so that a real node can never
+    read as one of the other two.
 
-    Empty until the first memoized rule fails, so a query that never backtracks
-    never allocates it.
+    Successes matter as much as failures here and for a different reason. The
+    failures are the exponential blowup DuckDB measured, which was 10.640 seconds
+    for nineteen unmatched parentheses. The successes are `SELECT f(f(f(1)))`,
+    where `TypeModifiers` parses the argument as a type before `FunctionExpression`
+    parses the same bytes as an expression, so every level of nesting doubles the
+    work. That one is worse, because it is valid SQL that a person would write.
+
+    The end position does not need storing because the node carries it. Four
+    bytes per rule per position, so eighty eight bytes a token, empty until the
+    first memoized rule finishes, so a query that never backtracks never
+    allocates it.
     """
 
     def __init__(
@@ -400,7 +422,7 @@ struct _Run[
         self.furthest = 0
         self.quiet = 0
         self.depth = 0
-        self.memo = List[UInt8]()
+        self.memo = List[UInt32]()
 
         comptime if Self.filtered:
             self.bits.reserve(len(tokens))
@@ -444,8 +466,10 @@ struct _Run[
         """Matches one rule at the current position.
 
         On success one node is pushed onto `pending` and the position has moved.
-        On failure nothing has changed at all, which is the invariant the whole
-        matcher rests on.
+        On failure nothing a caller can reach has changed, which is the invariant
+        the whole matcher rests on. What a failure does leave behind is the nodes
+        it built, because the memo table points at them and the arena is append
+        only, so a failed attempt is unlinked rather than unwound.
 
         Args:
             index: The rule index.
@@ -457,12 +481,19 @@ struct _Run[
             Error: If the parse is too deeply nested, or if the table holds a
                 node this build has no case for, which is a build problem.
         """
+        # Nothing is written to the memo table from inside a negative lookahead,
+        # because a terminal that fails in there does not move the error position
+        # and a later hit would inherit that silence. Reading is still fine, and
+        # the entry a lookahead would have written is one a later walk writes.
         var slot = Int(self.grammar[].memo_slots[index])
-        if slot != Int(_NO_SLOT) and self._failed_before(slot, self.at):
-            return False
+        if slot != Int(_NO_SLOT):
+            var before = self._remembered(slot, self.at)
+            if before == _MEMO_FAILED:
+                return False
+            if before != _MEMO_UNKNOWN:
+                return self._replay(before - 1)
 
         var start_at = self.at
-        var mark_nodes = len(self.nodes)
         var mark_pending = len(self.pending)
 
         self.depth += 1
@@ -474,9 +505,9 @@ struct _Run[
 
         if not matched:
             self.at = start_at
-            self._truncate(mark_nodes, mark_pending)
-            if slot != Int(_NO_SLOT):
-                self._remember_failure(slot, start_at)
+            self._unwind(mark_pending)
+            if slot != Int(_NO_SLOT) and self.quiet == 0:
+                self._remember(slot, start_at, _MEMO_FAILED)
             return False
 
         # Adopt everything the body left behind, in order, and put one node in
@@ -496,6 +527,31 @@ struct _Run[
             )
         )
         self.pending.append(node)
+        if slot != Int(_NO_SLOT) and self.quiet == 0:
+            self._remember(slot, start_at, node + 1)
+        return True
+
+    def _replay(mut self, root: UInt32) -> Bool:
+        """Hands back a subtree a memoized rule built here earlier.
+
+        The subtree itself is shared rather than copied, but its root is copied,
+        because the root is the one node a parent writes to when it adopts it and
+        the original may already be sitting in somebody else\'s tree.
+
+        Args:
+            root: The arena index of the remembered node.
+
+        Returns:
+            True, because only a success is remembered this way.
+        """
+        var it = self.nodes[Int(root)]
+        self.at = Int(it.token_end)
+        self.pending.append(UInt32(len(self.nodes)))
+        self.nodes.append(
+            ParseNode(
+                it.rule, it.token_start, it.token_end, it.first_child, NO_NODE
+            )
+        )
         return True
 
     def _body(mut self, index: Int) raises -> Bool:
@@ -561,13 +617,12 @@ struct _Run[
 
         if it.kind == NODE_SEQ:
             var start_at = self.at
-            var mark_nodes = len(self.nodes)
             var mark_pending = len(self.pending)
             var cursor = Int(it.child)
             while cursor != 0:
                 if not self._node(cursor):
                     self.at = start_at
-                    self._truncate(mark_nodes, mark_pending)
+                    self._unwind(mark_pending)
                     return False
                 cursor = Int(self.grammar[].nodes[cursor].sibling)
             return True
@@ -596,13 +651,12 @@ struct _Run[
 
         if it.kind == NODE_NOT:
             var start_at = self.at
-            var mark_nodes = len(self.nodes)
             var mark_pending = len(self.pending)
             self.quiet += 1
             var found = self._node(Int(it.child))
             self.quiet -= 1
             self.at = start_at
-            self._truncate(mark_nodes, mark_pending)
+            self._unwind(mark_pending)
             return not found
 
         # A character class or a capture. Both live only inside %whitespace,
@@ -640,18 +694,18 @@ struct _Run[
             if self.at == before:
                 return
 
-    def _truncate(mut self, mark_nodes: Int, mark_pending: Int):
-        """Throws away everything a failed attempt built.
+    def _unwind(mut self, mark_pending: Int):
+        """Drops what a failed attempt was holding, without touching the arena.
 
-        A parent is always appended after its children, so nothing below the mark
-        can point above it and there is nothing to unlink.
+        The nodes it built stay where they are. They are unreachable from the
+        tree, because a parent is always appended after its children and this
+        attempt has no parent now, but the memo table may point at them and a
+        later attempt may adopt them, so throwing them away would be throwing
+        away the work the memo table exists to keep.
 
         Args:
-            mark_nodes: The arena length at the start of the attempt.
             mark_pending: The pending stack length at the start of the attempt.
         """
-        if len(self.nodes) != mark_nodes:
-            self.nodes.resize(mark_nodes, ParseNode(0, 0, 0, NO_NODE, NO_NODE))
         if len(self.pending) != mark_pending:
             self.pending.resize(mark_pending, NO_NODE)
 
@@ -813,33 +867,32 @@ struct _Run[
     # Memoization
     # -----------------------------------------------------------------------
 
-    def _failed_before(self, slot: Int, position: Int) -> Bool:
-        """Says whether a memoized rule has already failed at a position.
+    def _remembered(self, slot: Int, position: Int) -> UInt32:
+        """Says what a memoized rule did at a position last time.
 
         Args:
             slot: The rule's memo slot.
             position: The token position.
 
         Returns:
-            Whether the bit is set.
+            `_MEMO_UNKNOWN`, `_MEMO_FAILED`, or a node index plus one.
         """
         if len(self.memo) == 0:
-            return False
-        var bit = position * self.grammar[].memo_count + slot
-        return self.memo[bit >> 3] & (UInt8(1) << UInt8(bit & 7)) != 0
+            return _MEMO_UNKNOWN
+        return self.memo[position * self.grammar[].memo_count + slot]
 
-    def _remember_failure(mut self, slot: Int, position: Int):
-        """Records that a memoized rule failed at a position.
+    def _remember(mut self, slot: Int, position: Int, what: UInt32):
+        """Records what a memoized rule did at a position.
 
         Args:
             slot: The rule's memo slot.
             position: The token position.
+            what: `_MEMO_FAILED`, or a node index plus one.
         """
         if len(self.memo) == 0:
-            var bits = len(self.tokens[]) * self.grammar[].memo_count
-            self.memo.resize((bits + 7) >> 3, 0)
-        var bit = position * self.grammar[].memo_count + slot
-        self.memo[bit >> 3] |= UInt8(1) << UInt8(bit & 7)
+            var entries = len(self.tokens[]) * self.grammar[].memo_count
+            self.memo.resize(entries, _MEMO_UNKNOWN)
+        self.memo[position * self.grammar[].memo_count + slot] = what
 
     # -----------------------------------------------------------------------
     # Errors and peeking

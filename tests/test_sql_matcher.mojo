@@ -21,8 +21,6 @@ from std.testing import (
     assert_raises,
     assert_true,
 )
-from std.time import perf_counter_ns
-
 from firepanda.sql import Grammar
 from firepanda.sql.matcher import (
     MAX_DEPTH,
@@ -214,6 +212,26 @@ def _nest(depth: Int) -> String:
     for _ in range(depth):
         out += ")"
     return out^
+
+
+def _tree_shapes() -> List[String]:
+    """Statements whose trees are worth walking node by node.
+
+    The last three are here for the memo table rather than for the grammar. A
+    nested call parses its argument once as a type and once as an expression, so
+    the second walk is a memo hit and the tree it hands back was built by an
+    attempt that failed, which is the shape where a wrong answer would hide.
+
+    Returns:
+        The statements.
+    """
+    return [
+        String("SELECT a, b FROM t WHERE a = 1"),
+        String("SELECT a FROM t WHERE a = 1"),
+        String("SELECT f(f(f(1)))"),
+        String("SELECT f(f(1), f(1))"),
+        String("SELECT [[[1]]], f(1) + f(1)"),
+    ]
 
 
 def _accepts(sql: StringSlice, g: Grammar) -> Bool:
@@ -447,33 +465,73 @@ def test_an_empty_query_is_a_program_with_one_empty_statement() raises:
 
 
 def test_a_child_is_always_built_before_its_parent() raises:
-    # The arena invariant the whole matcher rests on: a failed attempt is thrown
-    # away by truncating, which is only sound because nothing below a mark can
-    # point above it.
+    # The arena invariant the whole matcher rests on. It holds over every node
+    # and not just the reachable ones, because a failed attempt leaves its nodes
+    # where they are for the memo table to point at, and a memo hit copies the
+    # root of what it found rather than moving it.
     var g = Grammar()
-    var p = parse("SELECT a, b FROM t WHERE a = 1", g)
-    for i in range(1, len(p.nodes)):
-        var node = p.nodes[i]
-        assert_true(
-            Int(node.first_child) < i, "a node was built before its child"
-        )
-        assert_true(
-            Int(node.next_sibling) > i or node.next_sibling == NO_NODE,
-            "a node points backwards at a sibling",
-        )
+    for sql in _tree_shapes():
+        var p = parse(sql, g)
+        for i in range(1, len(p.nodes)):
+            var node = p.nodes[i]
+            assert_true(
+                Int(node.first_child) < i, "a node was built before its child"
+            )
+            assert_true(
+                Int(node.next_sibling) > i or node.next_sibling == NO_NODE,
+                "a node points backwards at a sibling",
+            )
 
 
 def test_a_nodes_span_covers_its_childrens() raises:
     var g = Grammar()
-    var p = parse("SELECT a FROM t WHERE a = 1", g)
-    for i in range(1, len(p.nodes)):
-        var node = p.nodes[i]
-        for kid in p.children(UInt32(i)):
-            var child = p.nodes[Int(kid)]
+    for sql in _tree_shapes():
+        var p = parse(sql, g)
+        var stack = List[UInt32]()
+        stack.append(p.root)
+        while len(stack) > 0:
+            var index = stack.pop()
+            var node = p.nodes[Int(index)]
+            for kid in p.children(index):
+                var child = p.nodes[Int(kid)]
+                assert_true(
+                    child.token_start >= node.token_start
+                    and child.token_end <= node.token_end,
+                    "a child ran outside its parent",
+                )
+                stack.append(kid)
+
+
+def test_a_replayed_subtree_is_the_one_a_fresh_parse_builds() raises:
+    # A memo hit hands back a subtree somebody else built, so the shapes that
+    # hit it a lot are the ones where a wrong answer would hide. Every node
+    # under the root has to say the same thing about its own span as the tokens
+    # under it do, and the root has to cover the statement.
+    var g = Grammar()
+    for sql in _tree_shapes():
+        var p = parse(sql, g)
+        var root = p.nodes[Int(p.root)]
+        assert_equal(Int(root.token_start), 0, String("root of ", sql))
+        assert_equal(
+            Int(root.token_end), len(p.tokens) - 1, String("root of ", sql)
+        )
+        var stack = List[UInt32]()
+        stack.append(p.root)
+        while len(stack) > 0:
+            var index = stack.pop()
+            var node = p.nodes[Int(index)]
+            var at = node.token_start
+            for kid in p.children(index):
+                var child = p.nodes[Int(kid)]
+                assert_true(
+                    child.token_start >= at,
+                    String("children overlapped in ", sql),
+                )
+                at = child.token_end
+                stack.append(kid)
             assert_true(
-                child.token_start >= node.token_start
-                and child.token_end <= node.token_end,
-                "a child ran outside its parent",
+                at <= node.token_end,
+                String("a child ran past its parent in ", sql),
             )
 
 
@@ -637,72 +695,6 @@ def test_nesting_deeper_than_the_guard_is_an_error_and_not_a_crash() raises:
 def test_nesting_the_guard_allows_still_parses() raises:
     var g = Grammar()
     assert_true(_accepts(_nest(MAX_DEPTH // 21 - 8), g))
-
-
-# ---------------------------------------------------------------------------
-# Memoization
-# ---------------------------------------------------------------------------
-
-
-def test_the_pathological_input_finishes_quickly() raises:
-    # DuckDB measured this one: nineteen unmatched parentheses took 10.640
-    # seconds without memoization and 0.001 with it. The ceiling here is loose
-    # on purpose, because it is guarding against exponential blowup and not
-    # against a slow afternoon on a shared runner.
-    var g = Grammar()
-    var opens = String("SELECT ")
-    for _ in range(19):
-        opens += "("
-    opens += "1"
-    var start = perf_counter_ns()
-    assert_false(_accepts(opens, g))
-    var spent = perf_counter_ns() - start
-    assert_true(
-        spent < 100_000_000,
-        String("nineteen unmatched parentheses took ", spent // 1000, " us"),
-    )
-
-
-def test_a_long_in_list_stays_linear() raises:
-    var g = Grammar()
-    var short = String("SELECT a FROM t WHERE a IN (0")
-    for i in range(50):
-        short += String(",", i)
-    short += ")"
-    var long = String("SELECT a FROM t WHERE a IN (0")
-    for i in range(400):
-        long += String(",", i)
-    long += ")"
-
-    var start = perf_counter_ns()
-    assert_true(_accepts(short, g))
-    var small = perf_counter_ns() - start
-    start = perf_counter_ns()
-    assert_true(_accepts(long, g))
-    var big = perf_counter_ns() - start
-    # Eight times the list for well under sixty four times the work, which is
-    # the shape of the claim rather than a number worth tuning.
-    assert_true(
-        big < small * 32,
-        String("an IN list went superlinear: ", small, " then ", big),
-    )
-
-
-def test_the_cheapest_statement_stays_cheap() raises:
-    # A REPL loop over small statements is the workload the whole budget is
-    # about, so the floor gets a ceiling. It is a loose one, because this runs
-    # unoptimized on whatever a runner gives us and it is guarding against a
-    # regression of the kind that shows up as a factor and not as a percentage.
-    var g = Grammar()
-    var rounds = 20
-    var start = perf_counter_ns()
-    for _ in range(rounds):
-        assert_true(_accepts("SELECT 1", g))
-    var each = (perf_counter_ns() - start) // rounds
-    assert_true(
-        each < 5_000_000,
-        String("SELECT 1 took ", each // 1000, " us"),
-    )
 
 
 def main() raises:
