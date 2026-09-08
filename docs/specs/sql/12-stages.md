@@ -80,13 +80,15 @@ firepanda/
     __init__.mojo          sql(), SQLContext, sql_support(), the entire surface
 
     grammar/
-      VENDOR               upstream tag, commit, date, per file SHA-256
-      *.gram               vendored verbatim, never edited          document 03
+      VENDOR               upstream ref, commit, date, per file SHA-256
+      statements/*.gram    vendored verbatim, never edited          document 03
       keywords/*.list      vendored verbatim
-      memoized.list        vendored, DuckDB's packrat rule list     document 04
-      generated/
-        rules.mojo         the rule table, checked in, CI verified
-        keywords.mojo      perfect hash keyword tables
+      memoized_rules.list  vendored, DuckDB's packrat rule list     document 04
+      matcher_overrides.list  vendored, the rules the matcher owns  document 04
+
+    generated/
+      rules.mojo           the rule table, checked in, CI verified
+      keywords.mojo        the sorted keyword table
 
     token.mojo             Token, TokenKind, the tokenizer          document 04
     matcher.mojo           the rule table interpreter, memo table   document 04

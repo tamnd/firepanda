@@ -72,6 +72,44 @@ KEYWORD_CLASSES = [
 # real rule and a named constant in the generated file.
 BUILTIN_RULES = ["EndOfInput"]
 
+# The matchers matcher_overrides.list can name. Index 0 is "no override, walk
+# the body", so the list order is also the wire encoding. The names are
+# upstream's class names in snake case. Adding one here without writing the
+# matcher for it in firepanda/sql/ is how a rule silently starts matching
+# nothing, so the loader checks the count.
+MATCHERS = [
+    "",
+    "identifier",
+    "reserved_identifier",
+    "number_literal",
+    "string_literal",
+    "operator",
+]
+
+# The suggestion each override was constructed with, in the same encoding. Index
+# 0 is the literal string "none", which is what the two literal matchers and the
+# operator matcher are built without.
+#
+# This looks like autocomplete trivia and is not. IdentifierMatcher reads the
+# suggestion to pick which keyword category the position tolerates, and whether
+# a single quoted string counts as a name there, so a table name accepts
+# 'path.csv' and a type name does not. Keeping upstream's name rather than the
+# two bits we derive from it means the next person can check the mapping against
+# identifier_matcher.hpp without guessing what got thrown away.
+SUGGESTIONS = [
+    "none",
+    "variable",
+    "catalog_name",
+    "schema_name",
+    "table_name",
+    "column_name",
+    "type_name",
+    "scalar_function_name",
+    "table_function_name",
+    "pragma_name",
+    "setting_name",
+]
+
 # Defined in common.gram, but applied implicitly between tokens rather than by
 # reference, so the matcher has to be told which rule it is.
 WHITESPACE_RULE = "%whitespace"
@@ -387,6 +425,8 @@ class Rule:
     body: Node
     source: str
     memoized: bool = False
+    matcher: str = ""
+    suggestion: str = "none"
 
 
 def load_rules() -> tuple[dict[str, Rule], dict[str, RawRule], dict[str, list[str]]]:
@@ -528,6 +568,46 @@ def check_references(rules: dict[str, Rule]) -> None:
         raise GrammarError("\n".join(sorted(set(missing))))
 
 
+def mark_matchers(rules: dict[str, Rule]) -> dict[str, str]:
+    """Attaches DuckDB's matcher overrides to the rules they belong to.
+
+    An override says the matcher does not walk this rule's body. It is not a
+    convenience: `OperatorLiteral <- Identifier` in the grammar text, so without
+    the override a bare `+` parses as an identifier. The body is kept anyway, so
+    that the round trip below still compares the table against the grammar.
+    """
+    path = GRAMMAR / "matcher_overrides.list"
+    pairs: dict[str, str] = {}
+    for line in path.read_text().splitlines():
+        if not line.strip():
+            continue
+        fields = line.split()
+        if len(fields) != 3:
+            raise GrammarError(
+                f"matcher_overrides.list wants a rule, a matcher and a suggestion"
+                f" on every line, and this line has {len(fields)}: {line!r}"
+            )
+        name, matcher, suggestion = fields
+        if name not in rules:
+            raise GrammarError(f"matcher_overrides.list names a rule that does not exist: {name}")
+        if matcher not in MATCHERS:
+            raise GrammarError(
+                f"{name} wants matcher {matcher!r}, which this generator does not"
+                f" know. Known matchers: {MATCHERS[1:]}. Read"
+                " docs/specs/sql/04-the-parser.md section 2 before adding one."
+            )
+        if suggestion not in SUGGESTIONS:
+            raise GrammarError(
+                f"{name} was built with suggestion {suggestion!r}, which this"
+                f" generator does not know. Known suggestions: {SUGGESTIONS}. Read"
+                " docs/specs/sql/04-the-parser.md section 2 before adding one."
+            )
+        pairs[name] = matcher
+        rules[name].matcher = matcher
+        rules[name].suggestion = suggestion
+    return pairs
+
+
 def mark_memoized(rules: dict[str, Rule]) -> list[str]:
     path = GRAMMAR / "memoized_rules.list"
     names = [line.strip() for line in path.read_text().splitlines() if line.strip()]
@@ -586,6 +666,8 @@ class Flat:
     rule_names: list[str]
     rule_roots: list[int]
     rule_memoized: list[bool]
+    rule_matcher: list[int]
+    rule_suggestion: list[int]
 
 
 def flatten(rules: dict[str, Rule], order: list[str]) -> Flat:
@@ -639,6 +721,8 @@ def flatten(rules: dict[str, Rule], order: list[str]) -> Flat:
         order,
         roots,
         [rules[name].memoized for name in order],
+        [MATCHERS.index(rules[name].matcher) for name in order],
+        [SUGGESTIONS.index(rules[name].suggestion) for name in order],
     )
 
 
@@ -807,6 +891,27 @@ def render_rules(flat: Flat, grammar_sha: str) -> str:
         "# chosen, see docs/specs/sql/04-the-parser.md.",
         f"comptime MEMOIZED_COUNT: Int = {sum(flat.rule_memoized)}",
         "",
+        "# Rules the matcher matches itself rather than by walking the body, and",
+        "# how many rules carry each. Vendored from the rule overrides in DuckDB's",
+        "# compiled_grammar.cpp, because OperatorLiteral reads `Identifier` in the",
+        "# grammar text and a bare `+` is not an identifier.",
+    ] + [
+        f"comptime MATCHER_{(name or 'none').upper()}: UInt8 = {i}"
+        for i, name in enumerate(MATCHERS)
+    ] + [
+        f"comptime MATCHER_COUNT: Int = {len(MATCHERS)}",
+        f"comptime OVERRIDDEN_COUNT: Int = {sum(1 for m in flat.rule_matcher if m)}",
+        "",
+        "# The suggestion each overridden rule was built with. The identifier",
+        "# matcher reads it to decide which keyword class the position tolerates",
+        "# and whether a single quoted string is a name there, so a table name and",
+        "# a type name do not accept the same words.",
+    ] + [
+        f"comptime SUGGEST_{name.upper()}: UInt8 = {i}"
+        for i, name in enumerate(SUGGESTIONS)
+    ] + [
+        f"comptime SUGGESTION_COUNT: Int = {len(SUGGESTIONS)}",
+        "",
         "# Two rules the matcher supplies itself. EndOfInput is referenced by the",
         "# grammar and defined nowhere in it, and gets the index one past the last",
         "# real rule. %whitespace is defined but never referenced, because it is",
@@ -829,6 +934,17 @@ def render_rules(flat: Flat, grammar_sha: str) -> str:
     body.append("R " + str(len(flat.rule_names)))
     for name, root, memoized in zip(flat.rule_names, flat.rule_roots, flat.rule_memoized):
         body.append(f"{root} {1 if memoized else 0} {name}")
+    # The overrides get their own section rather than two more columns on every
+    # R line, because 24 rules out of 1,187 have one and writing `0 0` on the
+    # other 1,163 costs four kilobytes to say nothing.
+    overrides = [
+        (i, m, s)
+        for i, (m, s) in enumerate(zip(flat.rule_matcher, flat.rule_suggestion))
+        if m
+    ]
+    body.append("O " + str(len(overrides)))
+    for index, matcher, suggestion in overrides:
+        body.append(f"{index} {matcher} {suggestion}")
 
     lines.append('comptime TABLE: StaticString = """')
     lines.extend(escape_table(line) for line in body)
@@ -911,6 +1027,7 @@ def build() -> tuple[dict[str, str], Flat, dict[str, Rule]]:
     rules, raw, words = load_rules()
     expand_calls(rules, raw)
     check_references(rules)
+    mark_matchers(rules)
     mark_memoized(rules)
     order = sorted(rules)
     flat = flatten(rules, order)
@@ -933,12 +1050,15 @@ def build() -> tuple[dict[str, str], Flat, dict[str, Rule]]:
             "    KEYWORDS,\n"
             ")\n"
             "from .rules import (\n"
+            "    MATCHER_COUNT,\n"
             "    MEMOIZED_COUNT,\n"
+            "    OVERRIDDEN_COUNT,\n"
             "    NODE_COUNT,\n"
             "    RULE_COUNT,\n"
             "    RULE_END_OF_INPUT,\n"
             "    RULE_WHITESPACE,\n"
             "    STRING_COUNT,\n"
+            "    SUGGESTION_COUNT,\n"
             "    TABLE,\n"
             ")\n"
         ),
@@ -978,9 +1098,12 @@ def main() -> int:
     if args.stats:
         print(f"rules      {len(flat.rule_names)}")
         print(f"memoized   {sum(flat.rule_memoized)}")
+        print(f"overridden {sum(1 for m in flat.rule_matcher if m)}")
         print(f"nodes      {len(flat.nodes)}")
         print(f"strings    {len(flat.strings)}")
-        print(f"table      {sum(len(t) for t in files.values())} bytes of Mojo")
+        for name in sorted(files):
+            print(f"{name:<10} {len(files[name])} bytes")
+        print(f"generated  {sum(len(t) for t in files.values())} bytes of Mojo")
         return 0
 
     GENERATED.mkdir(parents=True, exist_ok=True)

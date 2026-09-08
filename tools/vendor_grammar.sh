@@ -24,9 +24,10 @@ readonly UPSTREAM=https://github.com/duckdb/duckdb.git
 readonly DEST=firepanda/sql/grammar
 # Sparse checkout of just these two directories. The grammar is 61 KB and the
 # repository is not, and a blobless partial clone of the whole tree still walks
-# it. scripts/parser is here for grammar_types.yml, which carries the one list
-# that is not derivable from the grammar itself.
-readonly PATHS=(src/parser/peg/grammar scripts/parser)
+# it. src/parser/peg is here for compiled_grammar.cpp and scripts/parser for
+# grammar_types.yml, which between them carry the two lists that are not
+# derivable from the grammar itself.
+readonly PATHS=(src/parser/peg scripts/parser)
 
 ref=${1:-}
 if [ -z "$ref" ]; then
@@ -49,7 +50,8 @@ sha=$(git -C "$work/duckdb" rev-parse HEAD)
 src=$work/duckdb/src/parser/peg/grammar
 
 for required in "$src/statements" "$src/keywords" \
-  "$work/duckdb/scripts/parser/grammar_types.yml" "$work/duckdb/LICENSE"; do
+  "$work/duckdb/scripts/parser/grammar_types.yml" \
+  "$work/duckdb/src/parser/peg/compiled_grammar.cpp" "$work/duckdb/LICENSE"; do
   if [ ! -e "$required" ]; then
     echo "upstream layout changed: $required is missing at $ref" >&2
     echo "read docs/specs/sql/03-the-grammar.md section 6 before touching this" >&2
@@ -80,12 +82,73 @@ if [ ! -s "$staged/memoized_rules.list" ]; then
   exit 1
 fi
 
+# The rule overrides name the rules whose bodies the matcher ignores in favour
+# of a hand written matcher. They are not derivable from the grammar and they
+# are not optional: OperatorLiteral reads `Identifier` in the grammar text, so
+# without the override a bare `+` parses as an identifier.
+#
+# These come from compiled_grammar.cpp and not from grammar_types.yml, even
+# though the yml has a matcher_rule_overrides block that looks like the same
+# table. The yml is input to the transformer generator and its `matcher` field
+# is a result type rather than a matcher class, so for ReservedKeyword it says
+# identifier_string while the parser installs a ReservedIdentifierMatcher. The
+# C++ is what runs, so the C++ is what gets read.
+#
+# The second column is the matcher class in snake case and the third is the
+# suggestion it was constructed with. The suggestion is not autocomplete
+# trivia: IdentifierMatcher reads it to decide which keyword category the rule
+# tolerates and whether a single quoted string counts as a name in that
+# position, so a table name and a type name behave differently.
+awk '
+  function snake(s,   out, i, c) {
+    sub(/Matcher$/, "", s)
+    for (i = 1; i <= length(s); i++) {
+      c = substr(s, i, 1)
+      if (c ~ /[A-Z]/ && i > 1) out = out "_"
+      out = out tolower(c)
+    }
+    return out
+  }
+  /START GENERATED RULE OVERRIDES/ { collecting = 1; next }
+  /END GENERATED RULE OVERRIDES/ { collecting = 0 }
+  collecting { body = body $0 }
+  END {
+    gsub(/[ \t]/, "", body)
+    n = split(body, calls, ";")
+    for (i = 1; i <= n; i++) {
+      if (calls[i] !~ /AddTerminalRuleOverride\(overrides,"/) continue
+      if (!match(calls[i], /"[A-Za-z_]+"/)) continue
+      rule = substr(calls[i], RSTART + 1, RLENGTH - 2)
+      if (!match(calls[i], /make_uniq<[A-Za-z]+>/)) continue
+      matcher = snake(substr(calls[i], RSTART + 10, RLENGTH - 11))
+      suggestion = "none"
+      if (match(calls[i], /SuggestionState::SUGGEST_[A-Z_]+/))
+        suggestion = tolower(substr(calls[i], RSTART + 25, RLENGTH - 25))
+      print rule, matcher, suggestion
+    }
+  }
+' "$work/duckdb/src/parser/peg/compiled_grammar.cpp" |
+  sort > "$staged/matcher_overrides.list"
+
+if [ ! -s "$staged/matcher_overrides.list" ]; then
+  echo "the generated rule overrides block is empty or has moved in" \
+    "compiled_grammar.cpp" >&2
+  exit 1
+fi
+
+if awk 'NF != 3 { exit 1 }' "$staged/matcher_overrides.list"; then :; else
+  echo "a rule override line is not a rule, a matcher and a suggestion" >&2
+  exit 1
+fi
+
 {
   echo "# DuckDB's PEG grammar, vendored verbatim. Do not edit anything in this"
   echo "# directory. Run tools/vendor_grammar.sh to change it."
   echo "#"
   echo "# License: MIT, see LICENSE.duckdb. memoized_rules.list is extracted from"
-  echo "# scripts/parser/grammar_types.yml in the same repository at the same commit."
+  echo "# scripts/parser/grammar_types.yml and matcher_overrides.list from"
+  echo "# src/parser/peg/compiled_grammar.cpp, in the same repository at the same"
+  echo "# commit."
   echo
   echo "upstream: https://github.com/duckdb/duckdb"
   echo "ref: $ref"
@@ -113,7 +176,8 @@ fi
 mkdir -p "$DEST"
 rm -rf "$DEST/statements" "$DEST/keywords"
 cp -R "$staged/statements" "$staged/keywords" "$DEST/"
-cp "$staged/LICENSE.duckdb" "$staged/memoized_rules.list" "$staged/VENDOR" "$DEST/"
+cp "$staged/LICENSE.duckdb" "$staged/memoized_rules.list" \
+  "$staged/matcher_overrides.list" "$staged/VENDOR" "$DEST/"
 
 echo "vendored $ref ($sha) into $DEST"
 echo "next: python tools/gen_grammar.py, then read the diff"

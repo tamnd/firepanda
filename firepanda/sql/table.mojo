@@ -17,6 +17,7 @@ docs/specs/sql/03-the-grammar.md section 5.
 
 from .generated.keywords import KEYWORD_COUNT, KEYWORDS
 from .generated.rules import (
+    MATCHER_COUNT,
     MEMOIZED_COUNT,
     NODE_CAPTURE,
     NODE_CHOICE,
@@ -30,8 +31,10 @@ from .generated.rules import (
     NODE_REF,
     NODE_SEQ,
     NODE_STAR,
+    OVERRIDDEN_COUNT,
     RULE_COUNT,
     STRING_COUNT,
+    SUGGESTION_COUNT,
     TABLE,
 )
 
@@ -89,6 +92,24 @@ struct Grammar(Movable):
     var memoized: List[Bool]
     """Whether each rule is on DuckDB's packrat list. See document 04."""
 
+    var matchers: List[UInt8]
+    """Which hand written matcher each rule uses, 0 for none.
+
+    Nearly every rule is matched by walking its body. Twenty four are not,
+    because their bodies are placeholders that upstream's matcher never reads.
+    The body is still in the table, so that the generator can check it round
+    trips against the grammar text, and the matcher skips it.
+    """
+
+    var suggestions: List[UInt8]
+    """Which suggestion each overridden rule was built with, 0 for none.
+
+    Only the identifier matchers read this, and they read it for two things:
+    which keyword class the position tolerates, and whether a single quoted
+    string counts as a name there. A table name takes 'path.csv' and a type name
+    does not, and that difference lives here rather than in the grammar.
+    """
+
     var keywords: List[String]
     """Every keyword, lower case and sorted, so a lookup can bisect."""
 
@@ -108,6 +129,8 @@ struct Grammar(Movable):
         self.names = List[String]()
         self.roots = List[UInt32]()
         self.memoized = List[Bool]()
+        self.matchers = List[UInt8]()
+        self.suggestions = List[UInt8]()
         self.keywords = List[String]()
         self.keyword_classes = List[UInt8]()
 
@@ -145,10 +168,39 @@ struct Grammar(Movable):
         self.names.reserve(rule_count)
         self.roots.reserve(rule_count)
         self.memoized.reserve(rule_count)
+        self.matchers.resize(rule_count, 0)
+        self.suggestions.resize(rule_count, 0)
         for _ in range(rule_count):
             self.roots.append(UInt32(reader.number()))
             self.memoized.append(reader.number() == 1)
             self.names.append(reader.rest_of_line())
+
+        # The overrides come as their own short section rather than as two more
+        # columns on every rule, because 24 rules out of 1,187 have one.
+        var override_count = reader.section(UInt8(ord("O")))
+        if override_count != OVERRIDDEN_COUNT:
+            raise Error(
+                "grammar table: override count disagrees with OVERRIDDEN_COUNT"
+            )
+        for _ in range(override_count):
+            var rule = reader.number()
+            if rule < 0 or rule >= rule_count:
+                raise Error("grammar table: an override names no rule")
+            var matcher = UInt8(reader.number())
+            if Int(matcher) == 0 or Int(matcher) >= MATCHER_COUNT:
+                raise Error(
+                    "grammar table: a rule names a matcher this build does not"
+                    " have"
+                )
+            var suggestion = UInt8(reader.number())
+            if Int(suggestion) >= SUGGESTION_COUNT:
+                raise Error(
+                    "grammar table: a rule names a suggestion this build does"
+                    " not have"
+                )
+            reader.end_of_line()
+            self.matchers[rule] = matcher
+            self.suggestions[rule] = suggestion
 
         reader.expect_end()
 
@@ -180,8 +232,8 @@ struct Grammar(Movable):
                 return i
         return -1
 
-    def keyword_class(self, word: StringSlice) -> UInt8:
-        """Looks a word up in the keyword table.
+    def keyword_index(self, word: Span[UInt8, _]) -> Int:
+        """Finds a word in the keyword table.
 
         One bisection over one sorted table, rather than one lookup per class.
         The classes overlap, 26 words are both a function name and a type name
@@ -192,22 +244,34 @@ struct Grammar(Movable):
             word: The word, already lower cased by the caller.
 
         Returns:
-            The mask of classes the word is in, or 0 if it is not a keyword.
+            The index into `keywords`, or -1 if the word is not a keyword.
         """
         var low = 0
         var high = len(self.keywords)
         while low < high:
             var middle = (low + high) >> 1
-            var order = _compare(
-                self.keywords[middle].as_bytes(), word.as_bytes()
-            )
+            var order = _compare(self.keywords[middle].as_bytes(), word)
             if order < 0:
                 low = middle + 1
             elif order > 0:
                 high = middle
             else:
-                return self.keyword_classes[middle]
-        return 0
+                return middle
+        return -1
+
+    def keyword_class(self, word: StringSlice) -> UInt8:
+        """Looks a word up in the keyword table.
+
+        Args:
+            word: The word, already lower cased by the caller.
+
+        Returns:
+            The mask of classes the word is in, or 0 if it is not a keyword.
+        """
+        var found = self.keyword_index(word.as_bytes())
+        if found < 0:
+            return 0
+        return self.keyword_classes[found]
 
     def children(self, node: Int) -> List[Int]:
         """Collects one node's children in order.
@@ -308,6 +372,34 @@ def memoized_rules(grammar: Grammar) raises -> List[Int]:
     if len(out) != MEMOIZED_COUNT:
         raise Error(
             "grammar table: memoized rule count disagrees with the table"
+        )
+    return out^
+
+
+def overridden_rules(grammar: Grammar) raises -> List[Int]:
+    """Lists the rules the matcher matches itself instead of walking.
+
+    Also copied from DuckDB, and for a harder reason than the memoized list: the
+    bodies of these rules are wrong on purpose. `OperatorLiteral <- Identifier`
+    is how upstream writes down that the matcher handles it, and a matcher that
+    took the body at its word would read a bare `+` as an identifier.
+
+    Args:
+        grammar: A loaded grammar.
+
+    Returns:
+        The rule indices, ascending.
+
+    Raises:
+        Error: If the count disagrees with the generated constant.
+    """
+    var out = List[Int]()
+    for i in range(len(grammar.matchers)):
+        if grammar.matchers[i] != 0:
+            out.append(i)
+    if len(out) != OVERRIDDEN_COUNT:
+        raise Error(
+            "grammar table: overridden rule count disagrees with the table"
         )
     return out^
 

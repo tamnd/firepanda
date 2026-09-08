@@ -20,7 +20,7 @@ from std.testing import (
     assert_true,
 )
 
-from firepanda.sql import Grammar, memoized_rules
+from firepanda.sql import Grammar, memoized_rules, overridden_rules
 from firepanda.sql.generated.keywords import (
     KEYWORD_COLUMN_NAME,
     KEYWORD_COUNT,
@@ -32,6 +32,13 @@ from firepanda.sql.generated.keywords import (
 )
 from firepanda.sql.generated.rules import (
     FLAG_WORD,
+    MATCHER_COUNT,
+    MATCHER_IDENTIFIER,
+    MATCHER_NONE,
+    MATCHER_NUMBER_LITERAL,
+    MATCHER_OPERATOR,
+    MATCHER_RESERVED_IDENTIFIER,
+    MATCHER_STRING_LITERAL,
     MEMOIZED_COUNT,
     NODE_CAPTURE,
     NODE_CHOICE,
@@ -45,10 +52,17 @@ from firepanda.sql.generated.rules import (
     NODE_REF,
     NODE_SEQ,
     NODE_STAR,
+    OVERRIDDEN_COUNT,
     RULE_COUNT,
     RULE_END_OF_INPUT,
     RULE_WHITESPACE,
     STRING_COUNT,
+    SUGGEST_NONE,
+    SUGGEST_SCALAR_FUNCTION_NAME,
+    SUGGEST_TABLE_NAME,
+    SUGGEST_TYPE_NAME,
+    SUGGEST_VARIABLE,
+    SUGGESTION_COUNT,
 )
 from firepanda.sql.table import _Reader
 
@@ -60,6 +74,8 @@ def test_the_table_loads_and_the_counts_agree() raises:
     assert_equal(len(g.names), RULE_COUNT)
     assert_equal(len(g.roots), RULE_COUNT)
     assert_equal(len(g.memoized), RULE_COUNT)
+    assert_equal(len(g.matchers), RULE_COUNT)
+    assert_equal(len(g.suggestions), RULE_COUNT)
     assert_equal(len(g.keywords), KEYWORD_COUNT)
     assert_equal(len(g.keyword_classes), KEYWORD_COUNT)
 
@@ -284,6 +300,90 @@ def test_the_memoized_rules_are_duckdbs_list() raises:
         "FunctionExpression is not memoized",
     )
     assert_false(g.memoized[g.rule("SelectStatement")])
+
+
+def test_the_overridden_rules_are_duckdbs_list() raises:
+    var g = Grammar()
+    var rules = overridden_rules(g)
+    assert_equal(len(rules), OVERRIDDEN_COUNT)
+    assert_equal(len(rules), 24)
+    # Every one of them is a name or a literal, which is the whole point: these
+    # are the places where the grammar stops describing characters and hands the
+    # job to the tokenizer. See docs/specs/sql/04-the-parser.md section 2.
+    assert_equal(g.matchers[g.rule("OperatorLiteral")], MATCHER_OPERATOR)
+    assert_equal(g.matchers[g.rule("NumberLiteral")], MATCHER_NUMBER_LITERAL)
+    assert_equal(g.matchers[g.rule("StringLiteral")], MATCHER_STRING_LITERAL)
+    assert_equal(g.matchers[g.rule("Identifier")], MATCHER_IDENTIFIER)
+    assert_equal(g.matchers[g.rule("TableName")], MATCHER_IDENTIFIER)
+    assert_equal(
+        g.matchers[g.rule("ReservedIdentifier")], MATCHER_RESERVED_IDENTIFIER
+    )
+    # ReservedKeyword is the one row where grammar_types.yml and the parser
+    # disagree. The yml says identifier_string, which is a transformer result
+    # type, and compiled_grammar.cpp builds a ReservedIdentifierMatcher. The
+    # C++ is what runs, so the C++ is what the vendor script reads.
+    assert_equal(
+        g.matchers[g.rule("ReservedKeyword")], MATCHER_RESERVED_IDENTIFIER
+    )
+    # The rules that carry no override are the overwhelming majority, and a
+    # generator bug that set the column on everything would still pass the count
+    # check above if the count moved with it.
+    assert_equal(g.matchers[g.rule("SelectStatement")], MATCHER_NONE)
+    assert_equal(g.matchers[g.rule("Expression")], MATCHER_NONE)
+
+
+def test_the_suggestions_say_which_names_each_position_takes() raises:
+    # The suggestion is not decoration. IdentifierMatcher asks it which keyword
+    # class the position tolerates and whether a single quoted string is a name
+    # there, so TableName and TypeName take different words even though both
+    # run the same matcher.
+    var g = Grammar()
+    assert_equal(g.suggestions[g.rule("TableName")], SUGGEST_TABLE_NAME)
+    assert_equal(g.suggestions[g.rule("TypeName")], SUGGEST_TYPE_NAME)
+    assert_equal(
+        g.suggestions[g.rule("FunctionName")], SUGGEST_SCALAR_FUNCTION_NAME
+    )
+    assert_equal(g.suggestions[g.rule("Identifier")], SUGGEST_VARIABLE)
+    # The three matchers that take no suggestion, and every rule with no
+    # override at all, read zero.
+    assert_equal(g.suggestions[g.rule("NumberLiteral")], SUGGEST_NONE)
+    assert_equal(g.suggestions[g.rule("StringLiteral")], SUGGEST_NONE)
+    assert_equal(g.suggestions[g.rule("OperatorLiteral")], SUGGEST_NONE)
+    assert_equal(g.suggestions[g.rule("SelectStatement")], SUGGEST_NONE)
+
+
+def test_only_an_overridden_rule_carries_a_suggestion() raises:
+    var g = Grammar()
+    for i in range(len(g.matchers)):
+        assert_true(
+            Int(g.suggestions[i]) < SUGGESTION_COUNT,
+            String("rule ", g.names[i], " names an unknown suggestion"),
+        )
+        if g.matchers[i] == MATCHER_NONE:
+            assert_equal(
+                g.suggestions[i],
+                SUGGEST_NONE,
+                String(g.names[i], " has a suggestion but no matcher"),
+            )
+
+
+def test_an_overridden_rule_keeps_the_body_the_grammar_gave_it() raises:
+    # The bodies of these rules are placeholders that upstream's matcher never
+    # reads, and the temptation is to drop them. They stay, because the
+    # generator's round trip check is what proves we read the grammar text
+    # correctly, and it can only check text that is still there. This is the
+    # rule that would break first: `+` is not an identifier.
+    var g = Grammar()
+    assert_equal(g.write_rule(g.rule("OperatorLiteral")), "Identifier")
+
+
+def test_no_rule_names_a_matcher_this_build_does_not_have() raises:
+    var g = Grammar()
+    for i in range(len(g.matchers)):
+        assert_true(
+            Int(g.matchers[i]) < MATCHER_COUNT,
+            String("rule ", g.names[i], " names an unknown matcher"),
+        )
 
 
 def test_the_keyword_table_is_sorted_and_bisects() raises:
