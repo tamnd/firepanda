@@ -362,6 +362,74 @@ def _take_core[
     def gather(start: Int, stop: Int) raises {mut out, mut built, imm}:
         var target = out.unsafe_ptr()
 
+        # A run of consecutive ascending indices is a copy, and it is not a rare
+        # shape. An inner join that matches every probe row once hands the left
+        # side an index list that is `0, 1, 2, ...`, because the output is in
+        # probe order and every probe row produced exactly one output row, so
+        # every column taken from the probe side is being gathered by the
+        # identity. A limit and a slice are the same thing offset.
+        #
+        # The check is a pass over the indices and it is almost free on the
+        # columns it does not help: an index list that is not a run stops the
+        # loop at the first row that is not, which for a genuinely scattered
+        # list is the second row. What it saves when it does hold is the eight
+        # byte index load and the branch on every row, and it hands the copy to
+        # a memcpy that moves a cache line at a time instead of an element.
+        #
+        # Four ABBA passes a side on a 13900K, join microbenchmarks at ten
+        # million rows, milliseconds without the run check against with it.
+        # `join/inner_1000`, four gathered columns, 24.06 23.96 24.06 24.36
+        # against 22.49 22.19 22.20 22.54. `join/inner_projected`, two of them,
+        # 15.13 15.12 15.14 15.48 against 14.73 14.55 14.51 14.75.
+        # `join/two_keys` 43.8 42.4 42.2 47.9 against 40.1 40.1 40.6 40.8.
+        # `join/outer` 37.4 37.8 37.8 40.8 against 36.2 36.1 36.8 37.1. Every
+        # run with it below every run without it in all four.
+        #
+        # The controls say the check costs nothing where it fails.
+        # `join/indices_1000` pairs without gathering anything and comes out
+        # 7.24 7.21 7.18 7.23 against 7.29 7.17 7.19 7.26, `join/semi` and
+        # `join/anti` are interleaved the same way, and `join/many_to_many`,
+        # whose left indices repeat and so are never a run, is interleaved too.
+        #
+        # The db-benchmark joins at a hundred million rows move less, because at
+        # that size the gather is waiting on memory rather than on instructions.
+        # CPU seconds for three timed runs, without against with: j1 6.22 6.27
+        # 6.23 6.16 against 5.94 5.81 5.97 6.11, j2 12.49 12.74 12.84 12.55
+        # against 11.98 12.10 12.16 12.34, j3 12.61 12.81 11.81 12.59 against
+        # 12.01 12.10 12.22 12.25. Four per cent of the CPU on j1 and j2, and
+        # one to two per cent of the wall clock, which is what is left once the
+        # eight hundred megabytes still have to be read either way.
+        #
+        # Only when the source has no nulls. With nulls the output's validity is
+        # a bit shifted copy of a range of the input's, which is a different and
+        # more delicate loop than the two here, and a join gathering from a
+        # column with nulls is not the case this is for.
+        if not has_nulls and stop > start and indices[start] >= 0:
+            var first = indices[start]
+            var run = True
+            for i in range(start + 1, stop):
+                if indices[i] != first + (i - start):
+                    run = False
+                    break
+            if run:
+                unsafe_memcpy(
+                    dest=target.unsafe_offset(start),
+                    src=source.unsafe_offset(first),
+                    count=stop - start,
+                )
+                # Every row of the run is valid, so the words are filled rather
+                # than accumulated. The last word of the last morsel is the only
+                # partial one, and the bits above `stop` in it belong to no row.
+                var w = start >> 6
+                while (w + 1) << 6 <= stop:
+                    built.unsafe_set_word(w, UInt64.MAX)
+                    w += 1
+                if stop & 63 != 0:
+                    built.unsafe_set_word(
+                        w, (UInt64(1) << UInt64(stop & 63)) - 1
+                    )
+                return
+
         # The output positions are consecutive, so the validity bits can be
         # built in a register and stored once every sixty four rows instead of
         # read-modify-writing a byte per row. The input side has no such luck; a

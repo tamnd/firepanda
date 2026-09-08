@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A gather by consecutive indices is a copy, and now it is one
+
+An inner join that matches every probe row exactly once hands the probe side an index list that reads `0, 1, 2` and so on, because the output comes out in probe order and every probe row produced one output row. Every column taken from that side was being gathered by the identity permutation: an eight byte index load, a sign test and a validity bit per row, to move data that was already in order. The same thing happens on a left join, on a limit, and on any take whose index list happens to be a slice.
+
+The gather now checks for that before it starts. If a morsel's indices ascend by one from wherever they begin, and the source has no nulls, the values go through a memcpy and the validity words are filled rather than accumulated a bit at a time. The check stops at the first index that breaks the run, so a genuinely scattered list pays for two loads and a comparison once per morsel and nothing else.
+
+Four ABBA passes a side on the join microbenchmarks at ten million rows, milliseconds before against after. `join/inner_1000`, which gathers four columns, 24.06 23.96 24.06 24.36 against 22.49 22.19 22.20 22.54. `join/inner_projected`, two columns, 15.13 15.12 15.14 15.48 against 14.73 14.55 14.51 14.75. `join/two_keys` 43.8 42.4 42.2 47.9 against 40.1 40.1 40.6 40.8. `join/outer` 37.4 37.8 37.8 40.8 against 36.2 36.1 36.8 37.1. Every run after below every run before, in all four.
+
+The controls say the check costs nothing where it fails. `join/indices_1000` pairs without gathering anything, `join/semi` and `join/anti` produce no gathered values, and `join/many_to_many` has repeating left indices that are never a run. All four come out interleaved.
+
+The db-benchmark joins at a hundred million rows move less, which is what you would expect once the gather is waiting on memory rather than on instructions. CPU seconds for three timed runs, before against after: j1 6.22 6.27 6.23 6.16 against 5.94 5.81 5.97 6.11, j2 12.49 12.74 12.84 12.55 against 11.98 12.10 12.16 12.34. Four per cent of the CPU and one to two per cent of the wall clock, because the eight hundred megabytes still have to be read either way.
+
 ### The gather runs ahead of itself
 
 The hash table's probe has issued a prefetch eight rows ahead of itself for a long time, because where row `i + 8` will read is known as soon as its hash is, and asking for the line early turns eight misses taken one after another into eight outstanding at once. The gather that follows the probe never did the same thing, and it has exactly the same shape: the index list is in memory before the loop starts, so where every row will read from is known before the loop reaches it.
