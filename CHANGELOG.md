@@ -8,6 +8,35 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Cutting a byte range out of a text column, and the first text column built in parallel
+
+`Series` grew `str_slice` and `kernel/substr.mojo` holds it. This is SQL's `substring`, and TPC-H q22 is the reason it exists now rather than later: it groups customers by the first two characters of a phone number, which is nothing but this call.
+
+It cuts by bytes and not by code points. That is what the rest of the column measures itself in, `StringView.__len__` is a byte length and so is `byte_length`, and the reader that filled the column never promised the bytes were UTF-8 in the first place. Anyone coming from pandas should know that up front, because `.str[:2]` there slices code points. A code point variant is a different kernel and it can be written when something asks for one. Both ends are clamped rather than checked, so a negative offset counts back from the end, an offset past the end is the empty string, and a length running off the end stops at the end. None of those is an error.
+
+The interesting part is that this is the first text column in the library built on more than one core, and the shape it uses is the one `filter` and `take` need. Both of those go through `StringBuilder` one element at a time today, because a payload offset is a running total and a running total is serial. The way out is to know the totals before any bytes move, and for a substring that is easy: an element's output length depends on its input length and nothing else, and an input length is already in the view. So the views are read once to size each morsel's share of the payload, the shares are summed into a base per morsel, and then every morsel writes its own views and copies into its own stretch of payload with nothing shared between them at all.
+
+Two things fall out of that. The sizing pass reads the views buffer and never touches the payload, so it costs sixteen bytes a row in order and follows no pointers. And it is skipped entirely when the requested length is twelve or less, because then every result fits inside its own view, the payload is provably empty, and there is nothing to size.
+
+Nanoseconds a row on an i9-13900K over a million rows of thirty two bytes, the serial builder this started as against the two pass build it shipped as, with `text/equal_constant` alongside as a control that neither version touches.
+
+| row | serial builder | two pass build |
+| --- | --- | --- |
+| substring_inline, two bytes | 2.580 | 2.664 |
+| substring_payload, twenty bytes | 19.802 | 4.234 |
+| equal_constant (control) | 1.850 | 1.866 |
+
+The inline row does not move, which is the point of it: it never had a payload to build, so there was never anything there to parallelize. The payload row is 4.7 times faster.
+
+Against the same column on the same machine, with polars 1.44.1, pandas 3.0.5 and duckdb 1.5.5 asked for the same two cuts. DuckDB is measured through `.arrow()`, which is the only way it hands back a materialized column.
+
+| row | firepanda | polars | pandas | duckdb |
+| --- | --- | --- | --- | --- |
+| two bytes | 2.664 | 8.422 | 9.287 | 1.163 |
+| twenty bytes | 4.234 | 11.418 | 16.131 | 2.004 |
+
+So 3.2 times polars and 3.5 times pandas on the short cut, 2.7 and 3.8 on the long one, and still behind DuckDB by 2.3 and 2.1 times. The remaining gap is mostly a difference in what the two engines write. A firepanda view is sixteen bytes whatever the string is, so the short cut writes sixteen bytes a row where Arrow writes a four byte offset and two bytes of data, and the long cut writes thirty six against Arrow's twenty four. That is the price of the inline representation and it is paid back everywhere a short string is compared without a pointer chase. It is not something this kernel can undo, and closing what is left of the gap means not copying at all, which needs a payload buffer two columns can share and a plan for how long the original then stays alive. That is a separate piece of work.
+
 ### Every statement in DuckDB's test corpus, through both parsers
 
 The compatibility claim needed a number rather than a corpus of 135 statements somebody typed out by hand. `pixi run differential-sql` now takes DuckDB's own test suite, pulls 71,438 statements out of it, and runs every one through both parsers. The first reading is 2 statements DuckDB parses that firepanda does not, 1,130 the other way, and 98.41 per cent agreement.

@@ -144,6 +144,7 @@ from .sort import (
     sort_key,
     sort_rows,
 )
+from .substr import TO_END, text_substring
 from .temporal import (
     ROUND_DOWN,
     ROUND_HALF_EVEN,

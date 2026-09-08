@@ -160,6 +160,7 @@ from firepanda.kernel import (
     text_contains_in_order,
     text_ends_with,
     text_starts_with,
+    text_substring,
 )
 from firepanda.kernel.arith import OP_ADD
 from firepanda.kernel.compare import CMP_EQ, CMP_LT
@@ -2648,6 +2649,25 @@ def bench_text(mut harness: Harness) raises:
         keep(out)
 
     harness.record("text/ends_with", "rows", rows, ends_with)
+
+    # The two routes through the substring kernel, on the same thirty two byte
+    # column. Two bytes fits inside a view, so that one skips the sizing pass
+    # entirely and writes nothing but the views buffer. Twenty does not, so that
+    # one reads the views once to size every morsel's share of the payload, sums
+    # the shares, and then copies bytes. The gap between the two rows is what a
+    # payload costs, and it is the number to watch when the same two pass shape
+    # is put under `filter` and `take`.
+    def substring_inline() raises {imm flat}:
+        var out = text_substring(flat, 0, 2)
+        keep(out)
+
+    harness.record("text/substring_inline", "rows", rows, substring_inline)
+
+    def substring_payload() raises {imm flat}:
+        var out = text_substring(flat, 4, 20)
+        keep(out)
+
+    harness.record("text/substring_payload", "rows", rows, substring_payload)
 
     var plain = Array[BENCH_DTYPE](rows)
     for i in range(rows):

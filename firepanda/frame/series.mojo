@@ -56,6 +56,7 @@ from firepanda.kernel.pattern import (
 )
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.sort import argsort_any, is_sorted_any
+from firepanda.kernel.substr import TO_END, text_substring
 from firepanda.kernel.temporal import (
     ROUND_DOWN,
     ROUND_HALF_EVEN,
@@ -585,6 +586,31 @@ struct Series(Copyable, Movable, Sized, Writable):
             If the series is not text.
         """
         return text_ends_with(self.values.strings(), suffix.as_bytes())
+
+    def str_slice(self, offset: Int, length: Int = TO_END) raises -> Self:
+        """Returns a byte range cut out of every row.
+
+        This is SQL's `substring`. It cuts by bytes rather than by code points,
+        which is what the rest of the column measures itself in, and both ends
+        are clamped, so a range that runs off a short row is the empty string
+        rather than an error.
+
+        Args:
+            offset: Where each substring starts, in bytes. Negative counts back
+                from the end of the row, so -3 is the last three bytes.
+            length: How many bytes to take. Negative, which is the default,
+                means everything to the end of the row.
+
+        Returns:
+            A text series of the same height, null wherever this one is null.
+
+        Raises:
+            If the series is not text.
+        """
+        return self._relabelled(
+            self.name,
+            AnyArray(text_substring(self.values.strings(), offset, length)),
+        )
 
     def drop_nulls(self) raises -> Self:
         """Returns the series with the missing rows removed.

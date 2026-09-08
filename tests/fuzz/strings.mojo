@@ -53,7 +53,9 @@ from firepanda.kernel.scalar import (
     text_contains_scalar,
     text_ends_with_scalar,
     text_starts_with_scalar,
+    text_substring_scalar,
 )
+from firepanda.kernel.substr import TO_END, text_substring
 from firepanda.kernel.text import compare_text, compare_text_const
 from firepanda.testing.rng import Rng
 
@@ -592,6 +594,90 @@ def check_text_pattern(
         )
 
 
+def check_text_substring(
+    column: StringArray,
+    mut rng: Rng,
+    step: Int,
+    seed: UInt64,
+) raises:
+    """Cuts a random byte range out of the column and checks it against the twin.
+
+    The offset is drawn either side of zero and the length either side of
+    twelve, because those are the two numbers the kernel branches on: a
+    negative offset counts back from the end of a row whose length it does not
+    know until it reads it, and a length of at most twelve is the route that
+    writes into the view and never allocates a payload. Both are drawn wider
+    than any row this file builds, so ranges that fall entirely off the end
+    turn up often.
+
+    Args:
+        column: The column under test.
+        rng: The generator.
+        step: The case number, for the failure message.
+        seed: The seed, for the failure message.
+
+    Raises:
+        If the kernel and the twin disagree anywhere.
+    """
+    var offset = Int(rng.next_below(80)) - 40
+    var length = Int(rng.next_below(40)) - 2
+    if length < 0:
+        length = TO_END
+    var what = String("substring ", offset, " ", length)
+    var got = text_substring(column, offset, length)
+    var want = text_substring_scalar(column, offset, length)
+    if len(got) != len(want):
+        raise Error(
+            String(
+                "case ",
+                step,
+                " seed ",
+                seed,
+                ": ",
+                what,
+                " gave ",
+                len(got),
+                " rows against ",
+                len(want),
+            )
+        )
+    for i in range(len(got)):
+        if got.is_valid(i) != want.is_valid(i):
+            raise Error(
+                String(
+                    "case ",
+                    step,
+                    " seed ",
+                    seed,
+                    ": ",
+                    what,
+                    " row ",
+                    i,
+                    " validity ",
+                    got.is_valid(i),
+                    " against ",
+                    want.is_valid(i),
+                )
+            )
+        if got.is_valid(i) and got[i] != want[i]:
+            raise Error(
+                String(
+                    "case ",
+                    step,
+                    " seed ",
+                    seed,
+                    ": ",
+                    what,
+                    " row ",
+                    i,
+                    " gave ",
+                    got[i],
+                    " against ",
+                    want[i],
+                )
+            )
+
+
 def check_text_compare(
     column: StringArray,
     values: List[String],
@@ -923,8 +1009,11 @@ def main() raises:
         elif op < 85 and len(values) > 0:
             check_text_compare(column, values, present, rng, step, options.seed)
 
-        elif op < 90 and len(values) > 0:
+        elif op < 88 and len(values) > 0:
             check_text_pattern(column, values, rng, step, options.seed)
+
+        elif op < 90:
+            check_text_substring(column, rng, step, options.seed)
 
         elif op < 95 and len(values) > 0:
             # The permutation is compared position by position rather than the

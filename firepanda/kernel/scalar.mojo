@@ -19,7 +19,7 @@ from std.ffi import external_call
 from std.math import copysign, floor, isnan, nan, sqrt
 
 from firepanda.array.array import Array
-from firepanda.array.strings import StringArray
+from firepanda.array.strings import StringArray, StringBuilder
 
 from .accum import accumulator
 from .arith import OP_ADD, OP_MUL, OP_SUB
@@ -2101,3 +2101,42 @@ def text_ends_with_scalar(a: StringArray, suffix: String) -> Array[DType.bool]:
             continue
         out.set_valid(i, _string_find_scalar(text, suffix, room) == room)
     return out^
+
+
+def text_substring_scalar(
+    a: StringArray, offset: Int, length: Int
+) raises -> StringArray:
+    """Cuts a byte range out of every element, one byte at a time.
+
+    Args:
+        a: The column.
+        offset: Where each substring starts. Negative counts back from the end.
+        length: How many bytes to take. Negative means to the end.
+
+    Returns:
+        A text column, null where the column is null.
+
+    Raises:
+        Error: Never, but building a column can.
+    """
+    var builder = StringBuilder(capacity=len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            builder.append_null()
+            continue
+        var text = a[i]
+        var n = text.byte_length()
+        var at = offset
+        if at < 0:
+            at = n + at
+            if at < 0:
+                at = 0
+        elif at > n:
+            at = n
+        var room = n - at
+        var count = room if length < 0 else min(length, room)
+        var piece = String()
+        for k in range(at, at + count):
+            piece += text[byte=k]
+        builder.append(piece.as_bytes())
+    return builder^.finish()
