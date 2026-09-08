@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### The gather runs ahead of itself
+
+The hash table's probe has issued a prefetch eight rows ahead of itself for a long time, because where row `i + 8` will read is known as soon as its hash is, and asking for the line early turns eight misses taken one after another into eight outstanding at once. The gather that follows the probe never did the same thing, and it has exactly the same shape: the index list is in memory before the loop starts, so where every row will read from is known before the loop reaches it.
+
+It does now. What that is worth depends entirely on whether the column being gathered from fits in cache, and the join queries in db-benchmark sit on both sides of that line. The big join gathers from a hundred million rows, eight hundred megabytes against a thirty six megabyte L3, and there it is three per cent: four ABBA passes a side, every run with the prefetch below every run without it, and 45.1 CPU seconds against 46.6. The medium join gathers from a million rows, which is L3 resident, and there the same eight passes come out fully interleaved. The join microbenchmarks gather from a hundred thousand rows and are interleaved too.
+
+So it is a small win on the one shape where it can be a win and free everywhere else, which is why it is unconditional rather than behind a size test.
+
 ### A join in a pipeline can take a text key, and whether it should depends on cache
 
 The streaming join node refused a text key and the refusal was written down as a fact about streams: a text key needs the ordinal space that comes from concatenating both key columns, and having both columns at once is the one thing a stream has not got. That was true of the route it had. It stopped being true when the join learned to build a table over one side and read it from the other, because that route never concatenates anything, and the refusal outlived its reason by one release.
