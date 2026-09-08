@@ -156,6 +156,10 @@ from firepanda.kernel import (
     take_any,
     take_range,
     take_rows,
+    text_contains,
+    text_contains_in_order,
+    text_ends_with,
+    text_starts_with,
 )
 from firepanda.kernel.arith import OP_ADD
 from firepanda.kernel.compare import CMP_EQ, CMP_LT
@@ -2582,6 +2586,68 @@ def bench_text(mut harness: Harness) raises:
     harness.record(
         "text/equal_constant_short", "rows", rows, equal_constant_short
     )
+
+    # The pattern rows. What decides the cost of a contains is where the answer
+    # is and how much of the row the search has to look at before it gets there,
+    # so there are three: a needle that is present a quarter of the way into a
+    # thirty two byte row, one that is absent from the same row and so cannot be
+    # settled before the last byte, and the present one again on an eight byte
+    # row, which fits inside a single block and never enters the skipping loop
+    # at all. The prefix and suffix rows are the control. Both answer in one
+    # comparison at a known offset and should be several times cheaper than any
+    # of the three, and if they are not then the search is not skipping.
+    #
+    # `flat` holds the alphabet repeating, so `ghijk` sits at byte six of every
+    # row and `ghijx` sits nowhere, and the two differ only in whether the last
+    # byte of the candidate matches. That is the check the first and last byte
+    # filter exists to make, so the gap between these two rows is the closest
+    # thing the suite has to a direct reading of it.
+    var found_here = String("ghijk")
+    var found_nowhere = String("ghijx")
+
+    def contains_hit() raises {imm flat, imm found_here}:
+        var out = text_contains(flat, found_here.as_bytes())
+        keep(out)
+
+    harness.record("text/contains_hit", "rows", rows, contains_hit)
+
+    def contains_miss() raises {imm flat, imm found_nowhere}:
+        var out = text_contains(flat, found_nowhere.as_bytes())
+        keep(out)
+
+    harness.record("text/contains_miss", "rows", rows, contains_miss)
+
+    def contains_short() raises {imm short_left, imm found_here}:
+        var out = text_contains(short_left, found_here.as_bytes())
+        keep(out)
+
+    harness.record("text/contains_short", "rows", rows, contains_short)
+
+    var pair_first = String("cde")
+
+    def contains_pair() raises {imm flat, imm pair_first, imm found_here}:
+        var out = text_contains_in_order(
+            flat, pair_first.as_bytes(), found_here.as_bytes()
+        )
+        keep(out)
+
+    harness.record("text/contains_pair", "rows", rows, contains_pair)
+
+    var front = String("abcd")
+
+    def starts_with() raises {imm flat, imm front}:
+        var out = text_starts_with(flat, front.as_bytes())
+        keep(out)
+
+    harness.record("text/starts_with", "rows", rows, starts_with)
+
+    var back = String("abcd")
+
+    def ends_with() raises {imm flat, imm back}:
+        var out = text_ends_with(flat, back.as_bytes())
+        keep(out)
+
+    harness.record("text/ends_with", "rows", rows, ends_with)
 
     var plain = Array[BENCH_DTYPE](rows)
     for i in range(rows):

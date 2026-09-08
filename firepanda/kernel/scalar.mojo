@@ -1977,3 +1977,127 @@ def rescale_scalar[
         else:
             out.set_valid(i, _floored_int_quotient(a[i], ratio))
     return out^
+
+
+def _string_find_scalar(hay: String, needle: String, from_: Int) -> Int:
+    """Finds a substring by comparing characters one at a time.
+
+    Deliberately the worst search anybody would write. It tries every position
+    and compares every byte at each one, with no skip and no first byte filter,
+    which is exactly what makes it a check on a kernel whose whole content is the
+    skipping.
+
+    Args:
+        hay: The string being searched.
+        needle: The string being looked for.
+        from_: The first position that may be returned.
+
+    Returns:
+        The offset of the match, or -1.
+    """
+    var n = hay.byte_length()
+    var m = needle.byte_length()
+    if m == 0:
+        return from_ if from_ <= n else -1
+    for at in range(from_, n - m + 1):
+        var same = True
+        for k in range(m):
+            if hay[byte=at + k] != needle[byte=k]:
+                same = False
+                break
+        if same:
+            return at
+    return -1
+
+
+def text_contains_scalar(a: StringArray, needle: String) -> Array[DType.bool]:
+    """Whether each element contains a substring, one element at a time.
+
+    Args:
+        a: The column.
+        needle: The substring.
+
+    Returns:
+        A bool column, null where the column is null.
+    """
+    var out = Array[DType.bool](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        out.set_valid(i, _string_find_scalar(a[i], needle, 0) >= 0)
+    return out^
+
+
+def text_contains_in_order_scalar(
+    a: StringArray, first: String, second: String
+) -> Array[DType.bool]:
+    """Whether each element contains two substrings in order, one at a time.
+
+    Args:
+        a: The column.
+        first: The substring that must come first.
+        second: The substring that must follow it.
+
+    Returns:
+        A bool column, null where the column is null.
+    """
+    var out = Array[DType.bool](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        var text = a[i]
+        var at = _string_find_scalar(text, first, 0)
+        var found = False
+        if at >= 0:
+            found = (
+                _string_find_scalar(text, second, at + first.byte_length()) >= 0
+            )
+        out.set_valid(i, found)
+    return out^
+
+
+def text_starts_with_scalar(
+    a: StringArray, prefix: String
+) -> Array[DType.bool]:
+    """Whether each element begins with a substring, one element at a time.
+
+    Args:
+        a: The column.
+        prefix: The substring.
+
+    Returns:
+        A bool column, null where the column is null.
+    """
+    var out = Array[DType.bool](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        out.set_valid(i, _string_find_scalar(a[i], prefix, 0) == 0)
+    return out^
+
+
+def text_ends_with_scalar(a: StringArray, suffix: String) -> Array[DType.bool]:
+    """Whether each element ends with a substring, one element at a time.
+
+    Args:
+        a: The column.
+        suffix: The substring.
+
+    Returns:
+        A bool column, null where the column is null.
+    """
+    var out = Array[DType.bool](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        var text = a[i]
+        var room = text.byte_length() - suffix.byte_length()
+        if room < 0:
+            out.set_valid(i, False)
+            continue
+        out.set_valid(i, _string_find_scalar(text, suffix, room) == room)
+    return out^

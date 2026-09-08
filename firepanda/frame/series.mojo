@@ -48,6 +48,12 @@ from firepanda.kernel.nulls import (
     is_null_any,
     missing_count_any,
 )
+from firepanda.kernel.pattern import (
+    text_contains,
+    text_contains_in_order,
+    text_ends_with,
+    text_starts_with,
+)
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.sort import argsort_any, is_sorted_any
 from firepanda.kernel.temporal import (
@@ -504,6 +510,81 @@ struct Series(Copyable, Movable, Sized, Writable):
             Error: Only what the morsel runtime raises.
         """
         return is_not_null_any(self.values)
+
+    def str_contains(self, needle: StringSlice) raises -> Array[DType.bool]:
+        """Returns a mask that is true where the text holds a substring.
+
+        This is `LIKE '%needle%'`. The match is on bytes and not on characters,
+        which for UTF-8 is the same answer for any needle that is itself valid
+        UTF-8, because a valid sequence cannot begin inside another one.
+
+        Args:
+            needle: The substring to look for. An empty one matches every row
+                that is not null, which is what `LIKE '%%'` says.
+
+        Returns:
+            A bool column, null wherever the series is null.
+
+        Raises:
+            If the series is not text.
+        """
+        return text_contains(self.values.strings(), needle.as_bytes())
+
+    def str_contains_in_order(
+        self, first: StringSlice, second: StringSlice
+    ) raises -> Array[DType.bool]:
+        """Returns a mask that is true where two substrings appear in order.
+
+        This is `LIKE '%first%second%'`, and it is not the conjunction of two
+        `str_contains` calls: the second run has to begin after the first one
+        ends. `'abc'` holds both `'bc'` and `'a'` and does not match
+        `LIKE '%bc%a%'`.
+
+        Args:
+            first: The substring that must come first.
+            second: The substring that must follow it.
+
+        Returns:
+            A bool column, null wherever the series is null.
+
+        Raises:
+            If the series is not text.
+        """
+        return text_contains_in_order(
+            self.values.strings(), first.as_bytes(), second.as_bytes()
+        )
+
+    def str_starts_with(self, prefix: StringSlice) raises -> Array[DType.bool]:
+        """Returns a mask that is true where the text begins with a substring.
+
+        This is `LIKE 'prefix%'`.
+
+        Args:
+            prefix: The substring to look for at the front.
+
+        Returns:
+            A bool column, null wherever the series is null.
+
+        Raises:
+            If the series is not text.
+        """
+        return text_starts_with(self.values.strings(), prefix.as_bytes())
+
+    def str_ends_with(self, suffix: StringSlice) raises -> Array[DType.bool]:
+        """Returns a mask that is true where the text ends with a substring.
+
+        This is `LIKE '%suffix'`.
+
+        Args:
+            suffix: The substring to look for at the back.
+
+        Returns:
+            A bool column, null wherever the series is null.
+
+        Raises:
+            If the series is not text.
+        """
+        return text_ends_with(self.values.strings(), suffix.as_bytes())
 
     def drop_nulls(self) raises -> Self:
         """Returns the series with the missing rows removed.

@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Four ways to ask whether a text column holds a run of bytes
+
+`Series` grew `str_contains`, `str_starts_with`, `str_ends_with` and `str_contains_in_order`, and `kernel/pattern.mojo` holds the search behind them. Between them they cover every `LIKE` pattern the twenty two TPC-H queries use: `%x%` is a contains, `x%` is a starts with, `%x` is an ends with, and `%a%b%` is the pair. They return a mask rather than a series, the way `is_null` does, because a mask is what `filter` takes.
+
+The pair is one call and not two on purpose. `LIKE '%a%b%'` requires the second run to begin after the first one ends, so `'abc'` does not match `'%bc%a%'` even though it holds both runs, and a conjunction of two independent searches would say it does.
+
+The search is the first and last byte filter with a vectorized skip. The needle's first byte is broadcast across a register, thirty two bytes of the row are compared against it at once, and a block with no hit moves the cursor by the whole block. A block with a hit checks its candidates, and a candidate is only compared in full when its last byte matches too, which throws out nearly everything the first byte let through. That beats a two way or a Boyer Moore search on the shapes that turn up here, needles of five to twenty bytes against rows of ten to eighty, because those spend their setup on tables a short needle never earns back.
+
+Starts with and ends with do not search at all. Both know where to look, so both are a length test and one run of bytes compared at a fixed offset, which is what `text/starts_with` and `text/ends_with` are in the benchmark suite to confirm: if they are ever close to `text/contains_hit` then the skipping has stopped working.
+
+There is no general pattern compiler and this is not a step towards one before it is needed. A matcher with a wildcard alphabet is a different piece of work, it would be slower on all four of these, and none of the queries ask for it.
+
 ### DuckDB's grammar is in the tree, and a table is generated from it
 
 DuckDB replaced its Bison parser with a hand written PEG parser and shipped the grammar as data. Forty `.gram` files, five keyword lists, 61,190 bytes, MIT licensed, and executed by the reference implementation itself rather than being a description of it. That is the artifact the whole SQL milestone rests on, and it is now vendored at `firepanda/sql/grammar/` with a `VENDOR` file recording the upstream commit and a SHA-256 for each of the 47 files.
