@@ -275,14 +275,20 @@ def is_not_null_any(col: AnyArray) raises -> Array[DType.bool]:
 def widen_for_missing(col: AnyArray) raises -> AnyArray:
     """Moves a numeric column's missing rows out of the bitmap and into the values.
 
-    This is where a frame stops being Arrow and starts being pandas, and it is
-    the only place that turn happens. pandas on the numpy backend has one
-    missing value for a number and it is NaN, so an integer column that has a
-    missing row cannot stay an integer column: there is no integer that means
-    absent, and pandas makes room by widening the whole column to float64. That
-    is not something pandas does when you add two columns, it is something it
-    does when it reads the data, which is why this is a read path function and
-    not a rule inside a kernel.
+    This is where a frame stops being Arrow and starts being pandas. pandas on
+    the numpy backend has one missing value for a number and it is NaN, so an
+    integer column that has a missing row cannot stay an integer column: there
+    is no integer that means absent, and pandas makes room by widening the whole
+    column to float64.
+
+    What that buys the layer above is an invariant: in the pandas facing part of
+    the library, a numeric column never carries a null in its bitmap. The
+    invariant is established at the door, by `DataFrame.widen_for_missing` on the
+    way in, and it is restored by whatever else opens a gap afterwards, which
+    today is `Series.shift` and the differences built on it. So this is called
+    from more than one place, but it is called from one layer, and no kernel
+    calls it. A kernel gives the Arrow answer and the layer above decides
+    whether that answer is one a pandas program is allowed to see.
 
     The rule is one sentence. A numeric column that has a missing row carries
     that row as a NaN rather than as a cleared validity bit, and an integer

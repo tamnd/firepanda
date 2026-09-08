@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### The row before this one
+
+`Series.shift`, `Series.diff` and `Series.pct_change` move a column along its own rows and compare it against where it was. `shift(1)` puts the gap at the start, `shift(-2)` puts it at the end, `shift(0)` is a copy, and `shift(1, fill_value)` puts something in the gap rather than leaving it missing. `diff` is the column minus its own lag and `pct_change` is that difference as a fraction of where the column was. The labels stay where they are while the values move past them, which is what makes `s - s.shift(1)` mean anything, since the subtraction aligns on labels and would line the column back up with itself if the labels moved too.
+
+Underneath, a shift is a block for the gap, a slice for the overlap and a concat to join them, in `firepanda/kernel/shift.mojo`. It is not a `take` with an index array, which would have been four lines and correct and would also have allocated eight bytes a row for indices nobody reads twice and turned a memory copy into a gather. Shift is the operation people put inside a loop over a hundred lags, so it is written as the copy it is.
+
+The type of the answer follows the rule the read path already had. Opening a gap in an integer column widens it to float64, because there is no integer that means absent, so `shift()` and `diff()` on an int64 column answer float64 exactly as pandas does. Opening no gap changes nothing, so `shift(0)` and `shift(1, fill_value=0)` stay int64. A float32 column stays float32, a timestamp column stays a timestamp and gets a NaT, and a string column stays a string. The difference between two instants is a length of time, so `diff()` on a datetime column answers a duration, and across a daylight saving transition it answers the hour that was really there rather than the hour the clock face suggests, without anything in the call saying so.
+
+`pct_change` divides and then subtracts one rather than subtracting and then dividing. The two are the same number on ordinary values and are not the same number on the edges: a row of minus zero after a row of minus infinity gives minus one the first way and NaN the second. pandas divides first.
+
+One defect was fixed on the way. `all_null` took a logical type, matched it against the physical layouts and returned a column that had lost the logical type, so a block of missing timestamps came back as a block of missing integers. It now returns the type it was given. The other caller that passes a real logical type is the frame reindex path, which had the same bug waiting in it.
+
 ### The number that can go missing
 
 `DataFrame.widen_for_missing` reads a frame the way pandas would have read it rather than the way Arrow holds it. Arrow records absence in a validity bitmap, so an integer column with a gap in it is still an integer column and can hold every int64 there is. numpy has no spare integer to spend on absence, so pandas widens such a column to float64 and writes a NaN in the gap, and it does that when it reads the data rather than when it computes on it. This is that turn, in the one place pandas puts it. Every integer width goes to float64 and none goes to float32, a float32 column stays float32 because a NaN already fits in it, a column with nothing missing is handed back untouched, and bool, string, date, timestamp and duration keep their own way of being absent because they have one.
