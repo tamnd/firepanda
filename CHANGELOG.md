@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.52] - 2026-09-08
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Datetime fields, a join on a text key, and a claim about the benchmark suite that turned out to be wrong and is corrected here.
+
+The datetime work is the bulk of it and it arrives in three pieces. A datetime column will now give up its calendar and clock fields, round or restate itself at another resolution, and name its day, read its ISO calendar and render itself through a format string. Between them that is most of what a `.dt` accessor is for, and none of it existed a week ago.
+
+The join change is smaller and has a longer story. A join with one key column builds a table over the smaller side and asks it one read only question per row of the larger side, and a text key was excluded from that and made to copy both key columns instead. The exclusion was real rather than lazy, because the table stores a hash and a hash is not an exact answer for a string, so the bytes have to be compared and they live in the other side's column. Handing the probe that column is the whole change, and it is 1.56 times against a dimension of a thousand rows and 2.28 against one of a hundred thousand. It is declined when the two sides are close in height, where the serial build costs more than it saves, and the note beside the threshold says what would remove it.
+
+The correction is that the entry which motivated all of this said every db-benchmark join query joins on text. It does not. Four of the five join on an integer and only the fourth joins on a character key, and the suite in firepanda-bench had no character join at all until it was added there. That is written out in full in the join section below rather than being quietly dropped, along with the five gigabyte measurement confirming that none of the suite's join queries moved, which is exactly what an integer keyed suite should say about a change to the text key route.
+
 ### A join on a text key can build a table on the small side and read it, instead of copying both sides
 
 A join with one key column pairs its rows by building a table over the smaller side and asking it one read only question per row of the larger side. Nothing is copied, and every core probes at once. A text key was excluded from that and went down a second route instead, which concatenates both key columns, factorizes the whole thing, and slices the codes back apart.
