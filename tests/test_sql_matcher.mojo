@@ -10,9 +10,10 @@ is a compatibility bug and not a test to be edited.
 The second half is about the shapes the matcher produces and the errors it
 writes, which the corpus cannot see because it only records accept and reject.
 
-See docs/specs/sql/04-the-parser.md sections 3 to 5.
+See docs/specs/sql/04-the-parser.md sections 3 to 6.
 """
 
+from std.bit import pop_count
 from std.testing import (
     TestSuite,
     assert_equal,
@@ -29,8 +30,12 @@ from firepanda.sql.matcher import (
     Parse,
     parse,
     parse_rule,
+    parse_unfiltered,
 )
 from firepanda.sql.token import TOKEN_END
+
+comptime _OPEN = ~UInt64(0)
+"""The filter word of a node that lets every token through."""
 
 
 def accepted() -> List[StaticString]:
@@ -228,6 +233,63 @@ def _accepts(sql: StringSlice, g: Grammar) -> Bool:
         return False
 
 
+def _outcome(p: Parse, g: Grammar) -> String:
+    """Writes a whole parse down, so that two of them can be compared.
+
+    Every field of every node, because the point of comparing is to catch a
+    difference nobody thought to look for.
+
+    Args:
+        p: The parse.
+        g: The grammar it was made against.
+
+    Returns:
+        One line per node, and the root last.
+    """
+    var out = String()
+    for i in range(len(p.nodes)):
+        var n = p.nodes[i]
+        out += String(
+            g.names[Int(n.rule)],
+            " ",
+            Int(n.token_start),
+            " ",
+            Int(n.token_end),
+            " ",
+            Int(n.first_child),
+            " ",
+            Int(n.next_sibling),
+            "\n",
+        )
+    return out + String("root ", Int(p.root))
+
+
+def _either_way(sql: StringSlice, g: Grammar) -> String:
+    """Parses once with the filter and once without, and says what differed.
+
+    Args:
+        sql: The query.
+        g: A loaded grammar.
+
+    Returns:
+        The empty string when the two runs agreed, and what they disagreed
+        about otherwise.
+    """
+    var fast: String
+    var slow: String
+    try:
+        fast = _outcome(parse(sql, g), g)
+    except e:
+        fast = String("error: ", e)
+    try:
+        slow = _outcome(parse_unfiltered(sql, g), g)
+    except e:
+        slow = String("error: ", e)
+    if fast == slow:
+        return String()
+    return String(sql, "\n  filtered:   ", fast, "\n  unfiltered: ", slow)
+
+
 def _rule_of(p: Parse, node: UInt32, g: Grammar) -> String:
     """Names the rule a node matched.
 
@@ -269,6 +331,70 @@ def test_every_statement_duckdb_refuses_is_refused_here() raises:
             _accepts(sql, g),
             String("accepted a statement DuckDB calls a syntax error: ", sql),
         )
+
+
+# ---------------------------------------------------------------------------
+# The first token filter
+# ---------------------------------------------------------------------------
+
+
+def test_the_filter_changes_nothing_on_the_whole_corpus() raises:
+    # The filter is the only part of the matcher that is allowed to be wrong in
+    # a way the corpus cannot see, because a filter that is one bit too tight
+    # rejects a statement that used to parse and nothing else changes. So every
+    # statement runs twice, and the two runs have to agree node for node and
+    # word for word.
+    var g = Grammar()
+    for sql in accepted():
+        assert_equal(_either_way(sql, g), "")
+    for sql in rejected():
+        assert_equal(_either_way(sql, g), "")
+
+
+def test_the_filter_says_no_to_most_nodes() raises:
+    # A filter with every bit set everywhere would pass the test above and buy
+    # nothing at all, so this is the one that says the table has content in it.
+    var g = Grammar()
+    var open = 0
+    var narrow = 0
+    var bits = 0
+    for i in range(1, len(g.first)):
+        if g.first[i] == _OPEN:
+            open += 1
+        else:
+            narrow += 1
+            bits += Int(pop_count(g.first[i]))
+    assert_true(
+        narrow > open,
+        String(
+            "only ",
+            narrow,
+            " of ",
+            narrow + open,
+            " nodes can be filtered out, which is too few to pay for the table",
+        ),
+    )
+    assert_true(
+        bits < narrow * 4,
+        String(
+            "a node that filters has ",
+            bits // narrow,
+            " of 64 bits set on average, which is too many to reject much",
+        ),
+    )
+
+
+def test_a_rule_that_wants_one_keyword_says_so_in_one_bit() raises:
+    # `Program <- TopLevelStatement*` matches the empty string, so it has to be
+    # open or a parse that consumes nothing would be filtered away.
+    # `CallStatement <- 'CALL' ...` can start with nothing but CALL, so it has
+    # to be down to one bit, and that is what makes the choice over the eighty
+    # kinds of statement cost eighty ands rather than eighty recursions.
+    var g = Grammar()
+    assert_equal(g.first[Int(g.roots[g.rule("Program")])], _OPEN)
+    assert_equal(
+        Int(pop_count(g.first[Int(g.roots[g.rule("CallStatement")])])), 1
+    )
 
 
 # ---------------------------------------------------------------------------

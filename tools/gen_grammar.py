@@ -731,6 +731,241 @@ def flatten(rules: dict[str, Rule], order: list[str]) -> Flat:
     )
 
 
+# ---------------------------------------------------------------------------
+# The first token filter.
+# ---------------------------------------------------------------------------
+
+# A token's key, which is what a node's filter is a set of. A keyword is its own
+# key, because telling one keyword led alternative from another is the whole
+# point, and there are 499 of them. The other token kinds get a key each, except
+# that punctuation, operators and parameters are keyed on their first byte: a
+# literal made of punctuation has to match every byte anyway, so the first one is
+# already enough to tell two of them apart.
+KEY_IDENTIFIER = 512
+KEY_QUOTED_IDENTIFIER = 513
+KEY_NUMBER = 514
+KEY_STRING = 515
+KEY_END = 516
+KEY_BYTE = 640
+
+# How wide the filter is. One word per node and one per token position, so
+# widening it costs table size and a slower check and buys a lower false accept
+# rate. See docs/specs/sql/04-the-parser.md section 4.
+FILTER_BITS = 64
+FILTER_ALL = (1 << FILTER_BITS) - 1
+
+# The bytes _is_operator_byte in matcher.mojo takes, which is therefore what the
+# operator matcher can start with.
+OPERATOR_BYTES = "+-*/%^<>=~!@&|"
+
+# The keyword class bits, in the order KEYWORD_CLASSES is written above. The
+# reserved class is not here because no position takes a reserved word as a
+# name: the matcher that would takes every keyword and does not look at classes.
+CLASS_UNRESERVED = 2
+CLASS_COLUMN = 4
+CLASS_FUNC = 8
+CLASS_TYPE = 16
+
+
+def key_bit(key: int) -> int:
+    """One token key as a bit in the filter word."""
+    return 1 << (key % FILTER_BITS)
+
+
+def allowed_classes(suggestion: str) -> int:
+    """The keyword class a position tolerates as a name.
+
+    The same table as _allowed_classes in matcher.mojo, and the two have to say
+    the same thing or the filter rejects a token the matcher would have taken.
+    """
+    if suggestion == "type_name":
+        return CLASS_TYPE
+    if suggestion in ("scalar_function_name", "table_function_name"):
+        return CLASS_TYPE | CLASS_FUNC
+    return CLASS_COLUMN
+
+
+def matcher_first(matcher: str, suggestion: str, keyword_classes: list[int]) -> int:
+    """The keys one of the twenty four code matched rules can start with.
+
+    Read off _overridden and _is_identifier in matcher.mojo rather than off the
+    rule body, because the body is a placeholder there for the same reason it is
+    a placeholder upstream.
+    """
+    if matcher == "number_literal":
+        return key_bit(KEY_NUMBER)
+    if matcher == "string_literal":
+        return key_bit(KEY_STRING)
+    if matcher == "operator":
+        mask = 0
+        for ch in OPERATOR_BYTES:
+            mask |= key_bit(KEY_BYTE + ord(ch))
+        return mask
+
+    mask = key_bit(KEY_IDENTIFIER) | key_bit(KEY_QUOTED_IDENTIFIER)
+    if suggestion == "table_name":
+        # Only the table name position reads a single quoted string as a name,
+        # which is what makes FROM 'data.parquet' parse.
+        mask |= key_bit(KEY_STRING)
+    if matcher == "reserved_identifier":
+        # The reserved matcher is the one with the keyword check dropped, which
+        # is what makes db.select a legal column reference and a bare select
+        # not one. Every keyword is a name to it.
+        for index in range(len(keyword_classes)):
+            mask |= key_bit(index)
+        return mask
+    wanted = CLASS_UNRESERVED | allowed_classes(suggestion)
+    for index, classes in enumerate(keyword_classes):
+        if classes & wanted:
+            mask |= key_bit(index)
+    return mask
+
+
+def compute_first(flat: Flat, members: dict[str, int]) -> list[int]:
+    """One filter word per node, saying which tokens it can possibly start with.
+
+    The matcher checks this before it walks a node, and a node whose word does
+    not have the current token's bit cannot match, so it fails without
+    recursing. That is worth doing because an ordered choice in this grammar is
+    routinely fifty alternatives long and the token in hand rules out nearly all
+    of them, and the matcher would otherwise find that out one recursion at a
+    time.
+
+    A node that can match the empty string gets every bit, so it is never
+    filtered: it can succeed without looking at the token at all. Everything
+    else gets the union over what its first consuming terminal can be, which is
+    computed to a fixed point because the rule graph has cycles in it.
+
+    The filter is allowed to be too generous and is never allowed to be too
+    tight, so anything unclear here resolves to every bit.
+    """
+    by_code = {code: kind for kind, code in KIND_CODES.items()}
+    nodes = flat.nodes
+    rule_count = len(flat.rule_names)
+    words = sorted(members)
+    keyword_of = {word: index for index, word in enumerate(words)}
+    keyword_classes = [members[word] for word in words]
+
+    rule_nullable = [False] * rule_count
+    rule_first = [0] * rule_count
+    for index, matcher in enumerate(flat.rule_matcher):
+        if matcher:
+            rule_first[index] = matcher_first(
+                MATCHERS[matcher],
+                SUGGESTIONS[flat.rule_suggestion[index]],
+                keyword_classes,
+            )
+
+    def nullable(node: int) -> bool:
+        kind, _flags, payload, child, _sibling = nodes[node]
+        code = by_code[kind]
+        if code in (OPT, STAR, NOT):
+            return True
+        if code == PLUS:
+            return nullable(child)
+        if code == SEQ:
+            cursor = child
+            while cursor:
+                if not nullable(cursor):
+                    return False
+                cursor = nodes[cursor][4]
+            return True
+        if code == CHOICE:
+            cursor = child
+            while cursor:
+                if nullable(cursor):
+                    return True
+                cursor = nodes[cursor][4]
+            return False
+        if code == REF:
+            # EndOfInput consumes nothing, but it is still a check against the
+            # token in hand, so it filters like a terminal rather than like an
+            # empty match.
+            return payload < rule_count and rule_nullable[payload]
+        if code in (CLASS, CAPTURE):
+            # Unreachable: every rule holding one is overridden. Saying yes here
+            # means never filtering one away, so the matcher still gets to stop
+            # loudly if the grammar ever grows one somewhere reachable.
+            return True
+        return False
+
+    def first(node: int) -> int:
+        kind, flags, payload, child, _sibling = nodes[node]
+        code = by_code[kind]
+        if code == SEQ:
+            mask = 0
+            cursor = child
+            while cursor:
+                mask |= first(cursor)
+                if not nullable(cursor):
+                    break
+                cursor = nodes[cursor][4]
+            return mask
+        if code == CHOICE:
+            mask = 0
+            cursor = child
+            while cursor:
+                mask |= first(cursor)
+                cursor = nodes[cursor][4]
+            return mask
+        if code == NOT:
+            # A negative lookahead never consumes, so it contributes nothing to
+            # what the node around it can start with. Saying 0 here rather than
+            # the child's keys is what lets `!X Y` filter on Y.
+            return 0
+        if code in (OPT, STAR, PLUS):
+            return first(child)
+        if code == REF:
+            if payload >= rule_count:
+                return key_bit(KEY_END)
+            return rule_first[payload]
+        if code == LIT:
+            text = flat.strings[payload]
+            if flags & 1:
+                # A word literal the keyword lists do not have tokenizes as an
+                # identifier, and one they do have never tokenizes as anything
+                # but that keyword.
+                found = keyword_of.get(text.lower())
+                return key_bit(KEY_IDENTIFIER if found is None else found)
+            return key_bit(KEY_BYTE + ord(text[0]))
+        if code == KEYWORDS:
+            mask = 0
+            for index, classes in enumerate(keyword_classes):
+                if classes & payload:
+                    mask |= key_bit(index)
+            return mask
+        return FILTER_ALL
+
+    # Two fixed points rather than one, because first() reads nullable() and
+    # would otherwise chase a moving target. Both only ever grow, so both stop.
+    changed = True
+    while changed:
+        changed = False
+        for index, root in enumerate(flat.rule_roots):
+            if flat.rule_matcher[index]:
+                continue
+            value = nullable(root)
+            if value != rule_nullable[index]:
+                rule_nullable[index] = value
+                changed = True
+
+    changed = True
+    while changed:
+        changed = False
+        for index, root in enumerate(flat.rule_roots):
+            if flat.rule_matcher[index]:
+                continue
+            value = first(root)
+            if value != rule_first[index]:
+                rule_first[index] = value
+                changed = True
+
+    out = [FILTER_ALL] * len(nodes)
+    for node in range(1, len(nodes)):
+        out[node] = FILTER_ALL if nullable(node) else first(node)
+    return out
+
+
 def unflatten(flat: Flat) -> dict[str, Node]:
     """Rebuilds the tree from the array, which is what makes the check possible."""
     by_code = {code: kind for kind, code in KIND_CODES.items()}
@@ -861,7 +1096,7 @@ def escape_table(line: str) -> str:
     return "".join(out)
 
 
-def render_rules(flat: Flat, grammar_sha: str) -> str:
+def render_rules(flat: Flat, first: list[int], grammar_sha: str) -> str:
     lines = [
         '"""The DuckDB grammar, flattened into one array of nodes.',
         "",
@@ -926,15 +1161,33 @@ def render_rules(flat: Flat, grammar_sha: str) -> str:
         f"comptime RULE_WHITESPACE: Int = {flat.rule_names.index(WHITESPACE_RULE)}",
         f"comptime RULE_PROGRAM: Int = {flat.rule_names.index(START_RULE)}",
         "",
+        "# How wide the first token filter is, and how many distinct words the",
+        "# nodes share between them. See tools/gen_grammar.py and",
+        "# docs/specs/sql/04-the-parser.md section 4.",
+        f"comptime FILTER_BITS: Int = {FILTER_BITS}",
+        f"comptime FILTER_COUNT: Int = {len(dict.fromkeys(first))}",
+        "",
     ]
 
     # The table, in a line oriented text format so that a regeneration diff is
     # readable. Fields are space separated because no field can contain a space
     # except a string, and strings are length prefixed.
     body = []
+    # The filter words come first because a node line names one by index. There
+    # are 4,422 nodes and 237 distinct words between them, so the palette is
+    # what keeps a sixth column on every node line from being a sixth table.
+    palette = list(dict.fromkeys(first))
+    slot_of = {word: index for index, word in enumerate(palette)}
+    body.append("F " + str(len(palette)))
+    for word in palette:
+        # In two halves, because the reader reads decimal into an Int and a full
+        # word does not fit in a signed one.
+        body.append(f"{word >> 32} {word & 0xFFFFFFFF}")
     body.append("N " + str(len(flat.nodes)))
-    for kind, flags, payload, child, sibling in flat.nodes:
-        body.append(f"{kind} {flags} {payload} {child} {sibling}")
+    for node, (kind, flags, payload, child, sibling) in enumerate(flat.nodes):
+        body.append(
+            f"{kind} {flags} {payload} {child} {sibling} {slot_of[first[node]]}"
+        )
     body.append("S " + str(len(flat.strings)))
     for text in flat.strings:
         body.append(f"{len(text.encode())} {text}")
@@ -969,11 +1222,7 @@ def render_keywords(words: dict[str, list[str]]) -> str:
     26 words are both function name and type name keywords, so five tables would
     also store those words twice.
     """
-    members: dict[str, int] = {}
-    for index, (_, rule_name) in enumerate(KEYWORD_CLASSES):
-        for word in words[rule_name]:
-            members[word] = members.get(word, 0) | (1 << index)
-
+    members = keyword_members(words)
     lines = [
         '"""Every SQL keyword, with the classes it belongs to.',
         "",
@@ -1010,6 +1259,19 @@ def render_keywords(words: dict[str, list[str]]) -> str:
     return "\n".join(lines)
 
 
+def keyword_members(words: dict[str, list[str]]) -> dict[str, int]:
+    """Every keyword with the mask of classes it is in.
+
+    Sorting this by word gives the order the tokenizer bisects and therefore the
+    number each keyword answers to, which the first token filter keys on.
+    """
+    members: dict[str, int] = {}
+    for index, (_, rule_name) in enumerate(KEYWORD_CLASSES):
+        for word in words[rule_name]:
+            members[word] = members.get(word, 0) | (1 << index)
+    return members
+
+
 def camel_to_upper(name: str) -> str:
     out = []
     for i, ch in enumerate(name):
@@ -1030,7 +1292,7 @@ def vendored_sha() -> str:
     return digest.hexdigest()[:16]
 
 
-def build() -> tuple[dict[str, str], Flat, dict[str, Rule]]:
+def build() -> tuple[dict[str, str], Flat, dict[str, Rule], list[int]]:
     rules, raw, words = load_rules()
     expand_calls(rules, raw)
     check_references(rules)
@@ -1039,8 +1301,9 @@ def build() -> tuple[dict[str, str], Flat, dict[str, Rule]]:
     order = sorted(rules)
     flat = flatten(rules, order)
     verify_round_trip(rules, flat)
+    first = compute_first(flat, keyword_members(words))
     return {
-        "rules.mojo": render_rules(flat, vendored_sha()),
+        "rules.mojo": render_rules(flat, first, vendored_sha()),
         "keywords.mojo": render_keywords(words),
         "__init__.mojo": (
             '"""Generated grammar tables. See tools/gen_grammar.py."""\n'
@@ -1057,6 +1320,8 @@ def build() -> tuple[dict[str, str], Flat, dict[str, Rule]]:
             "    KEYWORDS,\n"
             ")\n"
             "from .rules import (\n"
+            "    FILTER_BITS,\n"
+            "    FILTER_COUNT,\n"
             "    MATCHER_COUNT,\n"
             "    MEMOIZED_COUNT,\n"
             "    OVERRIDDEN_COUNT,\n"
@@ -1070,7 +1335,7 @@ def build() -> tuple[dict[str, str], Flat, dict[str, Rule]]:
             "    TABLE,\n"
             ")\n"
         ),
-    }, flat, rules
+    }, flat, rules, first
 
 
 def main() -> int:
@@ -1085,7 +1350,7 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        files, flat, rules = build()
+        files, flat, rules, first = build()
     except GrammarError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
@@ -1109,6 +1374,13 @@ def main() -> int:
         print(f"overridden {sum(1 for m in flat.rule_matcher if m)}")
         print(f"nodes      {len(flat.nodes)}")
         print(f"strings    {len(flat.strings)}")
+        filtering = [w for w in first if w != FILTER_ALL]
+        print(f"filters    {len(dict.fromkeys(first))} distinct words")
+        print(
+            f"           {len(filtering)} of {len(first)} nodes filter,"
+            f" {sum(bin(w).count('1') for w in filtering) / max(len(filtering), 1):.1f}"
+            f" bits of {FILTER_BITS} set on average"
+        )
         for name in sorted(files):
             print(f"{name:<10} {len(files[name])} bytes")
         print(f"generated  {sum(len(t) for t in files.values())} bytes of Mojo")

@@ -17,6 +17,7 @@ docs/specs/sql/03-the-grammar.md section 5.
 
 from .generated.keywords import KEYWORD_COUNT, KEYWORDS
 from .generated.rules import (
+    FILTER_COUNT,
     MATCHER_COUNT,
     MEMOIZED_COUNT,
     NODE_CAPTURE,
@@ -80,6 +81,17 @@ struct Grammar(Movable):
     var nodes: List[GrammarNode]
     """Every node of every rule, indexed by the `child` and `sibling` fields."""
 
+    var first: List[UInt64]
+    """Which tokens each node can start with, one bit set per token key.
+
+    The matcher tests this against the token in hand before it walks a node, so
+    an ordered choice fifty alternatives long throws away the ones that cannot
+    match without recursing into any of them. A node that can match the empty
+    string has every bit set, because it can succeed without reading a token at
+    all. Parallel to `nodes` rather than a sixth field on one, because the
+    rejecting path reads this and nothing else.
+    """
+
     var strings: List[String]
     """Literal and character class text, indexed by a node's payload."""
 
@@ -136,6 +148,7 @@ struct Grammar(Movable):
                 than anything a caller can do something about.
         """
         self.nodes = List[GrammarNode]()
+        self.first = List[UInt64]()
         self.strings = List[String]()
         self.names = List[String]()
         self.roots = List[UInt32]()
@@ -149,18 +162,40 @@ struct Grammar(Movable):
 
         var reader = _Reader(TABLE.as_bytes())
 
+        # The filter words come first because a node line names one by index.
+        # 4,422 nodes share 237 words between them, so a palette is what keeps
+        # this from being sixty four bits written out 4,422 times.
+        var filter_count = reader.section(UInt8(ord("F")))
+        if filter_count != FILTER_COUNT:
+            raise Error(
+                "grammar table: filter count disagrees with FILTER_COUNT"
+            )
+        var palette = List[UInt64](capacity=filter_count)
+        for _ in range(filter_count):
+            # Two halves, because the table is decimal and a full word does not
+            # fit in the signed integer the reader returns.
+            var high = UInt64(reader.number())
+            var low = UInt64(reader.number())
+            reader.end_of_line()
+            palette.append((high << 32) | low)
+
         var node_count = reader.section(UInt8(ord("N")))
         if node_count != NODE_COUNT:
             raise Error("grammar table: node count disagrees with NODE_COUNT")
         self.nodes.reserve(node_count)
+        self.first.reserve(node_count)
         for _ in range(node_count):
             var kind = UInt8(reader.number())
             var flags = UInt8(reader.number())
             var payload = UInt32(reader.number())
             var child = UInt32(reader.number())
             var sibling = UInt32(reader.number())
+            var slot = reader.number()
+            if slot < 0 or slot >= filter_count:
+                raise Error("grammar table: a node names no filter word")
             reader.end_of_line()
             self.nodes.append(GrammarNode(kind, flags, payload, child, sibling))
+            self.first.append(palette[slot])
 
         var string_count = reader.section(UInt8(ord("S")))
         if string_count != STRING_COUNT:

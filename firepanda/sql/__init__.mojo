@@ -21,6 +21,6 @@ transformer that turns that tree into an AST is the rest of M4b. See
 docs/specs/sql/00-README.md.
 """
 
-from .matcher import Parse, ParseNode, parse, parse_rule
+from .matcher import Parse, ParseNode, parse, parse_rule, parse_unfiltered
 from .table import Grammar, GrammarNode, memoized_rules, overridden_rules
 from .token import Token, tokenize, token_text
