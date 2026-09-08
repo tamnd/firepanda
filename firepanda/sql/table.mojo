@@ -200,8 +200,8 @@ struct Grammar(Movable):
                 return i
         return -1
 
-    def keyword_class(self, word: StringSlice) -> UInt8:
-        """Looks a word up in the keyword table.
+    def keyword_index(self, word: Span[UInt8, _]) -> Int:
+        """Finds a word in the keyword table.
 
         One bisection over one sorted table, rather than one lookup per class.
         The classes overlap, 26 words are both a function name and a type name
@@ -212,22 +212,34 @@ struct Grammar(Movable):
             word: The word, already lower cased by the caller.
 
         Returns:
-            The mask of classes the word is in, or 0 if it is not a keyword.
+            The index into `keywords`, or -1 if the word is not a keyword.
         """
         var low = 0
         var high = len(self.keywords)
         while low < high:
             var middle = (low + high) >> 1
-            var order = _compare(
-                self.keywords[middle].as_bytes(), word.as_bytes()
-            )
+            var order = _compare(self.keywords[middle].as_bytes(), word)
             if order < 0:
                 low = middle + 1
             elif order > 0:
                 high = middle
             else:
-                return self.keyword_classes[middle]
-        return 0
+                return middle
+        return -1
+
+    def keyword_class(self, word: StringSlice) -> UInt8:
+        """Looks a word up in the keyword table.
+
+        Args:
+            word: The word, already lower cased by the caller.
+
+        Returns:
+            The mask of classes the word is in, or 0 if it is not a keyword.
+        """
+        var found = self.keyword_index(word.as_bytes())
+        if found < 0:
+            return 0
+        return self.keyword_classes[found]
 
     def children(self, node: Int) -> List[Int]:
         """Collects one node's children in order.

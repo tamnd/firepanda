@@ -26,7 +26,9 @@ The allocation line is the one that matters. A REPL loop over small statements s
 
 ## 2. The tokenizer
 
-Hand written, matching DuckDB's `src/parser/peg/` tokenizer by behaviour rather than by code, because there is no declarative artifact for it. One pass, no backtracking, producing a flat `List[Token]` of `(kind, byte_start, byte_len, keyword_id)`.
+Hand written, matching DuckDB's `src/parser/peg/` tokenizer by behaviour rather than by code, because there is no declarative artifact for it. One pass, no backtracking beyond a two byte peek, producing a flat `List[Token]` of `(kind, flags, keyword_id, byte_start, byte_len)`, twelve bytes each.
+
+Nothing is decoded. A string keeps its quotes and its escapes, a number keeps its underscores, an identifier keeps its case. Decoding is the transformer's job in document 05, and leaving it there is what keeps a token at twelve bytes and the whole vector in cache. The flags carry the handful of facts that are cheap to record while the bytes are under the cursor and expensive to work out again later, which is the literal's type, which quoting form a string used, and which parameter form a parameter was.
 
 Kinds: identifier, quoted identifier, keyword, number, string, operator, punctuation, parameter, end.
 
@@ -34,17 +36,27 @@ The details that have to be right, each of which is a silent compatibility bug i
 
 **Identifiers are case insensitive and fold to lowercase, and quoted identifiers do not fold.** `SELECT A` and `select a` are the same column and `"A"` is a different one. DuckDB folds down, unlike standard SQL's fold up, which matters for error messages and for `information_schema` style output.
 
-**Keyword classification comes from the vendored `.list` files**, five classes, resolved by a generated perfect hash on the folded text. A word in the reserved list cannot be a bare identifier, and a word in the unreserved list can be, in the positions the grammar allows. Getting a word into the wrong class produces exactly the failure mode we promised never to have, which is a syntax error on valid DuckDB SQL.
+**Keyword classification comes from the vendored `.list` files**, five classes, resolved by bisecting one sorted table on the folded text. The longest keyword is fifteen bytes, so the fold happens in a fixed stack buffer and a longer word skips the lookup entirely. A word in the reserved list cannot be a bare identifier, and a word in the unreserved list can be, in the positions the grammar allows. Getting a word into the wrong class produces exactly the failure mode we promised never to have, which is a syntax error on valid DuckDB SQL.
 
-**String literals** are single quoted with `''` as the escape. `E'...'` handles backslash escapes. Dollar quoting, `$tag$ ... $tag$`, has no escapes at all and is how macro bodies and regexes are written. Unicode escapes exist. All four forms appear in the corpus.
+**String literals** are single quoted with `''` as the escape. `E'...'` handles backslash escapes. Dollar quoting, `$tag$ ... $tag$`, has no escapes at all and is how macro bodies and regexes are written. `U&'...'` takes unicode escapes. All four forms appear in the corpus.
 
-**Numeric literals decide types**, and this is the tokenizer reaching into document 06: an unsuffixed literal with a decimal point is DECIMAL, not DOUBLE, which is why `1.1 + 2.2` is `DECIMAL(3,1)` and exactly `3.3`. Underscore digit separators are accepted. Hex and binary literals exist.
+And two literals separated by whitespace containing a newline are one literal. `SELECT 'a' 'b'` is a syntax error, `SELECT 'a'` then a newline then `'b'` is `'ab'`, a line comment in between keeps the join and a block comment breaks it. That is Postgres's rule and DuckDB kept it, and it is the sort of thing nobody writes down until a corpus file uses it.
+
+**Numeric literals decide types**, and this is the tokenizer reaching into document 06: an unsuffixed literal with a decimal point is DECIMAL, not DOUBLE, which is why `1.1 + 2.2` is `DECIMAL(3,1)` and exactly `3.3`. An exponent overrides that and makes it DOUBLE. `1.` and `.5` are both valid and both DECIMAL.
+
+Underscore digit separators are accepted, but only between two digits: `1_000` is a thousand while `SELECT 1_` is `1` aliased `_` and `SELECT 1__0` is `1` aliased `__0`. The same shape of rule governs the exponent, because `SELECT 1e` is `1` aliased `e`, so an `e` with no digits after it has to be handed back rather than reported as an error.
+
+There are no hex or binary literals, contrary to what an earlier draft of this document said. `SELECT 0x1F` returns 0 in a column named `x1F`, which is DuckDB reading the number `0` and then the identifier `x1F`, and `0b101` and `0o17` behave the same way.
 
 **Comments** are `--` to end of line and `/* */` with nesting.
 
-**Parameters** are `?` positional, `$1` numbered, and `$name` or `:name` named, noting that `$` is also dollar quoting, so the disambiguation is by what follows.
+**Parameters** are `?` anonymous, `?1` and `$1` numbered, and `$name` named. There is no `:name` form, contrary to another line in an earlier draft: `SELECT :name` is a syntax error and `expression.gram` lists exactly the four rules above. `$` is also dollar quoting, and the disambiguation is that a dollar quote tag is a word that does not start with a digit. `SELECT $1$a$1$` settles it, because DuckDB fails there with `unterminated dollar-quoted string`, which only happens if `$1` was a parameter and the quote started at `$a$`.
 
 **Trailing commas** are legal in most list positions. This is grammar, not tokenizer, but it is the single most used Friendly SQL nicety and it belongs on the same checklist.
+
+**Operators** are a maximal run of operator characters with one exception, which is Postgres's and which DuckDB inherited. A run of more than one character that ends in `+` or `-` keeps those characters only if the run also contains one of ``~ ! @ # ^ & | ` ``. `SELECT 1 =- 1` is `1 = -1` and `SELECT 1 !=- 1` goes looking for an operator named `!=-`. Without the rule, `x=-1` calls an operator nobody defined. `?` is not in the set, because DuckDB spends it on parameters.
+
+Every one of these came from running the query against DuckDB rather than from reading anything, because there is nothing to read: `NumberLiteral`, `StringLiteral`, `Identifier` and `OperatorLiteral` are all in `matcher_rule_overrides`, which is DuckDB stating that its own matcher ignores their bodies. Each behaviour above has a test in `tests/test_sql_token.mojo` naming the query it came from.
 
 The tokenizer gets a dedicated differential fuzzer from week one: random bytes and structured random SQL through both tokenizers, comparing the token stream. It is a few hundred lines of hand written state machine standing between us and the compatibility claim, and it is the cheapest place in the whole project to buy confidence.
 

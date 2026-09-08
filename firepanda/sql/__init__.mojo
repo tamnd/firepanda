@@ -20,3 +20,4 @@ docs/specs/sql/00-README.md.
 """
 
 from .table import Grammar, GrammarNode, memoized_rules, overridden_rules
+from .token import Token, tokenize, token_text

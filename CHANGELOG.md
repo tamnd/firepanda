@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A SQL tokenizer, written against the database rather than against the grammar
+
+Query text now comes apart into tokens. One pass, twelve bytes a token, nothing decoded: a string keeps its quotes, a number keeps its underscores, an identifier keeps its case, and a token holds a byte range into the query rather than any text of its own. The one thing the tokenizer does resolve is keywords, by folding a word into a fixed stack buffer and bisecting the generated table once, and the fold buffer is fixed because the longest keyword is fifteen bytes and a longer word cannot be one.
+
+`matcher_rule_overrides` in DuckDB's `grammar_types.yml` names twenty four rules whose bodies its own matcher ignores, so that list is now vendored beside the grammar the way the packrat list already was, and each rule in the generated table carries the name of its matcher as a column. It is not an optimization: `OperatorLiteral <- Identifier` is what the grammar text says, and a matcher that believed it would read a bare `+` as an identifier.
+
+Four of those twenty four are `NumberLiteral`, `StringLiteral`, `Identifier` and `OperatorLiteral`, which is exactly why the tokenizer could not be read off the grammar. The grammar says `NumberLiteral <- < [+-]?[0-9]*([.][0-9]*)? >`, which does not describe `1e5`, and it says `StringLiteral <- '\'' [^\']* '\''`, which does not describe `''` doubling let alone dollar quoting. So the rules came from running queries against DuckDB 1.5.5 and writing down what came back, and every awkward one has a test naming the query that settled it.
+
+Two of those answers contradict the research this milestone was planned from. There are no hex or binary literals: `SELECT 0x1F` returns 0 in a column named `x1F`, which is the number `0` followed by the identifier `x1F`, and `0b101` and `0o17` behave the same way. And there is no `:name` parameter, only `?`, `?1`, `$1` and `$name`, which is also all `expression.gram` has. Both notes have been corrected in `docs/specs/sql/04-the-parser.md` rather than quietly dropped.
+
+The rest of the awkward list, in short. An underscore is a digit separator only with a digit on both sides, so `1_000` is a thousand and `SELECT 1_` is `1` aliased `_`. An `e` with no digits after it is handed back, because `SELECT 1e` is `1` aliased `e` and not an error. Two string literals separated by whitespace containing a newline are one string, a line comment between them keeps the join and a block comment breaks it. A dollar quote tag is a word that does not start with a digit, which is what makes `$1` a parameter and `$_x$` a quote. Block comments nest. A form feed separates tokens and a vertical tab does not, whatever the grammar's `[ \t\n\r]` says. And an operator run that ends in `+` or `-` keeps them only if it also contains one of ``~ ! @ # ^ & | ` ``, which is why `1 =- 1` is `1 = -1` and `1 !=- 1` is an operator named `!=-`.
+
+The probes ran against 1.5.5 and the grammar is pinned at v2.0-cyanoptera, which is a newer parser. That gap is real, it is written down in `firepanda/sql/token.mojo`, and closing it is what the differential harness is for.
+
 ### Four ways to ask whether a text column holds a run of bytes
 
 `Series` grew `str_contains`, `str_starts_with`, `str_ends_with` and `str_contains_in_order`, and `kernel/pattern.mojo` holds the search behind them. Between them they cover every `LIKE` pattern the twenty two TPC-H queries use: `%x%` is a contains, `x%` is a starts with, `%x` is an ends with, and `%a%b%` is the pair. They return a mask rather than a series, the way `is_null` does, because a mask is what `filter` takes.
@@ -47,7 +61,6 @@ Read honestly that says three things. Against polars, which is the like for like
 Starts with and ends with do not search at all. Both know where to look, so both are a length test and one run of bytes compared at a fixed offset, which is what `text/starts_with` and `text/ends_with` are in the benchmark suite to confirm: if they are ever close to `text/contains_hit` then the skipping has stopped working.
 
 There is no general pattern compiler and this is not a step towards one before it is needed. A matcher with a wildcard alphabet is a different piece of work, it would be slower on all four of these, and none of the queries ask for it.
-
 ### DuckDB's grammar is in the tree, and a table is generated from it
 
 DuckDB replaced its Bison parser with a hand written PEG parser and shipped the grammar as data. Forty `.gram` files, five keyword lists, 61,190 bytes, MIT licensed, and executed by the reference implementation itself rather than being a description of it. That is the artifact the whole SQL milestone rests on, and it is now vendored at `firepanda/sql/grammar/` with a `VENDOR` file recording the upstream commit and a SHA-256 for each of the 47 files.
