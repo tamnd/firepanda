@@ -45,7 +45,17 @@ comptime TOKEN_PUNCTUATION: UInt8 = 7
 """One of `( ) [ ] { } , ; . :`, which carry structure rather than meaning."""
 
 comptime TOKEN_PARAMETER: UInt8 = 8
-"""`?`, `?1`, `$1` or `$name`."""
+"""The `?` or `$` that introduces a parameter, one byte on its own.
+
+The number or the name after it is a token of its own, because that is how the
+grammar spells it: `QuestionMarkNumberedParameter <- '?' NumberLiteral` and
+`ColLabelParameter <- '$' ColLabel`. A tokenizer that handed back `$1` whole
+would leave the matcher with a token the grammar has no node for.
+
+The `$` still needs the scan that a whole parameter would need, because a dollar
+opens a dollar quoted string when what follows it is a tag, and `$1` is a
+parameter only because `1` is not one.
+"""
 
 comptime FLAG_DECIMAL: UInt8 = 1
 """The number has a decimal point and no exponent, so its type is DECIMAL.
@@ -70,12 +80,6 @@ comptime FLAG_UNICODE: UInt8 = 16
 
 comptime FLAG_CONTINUED: UInt8 = 32
 """Two or more string literals joined across a newline, see `_continues`."""
-
-comptime FLAG_NUMBERED: UInt8 = 64
-"""A `$1` or `?1` parameter, as opposed to a bare `?`."""
-
-comptime FLAG_NAMED: UInt8 = 128
-"""A `$name` parameter."""
 
 comptime NO_KEYWORD: UInt16 = 65535
 """The keyword index of a token that is not a keyword. There are 499 of them."""
@@ -307,7 +311,7 @@ struct _Scan[origin: ImmOrigin, table: ImmOrigin](Movable):
                     return
                 continue
             self.at += 1
-        raise _error_at(self.src, start, "unterminated /* comment")
+        raise error_at(self.src, start, "unterminated /* comment")
 
     # -----------------------------------------------------------------------
     # Words
@@ -354,7 +358,7 @@ struct _Scan[origin: ImmOrigin, table: ImmOrigin](Movable):
                 # DuckDB rejects `""` outright rather than treating it as an
                 # empty name, and so does every Postgres derived parser.
                 if length == 2 and flags == 0:
-                    raise _error_at(
+                    raise error_at(
                         self.src, start, "zero-length delimited identifier"
                     )
                 return Token(
@@ -365,7 +369,7 @@ struct _Scan[origin: ImmOrigin, table: ImmOrigin](Movable):
                     UInt32(length),
                 )
             self.at += 1
-        raise _error_at(self.src, start, "unterminated quoted identifier")
+        raise error_at(self.src, start, "unterminated quoted identifier")
 
     # -----------------------------------------------------------------------
     # Numbers
@@ -458,7 +462,7 @@ struct _Scan[origin: ImmOrigin, table: ImmOrigin](Movable):
                 self.at += 1
                 return
             self.at += 1
-        raise _error_at(self.src, start, "unterminated quoted string")
+        raise error_at(self.src, start, "unterminated quoted string")
 
     def _continues(mut self) -> Bool:
         """Says whether another string literal joins onto the one just read.
@@ -490,7 +494,7 @@ struct _Scan[origin: ImmOrigin, table: ImmOrigin](Movable):
         return False
 
     def _dollar(mut self, start: Int) raises -> Token:
-        """Reads a `$` token, which is a dollar quoted string or a parameter.
+        """Reads a `$`, which opens a dollar quoted string or a parameter.
 
         The disambiguation is the whole reason this is its own method. A tag is
         a word that does not start with a digit, so `$tag$` and `$$` open a
@@ -498,6 +502,9 @@ struct _Scan[origin: ImmOrigin, table: ImmOrigin](Movable):
         `$1` as a parameter and then fails on the rest with `unterminated
         dollar-quoted string`, which is not what it would say if `$1$` opened
         one.
+
+        A string comes back whole and a parameter comes back as the `$` alone,
+        because the grammar spells a parameter as two nodes and a string as one.
         """
         var tag_start = self.at + 1
         var cursor = tag_start
@@ -522,31 +529,12 @@ struct _Scan[origin: ImmOrigin, table: ImmOrigin](Movable):
                         UInt32(self.at - start),
                     )
                 self.at += 1
-            raise _error_at(
-                self.src, start, "unterminated dollar-quoted string"
-            )
+            raise error_at(self.src, start, "unterminated dollar-quoted string")
 
-        # Not a string, so it is `$1` or `$name`, and a bare `$` is neither.
+        # Not a string, so the dollar introduces a parameter and the number or
+        # the name after it is the next token, read the ordinary way.
         self.at = tag_start
-        if self._digit_at(self.at):
-            self._digits()
-            return Token(
-                TOKEN_PARAMETER,
-                FLAG_NUMBERED,
-                NO_KEYWORD,
-                UInt32(start),
-                UInt32(self.at - start),
-            )
-        if self.at < len(self.src) and _is_word_start(self.src[self.at]):
-            self.at = cursor
-            return Token(
-                TOKEN_PARAMETER,
-                FLAG_NAMED,
-                NO_KEYWORD,
-                UInt32(start),
-                UInt32(self.at - start),
-            )
-        return Token(TOKEN_OPERATOR, 0, NO_KEYWORD, UInt32(start), 1)
+        return Token(TOKEN_PARAMETER, 0, NO_KEYWORD, UInt32(start), 1)
 
     def _tag_at(self, at: Int, tag_start: Int, tag_length: Int) -> Bool:
         """Says whether the closing `tag$` of a dollar quote is at `at`."""
@@ -562,17 +550,9 @@ struct _Scan[origin: ImmOrigin, table: ImmOrigin](Movable):
     # -----------------------------------------------------------------------
 
     def _question(mut self, start: Int) -> Token:
-        """Reads `?` or `?1`."""
+        """Reads the `?` of `?` or `?1`, leaving any number for the next call.
+        """
         self.at += 1
-        if self._digit_at(self.at):
-            self._digits()
-            return Token(
-                TOKEN_PARAMETER,
-                FLAG_NUMBERED,
-                NO_KEYWORD,
-                UInt32(start),
-                UInt32(self.at - start),
-            )
         return Token(TOKEN_PARAMETER, 0, NO_KEYWORD, UInt32(start), 1)
 
     def _operator(mut self, start: Int) -> Token:
@@ -618,16 +598,21 @@ struct _Scan[origin: ImmOrigin, table: ImmOrigin](Movable):
         return _is_digit(self._byte_at(at))
 
 
-def _error_at(src: Span[UInt8, _], offset: Int, message: StringSlice) -> Error:
-    """Builds a tokenizer error in DuckDB's shape.
+def error_at(src: Span[UInt8, _], offset: Int, message: StringSlice) -> Error:
+    """Builds a parser error in DuckDB's shape.
 
         Parser Error: unterminated quoted string
+
         LINE 1: SELECT 'abc
                        ^
 
-    The caret is where a human would point, because the tokenizer knows exactly
-    where the thing it could not finish started. The matcher's errors are harder
-    and document 04 section 5 says why.
+    The blank line after the message is DuckDB's and not a typo here.
+
+    Shared with the matcher, because there is one error shape for the whole
+    parser and document 11's corpus matches DuckDB's text by substring. The hard
+    part is choosing the offset, not rendering it: the tokenizer knows exactly
+    where the thing it could not finish started, and document 04 section 5 says
+    what the matcher does instead.
 
     Args:
         src: The query text.
@@ -654,7 +639,9 @@ def _error_at(src: Span[UInt8, _], offset: Int, message: StringSlice) -> Error:
     for _ in range(prefix.byte_length() + offset - line_start):
         caret += " "
     return Error(
-        String("Parser Error: ", message, "\n", prefix, text, "\n", caret, "^")
+        String(
+            "Parser Error: ", message, "\n\n", prefix, text, "\n", caret, "^"
+        )
     )
 
 

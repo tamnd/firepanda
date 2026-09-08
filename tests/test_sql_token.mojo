@@ -21,8 +21,6 @@ from firepanda.sql.token import (
     FLAG_DOLLAR,
     FLAG_ESCAPE,
     FLAG_EXPONENT,
-    FLAG_NAMED,
-    FLAG_NUMBERED,
     FLAG_UNICODE,
     NO_KEYWORD,
     TOKEN_END,
@@ -450,17 +448,21 @@ def test_an_unterminated_dollar_quote_is_refused() raises:
         _ = tokenize("SELECT $tag$abc", g)
 
 
-def test_the_three_parameter_forms() raises:
-    # The grammar has all of them, in expression.gram: QuestionMarkNumbered,
-    # Anonymous, Numbered and ColLabel. There is no `:name` form, whatever the
-    # research notes said: SELECT :name is a syntax error in DuckDB.
+def test_a_parameter_marker_comes_out_on_its_own() raises:
+    # The grammar has four parameter rules in expression.gram and every one of
+    # them is two nodes: `'?' NumberLiteral`, `'?'`, `'$' NumberLiteral` and
+    # `'$' ColLabel`. So the marker is one token and what follows it is another,
+    # and the matcher gets a stream the grammar has nodes for. There is no
+    # `:name` form, whatever the research notes said: SELECT :name is a syntax
+    # error in DuckDB.
     var g = Grammar()
     assert_equal(_only("?", g).kind, TOKEN_PARAMETER)
-    assert_equal(_only("?", g).flags, 0)
-    assert_equal(_only("?1", g).flags, FLAG_NUMBERED)
-    assert_equal(_only("$1", g).flags, FLAG_NUMBERED)
-    assert_equal(_only("$name", g).flags, FLAG_NAMED)
-    assert_equal(_render("$name", g), "param:$name")
+    assert_equal(_render("?1", g), "param:? num:1")
+    assert_equal(_render("$1", g), "param:$ num:1")
+    assert_equal(_render("$total", g), "param:$ id:total")
+    # ColLabel takes an unreserved keyword too, so `$offset` is a named
+    # parameter and not a syntax error.
+    assert_equal(_render("$offset", g), "param:$ kw:offset")
 
 
 def test_a_colon_is_punctuation_and_not_a_parameter() raises:

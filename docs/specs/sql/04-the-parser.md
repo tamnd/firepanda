@@ -52,6 +52,8 @@ There are no hex or binary literals, contrary to what an earlier draft of this d
 
 **Parameters** are `?` anonymous, `?1` and `$1` numbered, and `$name` named. There is no `:name` form, contrary to another line in an earlier draft: `SELECT :name` is a syntax error and `expression.gram` lists exactly the four rules above. `$` is also dollar quoting, and the disambiguation is that a dollar quote tag is a word that does not start with a digit. `SELECT $1$a$1$` settles it, because DuckDB fails there with `unterminated dollar-quoted string`, which only happens if `$1` was a parameter and the quote started at `$a$`.
 
+The marker is a token and the number or the name after it is another one, because all four grammar rules are two nodes and a matcher that was handed `$1` whole would have no node to spend it on. The cost of that is one divergence in a corner: DuckDB rejects `SELECT $ 1` and `SELECT ? 1` and accepts `SELECT $ name`, and we accept all three. Accepting a string DuckDB rejects is the cheap direction of that trade, and the differential harness reports it rather than hiding it.
+
 **Trailing commas** are legal in most list positions. This is grammar, not tokenizer, but it is the single most used Friendly SQL nicety and it belongs on the same checklist.
 
 **Operators** are a maximal run of operator characters with one exception, which is Postgres's and which DuckDB inherited. A run of more than one character that ends in `+` or `-` keeps those characters only if the run also contains one of ``~ ! @ # ^ & | ` ``. `SELECT 1 =- 1` is `1 = -1` and `SELECT 1 !=- 1` goes looking for an operator named `!=-`. Without the rule, `x=-1` calls an operator nobody defined. `?` is not in the set, because DuckDB spends it on parameters.
@@ -103,11 +105,12 @@ The standard fix, and DuckDB's, is to track the furthest position reached across
 
 ```
 Parser Error: syntax error at or near "form"
+
 LINE 1: SELECT * form t
                  ^
 ```
 
-matching DuckDB's shape, because document 11's corpus matches error text by substring and because the shape is good.
+matching DuckDB's shape, blank line and all, because document 11's corpus matches error text by substring and because the shape is good. When the furthest failure is at the end of the token vector there is no token to name and no caret to draw, and DuckDB says `Parser Error: syntax error at end of input` on one line with nothing after it, which is what `SELECT 1 FROM` gives.
 
 Two refinements are worth their cost. Keyword typo suggestions: when the furthest failure expected a keyword set and the actual token is an identifier within edit distance one of one of them, say so. DuckDB does this and it is most of the perceived quality of a SQL error message. And the rule stack at the furthest position, behind a debug flag, because when a grammar bump breaks something this is the only tool that finds it quickly.
 
