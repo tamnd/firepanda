@@ -40,12 +40,14 @@ conformance suite compares integer widths exactly, so a correct year in the wron
 width is a wrong answer. The predicates answer bool. There is no width here that
 is a matter of taste.
 
-What is not here is the time zone. Every field below reads the integers as they
-are stored, which is the wall clock reading for a naive column and UTC for a
-zoned one, and the wall clock reading in the column's own zone is a different
-number that needs a zone database this library does not have yet. A zoned column
-is refused rather than answered in UTC, because an hour that is silently seven
-off is worse than an hour that is missing.
+The time zone comes in at one point and only one. Every field below reads the
+integers as they are stored, which is the wall clock reading for a naive column
+and UTC for a zoned one, so a zoned column is turned into the readings it stands
+for before any of them sees it. That turn is possible when the zone names its own
+offset and impossible when it names a rule, so `UTC` and `+05:30` are answered
+and `America/New_York` is refused with a sentence saying it needs a database this
+library does not have yet. Refusing beats answering in UTC, because an hour that
+is silently seven off is worse than an hour that is missing.
 """
 
 from std.sys.info import simd_width_of
@@ -55,7 +57,7 @@ from firepanda.array.array import Array
 from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.logical import LogicalType, TypeKind
-from firepanda.dtype.temporal import TimeUnit
+from firepanda.dtype.temporal import TimeUnit, TimeZone
 from firepanda.exec import parallel_morsels
 
 from .mask import repair_range
@@ -688,16 +690,272 @@ def _units_per_day(t: LogicalType) raises -> Int64:
             " timestamp column, and this one is "
             + String(t)
         )
-    if not t.zone.is_naive():
-        # Reading these off the stored integers would answer UTC under the name
-        # of a local hour, which is a wrong number rather than a missing one.
-        raise Error(
-            "temporal: the calendar fields of a column in "
-            + String(t.zone)
-            + " need a time zone database firepanda does not have yet, and"
-            " answering them from the stored instants would give UTC"
-        )
+    _refuse_zone(t)
     return t.unit.per_second() * SECONDS_PER_DAY
+
+
+def _refuse_zone(t: LogicalType) raises:
+    """Refuses a column that is still on a clock.
+
+    Nothing reaches this through a public entry point, because each of them
+    turns a zoned column into the readings it stands for first and refuses the
+    zones that cannot be turned. It stays because it is the backstop for the
+    next entry point somebody writes, and the bug it catches is an hour that is
+    silently seven off rather than a crash.
+
+    Args:
+        t: The column type.
+
+    Raises:
+        Error: If the column carries a zone at all.
+    """
+    if not t.zone.is_naive():
+        raise Error(
+            "temporal: a column in "
+            + String(t.zone)
+            + " reached a calendar kernel without being read against its own"
+            " clock first, which is a bug in firepanda rather than in the call"
+        )
+
+
+def zone_offset(t: LogicalType) raises -> Int64:
+    """Returns what separates a column's stored instants from its readings.
+
+    A zoned column holds UTC and a name. The number a person reads off it is the
+    instant plus whatever the zone is ahead of UTC at that moment, and for a
+    zone that names its own offset that is one constant for the whole column.
+    For a zone that names a rule it is not a constant at all, and there is no
+    honest answer here without the IANA database.
+
+    Args:
+        t: The column type.
+
+    Returns:
+        How many of the column's own units to add to an instant to reach the
+        reading, which is zero for a naive column and for UTC.
+
+    Raises:
+        Error: If the column is on a clock whose offset is a rule rather than a
+            number.
+    """
+    if t.kind != TypeKind.TIMESTAMP or t.zone.is_naive():
+        return 0
+    var seconds = t.zone.fixed_offset()
+    if not seconds:
+        raise Error(
+            "temporal: reading a wall clock in "
+            + String(t.zone)
+            + " needs a time zone database firepanda does not have yet, since"
+            " what that zone is ahead of UTC changes twice a year and the"
+            " stored instants are UTC"
+        )
+    return seconds.value() * t.unit.per_second()
+
+
+def _shifted(a: Array[DType.int64], by: Int64) raises -> Array[DType.int64]:
+    """Adds one constant to every row of a column of instants.
+
+    Args:
+        a: The column.
+        by: How many of its own units to add.
+
+    Returns:
+        The shifted column, null wherever the input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    comptime width = simd_width_of[DType.int64]()
+
+    var n = len(a)
+    var out = Array[DType.int64](overwritten=n)
+    var validity = Bitmap(copy=a.data.validity)
+
+    def compute(start: Int, stop: Int) raises {mut out, imm}:
+        var source = a.unsafe_ptr()
+        var target = out.unsafe_ptr()
+        var i = start
+        while i < stop:
+            var value = source.unsafe_offset(i).unsafe_load[width=width]()
+            target.unsafe_offset(i).unsafe_store(value + by)
+            i += width
+        repair_range(out, validity, start, stop)
+
+    parallel_morsels(compute, n)
+    out.data.validity = validity^
+    return out^
+
+
+def local_readings(a: AnyArray) raises -> AnyArray:
+    """Returns a zoned column as the naive readings it stands for.
+
+    This is what every calendar kernel below wants, since each of them reads the
+    integers as they are stored and the integers are UTC. A naive column comes
+    back unchanged, which is the case that matters for speed, and a zoned one
+    pays one pass.
+
+    Args:
+        a: A timestamp column, on a clock or not.
+
+    Returns:
+        A naive timestamp column at the same resolution.
+
+    Raises:
+        Error: If the column is on a clock whose offset is a rule.
+    """
+    var shift = zone_offset(a.type)
+    var naive = LogicalType.timestamp(a.type.unit, TimeZone())
+    if shift == 0:
+        var same = AnyArray(copy=a)
+        same.type = naive
+        return same^
+    return AnyArray(
+        _shifted(a.as_typed_view[DType.int64](), shift).into_data(), naive
+    )
+
+
+def _back_on_the_clock(
+    var readings: AnyArray, t: LogicalType
+) raises -> AnyArray:
+    """Puts a column of readings back on the clock it was read from.
+
+    Args:
+        readings: A naive timestamp column, at the same resolution as `t`.
+        t: The type it is going back to.
+
+    Returns:
+        A column of that type.
+
+    Raises:
+        Error: If the type is on a clock whose offset is a rule, which the
+            caller has already met on the way in.
+    """
+    var shift = zone_offset(t)
+    if shift == 0:
+        readings.type = t
+        return readings^
+    return AnyArray(
+        _shifted(readings.as_typed_view[DType.int64](), -shift).into_data(), t
+    )
+
+
+def temporal_tz_convert(a: AnyArray, zone: StringSlice) raises -> AnyArray:
+    """Reads a zoned column against another clock.
+
+    This is `dt.tz_convert` and it moves nothing. A zoned column holds UTC
+    instants and a name saying which clock they are read against, so converting
+    changes the name and leaves every integer where it was. The instant a row
+    denotes is the same instant before and after, which is the one sentence that
+    separates this from `tz_localize`.
+
+    It follows that this works for every zone there is while localising works
+    only for the zones that name their own offset, because converting never asks
+    what the offset is. It also follows that the target name is not checked
+    against anything, since there is nothing here to check it against. pandas
+    would refuse a name its database does not hold and this does not.
+
+    Args:
+        a: A zoned timestamp column.
+        zone: The name to read it against.
+
+    Returns:
+        A column of the same instants under the new name.
+
+    Raises:
+        Error: If the column is not a timestamp, if it carries no zone, or if
+            the name is longer than any zone name is.
+    """
+    if a.type.kind != TypeKind.TIMESTAMP:
+        raise Error(
+            "temporal: tz_convert is only defined on a timestamp column, and"
+            " this one is "
+            + String(a.type)
+        )
+    if a.type.zone.is_naive():
+        raise Error(
+            "temporal: tz_convert has nothing to convert this column from,"
+            " because it carries no zone, and tz_localize is the one that puts"
+            " a clock on a column of readings"
+        )
+    var out = AnyArray(copy=a)
+    out.type = LogicalType.timestamp(a.type.unit, TimeZone(zone))
+    return out^
+
+
+def temporal_tz_localize(a: AnyArray, zone: StringSlice) raises -> AnyArray:
+    """Puts a clock on a column of readings.
+
+    This is `dt.tz_localize` with a name, and it is the operation `tz_convert`
+    is not. The readings stay what they were and the instants move, because a
+    reading of nine o'clock is a different moment in each zone somebody might
+    have taken it in.
+
+    Moving them needs to know what the zone is ahead of UTC, so this works for
+    the zones that name their own offset and refuses the ones that name a rule.
+    The refused ones are also where the hard questions live, since a reading in
+    the hour a clock skips forward denotes no instant at all and a reading in
+    the hour it repeats denotes two, and neither can happen in a zone whose
+    offset never changes.
+
+    Args:
+        a: A naive timestamp column.
+        zone: The name to put on it.
+
+    Returns:
+        A column on that clock, denoting instants that are the readings less
+        whatever the zone is ahead of UTC.
+
+    Raises:
+        Error: If the column is not a naive timestamp, or if the zone names a
+            rule rather than a number.
+    """
+    if a.type.kind != TypeKind.TIMESTAMP:
+        raise Error(
+            "temporal: tz_localize is only defined on a timestamp column, and"
+            " this one is "
+            + String(a.type)
+        )
+    if not a.type.zone.is_naive():
+        raise Error(
+            "temporal: this column is already on "
+            + String(a.type.zone)
+            + ", and tz_convert is the one that reads it against another clock"
+        )
+    var wanted = LogicalType.timestamp(a.type.unit, TimeZone(zone))
+    return _back_on_the_clock(AnyArray(copy=a), wanted)
+
+
+def temporal_tz_localize_none(a: AnyArray) raises -> AnyArray:
+    """Takes the clock off a zoned column, keeping the reading.
+
+    This is `dt.tz_localize(None)`, and it is the exact opposite of what
+    `tz_convert` does. The reading stays what it was and the instant moves,
+    where converting moves the reading and keeps the instant. A column of New
+    York afternoons becomes a column of naive afternoons rather than a column of
+    the evenings in UTC that they were stored as.
+
+    Args:
+        a: A zoned timestamp column.
+
+    Returns:
+        A naive timestamp column holding the readings.
+
+    Raises:
+        Error: If the column is not a timestamp, if it carries no zone, or if
+            the zone names a rule rather than a number.
+    """
+    if a.type.kind != TypeKind.TIMESTAMP:
+        raise Error(
+            "temporal: tz_localize is only defined on a timestamp column, and"
+            " this one is "
+            + String(a.type)
+        )
+    if a.type.zone.is_naive():
+        raise Error(
+            "temporal: this column carries no zone, so there is none to take"
+            " off it"
+        )
+    return local_readings(a)
 
 
 def _units_per_second(t: LogicalType) -> Int64:
@@ -761,9 +1019,15 @@ def temporal_field(a: AnyArray, field: TemporalField) raises -> AnyArray:
         make up the ISO calendar, null wherever the input is null.
 
     Raises:
-        Error: If the column is not temporal, if it carries a time zone, or if
-            the field code is not one of the twenty two.
+        Error: If the column is not temporal, if it is on a clock whose offset
+            is a rule, or if the field code is not one of the twenty two.
     """
+    if not a.type.zone.is_naive():
+        # The turn happens once here rather than inside the five kernels below,
+        # each of which would otherwise have to remember that the integers it
+        # was handed are UTC.
+        return temporal_field(local_readings(a), field)
+
     var per_day = _units_per_day(a.type)
     var per_second = _units_per_second(a.type)
 
@@ -876,8 +1140,12 @@ def temporal_date(a: AnyArray) raises -> AnyArray:
         A date32 column, null wherever the input is null.
 
     Raises:
-        Error: If the column is not temporal or carries a time zone.
+        Error: If the column is not temporal, or is on a clock whose offset is
+            a rule.
     """
+    if not a.type.zone.is_naive():
+        return temporal_date(local_readings(a))
+
     var per_day = _units_per_day(a.type)
     if a.type.kind == TypeKind.DATE:
         return AnyArray(copy=a)
@@ -902,8 +1170,16 @@ def temporal_normalize(a: AnyArray) raises -> AnyArray:
         A column of the same type, null wherever the input is null.
 
     Raises:
-        Error: If the column is not temporal or carries a time zone.
+        Error: If the column is not temporal, or is on a clock whose offset is
+            a rule.
     """
+    if not a.type.zone.is_naive():
+        # The midnight is the local one, so the reading has to come off the
+        # clock and the answer has to go back on it. That round trip is exact
+        # for a zone whose offset never moves and is why the zones that are a
+        # rule are refused rather than approximated.
+        return _back_on_the_clock(temporal_normalize(local_readings(a)), a.type)
+
     var per_day = _units_per_day(a.type)
     if a.type.kind == TypeKind.DATE:
         return AnyArray(copy=a)
@@ -1100,17 +1376,7 @@ def _nanos_per_unit(t: LogicalType) raises -> Int64:
             " column, and this one is "
             + String(t)
         )
-    if not t.zone.is_naive():
-        # pandas rounds the reading on the local clock and the stored integers
-        # are UTC, and in a zone that is not on a whole hour offset those are
-        # two different answers rather than the same answer written twice.
-        raise Error(
-            "temporal: rounding a column in "
-            + String(t.zone)
-            + " needs a time zone database firepanda does not have yet,"
-            " because pandas rounds the local reading and the stored instants"
-            " are UTC"
-        )
+    _refuse_zone(t)
     return NANOS_PER_SECOND // t.unit.per_second()
 
 
@@ -1351,9 +1617,18 @@ def temporal_round(
         A column of the same type, null wherever the input is null.
 
     Raises:
-        Error: If the column is not a naive timestamp, if the frequency does not
-            parse, or if the mode is not one of the three.
+        Error: If the column is not a timestamp, if it is on a clock whose
+            offset is a rule, if the frequency does not parse, or if the mode is
+            not one of the three.
     """
+    if not a.type.zone.is_naive():
+        # pandas rounds the reading on the local clock and the stored integers
+        # are UTC, and in a zone that is not on a whole hour offset those are
+        # two different answers rather than the same answer written twice.
+        return _back_on_the_clock(
+            temporal_round(local_readings(a), freq, mode), a.type
+        )
+
     var period = frequency_period(freq, a.type)
     if period == 0:
         # A frequency finer than the column's own unit, and a count of zero,
@@ -1635,14 +1910,7 @@ def _check_nameable(t: LogicalType) raises:
             " column, and this one is "
             + String(t)
         )
-    if not t.zone.is_naive():
-        raise Error(
-            "temporal: writing a column in "
-            + String(t.zone)
-            + " needs a time zone database firepanda does not have yet, because"
-            " the name of the day depends on the local reading and the stored"
-            " instants are UTC"
-        )
+    _refuse_zone(t)
 
 
 def _named_column[
@@ -1709,9 +1977,12 @@ def temporal_day_name(a: AnyArray, locale: StringSlice) raises -> StringArray:
         A text column, null wherever the input is null.
 
     Raises:
-        Error: If the column is not temporal, if it carries a time zone, or if
-            a locale other than English is asked for.
+        Error: If the column is not temporal, if it is on a clock whose offset
+            is a rule, or if a locale other than English is asked for.
     """
+    if not a.type.zone.is_naive():
+        return temporal_day_name(local_readings(a), locale)
+
     _check_nameable(a.type)
     _check_locale(locale)
 
@@ -1739,9 +2010,12 @@ def temporal_month_name(a: AnyArray, locale: StringSlice) raises -> StringArray:
         A text column, null wherever the input is null.
 
     Raises:
-        Error: If the column is not temporal, if it carries a time zone, or if
-            a locale other than English is asked for.
+        Error: If the column is not temporal, if it is on a clock whose offset
+            is a rule, or if a locale other than English is asked for.
     """
+    if not a.type.zone.is_naive():
+        return temporal_month_name(local_readings(a), locale)
+
     _check_nameable(a.type)
     _check_locale(locale)
 
@@ -2315,9 +2589,12 @@ def temporal_strftime(a: AnyArray, fmt: StringSlice) raises -> StringArray:
         A text column, null wherever the input is null.
 
     Raises:
-        Error: If the column is not temporal, if it carries a time zone, or if
-            the format has something in it this cannot render.
+        Error: If the column is not temporal, if it is on a clock whose offset
+            is a rule, or if the format has something in it this cannot render.
     """
+    if not a.type.zone.is_naive():
+        return temporal_strftime(local_readings(a), fmt)
+
     _check_nameable(a.type)
 
     var steps = parse_format(fmt)
