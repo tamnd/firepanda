@@ -1,0 +1,111 @@
+# We claim to be compatible with DuckDB's dialect, and the dialect is a file in
+# somebody else's repository that changes without telling us. This workflow's
+# whole job is to turn "upstream moved" from something discovered months later
+# into a tracked issue the week it happens.
+#
+# It never commits. It fetches, compares, and reports. The bump itself is a human
+# reading the diff, which is the point of vendoring rather than submoduling.
+# docs/specs/sql/03-the-grammar.md section 6.
+name: Grammar watch
+
+on:
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    name: Compare against upstream
+    runs-on: ubuntu-latest
+    outputs:
+      moved: ${{ steps.compare.outputs.moved }}
+      ref: ${{ steps.compare.outputs.ref }}
+      was: ${{ steps.compare.outputs.was }}
+      now: ${{ steps.compare.outputs.now }}
+      files: ${{ steps.compare.outputs.files }}
+      lines: ${{ steps.compare.outputs.lines }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-pixi
+
+      - id: compare
+        run: |
+          ref=$(awk '/^ref:/ {print $2}' firepanda/sql/grammar/VENDOR)
+          was=$(awk '/^commit:/ {print $2}' firepanda/sql/grammar/VENDOR)
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "was=$was" >> "$GITHUB_OUTPUT"
+
+          bash tools/vendor_grammar.sh "$ref"
+
+          now=$(awk '/^commit:/ {print $2}' firepanda/sql/grammar/VENDOR)
+          echo "now=$now" >> "$GITHUB_OUTPUT"
+
+          # VENDOR always changes, because it records the commit and the date the
+          # fetch happened, and "unchanged content at a newer commit" is not the
+          # same as not having looked. So the question is whether any grammar file
+          # changed, and VENDOR is excluded from the answer.
+          changed=$(git status --porcelain -- firepanda/sql/grammar |
+            awk '{print $NF}' | grep -v '/VENDOR$' || true)
+          if [ -z "$changed" ]; then
+            echo "moved=false" >> "$GITHUB_OUTPUT"
+            echo "grammar is unchanged at $ref ($now)"
+            exit 0
+          fi
+
+          echo "moved=true" >> "$GITHUB_OUTPUT"
+          echo "files=$(echo "$changed" | wc -l | tr -d ' ')" >> "$GITHUB_OUTPUT"
+          echo "lines=$(git diff --numstat -- firepanda/sql/grammar |
+            awk '$1 != "-" {added += $1; removed += $2} END {print added + removed}')" \
+            >> "$GITHUB_OUTPUT"
+          git --no-pager diff --stat -- firepanda/sql/grammar
+
+  report:
+    name: Open or update tracking issue
+    needs: watch
+    if: needs.watch.outputs.moved == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ needs.watch.outputs.ref }}
+          WAS: ${{ needs.watch.outputs.was }}
+          NOW: ${{ needs.watch.outputs.now }}
+          FILES: ${{ needs.watch.outputs.files }}
+          LINES: ${{ needs.watch.outputs.lines }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="DuckDB grammar has moved"
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --label "area/sql" --search "$title in:title" --json number --jq '.[0].number // empty')
+          body=$(printf '%s\n\n- ref: `%s`\n- vendored commit: `%s`\n- upstream commit: `%s`\n- files changed: %s\n- lines changed: %s\n- compare: %s\n- run: %s\n\n%s\n' \
+            "The grammar we vendor is no longer what upstream has at this ref." \
+            "$REF" "$WAS" "$NOW" "$FILES" "$LINES" \
+            "https://github.com/duckdb/duckdb/compare/$WAS...$NOW" "$RUN" \
+            "To bump it, follow docs/specs/sql/03-the-grammar.md section 6. Read the grammar diff before regenerating, because it is the complete syntactic change in that release and it is the only place new syntax shows up as something a person decided to support.")
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
+              --label "area/sql,upstream,dependencies" --body "$body"
+          fi
+
+  close:
+    name: Close tracking issue when we have caught up
+    needs: watch
+    if: needs.watch.outputs.moved == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label "area/sql" \
+            --search "DuckDB grammar has moved in:title" --json number --jq '.[0].number // empty')
+          [ -z "$n" ] || gh issue close "$n" --repo "$GITHUB_REPOSITORY" \
+            --comment "The vendored grammar matches upstream again as of run $GITHUB_RUN_ID."

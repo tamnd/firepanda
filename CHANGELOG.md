@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### DuckDB's grammar is in the tree, and a table is generated from it
+
+DuckDB replaced its Bison parser with a hand written PEG parser and shipped the grammar as data. Forty `.gram` files, five keyword lists, 61,190 bytes, MIT licensed, and executed by the reference implementation itself rather than being a description of it. That is the artifact the whole SQL milestone rests on, and it is now vendored at `firepanda/sql/grammar/` with a `VENDOR` file recording the upstream commit and a SHA-256 for each of the 47 files.
+
+The vendored directory is never edited, and CI checks the checksums on every pull request. The moment a local edit exists, compatible by construction becomes compatible except for the edits and nobody remembers what they were. `tools/vendor_grammar.sh` is the only thing that writes there. It takes a tag or a branch, resolves it to a commit, and stages everything in a temporary directory so that a partial fetch cannot leave half a grammar behind.
+
+`tools/gen_grammar.py` reads the vendored files and writes `firepanda/sql/generated/`. It reimplements upstream's own rule segmentation, which is whitespace sensitive in a way that a naive reader gets wrong, and it was checked against upstream's reader directly: the same 1,092 rule names, and the same token stream for all 1,087 rules with no differences either way. Parameterized rules such as `List(D)` are expanded at generation time, which is what lets the matcher have no environment to thread through it, and the five keyword lists become rules the same way upstream's build makes them, because `ReservedKeyword` is referenced everywhere in the grammar and defined nowhere in it.
+
+The output is one flat array of 4,422 nodes over 1,187 rules, emitted as a string rather than as a list of structs. A list literal with tens of thousands of entries is a compile time cost paid by everyone who builds firepanda whether or not they ever run a query, and a string literal costs one entry however long it is. `rules.mojo` is 92 KB, under the 100 KB the milestone budgeted, and it does not move the compile budget. `firepanda/sql/table.mojo` reads it back into a `Grammar`, and the generator round trips the table to PEG and compares it to the vendored text on every run, so a table that does not say what the grammar says fails before it is written.
+
+Keywords are one sorted table of 499 words with a class mask rather than five tables. The classes are not disjoint, 26 words are both a function name and a type name keyword, and most words in a query are not keywords at all, so five tables would mean five misses for the common case. One bisection answers the whole question.
+
+A weekly workflow re-fetches the grammar and opens an issue when upstream moves. That is the mechanism that makes one hundred per cent compatible with DuckDB a maintained property rather than a claim that was true once.
+
 ### A gather by consecutive indices is a copy, and now it is one
 
 An inner join that matches every probe row exactly once hands the probe side an index list that reads `0, 1, 2` and so on, because the output comes out in probe order and every probe row produced one output row. Every column taken from that side was being gathered by the identity permutation: an eight byte index load, a sign test and a validity bit per row, to move data that was already in order. The same thing happens on a left join, on a limit, and on any take whose index list happens to be a slice.
