@@ -33,6 +33,7 @@ the operation paid twice.
 """
 
 from std.memory import unsafe_memcpy
+from std.sys.intrinsics import PrefetchOptions, prefetch
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
@@ -65,6 +66,37 @@ and that is not the same for every row: indices that walk a small region are hot
 and indices that walk the whole column are not, and a join or a sort produces
 both in the same call. Eight thousand rows is around ten microseconds of work,
 which is four orders of magnitude more than the atomic that hands it out.
+"""
+
+comptime TAKE_LOOKAHEAD = 8
+"""Rows the gather runs ahead of itself when issuing prefetches.
+
+The index list is in memory before the loop starts, so where row `i` will read
+from is known long before row `i` is reached, and the only reason the load is
+late is that nothing asked for it early. Reading `indices[i + 8]` and prefetching
+the line it points at turns eight misses that would have been taken one after
+another into eight that are outstanding at once, which is the same trick the hash
+table's batch probe plays and for the same reason.
+
+Eight, matching `PROBE_LOOKAHEAD`, and picked the same way: far enough ahead that
+a miss to memory has time to land, close enough that the lines prefetched are
+still there when the loop arrives.
+
+What it is worth is entirely a question of whether the column being gathered from
+fits in cache, and the join queries in db-benchmark sit on both sides of that. The
+big join gathers from a hundred million rows, eight hundred megabytes against a
+thirty six megabyte L3, and there it is worth three per cent: four ABBA passes a
+side on a 13900K, every run with the prefetch below every run without it, 0.659
+to 0.667 seconds against 0.673 to 0.690, and 45.1 CPU seconds against 46.6. The
+medium join gathers from a million rows, eight megabytes, which is L3 resident,
+and there it is worth nothing measurable: the same eight passes come out fully
+interleaved. The join microbenchmarks gather from a hundred thousand rows and are
+interleaved too.
+
+So it never pays for itself on a small gather and it never costs anything either,
+which is what makes it worth having unconditionally rather than behind a size
+test. A branch and a load per row against a memory latency that a large gather
+takes on every row is not a trade that needs tuning.
 """
 
 
@@ -341,7 +373,21 @@ def _take_core[
         # source that usually does not have nulls, so the two halves of that
         # condition are worth keeping apart.
         var word = UInt64(0)
+        var ahead = min(start + TAKE_LOOKAHEAD, stop)
         for i in range(start, stop):
+            # The line row `i + 8` is going to read, asked for now. Only the
+            # values array, not the validity bitmap: a bitmap covering the whole
+            # column is a sixty fourth of its size and the row that misses on the
+            # values usually hits on the bits, so prefetching both would double
+            # the instructions to halve a cost that is already small.
+            if ahead < stop:
+                var next = indices[ahead]
+                if next >= 0:
+                    prefetch[PrefetchOptions().for_read().high_locality()](
+                        source.unsafe_offset(next)
+                    )
+                ahead += 1
+
             var at = indices[i]
             if at >= 0 and (not has_nulls or validity.get(at)):
                 target.unsafe_offset(i).unsafe_write(
