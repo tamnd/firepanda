@@ -18,6 +18,7 @@ from .rules import (
     NODE_COUNT,
     RULE_COUNT,
     RULE_END_OF_INPUT,
+    RULE_PROGRAM,
     RULE_WHITESPACE,
     STRING_COUNT,
     SUGGESTION_COUNT,

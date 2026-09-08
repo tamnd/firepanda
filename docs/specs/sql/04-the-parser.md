@@ -15,14 +15,16 @@ Those numbers include DuckDB's JSON serialization of the parse tree, so the true
 
 Our targets, which document 01's latency axis depends on:
 
-| | firepanda target |
-| --- | --- |
-| tokenize, match and transform, TPC-H q1 | under 60 us |
-| tokenize, match and transform, `SELECT 1` | under 3 us |
-| allocations for a small statement | one arena block, no per node malloc |
-| memoization table | reused across statements, not reallocated |
+| | firepanda target | measured, tokenize and match |
+| --- | --- | --- |
+| tokenize, match and transform, TPC-H q1 | under 60 us | 380 us |
+| tokenize, match and transform, `SELECT 1` | under 3 us | 20 us |
+| allocations for a small statement | one arena block, no per node malloc | met |
+| memoization table | reused across statements, not reallocated | not allocated at all unless a memoized rule fails |
 
 The allocation line is the one that matters. A REPL loop over small statements spends its time in the allocator, not the matcher, and this is the axis where a library beats a database.
+
+The measured column is an optimized build on the same M4, and it has no transformer in it yet, so the gap is worse than it reads. It is not the tokenizer, which is 1.7 us for q1 and 64 ns for `SELECT 1`, and it is not the allocator, which is five per cent of a parse. It is 27,814 node visits and 10,550 rule entries to parse one hundred and twenty tokens, which is the interpreter doing an honest amount of work an honest number of times. Closing the gap means visiting fewer nodes, not shaving the visit, and the way to do that is a first token filter: a mask per node saying which tokens can start it, computed at generation time, checked before descending. Most alternatives of most ordered choices begin with one specific keyword, so most of those descents are answerable in three instructions.
 
 ## 2. The tokenizer
 
@@ -85,6 +87,10 @@ Both identifier matchers accept a double quoted identifier and reject a token th
 
 The matcher is generic over the rule kinds and knows nothing about SQL. Sequence matches children in order and fails as a unit. Ordered choice tries alternatives left to right, resetting the token position on each failure, and takes the first success, with no longest match, no ambiguity and no conflict. Repetition is greedy with no backtracking into it, which is standard PEG and is a real semantic difference from a regex or a context free grammar that the grammar is written to expect. Lookahead matches without consuming.
 
+Because it recurses, it needs a depth cap that DuckDB does not, and the cap is five hundred rule frames. A statement costs forty frames before any nesting and then twenty one per nested parenthesis, twenty one per nested `CASE` and sixteen per nested subquery, so five hundred is about twenty two parentheses or twenty eight subqueries. An unoptimized build runs out of native stack at around eight hundred and twenty frames, which is where the number came from. Past the cap it raises DuckDB's own `memory exhausted at or near`, so the error text agrees even though the limit does not: DuckDB takes five thousand parentheses, because its matcher keeps an explicit `MatcherStack` rather than recursing. Turning this into a stack machine is the same change the budget above wants, which is why the two are one piece of work and not two.
+
+The matcher never reaches a character level node, and that is checked rather than assumed. Character classes and captures appear only inside `%whitespace`, `NumberLiteral`, `StringLiteral`, `PlainIdentifier` and `QuotedIdentifier`. The first is never referenced, because whitespace is applied between tokens rather than called; the next two are overridden; and the last two are reachable only through `Identifier`, which is overridden as well. So reaching one means the grammar grew a shape the tokenizer does not cover, and the matcher stops loudly rather than guessing.
+
 ## 4. Memoization
 
 Full packrat memoizes every rule at every position, gets linear time, and pays for it with a table proportional to rules times positions, so 1,087 times the token count, plus a lookup on every rule entry. For SQL, where most rules match or fail immediately, that overhead exceeds what it saves on almost every real query.
@@ -93,7 +99,9 @@ DuckDB measured the pathology. A query with nineteen unmatched parentheses took 
 
 Their answer, and ours, is a short explicit list of memoized rules. `packrat_memoized_rules` in the upstream source names them. We vendor the list alongside the grammar and treat any change to it as a grammar change. The rules on it are the expression precedence chain and a handful of the deepest statement level choices, which are the places where the same position is genuinely retried by many alternatives.
 
-Implementation is an open addressed table keyed on `(rule, token_pos)`, sized to the token count, allocated once per parser instance and cleared by generation counter rather than by memset. A `SELECT 1` must not pay for a table it does not use, and clearing by generation is what makes the 3 us target reachable.
+Implementation is denser than the open addressed table this document first described, and it records failures only. The generated table says which rules are memoized, so each one gets a slot number and the table is one bit per slot per token position, which for twenty two rules and a hundred tokens is two hundred and seventy five bytes. That is small enough to allocate on the first memoized failure and drop with the parse, so a `SELECT 1` never touches it and there is no table to keep or clear between statements.
+
+Failures only, because a PEG rule is a pure function of the grammar and the position: a rule that failed once at a position fails every time, and that is the whole of the exponential blowup. A success cannot be memoized here for a reason specific to this design, which is that a memoized success is a subtree in the node arena and a failing ancestor may have truncated that subtree away since. Memoizing successes needs the arena to stop being a stack, and it buys nothing on the pathology that motivated any of this.
 
 The pathological input tests go in the suite from day one, generated rather than collected: N unmatched parens, N nested `CASE`, N deep parenthesized expressions, long `IN` lists, deeply nested subqueries. Each has a wall clock ceiling in CI. A PEG parser's failure mode is exponential blowup on adversarial input, it is a denial of service if any front door takes untrusted SQL, and the only defence that works is a test that fails loudly.
 
@@ -101,7 +109,7 @@ The pathological input tests go in the suite from day one, generated rather than
 
 PEG error reporting is genuinely bad by default. The failure surfaces at the top level choice, having discarded everything it learned, and the naive message is syntax error at position 0.
 
-The standard fix, and DuckDB's, is to track the furthest position reached across all attempts, together with the set of terminals that were expected there. That position is almost always where a human would point. We track `(furthest_token, expected_set)` as two fields updated on every terminal failure, which is cheap and allocates nothing on the success path, and render:
+The standard fix, and DuckDB's, is to track the furthest position reached across all attempts, together with the set of terminals that were expected there. That position is almost always where a human would point. The furthest position is one field updated on every terminal failure, which is cheap and allocates nothing on the success path. It is enough on its own to produce DuckDB's message, and the built matcher stops there: the expected set is what the typo suggestion below needs and nothing else does, so it is deferred to that work rather than carried for a message that never names it. One thing that is not optional is the quiet counter, because a terminal that fails inside a negative lookahead failed on purpose, and letting it move the furthest position makes the error name whatever the grammar was checking was absent.
 
 ```
 Parser Error: syntax error at or near "form"
@@ -112,7 +120,7 @@ LINE 1: SELECT * form t
 
 matching DuckDB's shape, blank line and all, because document 11's corpus matches error text by substring and because the shape is good. When the furthest failure is at the end of the token vector there is no token to name and no caret to draw, and DuckDB says `Parser Error: syntax error at end of input` on one line with nothing after it, which is what `SELECT 1 FROM` gives.
 
-Two refinements are worth their cost. Keyword typo suggestions: when the furthest failure expected a keyword set and the actual token is an identifier within edit distance one of one of them, say so. DuckDB does this and it is most of the perceived quality of a SQL error message. And the rule stack at the furthest position, behind a debug flag, because when a grammar bump breaks something this is the only tool that finds it quickly.
+Two refinements are worth their cost and neither is built yet. Keyword typo suggestions: when the furthest failure expected a keyword set and the actual token is an identifier within edit distance one of one of them, say so. DuckDB does this and it is most of the perceived quality of a SQL error message, and it is what the expected set exists for. And the rule stack at the furthest position, behind a debug flag, because when a grammar bump breaks something this is the only tool that finds it quickly.
 
 ## 6. What the matcher must not do
 
