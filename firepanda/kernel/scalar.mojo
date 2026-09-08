@@ -21,8 +21,9 @@ from std.math import copysign, floor, isnan, nan, sqrt
 from firepanda.array.array import Array
 from firepanda.array.strings import StringArray
 
-from .accum import accumulator
+from .accum import accumulator, highest, lowest
 from .arith import OP_ADD, OP_MUL, OP_SUB
+from .cumulative import OP_CUMMAX, OP_CUMMIN, OP_CUMPROD, OP_CUMSUM
 from .compare import CMP_EQ, CMP_GE, CMP_GT, CMP_LE, CMP_LT, CMP_NE
 from .group import AggKind
 from .temporal import ROUND_HALF_EVEN, ROUND_UP
@@ -1415,6 +1416,82 @@ def fill_scalar[
             else:
                 out.set_null(i)
     return out^
+
+
+def cumulative_scalar[dt: DType, //, code: Int](col: Array[dt]) -> Array[dt]:
+    """Runs the fold down the column one row at a time, carrying nothing clever.
+
+    `_is_there` and not `is_valid`, so a NaN that arrived in the column is
+    missing and is stepped over, which is the rule the kernel gets to by folding
+    a vector `isnan` into the block's validity word. There is no block here and
+    no carry between blocks, so there is no seam to get wrong, and there is no
+    shift ladder, so the folds happen in the order they are written. That last
+    part is what makes this the right twin for a float running total: the kernel
+    only uses the ladder where the ladder is exact, and where it does not, both
+    sides are this loop.
+
+    A NaN the fold produces is a value here for the same reason it is a value in
+    the kernel, which is that nothing looks at the running total again once it
+    has been folded.
+
+    Args:
+        col: The column, already at the answer's width.
+
+    Parameters:
+        dt: The dtype.
+        code: The operation, as one of the four codes in `cumulative.mojo`.
+
+    Returns:
+        A column of the same height, missing where the input was, spelling
+        missing the way the dtype spells it, as in the kernel.
+    """
+    var out = Array[dt](len(col))
+    var carry = _identity_scalar[dt, code]()
+    for i in range(len(col)):
+        if not _is_there(col, i):
+            comptime if dt.is_floating_point():
+                out.set_valid(i, nan[dt]())
+            else:
+                out.set_null(i)
+            continue
+
+        var value = col[i]
+        comptime if code == OP_CUMSUM:
+            carry = carry + value
+        elif code == OP_CUMPROD:
+            carry = carry * value
+        elif code == OP_CUMMAX:
+            carry = value if value > carry else carry
+        else:
+            carry = value if value < carry else carry
+        out.set_valid(i, carry)
+    return out^
+
+
+def _identity_scalar[dt: DType, code: Int]() -> Scalar[dt]:
+    """The value a fold starts from, written out again rather than imported.
+
+    A twin that shares a helper with its kernel shares whatever is wrong with the
+    helper, so the four identities are spelled here as well. They are short
+    enough that saying them twice costs less than the dependency does.
+
+    Args:
+
+    Parameters:
+        dt: The dtype.
+        code: The operation.
+
+    Returns:
+        Zero, one, the lowest value of the dtype or the highest.
+    """
+    comptime if code == OP_CUMSUM:
+        return Scalar[dt](0)
+    elif code == OP_CUMPROD:
+        return Scalar[dt](1)
+    elif code == OP_CUMMAX:
+        return lowest[dt]()
+    else:
+        return highest[dt]()
 
 
 def is_null_scalar[dt: DType](col: Array[dt]) -> Array[DType.bool]:

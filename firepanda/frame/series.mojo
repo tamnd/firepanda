@@ -40,6 +40,7 @@ from firepanda.frame.display import DisplayOptions, render_column
 from firepanda.frame.index import Index
 from firepanda.kernel.binary import BinaryOp, binary_any, binary_value_any
 from firepanda.kernel.cast import cast_any
+from firepanda.kernel.cumulative import CumulativeOp, cumulative_any
 from firepanda.kernel.nulls import (
     coalesce_any,
     fill_backward_any,
@@ -710,6 +711,82 @@ struct Series(Copyable, Movable, Sized, Writable):
                 )
             ),
         )
+
+    def cumulative(self, op: CumulativeOp) raises -> Self:
+        """Runs a fold down the column, one row of answer per row of input.
+
+        The four pandas methods below are this with the operation filled in, and
+        they are separate methods only because pandas spells them separately.
+
+        Nothing is widened on the way out, which is the difference between this
+        and `shift`. A shift opens a gap that was not there before, so it can put
+        a missing value into a column that had none and has to make room for it.
+        A running fold is missing exactly where the column it read was missing
+        and nowhere else, so a column that arrived obeying the pandas layer's
+        rule leaves obeying it.
+
+        Args:
+            op: Which fold to run.
+
+        Returns:
+            A series of the same height and labels, of the type
+            `cumulative_type` gives.
+
+        Raises:
+            Error: If the operation has no answer on the column's type.
+        """
+        return self._relabelled(self.name, cumulative_any(self.values, op))
+
+    def cumsum(self) raises -> Self:
+        """Returns the running total down the column.
+
+        A missing row is stepped over in the total and comes back missing in
+        place, so a gap neither restarts the total nor poisons it. The type
+        widens the way a whole column sum does on an integer column and does not
+        widen at all on a float one, which is explained in
+        `firepanda/kernel/cumulative.mojo`.
+
+        Returns:
+            The running totals.
+
+        Raises:
+            Error: If the column is not a number, a bool or an elapsed time.
+        """
+        return self.cumulative(CumulativeOp.SUM)
+
+    def cumprod(self) raises -> Self:
+        """Returns the running product down the column.
+
+        Returns:
+            The running products.
+
+        Raises:
+            Error: If the column is not a number or a bool. An elapsed time has
+                no running product, because a product of two of them is an area.
+        """
+        return self.cumulative(CumulativeOp.PROD)
+
+    def cummax(self) raises -> Self:
+        """Returns the running maximum down the column.
+
+        Returns:
+            The running maxima, of the column's own type.
+
+        Raises:
+            Error: If the column has no order, which here means a string column.
+        """
+        return self.cumulative(CumulativeOp.MAX)
+
+    def cummin(self) raises -> Self:
+        """Returns the running minimum down the column.
+
+        Returns:
+            The running minima, of the column's own type.
+
+        Raises:
+            Error: If the column has no order, which here means a string column.
+        """
+        return self.cumulative(CumulativeOp.MIN)
 
     def dt(self, field: TemporalField) raises -> Self:
         """Returns one calendar or clock field of a datetime series.

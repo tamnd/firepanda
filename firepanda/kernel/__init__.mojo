@@ -78,6 +78,12 @@ from .concat import (
     concat_strings,
     concat_two_any,
 )
+from .cumulative import (
+    CumulativeOp,
+    cumulative,
+    cumulative_any,
+    cumulative_type,
+)
 from .group import (
     AggKind,
     aggregate_group,

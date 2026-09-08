@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Everything up to this row
+
+`Series.cumsum`, `Series.cumprod`, `Series.cummax` and `Series.cummin` fold a column into its own running answer, so row `i` holds the whole of the column up to and including row `i`. A missing row is skipped in the total and put back in place, which is what pandas does and is not what a loop written in an afternoon does: `[1.0, nan, 3.0, nan, 5.0]` adds up to `[1.0, nan, 4.0, nan, 9.0]`, so the gap neither restarts the total nor poisons it.
+
+The types are pandas' types and there are three rules. A running extreme answers the column's own type, always, so `cummax` on a bool column is a bool column. A running sum or product widens the way a whole column sum does, so every signed integer width answers int64, every unsigned one answers uint64, and bool answers int64, which makes `cumsum` on a bool column a running count. Floats are the exception and do not widen, so a float32 running total is float32 even though `Series.sum` over the same column accumulates in float64: a reduction answers one number and can afford the room, and a scan answers a whole column. A duration adds up and has no product, an instant has running extremes and no running total, and both raise with the reason in the message.
+
+The kernel is in `firepanda/kernel/cumulative.mojo` and it is a prefix ladder rather than a loop. A register is folded against itself shifted by one lane, then two, then four, and after log2 of the width steps every lane holds the prefix of the lanes at or below it, so the dependency chain is one step per block rather than one step per row. Missing lanes are replaced by the operator's identity before the ladder runs and the output is blanked afterwards, which is how the skipping happens without a branch per row.
+
+The ladder is not used for a running total or product of a float column, and that is deliberate. Regrouping the folds is exact for integers, because wrapping is associative, and exact for the extremes, because they select an input rather than computing a new one. It is not exact for floating point addition, and a scan produces every partial sum rather than one number, so a reassociated float total disagrees with pandas at nearly every row rather than in the last bits of one answer. Those two cases are summed one row at a time and the conformance case that covers ten thousand doubles compares bit for bit rather than within a tolerance.
+
+One thing that looks like a bug and is not: a NaN that arrives in the column is missing and is skipped, and a NaN the arithmetic produces is a value and is carried. So `[nan, inf, -inf, -0.0]` adds up to `[nan, inf, nan, nan]`, where the first NaN is a gap and the rest are the number that adding infinity to negative infinity gives. pandas does exactly this.
+
 ### The row before this one
 
 `Series.shift`, `Series.diff` and `Series.pct_change` move a column along its own rows and compare it against where it was. `shift(1)` puts the gap at the start, `shift(-2)` puts it at the end, `shift(0)` is a copy, and `shift(1, fill_value)` puts something in the gap rather than leaving it missing. `diff` is the column minus its own lag and `pct_change` is that difference as a fraction of where the column was. The labels stay where they are while the values move past them, which is what makes `s - s.shift(1)` mean anything, since the subtraction aligns on labels and would line the column back up with itself if the labels moved too.
