@@ -48,21 +48,25 @@ def test_a_series_reports_its_shape_the_pandas_way(firepanda: ModuleType, tmp_pa
     assert series.size == 3
 
 
-def test_the_values_come_back_with_the_holes_still_in_them(
+def test_a_missing_integer_widens_the_column_the_way_pandas_does(
     firepanda: ModuleType, tmp_path: Path
 ) -> None:
-    """A missing integer stays missing rather than becoming a float.
+    """`read_csv` is a pandas name and gives the pandas reading of the file.
 
-    This is a real difference from pandas and it is the one worth being loud
-    about. pandas would have widened this column to float64 and put a NaN in the
-    gap, because a numpy int64 array has nowhere to record absence. A firepanda
-    column is Arrow and has a validity bitmap, so the value is missing rather
-    than approximated, and `None` is what says so. pyarrow and Polars both answer
-    the same way.
+    A numpy int64 array has nowhere to record absence, so pandas widens a column
+    of numbers with a gap in it to float64 and writes a NaN in the gap, and it
+    does that when it reads the file rather than when it computes on it. Arrow
+    does have somewhere, and `firepanda.from_arrow` is the door that keeps that
+    answer, because the C Data Interface promises a consumer that what came in
+    comes out. This door promises a pandas program the frame pandas would have
+    handed it. Document 20 in the compat repository argues both halves.
     """
     series = _frame(firepanda, tmp_path)["qty"]
-    assert series.tolist() == [10, None, 25]
-    assert series.dtype == "int64"
+    values = series.tolist()
+    assert series.dtype == "float64"
+    assert values[0] == 10.0
+    assert values[1] != values[1], "a NaN is the only value unequal to itself"
+    assert values[2] == 25.0
 
 
 def test_every_kind_of_column_reads_back(firepanda: ModuleType, tmp_path: Path) -> None:
@@ -75,7 +79,9 @@ def test_every_kind_of_column_reads_back(firepanda: ModuleType, tmp_path: Path) 
     """
     frame = _frame(firepanda, tmp_path)
     assert frame["region"].tolist() == ["north", "south", "east"]
-    assert frame["price"].tolist() == [1.5, 2.5, None]
+    prices = frame["price"].tolist()
+    assert prices[:2] == [1.5, 2.5]
+    assert prices[2] != prices[2], "the gap in a float column is a NaN too"
     assert frame["ok"].tolist() == [True, False, True]
     assert frame["region"].dtype == "string"
     assert frame["price"].dtype == "float64"
@@ -85,7 +91,13 @@ def test_every_kind_of_column_reads_back(firepanda: ModuleType, tmp_path: Path) 
 def test_a_series_counts_what_is_there_and_what_is_not(
     firepanda: ModuleType, tmp_path: Path
 ) -> None:
-    """`count` is the non missing count in pandas, which is the trap in the name."""
+    """`count` is the non missing count in pandas, which is the trap in the name.
+
+    Worth keeping after the widening above, because that is what says the gap is
+    still a gap. The bitmap no longer records it and a NaN counts as missing to
+    everything that asks, so the answer here is the same two it was when the
+    column was an integer column with a null in it.
+    """
     series = _frame(firepanda, tmp_path)["qty"]
     assert series.count() == 2
     assert series.hasnans
@@ -96,8 +108,10 @@ def test_head_and_tail_stay_series(firepanda: ModuleType, tmp_path: Path) -> Non
     """A slice of a series is a series, not a frame and not a list."""
     series = _frame(firepanda, tmp_path)["qty"]
     assert isinstance(series.head(2), firepanda.Series)
-    assert series.head(2).tolist() == [10, None]
-    assert series.tail(1).tolist() == [25]
+    head = series.head(2).tolist()
+    assert head[0] == 10.0
+    assert head[1] != head[1]
+    assert series.tail(1).tolist() == [25.0]
     assert series.head(2).name == "qty"
 
 

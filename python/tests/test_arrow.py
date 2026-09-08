@@ -124,13 +124,32 @@ def test_a_string_longer_than_twelve_bytes_survives(firepanda: ModuleType, tmp_p
 
 
 @needs["pyarrow"]
-def test_nulls_arrive_as_nulls(firepanda: ModuleType, tmp_path: Path) -> None:
-    """An empty CSV field is a null, and Arrow's validity says so."""
+def test_nulls_arrive_as_nulls(firepanda: ModuleType) -> None:
+    """A null crosses in, sits in a firepanda column, and crosses back out.
+
+    Built through `from_arrow` rather than through `read_csv`, and that is the
+    point of the test rather than an inconvenience in it. `read_csv` is a pandas
+    name and gives the pandas reading of a file, where a column of numbers with
+    a gap in it has been widened to float64 with a NaN in the gap. This door
+    makes the opposite promise, which is that what a producer handed over is what
+    a consumer gets back, so an int64 column with a null in it stays exactly
+    that. Both promises are kept by the same library and each is kept to the
+    caller who asked for it.
+    """
     import pyarrow as pa
 
-    frame = frame_of(firepanda, tmp_path, "name,qty,price\nrivet,,1.25\n,10,\nnut,25,0.05\n")
+    frame = firepanda.from_arrow(
+        pa.table(
+            {
+                "name": pa.array(["rivet", None, "nut"]),
+                "qty": pa.array([None, 10, 25], type=pa.int64()),
+                "price": pa.array([1.25, None, 0.05], type=pa.float64()),
+            }
+        )
+    )
     batch = pa.record_batch(frame)
     assert batch.column("qty").to_pylist() == [None, 10, 25]
+    assert batch.column("qty").type == pa.int64()
     assert batch.column("price").to_pylist() == [1.25, None, 0.05]
     assert batch.column("name").to_pylist() == ["rivet", None, "nut"]
 
@@ -399,11 +418,18 @@ def test_pyarrow_reads_a_series_of_every_type(firepanda: ModuleType, tmp_path: P
 
 
 @needs["pyarrow"]
-def test_a_null_in_a_series_stays_a_null(firepanda: ModuleType, tmp_path: Path) -> None:
+def test_a_null_in_a_series_stays_a_null(firepanda: ModuleType) -> None:
     """The validity bitmap crosses with the column rather than with the frame."""
     import pyarrow as pa
 
-    frame = frame_of(firepanda, tmp_path, "name,qty\nrivet,\n,10\nnut,25\n")
+    frame = firepanda.from_arrow(
+        pa.table(
+            {
+                "name": pa.array(["rivet", None, "nut"]),
+                "qty": pa.array([None, 10, 25], type=pa.int64()),
+            }
+        )
+    )
     assert pa.array(frame["qty"]).to_pylist() == [None, 10, 25]
     assert pa.array(frame["name"]).to_pylist() == ["rivet", None, "nut"]
     assert pa.array(frame["qty"]).null_count == 1

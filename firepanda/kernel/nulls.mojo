@@ -73,6 +73,17 @@ filling at most zero nulls is a no-op nobody asks for.
 
 None of these promote. `coalesce` over an int32 and a float64 raises rather than
 picking one, for the same reason `concat` does.
+
+`widen_for_missing` is the odd one out and belongs here anyway, because it is the
+same question asked in the other direction. Everything above reads a column and
+reports what pandas would say about it. That one rewrites the column so that
+pandas would not have to be asked: a numeric column with a missing row carries it
+as a NaN and an integer column widens to float64 to have somewhere to put it,
+which is what `to_pandas` does to the same data. It is a read path function and
+not a rule inside a kernel, because pandas does the widening when it reads a file
+and not when it adds two columns, and putting it anywhere else would mean every
+kernel below had an opinion about pandas instead of one function above them all
+having it once. See #171.
 """
 
 from std.bit import pop_count
@@ -84,7 +95,10 @@ from firepanda.array.array import Array
 from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL, FLOAT
+from firepanda.dtype.logical import LogicalType
 from firepanda.exec import MORSEL_ROWS, parallel_morsels
+
+from .cast import cast_any
 
 
 def present_bitmap[dt: DType](col: Array[dt]) raises -> Bitmap:
@@ -256,6 +270,100 @@ def is_not_null_any(col: AnyArray) raises -> Array[DType.bool]:
         Error: Only what the morsel runtime raises.
     """
     return _null_mask[wants_null=False](present_bitmap_any(col), len(col))
+
+
+def widen_for_missing(col: AnyArray) raises -> AnyArray:
+    """Moves a numeric column's missing rows out of the bitmap and into the values.
+
+    This is where a frame stops being Arrow and starts being pandas, and it is
+    the only place that turn happens. pandas on the numpy backend has one
+    missing value for a number and it is NaN, so an integer column that has a
+    missing row cannot stay an integer column: there is no integer that means
+    absent, and pandas makes room by widening the whole column to float64. That
+    is not something pandas does when you add two columns, it is something it
+    does when it reads the data, which is why this is a read path function and
+    not a rule inside a kernel.
+
+    The rule is one sentence. A numeric column that has a missing row carries
+    that row as a NaN rather than as a cleared validity bit, and an integer
+    column widens to float64 to have somewhere to put it. Measured against
+    pandas 3.0.3, every integer width goes to float64 and no other, a float32
+    column stays float32 because a NaN already fits in it, and a column with no
+    missing row is not touched at all, which is why an int64 column full of
+    values comes back an int64 column.
+
+    Nothing else moves. A boolean, a string, a date, a timestamp and a duration
+    all keep their type and their bitmap, because pandas keeps a real missing
+    value for each of those and has no reason to widen them. See #171.
+
+    The bitmap is dropped rather than kept alongside the NaN. Keeping both would
+    be a column with two spellings of missing in it and a later kernel would
+    have to decide which one it meant, which is the ambiguity this whole
+    function exists to remove.
+
+    Args:
+        col: The column as Arrow has it.
+
+    Returns:
+        The column as pandas would have read it. The same column, deeply
+        copied, when the rule does not apply.
+
+    Raises:
+        Error: If the widening cast fails, which it cannot for a numeric column.
+    """
+    if not widens_for_missing(col.type, col.null_count()):
+        return AnyArray(copy=col)
+    if col.type.is_float():
+        return nan_over_nulls(AnyArray(copy=col))
+    return nan_over_nulls(cast_any(col, DType.float64))
+
+
+def widens_for_missing(type: LogicalType, nulls: Int) -> Bool:
+    """Reports whether the rule above has anything to do to a column.
+
+    It is a function rather than two lines inside the caller because a chunked
+    column has to make this decision once for the whole column and then apply it
+    to every piece, including the pieces that happen to hold no missing row. A
+    column whose first chunk is int64 and whose second is float64 is not a
+    column.
+
+    Args:
+        type: The column's logical type.
+        nulls: How many rows the whole column has cleared, not this chunk.
+
+    Returns:
+        True when the column is numeric and something in it is missing.
+    """
+    return type.is_numeric() and nulls > 0
+
+
+def nan_over_nulls(var col: AnyArray) -> AnyArray:
+    """Writes a NaN into every cleared row and then declares the column complete.
+
+    The bitmap is copied out before the loop rather than read through `col`,
+    because the loop holds a mutable pointer into the same column's values and
+    reading the bits off a separate object is what keeps those two apart.
+
+    Args:
+        col: A float column. Anything else comes back untouched, since a
+            column with no NaN in its dtype cannot be told to hold one.
+
+    Returns:
+        The same column with no validity bitmap and a NaN where each cleared
+        bit was.
+    """
+    if not col.type.is_float():
+        return col^
+    var validity = Bitmap(copy=col.data.validity)
+    var rows = len(col)
+    comptime for candidate in FLOAT:
+        if col.dtype() == candidate:
+            var values = col.unsafe_ptr[candidate]()
+            for i in range(rows):
+                if not validity.get(i):
+                    values.unsafe_offset(i).unsafe_store(nan[candidate]())
+    col.data.validity = Bitmap(rows)
+    return col^
 
 
 def all_valid_mask[

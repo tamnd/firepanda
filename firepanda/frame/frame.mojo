@@ -76,6 +76,7 @@ from firepanda.kernel.chunked import (
     filter_chunked,
     slice_chunked,
     take_chunked,
+    widen_chunked_for_missing,
 )
 from firepanda.kernel.group import (
     AggKind,
@@ -558,6 +559,37 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         var out = Self(copy=self)
         out.schema.fields[at] = Field(name, converted.type)
         out.columns[at] = converted^
+        return out^
+
+    def widen_for_missing(self) raises -> Self:
+        """Returns the frame as pandas would have read it rather than as Arrow holds it.
+
+        pandas on the numpy backend has one missing value for a number and it is
+        NaN, so an integer column with a missing row cannot stay an integer
+        column and is widened to float64 to make room. That widening happens
+        when pandas reads the data, not when it computes on it, which is why
+        this is a call on a frame that has just been read rather than a rule
+        inside a kernel. Everything downstream then agrees with pandas without
+        knowing anything about pandas: adding two to a column of NaN gives NaN
+        in both libraries for the same reason, and the reductions already step
+        over a NaN because `#170` decided they should.
+
+        A frame with no missing row in any numeric column comes back identical,
+        which is the common case and costs one read of a count per column.
+
+        Returns:
+            The frame with every numeric column that has a missing row widened,
+            and everything else as it was.
+
+        Raises:
+            Error: If the widening cast fails, which it cannot for a numeric
+                column.
+        """
+        var out = Self(copy=self)
+        for i in range(len(out.schema)):
+            var widened = widen_chunked_for_missing(out.columns[i])
+            out.schema.fields[i] = Field(out.schema[i].name, widened.type)
+            out.columns[i] = widened^
         return out^
 
     def filter(self, mask: Array[DType.bool]) raises -> Self:
