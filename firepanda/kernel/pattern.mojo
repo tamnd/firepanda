@@ -16,15 +16,17 @@ offset, so they are as cheap as an equality against a constant. Contains has to
 look at every position, and the position that matches is different for every row,
 so this is where the work is.
 
-The search is the classic first and last byte filter with a vectorized skip. The
-needle's first byte is broadcast across a register, a block of the haystack is
-compared against it, and a block with no hit moves the cursor by the whole block.
-A block with a hit falls back to checking each candidate position in it, and a
-candidate is only checked in full when its last byte matches too, which throws
-out almost everything the first byte let through. On the shapes here, needles of
-five to twenty bytes against strings of ten to eighty, that beats a two way or a
-Boyer Moore search because those spend their setup building tables that a short
-needle never earns back.
+The search is a two ended filter with a vectorized skip. The needle's first and
+last bytes are each broadcast across a register, two blocks of the haystack are
+loaded a needle apart, and a candidate survives only where both agree. A block
+with no survivor moves the cursor by the whole block, and a block with one falls
+back to comparing the middle bytes of that candidate. Filtering on one end lets
+through every position holding the needle's first byte, which on ordinary text is
+one in twenty odd; filtering on both lets through one in five hundred, and the
+second load is free next to what it saves. On the shapes here, needles of five to
+twenty bytes against strings of ten to eighty, this beats a two way or a Boyer
+Moore search because those spend their setup building tables that a short needle
+never earns back.
 
 Comparison against a null is null, the same as it is for the ordering kernels,
 and it is handled the same way: the loop writes whatever falls out and the repair
@@ -41,13 +43,21 @@ from firepanda.exec import parallel_morsels
 from .mask import repair_range
 
 
-comptime SCAN_WIDTH = 32
-"""Bytes of haystack compared against the needle's first byte at once.
+comptime SCAN_WIDTH = 16
+"""Candidate positions tested at once.
 
-Wide enough that a string of forty bytes is two blocks rather than five, and no
-wider, because the tail below the block loop is walked a byte at a time and a
-wider block leaves a longer tail. Thirty two is one AVX2 register and two SSE
-ones, and on a machine with neither the compiler splits it into whatever it has.
+Sixteen and not thirty two, and the reason is the row length rather than the
+register width. A block starting at `i` reads the needle's last byte for every
+candidate in it, so it reads through `i + SCAN_WIDTH + m - 2`, and a row shorter
+than `SCAN_WIDTH + m - 1` has no room for a single block and falls to the byte
+loop. At thirty two that threshold is thirty six bytes for a five byte needle,
+which is longer than most of the columns anybody searches: TPC-H's part type is
+about twenty five bytes and its name about forty. The first version of this file
+used thirty two and measured twelve nanoseconds a row on a thirty two byte
+column, three times DuckDB, because it never entered the block loop once.
+
+Sixteen puts the threshold at twenty bytes, which those columns clear, and it is
+one SSE register.
 """
 
 comptime WORD = 8
@@ -84,7 +94,7 @@ def _match_at(
             return False
         i += WORD
     while i < count - 1:
-        if hay[at + i] != needle[i]:
+        if left.unsafe_offset(i)[] != right.unsafe_offset(i)[]:
             return False
         i += 1
     return True
@@ -116,30 +126,56 @@ def find_bytes(hay: Span[UInt8, _], needle: Span[UInt8, _], from_: Int) -> Int:
 
     var base = hay.unsafe_ptr()
     var first = SIMD[DType.uint8, SCAN_WIDTH](needle[0])
-    var last = needle[m - 1]
-    var i = from_
+    var last = SIMD[DType.uint8, SCAN_WIDTH](needle[m - 1])
 
-    while i + SCAN_WIDTH <= limit + 1:
-        var block = base.unsafe_offset(i).unsafe_load[width=SCAN_WIDTH]()
-        var hits = block.eq(first)
-        if hits.reduce_or():
-            for k in range(SCAN_WIDTH):
-                if (
-                    hits[k]
-                    and hay[i + k + m - 1] == last
-                    and _match_at(hay, needle, i + k, m)
-                ):
-                    return i + k
-        i += SCAN_WIDTH
+    if limit + 1 - from_ >= SCAN_WIDTH:
+        # Sixteen candidates at a time, each one filtered on both ends before
+        # anything reads the middle. Two loads, one at the candidate and one at
+        # where its last byte would be, and a position survives only if both
+        # agree. Checking one end lets through every position holding the
+        # needle's first byte, which on ordinary text is one in twenty odd;
+        # checking both lets through one in five hundred.
+        #
+        # The last block overlaps the one before it rather than giving up and
+        # handing the remainder to a byte loop. Positions get tested twice that
+        # way, which costs one block and cannot change the answer: a block
+        # returns the first match inside itself, and a position that was already
+        # tested was already found not to match.
+        var stop = limit + 1 - SCAN_WIDTH
+        var i = from_
+        while True:
+            var front = base.unsafe_offset(i).unsafe_load[width=SCAN_WIDTH]()
+            var back = base.unsafe_offset(i + m - 1).unsafe_load[
+                width=SCAN_WIDTH
+            ]()
+            var hits = front.eq(first) & back.eq(last)
+            if hits.reduce_or():
+                # Unrolled, because `k` indexes a SIMD lane. A runtime index
+                # into a register is a store and a reload on most targets, and
+                # a compile time one is a single extract. That is worth more
+                # here than it looks: this loop runs on every row that matches,
+                # and with it rolled the row that finds its needle cost twice
+                # what the row that has none did.
+                comptime for k in range(SCAN_WIDTH):
+                    if hits[k] and _match_at(hay, needle, i + k, m):
+                        return i + k
+            if i >= stop:
+                return -1
+            i = min(i + SCAN_WIDTH, stop)
 
-    while i <= limit:
+    # A row too short to hold one block. The bounds are the same as above and
+    # the filter is the same filter, one position at a time.
+    var head = needle[0]
+    var tail = needle[m - 1]
+    var at = from_
+    while at <= limit:
         if (
-            hay[i] == needle[0]
-            and hay[i + m - 1] == last
-            and _match_at(hay, needle, i, m)
+            base.unsafe_offset(at)[] == head
+            and base.unsafe_offset(at + m - 1)[] == tail
+            and _match_at(hay, needle, at, m)
         ):
-            return i
-        i += 1
+            return at
+        at += 1
     return -1
 
 

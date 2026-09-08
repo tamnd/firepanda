@@ -5,23 +5,25 @@ tries every position and compares every byte, because the whole content of the
 kernel is the positions it manages not to try. A twin that skipped the same way
 would agree with the kernel about anything the skipping got wrong.
 
-The lengths are chosen to walk both halves of the search. `SCAN_WIDTH` is thirty
-two, so a string shorter than that never enters the block loop and a string of a
-hundred bytes goes round it three times and finishes in the tail. Both are here,
-and so is a match that starts at byte thirty one, which is the one an off by one
-in the block loop's limit would lose.
+The lengths are chosen to walk both halves of the search. `SCAN_WIDTH` is
+sixteen and a block reads through where the needle's last byte would fall, so a
+row under twenty bytes never enters the block loop and a row of a hundred goes
+round it several times. Both are here, and so is a match that starts at byte
+thirty one, which is the one an off by one in the block loop's limit would lose.
 
-One thing about this file is worth knowing before adding to it. A loop written
-here is interpreted while the library it calls is compiled, so a loop over a
-hundred thousand rows in a test costs about a thousand times what the same loop
-costs inside a kernel. That is why the last test hands whole columns to the
-library and asserts once, rather than reading rows one at a time. The whole file
-runs in a little over five seconds and almost all of that is compiling it.
+One thing about this file is worth knowing before adding to it. The per test
+times the harness prints are not wall clock and should not be used to decide
+anything. The last test has been reported as anything from twenty one to a
+hundred and ninety seconds across runs whose real time never moved off five. If
+the question is how long something takes, time the whole file, and throw away
+the first run after a sync: that one pays for a cold compile cache and costs
+about twenty five seconds against five for a warm one.
 
-The per test times the harness prints are not wall clock and do not agree with
-it. That test has been reported as anything from twenty one to a hundred and
-ninety seconds across runs whose real time never moved off five. Time the whole
-file if the question is how long something takes.
+The last test still hands whole columns to the library and asserts once rather
+than reading rows one at a time, which is worth doing on its own merits. The
+comparison and the reduction are both kernels and the only thing crossing back
+into the test is a count, so a failure anywhere in a hundred thousand rows is
+one assertion rather than a hundred thousand.
 """
 
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
@@ -300,8 +302,8 @@ def test_a_column_either_side_of_the_morsel_split_matches_the_twin() raises:
     # Every row is checked, and not one of them is read from this file. The twin
     # is asked for the whole column in one call, the two answers are compared by
     # a kernel and reduced by another, and the only thing crossing back into the
-    # test is a count. A loop here over a hundred thousand rows would cost more
-    # than the rest of the file put together, and this costs nothing measurable.
+    # test is a count. Warm runs of the file with and without this test land in
+    # the same five second band, so the whole thing is free next to compiling it.
     def unit() -> StringArray:
         return strings_from_list(
             ["forest green thread", padded("", 40, "green"), "nothing", "gree"]
