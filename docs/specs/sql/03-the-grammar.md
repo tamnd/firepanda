@@ -4,15 +4,17 @@ This is the mechanism that makes the compatibility half of document 01 cheap. Ev
 
 ## 1. The artifact
 
-At `v2.0-cyanoptera`, `duckdb/grammar/` contains:
+On the `v2.0-cyanoptera` branch, `src/parser/peg/grammar/` contains:
 
 | | |
 | --- | --- |
-| `.gram` files | 40 |
+| `.gram` files | 40, all in `statements/` |
 | total bytes | 61,190 |
-| non blank, non comment lines | 1,421 |
+| lines | 1,421, of which 1,222 are neither blank nor comment |
 | rules (`Name <- ...`) | 1,087 |
-| keyword lists | 5 files: 75 reserved, 55 unreserved, 30 column name, 32 type name, 339 other |
+| keyword lists | 5 files in `keywords/`: 75 reserved, 339 unreserved, 55 column name, 30 function name, 32 type name |
+
+`v2.0-cyanoptera` is DuckDB's default branch rather than a tag, because 2.0 has not been released yet and the last tag is v1.5.5. So the pin is a commit SHA, and the bump procedure below takes either a tag or a branch and records the SHA it resolved to.
 
 Sixty one kilobytes of declarative text is the entire syntactic surface of the dialect that beat Postgres compatibility at its own game. For comparison, DuckDB's hand written transformer, which is the layer after the parser and which we still have to write ourselves, is 46 files and 2,817,088 bytes, of which about 2.3 MB is generated. The grammar is two per cent of the front end and it is the two per cent that defines compatibility.
 
@@ -26,39 +28,45 @@ PEG, with the ordinary operators and two conveniences.
 SelectStatement <- WithClause? SelectOrParens SetopClause* OrderByClause? LimitClause?
 ```
 
-`<-` defines a rule. Juxtaposition is sequence. `/` is ordered choice, meaning the first alternative that matches wins, and this is the whole reason the dialect stopped fighting its parser, because there are no conflicts to resolve, only an order to get right. `?`, `*` and `+` are the usual. `&` and `!` are lookahead, and `!` is parsed and, in DuckDB's own matcher, treated as advisory rather than enforced in some positions, which document 04 handles explicitly rather than by guessing.
+`<-` defines a rule. Juxtaposition is sequence. `/` is ordered choice, meaning the first alternative that matches wins, and this is the whole reason the dialect stopped fighting its parser, because there are no conflicts to resolve, only an order to get right. `?`, `*` and `+` are the usual. `!` is negative lookahead, used in exactly one place, `PlainIdentifier <- !ReservedKeyword <[a-z_]i[a-z0-9_]i*>`. Positive lookahead `&` is in the notation and is never used, and DuckDB's own grammar reader does not accept it, so neither do we.
+
+Two more forms carry the leaves. A bracketed character class, `[ \t\n\r]` or `[^\']`, and an angle bracketed capture holding one, `<[a-z_]i[a-z0-9_]i*>`, where the trailing `i` makes the preceding class case insensitive. Both are lexical rather than structural, both appear in a handful of rules, and both belong to the tokenizer rather than to the matcher, which is document 04's problem.
 
 The two conveniences are what keep 1,087 rules down to 1,421 lines. Parameterized rules, invoked like macros:
 
 ```
-List(D)   <- D (',' D)*
+List(D)   <- D (',' D)* ','?
 Parens(D) <- '(' D ')'
 ```
 
-so `Parens(List(Expression))` is a whole argument list. And keyword lists as first class token classes, so the grammar refers to `ReservedKeyword` and the tokenizer resolves it against a sorted table.
+so `Parens(List(Expression))` is a whole argument list, trailing comma included. And keyword lists as first class token classes, so the grammar refers to `ReservedKeyword` and the tokenizer resolves it against a sorted table. That reference is not defined in any `.gram` file. Upstream's build turns each `.list` file into a rule named after the file, so `reserved_keyword.list` becomes `ReservedKeyword <- 'all' / 'analyse' / ...`, and our generator has to do the same thing before the grammar is even well formed.
 
-Uppercase bare words are keywords. Single quoted strings are literal punctuation. Rule references are `CamelCase`. That is the entire notation, and a recursive descent parser for it fits in a few hundred lines, which matters because we have to parse the grammar itself to generate anything from it.
+Two rules are provided by the runtime rather than by the grammar text: `%whitespace`, whose definition `[ \t\n\r]*` is in `common.gram` but which the matcher applies implicitly between tokens, and `EndOfInput`, which is referenced and never defined.
+
+Uppercase bare words are keywords. Single quoted strings are literal punctuation. Rule references are `CamelCase`. Comments run from `#` to end of line. A rule ends at the first newline that is outside brackets and not preceded by a trailing `/`, which is the only piece of the notation that is whitespace sensitive and the only place a naive reader gets it wrong. That is the entire notation, and a recursive descent parser for it fits in a few hundred lines, which matters because we have to parse the grammar itself to generate anything from it.
 
 ## 3. What we take, exactly
 
-**Take verbatim, byte for byte:** `grammar/**/*.gram` and `grammar/keywords/*.list`. These are checked into `firepanda/sql/grammar/` under a `VENDOR` file recording the upstream tag, the commit SHA, the retrieval date and the SHA-256 of each file.
+**Take verbatim, byte for byte:** `src/parser/peg/grammar/statements/*.gram` and `src/parser/peg/grammar/keywords/*.list`. These are checked into `firepanda/sql/grammar/` under a `VENDOR` file recording the upstream ref, the commit SHA, the retrieval date and the SHA-256 of each file.
 
-**Take as reference, do not vendor:** `scripts/parser/grammar_types.yml`, which is DuckDB's map from rule name to the C++ node type its transformer produces. It is a C++ artifact and useless to us directly, but it is the best available index of which rules a transformer actually has to handle and which are pure syntax. Document 05 uses it to order the work.
+**Take the one list we cannot derive:** `packrat_memoized_rules` out of `scripts/parser/grammar_types.yml`, which is the twenty two rules DuckDB memoizes, all of them on the expression chain from `Expression` down to `FunctionExpression`. That list is a performance decision somebody made with a profiler, and document 04 copies it rather than choosing its own, so it is vendored beside the grammar with its own checksum.
 
-**Do not take:** the generator, the matcher, the tokenizer, the transformer, the binder. All C++, all ours to write. `build_grammar.sh` is read for its behaviour and then discarded.
+**Take as reference, do not vendor:** the rest of `grammar_types.yml`, which is DuckDB's map from rule name to the C++ node type its transformer produces, plus its `excluded_rules` list. It is a C++ artifact and useless to us directly, but it is the best available index of which rules a transformer actually has to handle and which are pure syntax. Document 05 uses it to order the work.
+
+**Do not take:** the generator, the matcher, the tokenizer, the transformer, the binder. All C++, all ours to write. `scripts/parser/inline_grammar.py` is read for its behaviour, because it is the definition of how the keyword lists and the `.gram` files become one grammar, and then discarded.
 
 The vendored directory is never edited. Not for a fix, not for a workaround, not to add a rule we would like. The moment a local edit exists, compatible by construction becomes compatible except for the edits, and nobody will remember what they were. If upstream's grammar is wrong, the fix goes upstream and we pin the next tag. Document 13 records the one scenario that could force this and what we would do instead.
 
 ## 4. How much it moves
 
-The load bearing question for a vendoring strategy is churn, so it was measured across four upstream tags rather than assumed.
+The load bearing question for a vendoring strategy is churn, so it was measured across four upstream points rather than assumed.
 
-| tag | rules | `.gram` lines changed against previous |
+| ref | rules | `.gram` lines changed against previous |
 | --- | --- | --- |
 | v1.4.0 | 526 | |
 | v1.5.0 | 763 | 1,092 |
 | v1.5.5 | 779 | 78 |
-| v2.0-cyanoptera | 1,087 | 691 |
+| v2.0-cyanoptera, branch head | 1,087 | 691 |
 
 Read it in two parts. Within a release series the grammar is nearly static, at 78 lines across the whole of v1.5.0 to v1.5.5, most of it new function syntax. Across a major release it moves several hundred lines, and the v1.5.0 jump is inflated because that was the series where the PEG grammar was still being brought to parity with the Bison one.
 
@@ -84,13 +92,13 @@ Three decisions about it, all made for reasons that will otherwise be relitigate
 
 Written down because it will be run by someone who has not read this document.
 
-1. `tools/vendor_grammar.sh <tag>` fetches `grammar/` at the tag, rewrites `VENDOR`, and stops if any checksum is unchanged, meaning there is nothing to do, or if the fetch was partial.
+1. `tools/vendor_grammar.sh <ref>` fetches the grammar directory at the ref, resolves the ref to a commit SHA, rewrites `VENDOR`, and stops if nothing changed or if the fetch was partial.
 2. `git diff` on the vendored tree is the complete syntactic change in that release. Read it. It is tens of lines for a patch release.
 3. Regenerate. The table diff should be proportionate to the grammar diff, and if it is not then the generator has a bug.
 4. Run the differential parse harness from document 11 against the new DuckDB. Accept and reject must agree on the whole corpus. New syntax that we now parse and cannot transform shows up here as unsupported, never as a syntax error.
 5. New rules with no transformer case get a refusal by name and an issue. That is the entire cost of falling behind on semantics, and it is bounded.
 
-CI runs the first step once a week against the latest upstream tag and opens an issue when it moves. That is the mechanism that makes one hundred per cent compatible with DuckDB a maintained property instead of a claim that was true once.
+CI runs the first step once a week against the upstream default branch and opens an issue when it moves. That is the mechanism that makes one hundred per cent compatible with DuckDB a maintained property instead of a claim that was true once.
 
 ## 7. Where fidelity actually leaks
 
