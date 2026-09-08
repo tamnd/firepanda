@@ -78,11 +78,15 @@ The operational consequence is that a grammar bump is a routine, small, mechanic
 
 A Python script, `tools/gen_grammar.py`, run at build time, with checked in output.
 
-Input is the vendored `.gram` and `.list` files. Output is `firepanda/sql/grammar/generated/rules.mojo`, a table of rule descriptors that the matcher in document 04 interprets, plus `keywords.mojo`, which holds perfect hash lookup tables for the five keyword classes.
+Input is the vendored `.gram` and `.list` files. Output is `firepanda/sql/generated/rules.mojo`, a table of rule descriptors that the matcher in document 04 interprets, plus `keywords.mojo`, which holds every keyword and the classes it belongs to. The output sits beside the vendored directory rather than inside it, because a Mojo subpackage needs an `__init__.mojo` and "the vendored tree is byte for byte upstream" is worth more than the tidier path.
 
-Three decisions about it, all made for reasons that will otherwise be relitigated.
+Four decisions about it, all made for reasons that will otherwise be relitigated.
 
 **The output is data, not code.** The generator emits a flat array of rule nodes, covering sequence, choice, repeat, optional, reference, keyword, literal and lookahead, and the matcher walks it. It does not emit one Mojo function per rule. Two reasons: 1,087 generated functions is a compile time problem in a language whose compile times firepanda already tracks with `tools/compile_budget.py`, and a data table can be regenerated and diffed by a human. Interpreting a rule table costs an indirect branch per node, which document 04's budget shows is affordable.
+
+The table goes further than data and is emitted as one string rather than as a list of structs. A list literal with tens of thousands of entries is a compile time cost paid by everyone who builds firepanda whether or not they ever run a query, whereas a string literal costs one entry no matter how long it is, and it stays a readable diff. The price is a reader, `firepanda/sql/table.mojo`, and one pass over ninety kilobytes the first time a program asks for a `Grammar`.
+
+**The keyword table is one sorted list with a class mask, not five tables.** The five classes are not disjoint, twenty six words are both a function name and a type name keyword, so five tables means storing those words twice and deciding which answer wins. Worse, most words in a query are not keywords at all, and the common case with five tables is five misses. One bisection over 499 words answers the whole question, and the classes are bits in a mask that the grammar's keyword nodes carry as their payload, so matching a word against a class is an and.
 
 **Parameterized rules are expanded at generation time.** `List(Expression)` becomes a concrete rule with a synthesized name. This costs a few hundred extra table entries and buys a matcher with no environment to thread through it.
 

@@ -120,6 +120,16 @@ bench-compare = "python tools/bench_compare.py"
 # graphed from M0 rather than thresholded from M8. docs/specs/03-dtype-dispatch.md.
 compile-budget = "python tools/compile_budget.py"
 
+# DuckDB's PEG grammar, vendored verbatim, and the tables generated from it.
+# `vendor-grammar` takes a tag or a branch and rewrites firepanda/sql/grammar/.
+# `gen-grammar` turns that into firepanda/sql/generated/, which is checked in so
+# that a contributor with no Python and no network can still build firepanda.
+# `check-grammar` is the same run with the output compared rather than written,
+# which is what stops somebody hand editing a table. docs/specs/sql/03-the-grammar.md.
+vendor-grammar = "bash tools/vendor_grammar.sh"
+gen-grammar = "python tools/gen_grammar.py"
+check-grammar = "python tools/gen_grammar.py --check"
+
 # A grep is not a sanitizer. It is what exists.
 check-shared-state = """
 ! grep -rn --include=*.mojo -E '\\bAtomic\\b|^var [a-z_]+ *=' firepanda \

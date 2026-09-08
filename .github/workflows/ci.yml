@@ -337,6 +337,35 @@ jobs:
             --threshold 0.25 --reference 'hash/dict_*' --advisory \
             --markdown "$GITHUB_STEP_SUMMARY"
 
+  grammar:
+    name: Vendored grammar
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-pixi
+
+      # The vendored grammar is DuckDB's, byte for byte, and the moment a local
+      # edit exists "compatible by construction" becomes "compatible except for
+      # the edits" and nobody will remember what they were. VENDOR carries a
+      # SHA-256 per file so an edit is caught here rather than argued about
+      # later. docs/specs/sql/03-the-grammar.md section 3.
+      - name: Vendored grammar is unmodified
+        working-directory: firepanda/sql/grammar
+        run: |
+          grep -E '^[0-9a-f]{64}  ' VENDOR > /tmp/grammar.sha256
+          count=$(wc -l < /tmp/grammar.sha256)
+          if [ "$count" -lt 40 ]; then
+            echo "::error::VENDOR lists only $count files, which cannot be right"
+            exit 1
+          fi
+          sha256sum --check --strict /tmp/grammar.sha256
+
+      # The generated tables are checked in so that a contributor with no Python
+      # and no network can build firepanda. That means they can go stale, and
+      # this is the step that says so.
+      - name: Generated grammar tables are current
+        run: pixi run check-grammar
+
   differential:
     name: Differential vs pandas & DuckDB
     needs: guard
@@ -353,7 +382,7 @@ jobs:
   required:
     name: CI
     if: always()
-    needs: [spec, format, build, bench, differential]
+    needs: [spec, format, build, bench, grammar, differential]
     runs-on: ubuntu-latest
     steps:
       - name: Collect results
