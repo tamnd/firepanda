@@ -3963,14 +3963,19 @@ def bench_join(mut harness: Harness) raises:
     has and it was the only common join shape with no row here, which meant the
     one phase of a join that is still serial had nothing measuring it.
 
-    What does the key type cost. Every row above joins on an integer, and an
-    integer key whose values span the row count takes the direct route in the
-    factorizer, which is an array index and a store per row. All five
-    db-benchmark join queries join on text, where every key is hashed, compared
-    against whatever else landed in its slot and stored in a map.
-    `join/inner_equal_sides_text` is `join/inner_equal_sides` with both key
-    columns turned into text and nothing else changed, so the gap between the two
-    is what the key type costs on top of the pairing they share.
+    What does the key type cost. Every integer row above has a text twin:
+    `join/inner_1000_text`, `join/inner_100k_text` and
+    `join/inner_equal_sides_text` are the same joins with both key columns
+    written as `id` and a number, which is the form db-benchmark's character
+    columns use. Each pair differs in the key type and in nothing else, so the
+    gap within a pair is what text costs.
+
+    The three text rows are a ladder rather than three samples of one thing. The
+    probe is the same read on all three; what changes is how much of the run is
+    building the dictionary, from almost none at a thousand keys to almost all of
+    it at one key per row. That is the axis a route decision has to be made on.
+    db-benchmark's one join on a character key is its fourth query, on id5
+    against the medium table, and it sits at the second rung.
 
     What do the other kinds cost relative to inner. Semi and anti stop at the
     first match and gather nothing from the right, so they should be cheaper than
@@ -4101,24 +4106,12 @@ def bench_join(mut harness: Harness) raises:
 
     harness.record("join/inner_equal_sides", "rows", rows, inner_equal)
 
-    # The same shape again with the key as text, which is what db-benchmark j4
-    # and j5 join on and what no row here had. The keys are `id` and a number,
-    # the same values the row above uses and the same values db-benchmark writes
-    # into id3, so the two rows differ in the key type and in nothing else.
+    # The same shape again with the key as text, which no row here had. The keys
+    # are `id` and a number, the same values the row above uses written the way
+    # db-benchmark writes its character columns, so the two rows differ in the
+    # key type and in nothing else.
     var text_dim = _text_dimension(rows, "label")
-    var text_key = List[String](capacity=rows)
-    var text_value = Array[DType.int64](rows)
-    for i in range(rows):
-        var draw = rng.next_u64()
-        text_key.append(String("id", draw % UInt64(rows if rows > 0 else 1)))
-        text_value[i] = Int64(draw % 1000)
-    var text_series = List[Series]()
-    text_series.append(Series("key", strings_from_list(text_key)))
-    text_series.append(Series("value", text_value^))
-    var text_fact = DataFrame.from_series(text_series^)
-    # Ten million small strings held twice is most of a gigabyte, and the column
-    # has its own copy by now, so the list goes before the timing starts.
-    _ = text_key^
+    var text_fact = _text_fact(rows, rows, rng)
 
     def inner_equal_text() raises {imm text_fact, imm text_dim, imm one}:
         keep(text_fact.rows)
@@ -4128,6 +4121,36 @@ def bench_join(mut harness: Harness) raises:
     harness.record(
         "join/inner_equal_sides_text", "rows", rows, inner_equal_text
     )
+
+    # The two rungs below the one above, so the text side has the same ladder
+    # the integer side has: a thousand distinct keys, a hundred thousand, and one
+    # per row. What separates them is not the probe, which is the same read on
+    # all three, but how much of the work is building the dictionary and how much
+    # of that build can be spread. db-benchmark's character join is a build side
+    # a thousandth of the probe side, which is the middle rung.
+    var small_text_dim = _text_dimension(dim_rows, "label")
+    var small_text_fact = _text_fact(rows, dim_rows, rng)
+
+    def inner_small_text() raises {
+        imm small_text_fact, imm small_text_dim, imm one
+    }:
+        keep(small_text_fact.rows)
+        var out = small_text_fact.join(small_text_dim, one)
+        keep(out.rows)
+
+    harness.record("join/inner_1000_text", "rows", rows, inner_small_text)
+
+    var wide_text_dim = _text_dimension(wide_rows, "label")
+    var wide_text_fact = _text_fact(rows, wide_rows, rng)
+
+    def inner_wide_text() raises {
+        imm wide_text_fact, imm wide_text_dim, imm one
+    }:
+        keep(wide_text_fact.rows)
+        var out = wide_text_fact.join(wide_text_dim, one)
+        keep(out.rows)
+
+    harness.record("join/inner_100k_text", "rows", rows, inner_wide_text)
 
     def semi_partial() raises {imm fact, imm partial, imm one}:
         keep(fact.rows)
@@ -4242,8 +4265,8 @@ def _text_dimension(rows: Int, label: String) raises -> DataFrame:
     """Builds a dimension table keyed by text, with one row per key.
 
     `_dimension` above with the key column written as `id` and the number rather
-    than as the number, which is the form db-benchmark uses for id1, id2 and id3
-    and therefore the form all five of its join queries pair on.
+    than as the number, which is the form db-benchmark uses for its character
+    columns and the form its one join on a character key pairs on.
 
     Args:
         rows: The height, which is also the number of distinct keys.
@@ -4263,6 +4286,37 @@ def _text_dimension(rows: Int, label: String) raises -> DataFrame:
     var series = List[Series]()
     series.append(Series("key", strings_from_list(key)))
     series.append(Series(label, payload^))
+    return DataFrame.from_series(series^)
+
+
+def _text_fact(rows: Int, keys: Int, mut rng: Rng) raises -> DataFrame:
+    """Builds a fact table keyed by text, drawing from a fixed number of keys.
+
+    Args:
+        rows: The height.
+        keys: How many distinct keys to draw from, matching the dimension table
+            this will be joined against.
+        rng: The generator, so that two calls do not produce the same draws.
+
+    Returns:
+        A two column frame keyed by `key`.
+
+    Raises:
+        If the frame cannot be built.
+    """
+    var span = UInt64(keys if keys > 0 else 1)
+    var key = List[String](capacity=rows)
+    var value = Array[DType.int64](rows)
+    for i in range(rows):
+        var draw = rng.next_u64()
+        key.append(String("id", draw % span))
+        value[i] = Int64(draw % 1000)
+    var series = List[Series]()
+    series.append(Series("key", strings_from_list(key)))
+    series.append(Series("value", value^))
+    # The column has its own copy of every element by now and the list is the
+    # larger of the two, so it goes before the caller starts timing anything.
+    _ = key^
     return DataFrame.from_series(series^)
 
 

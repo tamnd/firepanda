@@ -2783,7 +2783,7 @@ def _factorize_strings_dictionary(
             var count = min(CHUNK_ROWS, stop - at)
             hash_strings_chunk(col, at, count, seed, mine)
             missed += table.probe_strings(
-                mine, col, False, at, count, UInt32.MAX, reps, codes
+                mine, col, col, False, at, count, UInt32.MAX, reps, codes
             )
             at += count
         absent[w] = missed
