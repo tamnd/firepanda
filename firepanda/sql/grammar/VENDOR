@@ -2,7 +2,9 @@
 # directory. Run tools/vendor_grammar.sh to change it.
 #
 # License: MIT, see LICENSE.duckdb. memoized_rules.list is extracted from
-# scripts/parser/grammar_types.yml in the same repository at the same commit.
+# scripts/parser/grammar_types.yml and matcher_overrides.list from
+# src/parser/peg/compiled_grammar.cpp, in the same repository at the same
+# commit.
 
 upstream: https://github.com/duckdb/duckdb
 ref: v2.0-cyanoptera
@@ -16,7 +18,7 @@ retrieved: 2026-09-08
 f999e346c982a548c8ede53d8a9022e4c366a1c54fb6380b7d97afedcf5ccad3  keywords/type_name_keyword.list
 d95aa28d78cbe3cd9dd2e0b9c77a0f32988d78e29cd8b4feedfe4044b451b609  keywords/unreserved_keyword.list
 075c33400ffcb0c586dd106a029d3e733e9da3693f8fcb9cebfc651c8a2f14e3  LICENSE.duckdb
-a843870e97149dc71e312a3c7fdbc496f72295ec01b9075b92e158a9a6b079ab  matcher_overrides.list
+6db46d4316c5e7e6f899fad15fb65db0a1416eb5620e488c43cb97a918978b6f  matcher_overrides.list
 f7f7b7d76d09078e998338e7733551093ae801a61861103d60a4a4e40e5a1b8d  memoized_rules.list
 8495d6ef80818533c41682fc067a5cce1f3785f68e8644d4995bcc35ae5b33ff  statements/alter.gram
 4bd5c409bb84e7b0fa189de1cf73c145ace1498138d2bc0d7c5fdea470815fd0  statements/analyze.gram

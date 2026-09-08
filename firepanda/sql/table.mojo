@@ -34,6 +34,7 @@ from .generated.rules import (
     OVERRIDDEN_COUNT,
     RULE_COUNT,
     STRING_COUNT,
+    SUGGESTION_COUNT,
     TABLE,
 )
 
@@ -100,6 +101,15 @@ struct Grammar(Movable):
     trips against the grammar text, and the matcher skips it.
     """
 
+    var suggestions: List[UInt8]
+    """Which suggestion each overridden rule was built with, 0 for none.
+
+    Only the identifier matchers read this, and they read it for two things:
+    which keyword class the position tolerates, and whether a single quoted
+    string counts as a name there. A table name takes 'path.csv' and a type name
+    does not, and that difference lives here rather than in the grammar.
+    """
+
     var keywords: List[String]
     """Every keyword, lower case and sorted, so a lookup can bisect."""
 
@@ -120,6 +130,7 @@ struct Grammar(Movable):
         self.roots = List[UInt32]()
         self.memoized = List[Bool]()
         self.matchers = List[UInt8]()
+        self.suggestions = List[UInt8]()
         self.keywords = List[String]()
         self.keyword_classes = List[UInt8]()
 
@@ -157,18 +168,39 @@ struct Grammar(Movable):
         self.names.reserve(rule_count)
         self.roots.reserve(rule_count)
         self.memoized.reserve(rule_count)
-        self.matchers.reserve(rule_count)
+        self.matchers.resize(rule_count, 0)
+        self.suggestions.resize(rule_count, 0)
         for _ in range(rule_count):
             self.roots.append(UInt32(reader.number()))
             self.memoized.append(reader.number() == 1)
+            self.names.append(reader.rest_of_line())
+
+        # The overrides come as their own short section rather than as two more
+        # columns on every rule, because 24 rules out of 1,187 have one.
+        var override_count = reader.section(UInt8(ord("O")))
+        if override_count != OVERRIDDEN_COUNT:
+            raise Error(
+                "grammar table: override count disagrees with OVERRIDDEN_COUNT"
+            )
+        for _ in range(override_count):
+            var rule = reader.number()
+            if rule < 0 or rule >= rule_count:
+                raise Error("grammar table: an override names no rule")
             var matcher = UInt8(reader.number())
-            if Int(matcher) >= MATCHER_COUNT:
+            if Int(matcher) == 0 or Int(matcher) >= MATCHER_COUNT:
                 raise Error(
                     "grammar table: a rule names a matcher this build does not"
                     " have"
                 )
-            self.matchers.append(matcher)
-            self.names.append(reader.rest_of_line())
+            var suggestion = UInt8(reader.number())
+            if Int(suggestion) >= SUGGESTION_COUNT:
+                raise Error(
+                    "grammar table: a rule names a suggestion this build does"
+                    " not have"
+                )
+            reader.end_of_line()
+            self.matchers[rule] = matcher
+            self.suggestions[rule] = suggestion
 
         reader.expect_end()
 

@@ -1,24 +1,24 @@
-CatalogName identifier
-ColumnName identifier
-CopyOptionName reserved_identifier
-FunctionName identifier
-Identifier identifier
-IndexName identifier
-NumberLiteral number_literal
-OperatorLiteral operator
-PragmaName identifier
-ReservedColumnName reserved_identifier
-ReservedFunctionName reserved_identifier
-ReservedIdentifier reserved_identifier
-ReservedIndexName reserved_identifier
-ReservedKeyword identifier_string
-ReservedSchemaName reserved_identifier
-ReservedTableName reserved_identifier
-ReservedTypeName reserved_identifier
-SchemaName identifier
-SequenceName identifier
-SettingName identifier
-StringLiteral string_literal
-TableFunctionName identifier
-TableName identifier
-TypeName identifier
+CatalogName identifier catalog_name
+ColumnName identifier column_name
+CopyOptionName reserved_identifier variable
+FunctionName identifier scalar_function_name
+Identifier identifier variable
+IndexName identifier variable
+NumberLiteral number_literal none
+OperatorLiteral operator none
+PragmaName identifier pragma_name
+ReservedColumnName reserved_identifier column_name
+ReservedFunctionName reserved_identifier scalar_function_name
+ReservedIdentifier reserved_identifier variable
+ReservedIndexName reserved_identifier variable
+ReservedKeyword reserved_identifier variable
+ReservedSchemaName reserved_identifier schema_name
+ReservedTableName reserved_identifier table_name
+ReservedTypeName reserved_identifier type_name
+SchemaName identifier schema_name
+SequenceName identifier variable
+SettingName identifier setting_name
+StringLiteral string_literal none
+TableFunctionName identifier table_function_name
+TableName identifier table_name
+TypeName identifier type_name

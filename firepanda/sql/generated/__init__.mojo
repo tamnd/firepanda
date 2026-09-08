@@ -20,5 +20,6 @@ from .rules import (
     RULE_END_OF_INPUT,
     RULE_WHITESPACE,
     STRING_COUNT,
+    SUGGESTION_COUNT,
     TABLE,
 )

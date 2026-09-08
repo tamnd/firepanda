@@ -2,10 +2,11 @@
 
 `grammar/` is DuckDB's PEG grammar, vendored verbatim and never edited. It is
 data rather than source: 40 `.gram` files, 5 keyword lists, two short lists
-lifted out of upstream's `grammar_types.yml` because they are decisions the
-grammar text does not record, the MIT license they come under, and a `VENDOR`
-file recording the commit they came from and the SHA-256 of each one.
-`tools/vendor_grammar.sh` is the only thing allowed to write into it.
+lifted out of upstream's `grammar_types.yml` and `compiled_grammar.cpp` because
+they are decisions the grammar text does not record, the MIT license they come
+under, and a `VENDOR` file recording the commit they came from and the SHA-256
+of each one. `tools/vendor_grammar.sh` is the only thing allowed to write into
+it.
 
 `generated/` is what `tools/gen_grammar.py` makes of that: one flat node array
 covering every rule, and one sorted keyword table. It is checked in, so a
