@@ -93,8 +93,8 @@ A second note, internal rather than user facing: Mojo 1.0 removed negative index
 ### Expressions, evaluation and options
 
 - [ ] `col` — pandas 3.0's `pd.col()` expression builder, and firepanda's native spelling (M4)
-- [ ] `eval` (M11)
-- [ ] `query` on `DataFrame` (M11)
+- [ ] `eval` (M4b)
+- [ ] `query` on `DataFrame` (M4b)
 - [ ] `set_option`, `get_option`, `reset_option`, `describe_option`, `option_context` (M1)
 - [ ] `show_versions` (M1)
 - [ ] `testing.assert_frame_equal`, `assert_series_equal`, `assert_index_equal` (M1)
@@ -116,7 +116,7 @@ A second note, internal rather than user facing: Mojo 1.0 removed negative index
 - [ ] `head`, `tail`, `sample`, `nlargest`, `nsmallest` (M1)
 - [ ] `filter` with `items`, `like`, `regex` (M6)
 - [ ] `take`, `xs`, `get`, `pop`, `insert` (M6)
-- [ ] `where`, `mask`, `query` (M6, `query` M11)
+- [ ] `where`, `mask`, `query` (M6, `query` M4b)
 - [ ] `isin`, `between` on Series (M1)
 - [ ] `first`, `last` (M7)
 
@@ -129,7 +129,7 @@ A second note, internal rather than user facing: Mojo 1.0 removed negative index
 - [ ] `stack`, `unstack`, `melt`, `pivot`, `pivot_table`, `explode`, `squeeze` (M6)
 - [ ] `transpose` — see `T` above
 - [ ] `droplevel`, `swaplevel`, `reorder_levels` (M6, compound index only)
-- [ ] `assign`, `eval` (M6, `eval` M11)
+- [ ] `assign`, `eval` (M6, `eval` M4b)
 
 ### Combining
 
@@ -326,7 +326,7 @@ Not a pandas feature, and more important than most of them.
 - [ ] DuckDB: registering a firepanda frame as a scannable table (M3)
 - [ ] `to_numpy` zero copy for primitive dtypes with no nulls (M3)
 - [ ] Arrow IPC file and stream (M2)
-- [ ] ADBC driver (M11)
+- [ ] ADBC driver (M4b)
 
 This section is the escape hatch that makes every gap elsewhere survivable. Anything firepanda has not implemented yet can be handed to pandas, Polars or DuckDB without a copy, which converts incompleteness from a blocker into an inconvenience. It is also why document 08 puts M2 before the lazy engine.
 

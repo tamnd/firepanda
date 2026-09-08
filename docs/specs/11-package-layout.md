@@ -53,7 +53,9 @@ firepanda/
     arrow_c.mojo           the C Data Interface, abi("C") declarations
     hive.mojo              partitioned dataset scanning
   temporal/                timezones, offsets, calendars, the DST rules     M7
-  sql/                     parser into the same logical plan                M11
+  sql/                     the DuckDB dialect, into the same logical plan   M4b
+                           expanded in docs/specs/sql/12-stages.md
+  adbc/                    the ADBC driver over the Arrow C stream          M4b
 
   py/
     module.mojo            PyInit_firepanda
