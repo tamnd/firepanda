@@ -114,6 +114,11 @@ SUGGESTIONS = [
 # reference, so the matcher has to be told which rule it is.
 WHITESPACE_RULE = "%whitespace"
 
+# The first rule in common.gram, and the one a parse starts at. Rule indices move
+# whenever the grammar is bumped, so the entry point is emitted as a constant
+# rather than looked up by name at run time.
+START_RULE = "Program"
+
 
 class GrammarError(Exception):
     pass
@@ -912,12 +917,14 @@ def render_rules(flat: Flat, grammar_sha: str) -> str:
     ] + [
         f"comptime SUGGESTION_COUNT: Int = {len(SUGGESTIONS)}",
         "",
-        "# Two rules the matcher supplies itself. EndOfInput is referenced by the",
-        "# grammar and defined nowhere in it, and gets the index one past the last",
-        "# real rule. %whitespace is defined but never referenced, because it is",
-        "# applied between tokens rather than called.",
+        "# Three rules the matcher has to know by name. EndOfInput is referenced",
+        "# by the grammar and defined nowhere in it, and gets the index one past",
+        "# the last real rule. %whitespace is defined but never referenced,",
+        "# because it is applied between tokens rather than called. Program is",
+        "# where a parse starts.",
         f"comptime RULE_END_OF_INPUT: Int = {flat.rule_names.index(BUILTIN_RULES[0]) if BUILTIN_RULES[0] in flat.rule_names else len(flat.rule_names)}",
         f"comptime RULE_WHITESPACE: Int = {flat.rule_names.index(WHITESPACE_RULE)}",
+        f"comptime RULE_PROGRAM: Int = {flat.rule_names.index(START_RULE)}",
         "",
     ]
 
@@ -1056,6 +1063,7 @@ def build() -> tuple[dict[str, str], Flat, dict[str, Rule]]:
             "    NODE_COUNT,\n"
             "    RULE_COUNT,\n"
             "    RULE_END_OF_INPUT,\n"
+            "    RULE_PROGRAM,\n"
             "    RULE_WHITESPACE,\n"
             "    STRING_COUNT,\n"
             "    SUGGESTION_COUNT,\n"

@@ -110,6 +110,17 @@ struct Grammar(Movable):
     does not, and that difference lives here rather than in the grammar.
     """
 
+    var memo_slots: List[UInt8]
+    """Which memoization slot each rule owns, 255 for a rule that has none.
+
+    Derived from `memoized` once here rather than once per parse, because a
+    thousand iterations to find twenty two rules is most of the cost of parsing
+    `SELECT 1`. It is the key the matcher's memo table is dense in.
+    """
+
+    var memo_count: Int
+    """How many rules are memoized, which is the stride of the memo table."""
+
     var keywords: List[String]
     """Every keyword, lower case and sorted, so a lookup can bisect."""
 
@@ -131,6 +142,8 @@ struct Grammar(Movable):
         self.memoized = List[Bool]()
         self.matchers = List[UInt8]()
         self.suggestions = List[UInt8]()
+        self.memo_slots = List[UInt8]()
+        self.memo_count = 0
         self.keywords = List[String]()
         self.keyword_classes = List[UInt8]()
 
@@ -203,6 +216,12 @@ struct Grammar(Movable):
             self.suggestions[rule] = suggestion
 
         reader.expect_end()
+
+        self.memo_slots.resize(rule_count, 255)
+        for i in range(rule_count):
+            if self.memoized[i]:
+                self.memo_slots[i] = UInt8(self.memo_count)
+                self.memo_count += 1
 
         var words = _Reader(KEYWORDS.as_bytes())
         self.keywords.reserve(KEYWORD_COUNT)

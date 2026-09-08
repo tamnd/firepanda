@@ -69,12 +69,14 @@ comptime SUGGEST_PRAGMA_NAME: UInt8 = 9
 comptime SUGGEST_SETTING_NAME: UInt8 = 10
 comptime SUGGESTION_COUNT: Int = 11
 
-# Two rules the matcher supplies itself. EndOfInput is referenced by the
-# grammar and defined nowhere in it, and gets the index one past the last
-# real rule. %whitespace is defined but never referenced, because it is
-# applied between tokens rather than called.
+# Three rules the matcher has to know by name. EndOfInput is referenced
+# by the grammar and defined nowhere in it, and gets the index one past
+# the last real rule. %whitespace is defined but never referenced,
+# because it is applied between tokens rather than called. Program is
+# where a parse starts.
 comptime RULE_END_OF_INPUT: Int = 1187
 comptime RULE_WHITESPACE: Int = 0
+comptime RULE_PROGRAM: Int = 800
 
 comptime TABLE: StaticString = """
 N 4422

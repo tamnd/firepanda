@@ -14,11 +14,13 @@ contributor with no Python and no network can still build firepanda, and CI
 regenerates it and fails on any diff, which is what actually stops somebody hand
 editing a table.
 
-`table.mojo` reads the generated tables back into a `Grammar`. That is the whole
-of this package for now. The matcher that walks a `Grammar`, the tokenizer under
-it, and the transformer above it are the rest of M4b. See
+`table.mojo` reads the generated tables back into a `Grammar`. `token.mojo` cuts
+a query into tokens and `matcher.mojo` walks the rule table over them, so
+`parse(sql, grammar)` is a whole query in and a tree of rule indices out. The
+transformer that turns that tree into an AST is the rest of M4b. See
 docs/specs/sql/00-README.md.
 """
 
+from .matcher import Parse, ParseNode, parse, parse_rule
 from .table import Grammar, GrammarNode, memoized_rules, overridden_rules
 from .token import Token, tokenize, token_text
