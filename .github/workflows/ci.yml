@@ -394,6 +394,13 @@ jobs:
       - name: Every statement in DuckDB's corpus, through both parsers
         run: pixi run differential-sql
 
+      # The same comparison over statements the grammar wrote rather than ones
+      # people wrote, which is how the rules the corpus has no test for get
+      # covered at all. It needs no corpus, so it does not depend on the cache
+      # above. docs/specs/sql/11-conformance.md section 4.
+      - name: Statements out of the grammar, through both parsers
+        run: pixi run differential-sql-generated
+
   required:
     name: CI
     if: always()
