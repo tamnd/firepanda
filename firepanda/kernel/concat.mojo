@@ -156,8 +156,13 @@ def concat_refs_any(
         # The `is_string` half is not redundant. A string column's physical
         # dtype is uint8, so a string column and a column of bytes agree on
         # `dtype()` and are not the same column at all.
+        # The logical type and not just the layout, because a date and an
+        # int32 are stored the same way and stacking them would produce a
+        # column that is one of the two and says so, having quietly decided
+        # which. `cast_any` is how a caller means to mix them.
         if (
-            parts[p][].dtype() != dt
+            parts[p][].type != parts[0][].type
+            or parts[p][].dtype() != dt
             or parts[p][].is_string() != parts[0][].is_string()
         ):
             raise Error(
@@ -185,7 +190,7 @@ def concat_refs_any(
         else:
             for p in range(len(parts)):
                 out.paste(parts[p][].strings())
-        return AnyArray(out^.finish())
+        return AnyArray(out^.finish()).retyped(parts[0][].type)
 
     var fixed = List[_Part](capacity=len(parts))
     var at = 0
@@ -195,7 +200,9 @@ def concat_refs_any(
 
     comptime for candidate in ALL:
         if dt == candidate:
-            return AnyArray(_stack_fixed[candidate](fixed, total))
+            return AnyArray(_stack_fixed[candidate](fixed, total)).retyped(
+                parts[0][].type
+            )
     raise Error("concat: unsupported dtype " + String(dt))
 
 
@@ -216,12 +223,12 @@ def concat_two_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
     Raises:
         If the dtypes differ or have no physical layout.
     """
-    if a.dtype() != b.dtype():
+    if a.type != b.type or a.dtype() != b.dtype():
         raise Error(
             "concat: every column must have the same dtype; got "
-            + String(a.dtype())
+            + String(a.type)
             + " and "
-            + String(b.dtype())
+            + String(b.type)
         )
     if a.is_string() != b.is_string():
         raise Error(
@@ -237,7 +244,7 @@ def concat_two_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
         )
         out.paste(a.strings())
         out.paste(b.strings())
-        return AnyArray(out^.finish())
+        return AnyArray(out^.finish()).retyped(a.type)
 
     var fixed = List[_Part](capacity=2)
     fixed.append(_part_of(a.data, 0))
@@ -245,7 +252,9 @@ def concat_two_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
 
     comptime for candidate in ALL:
         if a.dtype() == candidate:
-            return AnyArray(_stack_fixed[candidate](fixed, len(a) + len(b)))
+            return AnyArray(
+                _stack_fixed[candidate](fixed, len(a) + len(b))
+            ).retyped(a.type)
     raise Error("concat: unsupported dtype " + String(a.dtype()))
 
 

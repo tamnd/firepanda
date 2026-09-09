@@ -366,9 +366,7 @@ def pick_any(
         Error: If the two sides are different types, if the type has no physical
             layout, or if the lengths disagree.
     """
-    if a.is_string() != b.is_string() or (
-        not a.is_string() and a.type.physical != b.type.physical
-    ):
+    if a.type != b.type or a.is_string() != b.is_string():
         raise Error(
             "pick: cannot choose between "
             + String(a.type)
@@ -376,11 +374,13 @@ def pick_any(
             + String(b.type)
         )
     if a.is_string():
-        return AnyArray(text_pick(cond, a.strings(), b.strings()))
+        return AnyArray(text_pick(cond, a.strings(), b.strings())).retyped(
+            a.type
+        )
 
     comptime for target in ALL:
         if a.type.physical == target:
             ref x = a.as_typed_view[target]()
             ref y = b.as_typed_view[target]()
-            return AnyArray(pick[target](cond, x, y))
+            return AnyArray(pick[target](cond, x, y)).retyped(a.type)
     raise Error("pick: unsupported dtype")

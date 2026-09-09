@@ -142,7 +142,9 @@ def take_any(
         If the column's dtype is not one firepanda has a physical layout for.
     """
     if col.is_string():
-        return AnyArray(_take_strings(col.strings(), indices, spread))
+        return AnyArray(_take_strings(col.strings(), indices, spread)).retyped(
+            col.type
+        )
     comptime for candidate in ALL:
         if col.dtype() == candidate:
             return AnyArray(
@@ -153,7 +155,7 @@ def take_any(
                     indices,
                     spread,
                 )
-            )
+            ).retyped(col.type)
     raise Error("take: unsupported dtype")
 
 
@@ -526,7 +528,7 @@ def filter_any(col: AnyArray, mask: Array[DType.bool]) raises -> AnyArray:
         If the column's dtype is not one firepanda has a physical layout for.
     """
     if col.is_string():
-        return AnyArray(_filter_strings(col.strings(), mask))
+        return AnyArray(_filter_strings(col.strings(), mask)).retyped(col.type)
     comptime for candidate in ALL:
         if col.dtype() == candidate:
             return AnyArray(
@@ -536,7 +538,7 @@ def filter_any(col: AnyArray, mask: Array[DType.bool]) raises -> AnyArray:
                     col.null_count() > 0,
                     mask,
                 )
-            )
+            ).retyped(col.type)
     raise Error("filter: unsupported dtype")
 
 
