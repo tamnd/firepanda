@@ -12,6 +12,7 @@ writer spells a float at enough digits rather than at the digits a person wants
 to read.
 """
 
+from std.math import isnan, nan
 from std.testing import (
     TestSuite,
     assert_almost_equal,
@@ -343,6 +344,126 @@ def test_a_frame_renders_a_number_column_as_text() raises:
     assert_equal(out.schema[0].dtype, LogicalType.STRING)
     assert_equal(out[0].strings()[0], "10")
     assert_false(out[0].is_valid(1))
+
+
+def test_a_nan_writes_as_a_null_because_text_has_no_nan() raises:
+    # A float column says missing with a NaN and a text column says it with a
+    # cleared bit. There is nowhere for the NaN to go except the bitmap, and the
+    # alternative is a text column holding the word nan as a value, which is
+    # what pandas stopped doing when it gave the string dtype a missing value.
+    var column = Array[DType.float64](2)
+    column.set_valid(0, 1.5)
+    column.set_valid(1, nan[DType.float64]())
+    var out = cast_to_strings(column)
+    assert_true(out.validity.get(0))
+    assert_equal(out[0], "1.5")
+    assert_false(out.validity.get(1))
+
+
+def test_both_infinities_are_values_and_are_spelled() raises:
+    # The rule is about the missing value and not about the strange ones. A
+    # column holds an infinity on purpose and pandas spells it.
+    var column = Array[DType.float64](2)
+    column.set_valid(0, Float64.MAX_FINITE * 2)
+    column.set_valid(1, Float64.MAX_FINITE * -2)
+    var out = cast_to_strings(column)
+    assert_true(out.validity.get(0))
+    assert_true(out.validity.get(1))
+    assert_equal(out[0], "inf")
+    assert_equal(out[1], "-inf")
+
+
+def test_a_nan_and_a_null_are_the_same_row_once_it_is_text() raises:
+    # The two spellings of missing arrive at the same answer, which is the whole
+    # of the point: after the cast nothing downstream has to know which one the
+    # float column used.
+    var column = Array[DType.float32](2)
+    column.set_valid(0, nan[DType.float32]())
+    column.set_null(1)
+    var out = cast_to_strings(column)
+    assert_false(out.validity.get(0))
+    assert_false(out.validity.get(1))
+
+
+def test_a_missing_float_survives_the_round_trip_through_text() raises:
+    # Out as a null and back as a null. The layer above turns that null into a
+    # NaN again, which is where the widening rule lives, and the kernel is not
+    # the place that decides it.
+    var column = Array[DType.float64](2)
+    column.set_valid(0, 2.5)
+    column.set_valid(1, nan[DType.float64]())
+    var read = cast_strings_to[DType.float64](cast_to_strings(column), True)
+    assert_equal(read.unsafe_ptr().unsafe_offset(0).unsafe_load(), 2.5)
+    assert_false(read.is_valid(1))
+
+
+def test_a_missing_text_row_reads_back_as_a_nan_and_not_as_a_null() raises:
+    # The other half of the round trip, and the half the kernel cannot do. A
+    # cast out of text produces a cleared bit because that is the only thing a
+    # text column can say, and a float column has somewhere to put it, so the
+    # frame layer moves it into the values and the column that comes out is the
+    # column that went in.
+    var series = Series("value", AnyArray(text_with_null(words("2.5", ""), 1)))
+    var out = series.cast(DType.float64)
+    # `Array.null_count` is the cleared bits and nothing else, and there are
+    # none left. `Series.null_count` counts the NaNs as well, so it still says
+    # one, which is the same answer pandas gives and is the point of the move.
+    assert_equal(out.values.null_count(), 0)
+    assert_equal(out.null_count(), 1)
+    assert_equal(
+        out.values.unsafe_ptr[DType.float64]().unsafe_offset(0).unsafe_load(),
+        2.5,
+    )
+    assert_true(
+        isnan(
+            out.values.unsafe_ptr[DType.float64]()
+            .unsafe_offset(1)
+            .unsafe_load()
+        )
+    )
+
+
+def test_an_integer_target_keeps_its_missing_row_in_the_bitmap() raises:
+    # An integer has no NaN to hold, so the missing row stays where the cast put
+    # it. pandas widens to float here instead, and choosing between widening and
+    # raising is the error model milestone rather than this one.
+    var series = Series("value", AnyArray(text_with_null(words("7", ""), 1)))
+    var out = series.cast(DType.int64)
+    assert_equal(out.null_count(), 1)
+    assert_false(out.values.is_valid(1))
+
+
+def test_a_cast_between_two_numbers_leaves_the_bitmap_alone() raises:
+    # The move is a change of spelling and there is no change of spelling here,
+    # so nothing moves. A float column narrowing to a narrower float is Arrow at
+    # both ends and clearing a bitmap nobody asked about would throw away what
+    # Arrow was told, which is a different claim from the one this cast makes.
+    var values = Array[DType.float64](2)
+    values.set_valid(0, 1.25)
+    values.set_null(1)
+    var out = Series("value", values^).cast(DType.float32)
+    assert_equal(out.values.null_count(), 1)
+    assert_false(out.values.is_valid(1))
+
+
+def test_a_frame_column_makes_the_same_round_trip() raises:
+    var values = Array[DType.float64](2)
+    values.set_valid(0, 4.25)
+    values.set_null(1)
+    var columns = List[Series]()
+    columns.append(Series("value", values^))
+    var frame = DataFrame.from_series(columns^)
+
+    var out = frame.cast("value", LogicalType.STRING).cast(
+        "value", DType.float64
+    )
+    assert_equal(out[0].null_count(), 0)
+    assert_equal(
+        out[0].unsafe_ptr[DType.float64]().unsafe_offset(0).unsafe_load(), 4.25
+    )
+    assert_true(
+        isnan(out[0].unsafe_ptr[DType.float64]().unsafe_offset(1).unsafe_load())
+    )
 
 
 def main() raises:

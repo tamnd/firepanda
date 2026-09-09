@@ -48,6 +48,7 @@ from firepanda.kernel.nulls import (
     is_not_null_any,
     is_null_any,
     missing_count_any,
+    nan_over_nulls,
     widen_for_missing,
 )
 from firepanda.kernel.select import filter_any, take_any
@@ -279,18 +280,34 @@ struct Series(Copyable, Movable, Sized, Writable):
         as one and the reading can fail. Strict, which is the default, raises and
         names the row. Not strict writes a null.
 
+        Reading text into a float is the one direction that moves a missing row
+        from the bitmap into the values. Text has one way to say missing and it
+        is a cleared bit, a float has one way and it is a NaN, so the cast has
+        to change the spelling or the answer is a float column carrying a null,
+        which is not a column pandas has. Between two numbers nothing moves,
+        because there is no change of spelling to make and clearing a bitmap
+        that nobody asked about would lose what Arrow was told. An integer
+        answer is left alone in both directions, because an integer has no NaN
+        to hold the row, and widening it to make room is a decision about what
+        `astype` does when it cannot answer, which belongs to the milestone that
+        settles the error model.
+
         Args:
             to: The target dtype.
             strict: Whether a text value that is not a number raises.
 
         Returns:
-            A series of dtype `to`, null in the same places.
+            A series of dtype `to`, missing in the same rows, spelled the way
+            the answer's type spells missing.
 
         Raises:
             If either dtype has no physical layout, or the series is text and
             strict and some value is not a number.
         """
-        return self._relabelled(self.name, cast_any(self.values, to, strict))
+        var converted = cast_any(self.values, to, strict)
+        if self.values.type.is_variable_width():
+            converted = nan_over_nulls(converted^)
+        return self._relabelled(self.name, converted^)
 
     def cast(self, to: LogicalType, strict: Bool = True) raises -> Self:
         """Returns the series converted to another logical type.
@@ -299,18 +316,30 @@ struct Series(Copyable, Movable, Sized, Writable):
         `series.cast(LogicalType.STRING)` renders a number column as text and
         `series.cast(LogicalType.INT64)` reads a text one back.
 
+        Going out to text, a NaN becomes a null, because a text column has no
+        NaN and a cleared bit is the only thing it has to say a row is missing
+        with. Coming back to a float, that null becomes a NaN again, for the
+        mirror image of the same reason. So the round trip through text returns
+        the column it started with, and the two rules are one rule seen from
+        either side. Neither half applies to a cast that stays among the
+        numbers, where both ends spell a missing row the same way.
+
         Args:
             to: The target type.
             strict: Whether a text value that is not a number raises.
 
         Returns:
-            A series of type `to`, null in the same places.
+            A series of type `to`, missing in the same rows, spelled the way
+            the answer's type spells missing.
 
         Raises:
             If the type has no conversion from this one, or the series is text
             and strict and some value is not a number.
         """
-        return self._relabelled(self.name, cast_any(self.values, to, strict))
+        var converted = cast_any(self.values, to, strict)
+        if self.values.type.is_variable_width():
+            converted = nan_over_nulls(converted^)
+        return self._relabelled(self.name, converted^)
 
     def take(self, indices: List[Int]) raises -> Self:
         """Returns rows gathered by position.

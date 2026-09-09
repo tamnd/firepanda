@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A missing row that changes its spelling
+
+Rendering a float column as text writes a null where the column held a NaN, rather than writing the word nan as a value. A float column has one way to say a row is missing and it is a NaN, a text column has one way to say it and it is a cleared validity bit, and a cast that crosses between them has to move the missing row from the values into the bitmap or it turns an absent row into a three letter string. pandas 3 does the same thing, since it gave the string dtype a missing value of its own, and `pd.Series([1.5, float("nan")]).astype(str)` comes back with one value and one missing row.
+
+Both infinities are still spelled. The rule is about the missing value and not about the strange ones, and a column holds an infinity on purpose.
+
+The round trip still holds, and the other half of it is new too. `Series.cast` and `DataFrame.cast` now put a float answer's missing rows back into its values when the column they read was text, so a null that came out of a string becomes a NaN again and `cast(STRING).cast(FLOAT64)` gives back the column it started with. A cast that stays among the numbers is unchanged and keeps its validity bitmap, because both ends of it already spell a missing row the same way and clearing a bitmap nobody asked about would throw away what Arrow was told. An integer answer keeps its missing row in the bitmap in both directions, because an integer has no NaN to hold it and choosing between widening to float and raising is the error model milestone rather than this one.
+
+The outbound half is one line in `firepanda/kernel/cast.mojo` and it is a kernel change rather than a layer one, which is worth a sentence. The rest of the package already reads a float NaN as an absent row, in `present_bitmap_any`, in `missing_count_any` and in the mask `dropna` is built on, so the cast is applying a reading the kernels already share at the one boundary where the missing row has somewhere else to go. The inbound half is not a kernel change and is not in the kernel, because whether a null should become a NaN is a question about what pandas would have said and the kernel answers questions about what is in the buffers.
+
 ### Everything up to this row
 
 `Series.cumsum`, `Series.cumprod`, `Series.cummax` and `Series.cummin` fold a column into its own running answer, so row `i` holds the whole of the column up to and including row `i`. A missing row is skipped in the total and put back in place, which is what pandas does and is not what a loop written in an afternoon does: `[1.0, nan, 3.0, nan, 5.0]` adds up to `[1.0, nan, 4.0, nan, 9.0]`, so the gap neither restarts the total nor poisons it.

@@ -74,6 +74,7 @@ from firepanda.kernel.cast import cast_any
 from firepanda.kernel.chunked import (
     cast_chunked,
     filter_chunked,
+    nan_over_nulls_chunked,
     slice_chunked,
     take_chunked,
     widen_chunked_for_missing,
@@ -507,6 +508,12 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
     def cast(self, name: String, to: DType, strict: Bool = True) raises -> Self:
         """Returns a frame with one column converted to another dtype.
 
+        Reading text into a float moves the missing row out of the bitmap and
+        into the values, which is the same invariant `widen_for_missing`
+        establishes at the door and is restored here because the kernel hands
+        back the Arrow spelling. A cast between two numbers leaves the bitmap
+        where it is, since both ends already say missing the same way.
+
         Args:
             name: The column to convert.
             to: The target dtype.
@@ -520,10 +527,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             If the name is missing, either dtype has no physical layout, or the
             column is text and strict and some value is not a number.
         """
-        return self._cast(
-            name,
-            cast_chunked(self.columns[self.schema.index_of(name)], to, strict),
-        )
+        return self._cast(name, self._converted(name, to, strict))
 
     def cast(
         self, name: String, to: LogicalType, strict: Bool = True
@@ -533,6 +537,10 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         This is the overload that can name text. `frame.cast("id",
         LogicalType.STRING)` renders a number column as text, and the reverse
         reads it back.
+
+        A NaN goes out as a null, because text has no NaN, and comes back as a
+        NaN, because a float column in this layer says missing no other way. The
+        round trip returns the column it started with.
 
         Args:
             name: The column to convert.
@@ -548,10 +556,51 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             column's, or the column is text and strict and some value is not a
             number.
         """
-        return self._cast(
-            name,
-            cast_chunked(self.columns[self.schema.index_of(name)], to, strict),
-        )
+        return self._cast(name, self._converted(name, to, strict))
+
+    def _converted(
+        self, name: String, to: DType, strict: Bool
+    ) raises -> ChunkedArray:
+        """Converts one column, changing how it spells a missing row if it has to.
+
+        Args:
+            name: The column to convert.
+            to: The target dtype.
+            strict: Whether a text value that is not a number raises.
+
+        Returns:
+            The converted column.
+
+        Raises:
+            Error: Whatever the conversion raises.
+        """
+        var index = self.schema.index_of(name)
+        var converted = cast_chunked(self.columns[index], to, strict)
+        if self.columns[index].type.is_variable_width():
+            return nan_over_nulls_chunked(converted)
+        return converted^
+
+    def _converted(
+        self, name: String, to: LogicalType, strict: Bool
+    ) raises -> ChunkedArray:
+        """Converts one column, changing how it spells a missing row if it has to.
+
+        Args:
+            name: The column to convert.
+            to: The target type.
+            strict: Whether a text value that is not a number raises.
+
+        Returns:
+            The converted column.
+
+        Raises:
+            Error: Whatever the conversion raises.
+        """
+        var index = self.schema.index_of(name)
+        var converted = cast_chunked(self.columns[index], to, strict)
+        if self.columns[index].type.is_variable_width():
+            return nan_over_nulls_chunked(converted)
+        return converted^
 
     def _cast(self, name: String, var converted: ChunkedArray) raises -> Self:
         """Puts a converted column back in place of the one it came from."""
