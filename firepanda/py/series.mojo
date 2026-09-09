@@ -35,6 +35,10 @@ from firepanda.py.ops import (
     unary_op,
 )
 from firepanda.py.reduce import reduction
+from firepanda.py.temporal import column_part
+from firepanda.py.temporal import part as temporal_part
+from firepanda.py.temporal import word as temporal_word
+from firepanda.py.temporal import word_part
 from firepanda.py.transform import transformation, transformed
 from firepanda.py.values import python_list, python_value
 
@@ -339,6 +343,78 @@ struct PySeries(Movable, Writable):
             if flag(increasing, "increasing"):
                 return PythonObject(column.is_monotonic_increasing())
             return PythonObject(column.is_monotonic_decreasing())
+        except e:
+            raise retagged(DTYPE, e)
+
+    @staticmethod
+    def temporal_part(
+        py_self: PythonObject, kind: PythonObject, arg: PythonObject
+    ) raises -> PythonObject:
+        """Reads one part of a temporal column and hands back a column.
+
+        The `dt` accessor's main door. Twenty five of its names take nothing and
+        nine take one string, so the string crosses beside the name and the
+        twenty five are handed an empty one, which is the argument
+        `firepanda/py/temporal.mojo` makes at length.
+
+        Args:
+            py_self: The series.
+            kind: The part, as pandas spells the attribute.
+            arg: The frequency, unit, format, zone or locale, and the empty
+                string for the ones that take none.
+
+        Returns:
+            A new series.
+
+        Raises:
+            Error: Tagged `dtype`, if the column has a type with no such part,
+                and tagged `value` if the name is not one the accessor has.
+        """
+        var wanted = column_part(words(kind, "kind"))
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        temporal_part(
+                            Self._held(py_self)[].series[],
+                            wanted,
+                            words(arg, "arg"),
+                        )
+                    )
+                )
+            )
+        except e:
+            raise retagged(DTYPE, e)
+
+    @staticmethod
+    def temporal_word(
+        py_self: PythonObject, kind: PythonObject
+    ) raises -> PythonObject:
+        """Reads the clock or the resolution of a temporal column, as a string.
+
+        A separate door from `temporal_part` because `tz` and `unit` answer a
+        word rather than a column, which is the rule for how many doors there
+        should be. `tz` comes back as the empty string when the column carries
+        no zone, and the Python layer turns that into the `None` pandas answers,
+        since a zone called nothing and no zone at all are the same thing and
+        only one of them is spellable in a Mojo `String`.
+
+        Args:
+            py_self: The series.
+            kind: Either `tz` or `unit`.
+
+        Returns:
+            A Python string.
+
+        Raises:
+            Error: Tagged `dtype`, if the column is not temporal, and tagged
+                `value` if the name is not one of the two.
+        """
+        var wanted = word_part(words(kind, "kind"))
+        try:
+            return PythonObject(
+                temporal_word(Self._held(py_self)[].series[], wanted)
+            )
         except e:
             raise retagged(DTYPE, e)
 

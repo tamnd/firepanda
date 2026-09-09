@@ -111,6 +111,12 @@ class Series:
     def monotonic(self, increasing: bool) -> bool:
         """Whether the column is sorted, one way or the other."""
         ...
+    def temporal_part(self, kind: str, arg: str) -> Series:
+        """One part of a temporal column, as a column."""
+        ...
+    def temporal_word(self, kind: str) -> str:
+        """The clock or the resolution of a temporal column, as a string."""
+        ...
     def binary_series(
         self, other: Series, op: str, flip: bool, fill_value: object | None
     ) -> Series:
@@ -255,6 +261,10 @@ def read_csv(path: str) -> DataFrame:
 
 def from_arrow(source: object) -> DataFrame:
     """Builds a frame from a pyarrow, Polars or pandas frame."""
+    ...
+
+def _isocalendar(column: object) -> DataFrame:
+    """The ISO 8601 year, week and day of a temporal column, as a frame."""
     ...
 
 def _raise_for_test(kind: str) -> object:

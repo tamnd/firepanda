@@ -8,6 +8,26 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### The dt accessor a pandas program can finally reach
+
+`s.dt` now exists and carries thirty seven names. Twenty four are the calendar and clock parts that take nothing and answer a column, `tz` and `unit` answer a word, `normalize`, `floor`, `ceil`, `round`, `as_unit`, `day_name`, `month_name`, `strftime`, `tz_convert` and `tz_localize` are the methods, and `isocalendar` answers a frame of three columns. Every one of them was in the core already and none of them was reachable from Python, which is the third time this shape of gap has turned up and the third time it is the binding catching up rather than the library learning anything.
+
+The whole accessor is one Python class holding one series, with no Mojo struct under it. A bound Mojo type cannot carry a property, so an accessor built out of one would have thirty seven methods where pandas has twenty six properties, and there is nothing for the extension type to hold anyway since everything the accessor does is one call on the column it was made from.
+
+`Series.dt` read off the class is the accessor class, and reading it off a column builds one. That is a descriptor rather than a property, because a property read off the class answers itself, so a program that looks the accessor's members up on the class rather than on a column would find a property object with none of them on it. The conformance board is one such program, and it is not an unusual one, since documentation tools and type checkers all read the class. pandas answers the accessor class there for the same reason, so this matches it including the name of the parameter the accessor is built with.
+
+Three doors again, and the rule is the one the transformations arrived at: the shape of the answer decides, not how similar the words are. Thirty of the names hand back a column and share `temporal_part`, which takes the word and one string, since `floor`, `ceil` and `round` take a frequency, `as_unit` takes a unit, `strftime` takes a format, `tz_convert` and `tz_localize` take a zone and `day_name` and `month_name` take a locale, no name takes two, and the rest are handed an empty one. `tz` and `unit` answer a string rather than a column and go through `temporal_word`. `isocalendar` answers a frame and goes through a module level function, because it reads a series and answers a frame and the series module cannot import the frame module that already imports it. Each door refuses the words that belong to the other two rather than trusting the layer above to keep them apart.
+
+`tz_localize(None)` crosses as its own word rather than as an absent argument. Naming a zone keeps the readings and changes what they mean, and passing `None` keeps the instants and drops what they were read against, so they are two operations that pandas spells as one and the Python layer is where that is known.
+
+Five names pandas has are absent rather than declared and refusing: `time` and `timetz` need a time of day column type, `to_period` needs a period type, `to_pydatetime` needs a column of Python objects, and `freq` needs frequency inference over an index. This is the opposite of what the arguments do and the line between them is that a caller can see a name before they call it. An absent name reads as unimplemented and a name that always raises reads as broken.
+
+`days` and `total_seconds` are on the same accessor, where pandas splits `DatetimeProperties` from `TimedeltaProperties`. The core has one `Series.dt(name)` door for both and the column's own type is what decides whether a name means anything, so splitting here would mean reading the dtype on every `.dt` just to choose which object to build. The visible difference is the error: asking a timestamp column for `days` is a dtype error here and an AttributeError in pandas.
+
+A boolean part answers missing for a missing row, where pandas answers False. `is_month_end` on a NaT is False in pandas because its answer is a numpy bool array with nowhere to put a third value. Arrow has somewhere, and a row that is not there has no month to be the end of.
+
+Every argument pandas declares and this does not implement raises by name with the reason in the message. `ambiguous` and `nonexistent` on the three roundings and on `tz_localize`, `round_ok` on `as_unit`, a locale other than the default, `tz_convert(None)`, a frequency that is an offset object rather than a string and a zone that is a `tzinfo` rather than a name. `ambiguous` and `nonexistent` are both questions about a daylight saving transition, so both are waiting on the same zone database that naming a zone other than UTC is waiting on.
+
 ### The fourteen transformations a pandas program can finally call
 
 `s.dropna()`, `s.isna()`, `s.notna()`, `s.ffill()`, `s.bfill()`, `s.shift()`, `s.diff()`, `s.pct_change()`, `s.cumsum()`, `s.cumprod()`, `s.cummax()`, `s.cummin()`, `s.is_monotonic_increasing` and `s.is_monotonic_decreasing` now work from Python, along with the same list on a frame minus the monotonic pair, and `df.dropna()` on top. Every one of them worked in Mojo already. This is the same gap the reductions turned out to be, in the same place, and it is the binding catching up with the library rather than the library learning anything new.

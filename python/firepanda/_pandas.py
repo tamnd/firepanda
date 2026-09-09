@@ -903,6 +903,214 @@ class SeriesMixin:
         return self._transform(kind, 0, axis, False, False)
 
 
+class Namespace:
+    """One accessor, reached through an attribute the way pandas reaches one.
+
+    `s.dt` builds a `DatetimeProperties` around the series and `Series.dt` is the
+    class itself. That second half is the reason this is a descriptor rather than
+    a property. A property answers itself when it is read off the class, so
+    `Series.dt` would be a `property` object, and a program that reads the
+    accessor's members off the class rather than off an instance would find
+    nothing. pandas answers the accessor class there, and the conformance board
+    reads the class, so this answers the accessor class too.
+
+    Nothing is cached on the instance. pandas does cache, and a firepanda wrapper
+    has `__slots__` and therefore nowhere to cache into, so the object is built
+    per lookup. It holds one reference and building it is cheaper than the
+    dictionary lookup finding a cached one would need. `s.dt is s.dt` is False in
+    pandas as well, for a different reason, so nothing observable moves.
+    """
+
+    __slots__ = ("_accessor",)
+    """The class to build, which is the whole of the state."""
+
+    def __init__(self, accessor: type) -> None:
+        """Holds the accessor class.
+
+        Args:
+            accessor: The class to build around a series.
+        """
+        self._accessor = accessor
+
+    def __get__(self, obj: Any, owner: type | None = None) -> Any:
+        """Answers the accessor class off the class and an accessor off an instance."""
+        if obj is None:
+            return self._accessor
+        return self._accessor(obj)
+
+
+class DatetimeMixin:
+    """The hand written half of `DatetimeProperties`.
+
+    The one mixin whose state is not an extension object. An accessor holds the
+    series it was reached from, which is already a wrapper, and the reason it is
+    the wrapper rather than the wrapper's `_inner` is that everything the
+    accessor hands back is a `Series` and the wrapping has to happen somewhere.
+    Holding the wrapper means the accessor never builds one from nothing.
+
+    Nothing here decides what a part means. Every helper turns whatever pandas
+    lets a caller write into the word and the one string the boundary takes, and
+    the word is read in `firepanda/py/temporal.mojo`.
+    """
+
+    __slots__ = ("_series",)
+    """The series the accessor was reached from. Slotted for the reason
+    `DataFrameMixin` gives, and there is no `_inner` because there is no
+    extension object for an accessor to hold."""
+
+    _series: Series
+
+    def __init__(self, data: Series) -> None:
+        """Holds the series. Not a public entry point.
+
+        The parameter is called `data` because pandas calls it `data`, and the
+        signature board compares the two. It is the only hand written signature
+        in this file that a conformance case reads, since every other member here
+        is reached through a generated one.
+        """
+        self._series = data
+
+    def _part(self, kind: str, arg: str) -> Series:
+        """Reads one part of the column, and hands back a column.
+
+        Thirty of the names come through here, and the string is the frequency,
+        the unit, the format or the zone for the seven that take one and empty
+        for the rest.
+        """
+        from ._frame import Series
+
+        try:
+            return Series._wrap(self._series._inner.temporal_part(kind, arg))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _zone(self) -> str | None:
+        """Reads the clock the column is read against.
+
+        None in pandas when the column carries no zone, and the boundary answers
+        an empty string, because a Mojo `String` has no absent value and
+        inventing one for one caller would be worse than turning it back here.
+        """
+        try:
+            found = self._series._inner.temporal_word("tz")
+        except Exception as error:
+            raise translate(error) from None
+        return found or None
+
+    def _resolution(self) -> str:
+        """Reads how many of the column's integers make a second.
+
+        A separate helper from `_zone` rather than one that takes the word,
+        which is the only place the accessor splits a door two ways. The reason
+        is the return type: a zone can be absent and a resolution cannot, and one
+        helper answering both would have to be typed as though either could be.
+        """
+        try:
+            return self._series._inner.temporal_word("unit")
+        except Exception as error:
+            raise translate(error) from None
+
+    def _rounded(self, kind: str, freq: Any, ambiguous: Any, nonexistent: Any) -> Series:
+        """Moves every clock to a frequency, one of three ways."""
+        _held_at(
+            "ambiguous",
+            ambiguous,
+            "raise",
+            "picking which of the two readings a repeated wall clock hour means"
+            " needs the zone's transition table, which is the same work"
+            " tz_localize over a fold needs",
+        )
+        _held_at(
+            "nonexistent",
+            nonexistent,
+            "raise",
+            "shifting a wall clock time that a spring forward skipped needs the"
+            " zone's transition table",
+        )
+        if not isinstance(freq, str):
+            raise NotImplementedError(
+                "freq has to be a string for now, because an offset object carries"
+                " the whole frequency vocabulary and firepanda parses the string"
+                " spelling only"
+            )
+        return self._part(kind, freq)
+
+    def _as_unit(self, unit: str, round_ok: bool) -> Series:
+        """Restates the column in another resolution."""
+        _held_at(
+            "round_ok",
+            round_ok,
+            True,
+            "refusing a cast that would lose precision rather than rounding it"
+            " needs the cast to look at the values first, and it looks at the"
+            " types only",
+        )
+        return self._part("as_unit", unit)
+
+    def _named(self, kind: str, locale: Any) -> Series:
+        """Writes out the name of the day or the month."""
+        if locale is not None and not isinstance(locale, str):
+            raise TypeError(f"locale has to be a string, not {type(locale).__name__}")
+        return self._part(kind, "" if locale is None else locale)
+
+    def _tz_convert(self, tz: Any) -> Series:
+        """Reads the same instants against another clock."""
+        if tz is None:
+            raise NotImplementedError(
+                "tz_convert(None) moves the column to UTC and then takes the clock"
+                " off, and taking the clock off is tz_localize(None), so this is"
+                " two operations pandas spells as one"
+            )
+        if not isinstance(tz, str):
+            raise NotImplementedError(
+                "tz has to be a zone name for now, because a tzinfo object is a"
+                " Python object and the kernel reads the zone out of a string"
+            )
+        return self._part("tz_convert", tz)
+
+    def _tz_localize(self, tz: Any, ambiguous: Any, nonexistent: Any) -> Series:
+        """Puts the readings on a clock, or takes them off one.
+
+        `None` is a different operation rather than an absent argument, which is
+        why it crosses as its own word. Naming a zone keeps the readings and
+        changes what they mean, and passing None keeps the instants and drops
+        what they were read against.
+        """
+        _held_at(
+            "ambiguous",
+            ambiguous,
+            "raise",
+            "a wall clock hour that a fall back repeats is two instants and"
+            " choosing between them needs the zone's transition table",
+        )
+        _held_at(
+            "nonexistent",
+            nonexistent,
+            "raise",
+            "a wall clock time that a spring forward skipped is no instant at"
+            " all and shifting it needs the zone's transition table",
+        )
+        if tz is None:
+            return self._part("tz_localize_none", "")
+        if not isinstance(tz, str):
+            raise NotImplementedError(
+                "tz has to be a zone name for now, because a tzinfo object is a"
+                " Python object and the kernel reads the zone out of a string"
+            )
+        return self._part("tz_localize", tz)
+
+    def _isocalendar(self) -> DataFrame:
+        """The ISO 8601 week date fields, as a frame of three columns.
+
+        The one part of the accessor that goes through a module level function
+        rather than a method on the series. The reason is the import graph and it
+        is written where the function is.
+        """
+        from ._frame import _isocalendar
+
+        return _isocalendar(self._series._inner)
+
+
 class IndexMixin:
     """The hand written half of `Index`."""
 

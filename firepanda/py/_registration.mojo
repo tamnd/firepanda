@@ -12,7 +12,13 @@ a loop.
 from std.python import PythonObject
 from std.python.bindings import PythonModuleBuilder
 
-from firepanda.py.frame import PyDataFrame, open_arrow, open_csv, raise_for_test
+from firepanda.py.frame import (
+    PyDataFrame,
+    isocalendar,
+    open_arrow,
+    open_csv,
+    raise_for_test,
+)
 from firepanda.py.index import PyIndex
 from firepanda.py.series import PySeries
 
@@ -29,6 +35,12 @@ def register(mut module: PythonModuleBuilder) raises:
     module.def_function[open_arrow](
         "from_arrow",
         docstring="Builds a frame from a pyarrow, Polars or pandas frame.",
+    )
+    module.def_function[isocalendar](
+        "_isocalendar",
+        docstring=(
+            "The ISO 8601 year, week and day of a temporal column, as a frame."
+        ),
     )
     module.def_function[raise_for_test](
         "_raise_for_test",
@@ -142,6 +154,15 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = series.def_method[PySeries.monotonic](
         "monotonic",
         docstring="Whether the column is sorted, one way or the other.",
+    )
+    _ = series.def_method[PySeries.temporal_part](
+        "temporal_part", docstring="One part of a temporal column, as a column."
+    )
+    _ = series.def_method[PySeries.temporal_word](
+        "temporal_word",
+        docstring=(
+            "The clock or the resolution of a temporal column, as a string."
+        ),
     )
     _ = series.def_method[PySeries.binary_series](
         "binary_series",
