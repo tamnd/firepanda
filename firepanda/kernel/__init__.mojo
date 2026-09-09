@@ -159,6 +159,7 @@ from .temporal import (
     ROUND_UP,
     TemporalField,
     field_named,
+    instant_text,
     parse_format,
     temporal_as_unit,
     temporal_date,
@@ -168,6 +169,7 @@ from .temporal import (
     temporal_normalize,
     temporal_round,
     temporal_strftime,
+    temporal_text,
     unit_named,
 )
 from .text import compare_text, compare_text_const

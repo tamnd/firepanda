@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a date printed and wrote as a day count
+
+The same erasure as the previous entry, one layer further out. A date is stored as a day count and a timestamp as a tick count, and both of the places that turn a column into text read the physical layout and dispatched on it, so `print(df)` showed a date as `10471` and `write_csv` wrote `10471`. The second is the worse of the two, because a reader parsing that file back gets an integer where the schema promised a date, and the round trip the writer claims for nulls did not hold for dates at all.
+
+Both now ask for the instant before they dispatch. `temporal_text` renders one value in ISO 8601, which is what pandas prints, what Polars prints, and what a reader of either parses back to a date. A date is `YYYY-MM-DD`, a naive timestamp is `YYYY-MM-DD HH:MM:SS` with a fractional part only when the value has one, and the fraction carries the column's own unit, so a microsecond column gets six digits and a nanosecond column gets nine.
+
+`read_csv` does not infer a date yet, so firepanda's own round trip gives back text rather than the date it started as. That is still the better half of a bad trade: text is visibly not a date, and the number it used to write was a plausible integer that read back without complaint and was wrong. Date inference in the reader is the other half and is not in this change.
+
+A timestamp carrying a time zone still prints its count. The stored instants are UTC and reading an hour off them would print a wrong number under the right name, which is worse than an obviously raw one, so that waits for a zone database.
+
+This was found the same way as the previous entry: the TPC-H answers for q3 and q18 both carry an order date, and the checker compared `9194` against `1995-03-05`.
+
 ### The shape the engine will bind against
 
 The expression AST, and a printer that turns one back into SQL.
