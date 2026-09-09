@@ -1415,6 +1415,36 @@ def bench_frame(mut harness: Harness) raises:
 
     harness.record("frame/distinct_all", "rows", rows, frame_distinct_all)
 
+    # A window aggregate with no frame and no ordering, which is a group by and
+    # then a gather. Read the pair against `group/sum`, which is the reduction
+    # on its own: what is left over is the gather that writes each group's
+    # answer onto its rows. The two differ in how wide that gather reaches. The
+    # key has a thousand values, so its answers stay in cache and every row
+    # reads one of them; the score has a million, so the answer column is as
+    # large as the input and the gather is a random read over all of it.
+    var one_sum = List[AggSpec]()
+    one_sum.append(AggSpec("score", AggKind.SUM))
+    var one_count = List[AggSpec]()
+    one_count.append(AggSpec("key", AggKind.COUNT))
+
+    def frame_broadcast_narrow() raises {imm df, imm one_sum}:
+        keep(df.rows)
+        var out = df.group_broadcast(["key"], one_sum)
+        keep(out.rows)
+
+    harness.record(
+        "frame/group_broadcast", "rows", rows, frame_broadcast_narrow
+    )
+
+    def frame_broadcast_wide() raises {imm df, imm one_count}:
+        keep(df.rows)
+        var out = df.group_broadcast(["score"], one_count)
+        keep(out.rows)
+
+    harness.record(
+        "frame/group_broadcast_wide", "rows", rows, frame_broadcast_wide
+    )
+
     def frame_by_name() raises {imm df}:
         keep(df.rows)
         var got = df.column("score")

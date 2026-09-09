@@ -261,7 +261,8 @@ pandas 3.0 covers nested data thinly and Polars covers it well. We follow Polars
 - [ ] `sum`, `mean`, `min`, `max`, `count`, `size`, `first`, `last`, `nth` (M1)
 - [ ] `std`, `var`, `sem`, `median`, `quantile`, `nunique`, `prod` (M1)
 - [ ] `agg` with a string, a list, a dict, named aggregation kwargs (M1 basic, M6 complete)
-- [ ] `transform` (M6)
+- [x] `transform` with a built in aggregate, which is `group_broadcast` (M6)
+- [ ] `transform` with a Python callable (M6, and see document 04 section 7)
 - [ ] `apply` (M6, and see document 04 section 7)
 - [ ] `filter` (M6)
 - [ ] `cumsum`, `cumcount`, `cumprod`, `cummax`, `cummin`, `rank`, `shift`, `diff`, `pct_change` (M6)
@@ -284,7 +285,8 @@ pandas 3.0 covers nested data thinly and Polars covers it well. We follow Polars
 - [ ] All of `sum`, `mean`, `median`, `min`, `max`, `std`, `var`, `count`, `quantile`, `skew`, `kurt`, `sem`, `corr`, `cov`, `rank` on each of the three (M6)
 - [ ] `rolling.apply` with a callable (M6)
 - [ ] `win_type` weighted windows: triang, gaussian, boxcar, and the rest (M6)
-- [ ] `over` — the Polars spelling of a window function, since pandas has no direct equivalent short of `groupby.transform` (M6)
+- [x] `over` with an aggregate and no ordering, which is the Polars spelling of `group_broadcast` (M6)
+- [ ] `over` with an ordering or a window frame (M6)
 
 ## 10. Time series
 
