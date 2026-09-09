@@ -8,6 +8,26 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Distinct rows over a frame
+
+`DataFrame.drop_duplicates`, with and without a subset of columns, which is pandas' spelling of it and Polars' `unique` and SQL's `select distinct`. Until now the only thing in the library that could remove a repeat was `Index.unique`, over one column of labels.
+
+It is built on `group_ordinals` and it differs from a group by with no reductions in two ways, which is why it is its own method rather than a call to that one. It gives back every column and not just the keys, taking each group's first row whole. And it keeps the rows whose key holds a null, because a null is a value when the question is whether a row repeats, and two nulls repeat each other. That second one is pandas' rule and Polars', and it is the opposite of `group_by`'s `dropna` default, which is also pandas' rule for a group by. Both have a test that fails if this ever becomes a thin wrapper over the other.
+
+The rows come back in the order they appear in the input, which is what pandas means by keeping the first of each duplicate, and today that costs nothing at all. Every factorize route hands its ordinals out in first appearance order, so the representative rows are already ascending and are taken as they stand. That is a fact about the routes rather than something `Grouping` promises, so it is checked at one comparison per group, and `_first_rows` walks the rows when the check says no. Nothing in the library reaches that walk, so it is a function of its own with a test of its own rather than a branch inside a method that has never run it.
+
+Nanoseconds a row on an i9-13900K over 1,048,576 rows of three columns, one session, control `text/equal_constant` at 1.860 against its anchored 1.874. polars 1.44.2, pandas 3.0.5, duckdb 1.5.5, DuckDB read back through `.arrow()`, polars asked for `maintain_order=True` so that all four answer the same question.
+
+| shape | firepanda | polars | pandas | duckdb |
+| --- | --- | --- | --- | --- |
+| distinct on a key of a thousand values | 0.618 | 4.281 | 3.433 | 16.230 |
+| distinct on a key of a million values | 17.142 | 23.776 | 20.564 | 52.497 |
+| distinct on the whole row | 35.535 | 31.593 | 77.739 | 36.178 |
+
+The first row is 5.6 times ahead of both polars and pandas and 26 times ahead of DuckDB, and the other two are where the honest reading is. On a key with a million distinct values it is 1.4 times polars and 1.2 times pandas, and on the whole row it is 0.89 times polars, which is a loss.
+
+The reason is structural and is the next thing to do rather than something to explain away. Distinct on three columns of mixed dtype runs three factorizes, then a pass that packs the three ordinals into one number, then a fourth factorize over that. Four hash passes over the rows to answer a question that needs one, because the question here is only whether a row has been seen before and not which dense group it belongs to. A single pass that hashes the key tuple straight into one table and writes a first-appearance mask would do it, and it would leave the ordinal column, the packing pass and the dense renumbering unwritten. That is the follow up, and the numbers above are the baseline it has to beat.
+
 ### A conditional column, and a validity that costs nothing when nobody is null
 
 `CASE WHEN c THEN a ELSE b END`, which is `Series.pick` at the frame level and four functions in `kernel/pick.mojo`. TPC-H wants it three times and all three want a different shape of it: q8 and q14 put a column on the true side and a zero on the false side, q12 puts a one against a zero, and the general form takes two columns. Each of those is its own entry point rather than one function against a broadcast column, because broadcasting a constant is a second allocation and a second stream of loads for something that fits in a register.
