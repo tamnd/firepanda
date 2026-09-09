@@ -912,6 +912,91 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             )
         return self.agg(specs^)
 
+    def drop_duplicates(self) raises -> Self:
+        """Returns the frame with the repeated rows removed.
+
+        Every column is part of the comparison, which is `drop_duplicates()`
+        with no subset.
+
+        Returns:
+            A frame holding the first appearance of each distinct row, in the
+            order those appearances happened.
+
+        Raises:
+            If a dtype involved has no physical layout.
+        """
+        var every = List[String](capacity=len(self.schema.fields))
+        for f in range(len(self.schema.fields)):
+            every.append(self.schema.fields[f].name)
+        return self.drop_duplicates(every)
+
+    def drop_duplicates(self, subset: List[String]) raises -> Self:
+        """Returns the frame with rows that repeat a subset of columns removed.
+
+        Two differences from `group_by` with no reductions, and both of them are
+        the reason this is its own method rather than a call to that one. It
+        gives back every column and not just the keys, taking each group's first
+        row whole; and it keeps the rows whose key holds a null, because a null
+        is a value for the purpose of deciding whether a row is a repeat. That
+        second one is pandas' rule and Polars', and it is the opposite of
+        `group_by`'s `dropna` default, which is also pandas' rule for a group by.
+
+        The rows come back in the order they appear in the input. That is what
+        pandas means by keeping the first of each duplicate, and today it costs
+        nothing at all: every factorize route hands its ordinals out in first
+        appearance order, so `Grouping.rows_at` is already ascending and is
+        taken as it stands. That is a fact about the routes rather than
+        something `Grouping` promises, so it is checked, at one comparison per
+        group, and `_first_rows` walks the rows when the check says no. Sorting
+        the representatives instead would be the wrong trade, because a route
+        that ever stopped being ordered would be one of the packed ones, and
+        those are the routes where the groups can approach the rows in number.
+
+        Args:
+            subset: The columns that decide whether two rows are the same. At
+                least one, no repeats.
+
+        Returns:
+            A frame holding the first appearance of each distinct row.
+
+        Raises:
+            If a name is missing or repeated, or if a dtype involved has no
+            physical layout.
+        """
+        var at = List[Int](capacity=len(subset))
+        for i in range(len(subset)):
+            var idx = self.schema.index_of(subset[i])
+            for j in range(len(at)):
+                if at[j] == idx:
+                    raise Error(
+                        "drop_duplicates: column "
+                        + subset[i]
+                        + " was given twice"
+                    )
+            at.append(idx)
+        if len(at) == 0:
+            raise Error(
+                "drop_duplicates: at least one column is required, and a frame"
+                " with no columns has no rows to tell apart"
+            )
+
+        var grouping = group_ordinals(self.column_refs(), at, self.rows)
+
+        var ascending = True
+        for g in range(1, len(grouping.rows_at)):
+            if grouping.rows_at[g] <= grouping.rows_at[g - 1]:
+                ascending = False
+                break
+
+        var keep = grouping.rows_at.copy() if ascending else _first_rows(
+            grouping.codes, grouping.groups, self.rows
+        )
+
+        # `take` rather than a gather written out here, so that a frame whose
+        # columns are in chunks works and so that the row labels follow the rows
+        # they belong to, which is what pandas keeps across a `drop_duplicates`.
+        return self.take(keep)
+
     def group_by(
         self,
         by: List[String],
@@ -3873,6 +3958,47 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                 " null",
             )
         return out^
+
+
+def _first_rows(
+    codes: Array[DType.uint32], groups: Int, rows: Int
+) raises -> List[Int]:
+    """Returns the first row each ordinal appears on, in that order.
+
+    This is what `drop_duplicates` falls back to when a grouping hands back
+    representative rows that are not ascending. No route does today, so nothing
+    in the library reaches it, and it is written out here and tested on its own
+    rather than left as a branch inside the method that nobody has ever run.
+
+    Args:
+        codes: One group ordinal per row.
+        groups: How many distinct ordinals there are.
+        rows: How many rows to read, which is the frame's height.
+
+    Returns:
+        One row per group, ascending, the row that introduced that group.
+
+    Raises:
+        Error: If an ordinal is not below `groups`.
+    """
+    var out = List[Int](capacity=groups)
+    var seen = Bitmap(groups, all_valid=False)
+    var src = codes.unsafe_ptr()
+    for i in range(rows):
+        var g = Int(src.unsafe_offset(i).unsafe_load())
+        if g < 0 or g >= groups:
+            raise Error(
+                "drop_duplicates: row "
+                + String(i)
+                + " has group ordinal "
+                + String(g)
+                + " out of "
+                + String(groups)
+            )
+        if not seen.get(g):
+            seen.set(g, True)
+            out.append(i)
+    return out^
 
 
 def _has_name(fields: List[Field], name: String) -> Bool:

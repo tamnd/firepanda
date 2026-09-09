@@ -158,7 +158,8 @@ A second note, internal rather than user facing: Mojo 1.0 removed negative index
 - [ ] `describe` with `include` and `exclude` (M6)
 - [ ] `value_counts`, `nunique`, `idxmax`, `idxmin` (M6)
 - [ ] `any`, `all` (M1)
-- [ ] `duplicated`, `drop_duplicates` (M6)
+- [x] `drop_duplicates` (M6) — with and without a subset, keeping the first of each repeat and keeping null keys
+- [ ] `duplicated` (M6)
 - [ ] `apply`, `map`, `pipe`, `agg`, `transform` (M6, and see document 04 section 7 on Python callables)
 - [ ] `applymap` — `adapted`, `map` in pandas 3.0
 - [ ] `groupby` (M1 for the basic aggregations, M6 for the rest)

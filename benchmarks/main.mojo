@@ -1387,6 +1387,34 @@ def bench_frame(mut harness: Harness) raises:
 
     harness.record("frame/sort_two_keys", "rows", rows, frame_sort_two)
 
+    # Read these three against `group/ordinals_one_key`, which is the pass they
+    # all start with. What is left over is the gather of three columns, and the
+    # three rows differ only in how many rows that gather moves: a thousand
+    # groups, then roughly a million, then the whole frame back because the
+    # score column makes nearly every row its own. The last one is the shape a
+    # `select distinct` over a wide row has and it is the one where the gather,
+    # rather than the grouping, is the whole cost.
+    def frame_distinct_one() raises {imm df}:
+        keep(df.rows)
+        var out = df.drop_duplicates(["key"])
+        keep(out.rows)
+
+    harness.record("frame/distinct_one_key", "rows", rows, frame_distinct_one)
+
+    def frame_distinct_wide() raises {imm df}:
+        keep(df.rows)
+        var out = df.drop_duplicates(["score"])
+        keep(out.rows)
+
+    harness.record("frame/distinct_wide_key", "rows", rows, frame_distinct_wide)
+
+    def frame_distinct_all() raises {imm df}:
+        keep(df.rows)
+        var out = df.drop_duplicates()
+        keep(out.rows)
+
+    harness.record("frame/distinct_all", "rows", rows, frame_distinct_all)
+
     def frame_by_name() raises {imm df}:
         keep(df.rows)
         var got = df.column("score")
