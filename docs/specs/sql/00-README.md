@@ -50,7 +50,7 @@ And it makes the compatibility claim vacuous. One hundred per cent compatible wi
 | 01 | `01-the-goal.md` | the four axes, where ten times is real and where it is not |
 | 02 | `02-architecture.md` | the stages, where SQL enters, what it may not touch |
 | 03 | `03-the-grammar.md` | vendoring the `.gram` files, the codegen, the churn measurements |
-| 04 | `04-the-parser.md` | tokens, the PEG matcher, memoization, errors, the budget |
+| 04 | `04-the-parser.md` | tokens, the PEG matcher, the first token filter, memoization, errors, the budget |
 | 05 | `05-ast-and-binder.md` | parse tree to AST, the refusal, name resolution, the catalog |
 | 06 | `06-types-and-semantics.md` | the type lattice, decimals, nulls, the divergences that bite |
 | 07 | `07-functions.md` | 948 names, the tiers, overload resolution, the protocols |

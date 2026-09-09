@@ -17,14 +17,16 @@ Our targets, which document 01's latency axis depends on:
 
 | | firepanda target | measured, tokenize and match |
 | --- | --- | --- |
-| tokenize, match and transform, TPC-H q1 | under 60 us | 380 us |
-| tokenize, match and transform, `SELECT 1` | under 3 us | 20 us |
+| tokenize, match and transform, TPC-H q1 | under 60 us | 380 us before the first token filter, about 120 us after |
+| tokenize, match and transform, `SELECT 1` | under 3 us | 20 us before, about 5.5 us after |
 | allocations for a small statement | one arena block, no per node malloc | met |
 | memoization table | reused across statements, not reallocated | not allocated at all unless a memoized rule fails |
 
 The allocation line is the one that matters. A REPL loop over small statements spends its time in the allocator, not the matcher, and this is the axis where a library beats a database.
 
-The measured column is an optimized build on the same M4, and it has no transformer in it yet, so the gap is worse than it reads. It is not the tokenizer, which is 1.7 us for q1 and 64 ns for `SELECT 1`, and it is not the allocator, which is five per cent of a parse. It is 27,814 node visits and 10,550 rule entries to parse one hundred and twenty tokens, which is the interpreter doing an honest amount of work an honest number of times. Closing the gap means visiting fewer nodes, not shaving the visit, and the way to do that is a first token filter: a mask per node saying which tokens can start it, computed at generation time, checked before descending. Most alternatives of most ordered choices begin with one specific keyword, so most of those descents are answerable in three instructions.
+The before numbers are an optimized build on the same M4, measured while the machine was quiet. The after numbers are the before numbers divided by the speedup, which is about three times on q1 and about four times on `SELECT 1`, measured back to back in one binary. The speedup is worth more than the absolutes here because it does not move with load and the machine has not been quiet since, and a clean absolute measurement is still owed. None of these have a transformer in them yet, so the gap to the target is worse than it reads.
+
+Where the time went before the filter: not the tokenizer, which is 1.7 us for q1 and 64 ns for `SELECT 1`, and not the allocator, which is five per cent of a parse. It was 27,814 node visits and 10,504 rule entries to parse one hundred tokens, which is the interpreter doing an honest amount of work an honest number of times. Closing the gap means visiting fewer nodes rather than shaving the visit, which is what section 4 does. What is left after it is the recursion itself, and turning the matcher into an explicit stack machine is the remaining lever.
 
 ## 2. The tokenizer
 
@@ -91,7 +93,29 @@ Because it recurses, it needs a depth cap that DuckDB does not, and the cap is f
 
 The matcher never reaches a character level node, and that is checked rather than assumed. Character classes and captures appear only inside `%whitespace`, `NumberLiteral`, `StringLiteral`, `PlainIdentifier` and `QuotedIdentifier`. The first is never referenced, because whitespace is applied between tokens rather than called; the next two are overridden; and the last two are reachable only through `Identifier`, which is overridden as well. So reaching one means the grammar grew a shape the tokenizer does not cover, and the matcher stops loudly rather than guessing.
 
-## 4. Memoization
+## 4. The first token filter
+
+The ordered choices in this grammar are long, fifty alternatives is ordinary, and the token in hand rules out nearly all of them. Without help the matcher finds that out one recursion at a time, which is what the budget above is spent on.
+
+So every node in the generated table carries a sixty four bit word saying which tokens it can start with, and the matcher tests it against the token in hand before it walks the node. A node whose word does not have the token's bit cannot match, and fails without recursing.
+
+The word is a set of token keys, one bit each, at bit `key % 64`. A keyword is its own key, which is its index in the keyword table, so telling `SELECT` from `INSERT` is one bit out of sixty four. Identifiers, quoted identifiers, numbers, strings and end of input get a key each. Punctuation, operators and parameters are keyed on the byte they start with, which loses nothing, because a literal made of punctuation has to match every byte of itself anyway. Sixty four bits over seven hundred odd keys makes this a Bloom filter rather than an exact set, so it can say yes where it should have said no, and that costs one recursion that fails.
+
+The words are FIRST sets over the rule graph, computed at generation time to a fixed point because the graph has cycles in it. Three rules govern the computation and all three exist to keep the filter loose rather than tight:
+
+- A node that can match the empty string gets every bit. It can succeed without reading a token at all, so filtering it on the token would be wrong. This is a third of the nodes.
+- A negative lookahead never consumes, so it contributes nothing to what the node around it can start with. That is what lets `!X Y` filter on `Y` rather than on the union of the two.
+- The twenty four code matched rules get their words read off the matcher in section 3, not off their bodies, for the same reason the matcher does not walk those bodies.
+
+Anything else unclear resolves to every bit. A word that is too generous costs time and a word that is too tight rejects a valid query, so the two failures are not symmetric and the computation is written to fail in one direction.
+
+2,972 of the 4,422 nodes filter, and a node that filters has 1.8 of its sixty four bits set on average. The effect on the numbers in section 1 is that TPC-H q1 goes from 27,814 node visits and 10,504 rule entries to 9,918 and 3,197, of which the filter throws 2,870 out before they cost anything, and `SELECT 1` goes from 1,436 visits and 541 rule entries to 451 and 140.
+
+The words are stored as a palette. There are 237 distinct words across the 4,422 nodes, so each node line in the generated table names one by index, which keeps a sixty four bit column from being written out four thousand times.
+
+Correctness is by construction and then by test, because construction is not enough here: the generator computes the words and the matcher computes the keys, they are two pieces of code in two languages, and a disagreement between them shows up as a valid query that no longer parses rather than as a crash. So `parse_unfiltered` runs the same matcher with the check compiled out, and the whole corpus goes through both and has to come back with the same tree node for node and the same error text word for word.
+
+## 5. Memoization
 
 Full packrat memoizes every rule at every position, gets linear time, and pays for it with a table proportional to rules times positions, so 1,087 times the token count, plus a lookup on every rule entry. For SQL, where most rules match or fail immediately, that overhead exceeds what it saves on almost every real query.
 
@@ -105,7 +129,7 @@ Failures only, because a PEG rule is a pure function of the grammar and the posi
 
 The pathological input tests go in the suite from day one, generated rather than collected: N unmatched parens, N nested `CASE`, N deep parenthesized expressions, long `IN` lists, deeply nested subqueries. Each has a wall clock ceiling in CI. A PEG parser's failure mode is exponential blowup on adversarial input, it is a denial of service if any front door takes untrusted SQL, and the only defence that works is a test that fails loudly.
 
-## 5. Errors
+## 6. Errors
 
 PEG error reporting is genuinely bad by default. The failure surfaces at the top level choice, having discarded everything it learned, and the naive message is syntax error at position 0.
 
@@ -122,7 +146,7 @@ matching DuckDB's shape, blank line and all, because document 11's corpus matche
 
 Two refinements are worth their cost and neither is built yet. Keyword typo suggestions: when the furthest failure expected a keyword set and the actual token is an identifier within edit distance one of one of them, say so. DuckDB does this and it is most of the perceived quality of a SQL error message, and it is what the expected set exists for. And the rule stack at the furthest position, behind a debug flag, because when a grammar bump breaks something this is the only tool that finds it quickly.
 
-## 6. What the matcher must not do
+## 7. What the matcher must not do
 
 **No semantic decisions.** Not whether an identifier is a table or a column, not whether a function exists, not whether a cast is valid. The matcher's only output is shape. Every temptation to sneak semantics in here, and the classic one is resolving whether `foo(x)` is a function call or a type constructor, makes the parser impossible to regenerate and breaks the property that document 03 exists to buy.
 

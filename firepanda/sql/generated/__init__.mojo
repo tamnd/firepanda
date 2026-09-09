@@ -12,6 +12,8 @@ from .keywords import (
     KEYWORDS,
 )
 from .rules import (
+    FILTER_BITS,
+    FILTER_COUNT,
     MATCHER_COUNT,
     MEMOIZED_COUNT,
     OVERRIDDEN_COUNT,

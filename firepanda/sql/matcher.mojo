@@ -20,7 +20,7 @@ Twenty four rules are matched from code rather than from their bodies, because
 their bodies are placeholders upstream's matcher also ignores. See `_overridden`,
 and `firepanda/sql/grammar/matcher_overrides.list` for where the list comes from.
 
-See docs/specs/sql/04-the-parser.md sections 3 to 5.
+See docs/specs/sql/04-the-parser.md sections 3 to 6.
 """
 
 from .generated.keywords import (
@@ -30,6 +30,7 @@ from .generated.keywords import (
     KEYWORD_UNRESERVED,
 )
 from .generated.rules import (
+    FILTER_BITS,
     FLAG_WORD,
     MATCHER_NUMBER_LITERAL,
     MATCHER_OPERATOR,
@@ -94,6 +95,26 @@ comptime NO_NODE: UInt32 = 0
 
 comptime _NO_SLOT: UInt8 = 255
 """The memo slot of a rule that is not memoized. There are 22 that are."""
+
+comptime _KEY_IDENTIFIER = 512
+comptime _KEY_QUOTED_IDENTIFIER = 513
+comptime _KEY_NUMBER = 514
+comptime _KEY_STRING = 515
+comptime _KEY_END = 516
+comptime _KEY_BYTE = 640
+"""What the first token filter keys on.
+
+A keyword is its own key, which is its index in the keyword table, so telling
+`SELECT` from `INSERT` is one bit. The other token kinds get a key each, except
+that punctuation, operators and parameters are keyed on their first byte, which
+is enough because a literal made of punctuation has to match every byte anyway.
+
+These numbers are half of a contract. The other half is in tools/gen_grammar.py,
+which computes the filter words the same way and has the same constants written
+at the top of its first token filter section. A disagreement between the two is a
+rejected query rather than a crash, so tests/test_sql_matcher.mojo runs the whole
+corpus with the filter off as well as on and compares.
+"""
 
 comptime _DEFINED_OPERATORS = StaticString(
     "-> ->> <= >= != == <> ~~ ~~* ~~~ ~* !~~ !~~* !~ !~*"
@@ -217,8 +238,51 @@ def parse_rule(sql: StringSlice, grammar: Grammar, rule: Int) raises -> Parse:
     Raises:
         Error: On a tokenizer failure or a syntax error, in DuckDB's shape.
     """
+    return _parse[True](sql, grammar, rule)
+
+
+def parse_unfiltered(sql: StringSlice, grammar: Grammar) raises -> Parse:
+    """Parses a whole query with the first token filter turned off.
+
+    The filter is an optimization, so it is correct only if it changes nothing,
+    and the way to know that is to run without it and compare. Slower by three
+    to four times and here for the tests. See `_Run.filtered`.
+
+    Args:
+        sql: The query text.
+        grammar: A loaded grammar.
+
+    Returns:
+        The parse, which has to be the tree the filtered parse gives, node for
+        node.
+
+    Raises:
+        Error: On a tokenizer failure or a syntax error, in DuckDB's shape.
+    """
+    return _parse[False](sql, grammar, RULE_PROGRAM)
+
+
+def _parse[
+    filtered: Bool
+](sql: StringSlice, grammar: Grammar, rule: Int) raises -> Parse:
+    """Runs one parse, with or without the filter.
+
+    Parameters:
+        filtered: Whether to use the first token filter.
+
+    Args:
+        sql: The query text.
+        grammar: A loaded grammar.
+        rule: The rule index to start at.
+
+    Returns:
+        The parse.
+
+    Raises:
+        Error: On a tokenizer failure or a syntax error, in DuckDB's shape.
+    """
     var tokens = tokenize(sql, grammar)
-    var run = _Run(sql.as_bytes(), tokens, grammar)
+    var run = _Run[filtered=filtered](sql.as_bytes(), tokens, grammar)
     var matched = run.rule(rule)
     # Program is `TopLevelStatement*`, so it matches the empty string and cannot
     # fail. What says the query was bad is that the parse did not reach the end,
@@ -232,11 +296,22 @@ def parse_rule(sql: StringSlice, grammar: Grammar, rule: Int) raises -> Parse:
     return Parse(tokens^, nodes^, root)
 
 
-struct _Run[origin: ImmOrigin, words: ImmOrigin, table: ImmOrigin](Movable):
+struct _Run[
+    origin: ImmOrigin, words: ImmOrigin, table: ImmOrigin, filtered: Bool
+](Movable):
     """One parse in progress. Built, used once and dropped.
 
     Three origins because the query text, the token vector and the grammar come
     from three places and live for three different lengths of time.
+
+    Parameters:
+        origin: The query text.
+        words: The token vector.
+        table: The grammar.
+        filtered: Whether the first token filter is on. A parameter rather than
+            a field so that a run with it off compiles the check away, which is
+            what makes the equivalence test in tests/test_sql_matcher.mojo a
+            comparison of two builds rather than of two flags.
     """
 
     var src: Span[UInt8, Self.origin]
@@ -247,6 +322,14 @@ struct _Run[origin: ImmOrigin, words: ImmOrigin, table: ImmOrigin](Movable):
 
     var grammar: Pointer[Grammar, Self.table]
     """The rule table being walked."""
+
+    var bits: List[UInt64]
+    """One bit per token, saying which filter word would accept it.
+
+    Computed once up front rather than per node visit, because a node visit is
+    the thing there are twenty thousand of and a token is the thing there are a
+    hundred of. Empty when the filter is off.
+    """
 
     var at: Int
     """The current token."""
@@ -307,6 +390,7 @@ struct _Run[origin: ImmOrigin, words: ImmOrigin, table: ImmOrigin](Movable):
         self.src = src
         self.tokens = Pointer(to=tokens)
         self.grammar = Pointer(to=grammar)
+        self.bits = List[UInt64]()
         self.at = 0
         # A node per matched rule, and real SQL matches a few per token. This is
         # a starting size and not a bound.
@@ -317,6 +401,29 @@ struct _Run[origin: ImmOrigin, words: ImmOrigin, table: ImmOrigin](Movable):
         self.quiet = 0
         self.depth = 0
         self.memo = List[UInt8]()
+
+        comptime if Self.filtered:
+            self.bits.reserve(len(tokens))
+            for i in range(len(tokens)):
+                var key: Int
+                var token = tokens[i]
+                if token.kind == TOKEN_KEYWORD:
+                    key = Int(token.keyword)
+                elif token.kind == TOKEN_IDENTIFIER:
+                    key = _KEY_IDENTIFIER
+                elif token.kind == TOKEN_QUOTED_IDENTIFIER:
+                    key = _KEY_QUOTED_IDENTIFIER
+                elif token.kind == TOKEN_NUMBER:
+                    key = _KEY_NUMBER
+                elif token.kind == TOKEN_STRING:
+                    key = _KEY_STRING
+                elif token.kind == TOKEN_END:
+                    key = _KEY_END
+                else:
+                    # Punctuation, an operator or a parameter, keyed on the byte
+                    # it starts with.
+                    key = _KEY_BYTE + Int(src[Int(token.start)])
+                self.bits.append(UInt64(1) << UInt64(key % FILTER_BITS))
 
     def finish(deinit self) -> List[ParseNode]:
         """Hands the arena over and ends the run.
@@ -427,6 +534,17 @@ struct _Run[origin: ImmOrigin, words: ImmOrigin, table: ImmOrigin](Movable):
         Raises:
             Error: As `rule`.
         """
+
+        comptime if Self.filtered:
+            if self.grammar[].first[node] & self.bits[self.at] == 0:
+                # This node cannot match here, so nothing under it is worth
+                # walking. The first terminal it would have tried would have
+                # been tried at this position and failed, so the error position
+                # still has to move as if it had been.
+                if self.quiet == 0 and self.at > self.furthest:
+                    self.furthest = self.at
+                return False
+
         var it = self.grammar[].nodes[node]
 
         if it.kind == NODE_REF:
