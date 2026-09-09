@@ -16,11 +16,16 @@ editing a table.
 
 `table.mojo` reads the generated tables back into a `Grammar`. `token.mojo` cuts
 a query into tokens and `matcher.mojo` walks the rule table over them, so
-`parse(sql, grammar)` is a whole query in and a tree of rule indices out. The
-transformer that turns that tree into an AST is the rest of M4b. See
+`parse(sql, grammar)` is a whole query in and a tree of rule indices out.
+
+`ast.mojo` is the shape the rest of the engine binds against, arenas of fixed
+size nodes that hold no grammar rule names, and `printer.mojo` turns one back
+into SQL text. The transformer between the two is the rest of M4b. See
 docs/specs/sql/00-README.md.
 """
 
+from .ast import Ast, Expr
 from .matcher import Parse, ParseNode, parse, parse_rule, parse_unfiltered
+from .printer import needs_quoting, print_expr, quote_name, quote_string
 from .table import Grammar, GrammarNode, memoized_rules, overridden_rules
 from .token import Token, tokenize, token_text
