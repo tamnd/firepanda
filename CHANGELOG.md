@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Memoize successes, so nested function calls stop being exponential
+
+`SELECT f(f(f(f(f(f(f(f(f(f(f(f(1))))))))))))` took a fifth of a second, and every extra `f` doubled it. Twelve of anything is not an adversarial input, it is a query somebody writes, and the shape is not rare: nested list literals did the same thing.
+
+The cause is one line of the vendored grammar. `TypeModifiers <- Parens(List(Expression)?)` means `f(x)` is a parameterized type as well as a call, so `SingleExpression` reaches `TypeLiteral` first, walks the whole argument as a type, fails on the string literal a type literal needs, and then reaches `FunctionExpression` and walks the same bytes again as an expression. Two full walks per level of nesting is a factor of two per level. Memoizing failures cannot see any of it, because both walks succeed.
+
+So the memo table now records what a memoized rule did at a position rather than only that it failed there, and a rule that succeeded once hands back the node it built. That needed the arena to stop rolling back: a failed attempt now unwinds only the pending stack and leaves its nodes where they are, unreachable from the tree but reachable from the memo table. A hit copies the root of what it finds and shares everything under it, because the root is the one node a parent writes to and the same subtree can be adopted more than once.
+
+One thing the table now refuses to do is write anything from inside a negative lookahead. A terminal that fails in there failed on purpose and does not move the error position, so an entry written from in there would hand that silence to a later walk that meant it, and the error would point somewhere earlier than it should. Reading from inside a lookahead is still fine. This was already true of the failure entries and was already a latent way to get a wrong error message.
+
+The entry is four bytes per memoized rule per token position, up from one bit, so eighty eight bytes a token. Nothing is allocated until the first memoized rule finishes, so a `SELECT 1` still never touches it. The arena runs about half again the size of the tree it holds, which for TPC-H q1 is 1,376 nodes against a tree of 838.
+
+Twelve nested calls went from a fifth of a second to under a millisecond. Ordinary queries got faster too, because the doubling was there in miniature everywhere: TPC-H q1 is about one and a half times faster and `SELECT 1` about a quarter faster, measured back to back in one binary. Together with the first token filter below, a parse is now four to five times faster than it was when the matcher landed.
+
+There is a new test file for this, `tests/test_sql_pathological.mojo`, and it is where the bug came from rather than something written after it. Fourteen generated shapes, each with a wall clock ceiling, and the ones that could go exponential are asked at n and at 2n as well, because an absolute ceiling on a shared runner is a blunt instrument while a shape that takes sixty four times as long for twice the size is exponential however slow the machine was.
+
 ### A first token filter, so the matcher stops walking rules that cannot match
 
 An ordered choice in this grammar runs to fifty alternatives, and the token in hand rules out nearly all of them. The matcher used to find that out one recursion at a time. Now every node in the generated table carries a sixty four bit word saying which tokens it can start with, the matcher tests that word against the token in hand before it walks the node, and a node that cannot match fails without recursing into anything.
@@ -20,7 +36,7 @@ The generator computes the words as FIRST sets over the rule graph, to a fixed p
 
 A filter is only correct when it changes nothing, so there is a `parse_unfiltered` that runs the same matcher without it, and the whole 135 statement corpus goes through both. The two have to agree node for node, field for field, and word for word on the error text. That test is what makes the two halves of the filter safe to have: the generator computes the words and the matcher computes the keys, they are written in different languages in different files, and a disagreement between them would otherwise show up as a query that used to parse and no longer does.
 
-Still not done, and the reason is the same as before. q1 is now about 120 microseconds against a target of sixty and a DuckDB measurement of 156, so the remaining gap is a factor of two rather than of six. That 120 is the old 380 divided by the speedup rather than a fresh reading, because the machine has not been quiet since, and the speedup is the number to trust here because it does not move with load. What is left is 7,048 node visits that the filter lets through, and shaving those means visiting differently rather than visiting less: an explicit stack machine instead of native recursion, which is also the change that lifts the five hundred frame nesting cap.
+Still not done, and the reason is the same as before. The remaining gap to the sixty microsecond target is under a factor of two rather than of six. What is left is 7,048 node visits that the filter lets through, and shaving those means visiting differently rather than visiting less: an explicit stack machine instead of native recursion, which is also the change that lifts the five hundred frame nesting cap.
 
 ### The PEG matcher, so a query now has a parse tree
 

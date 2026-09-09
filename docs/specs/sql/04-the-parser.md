@@ -17,16 +17,16 @@ Our targets, which document 01's latency axis depends on:
 
 | | firepanda target | measured, tokenize and match |
 | --- | --- | --- |
-| tokenize, match and transform, TPC-H q1 | under 60 us | 380 us before the first token filter, about 120 us after |
-| tokenize, match and transform, `SELECT 1` | under 3 us | 20 us before, about 5.5 us after |
+| tokenize, match and transform, TPC-H q1 | under 60 us | 380 us when the matcher landed, four to five times faster than that now |
+| tokenize, match and transform, `SELECT 1` | under 3 us | 20 us when the matcher landed, about four times faster than that now |
 | allocations for a small statement | one arena block, no per node malloc | met |
-| memoization table | reused across statements, not reallocated | not allocated at all unless a memoized rule fails |
+| memoization table | reused across statements, not reallocated | not allocated at all unless a memoized rule finishes |
 
 The allocation line is the one that matters. A REPL loop over small statements spends its time in the allocator, not the matcher, and this is the axis where a library beats a database.
 
-The before numbers are an optimized build on the same M4, measured while the machine was quiet. The after numbers are the before numbers divided by the speedup, which is about three times on q1 and about four times on `SELECT 1`, measured back to back in one binary. The speedup is worth more than the absolutes here because it does not move with load and the machine has not been quiet since, and a clean absolute measurement is still owed. None of these have a transformer in them yet, so the gap to the target is worse than it reads.
+The 380 and the 20 are an optimized build on the same M4, measured while the machine was quiet. The speedups are measured back to back in one binary against the matcher as it was then, so they hold whatever the machine is doing, which is why they are stated as speedups: the machine has not been quiet since and a clean absolute reading is still owed. The two changes that bought them are the first token filter in section 4, worth about three times on its own, and memoizing successes as well as failures in section 5, worth about one and a half times on top of it. None of these have a transformer in them yet, so the gap to the target is worse than it reads.
 
-Where the time went before the filter: not the tokenizer, which is 1.7 us for q1 and 64 ns for `SELECT 1`, and not the allocator, which is five per cent of a parse. It was 27,814 node visits and 10,504 rule entries to parse one hundred tokens, which is the interpreter doing an honest amount of work an honest number of times. Closing the gap means visiting fewer nodes rather than shaving the visit, which is what section 4 does. What is left after it is the recursion itself, and turning the matcher into an explicit stack machine is the remaining lever.
+Where the time went when the matcher landed: not the tokenizer, which is 1.7 us for q1 and 64 ns for `SELECT 1`, and not the allocator, which is five per cent of a parse. It was 27,814 node visits and 10,504 rule entries to parse one hundred tokens, which is the interpreter doing an honest amount of work an honest number of times. Closing the gap means visiting fewer nodes rather than shaving the visit. What is left after sections 4 and 5 is the recursion itself, and turning the matcher into an explicit stack machine is the remaining lever.
 
 ## 2. The tokenizer
 
@@ -123,11 +123,21 @@ DuckDB measured the pathology. A query with nineteen unmatched parentheses took 
 
 Their answer, and ours, is a short explicit list of memoized rules. `packrat_memoized_rules` in the upstream source names them. We vendor the list alongside the grammar and treat any change to it as a grammar change. The rules on it are the expression precedence chain and a handful of the deepest statement level choices, which are the places where the same position is genuinely retried by many alternatives.
 
-Implementation is denser than the open addressed table this document first described, and it records failures only. The generated table says which rules are memoized, so each one gets a slot number and the table is one bit per slot per token position, which for twenty two rules and a hundred tokens is two hundred and seventy five bytes. That is small enough to allocate on the first memoized failure and drop with the parse, so a `SELECT 1` never touches it and there is no table to keep or clear between statements.
+Implementation is denser than the open addressed table this document first described. The generated table says which rules are memoized, so each one gets a slot number and the memo table is one four byte word per slot per token position, which is eighty eight bytes a token. Zero means the rule has not been tried there, one means it failed there, and anything else is the arena index of the node it produced, plus one so that a real node can never read as either of the other two. The table is allocated on the first memoized rule to finish and dropped with the parse, so a `SELECT 1` never touches it and there is nothing to keep or clear between statements.
 
-Failures only, because a PEG rule is a pure function of the grammar and the position: a rule that failed once at a position fails every time, and that is the whole of the exponential blowup. A success cannot be memoized here for a reason specific to this design, which is that a memoized success is a subtree in the node arena and a failing ancestor may have truncated that subtree away since. Memoizing successes needs the arena to stop being a stack, and it buys nothing on the pathology that motivated any of this.
+Both outcomes are recorded, and they are worth recording for two different reasons. A PEG rule is a pure function of the grammar and the position, so whatever it did once at a position it does every time.
 
-The pathological input tests go in the suite from day one, generated rather than collected: N unmatched parens, N nested `CASE`, N deep parenthesized expressions, long `IN` lists, deeply nested subqueries. Each has a wall clock ceiling in CI. A PEG parser's failure mode is exponential blowup on adversarial input, it is a denial of service if any front door takes untrusted SQL, and the only defence that works is a test that fails loudly.
+The failures are DuckDB's pathology, which is nineteen unmatched parentheses and is a query nobody meant to write.
+
+The successes are `SELECT f(f(f(1)))`, which is a query somebody did. `TypeModifiers <- Parens(List(Expression)?)` means `f(x)` parses as a parameterized type before it parses as a call, so `SingleExpression` reaches `TypeLiteral` first, walks the whole argument as a type, fails on the string literal that a type literal needs, and then reaches `FunctionExpression` and walks the same bytes again as an expression. Two full walks per level of nesting is a factor of two per level, and twelve levels took a fifth of a second, unoptimized, against under a millisecond now. Failure memoization cannot see any of it, because both walks succeed.
+
+That is what the first draft of this section got wrong. It said a success cannot be memoized because a memoized success is a subtree in the node arena and a failing ancestor may have truncated that subtree away since. The premise was right and the conclusion was not: the fix is for the arena to stop truncating. A failed attempt now unwinds only the pending stack, and the nodes it built stay where they are, unreachable from the tree but reachable from the memo table. The cost is an arena about half again the size of the tree it holds, which for TPC-H q1 is 1,376 nodes against a tree of 838.
+
+Nothing is written to the table from inside a negative lookahead. A terminal that fails in there failed on purpose and does not move the furthest position, so an entry written from in there would hand that silence to a later walk that meant it, and the error would point earlier than it should. Reading from in there is fine, because the answer is the answer either way.
+
+One thing a memo hit must not do is hand back the node itself. A node's `next_sibling` is written by whichever parent adopts it, and the same subtree can be adopted more than once, so a hit copies the root and shares everything under it. The copy is one node and it is the only node in the subtree that a new parent ever writes to.
+
+The pathological input tests are in the suite from the first week, generated rather than collected, in `tests/test_sql_pathological.mojo`: N unmatched parens, N nested calls, N nested list literals, N nested `CASE`, N deep parenthesized expressions, N nested subqueries, long `IN` lists, long operator chains, wide select lists, long qualified names and long scripts. Each has a wall clock ceiling, and the shapes that could go exponential are also asked at n and at 2n, because an absolute ceiling on a shared runner is a blunt instrument while a shape that takes sixty four times as long for twice the size is exponential however slow the machine was. A PEG parser's failure mode is exponential blowup on adversarial input, it is a denial of service if any front door takes untrusted SQL, and the only defence that works is a test that fails loudly. This suite earned its place immediately, because the nested call blowup is the first thing it found.
 
 ## 6. Errors
 
