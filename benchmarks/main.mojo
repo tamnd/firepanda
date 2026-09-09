@@ -123,10 +123,10 @@ from firepanda.kernel import (
     argsort_multi,
     arith_const,
     cast_to,
+    coalesce,
     compare_const,
     compare_text,
     compare_text_const,
-    coalesce,
     concat_any,
     concat_arrays,
     concat_two_any,
@@ -147,12 +147,15 @@ from firepanda.kernel import (
     group_top_rows,
     group_var,
     is_in,
+    is_null,
     less,
     mean_of,
-    is_null,
     min_of,
     missing_count_any,
     multiply,
+    pick,
+    pick_const,
+    pick_constants,
     sum_of,
     take_any,
     take_range,
@@ -1117,6 +1120,40 @@ def bench_kernel(mut harness: Harness) raises:
         keep(out)
 
     harness.record("kernel/filter_range", "rows", rows, filter_range_bench)
+
+    # The conditional column, in the three shapes a query writes it in. Read them
+    # in order: `kernel/pick_constants` is a select and a store with no input to
+    # load, `kernel/pick_const` adds one stream of loads, `kernel/pick` adds two.
+    # Nothing in those three touches a validity bitmap, and the gap between the
+    # last one and `kernel/pick_nulls` is what building the output's validity
+    # costs, which is a pass packing sixty four condition bytes into a word at a
+    # time. If that gap ever stops being visible, the fast path has stopped being
+    # a fast path and is building the bitmap unconditionally.
+    def pick_columns() raises {imm mask, imm dense, imm other}:
+        var out = pick(mask, dense, other)
+        keep(out)
+
+    harness.record("kernel/pick", "rows", rows, pick_columns)
+
+    def pick_one_const() raises {imm mask, imm dense}:
+        var out = pick_const(mask, dense, Scalar[BENCH_DTYPE](0))
+        keep(out)
+
+    harness.record("kernel/pick_const", "rows", rows, pick_one_const)
+
+    def pick_two_consts() raises {imm mask}:
+        var out = pick_constants(
+            mask, Scalar[BENCH_DTYPE](1), Scalar[BENCH_DTYPE](0)
+        )
+        keep(out)
+
+    harness.record("kernel/pick_constants", "rows", rows, pick_two_consts)
+
+    def pick_with_nulls() raises {imm mask, imm sparse, imm other}:
+        var out = pick(mask, sparse, other)
+        keep(out)
+
+    harness.record("kernel/pick_nulls", "rows", rows, pick_with_nulls)
 
 
 def bench_sort(mut harness: Harness) raises:
