@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.53] - 2026-09-09
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A SQL front end that parses, a number saying how much of DuckDB's dialect it parses, and the text kernels TPC-H needs. Nothing executes through the front end yet.
+
+DuckDB replaced its Bison parser with a hand written PEG parser and shipped the grammar as data, forty MIT licensed `.gram` files, and that is the whole reason this work moved ahead of the milestones that were meant to come first. It is vendored here verbatim, a generator turns it into a rule table that is checked in, and a matcher walks the table. A grammar bump is now a regeneration rather than a rewrite, and the dialect decisions are made by a file DuckDB maintains rather than by anything in this repository.
+
+The claim that firepanda accepts what DuckDB accepts is now a measurement. Every statement in DuckDB's own test corpus, 71,438 of them, goes through both parsers on every push: 2 that DuckDB parses and firepanda does not, 1,130 the other way, 98.41 per cent agreement. The 2 are the recursion depth guard firing rather than a gap in the grammar, and most of the 1,130 are syntax added after the newest DuckDB anyone can install from conda-forge. It found two real tokenizer bugs on its first run, which is what it is for.
+
+The parse is four to five times faster than it was when the matcher landed, from two changes. Every node now carries a sixty four bit set of the tokens it can start with, so an ordered choice with fifty alternatives stops walking the forty nine that cannot match. And the memo table records successes as well as failures, which removed a doubling per level of nesting that made twelve nested function calls take a fifth of a second.
+
+On the kernel side the text work now covers the whole of `LIKE`, in four named shapes rather than one general matcher, plus `substring` and `IN`. Two results there are worth reading past the feature list. `substring` is the first text column in the library built on more than one core, and the two pass shape it uses, size every morsel's share of the payload first and then let each one fill its own stretch, is exactly what `filter` and `take` need next; it made the payload case 4.7 times faster. And `is_in` shipped with the wrong threshold twice before it shipped with the right one, because a string comparison and a SIMD equal cost nothing like each other and one constant cannot serve both. There are two now, and the sweep that placed them is in the entry.
+
+Away from those: a gather by consecutive indices that copies instead of gathering, a prefetch on the gather, and a streaming join that takes a text key. There is also a note on a parallel string build that was tried, measured and dropped, because a change that did not work is worth writing down once so nobody spends the week again.
+
 ### Asking whether a column's value is one of a set, and two thresholds instead of one
 
 `Series` grew `is_in` and `kernel/member.mojo` holds it. This is pandas' `isin` and SQL's `IN`, and TPC-H wants it twice: q19 against four container names and q22 against seven country codes. Both are the same shape, a column of a million rows against a set of a handful, and that shape is what the kernel is built around.
