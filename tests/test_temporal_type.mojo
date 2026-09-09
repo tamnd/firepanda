@@ -20,6 +20,12 @@ The other half is refusing to mix. A date column and an int32 column have the
 same layout, so before this the two would stack and the answer would be one of
 the two, having quietly picked. Now that raises, and `astype` is how a caller
 says which one it meant.
+
+The same erasure happens one layer further out, at the two places that turn a
+column into text. Both read the physical layout and dispatch on it, so a date
+printed as a day count and a date written to CSV as a day count, and the second
+of those is worse because a reader parsing it back gets an integer. Both now ask
+for the instant first, and the last three tests are those two renderers.
 """
 
 from std.testing import TestSuite, assert_equal, assert_raises, assert_true
@@ -28,8 +34,11 @@ from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.array.value import Value
 from firepanda.dtype import Field, LogicalType, Schema
+from firepanda.dtype.temporal import TimeUnit
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.series import Series
+from firepanda.frame.display import DisplayOptions, render_value
+from firepanda.io.write import cell_text
 from firepanda.kernel.concat import concat_two_any
 from firepanda.kernel.nulls import coalesce_any, fill_forward_any
 from firepanda.kernel.select import filter_any, take_any
@@ -160,6 +169,32 @@ def test_a_date_survives_a_round_trip_through_a_frame() raises:
     assert_true(out.column("d").dtype() == DType.int32)
 
 
+def test_a_date_is_written_as_a_date() raises:
+    """Both renderers, which read the layout and used to write the day count."""
+    var column = days([10471])
+    assert_equal(cell_text(column, 0), "1998-09-02")
+    assert_equal(render_value(column, 0, DisplayOptions()), "1998-09-02")
+
+
+def test_a_timestamp_is_written_as_a_timestamp() raises:
+    """The same erasure one width up, and the fraction only when there is one.
+    """
+    var ticks = Array[DType.int64](2)
+    ticks[0] = Int64(10471) * 86_400_000_000
+    ticks[1] = ticks[0] + 45_296_000_001
+    var column = AnyArray(ticks^)
+    column.type = LogicalType.timestamp(TimeUnit.MICRO)
+    assert_equal(cell_text(column, 0), "1998-09-02 00:00:00")
+    assert_equal(cell_text(column, 1), "1998-09-02 12:34:56.000001")
+
+
+def test_a_date_before_the_epoch_is_written_as_a_date() raises:
+    """The day count is negative there and the calendar conversion floors."""
+    var column = days([-1, -719162])
+    assert_equal(cell_text(column, 0), "1969-12-31")
+    assert_equal(cell_text(column, 1), "0001-01-01")
+
+
 def main() raises:
     """Runs the suite."""
     var suite = TestSuite()
@@ -170,4 +205,7 @@ def main() raises:
     suite.test[test_a_date_and_an_integer_do_not_stack]()
     suite.test[test_relabelling_needs_the_same_layout]()
     suite.test[test_a_date_survives_a_round_trip_through_a_frame]()
+    suite.test[test_a_date_is_written_as_a_date]()
+    suite.test[test_a_timestamp_is_written_as_a_timestamp]()
+    suite.test[test_a_date_before_the_epoch_is_written_as_a_date]()
     suite^.run()
