@@ -98,6 +98,35 @@ def _under(
     )
 
 
+def _fastest(sql: StringSlice, g: Grammar, expected: Bool) raises -> Int:
+    """Parses a few times and gives back the quickest.
+
+    These cases take tens of microseconds and run on a shared runner, where a
+    scheduler stall is milliseconds. One sample of a fifty microsecond parse
+    that lands on a stall reads as sixty times slower than it is, which is the
+    same shape as the failure this file exists to catch. The quickest of a few
+    is the one run that had the machine to itself, and it cannot be made to
+    look fast by noise, only slow.
+
+    Args:
+        sql: The query.
+        g: A loaded grammar.
+        expected: Whether it should parse.
+
+    Returns:
+        The nanoseconds the quickest run spent.
+
+    Raises:
+        Error: If any run gave the wrong answer.
+    """
+    var best = _took(sql, g, expected)
+    for _ in range(4):
+        var spent = _took(sql, g, expected)
+        if spent < best:
+            best = spent
+    return best
+
+
 def _grows_slowly(
     what: StringSlice, small: StringSlice, big: StringSlice, g: Grammar
 ) raises:
@@ -116,12 +145,13 @@ def _grows_slowly(
     Raises:
         Error: If the big one took more than sixteen times the small one.
     """
-    # Once each to get the grammar and the allocator warm, then once each for
-    # the number, because the first parse in a process pays for both.
+    # Once each to get the grammar and the allocator warm, then the quickest of
+    # five each for the number, because the first parse in a process pays for
+    # both and a single sample on a shared runner is mostly a noise reading.
     _ = _took(small, g, True)
     _ = _took(big, g, True)
-    var short = _took(small, g, True)
-    var long = _took(big, g, True)
+    var short = _fastest(small, g, True)
+    var long = _fastest(big, g, True)
     assert_true(
         long < short * 16,
         String(
