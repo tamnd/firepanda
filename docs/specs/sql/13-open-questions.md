@@ -64,11 +64,13 @@ Not at 1.0, per document 02, because the interface would be a public API before 
 
 DuckDB's keyed recursion variant. It is in the grammar, so it parses. Whether it executes at 1.0 depends on corpus coverage and on whether the fixed point operator needs a different shape to support it. The default is to refuse by name and file the issue.
 
-## 10. Do we vendor the conformance corpus, or fetch it? By S1
+## 10. Do we vendor the conformance corpus, or fetch it? Settled in S1: fetch
 
-Document 12 says vendor. 4,046 files is a real weight in the repository, and the alternative is fetching at the pinned tag in CI.
+The measurement the question asked for came back at 33 MB, which is 4,796 files under `test/sql` at the pinned commit, against a repository whose pack is 5 MB. Vendoring it would make every clone six times larger, forever, to carry something only the differential harness reads, and the weight would stay in the history after the next grammar bump replaced it.
 
-Vendoring wins on reproducibility and on offline builds, and it means a bisect over a year old commit runs the corpus that commit was tested against. Fetching wins on repository size. The tie breaker is whether the corpus is large enough to matter to clone time, and if it is, a shallow fetch of the pinned tag in CI plus a documented local cache path is the compromise. Measure the size before deciding.
+So it is fetched. `tools/fetch_corpus.sh` reads the commit out of the grammar's own `VENDOR` file, sparse fetches `test/sql` at exactly that commit, and puts it in a directory named after the commit under `.cache/duckdb-corpus`, or under `FIREPANDA_CORPUS` if that is set. The corpus and the grammar therefore cannot drift apart, two commits can sit side by side, and a bisect across a grammar bump still runs the corpus that belongs to the commit being tested. CI caches the directory on the same commit, so the fetch happens once per grammar bump and not once per run.
+
+What is given up is the offline build, and only for this one harness. Everything else in the repository still builds and tests with no network, because the grammar itself and the tables generated from it are checked in.
 
 ## 11. String representation, when does short string inlining land? By S6
 

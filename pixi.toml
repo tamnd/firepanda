@@ -113,6 +113,14 @@ stress = "mojo run -I . tests/stress/main.mojo"
 
 differential = { cmd = "mojo run -I . tests/differential/main.mojo", default-environment = "differential" }
 
+# DuckDB's own test corpus, which is the oracle for the compatibility claim.
+# `corpus` fetches test/sql at the commit the grammar is pinned to and flattens
+# it into one statements file. It is not checked in, because 33 MB against a 5 MB
+# repository is not a trade worth making for something only the harness reads.
+# See docs/specs/sql/13-open-questions.md question 10.
+corpus = { cmd = "bash tools/fetch_corpus.sh && python tools/corpus.py" }
+differential-sql = { cmd = "mojo run -I . tests/differential/sql.mojo", default-environment = "differential", depends-on = ["corpus"] }
+
 bench = "mojo run -I . benchmarks/main.mojo"
 bench-compare = "python tools/bench_compare.py"
 
