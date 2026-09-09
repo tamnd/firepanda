@@ -624,7 +624,7 @@ def test_an_error_draws_a_caret_under_the_token() raises:
     var g = Grammar()
     var message = String()
     try:
-        _ = parse("SELECT * FRM t", g)
+        _ = parse("SELECT * FROM t t2 t3", g)
     except e:
         message = String(e)
     var lines = message.split("\n")
@@ -632,8 +632,91 @@ def test_an_error_draws_a_caret_under_the_token() raises:
     assert_equal(lines[1], "")
     assert_true(lines[2].startswith("LINE 1: "))
     # The caret sits under the first byte of the token it names, which is where
-    # the `t` is once the LINE prefix is counted in.
-    assert_equal(lines[3].find("^"), lines[2].find(" t") + 1)
+    # the `t3` is once the LINE prefix is counted in.
+    assert_equal(lines[3].find("^"), lines[2].find(" t3") + 1)
+
+
+def test_a_hint_goes_between_the_message_and_the_caret() raises:
+    # Where DuckDB puts the candidate bindings on a binder error, so an error
+    # with a hint still reads like an error from the same program.
+    var g = Grammar()
+    var message = String()
+    try:
+        _ = parse("SELECT * FRM t", g)
+    except e:
+        message = String(e)
+    var lines = message.split("\n")
+    assert_equal(len(lines), 5)
+    assert_equal(lines[0], 'Parser Error: syntax error at or near "t"')
+    assert_equal(lines[1], 'Did you mean "FROM"?')
+    assert_equal(lines[2], "")
+    assert_true(lines[3].startswith("LINE 1: "))
+    assert_equal(lines[4].find("^"), lines[3].find(" t", 8) + 1)
+
+
+def test_a_misspelled_keyword_is_named() raises:
+    # The set of word literals the grammar tried where the query went wrong is
+    # the list of words that would have worked there, so one of them a single
+    # edit from what the query wrote is almost certainly what was meant. The
+    # first three fail at the misspelled word itself. The rest do not: a
+    # misspelled keyword usually reads as an identifier and takes the statement
+    # down a token or two later, which is why the hint has to ask about the word
+    # before the one being blamed as well.
+    var g = Grammar()
+    var queries: List[StaticString] = [
+        "SELECT a FROM t GROUP BYY a",
+        "CREATE TABL t (a INTEGER)",
+        "SELECT * FROM t GROUP BY a HAVIN a > 1",
+        "SELCT 1",
+        "CREAT TABLE t (a INTEGER)",
+        "SELECT 1 FROMM t",
+        "SELECT * FROM t WEHRE a = 1",
+        "SELECT * FROM t ORDR BY a",
+        "SELECT * FROM t LIMT 10",
+        "WIHT x AS (SELECT 1) SELECT * FROM x",
+    ]
+    var wanted: List[StaticString] = [
+        'Did you mean "BY"?',
+        'Did you mean "TABLE"?',
+        'Did you mean "HAVING"?',
+        'Did you mean "SELECT"?',
+        'Did you mean "CREATE"?',
+        'Did you mean "FROM"?',
+        'Did you mean "WHERE"?',
+        'Did you mean "ORDER"?',
+        'Did you mean "LIMIT"?',
+        'Did you mean "WITH"?',
+    ]
+    for i in range(len(queries)):
+        var message = String()
+        try:
+            _ = parse(queries[i], g)
+        except e:
+            message = String(e)
+        assert_equal(message.split("\n")[1], String(wanted[i]))
+
+
+def test_a_hint_is_left_out_when_it_would_be_a_guess() raises:
+    # A hint that is a coin toss is worse than no hint, because a reader who is
+    # sent to look at the wrong word loses more time than one who is sent
+    # nowhere. WEHRE is a swap and is worth naming. `x` is one edit from a
+    # dozen keywords and means none of them, and a run of aliases is not a
+    # misspelling of anything.
+    var g = Grammar()
+    var queries: List[StaticString] = [
+        "SELECT * FROM orders x y",
+        "SELECT * FROM t AS x y",
+        "SELECT 1)",
+        "SELECT a FROM t WHERE",
+        "SELECT * FROM t WHERE a == = 1",
+    ]
+    for i in range(len(queries)):
+        var message = String()
+        try:
+            _ = parse(queries[i], g)
+        except e:
+            message = String(e)
+        assert_equal(message.find("Did you mean"), -1)
 
 
 def test_running_out_of_input_names_no_token() raises:

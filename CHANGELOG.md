@@ -32,6 +32,30 @@ Between 2.8 and 6.7 times ahead everywhere except one, and the exception is wort
 
 The text form is built through a builder on one core, unlike the three number forms. A text output is a payload whose length nobody knows until the rows are chosen, and the two pass shape `substr.mojo` uses is the right answer for it too, but the place to spend that work first is `filter` and `take`, which run on every query rather than on none of them.
 
+### Say which keyword the query meant
+
+A syntax error now names the word the query probably meant to write.
+
+```
+Parser Error: syntax error at or near "a"
+Did you mean "WHERE"?
+
+LINE 1: SELECT * FROM t WEHRE a = 1
+                              ^
+```
+
+DuckDB does not do this. Its parser error stops at the caret, because the candidate machinery upstream feeds autocomplete and binder errors and is never reached from the parser. So this is one of the few places where firepanda says more than the database does, and it is additive: the first line and the caret block are still DuckDB's byte for byte, and the suggestion goes on its own line between them, which is where DuckDB puts candidate bindings on a binder error.
+
+The set of word literals the grammar tried where a parse went wrong is the list of words that would have worked there, so one of them a single edit from what the query wrote is almost certainly what was meant. One edit means a substitution, an insertion, a deletion or a swap of two neighbours. The swap is in there because it is the typo people actually make on a keyboard, and WEHRE for WHERE is two edits to anything that counts them the plain way.
+
+None of this is carried on a parse that works. Collecting the set is a compile time flag, every ordinary parse runs with it off, and the set is built by a second parse that only starts once the first one has already failed. That second parse also runs with the first token filter off, because the filter refuses to walk a node that cannot match the token in hand, so a filtered run never reaches the terminals that would have said what they wanted.
+
+The awkward part is that a misspelled keyword usually does not fail at its own token. `SELCT 1` reads SELCT as an identifier and dies at the `1`, and `SELECT * FROM t WEHRE a = 1` reads WEHRE as an alias for t and dies at the `a`. So there are three places to look and the first one with an answer wins: the word being blamed, then the word before it against the set collected there, and then one more parse over the same tokens with the suspect word replaced by a token no rule can match, which forces the parse to stop on it and to collect everything the grammar would have accepted in its place. The third one is the interesting one, and it exists because PEG never gives an optional back once it has matched, so no amount of backtracking will go and ask what else could have stood where the alias went.
+
+Three parses of a query that has already failed sounds expensive and is not. The second and third only happen when the ones before them had nothing to say, and a query on its way to a person who is about to read the error is not the query anybody is timing.
+
+The guards matter as much as the search, because a hint that is a coin toss is worse than no hint. A word shorter than three bytes gets nothing, since every two letter word is one edit from a dozen keywords and means none of them. More than three candidates gets nothing, since that is a list rather than a hint. A keyword the query spelled right is never a candidate for itself. And the suggestions come out in the order the grammar tried them, which is the order the alternatives are written in and is therefore upstream's own opinion about what is likely.
+
 ## [0.6.53] - 2026-09-09
 
 Built against Mojo 1.0.0 (ed45d567).
