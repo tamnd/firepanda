@@ -39,6 +39,13 @@ comptime REJECTED = Byte(ord("0"))
 comptime SHOWN = 40
 """How many disagreements of each kind to print before summarizing the rest."""
 
+comptime LONGEST = 120
+"""How much of a statement to print before cutting it off.
+
+The corpus has a 57 KB generated expression in it, and a log nobody can scroll
+through is a log nobody reads.
+"""
+
 comptime DUCKDB_ONLY_CEILING = 2
 """How many statements DuckDB may parse that firepanda does not.
 
@@ -196,9 +203,14 @@ def report(kind: StringSlice, cases: List[Statement], of: Int) -> None:
     print()
     for i in range(min(SHOWN, len(cases))):
         ref item = cases[i]
-        var sql = item.sql
-        if sql.byte_length() > 120:
-            sql = String(StringSlice(sql)[byte=0:120], " ...")
+        # Built once from the statement rather than sliced and assigned back over
+        # itself. The short version took a slice of `sql` and put the result into
+        # `sql`, so the value being overwritten was the value being read.
+        var sql: String
+        if item.sql.byte_length() > LONGEST:
+            sql = String(StringSlice(item.sql)[byte=0:LONGEST], " ...")
+        else:
+            sql = item.sql
         print("   ", item.origin, "  ", sql.replace("\n", " "))
     if len(cases) > SHOWN:
         print("   ", len(cases) - SHOWN, "more")

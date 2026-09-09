@@ -371,6 +371,12 @@ jobs:
     needs: guard
     if: needs.guard.outputs.has_mojo == 'true'
     runs-on: ubuntu-latest
+    # This job takes about a minute on a warm cache and about four on a cold one.
+    # It has twice wedged instead of exiting, once for 37 minutes until somebody
+    # cancelled it by hand, so it gets a ceiling. The number is high enough that a
+    # slow runner and a cold cache together stay well under it, and low enough that
+    # a hang costs a coffee rather than an afternoon.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-pixi
