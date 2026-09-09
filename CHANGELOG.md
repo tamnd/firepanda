@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.54] - 2026-09-09
+
+Built against Mojo 1.0.0 (ed45d567).
+
+The rest of the SQL parser stage, and two frame operations TPC-H asks for. Still nothing executes through the front end.
+
+The parser now says what it thinks you meant. A syntax error names the keyword a misspelled word is one edit away from, on its own line between the message and the caret block, and everything DuckDB prints is still byte for byte what DuckDB prints. The hard part was not the edit distance, it was that a misspelled keyword almost never fails at its own token: `SELECT * FROM t WEHRE a = 1` reads WEHRE as an alias and dies at the `a`. So there are three places to look and the first with an answer wins, and none of it is carried on a parse that works.
+
+The grammar now writes SQL as well as reading it. A PEG grammar read backwards is a generator, so the same rules the matcher walks will write 25,000 statements in about ten seconds, and both parsers are asked about each one. That reaches the rules DuckDB's own test suite has one test for or none, which is the coverage the corpus differential cannot give. It found a defect on its first run and the defect is upstream: `CopyFileName` puts a bare identifier ahead of the qualified one, PEG choice is ordered, and so DuckDB's own grammar cannot describe `COPY t TO a.b` while DuckDB's own parser accepts it. The grammar is vendored byte for byte and CI checks the hashes, so it is carried as a known case with the reason written out rather than patched here.
+
+On the frame side, `drop_duplicates` and a conditional column. The first is 5.6 times ahead of polars and pandas on a key of a thousand values and 0.89 times polars on the whole row, and that loss is written up rather than left out, because distinct on three columns currently runs four hash passes to answer a question that needs one. The second is `CASE WHEN`, where a null condition takes the false side and costs nothing to make it do so, because a null in a bool column is already a false sitting in memory.
+
+One change is not a feature. The corpus differential has twice printed its result and then wedged instead of exiting, once for 37 minutes until it was cancelled by hand. The comparison is right and the process falls over on the way out, glibc reports a corrupted free list eleven milliseconds after the last line, it is intermittent, and it has never reproduced on the allocator this was developed against. The cause is open. The job now has a timeout, so the next one fails on its own rather than waiting for somebody to notice.
+
 ### Distinct rows over a frame
 
 `DataFrame.drop_duplicates`, with and without a subset of columns, which is pandas' spelling of it and Polars' `unique` and SQL's `select distinct`. Until now the only thing in the library that could remove a repeat was `Index.unique`, over one column of labels.
