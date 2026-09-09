@@ -121,6 +121,12 @@ differential = { cmd = "mojo run -I . tests/differential/main.mojo", default-env
 corpus = { cmd = "bash tools/fetch_corpus.sh && python tools/corpus.py" }
 differential-sql = { cmd = "mojo run -I . tests/differential/sql.mojo", default-environment = "differential", depends-on = ["corpus"] }
 
+# The same comparison against statements nobody wrote. The grammar writes them,
+# which reaches the rules DuckDB's corpus happens to have no test for, and it
+# needs no corpus so it is cheap to run anywhere.
+# See docs/specs/sql/11-conformance.md section 4.
+differential-sql-generated = { cmd = "mojo run -I . tests/differential/sql_generated.mojo", default-environment = "differential" }
+
 bench = "mojo run -I . benchmarks/main.mojo"
 bench-compare = "python tools/bench_compare.py"
 

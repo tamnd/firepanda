@@ -211,16 +211,19 @@ def location() -> str:
     return path
 
 
-def verdicts(path: str) -> str:
-    """Asks DuckDB to parse every statement in a file and reports what it said.
+def verdicts_for(sqls) -> str:
+    """Asks DuckDB to parse every statement it is given and reports what it said.
 
     Only the parser runs. `extract_statements` splits a string into statements
     and builds nothing else, so a column that does not exist and a function with
     no overload are not errors here, which is exactly the line the compatibility
     claim is drawn along.
 
+    One connection for the whole batch, because opening one costs more than
+    parsing a statement does.
+
     Args:
-        path: The statements file written by `write`.
+        sqls: An iterable of statements.
 
     Returns:
         One character per statement, in order: `1` accepted, `0` rejected with a
@@ -230,7 +233,7 @@ def verdicts(path: str) -> str:
 
     connection = duckdb.connect()
     out = []
-    for _, sql in read(path):
+    for sql in sqls:
         try:
             connection.extract_statements(sql)
             out.append(ACCEPTED)
@@ -240,6 +243,18 @@ def verdicts(path: str) -> str:
             out.append(UNDECIDED)
     connection.close()
     return "".join(out)
+
+
+def verdicts(path: str) -> str:
+    """Asks DuckDB about every statement in a file and reports what it said.
+
+    Args:
+        path: The statements file written by `write`.
+
+    Returns:
+        One character per statement, in the order they were written.
+    """
+    return verdicts_for(sql for _, sql in read(path))
 
 
 def main() -> int:
