@@ -123,10 +123,10 @@ from firepanda.kernel import (
     argsort_multi,
     arith_const,
     cast_to,
+    coalesce,
     compare_const,
     compare_text,
     compare_text_const,
-    coalesce,
     concat_any,
     concat_arrays,
     concat_two_any,
@@ -146,12 +146,16 @@ from firepanda.kernel import (
     group_sum,
     group_top_rows,
     group_var,
+    is_in,
+    is_null,
     less,
     mean_of,
-    is_null,
     min_of,
     missing_count_any,
     multiply,
+    pick,
+    pick_const,
+    pick_constants,
     sum_of,
     take_any,
     take_range,
@@ -159,7 +163,9 @@ from firepanda.kernel import (
     text_contains,
     text_contains_in_order,
     text_ends_with,
+    text_is_in,
     text_starts_with,
+    text_substring,
 )
 from firepanda.kernel.arith import OP_ADD
 from firepanda.kernel.compare import CMP_EQ, CMP_LT
@@ -1114,6 +1120,40 @@ def bench_kernel(mut harness: Harness) raises:
         keep(out)
 
     harness.record("kernel/filter_range", "rows", rows, filter_range_bench)
+
+    # The conditional column, in the three shapes a query writes it in. Read them
+    # in order: `kernel/pick_constants` is a select and a store with no input to
+    # load, `kernel/pick_const` adds one stream of loads, `kernel/pick` adds two.
+    # Nothing in those three touches a validity bitmap, and the gap between the
+    # last one and `kernel/pick_nulls` is what building the output's validity
+    # costs, which is a pass packing sixty four condition bytes into a word at a
+    # time. If that gap ever stops being visible, the fast path has stopped being
+    # a fast path and is building the bitmap unconditionally.
+    def pick_columns() raises {imm mask, imm dense, imm other}:
+        var out = pick(mask, dense, other)
+        keep(out)
+
+    harness.record("kernel/pick", "rows", rows, pick_columns)
+
+    def pick_one_const() raises {imm mask, imm dense}:
+        var out = pick_const(mask, dense, Scalar[BENCH_DTYPE](0))
+        keep(out)
+
+    harness.record("kernel/pick_const", "rows", rows, pick_one_const)
+
+    def pick_two_consts() raises {imm mask}:
+        var out = pick_constants(
+            mask, Scalar[BENCH_DTYPE](1), Scalar[BENCH_DTYPE](0)
+        )
+        keep(out)
+
+    harness.record("kernel/pick_constants", "rows", rows, pick_two_consts)
+
+    def pick_with_nulls() raises {imm mask, imm sparse, imm other}:
+        var out = pick(mask, sparse, other)
+        keep(out)
+
+    harness.record("kernel/pick_nulls", "rows", rows, pick_with_nulls)
 
 
 def bench_sort(mut harness: Harness) raises:
@@ -2224,6 +2264,51 @@ def _string_column(
     return builder^.finish()
 
 
+def _string_set(count: Int, width: Int, present: Int) raises -> StringArray:
+    """Builds a set of members for the set lookup benchmarks.
+
+    The first `present` members are the first `present` elements of
+    `_string_column(count, width, False)`, so they are the only ones that match
+    anything. The rest share their length and their first four bytes with that
+    column and differ at one byte near the end, so rejecting one costs a whole
+    comparison rather than being settled by the prefix.
+
+    Two sets built this way with the same `present` and different `count` match
+    exactly the same rows, which is what makes a row measuring one set size
+    against another a measurement of the set size and not of the selectivity.
+
+    Args:
+        count: How many members.
+        width: How many bytes in each.
+        present: How many of them the column holds.
+
+    Returns:
+        The set.
+
+    Raises:
+        If the builder raises.
+    """
+    var pool = List[UInt8](capacity=count * width)
+    for i in range(count):
+        for j in range(width):
+            if i < present and j == width - 1:
+                pool.append(UInt8(97 + i % 26))
+            elif i >= present and j == width - 2:
+                pool.append(UInt8(48 + i % 10))
+            else:
+                pool.append(UInt8(97 + j % 26))
+
+    var builder = StringBuilder(capacity=count)
+    var base = pool.unsafe_ptr()
+    for i in range(count):
+        builder.append(
+            Span[UInt8, origin_of(pool)](
+                unsafe_ptr=base.unsafe_offset(i * width), length=width
+            )
+        )
+    return builder^.finish()
+
+
 def bench_strings(mut harness: Harness) raises:
     """Times the variable width string column on both sides of the inline limit.
 
@@ -2649,6 +2734,107 @@ def bench_text(mut harness: Harness) raises:
 
     harness.record("text/ends_with", "rows", rows, ends_with)
 
+    # The two routes through the substring kernel, on the same thirty two byte
+    # column. Two bytes fits inside a view, so that one skips the sizing pass
+    # entirely and writes nothing but the views buffer. Twenty does not, so that
+    # one reads the views once to size every morsel's share of the payload, sums
+    # the shares, and then copies bytes. The gap between the two rows is what a
+    # payload costs, and it is the number to watch when the same two pass shape
+    # is put under `filter` and `take`.
+    def substring_inline() raises {imm flat}:
+        var out = text_substring(flat, 0, 2)
+        keep(out)
+
+    harness.record("text/substring_inline", "rows", rows, substring_inline)
+
+    def substring_payload() raises {imm flat}:
+        var out = text_substring(flat, 4, 20)
+        keep(out)
+
+    harness.record("text/substring_payload", "rows", rows, substring_payload)
+
+    # The set lookup, swept across the threshold between its two routes. Sets at
+    # or under the threshold are compared against one member at a time with
+    # nothing built. Larger ones go through a hash and a probe of a table. Every
+    # set here holds the same single member the column actually contains and pads
+    # the rest with members it cannot, so every row matches the same rows and what
+    # separates them is only the size of the set. That is what makes the sweep
+    # readable: the linear route climbs with the set size and the table route is
+    # flat, and where the climbing line crosses the flat one is where the
+    # threshold belongs.
+    #
+    # One and two are the linear route and the rest are the table, so what to
+    # watch is that two is still under three and that three, four and sixty four
+    # are all about the same. Four is here because it is the size of q19's set,
+    # and it is the row that would have caught the first threshold this had: it
+    # was eight, which sent a set of four down the linear route and cost it sixty
+    # percent.
+    var set_1 = _string_set(1, 32, 1)
+    var set_2 = _string_set(2, 32, 1)
+    var set_3 = _string_set(3, 32, 1)
+    var set_4 = _string_set(4, 32, 1)
+    var set_64 = _string_set(64, 32, 1)
+
+    def is_in_1() raises {imm flat, imm set_1}:
+        var out = text_is_in(flat, set_1)
+        keep(out)
+
+    harness.record("text/is_in_1", "rows", rows, is_in_1)
+
+    def is_in_2() raises {imm flat, imm set_2}:
+        var out = text_is_in(flat, set_2)
+        keep(out)
+
+    harness.record("text/is_in_2", "rows", rows, is_in_2)
+
+    def is_in_3() raises {imm flat, imm set_3}:
+        var out = text_is_in(flat, set_3)
+        keep(out)
+
+    harness.record("text/is_in_3", "rows", rows, is_in_3)
+
+    def is_in_4() raises {imm flat, imm set_4}:
+        var out = text_is_in(flat, set_4)
+        keep(out)
+
+    harness.record("text/is_in_4", "rows", rows, is_in_4)
+
+    def is_in_64() raises {imm flat, imm set_64}:
+        var out = text_is_in(flat, set_64)
+        keep(out)
+
+    harness.record("text/is_in_64", "rows", rows, is_in_64)
+
+    # The same crossover on an eight byte column, which is the width TPC-H
+    # actually looks things up at: two byte country codes in q22 and container
+    # names in q19. An element this short is compared inside its view and hashed
+    # in one go, so both routes get cheaper and they do not have to cross in the
+    # same place. They do not: the crossover here is between one and two rather
+    # than between two and three, so a threshold picked on wide strings alone
+    # would have been picked on the wrong data.
+    var short_flat = _string_column(rows, 8, False)
+    var short_1 = _string_set(1, 8, 1)
+    var short_2 = _string_set(2, 8, 1)
+    var short_4 = _string_set(4, 8, 1)
+
+    def is_in_short_1() raises {imm short_flat, imm short_1}:
+        var out = text_is_in(short_flat, short_1)
+        keep(out)
+
+    harness.record("text/is_in_short_1", "rows", rows, is_in_short_1)
+
+    def is_in_short_2() raises {imm short_flat, imm short_2}:
+        var out = text_is_in(short_flat, short_2)
+        keep(out)
+
+    harness.record("text/is_in_short_2", "rows", rows, is_in_short_2)
+
+    def is_in_short_4() raises {imm short_flat, imm short_4}:
+        var out = text_is_in(short_flat, short_4)
+        keep(out)
+
+    harness.record("text/is_in_short_4", "rows", rows, is_in_short_4)
+
     var plain = Array[BENCH_DTYPE](rows)
     for i in range(rows):
         plain[i] = Scalar[BENCH_DTYPE](i)
@@ -2659,6 +2845,44 @@ def bench_text(mut harness: Harness) raises:
         keep(out)
 
     harness.record("text/equal_number", "rows", rows, equal_number)
+
+    # The same sweep on numbers, where a comparison is one SIMD equal against a
+    # block that is already loaded rather than a walk over bytes, and so holds its
+    # own against a table far longer. Every set is a run of multiples of seven,
+    # all of which the column holds, so the selectivity is the same negligible
+    # thing in every row and the only difference is again the size of the set.
+    #
+    # Four and thirty two are the linear route and sixty four is the table. Thirty
+    # two is the threshold itself and is the row to watch: it should stay under
+    # sixty four, and the day it does not the threshold has drifted past its
+    # crossover.
+    def multiples(count: Int) -> Array[BENCH_DTYPE]:
+        var out = Array[BENCH_DTYPE](count)
+        for i in range(count):
+            out.set_valid(i, Scalar[BENCH_DTYPE](i * 7))
+        return out^
+
+    var numbers_4 = multiples(4)
+    var numbers_32 = multiples(32)
+    var numbers_64 = multiples(64)
+
+    def is_in_number_4() raises {imm plain, imm numbers_4}:
+        var out = is_in(plain, numbers_4)
+        keep(out)
+
+    harness.record("text/is_in_number_4", "rows", rows, is_in_number_4)
+
+    def is_in_number_32() raises {imm plain, imm numbers_32}:
+        var out = is_in(plain, numbers_32)
+        keep(out)
+
+    harness.record("text/is_in_number_32", "rows", rows, is_in_number_32)
+
+    def is_in_number_64() raises {imm plain, imm numbers_64}:
+        var out = is_in(plain, numbers_64)
+        keep(out)
+
+    harness.record("text/is_in_number_64", "rows", rows, is_in_number_64)
 
     # The three rows to read together are the sort rows, and what separates them
     # is how much of the answer the eight byte key can give. `sort_distinct` is

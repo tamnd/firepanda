@@ -54,6 +54,9 @@ learn to ignore. The seed moves when somebody moves it.
 comptime SHOWN = 25
 """How many disagreements of each kind to print before summarizing the rest."""
 
+comptime LONGEST = 140
+"""How much of a statement to print before cutting it off."""
+
 comptime DUCKDB_ONLY_CEILING = 0
 """How many unexplained statements DuckDB may parse that firepanda does not.
 
@@ -178,9 +181,15 @@ def report(kind: StringSlice, cases: List[String], of: Int) -> None:
     print(kind, len(cases), "of", of)
     print()
     for i in range(min(SHOWN, len(cases))):
-        var sql = cases[i]
-        if sql.byte_length() > 140:
-            sql = String(StringSlice(sql)[byte=0:140], " ...")
+        # Built once from the statement rather than sliced and assigned back over
+        # itself, for the reason given in `sql.mojo`: the value being overwritten
+        # should not be the value being read.
+        ref item = cases[i]
+        var sql: String
+        if item.byte_length() > LONGEST:
+            sql = String(StringSlice(item)[byte=0:LONGEST], " ...")
+        else:
+            sql = item
         print("   ", sql)
     if len(cases) > SHOWN:
         print("   ", len(cases) - SHOWN, "more")

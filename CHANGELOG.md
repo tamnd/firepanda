@@ -8,19 +8,29 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
-### The grammar now writes SQL as well as reading it
+### A conditional column, and a validity that costs nothing when nobody is null
 
-`pixi run differential-sql-generated` generates 25,000 statements out of the vendored grammar and runs each one through both parsers. It found a bug on its first run, which was the point.
+`CASE WHEN c THEN a ELSE b END`, which is `Series.pick` at the frame level and four functions in `kernel/pick.mojo`. TPC-H wants it three times and all three want a different shape of it: q8 and q14 put a column on the true side and a zero on the false side, q12 puts a one against a zero, and the general form takes two columns. Each of those is its own entry point rather than one function against a broadcast column, because broadcasting a constant is a second allocation and a second stream of loads for something that fits in a register.
 
-DuckDB's test corpus is what the existing differential compares over, and it is bounded by what somebody happened to write a test for. Whole rules are in there once or not at all, and a rule with no test behind it is a rule where a mistake sits until a user finds it. The grammar is declarative, so it can be walked the other way: choose an alternative instead of trying each one, write a token instead of consuming it, and a statement comes out that is built from the same 1,187 rules the matcher reads.
+Two decisions in it are worth writing down.
 
-The walk terminates for three reasons. Every node carries a cost, meaning the fewest tokens that finish it, worked out once by fixpoint before anything is generated. A token budget counts down, and once it is gone every choice takes its cheapest alternative, which for any reachable rule is a finite string. And a depth cap stops the walk far below the matcher's own guard, because a statement the generator wrote and the matcher then refused for running out of stack teaches nobody anything.
+The first is what a null condition means, and the answer is that it takes the false side. That is SQL's rule, an unknown is not a true, and it is already what `filter` does when it drops a row on a null in its mask. polars answers null there instead, and the binding layer is where that difference gets paid. The part that makes it worth a paragraph is that it is free: `kernel/__init__.mojo` says a null value is zero in the values buffer, so a null in a bool column is already a `False` sitting in memory, and a loop that reads the condition's values and never looks at its validity gets exactly the rule above with no mask and no second pass. The same invariant covers the output, which is why this is the only elementwise kernel in the package that does not call `repair_range`: a row taking a null from either side copies that side's zero with it.
 
-Not all of it parses, and the reason is worth stating rather than hiding. Satisfying a negative lookahead means knowing what it would have matched, which is the problem the parser exists to solve, so the walk skips those nodes and sometimes writes the thing the rule was there to forbid. About four in ten of the output is refused somewhere. That costs nothing, because the assertion is not that the generator writes good SQL, it is that the two parsers agree about whatever it writes.
+The second is the output's validity, the one thing a SIMD select cannot compute in the value registers. When neither side has a null there is nothing to compute at all, and that is the common case. When one does, the bits are packed out of the condition bytes a word at a time inside the worker that just wrote those rows, which is the argument `kernel/mask.mojo` already makes for repairing in the worker. Building it in a serial pass afterwards was measured first and cost 0.738 nanoseconds a row against 0.289 for the same work moved into the workers, both anchored on the same control. That is the difference between a null on one side costing 2.7 times what no nulls cost and costing 1.4 times.
 
-The two directions are read the way they are in the corpus differential. DuckDB accepting something firepanda rejects has a ceiling of zero. The other way runs at about 55 per cent, which is much higher than the corpus and is expected: the generator samples the grammar rather than the language people write, so it spends most of its time in rules the released oracle has never been asked about, where the corpus spends almost none. `DROP EXTENSION REPOSITORY` and `DISCONNECT` are both in the vendored development grammar and neither is in the oracle. That side is a rate rather than a count, so the ceiling still holds when somebody passes `--cases`.
+Writing that build is also what turned up a bug in the version before it. `pick_const` builds the validity as "valid wherever the condition is false, because the constant is", and every bit past the end of the last word is a false. Left unmasked those come out set, and `count_ones` walks whole words, so a column would report fewer nulls than it has. Reading any row would never show it. There is a test that asks for the count rather than the rows, and it fails without the mask.
 
-The bug it found is in the grammar rather than in the matcher. `CopyFileName` lists a bare `Identifier` ahead of `Identifier '.' ColId`, and PEG choice is ordered, so the bare one always wins and the qualified alternative can never be reached. `COPY t TO a.b` is a statement DuckDB's own parser accepts and DuckDB's own grammar cannot. The grammar is vendored byte for byte and CI enforces that, so the fix belongs upstream and not here. The harness carries the case in a `known` list with the reason instead, which is what lets the ceiling above stay at zero and mean something.
+Nanoseconds a row on an i9-13900K over 1,048,576 int64 rows, one session, control `text/equal_constant` at 1.857 against its anchored 1.874. polars 1.44.1, pandas 3.0.5, duckdb 1.5.5, DuckDB read back through `.arrow()`.
+
+| shape | firepanda | polars | pandas | duckdb |
+| --- | --- | --- | --- | --- |
+| two columns | 0.199 | 0.695 | 0.938 | 1.045 |
+| a column and a constant | 0.157 | 0.446 | 0.822 | 0.737 |
+| two constants | 0.142 | 0.183 | 0.737 | 0.954 |
+
+Between 2.8 and 6.7 times ahead everywhere except one, and the exception is worth naming rather than leaving for a reader to find. Against polars on two constants it is 1.29 times, not two. With two constants there is nothing to read but the condition and nothing to do but store, so all four are writing a column as fast as the machine will write one, and there is very little left in there to win.
+
+The text form is built through a builder on one core, unlike the three number forms. A text output is a payload whose length nobody knows until the rows are chosen, and the two pass shape `substr.mojo` uses is the right answer for it too, but the place to spend that work first is `filter` and `take`, which run on every query rather than on none of them.
 
 ### Say which keyword the query meant
 
@@ -45,6 +55,120 @@ The awkward part is that a misspelled keyword usually does not fail at its own t
 Three parses of a query that has already failed sounds expensive and is not. The second and third only happen when the ones before them had nothing to say, and a query on its way to a person who is about to read the error is not the query anybody is timing.
 
 The guards matter as much as the search, because a hint that is a coin toss is worse than no hint. A word shorter than three bytes gets nothing, since every two letter word is one edit from a dozen keywords and means none of them. More than three candidates gets nothing, since that is a list rather than a hint. A keyword the query spelled right is never a candidate for itself. And the suggestions come out in the order the grammar tried them, which is the order the alternatives are written in and is therefore upstream's own opinion about what is likely.
+
+### The grammar now writes SQL as well as reading it
+
+`pixi run differential-sql-generated` generates 25,000 statements out of the vendored grammar and runs each one through both parsers. It found a bug on its first run, which was the point.
+
+DuckDB's test corpus is what the existing differential compares over, and it is bounded by what somebody happened to write a test for. Whole rules are in there once or not at all, and a rule with no test behind it is a rule where a mistake sits until a user finds it. The grammar is declarative, so it can be walked the other way: choose an alternative instead of trying each one, write a token instead of consuming it, and a statement comes out that is built from the same 1,187 rules the matcher reads.
+
+The walk terminates for three reasons. Every node carries a cost, meaning the fewest tokens that finish it, worked out once by fixpoint before anything is generated. A token budget counts down, and once it is gone every choice takes its cheapest alternative, which for any reachable rule is a finite string. And a depth cap stops the walk far below the matcher's own guard, because a statement the generator wrote and the matcher then refused for running out of stack teaches nobody anything.
+
+Not all of it parses, and the reason is worth stating rather than hiding. Satisfying a negative lookahead means knowing what it would have matched, which is the problem the parser exists to solve, so the walk skips those nodes and sometimes writes the thing the rule was there to forbid. About four in ten of the output is refused somewhere. That costs nothing, because the assertion is not that the generator writes good SQL, it is that the two parsers agree about whatever it writes.
+
+The two directions are read the way they are in the corpus differential. DuckDB accepting something firepanda rejects has a ceiling of zero. The other way runs at about 55 per cent, which is much higher than the corpus and is expected: the generator samples the grammar rather than the language people write, so it spends most of its time in rules the released oracle has never been asked about, where the corpus spends almost none. `DROP EXTENSION REPOSITORY` and `DISCONNECT` are both in the vendored development grammar and neither is in the oracle. That side is a rate rather than a count, so the ceiling still holds when somebody passes `--cases`.
+
+The bug it found is in the grammar rather than in the matcher. `CopyFileName` lists a bare `Identifier` ahead of `Identifier '.' ColId`, and PEG choice is ordered, so the bare one always wins and the qualified alternative can never be reached. `COPY t TO a.b` is a statement DuckDB's own parser accepts and DuckDB's own grammar cannot. The grammar is vendored byte for byte and CI enforces that, so the fix belongs upstream and not here. The harness carries the case in a `known` list with the reason instead, which is what lets the ceiling above stay at zero and mean something.
+
+## [0.6.53] - 2026-09-09
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A SQL front end that parses, a number saying how much of DuckDB's dialect it parses, and the text kernels TPC-H needs. Nothing executes through the front end yet.
+
+DuckDB replaced its Bison parser with a hand written PEG parser and shipped the grammar as data, forty MIT licensed `.gram` files, and that is the whole reason this work moved ahead of the milestones that were meant to come first. It is vendored here verbatim, a generator turns it into a rule table that is checked in, and a matcher walks the table. A grammar bump is now a regeneration rather than a rewrite, and the dialect decisions are made by a file DuckDB maintains rather than by anything in this repository.
+
+The claim that firepanda accepts what DuckDB accepts is now a measurement. Every statement in DuckDB's own test corpus, 71,438 of them, goes through both parsers on every push: 2 that DuckDB parses and firepanda does not, 1,130 the other way, 98.41 per cent agreement. The 2 are the recursion depth guard firing rather than a gap in the grammar, and most of the 1,130 are syntax added after the newest DuckDB anyone can install from conda-forge. It found two real tokenizer bugs on its first run, which is what it is for.
+
+The parse is four to five times faster than it was when the matcher landed, from two changes. Every node now carries a sixty four bit set of the tokens it can start with, so an ordered choice with fifty alternatives stops walking the forty nine that cannot match. And the memo table records successes as well as failures, which removed a doubling per level of nesting that made twelve nested function calls take a fifth of a second.
+
+On the kernel side the text work now covers the whole of `LIKE`, in four named shapes rather than one general matcher, plus `substring` and `IN`. Two results there are worth reading past the feature list. `substring` is the first text column in the library built on more than one core, and the two pass shape it uses, size every morsel's share of the payload first and then let each one fill its own stretch, is exactly what `filter` and `take` need next; it made the payload case 4.7 times faster. And `is_in` shipped with the wrong threshold twice before it shipped with the right one, because a string comparison and a SIMD equal cost nothing like each other and one constant cannot serve both. There are two now, and the sweep that placed them is in the entry.
+
+Away from those: a gather by consecutive indices that copies instead of gathering, a prefetch on the gather, and a streaming join that takes a text key. There is also a note on a parallel string build that was tried, measured and dropped, because a change that did not work is worth writing down once so nobody spends the week again.
+
+### Asking whether a column's value is one of a set, and two thresholds instead of one
+
+`Series` grew `is_in` and `kernel/member.mojo` holds it. This is pandas' `isin` and SQL's `IN`, and TPC-H wants it twice: q19 against four container names and q22 against seven country codes. Both are the same shape, a column of a million rows against a set of a handful, and that shape is what the kernel is built around.
+
+The set is a `Series` rather than a list, so it carries its own type and can itself be a column, which is what a decorrelated subquery hands over. Nothing is promoted: a set of a different type is refused rather than cast, because casting here would silently pick which side loses precision and a caller who meant to compare across types can say so with a cast of their own.
+
+A null row answers null, not false. That is SQL's answer for `NULL IN (...)` and it is what `equal` already does, so a caller who builds `IN` out of a chain of equalities and a caller who uses this get the same column back. pandas reports False there. That difference belongs in the binding layer, because a caller who wants False can fill the nulls afterwards and a caller who wants three valued logic cannot get it back out of a column that has already lost it.
+
+There are two routes. A small set is compared against one member at a time and builds nothing at all. A larger one builds a hash table once and every worker probes it. The table stores hashes rather than keys, which is exact for a fixed width dtype because `mix` is a bijection on sixty four bits, and cannot be for text, so the text route keeps the needles and settles a hash match by comparing bytes.
+
+There is one thing the text table cannot settle that way, and it is checked for rather than assumed away. Two needles that are different strings and hash alike would take one slot between them and the second would quietly go missing from the set. The build notices when an insert hands back an ordinal already spoken for by a different string and falls back to comparing against every needle. That branch will not be taken on real data, but a set that has silently lost a member is not the kind of wrong that shows up in a test.
+
+The interesting part is the threshold, because it started as one number for both routes and one number was wrong by more than an order of magnitude, in both directions at once.
+
+Sweeping the set size over a million rows on an i9-13900K. Every set holds the same single member the column actually contains and pads the rest with members it cannot, so every size matches exactly the same rows and the only thing that changes is the size. The threshold was moved to force each route at each size. Nanoseconds a row, with `text/equal_constant` alongside at 1.874 as the control.
+
+| set size | thirty two byte text | eight byte text | int64 |
+| --- | --- | --- | --- |
+| 1 | 2.236 | 1.320 | |
+| 2 | 3.890 | 1.792 | |
+| 3 | 5.323 | | |
+| 4 | 6.838 | 2.728 | 0.462 |
+| 8 | 14.430 | | 0.762 |
+| 9 | 4.330 (table) | 1.612 (table) | 2.315 (table) |
+| 64 | 4.262 (table) | | 4.267 (table) |
+
+Read down the text columns and the linear route climbs about a nanosecond and a half for every extra member, because two members of a set usually share a length and a prefix, which is what makes them a set, so the prefix settles nothing and the comparison runs to the end. The table does not care about the size at all. They cross between two and three for a wide column and between one and two for a short one.
+
+Read down the int64 column and it is a different kernel entirely. A comparison there is one SIMD equal against a block that is already loaded, so an extra member costs about seven hundredths of a nanosecond. Running both routes against each other at every size in one session gave, linear against table, 1.30 against 2.99 at nine, 2.03 against 4.84 at sixteen, 3.82 against 5.03 at thirty two and 7.06 against 5.15 at sixty four. It turns over between thirty two and sixty four.
+
+So there are two constants now, `TEXT_LINEAR_MAX` at two and `LINEAR_MAX` at thirty two. What that is worth, both sessions anchored on the same control:
+
+| row | one threshold of eight | two thresholds |
+| --- | --- | --- |
+| is_in_4, thirty two byte text | 6.838 | 4.343 |
+| is_in_short_4, eight byte text | 2.728 | 1.716 |
+| is_in_number_32, int64 | 5.031 | 2.429 |
+
+The first row is q19's set exactly, and it was giving away sixty percent.
+
+Against polars 1.44.1, pandas 3.0.5 and duckdb 1.5.5 on the same machine, the same columns and the same sets, all in one session. DuckDB is measured through `.arrow()`, which is the only way it hands back a materialized column.
+
+| row | firepanda | polars | pandas | duckdb |
+| --- | --- | --- | --- | --- |
+| thirty two byte text, set of 4 | 4.343 | 5.472 | 5.177 | 6.068 |
+| thirty two byte text, set of 64 | 4.311 | 5.527 | 5.442 | 6.819 |
+| eight byte text, set of 1 | 1.248 | 3.371 | 4.286 | 3.893 |
+| eight byte text, set of 4 | 1.716 | 3.435 | 3.835 | 5.159 |
+| int64, set of 4 | 0.457 | 2.125 | 0.608 | 1.688 |
+| int64, set of 64 | 4.402 | 2.537 | 6.482 | 3.085 |
+
+Short text is where this is comfortably ahead, 2.0 to 3.4 times, and short text is what q19 and q22 both look things up at. Wide text is ahead by only 1.2 to 1.6 times, because at thirty two bytes everybody is paying for the same memory traffic and the routes stop mattering much.
+
+The last row is the one to keep. A set of sixty four numbers goes through the table, and there polars is 1.7 times quicker and DuckDB 1.4 times, so the numeric table route has something left in it. It is not a shape any query in the suite asks for, which is why it is recorded here rather than fixed here. pandas is worth a note too: it is flat at about 0.6 nanoseconds for every set size up to nine and then falls off a cliff to 6.5 at sixty four, which is what a dense lookup table over a narrow integer range looks like when it stops being used. That is a real trick for `IN` over a small range of integers and firepanda does not have it.
+
+### Cutting a byte range out of a text column, and the first text column built in parallel
+
+`Series` grew `str_slice` and `kernel/substr.mojo` holds it. This is SQL's `substring`, and TPC-H q22 is the reason it exists now rather than later: it groups customers by the first two characters of a phone number, which is nothing but this call.
+
+It cuts by bytes and not by code points. That is what the rest of the column measures itself in, `StringView.__len__` is a byte length and so is `byte_length`, and the reader that filled the column never promised the bytes were UTF-8 in the first place. Anyone coming from pandas should know that up front, because `.str[:2]` there slices code points. A code point variant is a different kernel and it can be written when something asks for one. Both ends are clamped rather than checked, so a negative offset counts back from the end, an offset past the end is the empty string, and a length running off the end stops at the end. None of those is an error.
+
+The interesting part is that this is the first text column in the library built on more than one core, and the shape it uses is the one `filter` and `take` need. Both of those go through `StringBuilder` one element at a time today, because a payload offset is a running total and a running total is serial. The way out is to know the totals before any bytes move, and for a substring that is easy: an element's output length depends on its input length and nothing else, and an input length is already in the view. So the views are read once to size each morsel's share of the payload, the shares are summed into a base per morsel, and then every morsel writes its own views and copies into its own stretch of payload with nothing shared between them at all.
+
+Two things fall out of that. The sizing pass reads the views buffer and never touches the payload, so it costs sixteen bytes a row in order and follows no pointers. And it is skipped entirely when the requested length is twelve or less, because then every result fits inside its own view, the payload is provably empty, and there is nothing to size.
+
+Nanoseconds a row on an i9-13900K over a million rows of thirty two bytes, the serial builder this started as against the two pass build it shipped as, with `text/equal_constant` alongside as a control that neither version touches.
+
+| row | serial builder | two pass build |
+| --- | --- | --- |
+| substring_inline, two bytes | 2.580 | 2.664 |
+| substring_payload, twenty bytes | 19.802 | 4.234 |
+| equal_constant (control) | 1.850 | 1.866 |
+
+The inline row does not move, which is the point of it: it never had a payload to build, so there was never anything there to parallelize. The payload row is 4.7 times faster.
+
+Against the same column on the same machine, with polars 1.44.1, pandas 3.0.5 and duckdb 1.5.5 asked for the same two cuts. DuckDB is measured through `.arrow()`, which is the only way it hands back a materialized column.
+
+| row | firepanda | polars | pandas | duckdb |
+| --- | --- | --- | --- | --- |
+| two bytes | 2.664 | 8.422 | 9.287 | 1.163 |
+| twenty bytes | 4.234 | 11.418 | 16.131 | 2.004 |
+
+So 3.2 times polars and 3.5 times pandas on the short cut, 2.7 and 3.8 on the long one, and still behind DuckDB by 2.3 and 2.1 times. The remaining gap is mostly a difference in what the two engines write. A firepanda view is sixteen bytes whatever the string is, so the short cut writes sixteen bytes a row where Arrow writes a four byte offset and two bytes of data, and the long cut writes thirty six against Arrow's twenty four. That is the price of the inline representation and it is paid back everywhere a short string is compared without a pointer chase. It is not something this kernel can undo, and closing what is left of the gap means not copying at all, which needs a payload buffer two columns can share and a plan for how long the original then stays alive. That is a separate piece of work.
 
 ### Every statement in DuckDB's test corpus, through both parsers
 
