@@ -151,7 +151,7 @@ The pathological input tests are in the suite from the first week, generated rat
 
 PEG error reporting is genuinely bad by default. The failure surfaces at the top level choice, having discarded everything it learned, and the naive message is syntax error at position 0.
 
-The standard fix, and DuckDB's, is to track the furthest position reached across all attempts, together with the set of terminals that were expected there. That position is almost always where a human would point. The furthest position is one field updated on every terminal failure, which is cheap and allocates nothing on the success path. It is enough on its own to produce DuckDB's message, and the built matcher stops there: the expected set is what the typo suggestion below needs and nothing else does, so it is deferred to that work rather than carried for a message that never names it. One thing that is not optional is the quiet counter, because a terminal that fails inside a negative lookahead failed on purpose, and letting it move the furthest position makes the error name whatever the grammar was checking was absent.
+The standard fix, and DuckDB's, is to track the furthest position reached across all attempts, together with the set of terminals that were expected there. That position is almost always where a human would point. The furthest position is one field updated on every terminal failure, which is cheap and allocates nothing on the success path, and it is enough on its own to produce DuckDB's message. The expected set is not carried at all. A run takes a compile time flag that says whether to collect it, every ordinary parse runs with that flag off, and the set is built by a second run that only starts once a parse is already known to have failed. The second run also has the first token filter off, because the filter works by refusing to walk a node that cannot match the token in hand, so a filtered run never reaches the terminals that would have said what they wanted. That is the right way round: an error is on its way to a person who is about to read it, and a success is on its way to a hot loop. One thing that is not optional is the quiet counter, because a terminal that fails inside a negative lookahead failed on purpose, and letting it move the furthest position makes the error name whatever the grammar was checking was absent.
 
 ```
 Parser Error: syntax error at or near "form"
@@ -162,7 +162,23 @@ LINE 1: SELECT * form t
 
 matching DuckDB's shape, blank line and all, because document 11's corpus matches error text by substring and because the shape is good. When the furthest failure is at the end of the token vector there is no token to name and no caret to draw, and DuckDB says `Parser Error: syntax error at end of input` on one line with nothing after it, which is what `SELECT 1 FROM` gives.
 
-Two refinements are worth their cost and neither is built yet. Keyword typo suggestions: when the furthest failure expected a keyword set and the actual token is an identifier within edit distance one of one of them, say so. DuckDB does this and it is most of the perceived quality of a SQL error message, and it is what the expected set exists for. And the rule stack at the furthest position, behind a debug flag, because when a grammar bump breaks something this is the only tool that finds it quickly.
+Keyword typo suggestions are built on top of that set, and they are the one place in this document where firepanda says more than DuckDB does. DuckDB's parser error stops at the caret. The candidate machinery upstream feeds autocomplete and binder errors and is never reached from the parser, so `SELCT 1` gets `syntax error at or near "SELCT"` there and nothing more. Here the first line and the caret block are still DuckDB's byte for byte, and the suggestion goes on its own line between them, which is where DuckDB puts candidate bindings on a binder error, so an error with one still reads like an error from the same program.
+
+```
+Parser Error: syntax error at or near "a"
+Did you mean "WHERE"?
+
+LINE 1: SELECT * FROM t WEHRE a = 1
+                              ^
+```
+
+A word in the expected set one edit from what the query wrote is almost certainly what was meant, where one edit is a substitution, an insertion, a deletion or a swap of two neighbours. The swap is in there because it is the typo people actually make on a keyboard, and WEHRE for WHERE is two edits to anything that counts them the plain way.
+
+The hard part is not the distance, it is that a misspelled keyword usually does not fail at its own token. `SELCT 1` reads SELCT as an identifier and dies at the `1`, and `SELECT * FROM t WEHRE a = 1` reads WEHRE as an alias for t and dies at the `a`. So there are three places to look, in order, and the first one that has an answer wins. The word being blamed, against the set collected there, which is what catches `GROUP BYY a`. The word before it, against the set collected at that position, which is what catches `SELCT 1`, because a statement whose first keyword is misspelled never gets a second alternative tried at token 0. And when that set has nothing either, one more parse over the same tokens with the suspect word replaced by a token no rule can match, which forces the parse to stop exactly there and to collect everything the grammar would have accepted in its place. That last one is what catches WEHRE, and it exists because PEG makes the alternative permanent: an optional that matched is never given back, so no amount of backtracking will go and ask what else could have stood where the alias went. Three parses of a query that has already failed, and only when the first two had nothing to say.
+
+The guards matter as much as the search. A word shorter than three bytes gets no suggestion, because every two letter word is one edit from a dozen keywords and means none of them. More than three candidates gets no suggestion, because that is a list rather than a hint. A keyword the query spelled right is not a candidate for itself. And the suggestions come out in the order the grammar tried them, which is the order the alternatives are written in, which is upstream's own opinion about what is likely.
+
+One refinement is still worth its cost and is not built: the rule stack at the furthest position, behind a debug flag, because when a grammar bump breaks something this is the only tool that finds it quickly.
 
 ## 7. What the matcher must not do
 

@@ -56,6 +56,7 @@ from .generated.rules import (
 )
 from .table import Grammar
 from .token import (
+    NO_KEYWORD,
     TOKEN_END,
     TOKEN_IDENTIFIER,
     TOKEN_KEYWORD,
@@ -120,6 +121,36 @@ which computes the filter words the same way and has the same constants written
 at the top of its first token filter section. A disagreement between the two is a
 rejected query rather than a crash, so tests/test_sql_matcher.mojo runs the whole
 corpus with the filter off as well as on and compares.
+"""
+
+comptime _EXPECT_NONE = UInt32(0xFFFFFFFF)
+"""A terminal whose failure says nothing worth collecting."""
+
+comptime _EXPECT_WORD = UInt32(0) << 28
+comptime _EXPECT_TEXT = UInt32(1) << 28
+comptime _EXPECT_CLASS = UInt32(2) << 28
+comptime _EXPECT_KIND = UInt32(3) << 28
+comptime _EXPECT_TAG = UInt32(0xF) << 28
+"""What an entry in the expected set is, in the top four bits of the entry.
+
+The rest of the entry is an interned string index for the two literal kinds, a
+keyword class mask for the third, and a token kind for the fourth. Four bits and
+twenty eight is not a tight fit for anything: the grammar interns 392 strings.
+"""
+
+comptime _MIN_TYPO = 3
+"""How long a word has to be before a one edit suggestion is worth making.
+
+Every two letter word is one edit from a dozen keywords, so a suggestion for one
+is a coin toss printed with confidence.
+"""
+
+comptime _SUGGESTIONS = 3
+"""How many keywords a `Did you mean` line will name.
+
+More than three is not a suggestion any more, it is a list, and a reader who is
+handed six near misses learns less than one who is handed none. So a failure with
+more than this many candidates at edit distance one says nothing extra.
 """
 
 comptime _DEFINED_OPERATORS = StaticString(
@@ -289,13 +320,17 @@ def _parse[
         Error: On a tokenizer failure or a syntax error, in DuckDB's shape.
     """
     var tokens = tokenize(sql, grammar)
-    var run = _Run[filtered=filtered](sql.as_bytes(), tokens, grammar)
+    var run = _Run[filtered=filtered, collect=False](
+        sql.as_bytes(), tokens, grammar
+    )
     var matched = run.rule(rule)
     # Program is `TopLevelStatement*`, so it matches the empty string and cannot
     # fail. What says the query was bad is that the parse did not reach the end,
     # and the furthest token a terminal was tried at is where a reader points.
     if not matched or run.at != len(tokens) - 1:
-        raise run.syntax_error()
+        raise run.syntax_error(
+            _diagnose(sql, tokens, grammar, rule, run.spot())
+        )
     var root = run.pending[len(run.pending) - 1]
     # The run borrows the tokens, so it has to be consumed before they can be
     # moved into the result.
@@ -303,8 +338,283 @@ def _parse[
     return Parse(tokens^, nodes^, root)
 
 
+def _diagnose(
+    sql: StringSlice,
+    ref tokens: List[Token],
+    grammar: Grammar,
+    rule: Int,
+    spot: Int,
+) -> String:
+    """Parses a second time, to find out what the query could have said.
+
+    The expected set is worth having and is not worth carrying. A parse that
+    succeeds never needs it, and a parse that fails has already finished, so the
+    cheap place to build it is a second run that only happens once the answer is
+    known to be an error. That costs a failing query a second parse, and a third
+    when `_shadow` is reached, and costs every other query nothing at all, which
+    is the right way round: an error is
+    on its way to a human who is about to read it, and a success is on its way
+    to a hot loop.
+
+    The second run has the first token filter off. The filter works by refusing
+    to walk a node that cannot match the token in hand, so a filtered run never
+    reaches the terminals that would have said what they wanted, and a collecting
+    run with the filter on would report a much smaller set that leaves out the
+    interesting half. `parse_unfiltered` already exists and is already tested to
+    produce the same answer, so this reuses it rather than teaching the filter to
+    explain itself.
+
+    Args:
+        sql: The query text.
+        tokens: The token vector, tokenized once and shared.
+        grammar: A loaded grammar.
+        rule: The rule the parse started at.
+        spot: The token position the first run is going to blame.
+
+    Returns:
+        A `Did you mean` line to put under the message, or an empty string when
+        there is nothing useful to say, which is the common case.
+    """
+    var run = _Run[filtered=False, collect=True](
+        sql.as_bytes(), tokens, grammar
+    )
+    try:
+        _ = run.rule(rule)
+    except:
+        # Only the depth guard raises from in here, and an unfiltered run walks
+        # deeper than a filtered one, so a query that parsed to a syntax error
+        # can still exhaust this second run. The message it was going to get is
+        # already correct without a hint.
+        return String()
+    if run.spot() != spot:
+        # The two runs disagree about where the query went wrong, which they
+        # should not, so say nothing rather than point somewhere else.
+        return String()
+    var hint = run.hint()
+    if hint:
+        return hint^
+    return _shadow(sql, tokens, grammar, rule, spot)
+
+
+def _shadow(
+    sql: StringSlice,
+    ref tokens: List[Token],
+    grammar: Grammar,
+    rule: Int,
+    spot: Int,
+) -> String:
+    """Asks what could have stood where the word before the failure stands.
+
+    A misspelled keyword in the middle of a statement is usually swallowed
+    rather than rejected. `SELECT * FROM t WEHRE a = 1` reads WEHRE as an alias
+    for t, so the parse dies one token later at the `a` and the WHERE clause is
+    never tried at the position WEHRE is at. PEG makes that permanent: an
+    optional that matched is never given back, so no amount of backtracking will
+    go and ask what else could have gone there.
+
+    So ask it directly. Run the parse again over the same tokens with that one
+    word replaced by a token no rule can match, which makes the parse stop
+    exactly there and collect everything the grammar would have accepted in its
+    place. A word in that set one edit from what the query wrote is the clause
+    the query meant to open.
+
+    This is the third parse of a query that has already failed, and it only
+    happens when the first two had nothing to say, so it costs a working query
+    nothing.
+
+    Args:
+        sql: The query text.
+        tokens: The token vector.
+        grammar: A loaded grammar.
+        rule: The rule the parse started at.
+        spot: The token position the error blames.
+
+    Returns:
+        A `Did you mean` line, or an empty string.
+    """
+    if spot == 0:
+        return String()
+    var suspect = tokens[spot - 1]
+    if suspect.kind != TOKEN_IDENTIFIER or Int(suspect.length) < _MIN_TYPO:
+        # A keyword there is spelled right and a quoted name was meant to be a
+        # name, so neither one is a typo waiting to be found.
+        return String()
+    var masked = tokens.copy()
+    # Punctuation whose bytes are a word matches no literal, no keyword class
+    # and no built in matcher, so it is a hole in the token vector.
+    masked[spot - 1] = Token(
+        TOKEN_PUNCTUATION, 0, NO_KEYWORD, suspect.start, suspect.length
+    )
+    var run = _Run[filtered=False, collect=True](
+        sql.as_bytes(), masked, grammar
+    )
+    try:
+        _ = run.rule(rule)
+    except:
+        return String()
+    if run.spot() != spot - 1:
+        # Nothing can match the hole, so the parse should have stopped on it.
+        # Anywhere else and this is not the question that was asked.
+        return String()
+    var start = Int(suspect.start)
+    return _suggest(
+        grammar,
+        sql.as_bytes()[start : start + Int(suspect.length)],
+        run.expected,
+    )
+
+
+def _suggest(
+    grammar: Grammar, written: Span[UInt8, _], ref candidates: List[UInt32]
+) -> String:
+    """Builds the line for one word against one expected set.
+
+    Args:
+        grammar: A loaded grammar, for the interned strings.
+        written: The word the query has.
+        candidates: The terminals tried where that word stands.
+
+    Returns:
+        The line, or empty when there is nothing worth saying.
+    """
+    if len(written) < _MIN_TYPO:
+        # One edit turns a short word into most of the alphabet, so `a` is
+        # one away from AT and AS and ALL and means none of them. Below this
+        # length the suggestion is noise dressed up as help.
+        return String()
+    var near = List[String]()
+    for i in range(len(candidates)):
+        var entry = candidates[i]
+        if entry & _EXPECT_TAG != _EXPECT_WORD:
+            continue
+        var candidate = grammar.strings[Int(entry & ~_EXPECT_TAG)]
+        if not _within_one(written, candidate.as_bytes()):
+            continue
+        var seen = False
+        for j in range(len(near)):
+            if near[j] == candidate:
+                seen = True
+        if not seen:
+            near.append(candidate)
+        if len(near) > _SUGGESTIONS:
+            return String()
+    if len(near) == 0:
+        return String()
+    # Left in the order the grammar tried them, which is the order the
+    # alternatives are written in and is therefore the order upstream
+    # considers most likely. That is a better answer than alphabetical and
+    # it is just as repeatable.
+    var out = String("Did you mean ")
+    for i in range(len(near)):
+        if i > 0:
+            out += " or " if i == len(near) - 1 else ", "
+        out += String('"', near[i], '"')
+    out += "?"
+    return out^
+
+
+def _remember(mut set: List[UInt32], what: UInt32):
+    """Adds one terminal to an expected set, if it is not there already.
+
+    Deduplicated by a linear scan, which is fine on a list this short and keeps
+    the order the grammar tried things in.
+
+    Args:
+        set: The set to add to.
+        what: The tagged entry.
+    """
+    for i in range(len(set)):
+        if set[i] == what:
+            return
+    set.append(what)
+
+
+def _within_one(left: Span[UInt8, _], right: Span[UInt8, _]) -> Bool:
+    """Says whether two words are one edit apart, ignoring case.
+
+    One substitution, one insertion, one deletion, or one pair of neighbours
+    swapped. The swap is in here because it is the typo people actually make on
+    a keyboard, and WEHRE for WHERE is two substitutions to anything counting
+    edits the plain way. Being the same word is not one edit and does not count,
+    because a keyword the query already spelled right is not what it meant to
+    type.
+
+    Args:
+        left: The word the query has, in whatever case it was written.
+        right: The keyword the grammar wanted, which the generator interned
+            upper cased.
+
+    Returns:
+        Whether one edit turns one into the other.
+    """
+    # The two spans come from different places, so neither one can be assigned
+    # to the other and the three cases are written out instead of swapping.
+    if len(left) > len(right) + 1 or len(right) > len(left) + 1:
+        return False
+
+    var shared = min(len(left), len(right))
+    var i = 0
+    while i < shared and _fold(left[i]) == _fold(right[i]):
+        i += 1
+
+    if len(left) == len(right):
+        if i == len(left):
+            # The same word, which is not an edit away from anything.
+            return False
+        # A substitution, so everything after the one byte that differs has to
+        # line up exactly.
+        var substituted = True
+        for j in range(i + 1, len(left)):
+            if _fold(left[j]) != _fold(right[j]):
+                substituted = False
+                break
+        if substituted:
+            return True
+        # Or the two bytes at the mismatch are each other's, and the rest lines
+        # up after them.
+        if (
+            i + 1 >= len(left)
+            or _fold(left[i]) != _fold(right[i + 1])
+            or _fold(left[i + 1]) != _fold(right[i])
+        ):
+            return False
+        for j in range(i + 2, len(left)):
+            if _fold(left[j]) != _fold(right[j]):
+                return False
+        return True
+
+    if len(left) > len(right):
+        # A byte too many on the left, so the rest of the right has to line up
+        # with the left shifted by one.
+        for j in range(i, len(right)):
+            if _fold(left[j + 1]) != _fold(right[j]):
+                return False
+        return True
+
+    for j in range(i, len(left)):
+        if _fold(left[j]) != _fold(right[j + 1]):
+            return False
+    return True
+
+
+def _fold(c: UInt8) -> UInt8:
+    """Upper cases one ASCII byte.
+
+    Args:
+        c: The byte.
+
+    Returns:
+        The byte, upper cased if it was a lower case letter.
+    """
+    return c - 32 if c >= 97 and c <= 122 else c
+
+
 struct _Run[
-    origin: ImmOrigin, words: ImmOrigin, table: ImmOrigin, filtered: Bool
+    origin: ImmOrigin,
+    words: ImmOrigin,
+    table: ImmOrigin,
+    filtered: Bool,
+    collect: Bool,
 ](Movable):
     """One parse in progress. Built, used once and dropped.
 
@@ -319,6 +629,10 @@ struct _Run[
             a field so that a run with it off compiles the check away, which is
             what makes the equivalence test in tests/test_sql_matcher.mojo a
             comparison of two builds rather than of two flags.
+        collect: Whether to keep the set of terminals that were tried at the
+            furthest position. A parameter for the same reason: a parse that is
+            going to succeed must not pay a byte or a branch for a message it
+            will never print. See `_diagnose`.
     """
 
     var src: Span[UInt8, Self.origin]
@@ -362,6 +676,31 @@ struct _Run[
     var furthest: Int
     """The furthest token a terminal was tried at, which is where an error
     goes."""
+
+    var expected: List[UInt32]
+    """Which terminals were tried at the furthest position, when collecting.
+
+    Emptied when the furthest position moves, because a terminal that failed
+    further back is not what the query needed here. Deduplicated on the way in
+    by a linear scan, which is fine on a list this short and keeps the order the
+    grammar tried things in.
+
+    Empty and never written on a run that is not collecting, which is every run
+    except the one `_diagnose` makes after a parse has already failed.
+    """
+
+    var earlier: List[UInt32]
+    """The same, for the last position before the furthest one.
+
+    A misspelled keyword usually does not fail at its own token. `SELCT 1` reads
+    SELCT as an identifier and fails at the 1, so the word to suggest something
+    for is the one before the one being blamed, and what could have stood there
+    is the set collected at that position. Two positions is enough, because the
+    word before the failure is the one a reader is looking at.
+    """
+
+    var earlier_at: Int
+    """Which position `earlier` holds, or -1 before the furthest has moved."""
 
     var quiet: Int
     """How many negative lookaheads we are inside.
@@ -420,6 +759,9 @@ struct _Run[
         self.nodes.append(ParseNode(0, 0, 0, NO_NODE, NO_NODE))
         self.pending = List[UInt32]()
         self.furthest = 0
+        self.expected = List[UInt32]()
+        self.earlier = List[UInt32]()
+        self.earlier_at = -1
         self.quiet = 0
         self.depth = 0
         self.memo = List[UInt32]()
@@ -606,14 +948,23 @@ struct _Run[
         if it.kind == NODE_REF:
             var target = Int(it.payload)
             if target == RULE_END_OF_INPUT:
-                return self._terminal(self._kind(self.at) == TOKEN_END)
+                return self._terminal(
+                    self._kind(self.at) == TOKEN_END,
+                    _EXPECT_KIND | UInt32(TOKEN_END),
+                )
             return self.rule(target)
 
         if it.kind == NODE_LIT:
-            return self._terminal(self._literal(it.flags, Int(it.payload)))
+            return self._terminal(
+                self._literal(it.flags, Int(it.payload)),
+                (_EXPECT_WORD if it.flags & FLAG_WORD != 0 else _EXPECT_TEXT)
+                | it.payload,
+            )
 
         if it.kind == NODE_KEYWORDS:
-            return self._terminal(self._keyword_in(UInt8(it.payload)))
+            return self._terminal(
+                self._keyword_in(UInt8(it.payload)), _EXPECT_CLASS | it.payload
+            )
 
         if it.kind == NODE_SEQ:
             var start_at = self.at
@@ -713,12 +1064,15 @@ struct _Run[
     # Terminals
     # -----------------------------------------------------------------------
 
-    def _terminal(mut self, matched: Bool) -> Bool:
+    def _terminal(mut self, matched: Bool, expected: UInt32) -> Bool:
         """Records where a terminal was tried, and consumes it if it matched.
 
         Args:
             matched: Whether the token at the current position was the one
                 wanted.
+            expected: What this terminal wanted, for the expected set. Read only
+                on a collecting run, so an ordinary parse pays for passing it and
+                for nothing else.
 
         Returns:
             The same answer, so a caller can return this directly.
@@ -729,8 +1083,28 @@ struct _Run[
             if self._kind(self.at) != TOKEN_END:
                 self.at += 1
             return True
-        if self.quiet == 0 and self.at > self.furthest:
+        if self.quiet != 0:
+            return False
+        if self.at > self.furthest:
+            comptime if Self.collect:
+                # The earlier set is always the one for the token right before
+                # the furthest. If the furthest moved by one then the set just
+                # collected is that one, and if it jumped then there is nothing
+                # for that position yet and the attempts that land there later
+                # will fill it in.
+                if self.at == self.furthest + 1:
+                    self.earlier = self.expected.copy()
+                else:
+                    self.earlier.clear()
+                self.earlier_at = self.at - 1
+                self.expected.clear()
             self.furthest = self.at
+        comptime if Self.collect:
+            if expected != _EXPECT_NONE:
+                if self.at == self.furthest:
+                    _remember(self.expected, expected)
+                elif self.at == self.earlier_at:
+                    _remember(self.earlier, expected)
         return False
 
     def _literal(self, flags: UInt8, text: Int) -> Bool:
@@ -790,15 +1164,24 @@ struct _Run[
             Whether it matched.
         """
         if matcher == MATCHER_NUMBER_LITERAL:
-            return self._terminal(self._kind(self.at) == TOKEN_NUMBER)
+            return self._terminal(
+                self._kind(self.at) == TOKEN_NUMBER,
+                _EXPECT_KIND | UInt32(TOKEN_NUMBER),
+            )
         if matcher == MATCHER_STRING_LITERAL:
-            return self._terminal(self._kind(self.at) == TOKEN_STRING)
+            return self._terminal(
+                self._kind(self.at) == TOKEN_STRING,
+                _EXPECT_KIND | UInt32(TOKEN_STRING),
+            )
         if matcher == MATCHER_OPERATOR:
-            return self._terminal(self._is_operator())
+            return self._terminal(
+                self._is_operator(), _EXPECT_KIND | UInt32(TOKEN_OPERATOR)
+            )
         return self._terminal(
             self._is_identifier(
                 matcher == MATCHER_RESERVED_IDENTIFIER, suggestion
-            )
+            ),
+            _EXPECT_KIND | UInt32(TOKEN_IDENTIFIER),
         )
 
     def _is_identifier(self, reserved: Bool, suggestion: UInt8) -> Bool:
@@ -898,7 +1281,16 @@ struct _Run[
     # Errors and peeking
     # -----------------------------------------------------------------------
 
-    def syntax_error(self) -> Error:
+    def spot(self) -> Int:
+        """The token position an error is going to blame.
+
+        Returns:
+            The furthest a terminal was tried at, or the current position when
+            the parse stopped short of the end without any terminal failing.
+        """
+        return max(self.furthest, self.at)
+
+    def syntax_error(self, hint: StringSlice) -> Error:
         """Builds the error for a parse that did not reach the end.
 
         PEG reports failure at the top level choice, having thrown away
@@ -906,19 +1298,74 @@ struct _Run[
         The furthest token a terminal was tried at is almost always where a
         reader would point, and it is what DuckDB uses too.
 
+        The first line and the caret block are DuckDB's, byte for byte. A hint
+        goes on its own line between them, which is where DuckDB puts the
+        candidate bindings on a binder error, so an error with one still reads
+        like an error from the same program.
+
+        Args:
+            hint: A `Did you mean` line, or empty for no hint.
+
         Returns:
             The error, ready to raise.
         """
-        var position = max(self.furthest, self.at)
+        var position = self.spot()
         if self._kind(position) == TOKEN_END:
             # Nothing to name and nothing to point at, and DuckDB drops the LINE
             # and the caret here rather than pointing past the end.
             return Error("Parser Error: syntax error at end of input")
-        return error_at(
-            self.src,
-            self._offset(position),
-            String("syntax error at or near ", self._quoted(position)),
-        )
+        var message = String("syntax error at or near ", self._quoted(position))
+        if hint:
+            message += "\n"
+            message += hint
+        return error_at(self.src, self._offset(position), message)
+
+    def hint(self) -> String:
+        """Builds a `Did you mean` line out of the expected set.
+
+        A misspelled keyword is the most common syntax error there is, and it is
+        the one where the parser knows the answer and says nothing. The set of
+        word literals that were tried where the query went wrong is exactly the
+        list of words that would have worked there, so a word in it that is one
+        edit away from what the query wrote is almost certainly what was meant.
+
+        DuckDB does not do this. Its message stops at the caret, so this is one
+        of the few places where firepanda says more than the database does, and
+        it is additive: the line DuckDB writes is still the first line here.
+
+        Returns:
+            The line, or empty when the token is not a word, when nothing was
+            near it, or when too many things were.
+        """
+        var position = self.spot()
+        if self._word(position):
+            var here = _suggest(
+                self.grammar[], self._text(position), self.expected
+            )
+            if here:
+                return here^
+        # `SELCT 1` fails at the 1 and `CREAT TABLE t` fails at the TABLE,
+        # because a misspelled leading keyword reads as an identifier and takes
+        # the statement down one token later. So when the blamed token has
+        # nothing near it, the word before it is the one to ask about, against
+        # the set collected where that word stands.
+        if self.earlier_at == position - 1 and self._word(position - 1):
+            return _suggest(
+                self.grammar[], self._text(position - 1), self.earlier
+            )
+        return String()
+
+    def _word(self, position: Int) -> Bool:
+        """Says whether a token is one a suggestion could be made for.
+
+        Args:
+            position: The token position.
+
+        Returns:
+            Whether it is an unquoted word.
+        """
+        var kind = self._kind(position)
+        return kind == TOKEN_IDENTIFIER or kind == TOKEN_KEYWORD
 
     def _exhausted(self) -> Error:
         """Builds the error for a query that nests deeper than MAX_DEPTH.
