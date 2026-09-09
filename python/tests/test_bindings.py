@@ -26,6 +26,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
 from conftest import REPO
@@ -173,8 +174,26 @@ def test_the_python_signature_matches_pandas(firepanda: ModuleType) -> None:
     the kind of difference that breaks a caller silently.
     """
     import pandas as pd
+    from firepanda._pandas import NO_DEFAULT
+    from pandas._libs import lib
 
     problems: list[str] = []
+
+    def agrees(ours: Any, theirs: Any) -> bool:
+        """Whether two defaults mean the same thing to a caller.
+
+        Almost always plain equality. The exception is the sentinel pandas puts
+        where a default has to mean "nothing was passed", since `None` is a value
+        a caller might mean and a parameter that treats those two differently
+        needs a third thing. firepanda has its own, because importing pandas to
+        be compatible with pandas would make the library depend on the thing it
+        replaces, and the two are the same idea wearing different names. No
+        caller can construct either one or tell them apart from the outside, so
+        this is the only place the difference is visible at all.
+        """
+        if ours is NO_DEFAULT or theirs is lib.no_default:
+            return ours is NO_DEFAULT and theirs is lib.no_default
+        return bool(ours == theirs)
 
     def compare(label: str, ours: object, theirs: object) -> None:
         """Records every way our parameters disagree with the pandas ones."""
@@ -190,7 +209,7 @@ def test_the_python_signature_matches_pandas(firepanda: ModuleType) -> None:
             if match is None:
                 problems.append(f"{label} has a parameter {name!r} that pandas does not")
                 continue
-            if parameter.default != match.default:
+            if not agrees(parameter.default, match.default):
                 problems.append(
                     f"{label}({name}) defaults to {parameter.default!r} and pandas"
                     f" defaults to {match.default!r}"

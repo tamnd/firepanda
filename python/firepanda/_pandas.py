@@ -227,7 +227,85 @@ def _quantile_wanted(q: Any, interpolation: str) -> float:
     return float(q)
 
 
-__all__ = ["DataFrameMixin", "IndexMixin", "SeriesMixin"]
+class _NoDefault:
+    """The sentinel pandas puts where a default has to mean "nothing was passed".
+
+    pandas has one of these, `pandas._libs.lib.no_default`, and it appears as the
+    default of `shift(fill_value=)`, `dropna(how=)`, `dropna(thresh=)` and
+    several more. It exists because `None` is a value a caller might mean, so a
+    parameter that treats a missing argument differently from an explicit `None`
+    needs a third thing, and pandas made one.
+
+    firepanda needs the same third thing on the same parameters and cannot
+    borrow theirs, because importing pandas to be compatible with pandas would
+    make the library depend on the thing it replaces. So there is one here, and
+    the signature parity test knows the two sentinels are the same idea wearing
+    different names. That is the only place the difference is visible, since a
+    caller can neither construct one nor tell them apart from the outside.
+    """
+
+    def __repr__(self) -> str:
+        """Reads the way the pandas one does, so a signature prints the same."""
+        return "<no_default>"
+
+
+NO_DEFAULT = _NoDefault()
+"""The one instance, compared by identity the way the pandas one is."""
+
+
+def _limit_wanted(limit: Any) -> int:
+    """Reads a fill limit, where the absence of one means as far as it goes.
+
+    pandas spells no limit as `None` and the core spells it as zero, and this is
+    the one line where the two meet. A caller who writes `limit=0` meant
+    something and it is not "no limit", so it is rejected here with the pandas
+    message rather than being read as its own opposite.
+
+    Args:
+        limit: What was passed.
+
+    Returns:
+        The limit, or zero for no limit.
+
+    Raises:
+        InvalidArgumentError: If it is not a positive whole number.
+    """
+    if limit is None:
+        return 0
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise InvalidArgumentError("Limit must be an integer")
+    if limit <= 0:
+        raise InvalidArgumentError("Limit must be greater than 0")
+    return limit
+
+
+def _transforming_axis(axis: Any, owner: str) -> None:
+    """Refuses a transformation along the second axis.
+
+    Same shape as `_reducing_axis` and the same reason, one step further along.
+    `df.cumsum()` totals down each column, which is a pass over contiguous
+    memory, and `df.cumsum(axis=1)` totals across each row, which touches every
+    column once per row. A frame is stored as columns, so those are two
+    different kernels and not one kernel pointed the other way.
+
+    Args:
+        axis: What was passed.
+        owner: The class name, for the message.
+
+    Raises:
+        InvalidArgumentError: If it is not an axis this class has.
+        NotImplementedError: If it is the second axis of a frame.
+    """
+    allowed = (0, 1) if owner == "DataFrame" else (0,)
+    if _axis_number(axis, owner, 0, allowed) == 1:
+        raise NotImplementedError(
+            "axis=1 is not supported yet, because a frame is stored as columns"
+            " and running across a row touches every one of them per row, which"
+            " is a different kernel from the one that runs down a column"
+        )
+
+
+__all__ = ["NO_DEFAULT", "DataFrameMixin", "IndexMixin", "SeriesMixin"]
 
 
 class DataFrameMixin:
@@ -433,6 +511,150 @@ class DataFrameMixin:
         )
         return self._reduce("nunique", 0.0, axis, True, False, 0)
 
+    def _transform(
+        self, kind: str, periods: int, axis: Any, inplace: bool, ignore_index: bool
+    ) -> DataFrame:
+        """Runs one named transformation down every column.
+
+        Eleven of the twelve come through here. `dropna` on a frame does not,
+        because it removes rows rather than transforming columns, and it has its
+        own method below.
+        """
+        from ._frame import DataFrame
+
+        _transforming_axis(axis, "DataFrame")
+        _held_at(
+            "inplace",
+            inplace,
+            False,
+            "every operation here answers a new frame and the Arrow buffers"
+            " underneath are shared rather than owned, so writing into one would"
+            " change frames the caller never mentioned",
+        )
+        _held_at(
+            "ignore_index",
+            ignore_index,
+            False,
+            "throwing the labels away and numbering the rows again is a change to"
+            " the index rather than to the values",
+        )
+        try:
+            return DataFrame._wrap(self._inner.transform(kind, periods))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _fill(self, kind: str, axis: Any, inplace: bool, limit: Any, limit_area: Any) -> DataFrame:
+        """Fills each column's missing values from its neighbours."""
+        _refuse(
+            "limit_area",
+            limit_area,
+            "filling only the gaps between two present values, or only the ones"
+            " outside them, needs the fill to know where the ends are and it"
+            " walks the column without looking",
+        )
+        return self._transform(kind, _limit_wanted(limit), axis, inplace, False)
+
+    def _shift(self, periods: Any, freq: Any, axis: Any, fill_value: Any, suffix: Any) -> DataFrame:
+        """Moves every column's rows along, leaving the gap missing."""
+        _refuse(
+            "freq",
+            freq,
+            "shifting by a frequency moves the labels rather than the values and"
+            " needs the offset vocabulary, which is the resampling milestone",
+        )
+        _refuse("suffix", suffix, "it only names the columns a list of periods produces")
+        _held_at(
+            "fill_value",
+            fill_value,
+            NO_DEFAULT,
+            "filling the gap keeps a column of whole numbers whole, and the value"
+            " has to reach the kernel as a typed one rather than as a Python"
+            " object",
+        )
+        if not isinstance(periods, int) or isinstance(periods, bool):
+            raise NotImplementedError(
+                "periods has to be a single number for now, because a list of them"
+                " answers a frame with one set of columns per period"
+            )
+        return self._transform("shift", periods, axis, False, False)
+
+    def _pct_change(self, periods: int, fill_method: Any, freq: Any) -> DataFrame:
+        """The fractional change between each row and the one before it."""
+        _refuse("fill_method", fill_method, "pandas removed it in 3.0 and only accepts None")
+        _refuse("freq", freq, "it needs the offset vocabulary, which is the resampling milestone")
+        return self._transform("pct_change", periods, 0, False, False)
+
+    def _scan(self, kind: str, axis: Any, skipna: bool, numeric_only: bool) -> DataFrame:
+        """Runs one of the four scans down every column."""
+        _held_at(
+            "skipna",
+            skipna,
+            True,
+            "a missing row is stepped over and put back where it was, and letting"
+            " one through would poison every row after it",
+        )
+        _held_at(
+            "numeric_only",
+            numeric_only,
+            False,
+            "dropping the columns a scan cannot read is a choice about the shape"
+            " of the answer rather than about the scan",
+        )
+        return self._transform(kind, 0, axis, False, False)
+
+    def _dropna(
+        self,
+        axis: Any,
+        how: Any,
+        thresh: Any,
+        subset: Any,
+        inplace: bool,
+        ignore_index: bool,
+    ) -> DataFrame:
+        """Removes the rows that have a missing value in them.
+
+        The one name on the transformation list that means something different
+        to a frame than to a column, so it does not go through `_transform`.
+        """
+        from ._frame import DataFrame
+
+        _transforming_axis(axis, "DataFrame")
+        _held_at(
+            "how",
+            how,
+            NO_DEFAULT,
+            "dropping a row only when every column is missing is the other rule and"
+            " the kernel implements the one where any column disqualifies it",
+        )
+        _held_at(
+            "thresh",
+            thresh,
+            NO_DEFAULT,
+            "keeping a row that has at least so many values counts per row, and"
+            " the mask says present or absent rather than how many",
+        )
+        _held_at(
+            "inplace",
+            inplace,
+            False,
+            "the answer is a new frame over shared Arrow buffers, so writing into"
+            " one would change frames the caller never mentioned",
+        )
+        _held_at(
+            "ignore_index",
+            ignore_index,
+            False,
+            "numbering the surviving rows again is a change to the index rather"
+            " than to which rows survive",
+        )
+        names: list[str] = []
+        if subset is not None:
+            names = [subset] if isinstance(subset, str) else [str(one) for one in subset]
+        try:
+            return DataFrame._wrap(self._inner.dropna(names))
+        except Exception as error:
+            raise translate(error) from None
+
 
 class SeriesMixin:
     """The hand written half of `Series`."""
@@ -596,6 +818,89 @@ class SeriesMixin:
             " to know it saw one, and the kernel skips them before it counts",
         )
         return self._reduce("nunique", 0.0, axis, True, False, 0)
+
+    def _transform(
+        self, kind: str, periods: int, axis: Any, inplace: bool, ignore_index: bool
+    ) -> Series:
+        """Runs one named transformation over the whole column.
+
+        All twelve come through here, including `dropna`, because a column
+        `dropna` removes values and is a transformation like the rest. The frame
+        one removes rows and is not.
+        """
+        from ._frame import Series
+
+        _transforming_axis(axis, "Series")
+        _held_at(
+            "inplace",
+            inplace,
+            False,
+            "the answer is a new series over shared Arrow buffers, so writing into"
+            " one would change columns the caller never mentioned",
+        )
+        _held_at(
+            "ignore_index",
+            ignore_index,
+            False,
+            "throwing the labels away and numbering the rows again is a change to"
+            " the index rather than to the values",
+        )
+        try:
+            return Series._wrap(self._inner.transform(kind, periods))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _fill(self, kind: str, axis: Any, inplace: bool, limit: Any, limit_area: Any) -> Series:
+        """Fills the column's missing values from its neighbours."""
+        _refuse(
+            "limit_area",
+            limit_area,
+            "filling only the gaps between two present values, or only the ones"
+            " outside them, needs the fill to know where the ends are and it"
+            " walks the column without looking",
+        )
+        return self._transform(kind, _limit_wanted(limit), axis, inplace, False)
+
+    def _shift(self, periods: Any, freq: Any, axis: Any, fill_value: Any, suffix: Any) -> Series:
+        """Moves the column's rows along, leaving the gap missing."""
+        _refuse(
+            "freq",
+            freq,
+            "shifting by a frequency moves the labels rather than the values and"
+            " needs the offset vocabulary, which is the resampling milestone",
+        )
+        _refuse("suffix", suffix, "it only names the columns a list of periods produces")
+        _held_at(
+            "fill_value",
+            fill_value,
+            NO_DEFAULT,
+            "filling the gap keeps a column of whole numbers whole, and the value"
+            " has to reach the kernel as a typed one rather than as a Python"
+            " object",
+        )
+        if not isinstance(periods, int) or isinstance(periods, bool):
+            raise NotImplementedError(
+                "periods has to be a single number for now, because a list of them"
+                " answers a frame with one column per period"
+            )
+        return self._transform("shift", periods, axis, False, False)
+
+    def _pct_change(self, periods: int, fill_method: Any, freq: Any) -> Series:
+        """The fractional change between each row and the one before it."""
+        _refuse("fill_method", fill_method, "pandas removed it in 3.0 and only accepts None")
+        _refuse("freq", freq, "it needs the offset vocabulary, which is the resampling milestone")
+        return self._transform("pct_change", periods, 0, False, False)
+
+    def _scan(self, kind: str, axis: Any, skipna: bool, numeric_only: bool) -> Series:
+        """Runs one of the four scans over the whole column."""
+        _held_at(
+            "skipna",
+            skipna,
+            True,
+            "a missing row is stepped over and put back where it was, and letting"
+            " one through would poison every row after it",
+        )
+        return self._transform(kind, 0, axis, False, False)
 
 
 class IndexMixin:

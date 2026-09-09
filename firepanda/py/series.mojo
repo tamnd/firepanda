@@ -35,6 +35,7 @@ from firepanda.py.ops import (
     unary_op,
 )
 from firepanda.py.reduce import reduction
+from firepanda.py.transform import transformation, transformed
 from firepanda.py.values import python_list, python_value
 
 
@@ -262,6 +263,82 @@ struct PySeries(Movable, Writable):
             return python_value(
                 reduce_any(Self._held(py_self)[].series[].values, wanted), 0
             )
+        except e:
+            raise retagged(DTYPE, e)
+
+    @staticmethod
+    def transform(
+        py_self: PythonObject, kind: PythonObject, periods: PythonObject
+    ) raises -> PythonObject:
+        """Applies one named transformation and hands back a column.
+
+        Twelve of them come through here for the reason `reduce` gives above,
+        and the answer is a series rather than a Python value because a
+        transformation answers a column. `firepanda/py/transform.mojo` is the
+        list and the argument for the list being one door.
+
+        Args:
+            py_self: The series.
+            kind: The transformation, as pandas spells the method.
+            periods: The `periods` or the `limit`, and zero for the ones that
+                take neither.
+
+        Returns:
+            A new series.
+
+        Raises:
+            Error: Tagged `dtype`, if the column has a type the transformation
+                cannot read, and tagged `value` if the name is not one of the
+                twelve.
+        """
+        var wanted = transformation(words(kind, "kind"))
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        transformed(
+                            Self._held(py_self)[].series[],
+                            wanted,
+                            whole(periods, "periods"),
+                        )
+                    )
+                )
+            )
+        except e:
+            raise retagged(DTYPE, e)
+
+    @staticmethod
+    def monotonic(
+        py_self: PythonObject, increasing: PythonObject
+    ) raises -> PythonObject:
+        """Answers whether the column is sorted, one way or the other.
+
+        The two of these are a separate door from `transform` because they
+        answer a bool rather than a column, which is the thing that decides
+        which door something goes through. They are properties on the pandas
+        side and so take no argument there, and the direction has to cross as a
+        flag rather than as part of the name only because the name is what
+        `transform` already uses for something else.
+
+        A column with a missing row in it is not monotonic in either direction,
+        which is the core's rule and is also pandas', since a value that is not
+        there cannot be said to be in order with respect to anything.
+
+        Args:
+            py_self: The series.
+            increasing: True for increasing, False for decreasing.
+
+        Returns:
+            A Python bool.
+
+        Raises:
+            Error: Tagged `dtype`, if the column has a type with no order on it.
+        """
+        try:
+            ref column = Self._held(py_self)[].series[]
+            if flag(increasing, "increasing"):
+                return PythonObject(column.is_monotonic_increasing())
+            return PythonObject(column.is_monotonic_decreasing())
         except e:
             raise retagged(DTYPE, e)
 

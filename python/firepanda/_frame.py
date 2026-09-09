@@ -21,7 +21,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from . import _firepanda
-from ._pandas import DataFrameMixin, IndexMixin, SeriesMixin
+from ._pandas import NO_DEFAULT, DataFrameMixin, IndexMixin, SeriesMixin
 from .errors import translate
 
 __all__ = ["DataFrame", "Index", "Series"]
@@ -262,6 +262,140 @@ class DataFrame(DataFrameMixin):
         """How many values are not missing. Over the columns. One value per column."""
         try:
             return self._reduce("count", 0.0, axis, True, numeric_only, 0)
+        except Exception as error:
+            raise translate(error) from None
+
+    def dropna(
+        self,
+        *,
+        axis: Any = 0,
+        how: Any = NO_DEFAULT,
+        thresh: Any = NO_DEFAULT,
+        subset: Any = None,
+        inplace: bool = False,
+        ignore_index: bool = False,
+    ) -> DataFrame:
+        """The rows with no missing value in them."""
+        try:
+            return self._dropna(axis, how, thresh, subset, inplace, ignore_index)
+        except Exception as error:
+            raise translate(error) from None
+
+    def isna(self) -> DataFrame:
+        """True where a value is missing."""
+        try:
+            return self._transform("isna", 0, 0, False, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def notna(self) -> DataFrame:
+        """True where a value is present."""
+        try:
+            return self._transform("notna", 0, 0, False, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def ffill(
+        self, *, axis: Any = None, inplace: bool = False, limit: Any = None, limit_area: Any = None
+    ) -> DataFrame:
+        """Each missing value taken from the nearest present one before it."""
+        try:
+            return self._fill("ffill", axis, inplace, limit, limit_area)
+        except Exception as error:
+            raise translate(error) from None
+
+    def bfill(
+        self, *, axis: Any = None, inplace: bool = False, limit: Any = None, limit_area: Any = None
+    ) -> DataFrame:
+        """Each missing value taken from the nearest present one after it."""
+        try:
+            return self._fill("bfill", axis, inplace, limit, limit_area)
+        except Exception as error:
+            raise translate(error) from None
+
+    def shift(
+        self,
+        periods: Any = 1,
+        freq: Any = None,
+        axis: Any = 0,
+        fill_value: Any = NO_DEFAULT,
+        suffix: Any = None,
+    ) -> DataFrame:
+        """The frame with its rows moved along, leaving the gap missing."""
+        try:
+            return self._shift(periods, freq, axis, fill_value, suffix)
+        except Exception as error:
+            raise translate(error) from None
+
+    def diff(self, periods: int = 1, axis: Any = 0) -> DataFrame:
+        """The difference between each row and the one that many rows before it."""
+        try:
+            return self._transform("diff", periods, axis, False, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def pct_change(
+        self, periods: int = 1, fill_method: Any = None, freq: Any = None, **kwargs: Any
+    ) -> DataFrame:
+        """The fractional change between each row and the one that many rows before it."""
+        try:
+            return self._pct_change(periods, fill_method, freq)
+        except Exception as error:
+            raise translate(error) from None
+
+    def cumsum(
+        self,
+        axis: Any = 0,
+        skipna: bool = True,
+        numeric_only: bool = False,
+        *args: Any,
+        **kwargs: Any,
+    ) -> DataFrame:
+        """The running total, where row i holds the sum of every row up to i."""
+        try:
+            return self._scan("cumsum", axis, skipna, numeric_only)
+        except Exception as error:
+            raise translate(error) from None
+
+    def cumprod(
+        self,
+        axis: Any = 0,
+        skipna: bool = True,
+        numeric_only: bool = False,
+        *args: Any,
+        **kwargs: Any,
+    ) -> DataFrame:
+        """The running product."""
+        try:
+            return self._scan("cumprod", axis, skipna, numeric_only)
+        except Exception as error:
+            raise translate(error) from None
+
+    def cummax(
+        self,
+        axis: Any = 0,
+        skipna: bool = True,
+        numeric_only: bool = False,
+        *args: Any,
+        **kwargs: Any,
+    ) -> DataFrame:
+        """The largest value seen so far."""
+        try:
+            return self._scan("cummax", axis, skipna, numeric_only)
+        except Exception as error:
+            raise translate(error) from None
+
+    def cummin(
+        self,
+        axis: Any = 0,
+        skipna: bool = True,
+        numeric_only: bool = False,
+        *args: Any,
+        **kwargs: Any,
+    ) -> DataFrame:
+        """The smallest value seen so far."""
+        try:
+            return self._scan("cummin", axis, skipna, numeric_only)
         except Exception as error:
             raise translate(error) from None
 
@@ -855,6 +989,121 @@ class Series(SeriesMixin):
         """How many distinct values there are. Over the rows."""
         try:
             return self._nunique(0, dropna)
+        except Exception as error:
+            raise translate(error) from None
+
+    def dropna(
+        self, *, axis: Any = 0, inplace: bool = False, how: Any = None, ignore_index: bool = False
+    ) -> Series:
+        """The values that are not missing."""
+        try:
+            return self._transform("dropna", 0, axis, inplace, ignore_index)
+        except Exception as error:
+            raise translate(error) from None
+
+    def isna(self) -> Series:
+        """True where a value is missing."""
+        try:
+            return self._transform("isna", 0, 0, False, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def notna(self) -> Series:
+        """True where a value is present."""
+        try:
+            return self._transform("notna", 0, 0, False, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def ffill(
+        self, *, axis: Any = None, inplace: bool = False, limit: Any = None, limit_area: Any = None
+    ) -> Series:
+        """Each missing value taken from the nearest present one before it."""
+        try:
+            return self._fill("ffill", axis, inplace, limit, limit_area)
+        except Exception as error:
+            raise translate(error) from None
+
+    def bfill(
+        self, *, axis: Any = None, inplace: bool = False, limit: Any = None, limit_area: Any = None
+    ) -> Series:
+        """Each missing value taken from the nearest present one after it."""
+        try:
+            return self._fill("bfill", axis, inplace, limit, limit_area)
+        except Exception as error:
+            raise translate(error) from None
+
+    def shift(
+        self,
+        periods: Any = 1,
+        freq: Any = None,
+        axis: Any = 0,
+        fill_value: Any = NO_DEFAULT,
+        suffix: Any = None,
+    ) -> Series:
+        """The column with its rows moved along, leaving the gap missing."""
+        try:
+            return self._shift(periods, freq, axis, fill_value, suffix)
+        except Exception as error:
+            raise translate(error) from None
+
+    def diff(self, periods: int = 1) -> Series:
+        """The difference between each row and the one that many rows before it."""
+        try:
+            return self._transform("diff", periods, 0, False, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def pct_change(
+        self, periods: int = 1, fill_method: Any = None, freq: Any = None, **kwargs: Any
+    ) -> Series:
+        """The fractional change between each row and the one that many rows before it."""
+        try:
+            return self._pct_change(periods, fill_method, freq)
+        except Exception as error:
+            raise translate(error) from None
+
+    def cumsum(self, axis: Any = 0, skipna: bool = True, *args: Any, **kwargs: Any) -> Series:
+        """The running total, where row i holds the sum of every row up to i."""
+        try:
+            return self._scan("cumsum", axis, skipna, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def cumprod(self, axis: Any = 0, skipna: bool = True, *args: Any, **kwargs: Any) -> Series:
+        """The running product."""
+        try:
+            return self._scan("cumprod", axis, skipna, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def cummax(self, axis: Any = 0, skipna: bool = True, *args: Any, **kwargs: Any) -> Series:
+        """The largest value seen so far."""
+        try:
+            return self._scan("cummax", axis, skipna, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def cummin(self, axis: Any = 0, skipna: bool = True, *args: Any, **kwargs: Any) -> Series:
+        """The smallest value seen so far."""
+        try:
+            return self._scan("cummin", axis, skipna, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def is_monotonic_increasing(self) -> bool:
+        """Whether the values never go down. A missing value makes this False."""
+        try:
+            return self._inner.monotonic(True)
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def is_monotonic_decreasing(self) -> bool:
+        """Whether the values never go up. A missing value makes this False."""
+        try:
+            return self._inner.monotonic(False)
         except Exception as error:
             raise translate(error) from None
 

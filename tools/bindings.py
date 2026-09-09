@@ -564,6 +564,182 @@ def _reductions(py: str) -> tuple[Member, ...]:
     return tuple(out)
 
 
+CUMULATIVE: tuple[tuple[str, str], ...] = (
+    ("cumsum", "The running total, where row i holds the sum of every row up to i."),
+    ("cumprod", "The running product."),
+    ("cummax", "The largest value seen so far."),
+    ("cummin", "The smallest value seen so far."),
+)
+"""The four scans, which differ only in the operator they fold with."""
+
+
+def _transformations(py: str) -> tuple[Member, ...]:
+    """Writes the transformation members for one class.
+
+    Twelve on a series and twelve on a frame, and they are not the same twelve.
+    `dropna` removes values from a column and removes rows from a frame, so the
+    frame one goes through its own door and takes a `subset`, while the series
+    one is a per column transformation like the rest. The frame gains
+    `is_monotonic_increasing` from nowhere, because a frame has no such property
+    in pandas, and the series gains it as a property rather than a method.
+
+    Same restriction as `_reductions`. Nothing here decides what a
+    transformation does. The word crosses the boundary,
+    `firepanda/py/transform.mojo` reads it, and every body is one call to a
+    mixin helper that checks the arguments.
+
+    The signatures are pandas' own, measured. Two details in them are easy to
+    get wrong and are load bearing for the parity test: the four scans take
+    `*args, **kwargs` after their named parameters, and `pct_change` takes
+    `**kwargs` without the `*args`.
+
+    Args:
+        py: The class name, `DataFrame` or `Series`.
+
+    Returns:
+        The members, in the order they should be written out.
+    """
+    frame = py == "DataFrame"
+    this = "frame" if frame else "column"
+    gives = py
+    out: list[Member] = []
+
+    if frame:
+        out.append(
+            Member(
+                name="dropna",
+                kind="method",
+                signature=(
+                    "*, axis: Any = 0, how: Any = NO_DEFAULT, thresh: Any = NO_DEFAULT,"
+                    " subset: Any = None, inplace: bool = False, ignore_index: bool = False"
+                ),
+                body="self._dropna(axis, how, thresh, subset, inplace, ignore_index)",
+                doc="The rows with no missing value in them.",
+                returns="DataFrame",
+            )
+        )
+    else:
+        out.append(
+            Member(
+                name="dropna",
+                kind="method",
+                signature=(
+                    "*, axis: Any = 0, inplace: bool = False, how: Any = None,"
+                    " ignore_index: bool = False"
+                ),
+                body='self._transform("dropna", 0, axis, inplace, ignore_index)',
+                doc="The values that are not missing.",
+                returns="Series",
+            )
+        )
+
+    for name, what in (
+        ("isna", "True where a value is missing."),
+        ("notna", "True where a value is present."),
+    ):
+        out.append(
+            Member(
+                name=name,
+                kind="method",
+                signature="",
+                body=f'self._transform("{name}", 0, 0, False, False)',
+                doc=what,
+                returns=gives,
+            )
+        )
+
+    for name, way in (("ffill", "before"), ("bfill", "after")):
+        out.append(
+            Member(
+                name=name,
+                kind="method",
+                signature=(
+                    "*, axis: Any = None, inplace: bool = False, limit: Any = None,"
+                    " limit_area: Any = None"
+                ),
+                body=f'self._fill("{name}", axis, inplace, limit, limit_area)',
+                doc=f"Each missing value taken from the nearest present one {way} it.",
+                returns=gives,
+            )
+        )
+
+    shift = (
+        "periods: Any = 1, freq: Any = None, axis: Any = 0,"
+        " fill_value: Any = NO_DEFAULT, suffix: Any = None"
+    )
+    out.append(
+        Member(
+            name="shift",
+            kind="method",
+            signature=shift,
+            body="self._shift(periods, freq, axis, fill_value, suffix)",
+            doc=f"The {this} with its rows moved along, leaving the gap missing.",
+            returns=gives,
+        )
+    )
+
+    out.append(
+        Member(
+            name="diff",
+            kind="method",
+            signature="periods: int = 1, axis: Any = 0" if frame else "periods: int = 1",
+            body=(
+                'self._transform("diff", periods, axis, False, False)'
+                if frame
+                else 'self._transform("diff", periods, 0, False, False)'
+            ),
+            doc="The difference between each row and the one that many rows before it.",
+            returns=gives,
+        )
+    )
+
+    out.append(
+        Member(
+            name="pct_change",
+            kind="method",
+            signature=(
+                "periods: int = 1, fill_method: Any = None, freq: Any = None, **kwargs: Any"
+            ),
+            body="self._pct_change(periods, fill_method, freq)",
+            doc="The fractional change between each row and the one that many rows before it.",
+            returns=gives,
+        )
+    )
+
+    for name, what in CUMULATIVE:
+        parts = ["axis: Any = 0", "skipna: bool = True"]
+        if frame:
+            parts.append("numeric_only: bool = False")
+        only = "numeric_only" if frame else "False"
+        out.append(
+            Member(
+                name=name,
+                kind="method",
+                signature=", ".join(parts) + ", *args: Any, **kwargs: Any",
+                body=f'self._scan("{name}", axis, skipna, {only})',
+                doc=what,
+                returns=gives,
+            )
+        )
+
+    if not frame:
+        for way in ("increasing", "decreasing"):
+            out.append(
+                Member(
+                    name=f"is_monotonic_{way}",
+                    kind="property",
+                    body=f"self._inner.monotonic({way == 'increasing'})",
+                    doc=(
+                        f"Whether the values never go {'down' if way == 'increasing' else 'up'}."
+                        " A missing value makes this False."
+                    ),
+                    returns="bool",
+                )
+            )
+
+    return tuple(out)
+
+
 FRAME = Exposed(
     mojo="PyDataFrame",
     name="DataFrame",
@@ -626,6 +802,20 @@ FRAME = Exposed(
             doc="Every column reduced to one value, as a series of them.",
             params=(("kind", "str"), ("param", "float")),
             returns="Series",
+        ),
+        Binding(
+            mojo="PyDataFrame.transform",
+            name="transform",
+            doc="Every column put through one named transformation.",
+            params=(("kind", "str"), ("periods", "int")),
+            returns="DataFrame",
+        ),
+        Binding(
+            mojo="PyDataFrame.dropna",
+            name="dropna",
+            doc="The rows with no missing value in them.",
+            params=(("subset", "list[str]"),),
+            returns="DataFrame",
         ),
         Binding(
             mojo="PyDataFrame.labels",
@@ -785,6 +975,7 @@ FRAME = Exposed(
             returns="object",
         ),
         *_reductions("DataFrame"),
+        *_transformations("DataFrame"),
         *_operators("DataFrame"),
     ),
 )
@@ -856,6 +1047,20 @@ SERIES = Exposed(
             doc="The whole column reduced to one Python value.",
             params=(("kind", "str"), ("param", "float")),
             returns="object",
+        ),
+        Binding(
+            mojo="PySeries.transform",
+            name="transform",
+            doc="The column put through one named transformation.",
+            params=(("kind", "str"), ("periods", "int")),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.monotonic",
+            name="monotonic",
+            doc="Whether the column is sorted, one way or the other.",
+            params=(("increasing", "bool"),),
+            returns="bool",
         ),
         Binding(
             mojo="PySeries.binary_series",
@@ -1017,6 +1222,7 @@ SERIES = Exposed(
             returns="tuple[object, ...]",
         ),
         *_reductions("Series"),
+        *_transformations("Series"),
         *_operators("Series"),
     ),
 )
@@ -1771,6 +1977,8 @@ def wrapper() -> str:
         out.append("")
     out.append("from . import _firepanda")
     mixins = sorted({t.mixin for t in TYPES if t.mixin})
+    if any("NO_DEFAULT" in (m.signature or "") for t in TYPES for m in t.members):
+        mixins = ["NO_DEFAULT", *mixins]
     if mixins:
         out.append("from ._pandas import " + ", ".join(mixins))
     out.append("from .errors import translate")
