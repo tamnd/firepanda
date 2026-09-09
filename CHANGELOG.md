@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Every statement in DuckDB's test corpus, through both parsers
+
+The compatibility claim needed a number rather than a corpus of 135 statements somebody typed out by hand. `pixi run differential-sql` now takes DuckDB's own test suite, pulls 71,438 statements out of it, and runs every one through both parsers. The first reading is 2 statements DuckDB parses that firepanda does not, 1,130 the other way, and 98.41 per cent agreement.
+
+The corpus is fetched rather than vendored, which is the answer to a question the spec had left open. It is 33 MB against a repository whose pack is 5 MB, so vendoring it would make every clone six times larger, forever, to carry something only this one harness reads. `tools/fetch_corpus.sh` reads the commit out of the grammar's own `VENDOR` file and sparse fetches `test/sql` at exactly that commit, into a directory named after it, so the corpus and the grammar cannot drift apart and a bisect across a grammar bump still runs the corpus that belongs to the commit being tested. CI caches it on the same commit. Everything else in the repository still builds and tests with no network.
+
+`tools/corpus.py` flattens the `.test` files, taking the SQL out of every `statement` and `query` block and ignoring the expected output, because the annotation is not the oracle. A `statement error` is very often a binder error, which means the parser was perfectly happy. The oracle is DuckDB's `extract_statements`, which parses and binds nothing, so a missing column and an unknown function are not errors on that side either, which is exactly where the line has to be drawn. The whole corpus takes about two seconds there, and the harness crosses into Python once for all 71,438 rather than once each.
+
+The two directions are counted separately because they are not the same failure. DuckDB parsing something we reject is a compatibility failure and the target is zero. Us parsing something DuckDB rejects usually is not: the grammar is vendored from the development branch while conda-forge's newest DuckDB is 1.5.5, so `CREATE TRIGGER` alone is 357 of the 1,130, and the move from Bison to PEG pushed a pile of errors out of the parser and into the binder upstream. Both have a ceiling in the harness. Only the first has a target.
+
+It found two real bugs on its first run, both of them the tokenizer copying Postgres's answer where DuckDB has its own. `SELECT #1+#2` was tokenized with `+#` as one operator, because a dozen characters including `-` and `#` are their own token in DuckDB's tokenizer and never join a run. That also means `->` and `->>` have to be spelled out, since a minus otherwise joins nothing, and that a run gives back a trailing `+` but never a trailing `-`, because the minus was never in the run. And `E'it\'s a test'` was reported as an unterminated string, because the escape prefix set a flag that nothing read. While fixing that, `U&'...'` turned out not to be a string prefix at all: DuckDB reads it as an identifier, an operator and a string, and the four real prefixes are `E`, `X`, `B` and `N` with the quote immediately after.
+
+The 2 that are left are both the five hundred frame recursion cap firing, on a 57 KB generated expression and on a subquery nested a hundred deep. Raising the number is not safe, since an unoptimized build runs out of native stack at about 820 frames. The fix is the explicit stack machine, which is the same change the parse wants for speed.
+
 ### Memoize successes, so nested function calls stop being exponential
 
 `SELECT f(f(f(f(f(f(f(f(f(f(f(f(1))))))))))))` took a fifth of a second, and every extra `f` doubled it. Twelve of anything is not an adversarial input, it is a query somebody writes, and the shape is not rare: nested list literals did the same thing.

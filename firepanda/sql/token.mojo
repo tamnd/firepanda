@@ -75,9 +75,6 @@ comptime FLAG_ESCAPE: UInt8 = 4
 comptime FLAG_DOLLAR: UInt8 = 8
 """A `$tag$...$tag$` string, which has no escapes at all."""
 
-comptime FLAG_UNICODE: UInt8 = 16
-"""A `U&'...'` string or a `U&"..."` identifier, with unicode escapes."""
-
 comptime FLAG_CONTINUED: UInt8 = 32
 """Two or more string literals joined across a newline, see `_continues`."""
 
@@ -92,6 +89,9 @@ comptime _SPACE = UInt8(32)
 comptime _BANG = UInt8(33)
 comptime _QUOTE = UInt8(39)
 comptime _AMPERSAND = UInt8(38)
+comptime _HASH = UInt8(35)
+comptime _PERCENT = UInt8(37)
+comptime _BACKSLASH = UInt8(92)
 comptime _STAR = UInt8(42)
 comptime _PLUS = UInt8(43)
 comptime _MINUS = UInt8(45)
@@ -109,7 +109,6 @@ comptime _UPPER_Z = UInt8(90)
 comptime _UNDERSCORE = UInt8(95)
 comptime _LOWER_A = UInt8(97)
 comptime _LOWER_E = UInt8(101)
-comptime _LOWER_U = UInt8(117)
 comptime _LOWER_Z = UInt8(122)
 comptime _DOUBLE_QUOTE = UInt8(34)
 comptime _DOLLAR = UInt8(36)
@@ -226,27 +225,42 @@ struct _Scan[origin: ImmOrigin, table: ImmOrigin](Movable):
         if c == _DOLLAR:
             return self._dollar(start)
 
-        # `E'...'`, `U&'...'` and `U&"..."` are prefixes only when the quote is
-        # the very next byte. `SELECT e 'a'` is an identifier and a string.
-        if (c | _CASE_BIT) == _LOWER_E and self._byte_at(self.at + 1) == _QUOTE:
+        # `E'...'`, `X'...'`, `B'...'` and `N'...'` are prefixes only when the
+        # quote is the very next byte. `SELECT e 'a'` is an identifier and a
+        # string. Only the `E` one changes how the body is read; the other three
+        # are ordinary strings whose prefix the transformer reads back off the
+        # token text, which is what DuckDB's tokenizer does with them.
+        if _is_string_prefix(c) and self._byte_at(self.at + 1) == _QUOTE:
             self.at += 1
-            return self._string(start, FLAG_ESCAPE)
-        if (c | _CASE_BIT) == _LOWER_U and self._byte_at(
-            self.at + 1
-        ) == _AMPERSAND:
-            var quote = self._byte_at(self.at + 2)
-            if quote == _QUOTE:
-                self.at += 2
-                return self._string(start, FLAG_UNICODE)
-            if quote == _DOUBLE_QUOTE:
-                self.at += 2
-                return self._quoted_identifier(start, FLAG_UNICODE)
+            var escapes = (c | _CASE_BIT) == _LOWER_E
+            return self._string(start, FLAG_ESCAPE if escapes else 0)
 
         if _is_word_start(c):
             return self._word(start)
         if c == _QUESTION:
             return self._question(start)
-        if _is_operator_char(c):
+        if _is_single_byte_operator(c):
+            # `->` and `->>` are the two operators that start with a byte which
+            # otherwise never joins anything, so they are spelled out here. If
+            # what follows one of them is itself an operator byte then the whole
+            # thing is a run after all, and `a ->>= b` asks for an operator named
+            # `->>=` rather than for a JSON extract and a comparison.
+            var special = self._arrow()
+            if special > 0 and not _is_operator_char(
+                self._byte_at(self.at + special)
+            ):
+                self.at += special
+                return Token(
+                    TOKEN_OPERATOR,
+                    0,
+                    NO_KEYWORD,
+                    UInt32(start),
+                    UInt32(special),
+                )
+            if special == 0:
+                self.at += 1
+                return Token(TOKEN_OPERATOR, 0, NO_KEYWORD, UInt32(start), 1)
+        if _is_single_byte_operator(c) or _is_operator_char(c):
             return self._operator(start)
         if c == _COLON:
             # `::` and `:=` are operators and a lone `:` is the slice separator
@@ -439,7 +453,7 @@ struct _Scan[origin: ImmOrigin, table: ImmOrigin](Movable):
         """Reads a `'...'`, including any parts continued onto later lines."""
         var all_flags = flags
         while True:
-            self._one_quoted(start)
+            self._one_quoted(start, flags & FLAG_ESCAPE != 0)
             if not self._continues():
                 break
             all_flags |= FLAG_CONTINUED
@@ -451,10 +465,23 @@ struct _Scan[origin: ImmOrigin, table: ImmOrigin](Movable):
             UInt32(self.at - start),
         )
 
-    def _one_quoted(mut self, start: Int) raises:
-        """Reads one `'...'`, where `''` is one embedded quote."""
+    def _one_quoted(mut self, start: Int, escapes: Bool) raises:
+        """Reads one `'...'`, where `''` is one embedded quote.
+
+        In an `E'...'` string a backslash also takes the byte after it out of
+        play, so `E'it\\'s'` is one string and not an unterminated one. That is
+        the only thing the escape prefix changes here. Whether `\\n` means a
+        newline is a question for whoever decodes the body later.
+        """
         self.at += 1
         while self.at < len(self.src):
+            if (
+                escapes
+                and self.src[self.at] == _BACKSLASH
+                and self.at + 1 < len(self.src)
+            ):
+                self.at += 2
+                continue
             if self.src[self.at] == _QUOTE:
                 if self._byte_at(self.at + 1) == _QUOTE:
                     self.at += 2
@@ -549,6 +576,20 @@ struct _Scan[origin: ImmOrigin, table: ImmOrigin](Movable):
     # Operators and parameters
     # -----------------------------------------------------------------------
 
+    def _arrow(self) -> Int:
+        """The length of the `->` or `->>` starting here, or zero.
+
+        Returns:
+            3, 2 or 0.
+        """
+        if self.src[self.at] != _MINUS or self._byte_at(self.at + 1) != UInt8(
+            62
+        ):
+            return 0
+        if self._byte_at(self.at + 2) == UInt8(62):
+            return 3
+        return 2
+
     def _question(mut self, start: Int) -> Token:
         """Reads the `?` of `?` or `?1`, leaving any number for the next call.
         """
@@ -558,13 +599,17 @@ struct _Scan[origin: ImmOrigin, table: ImmOrigin](Movable):
     def _operator(mut self, start: Int) -> Token:
         """Reads a run of operator characters, longest first, with one caveat.
 
-        The caveat is Postgres's, and DuckDB has it too. A multi character
-        operator that ends in `+` or `-` keeps those characters only if it also
-        contains one of `~ ! @ # ^ & | ` `, and otherwise gives them back. That
-        is why `SELECT 1 =- 1` is `1 = -1` and `SELECT 1 !=- 1` asks the catalog
-        for an operator named `!=-`. Without the rule, `x=-1` is a call to an
-        operator nobody defined.
+        The caveat is Postgres's, and DuckDB kept it. A multi character operator
+        that ends in `+` keeps it only if the operator also contains one of
+        `~ ! @ % ^ & | ` `, and otherwise gives it back. Without the rule,
+        `SELECT 1 =+ 1` is a call to an operator nobody defined. Postgres applies
+        the same rule to a trailing `-`, and DuckDB does not have to, because a
+        `-` never joins a run in the first place.
         """
+        # The first byte goes in whatever it is, because the only way to get here
+        # with a byte that cannot join a run is through `->` or `->>`, and those
+        # are already known to be the start of one.
+        self.at += 1
         while self.at < len(self.src) and _is_operator_char(self.src[self.at]):
             self.at += 1
         var end = self.at
@@ -575,9 +620,7 @@ struct _Scan[origin: ImmOrigin, table: ImmOrigin](Movable):
                     special = True
                     break
             if not special:
-                while end - start > 1 and (
-                    self.src[end - 1] == _PLUS or self.src[end - 1] == _MINUS
-                ):
+                while end - start > 1 and self.src[end - 1] == _PLUS:
                     end -= 1
         self.at = end
         return Token(
@@ -702,19 +745,32 @@ def _is_tag_byte(c: UInt8) -> Bool:
     return _is_word_start(c) or _is_digit(c)
 
 
-def _is_operator_char(c: UInt8) -> Bool:
-    """Postgres's operator character set, less `?`.
+def _is_single_byte_operator(c: UInt8) -> Bool:
+    """The operator characters that are always a token on their own.
 
-    `?` is a parameter in DuckDB rather than an operator: `SELECT 1 ?? 2` fails
-    at the first `?` rather than at a two character operator, so it does not
-    take part in the run.
+    Postgres builds a multi character operator out of every operator byte it can
+    reach, so `#` and `-` join whatever run they land in and `SELECT #1+#2` is
+    `#1`, `+#`, `2`, which is not a query. DuckDB's PEG tokenizer takes eleven
+    bytes out of the run instead, and these are the two of them that would
+    otherwise get here. The rest are already read as punctuation or as the start
+    of a parameter.
+    """
+    return c == _MINUS or c == _HASH
+
+
+def _is_operator_char(c: UInt8) -> Bool:
+    """The characters a multi byte operator is built out of.
+
+    Postgres's set less `?`, `-` and `#`. `?` is a parameter in DuckDB rather
+    than an operator: `SELECT 1 ?? 2` fails at the first `?` rather than at a two
+    character operator, so it does not take part in the run. `-` and `#` are in
+    `_is_single_byte_operator`.
     """
     return (
         c == _PLUS
-        or c == _MINUS
         or c == _STAR
         or c == _SLASH
-        or c == UInt8(37)  # %
+        or c == _PERCENT
         or c == UInt8(60)  # <
         or c == _EQUALS
         or c == UInt8(62)  # >
@@ -723,16 +779,32 @@ def _is_operator_char(c: UInt8) -> Bool:
 
 
 def _is_operator_marker(c: UInt8) -> Bool:
-    """The operator characters that let a run keep a trailing `+` or `-`."""
+    """The operator characters that let a run keep a trailing `+`."""
     return (
         c == UInt8(126)  # ~
         or c == _BANG
         or c == UInt8(64)  # @
-        or c == UInt8(35)  # #
+        or c == _PERCENT
         or c == UInt8(94)  # ^
         or c == _AMPERSAND
         or c == UInt8(124)  # |
         or c == UInt8(96)  # `
+    )
+
+
+def _is_string_prefix(c: UInt8) -> Bool:
+    """The letters that turn a following `'...'` into something other than text.
+
+    `E` is an escape string, `X` a hex blob, `B` a bit string and `N` a national
+    character string, in either case. DuckDB's tokenizer treats all four the same
+    way and only records the difference in the token text.
+    """
+    var lower = c | _CASE_BIT
+    return (
+        lower == _LOWER_E
+        or lower == UInt8(120)  # x
+        or lower == UInt8(98)  # b
+        or lower == UInt8(110)  # n
     )
 
 

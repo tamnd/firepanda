@@ -21,7 +21,6 @@ from firepanda.sql.token import (
     FLAG_DOLLAR,
     FLAG_ESCAPE,
     FLAG_EXPONENT,
-    FLAG_UNICODE,
     NO_KEYWORD,
     TOKEN_END,
     TOKEN_IDENTIFIER,
@@ -214,11 +213,12 @@ def test_an_unterminated_quoted_identifier_is_refused() raises:
         _ = tokenize('SELECT "x', g)
 
 
-def test_a_unicode_quoted_identifier_is_marked() raises:
+def test_a_unicode_prefix_is_not_a_prefix() raises:
+    # Postgres has U&"a" and U&'a' and DuckDB's tokenizer does not, so this is
+    # the keyword U, the operator & and then a quoted identifier. Reading it
+    # Postgres's way would have firepanda accept a statement DuckDB rejects.
     var g = Grammar()
-    var token = _only('U&"a"', g)
-    assert_equal(token.kind, TOKEN_QUOTED_IDENTIFIER)
-    assert_equal(token.flags, FLAG_UNICODE)
+    assert_equal(_render('U&"a"', g), 'id:U op:& quoted:"a"')
 
 
 # ---------------------------------------------------------------------------
@@ -354,15 +354,35 @@ def test_an_escape_string_is_marked() raises:
     assert_equal(_only("e'a'", g).flags, FLAG_ESCAPE)
 
 
+def test_a_backslash_escapes_the_quote_in_an_escape_string() raises:
+    # From test/sql/peg_parser/escape_string.test. Without this the string runs
+    # to the end of the statement and the tokenizer calls it unterminated.
+    var g = Grammar()
+    assert_equal(_render("E'it\\'s'", g), "str:E'it\\'s'")
+
+
+def test_the_other_three_string_prefixes_are_plain_strings() raises:
+    # X is a hex blob, B is a bit string and N is a national character string.
+    # DuckDB's tokenizer reads all three as ordinary string literals and leaves
+    # the prefix in the token text for whoever decodes the body.
+    var g = Grammar()
+    for prefix in ["X", "x", "B", "b", "N", "n"]:
+        var sql = String(prefix, "'a'")
+        assert_equal(_only(sql, g).kind, TOKEN_STRING)
+        assert_equal(_only(sql, g).flags, 0)
+
+
 def test_a_prefix_only_counts_when_the_quote_is_next_to_it() raises:
     # SELECT e 'a' is the identifier e and then a string, not an escape string.
     var g = Grammar()
     assert_equal(_render("e 'a'", g), "id:e str:'a'")
 
 
-def test_a_unicode_string_is_marked() raises:
+def test_a_unicode_string_prefix_is_not_a_prefix() raises:
+    # As above. DuckDB's special string prefixes are E, X, B and N, and U& is
+    # not one of them.
     var g = Grammar()
-    assert_equal(_only("U&'a'", g).flags, FLAG_UNICODE)
+    assert_equal(_render("U&'a'", g), "id:U op:& str:'a'")
 
 
 def test_strings_join_across_a_newline_and_not_across_a_space() raises:
@@ -492,14 +512,40 @@ def test_a_cast_and_a_named_argument_are_operators() raises:
     assert_equal(_render("a := 1", g), "id:a op::= num:1")
 
 
-def test_a_run_gives_back_a_trailing_sign_unless_it_earned_it() raises:
-    # SELECT 1 =- 1 is 1 = -1, so `=-` splits. SELECT 1 !=- 1 asks the catalog
-    # for an operator named `!=-`, so `!=-` does not. The difference is whether
-    # the run contains one of ~ ! @ # ^ & | `, which is Postgres's rule.
+def test_a_run_gives_back_a_trailing_plus_unless_it_earned_it() raises:
+    # SELECT 1 =+ 1 is 1 = +1, so `=+` splits. SELECT 1 !=+ 1 asks the catalog
+    # for an operator named `!=+`, so `!=+` does not. The difference is whether
+    # the run contains one of ~ ! @ % ^ & | `, which is Postgres's rule.
+    var g = Grammar()
+    assert_equal(_render("1 =+ 1", g), "num:1 op:= op:+ num:1")
+    assert_equal(_render("1 !=+ 1", g), "num:1 op:!=+ num:1")
+
+
+def test_a_minus_never_joins_the_run_next_to_it() raises:
+    # Postgres has the same give back rule for a trailing `-` because a `-` can
+    # start a run. DuckDB's tokenizer takes `-` out of the run entirely, so
+    # `!=-` is `!=` and `-` where Postgres reads one operator.
     var g = Grammar()
     assert_equal(_render("1 =- 1", g), "num:1 op:= op:- num:1")
-    assert_equal(_render("1 !=- 1", g), "num:1 op:!=- num:1")
+    assert_equal(_render("1 !=- 1", g), "num:1 op:!= op:- num:1")
     assert_equal(_render("1 - -1", g), "num:1 op:- op:- num:1")
+
+
+def test_a_hash_never_joins_the_run_next_to_it() raises:
+    # From test/sql/select/test_positional_reference.test. `#` is a positional
+    # column reference, so `#1+#2` has to be five tokens. Postgres reads `+#`
+    # as one operator and the statement stops being a query.
+    var g = Grammar()
+    assert_equal(_render("#1+#2", g), "op:# num:1 op:+ op:# num:2")
+
+
+def test_an_arrow_survives_the_minus_rule() raises:
+    # `->` and `->>` start with the one byte that never joins a run, so they are
+    # the two operators the rule above would otherwise take apart.
+    var g = Grammar()
+    assert_equal(_render("a -> b", g), "id:a op:-> id:b")
+    assert_equal(_render("a ->> b", g), "id:a op:->> id:b")
+    assert_equal(_render("a ->>= b", g), "id:a op:->>= id:b")
 
 
 def test_punctuation_is_one_byte_at_a_time() raises:

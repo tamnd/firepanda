@@ -42,7 +42,9 @@ The details that have to be right, each of which is a silent compatibility bug i
 
 **Keyword classification comes from the vendored `.list` files**, five classes, resolved by bisecting one sorted table on the folded text. The longest keyword is fifteen bytes, so the fold happens in a fixed stack buffer and a longer word skips the lookup entirely. A word in the reserved list cannot be a bare identifier, and a word in the unreserved list can be, in the positions the grammar allows. Getting a word into the wrong class produces exactly the failure mode we promised never to have, which is a syntax error on valid DuckDB SQL.
 
-**String literals** are single quoted with `''` as the escape. `E'...'` handles backslash escapes. Dollar quoting, `$tag$ ... $tag$`, has no escapes at all and is how macro bodies and regexes are written. `U&'...'` takes unicode escapes. All four forms appear in the corpus.
+**String literals** are single quoted with `''` as the escape. Dollar quoting, `$tag$ ... $tag$`, has no escapes at all and is how macro bodies and regexes are written.
+
+Four letters are string prefixes, `E`, `X`, `B` and `N` in either case, and only when the quote is the very next byte, so `SELECT e 'a'` is an identifier followed by a string. Only `E` changes how the body is read, where a backslash swallows whatever byte comes after it, including a quote. The other three are ordinary strings whose prefix the transformer reads back off the token text, which is what DuckDB does with them too. There is no `U&'...'` form, contrary to what an earlier draft of this document said: `SELECT U&'a'` is the identifier `U`, the operator `&` and the string `'a'`, and it fails on the operator rather than on the string.
 
 And two literals separated by whitespace containing a newline are one literal. `SELECT 'a' 'b'` is a syntax error, `SELECT 'a'` then a newline then `'b'` is `'ab'`, a line comment in between keeps the join and a block comment breaks it. That is Postgres's rule and DuckDB kept it, and it is the sort of thing nobody writes down until a corpus file uses it.
 
@@ -60,9 +62,15 @@ The marker is a token and the number or the name after it is another one, becaus
 
 **Trailing commas** are legal in most list positions. This is grammar, not tokenizer, but it is the single most used Friendly SQL nicety and it belongs on the same checklist.
 
-**Operators** are a maximal run of operator characters with one exception, which is Postgres's and which DuckDB inherited. A run of more than one character that ends in `+` or `-` keeps those characters only if the run also contains one of ``~ ! @ # ^ & | ` ``. `SELECT 1 =- 1` is `1 = -1` and `SELECT 1 !=- 1` goes looking for an operator named `!=-`. Without the rule, `x=-1` calls an operator nobody defined. `?` is not in the set, because DuckDB spends it on parameters.
+**Operators** are a maximal run of operator characters, with three rules on top that came out of `src/parser/peg/tokenizer/base_tokenizer.cpp` rather than out of Postgres. This is the one place where copying Postgres's answer is wrong, and it produced two real bugs before the corpus found them.
 
-Every one of these came from running the query against DuckDB rather than from reading anything, because there is nothing to read: `NumberLiteral`, `StringLiteral`, `Identifier` and `OperatorLiteral` are all in the rule override block, which is DuckDB stating that its own matcher ignores their bodies. Each behaviour above has a test in `tests/test_sql_token.mojo` naming the query it came from.
+A dozen characters are their own token always and never join a run: `( ) { } [ ] , ? $ - #`. So `SELECT #1+#2` is five tokens and not three, and `SELECT 1 =- 1` is `1 = -1` because the minus left on its own. `?` is out because DuckDB spends it on parameters, and `-` and `#` are out because the tokenizer says so.
+
+Six sequences are checked before that, `->>`, `::`, `:=`, `->`, `**` and `//`, which is how `->` survives the rule that a minus never joins anything. If the byte after one of them is itself an operator character then it was a run after all, so `a ->>= b` asks for an operator named `->>=` rather than for a JSON extract and a comparison.
+
+And a run of more than one character gives back a trailing `+` unless the run also contains one of ``~ ! @ # % ^ & | ` ?``. `SELECT 1 =+ 1` is `1 = +1` and `SELECT 1 !=+ 1` goes looking for an operator named `!=+`. Only `+` is given back, because the minus never got into the run to begin with.
+
+Every one of these came from running the query against DuckDB, or from reading its tokenizer where there was no query that could tell the difference. There is nothing declarative to read: `NumberLiteral`, `StringLiteral`, `Identifier` and `OperatorLiteral` are all in the rule override block, which is DuckDB stating that its own matcher ignores their bodies. Each behaviour above has a test in `tests/test_sql_token.mojo` naming the query it came from.
 
 The tokenizer gets a dedicated differential fuzzer from week one: random bytes and structured random SQL through both tokenizers, comparing the token stream. It is a few hundred lines of hand written state machine standing between us and the compatibility claim, and it is the cheapest place in the whole project to buy confidence.
 

@@ -379,6 +379,21 @@ jobs:
       # Mojo imports pandas in-process, so this needs no bindings and works from M1.
       - run: pixi run differential
 
+      # DuckDB's test corpus is 33 MB and is fetched rather than vendored, so it
+      # is cached on the commit the grammar is pinned to. A grammar bump changes
+      # the key and the next run fetches the corpus that belongs to it.
+      - name: Read the pinned grammar commit
+        id: grammar
+        run: echo "sha=$(awk '/^commit:/ {print $2}' firepanda/sql/grammar/VENDOR)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: .cache/duckdb-corpus
+          key: duckdb-corpus-${{ steps.grammar.outputs.sha }}
+
+      - name: Every statement in DuckDB's corpus, through both parsers
+        run: pixi run differential-sql
+
   required:
     name: CI
     if: always()
