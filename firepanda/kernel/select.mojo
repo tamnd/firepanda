@@ -68,6 +68,15 @@ both in the same call. Eight thousand rows is around ten microseconds of work,
 which is four orders of magnitude more than the atomic that hands it out.
 """
 
+comptime PARALLEL_FILTER_ROWS = 1 << 16
+"""Below this many input rows a variable width filter stays on one thread.
+
+Higher than it would be for a gather, because a filter reads its input in order
+and a gather does not, so a filtered row is a few nanoseconds rather than a cache
+miss. The same number as the take threshold in the end, which is a coincidence of
+two different arguments landing in the same place rather than a shared constant.
+"""
+
 comptime TAKE_LOOKAHEAD = 8
 """Rows the gather runs ahead of itself when issuing prefetches.
 
@@ -553,6 +562,16 @@ def _filter_strings(
     mask bit, which only works when a row that nobody keeps costs a fixed number
     of bytes that the next row overwrites.
 
+    What it does have is the split `_take_strings` uses, and it needs it more.
+    A filtered row is sixteen bytes of view wherever it lands, so the only thing
+    a worker has to be told is how many rows and how many payload bytes the
+    workers before it produced. Both come out of a counting pass, and then every
+    worker writes its own stretch of the output with no coordination at all.
+    Before this the loop went through `StringBuilder`, which appends a view and a
+    null flag to two growing lists and then copies both into the finished column,
+    and on six million single character labels that was ninety milliseconds
+    against eight for the same filter over a column of doubles.
+
     Args:
         col: The column to filter.
         mask: The mask. Must be as tall as the column.
@@ -572,18 +591,136 @@ def _filter_strings(
                 len(col),
             )
         )
+    var n = len(col)
     var values = mask.unsafe_ptr()
-    var builder = StringBuilder(capacity=len(col))
-    for i in range(len(col)):
-        if not mask.data.validity.get(i):
-            continue
-        if not Bool(values.unsafe_offset(i).unsafe_load()):
-            continue
-        if col.is_valid(i):
-            builder.append(col.unsafe_bytes(i))
-        else:
-            builder.append_null()
-    return builder^.finish()
+    var workers = worker_count()
+    if n < PARALLEL_FILTER_ROWS or workers <= 1:
+        var builder = StringBuilder(capacity=n)
+        for i in range(n):
+            if not mask.data.validity.get(i):
+                continue
+            if not Bool(values.unsafe_offset(i).unsafe_load()):
+                continue
+            if col.is_valid(i):
+                builder.append(col.unsafe_bytes(i))
+            else:
+                builder.append_null()
+        return builder^.finish()
+
+    var most = n // PARALLEL_FILTER_ROWS
+    if workers > most:
+        workers = most
+    var bounds = _take_bounds(n, workers)
+    var source_views = col.views.unsafe_ptr().unsafe_bitcast[StringView]()
+    var source_bytes = col.payload.unsafe_ptr()
+    var wide_payload = len(col.payload) > 0
+
+    # Where a worker's rows land depends on how many rows the workers before it
+    # kept, and where their bytes land depends on how many bytes those workers
+    # copied, so both are counted before anything is written. The byte count is
+    # skipped when the column has no payload at all, which is every column of
+    # labels and is the case a filter over a status column actually hits.
+    var kept_totals = Buffer(workers * 8)
+    var byte_totals = Buffer(workers * 8)
+
+    def measure(w: Int) raises {mut kept_totals, mut byte_totals, imm}:
+        var rows = 0
+        var wide = 0
+        for i in range(bounds[w], bounds[w + 1]):
+            if not mask.data.validity.get(i):
+                continue
+            if not Bool(values.unsafe_offset(i).unsafe_load()):
+                continue
+            rows += 1
+            if wide_payload and col.is_valid(i):
+                var view = source_views.unsafe_offset(i)[]
+                if not view.is_inline():
+                    wide += len(view)
+        kept_totals.bitcast[DType.int64]().unsafe_offset(w).unsafe_store(
+            Int64(rows)
+        )
+        byte_totals.bitcast[DType.int64]().unsafe_offset(w).unsafe_store(
+            Int64(wide)
+        )
+
+    parallel_for(measure, workers)
+
+    var rows_before = List[Int](length=workers + 1, fill=0)
+    var bytes_before = List[Int](length=workers + 1, fill=0)
+    var counted_rows = kept_totals.bitcast[DType.int64]()
+    var counted_bytes = byte_totals.bitcast[DType.int64]()
+    for w in range(workers):
+        rows_before[w + 1] = rows_before[w] + Int(
+            counted_rows.unsafe_offset(w).unsafe_load()
+        )
+        bytes_before[w + 1] = bytes_before[w] + Int(
+            counted_bytes.unsafe_offset(w).unsafe_load()
+        )
+
+    var kept = rows_before[workers]
+    var views = Buffer(overwritten=kept * VIEW_SIZE)
+    var payload = Buffer(overwritten=bytes_before[workers])
+    var nulls = not col.validity.all_valid()
+    var built = Bitmap(kept, all_valid=not nulls)
+
+    def compact(w: Int) raises {mut views, mut payload, imm}:
+        var target = views.unsafe_ptr().unsafe_bitcast[StringView]()
+        var into = payload.unsafe_ptr()
+        var at = rows_before[w]
+        var cursor = bytes_before[w]
+        for i in range(bounds[w], bounds[w + 1]):
+            if not mask.data.validity.get(i):
+                continue
+            if not Bool(values.unsafe_offset(i).unsafe_load()):
+                continue
+            if not col.is_valid(i):
+                # The view of the empty string, so that reading a null's bytes
+                # gives an empty span rather than uninitialized memory, which is
+                # what `StringBuilder.append_null` writes for the same reason.
+                target.unsafe_offset(at)[] = StringView()
+            else:
+                var view = source_views.unsafe_offset(i)[]
+                if view.is_inline():
+                    target.unsafe_offset(at)[] = view
+                else:
+                    var count = len(view)
+                    var from_ = source_bytes.unsafe_offset(view.offset())
+                    unsafe_memcpy(
+                        dest=into.unsafe_offset(cursor),
+                        src=from_,
+                        count=count,
+                    )
+                    target.unsafe_offset(at)[] = make_long_at(
+                        from_, count, 0, cursor
+                    )
+                    cursor += count
+            at += 1
+
+    parallel_for(compact, workers)
+
+    # A worker's first output row can land in the middle of a validity word that
+    # the worker before it also writes to, which is the one thing the take route
+    # does not have to worry about because there the output row is the input row.
+    # Rather than lock a word or align the cuts, the bits go down in one pass
+    # here, and only when there is a null to record.
+    if nulls:
+        var at = 0
+        var word = UInt64(0)
+        for i in range(n):
+            if not mask.data.validity.get(i):
+                continue
+            if not Bool(values.unsafe_offset(i).unsafe_load()):
+                continue
+            if col.is_valid(i):
+                word |= UInt64(1) << UInt64(at & 63)
+            at += 1
+            if at & 63 == 0:
+                built.unsafe_set_word((at >> 6) - 1, word)
+                word = 0
+        if at & 63 != 0:
+            built.unsafe_set_word(at >> 6, word)
+
+    return StringArray(views^, payload^, built^, kept)
 
 
 def _filter_core[

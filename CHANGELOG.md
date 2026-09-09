@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Filtering a text column is twenty two times faster
+
+`filter` over a column of six million single character labels took ninety milliseconds. The same filter over a column of doubles beside it took eight. The gap was not the strings, it was the route: the variable width path went through `StringBuilder`, which appends a view to one growing list and a null flag to another and then copies both into the finished column, so a filter that should have been one pass over the mask was three passes and two reallocating lists.
+
+It now uses the split `take` has had since the parallel gather landed. A filtered element is sixteen bytes of view wherever it ends up, so the only thing a worker needs to be told is how many rows and how many payload bytes the workers before it produced, and both come out of a counting pass in front. After that every worker writes its own stretch of views and its own stretch of payload with nothing shared. The byte count is skipped when the column has no payload at all, which is every column of labels.
+
+One thing the gather does not have to deal with is that a filtered row is not the row it came from, so a worker's first output row can land in the middle of a validity word its neighbour also writes. Rather than lock the word or align the cuts, the validity bits go down in a single pass afterwards, and only when the column has a null in it at all.
+
+Measured on an i9-13900K over six million rows: ninety milliseconds to four, with the same filter over doubles unchanged at eight as the control. This is the largest single cost in TPC-H q1, which filters two label columns out of `lineitem`, and it took that query from 0.383 s to 0.212 s against Polars at 0.092.
+
 ### Fixed: a date printed and wrote as a day count
 
 The same erasure as the previous entry, one layer further out. A date is stored as a day count and a timestamp as a tick count, and both of the places that turn a column into text read the physical layout and dispatched on it, so `print(df)` showed a date as `10471` and `write_csv` wrote `10471`. The second is the worse of the two, because a reader parsing that file back gets an integer where the schema promised a date, and the round trip the writer claims for nulls did not hold for dates at all.
