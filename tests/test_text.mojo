@@ -234,6 +234,46 @@ def test_a_null_in_the_mask_drops_the_row() raises:
     assert_equal(kept.text(0), "a")
 
 
+def test_a_substring_is_a_series_and_a_pattern_is_a_mask() raises:
+    # `str_slice` gives a series back rather than a mask, because the answer is
+    # text and text is what the next operation wants. That is the opposite of
+    # the four pattern methods below it and it is not an inconsistency: those
+    # answer a question and this one produces a column.
+    var s = Series(
+        "phone", strings_from_list(["23-768-687-3665", "13-750-942-6364"])
+    )
+    var code = s.str_slice(0, 2)
+    assert_equal(code.text(0), "23")
+    assert_equal(code.text(1), "13")
+    assert_equal(code.name, "phone")
+    assert_equal(len(code), 2)
+
+    # To the end by default, and a negative offset counts back from it.
+    assert_equal(s.str_slice(3).text(0), "768-687-3665")
+    assert_equal(s.str_slice(-4).text(0), "3665")
+
+
+def test_a_substring_on_a_number_column_is_refused() raises:
+    var s = Series("n", Array[DType.int64](3))
+    with assert_raises(contains="not a string column"):
+        _ = s.str_slice(0, 2)
+
+
+def test_a_substring_keeps_the_nulls_where_they_were() raises:
+    var builder = StringBuilder(capacity=3)
+    builder.append("abcdefghijklmnop".as_bytes())
+    builder.append_null()
+    builder.append("qrst".as_bytes())
+    var s = Series("t", builder^.finish())
+
+    var cut = s.str_slice(1, 3)
+    assert_true(cut.is_valid(0))
+    assert_false(cut.is_valid(1))
+    assert_true(cut.is_valid(2))
+    assert_equal(cut.text(0), "bcd")
+    assert_equal(cut.text(2), "rst")
+
+
 def test_a_pattern_filter_is_a_mask_and_then_a_filter() raises:
     # The four `str_` methods hand back a mask rather than a series, the way
     # `is_null` does, because a mask is what `filter` takes and turning it into
