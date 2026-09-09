@@ -52,15 +52,17 @@ from firepanda.kernel.pattern import (
     text_ends_with,
     text_starts_with,
 )
-from firepanda.kernel.sort import argsort_any
+from firepanda.kernel.pick import text_pick
 from firepanda.kernel.scalar import (
     text_contains_in_order_scalar,
     text_contains_scalar,
     text_ends_with_scalar,
     text_is_in_scalar,
+    text_pick_scalar,
     text_starts_with_scalar,
     text_substring_scalar,
 )
+from firepanda.kernel.sort import argsort_any
 from firepanda.kernel.substr import TO_END, text_substring
 from firepanda.kernel.text import compare_text, compare_text_const
 from firepanda.testing.rng import Rng
@@ -757,6 +759,86 @@ def check_text_is_in(
             )
 
 
+def check_text_pick(
+    column: StringArray,
+    values: List[String],
+    mut rng: Rng,
+    step: Int,
+    seed: UInt64,
+) raises:
+    """Chooses between the column and a shuffle of itself, against the twin.
+
+    The condition is drawn with nulls in it on purpose, because the rule that a
+    null takes the false side is the one thing about this kernel that is not
+    obvious, and a condition with no nulls in it never exercises the rule.
+
+    The second column is a gather from the first, so the two sides agree on
+    their bytes often enough that a kernel taking the wrong side would still
+    produce something plausible, which is what makes the comparison worth
+    running.
+
+    Args:
+        column: The column under test.
+        values: The reference elements.
+        rng: The generator.
+        step: The case number, for the failure message.
+        seed: The seed, for the failure message.
+
+    Raises:
+        If the kernel and the twin disagree anywhere.
+    """
+    var n = len(column)
+    var builder = StringBuilder(capacity=n)
+    for _ in range(n):
+        if len(values) > 0 and rng.next_bool():
+            builder.append(values[rng.next_below(len(values))].as_bytes())
+        else:
+            builder.append_null()
+    var other = builder^.finish()
+
+    var cond = Array[DType.bool](n)
+    for i in range(n):
+        var draw = rng.next_below(3)
+        if draw == 2:
+            cond.set_null(i)
+        else:
+            cond.set_valid(i, draw == 1)
+
+    var got = text_pick(cond, column, other)
+    var want = text_pick_scalar(cond, column, other)
+    for i in range(len(got)):
+        if got.is_valid(i) != want.is_valid(i):
+            raise Error(
+                String(
+                    "case ",
+                    step,
+                    " seed ",
+                    seed,
+                    ": pick row ",
+                    i,
+                    " validity ",
+                    got.is_valid(i),
+                    " against ",
+                    want.is_valid(i),
+                )
+            )
+        if got.is_valid(i) and got[i] != want[i]:
+            raise Error(
+                String(
+                    "case ",
+                    step,
+                    " seed ",
+                    seed,
+                    ": pick row ",
+                    i,
+                    " gave ",
+                    got[i],
+                    " against ",
+                    want[i],
+                )
+            )
+
+
 def check_text_compare(
     column: StringArray,
     values: List[String],
@@ -1094,8 +1176,11 @@ def main() raises:
         elif op < 90:
             check_text_substring(column, rng, step, options.seed)
 
-        elif op < 92:
+        elif op < 91:
             check_text_is_in(column, values, rng, step, options.seed)
+
+        elif op < 92:
+            check_text_pick(column, values, rng, step, options.seed)
 
         elif op < 95 and len(values) > 0:
             # The permutation is compared position by position rather than the

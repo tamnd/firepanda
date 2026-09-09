@@ -55,6 +55,7 @@ from firepanda.kernel.pattern import (
     text_ends_with,
     text_starts_with,
 )
+from firepanda.kernel.pick import pick_any
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.sort import argsort_any, is_sorted_any
 from firepanda.kernel.substr import TO_END, text_substring
@@ -538,6 +539,33 @@ struct Series(Copyable, Movable, Sized, Writable):
             If the two are not the same type.
         """
         return is_in_any(self.values, values.values)
+
+    def pick(self, cond: Array[DType.bool], otherwise: Series) raises -> Series:
+        """Returns a series taking each row from this one or from another.
+
+        This is SQL's `CASE WHEN cond THEN self ELSE otherwise END`. A null in
+        the condition takes the other side rather than answering null, which is
+        SQL's rule and is the rule `filter` already follows when it drops a row
+        on a null in its mask. polars answers null there instead.
+
+        The name is not `where` because that is a keyword the formatter will not
+        accept as an identifier, and it is not `case_when` because there is no
+        chain of conditions here, only one.
+
+        Args:
+            cond: The condition, as tall as the series. Usually a mask that came
+                out of a comparison or one of the `str_` methods.
+            otherwise: The series to take a row from where the condition does
+                not hold. Must be the same type and length.
+
+        Returns:
+            A series with this one's name, taking each row from whichever side
+            the condition chose.
+
+        Raises:
+            If the two are not the same type, or the lengths disagree.
+        """
+        return Series(self.name, pick_any(cond, self.values, otherwise.values))
 
     def str_contains(self, needle: StringSlice) raises -> Array[DType.bool]:
         """Returns a mask that is true where the text holds a substring.

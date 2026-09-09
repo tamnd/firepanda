@@ -8,6 +8,30 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A conditional column, and a validity that costs nothing when nobody is null
+
+`CASE WHEN c THEN a ELSE b END`, which is `Series.pick` at the frame level and four functions in `kernel/pick.mojo`. TPC-H wants it three times and all three want a different shape of it: q8 and q14 put a column on the true side and a zero on the false side, q12 puts a one against a zero, and the general form takes two columns. Each of those is its own entry point rather than one function against a broadcast column, because broadcasting a constant is a second allocation and a second stream of loads for something that fits in a register.
+
+Two decisions in it are worth writing down.
+
+The first is what a null condition means, and the answer is that it takes the false side. That is SQL's rule, an unknown is not a true, and it is already what `filter` does when it drops a row on a null in its mask. polars answers null there instead, and the binding layer is where that difference gets paid. The part that makes it worth a paragraph is that it is free: `kernel/__init__.mojo` says a null value is zero in the values buffer, so a null in a bool column is already a `False` sitting in memory, and a loop that reads the condition's values and never looks at its validity gets exactly the rule above with no mask and no second pass. The same invariant covers the output, which is why this is the only elementwise kernel in the package that does not call `repair_range`: a row taking a null from either side copies that side's zero with it.
+
+The second is the output's validity, the one thing a SIMD select cannot compute in the value registers. When neither side has a null there is nothing to compute at all, and that is the common case. When one does, the bits are packed out of the condition bytes a word at a time inside the worker that just wrote those rows, which is the argument `kernel/mask.mojo` already makes for repairing in the worker. Building it in a serial pass afterwards was measured first and cost 0.738 nanoseconds a row against 0.289 for the same work moved into the workers, both anchored on the same control. That is the difference between a null on one side costing 2.7 times what no nulls cost and costing 1.4 times.
+
+Writing that build is also what turned up a bug in the version before it. `pick_const` builds the validity as "valid wherever the condition is false, because the constant is", and every bit past the end of the last word is a false. Left unmasked those come out set, and `count_ones` walks whole words, so a column would report fewer nulls than it has. Reading any row would never show it. There is a test that asks for the count rather than the rows, and it fails without the mask.
+
+Nanoseconds a row on an i9-13900K over 1,048,576 int64 rows, one session, control `text/equal_constant` at 1.857 against its anchored 1.874. polars 1.44.1, pandas 3.0.5, duckdb 1.5.5, DuckDB read back through `.arrow()`.
+
+| shape | firepanda | polars | pandas | duckdb |
+| --- | --- | --- | --- | --- |
+| two columns | 0.199 | 0.695 | 0.938 | 1.045 |
+| a column and a constant | 0.157 | 0.446 | 0.822 | 0.737 |
+| two constants | 0.142 | 0.183 | 0.737 | 0.954 |
+
+Between 2.8 and 6.7 times ahead everywhere except one, and the exception is worth naming rather than leaving for a reader to find. Against polars on two constants it is 1.29 times, not two. With two constants there is nothing to read but the condition and nothing to do but store, so all four are writing a column as fast as the machine will write one, and there is very little left in there to win.
+
+The text form is built through a builder on one core, unlike the three number forms. A text output is a payload whose length nobody knows until the rows are chosen, and the two pass shape `substr.mojo` uses is the right answer for it too, but the place to spend that work first is `filter` and `take`, which run on every query rather than on none of them.
+
 ## [0.6.53] - 2026-09-09
 
 Built against Mojo 1.0.0 (ed45d567).

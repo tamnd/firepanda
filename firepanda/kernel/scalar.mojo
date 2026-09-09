@@ -2203,3 +2203,110 @@ def text_is_in_scalar(
                 hit = True
         out.set_valid(i, hit)
     return out^
+
+
+def pick_scalar[
+    dt: DType
+](cond: Array[DType.bool], a: Array[dt], b: Array[dt]) -> Array[dt]:
+    """Chooses between two columns a row at a time, one row at a time.
+
+    Written out the way the rule reads, which is the only thing that can say
+    whether the select in `pick.mojo` and the words it builds its validity out
+    of agree with each other.
+
+    Args:
+        cond: The condition. A null in it takes the false side.
+        a: The true side.
+        b: The false side.
+
+    Parameters:
+        dt: The dtype of both sides.
+
+    Returns:
+        A column of that dtype.
+    """
+    var out = Array[dt](len(cond))
+    for i in range(len(cond)):
+        var yes = cond.is_valid(i) and cond[i]
+        ref side = a if yes else b
+        if side.is_valid(i):
+            out.set_valid(i, side[i])
+        else:
+            out.set_null(i)
+    return out^
+
+
+def pick_const_scalar[
+    dt: DType
+](cond: Array[DType.bool], a: Array[dt], b: Scalar[dt]) -> Array[dt]:
+    """Chooses between a column and a constant, one row at a time.
+
+    Args:
+        cond: The condition.
+        a: The true side.
+        b: The false side.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column of that dtype.
+    """
+    var out = Array[dt](len(cond))
+    for i in range(len(cond)):
+        if not (cond.is_valid(i) and cond[i]):
+            out.set_valid(i, b)
+        elif a.is_valid(i):
+            out.set_valid(i, a[i])
+        else:
+            out.set_null(i)
+    return out^
+
+
+def pick_constants_scalar[
+    dt: DType
+](cond: Array[DType.bool], a: Scalar[dt], b: Scalar[dt]) -> Array[dt]:
+    """Chooses between two constants, one row at a time.
+
+    Args:
+        cond: The condition.
+        a: The value where it holds.
+        b: The value where it does not.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column of that dtype, with no nulls.
+    """
+    var out = Array[dt](len(cond))
+    for i in range(len(cond)):
+        out.set_valid(i, a if cond.is_valid(i) and cond[i] else b)
+    return out^
+
+
+def text_pick_scalar(
+    cond: Array[DType.bool], a: StringArray, b: StringArray
+) raises -> StringArray:
+    """Chooses between two text columns, one row at a time.
+
+    Args:
+        cond: The condition.
+        a: The true side.
+        b: The false side.
+
+    Returns:
+        A text column.
+
+    Raises:
+        Error: Never.
+    """
+    var builder = StringBuilder(capacity=len(cond))
+    for i in range(len(cond)):
+        var yes = cond.is_valid(i) and cond[i]
+        ref side = a if yes else b
+        if side.is_valid(i):
+            builder.append(side.unsafe_bytes(i))
+        else:
+            builder.append_null()
+    return builder^.finish()
