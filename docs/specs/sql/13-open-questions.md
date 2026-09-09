@@ -78,7 +78,15 @@ Document 09 notes that a twelve to sixteen byte inline prefix beside the pointer
 
 It is a storage layer change in `array/strview.mojo`, which already reserves a sixteen byte view layout, so the groundwork may already be there. The question is sequencing, because SQL string work in S3 through S5 will be written against whatever representation exists and doing it twice is waste. Settle before S3 whether the layout is final.
 
-## 12. Questions that are settled and should stay settled
+## 12. The vendored grammar disagrees with DuckDB's own parser on `COPY`. Report upstream
+
+`CopyFileName <- CopyFileNameExpression / CopyFileNameStringLiteral / CopyFileNameIdentifier / CopyFileNameIdentifierColId`, and `CopyFileNameIdentifier` is a bare `Identifier` while `CopyFileNameIdentifierColId` is `Identifier '.' ColId`. PEG choice is ordered, so the bare alternative always wins and the qualified one is dead. `COPY t TO a.b` is a statement DuckDB's own parser accepts and DuckDB's own grammar cannot, which the generated differential in document 11 found on its first run.
+
+Swapping the two alternatives fixes it and nothing else changes, because a bare identifier is still reached when there is no dot. We are not making that edit. The grammar is vendored byte for byte and CI enforces it, and the moment a local edit exists the compatibility claim becomes compatible except for the edits and nobody will remember what they were. The harness carries the case in a `known` list with the reason instead.
+
+So the question is not what to do here, it is when the fix lands upstream. Report it, and drop the entry from `known` at the grammar bump that carries the fix.
+
+## 13. Questions that are settled and should stay settled
 
 Recorded so they are not reopened by each new contributor.
 

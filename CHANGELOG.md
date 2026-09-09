@@ -56,6 +56,20 @@ Three parses of a query that has already failed sounds expensive and is not. The
 
 The guards matter as much as the search, because a hint that is a coin toss is worse than no hint. A word shorter than three bytes gets nothing, since every two letter word is one edit from a dozen keywords and means none of them. More than three candidates gets nothing, since that is a list rather than a hint. A keyword the query spelled right is never a candidate for itself. And the suggestions come out in the order the grammar tried them, which is the order the alternatives are written in and is therefore upstream's own opinion about what is likely.
 
+### The grammar now writes SQL as well as reading it
+
+`pixi run differential-sql-generated` generates 25,000 statements out of the vendored grammar and runs each one through both parsers. It found a bug on its first run, which was the point.
+
+DuckDB's test corpus is what the existing differential compares over, and it is bounded by what somebody happened to write a test for. Whole rules are in there once or not at all, and a rule with no test behind it is a rule where a mistake sits until a user finds it. The grammar is declarative, so it can be walked the other way: choose an alternative instead of trying each one, write a token instead of consuming it, and a statement comes out that is built from the same 1,187 rules the matcher reads.
+
+The walk terminates for three reasons. Every node carries a cost, meaning the fewest tokens that finish it, worked out once by fixpoint before anything is generated. A token budget counts down, and once it is gone every choice takes its cheapest alternative, which for any reachable rule is a finite string. And a depth cap stops the walk far below the matcher's own guard, because a statement the generator wrote and the matcher then refused for running out of stack teaches nobody anything.
+
+Not all of it parses, and the reason is worth stating rather than hiding. Satisfying a negative lookahead means knowing what it would have matched, which is the problem the parser exists to solve, so the walk skips those nodes and sometimes writes the thing the rule was there to forbid. About four in ten of the output is refused somewhere. That costs nothing, because the assertion is not that the generator writes good SQL, it is that the two parsers agree about whatever it writes.
+
+The two directions are read the way they are in the corpus differential. DuckDB accepting something firepanda rejects has a ceiling of zero. The other way runs at about 55 per cent, which is much higher than the corpus and is expected: the generator samples the grammar rather than the language people write, so it spends most of its time in rules the released oracle has never been asked about, where the corpus spends almost none. `DROP EXTENSION REPOSITORY` and `DISCONNECT` are both in the vendored development grammar and neither is in the oracle. That side is a rate rather than a count, so the ceiling still holds when somebody passes `--cases`.
+
+The bug it found is in the grammar rather than in the matcher. `CopyFileName` lists a bare `Identifier` ahead of `Identifier '.' ColId`, and PEG choice is ordered, so the bare one always wins and the qualified alternative can never be reached. `COPY t TO a.b` is a statement DuckDB's own parser accepts and DuckDB's own grammar cannot. The grammar is vendored byte for byte and CI enforces that, so the fix belongs upstream and not here. The harness carries the case in a `known` list with the reason instead, which is what lets the ceiling above stay at zero and mean something.
+
 ## [0.6.53] - 2026-09-09
 
 Built against Mojo 1.0.0 (ed45d567).
