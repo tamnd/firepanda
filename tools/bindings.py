@@ -432,6 +432,138 @@ def _named_signature(py: str, fill_value: bool) -> str:
     return ", ".join(parts)
 
 
+PLAIN: tuple[tuple[str, str], ...] = (
+    ("mean", "The average of the values."),
+    ("min", "The smallest value."),
+    ("max", "The largest value."),
+    ("median", "The middle value."),
+    ("skew", "The unbiased skew, normalised by N-1."),
+)
+"""The reductions whose only arguments are the four every reduction has."""
+
+SPREAD: tuple[tuple[str, str], ...] = (
+    ("std", "The sample standard deviation, normalised by N-1 by default."),
+    ("var", "The unbiased variance, normalised by N-1 by default."),
+    ("sem", "The unbiased standard error of the mean, normalised by N-1 by default."),
+)
+"""The three that also take a delta degrees of freedom."""
+
+
+def _reductions(py: str) -> tuple[Member, ...]:
+    """Writes the twelve reduction members for one class.
+
+    A loop for the same reason `_operators` is one, and under the same
+    restriction: what varies between these rows is a word and a parameter list,
+    and nothing here decides what a reduction does. The word crosses the boundary
+    and `firepanda/py/reduce.mojo` reads it, the arguments are checked in
+    `_pandas.py`, and every body below is one call to a mixin helper.
+
+    The signatures are pandas' own, measured rather than copied from the
+    documentation, and the two classes differ in ways that are not cosmetic. A
+    series returns a value and a frame returns a series of them. `quantile` and
+    `nunique` and `count` take positional arguments while the other nine are
+    keyword only. A frame's `quantile` takes two parameters a series' does not.
+    The signature parity test compares the whole list in order, so each of those
+    is written out rather than shared.
+
+    Args:
+        py: The class name, `DataFrame` or `Series`.
+
+    Returns:
+        The members, in the order they should be written out.
+    """
+    frame = py == "DataFrame"
+    over = "column" if frame else "row"
+    gives = "Series" if frame else "Any"
+    plural = "One value per column." if frame else ""
+    tail = ", **kwargs: Any"
+    out: list[Member] = []
+
+    for name, what in PLAIN + (("sum", "The sum of the values."),):
+        start = "0" if frame or name != "sum" else "None"
+        parts = [
+            "*",
+            f"axis: Any = {start}",
+            "skipna: bool = True",
+            "numeric_only: bool = False",
+        ]
+        if name == "sum":
+            parts.append("min_count: int = 0")
+        count = "min_count" if name == "sum" else "0"
+        out.append(
+            Member(
+                name=name,
+                kind="method",
+                signature=", ".join(parts) + tail,
+                body=f'self._reduce("{name}", 0.0, axis, skipna, numeric_only, {count})',
+                doc=f"{what} Over the {over}s. {plural}".strip(),
+                returns=gives,
+            )
+        )
+
+    for name, what in SPREAD:
+        out.append(
+            Member(
+                name=name,
+                kind="method",
+                signature=(
+                    f"*, axis: Any = {'0' if frame else 'None'}, skipna: bool = True,"
+                    " ddof: int = 1, numeric_only: bool = False" + tail
+                ),
+                body=f'self._reduce("{name}", float(ddof), axis, skipna, numeric_only, 0)',
+                doc=f"{what} Over the {over}s. {plural}".strip(),
+                returns=gives,
+            )
+        )
+
+    quantile = (
+        "q: Any = 0.5, axis: Any = 0, numeric_only: bool = False,"
+        ' interpolation: str = "linear", method: str = "single"'
+        if frame
+        else 'q: Any = 0.5, interpolation: str = "linear"'
+    )
+    body = (
+        "self._quantile(q, axis, numeric_only, interpolation, method)"
+        if frame
+        else "self._quantile(q, interpolation)"
+    )
+    out.append(
+        Member(
+            name="quantile",
+            kind="method",
+            signature=quantile,
+            body=body,
+            doc=f"The value at the given quantile. Over the {over}s. {plural}".strip(),
+            returns=gives,
+        )
+    )
+
+    out.append(
+        Member(
+            name="nunique",
+            kind="method",
+            signature="axis: Any = 0, dropna: bool = True" if frame else "dropna: bool = True",
+            body="self._nunique(axis, dropna)" if frame else "self._nunique(0, dropna)",
+            doc=f"How many distinct values there are. Over the {over}s. {plural}".strip(),
+            returns=gives,
+        )
+    )
+
+    if frame:
+        out.append(
+            Member(
+                name="count",
+                kind="method",
+                signature="axis: Any = 0, numeric_only: bool = False",
+                body='self._reduce("count", 0.0, axis, True, numeric_only, 0)',
+                doc="How many values are not missing. Over the columns. One value per column.",
+                returns="Series",
+            )
+        )
+
+    return tuple(out)
+
+
 FRAME = Exposed(
     mojo="PyDataFrame",
     name="DataFrame",
@@ -487,6 +619,13 @@ FRAME = Exposed(
             doc="Several columns, as a frame.",
             params=(("names", "list[str]"),),
             returns="DataFrame",
+        ),
+        Binding(
+            mojo="PyDataFrame.reduce",
+            name="reduce",
+            doc="Every column reduced to one value, as a series of them.",
+            params=(("kind", "str"), ("param", "float")),
+            returns="Series",
         ),
         Binding(
             mojo="PyDataFrame.labels",
@@ -645,6 +784,7 @@ FRAME = Exposed(
             doc="The frame as a stream of one batch, as an arrow_array_stream PyCapsule.",
             returns="object",
         ),
+        *_reductions("DataFrame"),
         *_operators("DataFrame"),
     ),
 )
@@ -709,6 +849,13 @@ SERIES = Exposed(
             name="labels",
             doc="The row labels, as an index.",
             returns="Index",
+        ),
+        Binding(
+            mojo="PySeries.reduce",
+            name="reduce",
+            doc="The whole column reduced to one Python value.",
+            params=(("kind", "str"), ("param", "float")),
+            returns="object",
         ),
         Binding(
             mojo="PySeries.binary_series",
@@ -869,6 +1016,7 @@ SERIES = Exposed(
             doc="The column's Arrow data, as an arrow_schema and an arrow_array PyCapsule.",
             returns="tuple[object, ...]",
         ),
+        *_reductions("Series"),
         *_operators("Series"),
     ),
 )
@@ -1664,7 +1812,7 @@ def wrapper() -> str:
             else:
                 params = ["self"] + (m.signature.split(", ") if m.signature else [])
                 out.extend(_python_def("    ", m.name, params, m.returns))
-            out.append(f'        """{m.doc}"""')
+            out.extend(_docstring(m.doc, "        "))
             body = f"{m.wraps}._wrap({m.body})" if m.wraps else m.body
             out.extend(_guarded(f"return {body}", "        "))
 

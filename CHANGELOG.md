@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### The twelve reductions a pandas program can finally call
+
+`s.sum()`, `s.mean()`, `s.min()`, `s.max()`, `s.median()`, `s.skew()`, `s.std()`, `s.var()`, `s.sem()`, `s.quantile()`, `s.nunique()` and the same list on a frame, plus `df.count()`, now work from Python. They worked in Mojo the whole time. The core has had seventeen reductions behind `AggKind` since the aggregation work landed, and the Python extension exposed none of them, which meant the second most written expression in pandas after `df["a"]` was not available to a pandas program. This is the binding catching up with the library rather than the library learning anything.
+
+There is one new decision in it and it is about shape. `DataFrame.agg_all` gives back a one row frame, which lets every column keep its own type, and pandas gives back a series, which forces the answers to share one type. So the frame path picks a type: if the columns all reduce to the same one it stays, if they are all numbers and differ they widen to float64 the way pandas widens them, and if they have nothing in common the call is refused with that sentence rather than being widened to text. pandas answers an object series in that last case, holding a number and a string beside each other, and Arrow has no object column to answer with, so a refusal that names the reason is the honest answer and a silent stringification is not.
+
+Five of the seventeen are not here. `corr` and `cov` need a second column and the index alignment that goes with it, `size`, `first` and `last` are grouped shapes rather than whole column answers, and each is its own piece of work rather than a line in a table.
+
+Every argument that pandas declares and this does not implement raises rather than being ignored. `skipna=False`, `min_count`, `numeric_only`, a non-linear `interpolation`, a list of quantiles, `nunique(dropna=False)` and a frame reduction over `axis=1` each refuse by name with the reason in the message. A parameter that is accepted and quietly dropped gives the right answer at its default and the wrong one everywhere else, which is the failure that takes longest to find, and there is a test per refusal so that none of them can be dropped later by accident.
+
 ### A missing row that changes its spelling
 
 Rendering a float column as text writes a null where the column held a NaN, rather than writing the word nan as a value. A float column has one way to say a row is missing and it is a NaN, a text column has one way to say it and it is a cleared validity bit, and a cast that crosses between them has to move the missing row from the values into the bitmap or it turns an absent row into a three letter string. pandas 3 does the same thing, since it gave the string dtype a missing value of its own, and `pd.Series([1.5, float("nan")]).astype(str)` comes back with one value and one missing row.
