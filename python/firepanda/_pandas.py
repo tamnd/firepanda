@@ -15,6 +15,13 @@ rather than this.
 The rule for what belongs here is narrow on purpose. A member goes here when what
 it does depends on its argument, and nowhere else. Anything that is one call with
 a different name belongs in the table where it can be checked against pandas.
+
+`to_datetime` at the bottom is the one thing here that is not a member, and it is
+here for the same reason the members are. It is a module level function in pandas
+rather than a method, so nothing inherits it and `__init__.py` exports it
+directly, but it is ten parameters of which five are refused by name, which is
+exactly the shape the generator cannot write and exactly the shape `_refuse` and
+`_held_at` exist for.
 """
 
 from __future__ import annotations
@@ -672,17 +679,26 @@ class SeriesMixin:
         name: Any = None,
         copy: bool | None = None,
     ) -> None:
-        """Builds a series from a sequence of values.
+        """Builds a series from a sequence of values, or copies another one.
 
         Same shape as the frame constructor and refusing the same way, with the
         one difference that `name` is honoured, since a series carries its name
         and there is nothing to implement.
+
+        A series arriving as the data is unwrapped and handed across as the
+        extension object it holds, so the extension can copy the column instead
+        of iterating it. Going out through a Python list and back would infer
+        the type again off the values, which loses a column of instants
+        entirely and is slow for the columns it does not lose. It has to be
+        unwrapped here because what a user holds is the generated wrapper and
+        the extension can only recognise its own type.
         """
         _refuse("index", index, "putting labels on a series as it is built is not written")
         _refuse("dtype", dtype, "casting on the way in needs the cast machinery")
         _refuse("copy", copy, "there is exactly one behaviour and it always copies")
+        source = data._inner if isinstance(data, SeriesMixin) else data
         try:
-            self._inner = _firepanda.Series(data, "" if name is None else str(name))
+            self._inner = _firepanda.Series(source, "" if name is None else str(name))
         except Exception as error:
             raise translate(error) from None
 
@@ -1490,3 +1506,101 @@ def _unwrap(value: Any, name: str) -> Any:
     if isinstance(value, (list, tuple)):
         return _firepanda.Index(list(value), None)
     raise TypeError(f"{name} must be an Index or a list of labels, not a {type(value).__name__}")
+
+
+def to_datetime(
+    arg: Any,
+    errors: str = "raise",
+    dayfirst: bool = False,
+    yearfirst: bool = False,
+    utc: bool = False,
+    format: str | None = None,
+    exact: Any = NO_DEFAULT,
+    unit: str | None = None,
+    origin: Any = "unix",
+    cache: bool = True,
+) -> Any:
+    """Reads text or whole numbers as instants, which is `pandas.to_datetime`.
+
+    Hand written rather than generated for the reason the top of this file
+    gives: what it does depends on its arguments. Ten of them are declared,
+    four are implemented, one is accepted and has no effect, and five are
+    refused by name, which is the pattern `_refuse` exists for.
+
+    What it answers is a `Series` and pandas answers a `DatetimeIndex` when it
+    is handed a list. That is the one difference a caller will meet on the
+    first line they write, and it is not hidden: firepanda's `Index` is a
+    labels object with none of the calendar members a `DatetimeIndex` carries,
+    so answering one would be a name that resolves and then has nothing on it,
+    which document 07 argues is worse than a name that resolves to something
+    honest. See #354.
+
+    The format is worked out from the first row that is not missing, and only
+    ISO 8601 is recognised. pandas guesses more than that, including
+    `01/02/2026`, and decides for itself which of the two numbers is the month.
+    A wrong guess there is a column of instants that are wrong by up to eleven
+    months and that nothing anywhere reports, so firepanda refuses the shapes
+    it does not recognise and names the value in the message. Passing `format`
+    reads anything, including the shapes the guesser will not touch.
+
+    Args:
+        arg: The values. A firepanda series, or anything a series is built
+            from, such as a list of strings or a list of whole numbers.
+        errors: `raise` to stop on the first row that will not read, or
+            `coerce` to turn that row into a missing one.
+        dayfirst: Refused. Only ISO 8601 is guessed and it has one order.
+        yearfirst: Refused, for the same reason.
+        utc: Whether to read every row against UTC, which is the only way a
+            column carrying more than one offset can be read at all.
+        format: The format the text is written in, or None to work it out.
+        exact: Refused. It is a question about a regular expression search that
+            this parser does not do.
+        unit: What whole numbers are counts of, as one of `s`, `ms`, `us` and
+            `ns`. Ignored for text, which pandas ignores it for too.
+        origin: Refused at anything other than `unix`.
+        cache: Accepted and has no effect. pandas caches repeated values to go
+            faster and the answer is the same either way, so honouring the
+            parameter means not changing the answer.
+
+    Returns:
+        A series of instants, null where the input was null and, under
+        `errors="coerce"`, wherever a row would not read.
+
+    Raises:
+        NotImplementedError: For the five refused arguments and for a format
+            firepanda's guesser does not recognise.
+        ValueError: For a row that does not match the format, for a column
+            carrying more than one offset with no `utc`, and for an `errors`
+            that is neither of the two words.
+    """
+    from ._frame import Series
+
+    _held_at("dayfirst", dayfirst, False, "firepanda guesses ISO 8601 and nothing else")
+    _held_at("yearfirst", yearfirst, False, "firepanda guesses ISO 8601 and nothing else")
+    _held_at("origin", origin, "unix", "an epoch other than 1970 has to move every value")
+    if exact is not NO_DEFAULT:
+        raise NotImplementedError(
+            "exact= is not supported yet, because it asks whether the format may match"
+            " part of the value, and this parser reads the whole of it or none of it"
+        )
+    if format in ("mixed", "ISO8601"):
+        raise NotImplementedError(
+            f"format={format!r} is not supported yet, because it asks for the format to"
+            " be worked out per row, and firepanda works one out from the first row and"
+            " holds every other row to it"
+        )
+    if errors not in ("raise", "coerce"):
+        raise ValueError(f"errors must be one of 'raise' or 'coerce', not {errors!r}")
+
+    column = arg if isinstance(arg, SeriesMixin) else Series(arg)
+    try:
+        return Series._wrap(
+            column._inner.to_datetime(
+                "" if format is None else format,
+                "ns" if unit is None else unit,
+                errors == "coerce",
+                utc,
+            )
+        )
+    except Exception as error:
+        raise translate(error) from None

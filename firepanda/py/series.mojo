@@ -74,7 +74,24 @@ struct PySeries(Movable, Writable):
         """
         check_arguments_arity(2, args, "Series")
         var name = String(args[1])
-        if args[0] is Python.none():
+        # A firepanda series arriving here is copied rather than iterated.
+        # `pd.Series(a_series)` is ordinary pandas, and going out through a
+        # Python list and back would infer the type again off the values, which
+        # loses a column of instants entirely and is slow for the columns it
+        # does not lose. An empty name means the caller passed none, so the
+        # source keeps the name it had, which is what pandas does too.
+        var held = Optional[ArcPointer[Series]]()
+        try:
+            held = args[0].downcast_value_ptr[Self]()[].series
+        except:
+            held = Optional[ArcPointer[Series]]()
+
+        if held:
+            var copied = Series(copy=held.value()[])
+            if name.byte_length() != 0:
+                copied.name = name
+            self = Self(ArcPointer(copied^))
+        elif args[0] is Python.none():
             self = Self(ArcPointer(Series(name, empty_column(0))))
         else:
             self = Self(ArcPointer(column_from(name, args[0])))
@@ -417,6 +434,63 @@ struct PySeries(Movable, Writable):
             )
         except e:
             raise retagged(DTYPE, e)
+
+    @staticmethod
+    def to_datetime(
+        py_self: PythonObject,
+        fmt: PythonObject,
+        unit: PythonObject,
+        coerce: PythonObject,
+        utc: PythonObject,
+    ) raises -> PythonObject:
+        """Reads a column of text or of whole numbers as a column of instants.
+
+        `pandas.to_datetime` is a free function and this is a method, for the
+        reason `Series.to_timedelta` gives: the column is the thing being read.
+        The Python layer is where it is a free function again, and where a list
+        or a tuple becomes a series before it arrives here, so everything that
+        reaches this point is already a column.
+
+        Every failure arrives as a `ValueError`, which is what pandas raises
+        for a row that will not parse and for a column carrying offsets it
+        cannot reconcile. pandas raises a `TypeError` for a column whose type
+        has no reading at all, such as a column of booleans, and firepanda
+        raises a `ValueError` there instead. That is a difference worth knowing
+        about and it is recorded rather than hidden. See #353.
+
+        Args:
+            py_self: The series.
+            fmt: The format the text is written in, or the empty string to work
+                it out from the first row that is not missing.
+            unit: What whole numbers are counts of.
+            coerce: Whether a row that will not read becomes missing.
+            utc: Whether to read every row against UTC.
+
+        Returns:
+            A new series of instants.
+
+        Raises:
+            Error: Tagged `value`, for a row that does not match the format, a
+                column carrying more than one offset with no `utc`, and a
+                column whose type has no reading.
+        """
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        Self._held(py_self)[]
+                        .series[]
+                        .to_datetime(
+                            words(fmt, "format"),
+                            words(unit, "unit"),
+                            flag(coerce, "coerce"),
+                            flag(utc, "utc"),
+                        )
+                    )
+                )
+            )
+        except e:
+            raise retagged(VALUE, e)
 
     @staticmethod
     def _other(value: PythonObject, name: String) raises -> ArcPointer[Series]:

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 from . import _firepanda, errors
 from ._frame import DataFrame, Index, Series, from_arrow, read_csv
+from ._pandas import to_datetime
 
 __all__ = [
     "DataFrame",
@@ -45,6 +46,7 @@ __all__ = [
     "errors",
     "from_arrow",
     "read_csv",
+    "to_datetime",
 ]
 
 __version__: str = _firepanda.version()

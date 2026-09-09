@@ -117,6 +117,9 @@ class Series:
     def temporal_word(self, kind: str) -> str:
         """The clock or the resolution of a temporal column, as a string."""
         ...
+    def to_datetime(self, format: str, unit: str, coerce: bool, utc: bool) -> Series:
+        """A column of text or of whole numbers read as a column of instants."""
+        ...
     def binary_series(
         self, other: Series, op: str, flip: bool, fill_value: object | None
     ) -> Series:

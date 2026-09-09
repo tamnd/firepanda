@@ -122,6 +122,30 @@ def test_a_series_is_built_from_a_sequence(firepanda: ModuleType) -> None:
     assert firepanda.Series(["a", "b"]).name == ""
 
 
+def test_a_series_built_from_a_series_is_copied_rather_than_iterated(
+    firepanda: ModuleType,
+) -> None:
+    """`Series(a_series)` keeps the column's type instead of inferring it again.
+
+    It used to go out through a Python list and back, which reads the values
+    and guesses a type off them. That is wrong twice over. It is slow for the
+    columns it gets right, and for a column of instants it gets nothing right
+    at all, since the values it would read are whole numbers and a column of
+    whole numbers is what it would build.
+
+    The name follows pandas: no name given means the source keeps the one it
+    had, and a name given replaces it.
+    """
+    named = firepanda.Series([1, 2, 3], name="qty")
+    assert firepanda.Series(named).name == "qty"
+    assert firepanda.Series(named).tolist() == [1, 2, 3]
+    assert firepanda.Series(named, name="other").name == "other"
+
+    stamps = firepanda.to_datetime(["2026-01-01", "2026-01-02"])
+    assert firepanda.Series(stamps).dtype == stamps.dtype
+    assert firepanda.Series(stamps).tolist() == stamps.tolist()
+
+
 def test_an_empty_constructor_is_empty(firepanda: ModuleType) -> None:
     """Which is what pandas does, and used to be a refusal here."""
     assert firepanda.DataFrame().shape == (0, 0)

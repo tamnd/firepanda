@@ -1289,6 +1289,18 @@ SERIES = Exposed(
             returns="str",
         ),
         Binding(
+            mojo="PySeries.to_datetime",
+            name="to_datetime",
+            doc="A column of text or of whole numbers read as a column of instants.",
+            params=(
+                ("format", "str"),
+                ("unit", "str"),
+                ("coerce", "bool"),
+                ("utc", "bool"),
+            ),
+            returns="Series",
+        ),
+        Binding(
             mojo="PySeries.binary_series",
             name="binary_series",
             doc="An operation between two series, matching rows by label.",

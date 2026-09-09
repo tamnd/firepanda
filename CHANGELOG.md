@@ -8,6 +8,30 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Text and whole numbers read as a column of instants
+
+`firepanda.to_datetime` exists, and with it the first way to build a timestamp column that is not Arrow. Every temporal test in the library until now started by importing pyarrow, and every pandas program starts by calling this, which is the gap it closes.
+
+The reading half of the calendar is new. `firepanda/kernel/parse_time.mojo` is the inbound twin of `temporal.mojo`, and it shares the format machinery rather than copying it: `parse_format` turns a format string into a list of steps, the renderer walks that list writing bytes, and the reader now walks the same list reading them. A directive that one of them understands and the other does not is a compile error rather than a pair of tables that drift. `days_from_civil` is the exact inverse of the `civil_from_days` the renderer already had, and the two are checked against each other over every day from 1600 to 2400, which covers the 1600 and 2000 leap centuries and the 1700, 1800, 1900, 2100, 2200 and 2300 non leap ones.
+
+There is no SIMD twin and no scalar twin, which every other kernel has. The twin here is the round trip: ten thousand instants are rendered by `temporal_strftime` and read back by the parser, and the two have to agree. A scalar reimplementation of the same parse would be the same code written twice and would agree with itself for the same reasons.
+
+The result unit is microseconds unless a row carries more than six fraction digits, in which case it is nanoseconds. That is what pandas 3 does and it is not what the kernel would pick on its own, since a column of whole seconds fits in seconds. A caller who reads two columns and lines them up should not have to think about which one happened to have a fractional second in it.
+
+Only ISO 8601 is guessed, and the guess is made once from the first row that is not missing. pandas also reads `01/02/2026` and decides for itself which of the two numbers is the month. Somebody who wrote that meaning the first of February gets a column wrong by up to eleven months, with nothing anywhere reporting it, and there is no later check that catches it because every value is a real date. So firepanda says it does not recognise the shape and names the value, and passing `format` reads anything, including the shapes the guesser will not touch. Holding every row to the first row's format is what pandas does too, and it raises there as well.
+
+A row carrying an offset gives a column that knows which clock it is on, spelled the way pandas spells it, so `2026-01-01T14:00:00+02:00` gives `datetime64[us, UTC+02:00]`. Two different offsets in one column have no single clock to be read against, and that is an error naming `utc=True` as the way out, which is the pandas message as well.
+
+Empty, `NaT` and `nan` are the words that mean a missing row, and `null` is not one of them. That list is copied from pandas exactly rather than tidied up, `nan` included, since a compatibility layer that is stricter than the thing it copies is still incompatible with it.
+
+`errors="coerce"` turns a row that will not read into a missing one, `errors="raise"` stops on it, and there is no third word. `dayfirst`, `yearfirst`, `exact`, `origin` away from `unix`, and `format` at `"mixed"` or `"ISO8601"` are declared and refused by name with the reason in the message. `cache` is accepted and has no effect, because it is a speed hint that cannot change an answer, and refusing an argument nobody can observe would fail calls that are asking for nothing.
+
+The answer is a `Series` where pandas hands back a `DatetimeIndex` for a list. firepanda's `Index` is a labels object with none of the calendar members a `DatetimeIndex` carries, so answering one would be a name that resolves and then has nothing on it. A `Series` has the `dt` accessor, which is what nearly every use of this reaches for next.
+
+`firepanda.Series(a_series)` now copies the column instead of iterating it. It used to go out through a Python list and back, which inferred the type again off the values and lost a column of instants entirely.
+
+This is the first module level function in the package written by hand rather than generated. The generator writes one call per entry and this is ten parameters of which five are refused, which is the shape `_pandas.py` exists for. Being hand written is why it is named in the signature parity walk explicitly: a signature nothing generates is a signature nothing keeps in step.
+
 ### The dt accessor a pandas program can finally reach
 
 `s.dt` now exists and carries thirty seven names. Twenty four are the calendar and clock parts that take nothing and answer a column, `tz` and `unit` answer a word, `normalize`, `floor`, `ceil`, `round`, `as_unit`, `day_name`, `month_name`, `strftime`, `tz_convert` and `tz_localize` are the methods, and `isocalendar` answers a frame of three columns. Every one of them was in the core already and none of them was reachable from Python, which is the third time this shape of gap has turned up and the third time it is the binding catching up rather than the library learning anything.

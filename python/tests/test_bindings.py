@@ -41,6 +41,15 @@ needs_pandas = pytest.mark.skipif(
     importlib.util.find_spec("pandas") is None, reason="pandas is not installed"
 )
 
+HAND_WRITTEN = ("to_datetime",)
+"""The module level names that are written by hand rather than generated.
+
+They are here so the signature parity walk still reaches them. A name goes on
+this list when what it does depends on its arguments, which is the same rule
+`_pandas.py` uses for the members, and it has to be a name pandas has too since
+the walk compares against a running pandas.
+"""
+
 
 def test_the_generated_files_are_what_the_table_says() -> None:
     """The three generated files match the table they came from.
@@ -271,6 +280,14 @@ def test_the_python_signature_matches_pandas(firepanda: ModuleType) -> None:
         if theirs is None:
             continue
         compare(function.name, getattr(firepanda, function.name), theirs)
+
+    # `to_datetime` is a module level name that is not in the table, because it
+    # is ten parameters of which five are refused by name and the generator
+    # writes one call per entry. Being hand written is exactly why it is listed
+    # here rather than left out: a signature nothing generates is a signature
+    # nothing keeps in step, and this is the check that does.
+    for name in HAND_WRITTEN:
+        compare(name, getattr(firepanda, name), getattr(pd, name))
 
     assert not problems, "\n".join(problems)
 
