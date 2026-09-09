@@ -103,6 +103,7 @@ from .group import (
     group_var,
 )
 from .mask import apply_validity, combined_validity
+from .member import is_in, is_in_any, text_is_in
 from .nulls import (
     all_valid_mask,
     coalesce,

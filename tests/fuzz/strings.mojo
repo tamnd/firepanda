@@ -24,7 +24,11 @@ from std.time import perf_counter_ns
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
-from firepanda.array.strings import StringArray, StringBuilder
+from firepanda.array.strings import (
+    StringArray,
+    StringBuilder,
+    strings_from_list,
+)
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.hash.factorize import (
     _factorize_strings_parallel,
@@ -41,6 +45,7 @@ from firepanda.kernel.compare import (
     CMP_NE,
 )
 from firepanda.kernel.group import AggKind, aggregate_group_any
+from firepanda.kernel.member import TEXT_LINEAR_MAX, text_is_in
 from firepanda.kernel.pattern import (
     text_contains,
     text_contains_in_order,
@@ -52,6 +57,7 @@ from firepanda.kernel.scalar import (
     text_contains_in_order_scalar,
     text_contains_scalar,
     text_ends_with_scalar,
+    text_is_in_scalar,
     text_starts_with_scalar,
     text_substring_scalar,
 )
@@ -678,6 +684,79 @@ def check_text_substring(
             )
 
 
+def check_text_is_in(
+    column: StringArray,
+    values: List[String],
+    mut rng: Rng,
+    step: Int,
+    seed: UInt64,
+) raises:
+    """Looks the column up in a random set and checks it against the twin.
+
+    The set is drawn either side of the threshold the kernel switches routes at,
+    so both the comparison against every member and the table are walked, and it
+    is drawn mostly out of the column's own elements, because a set of freely
+    drawn strings almost never hits anything and a kernel answering no to
+    everything would pass it.
+
+    Args:
+        column: The column under test.
+        values: The reference elements.
+        rng: The generator.
+        step: The case number, for the failure message.
+        seed: The seed, for the failure message.
+
+    Raises:
+        If the kernel and the twin disagree anywhere.
+    """
+    var count = Int(rng.next_below(6 * TEXT_LINEAR_MAX + 5))
+    var members = List[String]()
+    for _ in range(count):
+        if len(values) > 0 and rng.next_bool():
+            members.append(values[rng.next_below(len(values))])
+        else:
+            members.append(random_run(rng, values))
+    var set = strings_from_list(members)
+    var what = String("is_in over ", count)
+    var got = text_is_in(column, set)
+    var want = text_is_in_scalar(column, set)
+    for i in range(len(got)):
+        if got.is_valid(i) != want.is_valid(i):
+            raise Error(
+                String(
+                    "case ",
+                    step,
+                    " seed ",
+                    seed,
+                    ": ",
+                    what,
+                    " row ",
+                    i,
+                    " validity ",
+                    got.is_valid(i),
+                    " against ",
+                    want.is_valid(i),
+                )
+            )
+        if got.is_valid(i) and got[i] != want[i]:
+            raise Error(
+                String(
+                    "case ",
+                    step,
+                    " seed ",
+                    seed,
+                    ": ",
+                    what,
+                    " row ",
+                    i,
+                    " gave ",
+                    got[i],
+                    " against ",
+                    want[i],
+                )
+            )
+
+
 def check_text_compare(
     column: StringArray,
     values: List[String],
@@ -1014,6 +1093,9 @@ def main() raises:
 
         elif op < 90:
             check_text_substring(column, rng, step, options.seed)
+
+        elif op < 92:
+            check_text_is_in(column, values, rng, step, options.seed)
 
         elif op < 95 and len(values) > 0:
             # The permutation is compared position by position rather than the

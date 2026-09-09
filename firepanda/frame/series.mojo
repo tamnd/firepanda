@@ -40,6 +40,7 @@ from firepanda.frame.display import DisplayOptions, render_column
 from firepanda.frame.index import Index
 from firepanda.kernel.binary import BinaryOp, binary_any, binary_value_any
 from firepanda.kernel.cast import cast_any
+from firepanda.kernel.member import is_in_any
 from firepanda.kernel.nulls import (
     coalesce_any,
     fill_backward_any,
@@ -511,6 +512,32 @@ struct Series(Copyable, Movable, Sized, Writable):
             Error: Only what the morsel runtime raises.
         """
         return is_not_null_any(self.values)
+
+    def is_in(self, values: Series) raises -> Array[DType.bool]:
+        """Returns a mask that is true where a row's value is in a set.
+
+        This is SQL's `IN`, and so a null row answers null rather than false.
+        pandas' `isin` answers false there instead, and a caller who wants that
+        can fill the nulls; a caller who wants three valued logic cannot get it
+        back out of a column that has already lost them.
+
+        The set is a series and not a list so that it can carry its own type and
+        can itself be a column, which is what a decorrelated subquery hands over.
+        No promotion happens: a set of a different type is refused rather than
+        cast, because casting here would silently decide which side loses
+        precision.
+
+        Args:
+            values: The set. Nulls and duplicates in it are ignored.
+
+        Returns:
+            A bool column, null wherever the series is null, as tall as the
+            series.
+
+        Raises:
+            If the two are not the same type.
+        """
+        return is_in_any(self.values, values.values)
 
     def str_contains(self, needle: StringSlice) raises -> Array[DType.bool]:
         """Returns a mask that is true where the text holds a substring.

@@ -8,6 +8,61 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Asking whether a column's value is one of a set, and two thresholds instead of one
+
+`Series` grew `is_in` and `kernel/member.mojo` holds it. This is pandas' `isin` and SQL's `IN`, and TPC-H wants it twice: q19 against four container names and q22 against seven country codes. Both are the same shape, a column of a million rows against a set of a handful, and that shape is what the kernel is built around.
+
+The set is a `Series` rather than a list, so it carries its own type and can itself be a column, which is what a decorrelated subquery hands over. Nothing is promoted: a set of a different type is refused rather than cast, because casting here would silently pick which side loses precision and a caller who meant to compare across types can say so with a cast of their own.
+
+A null row answers null, not false. That is SQL's answer for `NULL IN (...)` and it is what `equal` already does, so a caller who builds `IN` out of a chain of equalities and a caller who uses this get the same column back. pandas reports False there. That difference belongs in the binding layer, because a caller who wants False can fill the nulls afterwards and a caller who wants three valued logic cannot get it back out of a column that has already lost it.
+
+There are two routes. A small set is compared against one member at a time and builds nothing at all. A larger one builds a hash table once and every worker probes it. The table stores hashes rather than keys, which is exact for a fixed width dtype because `mix` is a bijection on sixty four bits, and cannot be for text, so the text route keeps the needles and settles a hash match by comparing bytes.
+
+There is one thing the text table cannot settle that way, and it is checked for rather than assumed away. Two needles that are different strings and hash alike would take one slot between them and the second would quietly go missing from the set. The build notices when an insert hands back an ordinal already spoken for by a different string and falls back to comparing against every needle. That branch will not be taken on real data, but a set that has silently lost a member is not the kind of wrong that shows up in a test.
+
+The interesting part is the threshold, because it started as one number for both routes and one number was wrong by more than an order of magnitude, in both directions at once.
+
+Sweeping the set size over a million rows on an i9-13900K. Every set holds the same single member the column actually contains and pads the rest with members it cannot, so every size matches exactly the same rows and the only thing that changes is the size. The threshold was moved to force each route at each size. Nanoseconds a row, with `text/equal_constant` alongside at 1.874 as the control.
+
+| set size | thirty two byte text | eight byte text | int64 |
+| --- | --- | --- | --- |
+| 1 | 2.236 | 1.320 | |
+| 2 | 3.890 | 1.792 | |
+| 3 | 5.323 | | |
+| 4 | 6.838 | 2.728 | 0.462 |
+| 8 | 14.430 | | 0.762 |
+| 9 | 4.330 (table) | 1.612 (table) | 2.315 (table) |
+| 64 | 4.262 (table) | | 4.267 (table) |
+
+Read down the text columns and the linear route climbs about a nanosecond and a half for every extra member, because two members of a set usually share a length and a prefix, which is what makes them a set, so the prefix settles nothing and the comparison runs to the end. The table does not care about the size at all. They cross between two and three for a wide column and between one and two for a short one.
+
+Read down the int64 column and it is a different kernel entirely. A comparison there is one SIMD equal against a block that is already loaded, so an extra member costs about seven hundredths of a nanosecond. Running both routes against each other at every size in one session gave, linear against table, 1.30 against 2.99 at nine, 2.03 against 4.84 at sixteen, 3.82 against 5.03 at thirty two and 7.06 against 5.15 at sixty four. It turns over between thirty two and sixty four.
+
+So there are two constants now, `TEXT_LINEAR_MAX` at two and `LINEAR_MAX` at thirty two. What that is worth, both sessions anchored on the same control:
+
+| row | one threshold of eight | two thresholds |
+| --- | --- | --- |
+| is_in_4, thirty two byte text | 6.838 | 4.343 |
+| is_in_short_4, eight byte text | 2.728 | 1.716 |
+| is_in_number_32, int64 | 5.031 | 2.429 |
+
+The first row is q19's set exactly, and it was giving away sixty percent.
+
+Against polars 1.44.1, pandas 3.0.5 and duckdb 1.5.5 on the same machine, the same columns and the same sets, all in one session. DuckDB is measured through `.arrow()`, which is the only way it hands back a materialized column.
+
+| row | firepanda | polars | pandas | duckdb |
+| --- | --- | --- | --- | --- |
+| thirty two byte text, set of 4 | 4.343 | 5.472 | 5.177 | 6.068 |
+| thirty two byte text, set of 64 | 4.311 | 5.527 | 5.442 | 6.819 |
+| eight byte text, set of 1 | 1.248 | 3.371 | 4.286 | 3.893 |
+| eight byte text, set of 4 | 1.716 | 3.435 | 3.835 | 5.159 |
+| int64, set of 4 | 0.457 | 2.125 | 0.608 | 1.688 |
+| int64, set of 64 | 4.402 | 2.537 | 6.482 | 3.085 |
+
+Short text is where this is comfortably ahead, 2.0 to 3.4 times, and short text is what q19 and q22 both look things up at. Wide text is ahead by only 1.2 to 1.6 times, because at thirty two bytes everybody is paying for the same memory traffic and the routes stop mattering much.
+
+The last row is the one to keep. A set of sixty four numbers goes through the table, and there polars is 1.7 times quicker and DuckDB 1.4 times, so the numeric table route has something left in it. It is not a shape any query in the suite asks for, which is why it is recorded here rather than fixed here. pandas is worth a note too: it is flat at about 0.6 nanoseconds for every set size up to nine and then falls off a cliff to 6.5 at sixty four, which is what a dense lookup table over a narrow integer range looks like when it stops being used. That is a real trick for `IN` over a small range of integers and firepanda does not have it.
+
 ### Cutting a byte range out of a text column, and the first text column built in parallel
 
 `Series` grew `str_slice` and `kernel/substr.mojo` holds it. This is SQL's `substring`, and TPC-H q22 is the reason it exists now rather than later: it groups customers by the first two characters of a phone number, which is nothing but this call.

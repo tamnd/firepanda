@@ -2140,3 +2140,66 @@ def text_substring_scalar(
             piece += text[byte=k]
         builder.append(piece.as_bytes())
     return builder^.finish()
+
+
+def is_in_scalar[
+    dt: DType
+](a: Array[dt], values: Array[dt]) raises -> Array[DType.bool]:
+    """Says whether each row's value is in a set, by asking every member.
+
+    No table, no register, no threshold. This is the definition of `IN` written
+    out, which is the only thing that can tell the two routes in `member.mojo`
+    apart from each other when they disagree.
+
+    Args:
+        a: The column.
+        values: The set. Nulls in it are ignored.
+
+    Parameters:
+        dt: The dtype of both.
+
+    Returns:
+        A bool column, null wherever the column is null.
+
+    Raises:
+        Error: Never.
+    """
+    var out = Array[DType.bool](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        var hit = False
+        for j in range(len(values)):
+            if values.is_valid(j) and a[i] == values[j]:
+                hit = True
+        out.set_valid(i, hit)
+    return out^
+
+
+def text_is_in_scalar(
+    a: StringArray, values: StringArray
+) raises -> Array[DType.bool]:
+    """Says whether each row's text is in a set, by asking every member.
+
+    Args:
+        a: The column.
+        values: The set. Nulls in it are ignored.
+
+    Returns:
+        A bool column, null wherever the column is null.
+
+    Raises:
+        Error: Never.
+    """
+    var out = Array[DType.bool](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        var hit = False
+        for j in range(len(values)):
+            if values.is_valid(j) and a[i] == values[j]:
+                hit = True
+        out.set_valid(i, hit)
+    return out^
