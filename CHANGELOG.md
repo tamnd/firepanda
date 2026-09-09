@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### The shape the engine will bind against
+
+The expression AST, and a printer that turns one back into SQL.
+
+The parse tree the matcher produces has one node per grammar rule, which for an ordinary comparison is a dozen nodes of pure syntax. Binding against that would tie every later stage to grammar rule names, and a grammar bump would then break the binder rather than a small translation layer. `firepanda/sql/ast.mojo` is the shape that layer produces instead. Three arenas were planned and this is the first of them. Expressions are the self contained part of the grammar, so they go first, and the statement and table reference arenas arrive with the transformer along with the three expression kinds that hold a statement inside them, which are a scalar subquery, `EXISTS` and the subquery form of `IN`.
+
+Nodes are fixed size and referenced by index rather than by pointer. A node that needs a variable number of children stores a run in a side list, where a run is a count followed by that many entries, so the node itself stays one size and nothing allocates per node. Index 0 is the null node, the same convention the matcher already uses, so an absent operand is 0 and no caller needs a separate flag to say a field is missing. The AST owns its text. A token keeps its quotes, its escapes and its original case, because that is what makes a token twelve bytes, and nothing downstream wants any of it, so text is decoded once on the way in and interned. Every node carries a token index, which is not for debugging: it is the thing that lets a binder error draw a caret under the right word.
+
+The printer is written now rather than later because it pays for itself three times. Round trip is the transformer's main test, it is the oracle for the statement generator, and it is how `EXPLAIN` will show a filter or a projection, which is how somebody works out why a pushdown did not happen. It parenthesizes every operand rather than working out which parentheses it could leave out, because a printer that minimizes parentheses is a second implementation of precedence and therefore a second place to get precedence wrong, inside the component whose whole job is to check the first one. It quotes an identifier whenever the bare text would not read back as itself, which covers a capital letter, a character no bare identifier may hold, and a reserved keyword.
+
+The round trip tests earned their place on the first run. They print an expression, put it in a `SELECT` and parse it with the real parser, and that caught the star `RENAME` clause being written with `TO`. The grammar says `RenameEntry <- ExcludeName 'AS' Identifier`, so it is `AS`, and `ALTER TABLE` spelling the same idea with `TO` a few rules away is what made the wrong one look right.
+
+Nothing calls any of this yet. The transformer that fills an `Ast` from a parse tree is the next piece.
+
 ### Fixed: a date stayed a date only until something touched it
 
 A date is stored as a signed thirty two bit day count and a timestamp as a sixty four bit tick count, so every kernel that moves rows around builds its output through `Array[DType.int32]` or `Array[DType.int64]` and then erases it. Erasing a typed array labels the result from its layout, so the label that came back was int32, and the date was gone. This reached `filter`, `take`, and through `take` everything built on it, which is `sort_values`, `head`, `join` and `drop_duplicates`, plus `concat`, `coalesce`, `ffill`, `bfill` and `pick`.
