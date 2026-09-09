@@ -599,7 +599,7 @@ def coalesce_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
             + " rows and fallback has "
             + String(len(b))
         )
-    if a.is_string() != b.is_string():
+    if a.type != b.type or a.is_string() != b.is_string():
         raise Error(
             "coalesce: both columns must have the same dtype; got "
             + String(a.type)
@@ -607,7 +607,9 @@ def coalesce_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
             + String(b.type)
         )
     if a.is_string():
-        return AnyArray(_coalesce_strings(a.strings(), b.strings()))
+        return AnyArray(_coalesce_strings(a.strings(), b.strings())).retyped(
+            a.type
+        )
 
     comptime for candidate in ALL:
         if a.dtype() == candidate:
@@ -620,7 +622,7 @@ def coalesce_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
                     b.data.validity,
                     len(b),
                 )
-            )
+            ).retyped(a.type)
     raise Error("coalesce: unsupported dtype " + String(a.dtype()))
 
 
@@ -777,7 +779,9 @@ def fill_forward_any(col: AnyArray, limit: Int = 0) raises -> AnyArray:
         If the dtype has no physical layout.
     """
     if col.is_string():
-        return AnyArray(_fill_strings[forward=True](col.strings(), limit))
+        return AnyArray(
+            _fill_strings[forward=True](col.strings(), limit)
+        ).retyped(col.type)
 
     comptime for candidate in ALL:
         if col.dtype() == candidate:
@@ -788,7 +792,7 @@ def fill_forward_any(col: AnyArray, limit: Int = 0) raises -> AnyArray:
                     len(col),
                     limit,
                 )
-            )
+            ).retyped(col.type)
     raise Error("fill_forward: unsupported dtype " + String(col.dtype()))
 
 
@@ -806,7 +810,9 @@ def fill_backward_any(col: AnyArray, limit: Int = 0) raises -> AnyArray:
         If the dtype has no physical layout.
     """
     if col.is_string():
-        return AnyArray(_fill_strings[forward=False](col.strings(), limit))
+        return AnyArray(
+            _fill_strings[forward=False](col.strings(), limit)
+        ).retyped(col.type)
 
     comptime for candidate in ALL:
         if col.dtype() == candidate:
@@ -817,7 +823,7 @@ def fill_backward_any(col: AnyArray, limit: Int = 0) raises -> AnyArray:
                     len(col),
                     limit,
                 )
-            )
+            ).retyped(col.type)
     raise Error("fill_backward: unsupported dtype " + String(col.dtype()))
 
 

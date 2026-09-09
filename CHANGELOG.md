@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a date stayed a date only until something touched it
+
+A date is stored as a signed thirty two bit day count and a timestamp as a sixty four bit tick count, so every kernel that moves rows around builds its output through `Array[DType.int32]` or `Array[DType.int64]` and then erases it. Erasing a typed array labels the result from its layout, so the label that came back was int32, and the date was gone. This reached `filter`, `take`, and through `take` everything built on it, which is `sort_values`, `head`, `join` and `drop_duplicates`, plus `concat`, `coalesce`, `ffill`, `bfill` and `pick`.
+
+The bytes were always right, which is what made it quiet. The frame's schema still said date while the column underneath said int32, and the disagreement surfaced somewhere else entirely: on a Parquet file of more than one row group, `filter` raised `chunk dtype int32 does not match column dtype date32[day]`, a message that names neither the filter nor the date. On a single chunk nothing raised at all and the column simply stopped being a date. This is how it was found, trying to run TPC-H q1, whose first step is a filter on a shipping date.
+
+`AnyArray.retyped` puts the input's type back on the output, and it refuses to move a label onto a layout that is not already the right one, because relabelling an int32 buffer as a float32 one reads the same bits as a different number and that is what `cast_any` is for. Every one of the kernels above now calls it.
+
+The other half is that `concat` and `coalesce` were checking the layout and not the type. A date column and an int32 column are both int32 underneath, so the two would stack and the answer would be one of the two, having quietly picked which. Both now refuse, and `astype` is how a caller says which it meant. The same tightening went into `pick`, which had the same check written out by hand.
+
+Group aggregates are not covered here. The minimum of a group of dates is a date and the mean of them is not, so it is per aggregate rather than a blanket rule, and that is its own change.
+
 ### A group's answer written back onto its own rows
 
 `DataFrame.group_broadcast`, which is a window aggregate with no frame and no ordering. SQL spells it `sum(x) over (partition by k)`, pandas spells it `df.groupby(k)[x].transform("sum")` and Polars spells it `.over(k)`. The result is as tall as the input, in the input's order and with the input's labels, and every row of a group holds that group's value.
