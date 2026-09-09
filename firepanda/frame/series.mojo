@@ -40,6 +40,7 @@ from firepanda.frame.display import DisplayOptions, render_column
 from firepanda.frame.index import Index
 from firepanda.kernel.binary import BinaryOp, binary_any, binary_value_any
 from firepanda.kernel.cast import cast_any
+from firepanda.kernel.member import is_in_any
 from firepanda.kernel.nulls import (
     coalesce_any,
     fill_backward_any,
@@ -54,8 +55,10 @@ from firepanda.kernel.pattern import (
     text_ends_with,
     text_starts_with,
 )
+from firepanda.kernel.pick import pick_any
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.sort import argsort_any, is_sorted_any
+from firepanda.kernel.substr import TO_END, text_substring
 from firepanda.kernel.temporal import (
     ROUND_DOWN,
     ROUND_HALF_EVEN,
@@ -511,6 +514,59 @@ struct Series(Copyable, Movable, Sized, Writable):
         """
         return is_not_null_any(self.values)
 
+    def is_in(self, values: Series) raises -> Array[DType.bool]:
+        """Returns a mask that is true where a row's value is in a set.
+
+        This is SQL's `IN`, and so a null row answers null rather than false.
+        pandas' `isin` answers false there instead, and a caller who wants that
+        can fill the nulls; a caller who wants three valued logic cannot get it
+        back out of a column that has already lost them.
+
+        The set is a series and not a list so that it can carry its own type and
+        can itself be a column, which is what a decorrelated subquery hands over.
+        No promotion happens: a set of a different type is refused rather than
+        cast, because casting here would silently decide which side loses
+        precision.
+
+        Args:
+            values: The set. Nulls and duplicates in it are ignored.
+
+        Returns:
+            A bool column, null wherever the series is null, as tall as the
+            series.
+
+        Raises:
+            If the two are not the same type.
+        """
+        return is_in_any(self.values, values.values)
+
+    def pick(self, cond: Array[DType.bool], otherwise: Series) raises -> Series:
+        """Returns a series taking each row from this one or from another.
+
+        This is SQL's `CASE WHEN cond THEN self ELSE otherwise END`. A null in
+        the condition takes the other side rather than answering null, which is
+        SQL's rule and is the rule `filter` already follows when it drops a row
+        on a null in its mask. polars answers null there instead.
+
+        The name is not `where` because that is a keyword the formatter will not
+        accept as an identifier, and it is not `case_when` because there is no
+        chain of conditions here, only one.
+
+        Args:
+            cond: The condition, as tall as the series. Usually a mask that came
+                out of a comparison or one of the `str_` methods.
+            otherwise: The series to take a row from where the condition does
+                not hold. Must be the same type and length.
+
+        Returns:
+            A series with this one's name, taking each row from whichever side
+            the condition chose.
+
+        Raises:
+            If the two are not the same type, or the lengths disagree.
+        """
+        return Series(self.name, pick_any(cond, self.values, otherwise.values))
+
     def str_contains(self, needle: StringSlice) raises -> Array[DType.bool]:
         """Returns a mask that is true where the text holds a substring.
 
@@ -585,6 +641,31 @@ struct Series(Copyable, Movable, Sized, Writable):
             If the series is not text.
         """
         return text_ends_with(self.values.strings(), suffix.as_bytes())
+
+    def str_slice(self, offset: Int, length: Int = TO_END) raises -> Self:
+        """Returns a byte range cut out of every row.
+
+        This is SQL's `substring`. It cuts by bytes rather than by code points,
+        which is what the rest of the column measures itself in, and both ends
+        are clamped, so a range that runs off a short row is the empty string
+        rather than an error.
+
+        Args:
+            offset: Where each substring starts, in bytes. Negative counts back
+                from the end of the row, so -3 is the last three bytes.
+            length: How many bytes to take. Negative, which is the default,
+                means everything to the end of the row.
+
+        Returns:
+            A text series of the same height, null wherever this one is null.
+
+        Raises:
+            If the series is not text.
+        """
+        return self._relabelled(
+            self.name,
+            AnyArray(text_substring(self.values.strings(), offset, length)),
+        )
 
     def drop_nulls(self) raises -> Self:
         """Returns the series with the missing rows removed.

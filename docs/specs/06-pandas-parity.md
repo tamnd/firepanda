@@ -117,7 +117,8 @@ A second note, internal rather than user facing: Mojo 1.0 removed negative index
 - [ ] `filter` with `items`, `like`, `regex` (M6)
 - [ ] `take`, `xs`, `get`, `pop`, `insert` (M6)
 - [ ] `where`, `mask`, `query` (M6, `query` M4b)
-- [ ] `isin`, `between` on Series (M1)
+- [x] `isin` on Series (M1)
+- [ ] `between` on Series (M1)
 - [ ] `first`, `last` (M7)
 
 ### Reshaping and sorting
