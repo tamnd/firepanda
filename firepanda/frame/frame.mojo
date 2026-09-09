@@ -997,6 +997,127 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         # they belong to, which is what pandas keeps across a `drop_duplicates`.
         return self.take(keep)
 
+    def group_broadcast(
+        self, by: List[String], specs: List[AggSpec]
+    ) raises -> Self:
+        """Reduces each group and writes the answer back onto every row of it.
+
+        This is a window aggregate with no frame and no ordering, which SQL
+        spells `sum(x) over (partition by k)`, pandas spells
+        `df.groupby(k)[x].transform("sum")` and Polars spells `.over(k)`. The
+        result is as tall as the input, not as tall as the group count, and
+        every row of a group holds that group's value.
+
+        What it is for is the shape where a predicate is on the aggregate but
+        the rows wanted back are the original ones. TPC-H asks that twice, in
+        q17 against a group's average and in q18 against a group's sum, and
+        without this the only way to write it is to group, filter the groups,
+        and join the surviving keys back onto the input, which is a build and a
+        probe over a question that is a gather.
+
+        The gather is what this is. The reduction runs once per group exactly as
+        `group_by` runs it, and then each row reads its own group's answer
+        through the ordinal it already has. Nothing is sorted, nothing is
+        hashed twice, and no key column is materialized.
+
+        Null keys are not dropped. A group by drops them by default because its
+        result is one row per key and a null key is not a key; here the result
+        is one row per input row and dropping would mean deciding that some
+        input rows have no answer. They get their group's answer like any other
+        row, and a caller that wants pandas' behaviour can mask on the key.
+
+        Args:
+            by: The key columns. At least one, no repeats.
+            specs: What to compute. At least one, no two producing the same
+                name.
+
+        Returns:
+            A frame of the input's height and labels, one column per spec.
+
+        Raises:
+            If a name is missing or repeated, if two outputs would collide, if
+            no specs were given, or if a dtype involved has no physical layout.
+        """
+        if len(specs) == 0:
+            raise Error(
+                "group broadcast: at least one aggregate is required, because"
+                " the result is one column per aggregate and no aggregates is"
+                " an empty frame as tall as the input"
+            )
+
+        var at = List[Int](capacity=len(by))
+        for i in range(len(by)):
+            var idx = self.schema.index_of(by[i])
+            for j in range(len(at)):
+                if at[j] == idx:
+                    raise Error(
+                        "group broadcast: key column "
+                        + by[i]
+                        + " was given twice"
+                    )
+            at.append(idx)
+
+        var names = List[String](capacity=len(specs))
+        for s in range(len(specs)):
+            var name = specs[s].output_name()
+            for f in range(len(names)):
+                if names[f] == name:
+                    raise Error(
+                        "group broadcast: two output columns would both be"
+                        " called "
+                        + name
+                    )
+            names.append(name)
+
+        var grouping = group_ordinals(self.column_refs(), at, self.rows)
+
+        var single_at = List[Int]()
+        var single_kinds = List[AggKind]()
+        for s in range(len(specs)):
+            if specs[s].kind.reads_two_columns():
+                continue
+            single_at.append(self.schema.index_of(specs[s].column))
+            single_kinds.append(specs[s].kind)
+
+        var reduced = aggregate_group_many(
+            self.column_refs(),
+            single_at,
+            single_kinds,
+            grouping.codes,
+            grouping.groups,
+        )
+
+        # One list of positions for every column, because they all read the
+        # same ordinal per row. Widening the ordinals into it costs a pass that
+        # a gather taking the codes directly would not, and that gather is the
+        # follow up here; what it buys today is `take_any`, which already
+        # spreads over the cores, already carries validity and already knows
+        # what to do with a text column.
+        var spread = _broadcast_positions(grouping.codes, self.rows)
+
+        var fields = List[Field](capacity=len(specs))
+        var columns = List[AnyArray](capacity=len(specs))
+        for s in range(len(specs)):
+            var produced: AnyArray
+            if specs[s].kind.reads_two_columns():
+                produced = aggregate_group_pair_any(
+                    self.columns[self.schema.index_of(specs[s].column)].only(),
+                    self.columns[self.schema.index_of(specs[s].other)].only(),
+                    specs[s].kind,
+                    grouping.codes,
+                    grouping.groups,
+                )
+            else:
+                produced = reduced.pop(0)
+            fields.append(Field(names[s], produced.type))
+            columns.append(take_any(produced, spread))
+
+        var out = Self(Schema(fields^), columns^)
+        # The rows are the input's rows, so they keep the input's labels. That
+        # is what makes `df.with_column(df.group_broadcast(...)[0])` line up.
+        out.index = Index(copy=self.index)
+        return out^
+
     def group_by(
         self,
         by: List[String],
@@ -3998,6 +4119,28 @@ def _first_rows(
         if not seen.get(g):
             seen.set(g, True)
             out.append(i)
+    return out^
+
+
+def _broadcast_positions(
+    codes: Array[DType.uint32], rows: Int
+) raises -> List[Int]:
+    """Widens group ordinals into the positions a gather wants.
+
+    Args:
+        codes: One group ordinal per row.
+        rows: How many rows to read.
+
+    Returns:
+        The same ordinals as `Int`, one per row.
+
+    Raises:
+        Error: Never, but the list build is inside a raising context.
+    """
+    var out = List[Int](capacity=rows)
+    var src = codes.unsafe_ptr()
+    for i in range(rows):
+        out.append(Int(src.unsafe_offset(i).unsafe_load()))
     return out^
 
 

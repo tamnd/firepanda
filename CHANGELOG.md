@@ -8,6 +8,23 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A group's answer written back onto its own rows
+
+`DataFrame.group_broadcast`, which is a window aggregate with no frame and no ordering. SQL spells it `sum(x) over (partition by k)`, pandas spells it `df.groupby(k)[x].transform("sum")` and Polars spells it `.over(k)`. The result is as tall as the input, in the input's order and with the input's labels, and every row of a group holds that group's value.
+
+The shape it exists for is a predicate on an aggregate where the rows wanted back are the original ones. TPC-H asks for it twice, in q17 against a group's average and in q18 against a group's sum, and without it the only way to write either is to group, filter the groups, and join the surviving keys back onto the input. That is a build and a probe over a question that is a gather. Here the reduction runs once per group exactly as `group_by` runs it, and then each row reads its own group's answer through the ordinal it already has. Nothing is sorted, nothing is hashed twice, and no key column is materialized.
+
+Null keys are not dropped. A group by drops them by default because its result is one row per key and a null key is not a key. Here the result is one row per input row, and dropping would mean deciding that some input rows have no answer.
+
+Nanoseconds a row on an i9-13900K over 1,048,576 rows, one session, controls `text/equal_constant` at 1.840 and 1.889 either side of the measurements against an anchored 1.874. polars 1.44.2, pandas 3.0.5, duckdb 1.5.5.
+
+| shape | firepanda | polars | pandas | duckdb |
+| --- | --- | --- | --- | --- |
+| a partition key with a thousand values | 1.940 | 11.815 | 11.429 | 17.877 |
+| a partition key with a million values | 17.943 | 12.230 | 64.295 | 67.266 |
+
+Six times polars and pandas and nine times DuckDB on the narrow key. On the wide key it is 3.6 times pandas and 3.7 times DuckDB and 0.68 times polars, which is a loss, and it is the same loss the distinct rows entry above records for the same reason. In the same session `hash/factorize_all_distinct` is 12.739 nanoseconds a row, which is seventy one per cent of the whole wide broadcast and more than polars spends on the entire operation. Distinct on a million value key is 17.142 and is seventy four per cent the same pass. Both of these are one problem wearing two hats, and the problem is the hashed factorize over a column where nearly every value is its own group. That is where the work goes next.
+
 ### Distinct rows over a frame
 
 `DataFrame.drop_duplicates`, with and without a subset of columns, which is pandas' spelling of it and Polars' `unique` and SQL's `select distinct`. Until now the only thing in the library that could remove a repeat was `Index.unique`, over one column of labels.
