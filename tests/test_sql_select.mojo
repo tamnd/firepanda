@@ -684,6 +684,97 @@ def test_a_statement_that_is_not_sql_at_all_is_still_a_syntax_error() raises:
         _ = _printed("SELCT 1", g, rules)
 
 
+def test_an_expression_form_refuses_by_name_rather_than_by_rule_number() raises:
+    # A rule number is a fact about firepanda's build of the grammar and it
+    # means nothing to the person who wrote the query. Every one of these used
+    # to print one.
+    var g = Grammar()
+    var rules = Transform(g)
+    with assert_raises(contains="a row value"):
+        _ = _printed("SELECT (1, 2)", g, rules)
+    with assert_raises(contains="a row value"):
+        _ = _printed("SELECT ROW(1, 2)", g, rules)
+    with assert_raises(contains="an INTERVAL literal"):
+        _ = _printed("SELECT INTERVAL '1 day'", g, rules)
+    with assert_raises(contains="a typed literal"):
+        _ = _printed("SELECT DATE '2020-01-01'", g, rules)
+    with assert_raises(contains="a lambda"):
+        _ = _printed("SELECT list_apply(l, lambda x: x + 1)", g, rules)
+    with assert_raises(contains="a list comprehension"):
+        _ = _printed("SELECT [x FOR x IN l]", g, rules)
+    with assert_raises(contains="an argument passed by name"):
+        _ = _printed("SELECT f(a := 1)", g, rules)
+    with assert_raises(contains="COLUMNS"):
+        _ = _printed("SELECT COLUMNS('a')", g, rules)
+    with assert_raises(contains="a MAP literal"):
+        _ = _printed("SELECT MAP {'a': 1}", g, rules)
+    with assert_raises(contains="GROUPING"):
+        _ = _printed("SELECT GROUPING(a) FROM t GROUP BY a", g, rules)
+    with assert_raises(contains="a column written as #1"):
+        _ = _printed("SELECT #1 FROM t", g, rules)
+
+
+def test_a_call_spelled_with_keywords_refuses_under_its_own_name() raises:
+    # One table entry for the lot of them, and the message still says which one
+    # it was, which is what the `{}` slot is for.
+    var g = Grammar()
+    var rules = Transform(g)
+    with assert_raises(contains="EXTRACT yet"):
+        _ = _printed("SELECT EXTRACT(YEAR FROM x)", g, rules)
+    with assert_raises(contains="SUBSTRING yet"):
+        _ = _printed("SELECT SUBSTRING(a FROM 1 FOR 2)", g, rules)
+    with assert_raises(contains="TRIM yet"):
+        _ = _printed("SELECT TRIM(BOTH ' ' FROM a)", g, rules)
+    with assert_raises(contains="POSITION yet"):
+        _ = _printed("SELECT POSITION(a IN b)", g, rules)
+    with assert_raises(contains="OVERLAY yet"):
+        _ = _printed("SELECT OVERLAY(a PLACING b FROM 1)", g, rules)
+
+
+def test_a_statement_inside_a_with_refuses_under_its_own_name() raises:
+    # `WITH x AS (INSERT ...)` used to blame `CTEDMLBody`, which is a rule the
+    # user did not write and cannot look up. The statement inside says its own
+    # name and the caret lands on it.
+    var g = Grammar()
+    var rules = Transform(g)
+    with assert_raises(contains="the INSERT statement yet"):
+        _ = _printed(
+            "WITH x AS (INSERT INTO t VALUES (1)) SELECT * FROM x", g, rules
+        )
+    with assert_raises(contains="the DELETE statement."):
+        _ = _printed("WITH x AS (DELETE FROM t) SELECT * FROM x", g, rules)
+
+
+def test_a_query_that_is_not_a_select_refuses_by_name() raises:
+    # These three produce rows, so they hang off the select rule rather than off
+    # the statement rule, and the tier loop never reached them.
+    var g = Grammar()
+    var rules = Transform(g)
+    with assert_raises(contains="the DESCRIBE statement yet"):
+        _ = _printed("DESCRIBE t", g, rules)
+    with assert_raises(contains="the PIVOT statement yet"):
+        _ = _printed("PIVOT t ON a", g, rules)
+    with assert_raises(contains="the UNPIVOT statement yet"):
+        _ = _printed("UNPIVOT t ON a", g, rules)
+
+
+def test_a_parenthesised_expression_is_still_just_the_expression() raises:
+    # `ParenthesisExpression` is the rule that refuses a row value, and it is
+    # also the rule around `(1 + 2)`. The one that is a plain expression has to
+    # keep working.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("SELECT (1 + 2) * 3", g, rules), "SELECT ((1 + 2) * 3)"
+    )
+    assert_equal(
+        _printed(
+            "SELECT a FROM t GROUP BY GROUPING SETS (a, (b, c))", g, rules
+        ),
+        "SELECT a FROM t GROUP BY GROUPING SETS (a, (b, c))",
+    )
+
+
 def test_the_table_has_an_entry_for_the_statement_rule() raises:
     var g = Grammar()
     var rules = Transform(g)
