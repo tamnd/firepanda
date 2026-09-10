@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: the type check that failed over a dependency we do not have
+
+`_numpy` imports numpy inside a `try` so that the three names handing back a numpy scalar can say what is missing rather than raise `ImportError` at anyone. mypy runs with no numpy installed, which is the whole point of the guard, and reported the guarded import as a missing library stub. That took the Format job down on every branch and there was nothing on any of those branches to fix. numpy is now declared to mypy as a module it will not find, which is true and is going to stay true, since firepanda has no dependencies.
+
 ### The span a person types, and three parameter names
 
 `Timedelta("1D")` was refused until now, and so was `1h30min`, `30 min`, `1.5s`, `1 day, 2:03:04` and every other spelling that is not the one a span prints as. The constructor accepted its own repr and nothing else, which is a library nobody can call by hand. It now reads a run of counts with their units attached, in either order of spacing, with a leading sign, over the thirty three unit spellings pandas accepts in a string.

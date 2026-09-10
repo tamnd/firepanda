@@ -76,3 +76,11 @@ addopts = "-q --strict-markers"
 [tool.mypy]
 strict = true
 files = ["python/firepanda"]
+
+# numpy is not a dependency and never will be. Three names hand back a numpy
+# scalar, and the only way to do that is to import numpy where they are called
+# and say so plainly when it is not there. mypy runs without numpy installed,
+# so without this it reports the guarded import as a missing library.
+[[tool.mypy.overrides]]
+module = ["numpy"]
+ignore_missing_imports = true
