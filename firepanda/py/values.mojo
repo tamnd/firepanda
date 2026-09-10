@@ -27,6 +27,7 @@ from firepanda.array.array import Array
 from firepanda.dtype.dispatch import dispatch_typed
 from firepanda.dtype.lists import ALL
 from firepanda.dtype.logical import TypeKind
+from firepanda.kernel.dictionary import decode_dictionary
 
 
 def _numbers[dt: DType](values: Array[dt]) raises -> PythonObject:
@@ -57,10 +58,13 @@ def _numbers[dt: DType](values: Array[dt]) raises -> PythonObject:
 def python_list(column: AnyArray) raises -> PythonObject:
     """Copies every value of a column out into a Python list.
 
-    Three kinds of column are handled separately. Text is not dispatched over
+    Four kinds of column are handled separately. Text is not dispatched over
     `ALL` because a string column is physically uint8 and would come back as a
     list of bytes. A column of the null type has no buffer at all, so there is
-    nothing to read and every row is missing. Everything else is one typed pass.
+    nothing to read and every row is missing. A category column is decoded first,
+    because its physical type is its index type and the dispatch would find a
+    matching arm and hand back the codes, which are integers and look like an
+    answer. Everything else is one typed pass.
 
     Args:
         column: The values.
@@ -76,6 +80,11 @@ def python_list(column: AnyArray) raises -> PythonObject:
         for _ in range(len(column)):
             out.append(Python.none())
         return out
+    if column.is_dictionary():
+        # The values a categorical stands for, which is what pandas hands back
+        # from `tolist()` and what a person at a prompt asked for. The codes are
+        # reachable through `Series.cat.codes` for somebody who wants those.
+        return python_list(AnyArray(decode_dictionary(column)))
     if column.is_string():
         var out = Python.list()
         for i in range(len(column)):

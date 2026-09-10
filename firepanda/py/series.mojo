@@ -16,9 +16,16 @@ from std.memory import ArcPointer, Pointer
 from std.python import Python, PythonObject
 from std.python.bindings import check_arguments_arity
 
+from firepanda.array.any import AnyArray
+from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.dtype.logical import LogicalType, TypeKind, named_type
 from firepanda.frame.index import Index
 from firepanda.frame.series import Series
+from firepanda.kernel.dictionary import dictionary_codes
+from firepanda.kernel.dictionary import drop_unused_categories as drop_unused
+from firepanda.kernel.dictionary import rename_categories as relabel
+from firepanda.kernel.dictionary import set_categories as recategorized
+from firepanda.kernel.dictionary import set_ordered as with_order
 from firepanda.kernel.reduce import reduce_any
 from firepanda.py.args import flag, number, whole, words
 from firepanda.py.build import column_from, empty_column
@@ -415,6 +422,277 @@ struct PySeries(Movable, Writable):
             if wanted.kind == TypeKind.DICTIONARY:
                 raise retagged(UNSUPPORTED, cause)
             raise retagged(DTYPE, cause)
+
+    @staticmethod
+    def categories(py_self: PythonObject) raises -> PythonObject:
+        """Hands out a category column's categories, as an index.
+
+        An index rather than a list because that is what `s.cat.categories` is
+        in pandas, and because a caller who has one wants to ask it questions a
+        list cannot answer. There are as many of them as the column has distinct
+        values, not as it has rows.
+
+        Args:
+            py_self: The series.
+
+        Returns:
+            A new index over the categories.
+
+        Raises:
+            Error: Tagged `dtype`, if the column is not a category column.
+        """
+        ref held = Self._held(py_self)[].series[]
+        try:
+            return PythonObject(
+                alloc=PyIndex(
+                    ArcPointer(
+                        Index(
+                            AnyArray(
+                                StringArray(copy=held.values.categories())
+                            ),
+                            None,
+                        )
+                    )
+                )
+            )
+        except cause:
+            raise retagged(DTYPE, cause)
+
+    @staticmethod
+    def codes(py_self: PythonObject) raises -> PythonObject:
+        """Hands out a category column's codes, as a column of numbers.
+
+        The row labels come across, because a caller comparing codes to values
+        is lining two columns up and pandas keeps the index here for that
+        reason. The name does not, which is also pandas: the codes are not the
+        column, so they do not carry its name.
+
+        Args:
+            py_self: The series.
+
+        Returns:
+            A new series of positions, null where the column is null.
+
+        Raises:
+            Error: Tagged `dtype`, if the column is not a category column.
+        """
+        ref held = Self._held(py_self)[].series[]
+        try:
+            return Self._alongside(
+                held, AnyArray(dictionary_codes(held.values)), ""
+            )
+        except cause:
+            raise retagged(DTYPE, cause)
+
+    @staticmethod
+    def ordered(py_self: PythonObject) raises -> PythonObject:
+        """Answers whether a category column's categories have an order.
+
+        Args:
+            py_self: The series.
+
+        Returns:
+            True if comparing two of the categories means something.
+
+        Raises:
+            Error: Tagged `dtype`, if the column is not a category column.
+        """
+        ref held = Self._held(py_self)[].series[]
+        if not held.values.is_dictionary():
+            raise tagged(
+                DTYPE,
+                String(
+                    "a column of ",
+                    held.values.type,
+                    " has no categories to order",
+                ),
+            )
+        return PythonObject(held.values.type.ordered)
+
+    @staticmethod
+    def set_ordered(
+        py_self: PythonObject, ordered: PythonObject
+    ) raises -> PythonObject:
+        """Says whether the categories are to have a meaning to their order.
+
+        A door of its own rather than a `recategorize` with the categories the
+        column already has, which would walk every row to arrive at the codes it
+        started with. This changes the type and nothing else.
+
+        Args:
+            py_self: The series.
+            ordered: The flag to carry.
+
+        Returns:
+            A new series over the same codes and categories.
+
+        Raises:
+            Error: Tagged `dtype`, if the column is not a category column.
+        """
+        ref held = Self._held(py_self)[].series[]
+        var wanted = flag(ordered, "ordered")
+        try:
+            return Self._alongside(
+                held, with_order(held.values, wanted), held.name
+            )
+        except cause:
+            raise Self._category_error(held.values, cause)
+
+    @staticmethod
+    def relabel_categories(
+        py_self: PythonObject, names: PythonObject, ordered: PythonObject
+    ) raises -> PythonObject:
+        """Gives the categories new labels, leaving every code where it is.
+
+        The door under `rename_categories`, and the only category operation that
+        is decided by position rather than by value. It is separate from
+        `recategorize` below for exactly that reason: a rename put through the
+        value route would look each old label up in the new list, find nothing,
+        and null the column.
+
+        The count is not checked here. `rename_categories` insists on one label
+        per category and checks that in Python, where the message can name what
+        the caller passed, and `set_categories(rename=True)` deliberately allows
+        a different count.
+
+        Args:
+            py_self: The series.
+            names: The new labels, in the order the column holds its categories.
+            ordered: Whether the order is to mean anything.
+
+        Returns:
+            A new series over the same codes under the new labels.
+
+        Raises:
+            Error: Tagged `dtype` if the column is not a category column, and
+                tagged `value` if the labels repeat.
+        """
+        ref held = Self._held(py_self)[].series[]
+        var wanted = Self._category_names(names)
+        var order = flag(ordered, "ordered")
+        try:
+            return Self._alongside(
+                held, relabel(held.values, wanted^, order), held.name
+            )
+        except cause:
+            raise Self._category_error(held.values, cause)
+
+    @staticmethod
+    def recategorize(
+        py_self: PythonObject, names: PythonObject, ordered: PythonObject
+    ) raises -> PythonObject:
+        """Rewrites the column against a new list of categories, by value.
+
+        The door the other five pandas methods are arithmetic over. Adding,
+        removing, reordering and setting the categories all come out as one list
+        and a flag, and a row whose value is not in the list becomes null, which
+        is how a categorical loses rows to missing in pandas as well.
+
+        Args:
+            py_self: The series.
+            names: The categories to hold, in the order to hold them.
+            ordered: Whether that order is to mean anything.
+
+        Returns:
+            A new series over the given categories.
+
+        Raises:
+            Error: Tagged `dtype` if the column is not a category column, and
+                tagged `value` if the categories repeat or one is missing.
+        """
+        ref held = Self._held(py_self)[].series[]
+        var wanted = Self._category_names(names)
+        var order = flag(ordered, "ordered")
+        try:
+            return Self._alongside(
+                held, recategorized(held.values, wanted^, order), held.name
+            )
+        except cause:
+            raise Self._category_error(held.values, cause)
+
+    @staticmethod
+    def drop_unused_categories(py_self: PythonObject) raises -> PythonObject:
+        """Drops the categories nothing in the column uses, keeping the order.
+
+        A door of its own rather than a `recategorize` with the used ones,
+        because which ones are used is a question about the codes, and a caller
+        answering it would have to read every code out into Python first.
+
+        Args:
+            py_self: The series.
+
+        Returns:
+            A new series over the categories that appear in it.
+
+        Raises:
+            Error: Tagged `dtype`, if the column is not a category column.
+        """
+        ref held = Self._held(py_self)[].series[]
+        try:
+            return Self._alongside(held, drop_unused(held.values), held.name)
+        except cause:
+            raise Self._category_error(held.values, cause)
+
+    @staticmethod
+    def _category_names(names: PythonObject) raises -> StringArray:
+        """Reads a list of category labels off the Python side.
+
+        Args:
+            names: A sequence of strings.
+
+        Returns:
+            The labels, as a text column.
+        """
+        var built = StringBuilder(capacity=Int(len(names)))
+        for name in names:
+            var label = String(name)
+            built.append(label.as_bytes())
+        return built^.finish()
+
+    @staticmethod
+    def _category_error(values: AnyArray, cause: Error) -> Error:
+        """Decides which class a refusal from the category kernel belongs to.
+
+        There are two kinds of refusal down there and they are not the same
+        mistake. Asking a column that is not a categorical is a wrong type, and
+        pandas raises an `AttributeError` a step earlier for it. A category list
+        with a repeat in it, or the wrong number of new labels, is a wrong value
+        on a column that was perfectly good. So the column decides, rather than
+        the message being read back for words that would then have to be kept in
+        step with the kernel.
+
+        Args:
+            values: The column the call was made on.
+            cause: What came back.
+
+        Returns:
+            The error to raise.
+        """
+        if not values.is_dictionary():
+            return retagged(DTYPE, cause)
+        return retagged(VALUE, cause)
+
+    @staticmethod
+    def _alongside(
+        held: Series, var values: AnyArray, name: String
+    ) raises -> PythonObject:
+        """Puts a rewritten column back under the row labels it came with.
+
+        Six doors above differ in what they do to the categories and agree about
+        everything else, so the part they agree about is written once. The row
+        labels come across because none of them moves a row.
+
+        Args:
+            held: The series the column came out of.
+            values: The rewritten column. Consumed.
+            name: The name to carry, and empty for none.
+
+        Returns:
+            A new series.
+        """
+        var out = Series(name, values^)
+        out.index = Index(copy=held.index)
+        return PythonObject(alloc=Self(ArcPointer(out^)))
 
     @staticmethod
     def monotonic(

@@ -785,6 +785,110 @@ def _datetime_members() -> tuple[Member, ...]:
     return tuple(out)
 
 
+def _categorical_members() -> tuple[Member, ...]:
+    """Writes the members of the `cat` accessor.
+
+    Eleven names, and three doors under them. The three are in the extension and
+    the other eight are arithmetic over them, which is all in the mixin: what
+    counts as adding a category, what counts as removing one, and which of the
+    disagreements are a `ValueError` rather than a quiet answer are questions
+    about the pandas surface and belong on the pandas side of the boundary.
+
+    The order is the three that answer a value first and then the methods, which
+    is how the pandas documentation lists them.
+
+    Returns:
+        The members, in the order they should be written out.
+    """
+    return (
+        Member(
+            name="categories",
+            kind="property",
+            body="self._levels()",
+            doc="The categories, in the order the column holds them.",
+            returns="Index",
+        ),
+        Member(
+            name="ordered",
+            kind="property",
+            body="self._ordered()",
+            doc="Whether comparing two of the categories means anything.",
+            returns="bool",
+        ),
+        Member(
+            name="codes",
+            kind="property",
+            body="self._codes()",
+            doc="Which category each row holds, as positions into the categories.",
+            returns="Series",
+        ),
+        Member(
+            name="as_ordered",
+            kind="method",
+            signature="",
+            body="self._with_order(True)",
+            doc="The same column, with the category order made to mean something.",
+            returns="Series",
+        ),
+        Member(
+            name="as_unordered",
+            kind="method",
+            signature="",
+            body="self._with_order(False)",
+            doc="The same column, with the category order made to mean nothing.",
+            returns="Series",
+        ),
+        Member(
+            name="add_categories",
+            kind="method",
+            signature="new_categories: Any",
+            body="self._added(new_categories)",
+            doc="The same values, over more categories than before.",
+            returns="Series",
+        ),
+        Member(
+            name="remove_categories",
+            kind="method",
+            signature="removals: Any",
+            body="self._removed(removals)",
+            doc="The same values, with the named categories gone and their rows missing.",
+            returns="Series",
+        ),
+        Member(
+            name="remove_unused_categories",
+            kind="method",
+            signature="",
+            body="self._thinned()",
+            doc="The same values, over only the categories that appear in them.",
+            returns="Series",
+        ),
+        Member(
+            name="rename_categories",
+            kind="method",
+            signature="new_categories: Any",
+            body="self._renamed(new_categories)",
+            doc="The same values under new labels, matched by position.",
+            returns="Series",
+        ),
+        Member(
+            name="reorder_categories",
+            kind="method",
+            signature="new_categories: Any, ordered: Any = None",
+            body="self._reordered(new_categories, ordered)",
+            doc="The same categories in another order.",
+            returns="Series",
+        ),
+        Member(
+            name="set_categories",
+            kind="method",
+            signature="new_categories: Any, ordered: Any = None, rename: bool = False",
+            body="self._set(new_categories, ordered, rename)",
+            doc="A new list of categories, with the values matched against it.",
+            returns="Series",
+        ),
+    )
+
+
 GROUPED: tuple[tuple[str, str, str], ...] = (
     ("sum", "The sum of the values in each group.", "sum"),
     ("mean", "The mean of the values in each group.", "mean"),
@@ -1447,6 +1551,51 @@ SERIES = Exposed(
             returns="Series",
         ),
         Binding(
+            mojo="PySeries.categories",
+            name="categories",
+            doc="A category column's categories, as an index.",
+            returns="Index",
+        ),
+        Binding(
+            mojo="PySeries.codes",
+            name="codes",
+            doc="The codes of a category column, as positions.",
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.ordered",
+            name="ordered",
+            doc="Whether the categories have a meaningful order.",
+            returns="bool",
+        ),
+        Binding(
+            mojo="PySeries.set_ordered",
+            name="set_ordered",
+            doc="The same categories, ordered or not.",
+            params=(("ordered", "bool"),),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.relabel_categories",
+            name="relabel_categories",
+            doc="New labels for the categories, matched by position.",
+            params=(("names", "list[str]"), ("ordered", "bool")),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.recategorize",
+            name="recategorize",
+            doc="New categories, matched by value.",
+            params=(("names", "list[str]"), ("ordered", "bool")),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.drop_unused_categories",
+            name="drop_unused_categories",
+            doc="Only the categories that appear in the values.",
+            returns="Series",
+        ),
+        Binding(
             mojo="PySeries.monotonic",
             name="monotonic",
             doc="Whether the column is sorted, one way or the other.",
@@ -1649,6 +1798,16 @@ SERIES = Exposed(
                 " temporal column live."
             ),
             returns="DatetimeProperties",
+        ),
+        Member(
+            name="cat",
+            kind="accessor",
+            body="CategoricalAccessor",
+            doc=(
+                "The categorical accessor, which is where the categories of a category"
+                " column live."
+            ),
+            returns="CategoricalAccessor",
         ),
         *_operators("Series"),
     ),
@@ -2220,6 +2379,27 @@ ACCESSORS: tuple[Accessor, ...] = (
         ),
         mixin="DatetimeMixin",
         members=_datetime_members(),
+    ),
+    Accessor(
+        py="CategoricalAccessor",
+        owner="Series",
+        doc=(
+            "The `cat` accessor, which is where a category column's categories"
+            " live.\n\n"
+            "Reached from `s.cat`, and only on a column that is a category, which is"
+            " the one accessor pandas refuses to build at all rather than refusing"
+            " each member: `s.cat` on a column of numbers is an `AttributeError`"
+            " there and here. That is the opposite of what `dt` does, and it is not"
+            " an inconsistency worth fixing, because a caller writing `s.cat` has"
+            " already decided the column is a categorical and finding out at the"
+            " accessor is finding out at the right place.\n\n"
+            "Eleven names and three doors. A rename is decided by position, setting"
+            " the categories is decided by value, and dropping the unused ones is"
+            " decided by the codes. Everything else here is arithmetic over those"
+            " three."
+        ),
+        mixin="CategoricalMixin",
+        members=_categorical_members(),
     ),
     Accessor(
         py="DataFrameGroupBy",
