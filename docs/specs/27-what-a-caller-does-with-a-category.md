@@ -58,6 +58,16 @@ The third is the name on the codes. pandas hands back a series with no name and 
 
 The reason is `hasattr`. A caller who guards with `hasattr(s, "cat")` should be handed a `False` rather than an exception, and that only works if building the accessor is what fails. It also reads better: somebody writing `s.cat` has already decided the column is a categorical, so finding out that it is not at the `.cat` is finding out at the first place they said something wrong.
 
+## The other front door had none of it
+
+The accessor above went in on the Python side and called the kernels directly, reaching past the Mojo `Series` rather than through it. That was the shortest way to get it working and it left the two front doors disagreeing about what the library can do: a caller writing Python could read a category column's codes and a caller writing Mojo could not, and had to import `firepanda.kernel.dictionary` and hold an `AnyArray`, which is the layer the frame package exists to cover.
+
+It was the conformance driver that made this visible rather than a review. That driver runs the data cases through the Mojo API, so it had no way to ask for any of this and reported all 64 runs across the 36 `categorical/*` case ids as absent, on a section the library largely implements. The driver could have reached into the kernels the way the Python layer did and answered most of them. It did not, because a pass produced that way is a pass nobody holding a `Series` can get, and the driver's one rule is that it writes down what firepanda does.
+
+`Series` now has seven category members and one question. `cat_is_category` answers whether the column is one at all, so a caller can ask before calling rather than calling and catching. `cat_categories` and `cat_codes` are the two reads. `cat_set_ordered`, `cat_rename_categories`, `cat_set_categories` and `cat_drop_unused_categories` are the four writes, which are the three doors of the previous section with the flag one split out. They are named for the kernel operation rather than for the pandas spelling, the way `dt_*` and `str_*` already are, because the pandas spelling is what the Python layer is for.
+
+The Python accessor now calls those members instead of the kernels. It got shorter and it lost its own copy of the rule that a rewritten column keeps its row labels, which is the part that would have drifted. What did not move is the arithmetic: `add_categories`, `remove_categories` and `reorder_categories` are still worked out in Python for the reasons two sections up, so those three names exist on one door and not on the other, and a Mojo caller who wants them writes the list themselves and calls `cat_set_categories`. That is a real asymmetry rather than a hidden one, and whether it should stay is a question the categorical type object will force anyway.
+
 ## What is still missing
 
 `CategoricalDtype` is not here. It is how pandas says both halves of a categorical's type at once, which a name cannot carry, so `astype(CategoricalDtype(["a", "b"], ordered=True))` has no spelling in firepanda yet. Everything it would do is now reachable, since `astype("category").cat.set_categories(names, ordered=True)` is the same thing in three calls, but that is not the same as having the name.
