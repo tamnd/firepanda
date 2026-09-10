@@ -23,7 +23,7 @@ from std.python.bindings import check_arguments_arity
 
 from firepanda.array.any import AnyArray
 from firepanda.array.strings import strings_from_list
-from firepanda.dtype.logical import LogicalType, named_type
+from firepanda.dtype.logical import LogicalType, TypeKind, named_type
 from firepanda.frame import DataFrame
 from firepanda.frame.concat import concat_series
 from firepanda.frame.index import Index
@@ -514,6 +514,11 @@ struct PyDataFrame(Movable, Writable):
                 # not read, which is a value error in pandas.
                 if text:
                     raise retagged(VALUE, cause)
+                # And the same gap `PySeries.cast` names: a category out of a
+                # column that is not text is a thing pandas does and firepanda
+                # has not written, rather than a type error.
+                if wanted.kind == TypeKind.DICTIONARY:
+                    raise retagged(UNSUPPORTED, cause)
                 raise retagged(DTYPE, cause)
         return PythonObject(alloc=Self(ArcPointer(out^)))
 

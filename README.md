@@ -114,6 +114,69 @@ Symbol 1 averages 100.625 over two prices rather than three, because row 4 is nu
 
 No Parquet, no expression API, and no strings in a frame yet: the string column exists but nothing that takes a frame can hold one. Columns are built by hand, the mask comes from a kernel rather than from `df["qty"] > 1000`, group by takes a list of specs rather than a chained `.groupby("symbol").sum()`, and a null and a `NaN` print differently because in an Arrow layout they are different things.
 
+## SQL, and the line under it
+
+There is a SQL front end being built in `firepanda/sql/`, tracked in [#304](https://github.com/tamnd/firepanda/issues/304). It reads DuckDB's own PEG grammar, so the syntax it accepts is DuckDB's syntax rather than an approximation of it, and every statement in DuckDB's test corpus goes through both parsers on every change. No query runs yet. What exists is the parser, the AST and the printer.
+
+The part worth reading now is where the line is. The grammar accepts everything DuckDB accepts and firepanda will execute rather less than that, so a query on the far side of the line gets a refusal that names the feature, points at the word in the query, says what firepanda is instead, and links to an issue. It is not a syntax error and it is not a silent wrong answer, because both of those leave you with nothing to go on.
+
+```
+Not Implemented Error: firepanda does not support a slice or a subscript.
+LINE 1: SELECT a[1] FROM t
+                ^
+firepanda reads a list element with a function rather than with brackets.
+See https://github.com/tamnd/firepanda/issues/13
+```
+
+`firepanda.sql_support()` returns that whole set, so a program can ask what is missing rather than discover it a query at a time. A message with `{}` in it fills the `{}` with the word out of your query. Two issues are linked: [#13](https://github.com/tamnd/firepanda/issues/13) is a feature with no nearer home, [#304](https://github.com/tamnd/firepanda/issues/304) is one that is coming and has not landed.
+
+<!-- sql-support -->
+
+| Name | firepanda does not support | Instead | Issue |
+| --- | --- | --- | --- |
+| `operator` | {} as an operator | firepanda holds an operator as the words it was written with and runs the ones it has a kernel for, and this is not one of them. | [#13](https://github.com/tamnd/firepanda/issues/13) |
+| `custom-operator` | OPERATOR(...) as a prefix operator | An operator named this way is resolved against the catalog, and firepanda has no catalog of operators to resolve it against. | [#13](https://github.com/tamnd/firepanda/issues/13) |
+| `is-unknown` | IS UNKNOWN | It means IS NULL over a boolean, which firepanda does have, so write that instead. | [#13](https://github.com/tamnd/firepanda/issues/13) |
+| `in-bare-value` | IN over an unparenthesized value | firepanda reads the right side of an IN as a list or as a subquery. Put the value in parentheses. | [#13](https://github.com/tamnd/firepanda/issues/13) |
+| `like-escape` | ESCAPE on a LIKE | firepanda reads a LIKE pattern with the default escape and takes no other one. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `method-call` | a method call | firepanda has no node for the x.f(y) spelling. Write f(x, y), which is the same call. | [#13](https://github.com/tamnd/firepanda/issues/13) |
+| `field-access` | a field access | A dotted name is a name to firepanda, and telling a struct field from a column needs a binder that knows what the columns are. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `subscript` | a slice or a subscript | firepanda reads a list element and a substring with a function rather than with brackets. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `postfix-operator` | a postfix operator | The two firepanda reads after an operand are a cast and a dotted name, and this is neither. | [#13](https://github.com/tamnd/firepanda/issues/13) |
+| `call-modifier` | {} on a call | Window specifications and aggregate filters are the rest of this stage and are not in the AST yet. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `call-argument` | {} inside a call | An ordered aggregate and a null treatment both change what the call means, so firepanda refuses them rather than dropping them. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `array-subquery` | ARRAY over a subquery | It collects a whole column into one list value, which firepanda has no node for. | [#13](https://github.com/tamnd/firepanda/issues/13) |
+| `dotted-name` | a dotted name here | Only a plain name fits in this position. | [#13](https://github.com/tamnd/firepanda/issues/13) |
+| `quoted-name` | anything but a plain name here | Only a plain name fits in this position. | [#13](https://github.com/tamnd/firepanda/issues/13) |
+| `not-subquery` | NOT in front of a subquery | Write NOT EXISTS or NOT IN, which say which of the two this means. | [#13](https://github.com/tamnd/firepanda/issues/13) |
+| `select-clause` | {} in a SELECT | The query node has a slot for each clause firepanda runs, and none for this one yet. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `select-sample` | a sample on a SELECT | Sampling is a row source of its own and firepanda has no node for it yet. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `table-sample` | a sample on a table | Sampling is a row source of its own and firepanda has no node for it yet. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `table-modifier` | {} on a table | PIVOT and UNPIVOT are the rest of this stage. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `table-at` | AT on a table | It reads a table as of a version or a timestamp, and firepanda has no storage that keeps either one. | [#13](https://github.com/tamnd/firepanda/issues/13) |
+| `alias-colon` | the name: table spelling | Write FROM t AS name, which is the same alias. | [#13](https://github.com/tamnd/firepanda/issues/13) |
+| `join-form` | this kind of join | firepanda runs the joins that name a condition or take none. POSITIONAL, NEAREST and JOIN BY are not among them. | [#13](https://github.com/tamnd/firepanda/issues/13) |
+| `with-ordinality` | WITH ORDINALITY | It adds a row number column to a table function, which firepanda has no node for. | [#13](https://github.com/tamnd/firepanda/issues/13) |
+| `with-using-key` | USING KEY on a WITH | It changes how a recursive query deduplicates, and firepanda runs the UNION and UNION ALL forms only. | [#13](https://github.com/tamnd/firepanda/issues/13) |
+| `escape-string` | an E'...' string | Reading one means implementing every backslash escape, and half of that is worse than none of it. A plain '...' doubles a quote to hold one. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `statement-later` | the {} statement yet | It maps onto something a dataframe already does and it is coming. firepanda runs SELECT today. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `statement-never` | the {} statement | It asks for a catalog, a transaction or an extension, and firepanda is a dataframe library rather than a database. Read the data with SELECT and do the rest in Mojo. | [#13](https://github.com/tamnd/firepanda/issues/13) |
+| `row-value` | a row value | Several expressions in one pair of parentheses make a single value with fields in it, and a firepanda column holds one scalar. Select the parts as separate columns. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `interval` | an INTERVAL literal | A duration is its own type with its own arithmetic, and firepanda has no column type for one yet. It arrives with the date and time work. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `type-literal` | a typed literal such as DATE '2020-01-01' | The type in front of the string decides how the string is read, which is a cast, and firepanda has not wired the cast up yet. Write CAST('2020-01-01' AS DATE) instead. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `special-call` | {} yet | The grammar gives a handful of functions a rule of their own, because SQL spells them with keywords inside the parentheses where the commas would go. Each one needs a form the plain call form cannot hold, and they are coming. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `lambda` | a lambda | A function written inside the query has to be compiled along with the query, and firepanda runs the functions it already has. Pass a named one. | [#13](https://github.com/tamnd/firepanda/issues/13) |
+| `list-comprehension` | a list comprehension | It runs an expression once for every element, which is a lambda in different brackets, and firepanda runs the functions it already has. | [#13](https://github.com/tamnd/firepanda/issues/13) |
+| `named-argument` | an argument passed by name | firepanda matches arguments by position, so f(a := 1) has nowhere to put the name. Pass it in order. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `columns` | COLUMNS | It stands for however many columns the pattern matches, so the shape of the result is not known until the table is, and firepanda works out the shape first. Name the columns. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `map-literal` | a MAP literal | A map holds keys and values in one value and a firepanda column holds one scalar. It arrives with the nested types. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `grouping` | GROUPING | It reports which grouping set a row came from, which only means anything next to ROLLUP, CUBE and GROUPING SETS, and firepanda does not carry that number out of the aggregate yet. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `positional` | a column written as #1 | firepanda reads a column by name. Write the name, or the expression the column was built from. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `default-value` | DEFAULT where a value goes | It stands for whatever a table declares as the default for a column, and that lives in a catalog. firepanda is a dataframe library and has no catalog to ask. | [#13](https://github.com/tamnd/firepanda/issues/13) |
+| `no-case` | grammar rule {} | The grammar accepts more than firepanda runs, and this is a rule the transformer has no case for. Please file it. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+
+<!-- end sql-support -->
+
 ## The argument
 
 Every fast dataframe library today is a fast engine in one language with a Python veneer on top. pandas is C and Cython. Polars is Rust. DuckDB is C++. The veneer is where user code lives, and it is why `df.apply(lambda ...)` falls off a cliff: the moment you write a function the library did not anticipate, you leave the fast language and enter the slow one.
