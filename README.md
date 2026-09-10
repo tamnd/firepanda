@@ -143,7 +143,7 @@ See https://github.com/tamnd/firepanda/issues/13
 | `field-access` | a field access | A dotted name is a name to firepanda, and telling a struct field from a column needs a binder that knows what the columns are. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `subscript` | a slice or a subscript | firepanda reads a list element and a substring with a function rather than with brackets. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `postfix-operator` | a postfix operator | The two firepanda reads after an operand are a cast and a dotted name, and this is neither. | [#13](https://github.com/tamnd/firepanda/issues/13) |
-| `call-modifier` | {} on a call | Window specifications and aggregate filters are the rest of this stage and are not in the AST yet. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `call-modifier` | {} on a call | A window specification is read now. The aggregate filter and the two that change what a call reads are the rest of this stage and are not in the AST yet. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `call-argument` | {} inside a call | An ordered aggregate and a null treatment both change what the call means, so firepanda refuses them rather than dropping them. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `array-subquery` | ARRAY over a subquery | It collects a whole column into one list value, which firepanda has no node for. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `dotted-name` | a dotted name here | Only a plain name fits in this position. | [#13](https://github.com/tamnd/firepanda/issues/13) |
@@ -152,7 +152,7 @@ See https://github.com/tamnd/firepanda/issues/13
 | `select-clause` | {} in a SELECT | The query node has a slot for each clause firepanda runs, and none for this one yet. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `select-sample` | a sample on a SELECT | Sampling is a row source of its own and firepanda has no node for it yet. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `table-sample` | a sample on a table | Sampling is a row source of its own and firepanda has no node for it yet. | [#304](https://github.com/tamnd/firepanda/issues/304) |
-| `table-modifier` | {} on a table | PIVOT and UNPIVOT are the rest of this stage. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `table-modifier` | {} on a table | A join, a PIVOT and an UNPIVOT are the three things that go here and all three are read, so this is a fourth one the grammar grew and the transformer has no case for. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `table-at` | AT on a table | It reads a table as of a version or a timestamp, and firepanda has no storage that keeps either one. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `alias-colon` | the name: table spelling | Write FROM t AS name, which is the same alias. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `join-form` | this kind of join | firepanda runs the joins that name a condition or take none. POSITIONAL, NEAREST and JOIN BY are not among them. | [#13](https://github.com/tamnd/firepanda/issues/13) |
@@ -173,6 +173,8 @@ See https://github.com/tamnd/firepanda/issues/13
 | `grouping` | GROUPING | It reports which grouping set a row came from, which only means anything next to ROLLUP, CUBE and GROUPING SETS, and firepanda does not carry that number out of the aggregate yet. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `positional` | a column written as #1 | firepanda reads a column by name. Write the name, or the expression the column was built from. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `default-value` | DEFAULT where a value goes | It stands for whatever a table declares as the default for a column, and that lives in a catalog. firepanda is a dataframe library and has no catalog to ask. | [#13](https://github.com/tamnd/firepanda/issues/13) |
+| `unpivot-nulls` | INCLUDE NULLS on an UNPIVOT | The statement spelling of an UNPIVOT has no way to write it, and that is the spelling the node records, so there is nowhere to keep it. EXCLUDE NULLS is the default and is read. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `unpivot-groups` | more than one FOR group on an UNPIVOT | One UNPIVOT node holds one name column and one set of value columns, so a second group has nowhere to go. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `no-case` | grammar rule {} | The grammar accepts more than firepanda runs, and this is a rule the transformer has no case for. Please file it. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 
 <!-- end sql-support -->

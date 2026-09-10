@@ -17,3 +17,8 @@ https://github.com/tamnd/firepanda/discussions
 # release pull request merges. On that pull request the link is correctly a 404.
 ^https://github\.com/tamnd/firepanda/releases/tag/
 ^https://github\.com/tamnd/firepanda/compare/
+
+# The polars blog refuses connections from GitHub runners often enough to fail
+# a job on links that are correct and that resolve from a desktop. Retries do
+# not help because the connection is refused rather than rate limited.
+^https://pola\.rs/posts/
