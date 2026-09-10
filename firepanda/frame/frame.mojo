@@ -62,7 +62,8 @@ from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.frame.display import DisplayOptions, render_table
 from firepanda.frame.index import NOT_FOUND, Index
-from firepanda.hash.grouping import group_ordinals
+from firepanda.hash.grouping import Grouping, group_ordinals
+from firepanda.hash.sorted import sorted_ordinals
 from firepanda.join.pairs import JoinKind, join_indices, take_pair
 from firepanda.kernel.binary import (
     BinaryOp,
@@ -306,6 +307,44 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                 Pointer(to=self.columns[i].only()).unsafe_origin_cast[o]()
             )
         return refs^
+
+    def _grouping(self, at: List[Int]) raises -> Grouping:
+        """Assigns a group ordinal to every row, by whichever route applies.
+
+        Every group by in this file goes through here rather than calling
+        `group_ordinals` itself, so that there is one place the choice between
+        the two routes is made and one place a third would be added.
+
+        The choice is not a guess. A single key column carrying the sortedness
+        flag has its equal values adjacent already, and a walk that closes a
+        group each time the value changes gives the same ordinals as the hash
+        table for one comparison a row. Anything else, which is every unflagged
+        column and every group by on more than one key, goes the ordinary way.
+        The two produce the same groups over the same rows; `sorted_ordinals`
+        says what it refuses and hands back nothing rather than a wrong answer,
+        and this falls through when it does.
+
+        Args:
+            at: Which columns are keys, in the order they should be combined.
+
+        Returns:
+            The ordinals, the group count and a representative row per group.
+
+        Raises:
+            If no keys were given or a key dtype has no physical layout.
+        """
+        if len(at) == 1:
+            ref order = self.columns[at[0]].order
+            # Either direction. What the walk needs is that equal values are
+            # adjacent, which a descending column has just as much as an
+            # ascending one, and the ordinals come out in first appearance order
+            # both ways round because for a column in any order that is the
+            # order the runs are in.
+            if order.is_ascending() or order.is_descending():
+                var walked = sorted_ordinals(self.columns[at[0]].only())
+                if walked:
+                    return walked.take()
+        return group_ordinals(self.column_refs(), at, self.rows)
 
     def into_columns(deinit self) -> List[ChunkedArray]:
         """Gives up the columns without copying them, consuming the frame.
@@ -1091,7 +1130,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                 " with no columns has no rows to tell apart"
             )
 
-        var grouping = group_ordinals(self.column_refs(), at, self.rows)
+        var grouping = self._grouping(at)
 
         var ascending = True
         for g in range(1, len(grouping.rows_at)):
@@ -1180,7 +1219,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                     )
             names.append(name)
 
-        var grouping = group_ordinals(self.column_refs(), at, self.rows)
+        var grouping = self._grouping(at)
 
         var single_at = List[Int]()
         var single_kinds = List[AggKind]()
@@ -1292,7 +1331,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                     )
             at.append(idx)
 
-        var grouping = group_ordinals(self.column_refs(), at, self.rows)
+        var grouping = self._grouping(at)
 
         var fields = List[Field]()
         var columns = List[AnyArray]()
@@ -1460,7 +1499,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                     )
             at.append(idx)
 
-        var grouping = group_ordinals(self.column_refs(), at, self.rows)
+        var grouping = self._grouping(at)
         var top = group_top_rows_any(
             self.columns[self.schema.index_of(column)].only(),
             grouping.codes,

@@ -1059,8 +1059,88 @@ and why each of them is its own piece of work.
 """
 
 
+WINDOW_STATE: tuple[tuple[str, str, str, str], ...] = (
+    (
+        "window",
+        "self._window",
+        "int | None",
+        "How many rows wide, and None for an expanding window.",
+    ),
+    (
+        "min_periods",
+        "self._min_periods",
+        "int | None",
+        "How many values a window needs before it answers, and None for the default.",
+    ),
+    (
+        "center",
+        "self._center",
+        "bool",
+        "Whether the window sits around its row rather than behind it.",
+    ),
+    (
+        "closed",
+        "self._closed",
+        "str | None",
+        "Which of the two ends the window keeps, and None for the default.",
+    ),
+    (
+        "step",
+        "self._step",
+        "int | None",
+        "How many rows apart the answered rows are, and None for every row.",
+    ),
+    (
+        "obj",
+        "self._data",
+        "Series | DataFrame",
+        "The column or the frame the windows are read out of.",
+    ),
+    (
+        "ndim",
+        "2 if self._over_frame() else 1",
+        "int",
+        "The number of dimensions of what is being windowed.",
+    ),
+    (
+        "method",
+        '"single"',
+        "str",
+        "Whether the columns are reduced together, which here they are not.",
+    ),
+    (
+        "win_type",
+        "None",
+        "str | None",
+        "The weighting over the window, which here is always none.",
+    ),
+    (
+        "on",
+        "None",
+        "str | None",
+        "The column the window is ordered by, which here is always the rows.",
+    ),
+    (
+        "exclusions",
+        "frozenset()",
+        "frozenset[str]",
+        "The columns held out of the reduction, which here is none of them.",
+    ),
+)
+"""The eleven things a window object reports about itself, and how each is read.
+
+pandas puts these on the window object and code in the wild reads them, mostly
+to find out what a window it was handed is going to do before asking it to do
+it. Six of the eleven are the arguments back, which is why `_hold` keeps them as
+they arrived rather than resolved: `df.rolling(2).closed` is None in pandas and
+answering `right` here would be reporting a decision rather than an argument.
+The other five are constant, because they describe the choices this library has
+made once rather than per window.
+"""
+
+
 def _window_members(py: str) -> tuple[Member, ...]:
-    """Writes the five reduction members for one window class.
+    """Writes the eleven properties and five reduction members for one window class.
 
     Same restriction as `_group_members`, which is that nothing here decides
     what a reduction does. The word crosses the boundary and
@@ -1080,6 +1160,16 @@ def _window_members(py: str) -> tuple[Member, ...]:
     engines = "engine: Any = None, engine_kwargs: Any = None"
     over = "rolling" if py == "Rolling" else "expanding"
     out: list[Member] = []
+    for name, body, returns, what in WINDOW_STATE:
+        out.append(
+            Member(
+                name=name,
+                kind="property",
+                body=body,
+                doc=what,
+                returns=returns,
+            )
+        )
     for name, what in WINDOWED:
         # `count` is the one pandas gives no engine arguments, because it never
         # had a numba path to choose, and copying that is free here.
@@ -1099,7 +1189,7 @@ def _window_members(py: str) -> tuple[Member, ...]:
                     else f'self._reduce("{name}", numeric_only, engine, engine_kwargs)'
                 ),
                 doc=f"{what} Over every {over} window.",
-                returns="Series",
+                returns="Series | DataFrame",
             )
         )
     return tuple(out)
@@ -1433,6 +1523,20 @@ FRAME = Exposed(
             returns="DataFrame",
         ),
         Binding(
+            mojo="PyDataFrame.window_agg",
+            name="window_agg",
+            doc="One reduction over every window of every column.",
+            params=(
+                ("kind", "str"),
+                ("window", "int | None"),
+                ("min_periods", "int | None"),
+                ("center", "bool"),
+                ("closed", "str"),
+                ("step", "int | None"),
+            ),
+            returns="DataFrame",
+        ),
+        Binding(
             mojo="PyDataFrame.dropna",
             name="dropna",
             doc="The rows with no missing value in them.",
@@ -1632,6 +1736,26 @@ FRAME = Exposed(
             body="self._inner.arrow_c_stream(requested_schema)",
             doc="The frame as a stream of one batch, as an arrow_array_stream PyCapsule.",
             returns="object",
+        ),
+        Member(
+            name="rolling",
+            kind="method",
+            signature=(
+                "window: Any, min_periods: int | None = None, center: bool = False,"
+                " win_type: str | None = None, on: str | None = None,"
+                ' closed: str | None = None, step: int | None = None, method: str = "single"'
+            ),
+            body="_rolling(self, window, min_periods, center, win_type, on, closed, step, method)",
+            doc="A window of a fixed width over every column, computing nothing until reduced.",
+            returns="Rolling",
+        ),
+        Member(
+            name="expanding",
+            kind="method",
+            signature='min_periods: int = 1, method: str = "single"',
+            body="_expanding(self, min_periods, method)",
+            doc="A window over every column that starts at the first row and grows.",
+            returns="Expanding",
         ),
         *_reductions("DataFrame"),
         *_transformations("DataFrame"),
@@ -2609,7 +2733,8 @@ class Accessor:
     """The class name, which is the pandas one."""
 
     owner: str
-    """The class the accessor is reached from."""
+    """The class the accessor is reached from, and both of them where a namespace
+    hangs off a column and a frame alike."""
 
     doc: str
     """The Python class docstring."""
@@ -2682,16 +2807,21 @@ ACCESSORS: tuple[Accessor, ...] = (
     ),
     Accessor(
         py="Rolling",
-        owner="Series",
+        owner="Series and DataFrame",
         doc=(
-            "A window of a fixed width over a column, waiting for a"
-            " reduction.\n\n"
-            "Reached from `s.rolling(...)`, and it holds the column and the five"
-            " numbers that say where each window sits rather than computing"
-            " anything, which is what pandas does as well. The five are one"
-            " question, `firepanda/kernel/window.mojo` states it as a pair of row"
-            " numbers, and this class is where a caller's spelling of that"
-            " question is checked.\n\n"
+            "A window of a fixed width, waiting for a reduction.\n\n"
+            "Reached from `s.rolling(...)` and from `df.rolling(...)`, and it"
+            " holds what it was given and the five numbers that say where each"
+            " window sits rather than computing anything, which is what pandas"
+            " does as well. The five are one question,"
+            " `firepanda/kernel/window.mojo` states it as a pair of row numbers,"
+            " and this class is where a caller's spelling of that question is"
+            " checked.\n\n"
+            "One class for both owners rather than pandas' two, because a window"
+            " is a pair of row numbers and every column of a frame has the same"
+            " rows, so a frame window is the columns windowed one at a time. The"
+            " only place the difference is visible is `numeric_only`, which asks"
+            " a question a frame can answer and a column cannot.\n\n"
             "Five of pandas' twenty six reductions so far, and they are the five"
             " a window can be carried through. A total can have the row that"
             " left subtracted from it and the row that arrived added to it, and"
@@ -2703,17 +2833,17 @@ ACCESSORS: tuple[Accessor, ...] = (
     ),
     Accessor(
         py="Expanding",
-        owner="Series",
+        owner="Series and DataFrame",
         doc=(
             "A window that starts at the first row and grows, waiting for a"
             " reduction.\n\n"
-            "Reached from `s.expanding(...)`. The same five reductions as"
-            " `Rolling` over a window with no near end, which is why the two"
-            " classes share everything below the constructor: an expanding"
-            " window is a rolling one whose width is the height of the column."
-            " The one thing that is genuinely different is the default for"
-            " `min_periods`, which is one here and the full width there, and"
-            " pandas has the same split."
+            "Reached from `s.expanding(...)` and from `df.expanding(...)`. The"
+            " same five reductions as `Rolling` over a window with no near end,"
+            " which is why the two classes share everything below the"
+            " constructor: an expanding window is a rolling one whose width is"
+            " the height of what it reads. The one thing that is genuinely"
+            " different is the default for `min_periods`, which is one here and"
+            " the full width there, and pandas has the same split."
         ),
         mixin="ExpandingMixin",
         members=_window_members("Expanding"),
