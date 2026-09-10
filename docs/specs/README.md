@@ -28,6 +28,7 @@ says what was already decided and why.
 | [19-finding-a-label-in-an-index.md](19-finding-a-label-in-an-index.md) | The lookups and the set operations on `Index`, why one factorize answers all of them, and what the unmaterialized range is worth |
 | [20-editing-an-index.md](20-editing-an-index.md) | The five operations that change an index's labels, the three that turn a label into a slice bound, and what an unsorted index costs |
 | [21-the-index-you-can-hold.md](21-the-index-you-can-hold.md) | The third bound type, why `df.index` returns an index rather than a list, and the divergences the Python facing index has |
+| [22-what-a-message-is-for.md](22-what-a-message-is-for.md) | Why an error message leads with pandas' sentence and follows with ours, which three kinds are deliberately not copied, and why the code asks a question rather than reading its own strings |
 | [engine/](engine/00-README.md) | How DuckDB and Polars execute a query, and what firepanda is going to do about it |
 | [planner/](planner/00-README.md) | What decides the shape of a query: the plan, the passes, predicate transfer, and choosing an operator |
 | [sql/](sql/00-README.md) | DuckDB's dialect, the vendored grammar, the shared logical plan, and how compatibility gets measured |

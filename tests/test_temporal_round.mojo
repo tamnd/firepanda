@@ -382,7 +382,7 @@ def test_a_frequency_that_has_no_fixed_length_is_refused() raises:
     """
     var stamp = stamps([Int64(0)], TimeUnit.SECOND)
     for freq in ["W", "ME", "QE", "YS", "B"]:
-        with assert_raises(contains="is not a fixed frequency"):
+        with assert_raises(contains="Invalid frequency"):
             _ = temporal_round(stamp, freq, ROUND_DOWN)
 
 
@@ -394,7 +394,7 @@ def test_the_spellings_pandas_dropped_are_refused_too() raises:
     still a difference."""
     var stamp = stamps([Int64(0)], TimeUnit.SECOND)
     for freq in ["T", "H", "S", "L", "U", "N", "hour", "minutes", "", "hh"]:
-        with assert_raises(contains="is not a fixed frequency"):
+        with assert_raises(contains="Invalid frequency"):
             _ = temporal_round(stamp, freq, ROUND_DOWN)
 
 

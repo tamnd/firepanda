@@ -72,9 +72,9 @@ from firepanda.py.errors import (
 )
 from firepanda.py.index import PyIndex
 from firepanda.py.ops import (
+    binary_failure,
     binary_op,
     constant,
-    binary_tag,
     constant_tag,
     fill,
     unary_op,
@@ -703,7 +703,8 @@ struct PyDataFrame(Movable, Writable):
                 operation is not defined on a pair of columns it reached.
         """
         var right = Self._other(other, "other")
-        var which = binary_op(words(op, "op"))
+        var spelling = words(op, "op")
+        var which = binary_op(spelling)
         var filled = fill(fill_value)
         var flipped = flag(flip, "flip")
         try:
@@ -717,12 +718,11 @@ struct PyDataFrame(Movable, Writable):
                 )
             )
         except cause:
-            raise retagged(
-                binary_tag(
-                    which,
-                    Self._dtypes_of(Self._frame(py_self)[].frame[]),
-                    Self._dtypes_of(right[]),
-                ),
+            raise binary_failure(
+                spelling,
+                which,
+                Self._dtypes_of(Self._frame(py_self)[].frame[]),
+                Self._dtypes_of(right[]),
                 cause,
             )
 
@@ -762,7 +762,8 @@ struct PyDataFrame(Movable, Writable):
                 operation is not defined on a pair it reached.
         """
         var right = PySeries._other(other, "other")
-        var which = binary_op(words(op, "op"))
+        var spelling = words(op, "op")
+        var which = binary_op(spelling)
         var along = whole(axis, "axis")
         var flipped = flag(flip, "flip")
         try:
@@ -778,12 +779,11 @@ struct PyDataFrame(Movable, Writable):
         except cause:
             var theirs = List[LogicalType](capacity=1)
             theirs.append(right[].logical())
-            raise retagged(
-                binary_tag(
-                    which,
-                    Self._dtypes_of(Self._frame(py_self)[].frame[]),
-                    theirs,
-                ),
+            raise binary_failure(
+                spelling,
+                which,
+                Self._dtypes_of(Self._frame(py_self)[].frame[]),
+                theirs,
                 cause,
             )
 

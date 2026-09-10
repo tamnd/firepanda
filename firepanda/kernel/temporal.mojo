@@ -872,10 +872,15 @@ def temporal_tz_convert(a: AnyArray, zone: StringSlice) raises -> AnyArray:
             + String(a.type)
         )
     if a.type.zone.is_naive():
+        # pandas' own sentence first and ours after it. The first half is what
+        # somebody pastes into a search box when they hit this, and a message
+        # that describes our internals accurately and shares no words with the
+        # pandas documentation sends them nowhere.
         raise Error(
-            "temporal: tz_convert has nothing to convert this column from,"
-            " because it carries no zone, and tz_localize is the one that puts"
-            " a clock on a column of readings"
+            "temporal: Cannot convert tz-naive timestamps, use tz_localize to"
+            " localize. This column carries no zone, so there is nothing to"
+            " read it against, and tz_localize is the one that puts a clock on"
+            " a column of readings"
         )
     var out = AnyArray(copy=a)
     out.type = LogicalType.timestamp(a.type.unit, TimeZone(zone))
@@ -917,7 +922,8 @@ def temporal_tz_localize(a: AnyArray, zone: StringSlice) raises -> AnyArray:
         )
     if not a.type.zone.is_naive():
         raise Error(
-            "temporal: this column is already on "
+            "temporal: Already tz-aware, use tz_convert to convert. This column"
+            " is already on "
             + String(a.type.zone)
             + ", and tz_convert is the one that reads it against another clock"
         )
@@ -1380,7 +1386,7 @@ def _nanos_per_unit(t: LogicalType) raises -> Int64:
     return NANOS_PER_SECOND // t.unit.per_second()
 
 
-def _alias_nanos(spelling: StringSlice) raises -> Int64:
+def _alias_nanos(spelling: StringSlice, whole: String) raises -> Int64:
     """Returns how many nanoseconds long one of the fixed frequencies is.
 
     These seven are the whole list pandas will round to. Everything else it
@@ -1390,6 +1396,12 @@ def _alias_nanos(spelling: StringSlice) raises -> Int64:
 
     Args:
         spelling: The letters after the count, so `h` rather than `2h`.
+        whole: The frequency the caller wrote, count and all, which is what the
+            message names. Naming the alias alone would tell somebody who wrote
+            `2xyz` that `xyz` is the problem, which is true and is not the
+            string they typed or the string they will search for. It is a copy
+            rather than a slice because the alias is a slice of the same string
+            and two slices of one origin cannot both be passed.
 
     Returns:
         The length in nanoseconds.
@@ -1412,10 +1424,11 @@ def _alias_nanos(spelling: StringSlice) raises -> Int64:
     if spelling == "ns":
         return 1
     raise Error(
-        "temporal: '"
-        + String(spelling)
-        + "' is not a fixed frequency; the ones that can be rounded to are D,"
-        " h, min, s, ms, us and ns, each with an optional count in front of it"
+        "temporal: Invalid frequency: "
+        + whole
+        + ". The fixed frequencies, which are the ones that can be rounded to,"
+        " are D, h, min, s, ms, us and ns, each with an optional count in front"
+        " of it"
     )
 
 
@@ -1519,7 +1532,9 @@ def frequency_period(freq: StringSlice, t: LogicalType) raises -> Int64:
     if negative:
         count = -count
 
-    var nanos = _alias_nanos(freq[byte=at:stop])
+    var nanos = _alias_nanos(
+        freq[byte=at:stop], String(freq[byte=start:stop])
+    )
     var magnitude = count if count >= 0 else -count
     if magnitude > Int64.MAX // nanos:
         raise Error(
