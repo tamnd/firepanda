@@ -163,7 +163,7 @@ def ask_duckdb(statements: List[String]) raises -> String:
     var python_path = Python.import_module("sys").path
     python_path.insert(0, "tools")
     var helper = Python.import_module("corpus")
-    return String(helper.verdicts_for(batch))
+    return String(helper.verdicts_of(batch))
 
 
 def report(kind: StringSlice, cases: List[String], of: Int) -> None:
