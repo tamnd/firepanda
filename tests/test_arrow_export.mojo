@@ -31,8 +31,10 @@ from firepanda.dtype.logical import LogicalType
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.series import Series
 from firepanda.io.arrow_c import (
+    ARROW_FLAG_DICTIONARY_ORDERED,
     ARROW_FLAG_NULLABLE,
     ArrowArray,
+    ArrowSchema,
     NullableVoidPtr,
     release_array,
     release_schema,
@@ -440,6 +442,102 @@ def test_releasing_a_struct_twice_is_a_no_op() raises:
     release_array(array)
     release_array(array)
     assert_equal(array.n_children, 0)
+
+
+def _grades(ordered: Bool = True) raises -> AnyArray:
+    """A four row categorical over three categories, one of them never used.
+
+    An unused category is deliberate. It is the thing that is lost by a round
+    trip through the values rather than through the codes, so a column that has
+    one is the column that notices.
+
+    Args:
+        ordered: Whether the categories have a meaning to their order.
+
+    Returns:
+        The column.
+    """
+    var codes = Array[DType.int8](4)
+    codes.set_valid(0, Int8(1))
+    codes.set_valid(1, Int8(0))
+    codes.set_null(2)
+    codes.set_valid(3, Int8(1))
+    var levels = StringBuilder()
+    levels.append(String("low").as_bytes())
+    levels.append(String("high").as_bytes())
+    levels.append(String("unused").as_bytes())
+    return AnyArray.dictionary[DType.int8](codes^, levels^.finish(), ordered)
+
+
+def test_a_dictionary_field_carries_the_format_of_its_codes() raises:
+    # Which is the part of this that catches people. A dictionary has no format
+    # string of its own, so the field says `c` for int8 and the fact that it is
+    # a dictionary at all is carried by the member hanging off it.
+    var schema = export_schema(LogicalType.dictionary(DType.int8, True), "g")
+    assert_equal(_c_string_at(schema.format.value()), "c")
+    assert_true(schema.dictionary)
+    var values = schema.dictionary.value().unsafe_bitcast[ArrowSchema]()
+    assert_equal(_c_string_at(values[].format.value()), "vu")
+    release_schema(schema)
+
+
+def test_the_ordered_flag_is_written_on_the_field() raises:
+    # One bit, and the difference between `a < b` answering and refusing.
+    var yes = export_schema(LogicalType.dictionary(DType.int8, True), "g")
+    var no = export_schema(LogicalType.dictionary(DType.int8, False), "g")
+    assert_true((yes.flags & ARROW_FLAG_DICTIONARY_ORDERED) != 0)
+    assert_true((no.flags & ARROW_FLAG_DICTIONARY_ORDERED) == 0)
+    release_schema(yes)
+    release_schema(no)
+
+
+def test_an_exported_categorical_hands_over_its_categories() raises:
+    # Three categories against four rows, which is the whole difference between
+    # this and a string column and the only reason the encoding exists.
+    var array = export_array(_grades())
+    assert_equal(array.length, 4)
+    assert_equal(array.null_count, 1)
+    assert_true(array.dictionary)
+    var values = array.dictionary.value().unsafe_bitcast[ArrowArray]()
+    assert_equal(values[].length, 3)
+    release_array(array)
+
+
+def test_releasing_a_categorical_releases_its_categories() raises:
+    # The categories are a second structure with a second allocation behind it,
+    # and nothing else in this file frees it, so a release that walked past it
+    # would leak one array and one schema on every export of every category
+    # column. Nothing fails over that and everything grows on it.
+    var array = export_array(_grades())
+    var values = array.dictionary.value().unsafe_bitcast[ArrowArray]()
+    release_array(array)
+    assert_false(values[].release)
+    assert_false(array.dictionary)
+    assert_false(array.release)
+
+
+def test_releasing_a_categorical_twice_is_a_no_op() raises:
+    # Same rule as the struct next door, and a second call here would be reading
+    # a freed array through a pointer the first call did not clear.
+    var array = export_array(_grades())
+    release_array(array)
+    release_array(array)
+    assert_false(array.dictionary)
+
+
+def test_a_frame_with_a_category_column_describes_it_as_one() raises:
+    # The frame path builds its children through `export_schema`, so this is
+    # really asking whether the dictionary member survives being made a child of
+    # a struct, and whether the struct's release reaches it.
+    var schema = export_frame_schema(
+        [LogicalType.INT64, LogicalType.dictionary(DType.int8, False)],
+        ["qty", "grade"],
+    )
+    var child = schema.children.value().unsafe_offset(1)[]
+    assert_true(child[].dictionary)
+    assert_equal(_c_string_at(child[].format.value()), "c")
+    release_schema(schema)
+    assert_false(schema.release)
 
 
 def main() raises:

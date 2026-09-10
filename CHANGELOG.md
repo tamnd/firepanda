@@ -8,6 +8,34 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: astype no longer halves the precision of a longdouble on x86
+
+`longdouble` and its character code `g` are refused by name now, where before they resolved to float64. That mapping was measured on an arm Mac, where numpy's `longdouble` really is a float64, and it is wrong on x86 Linux, where it is an eighty bit float that numpy prints as float128. Anyone asking for the widest float the machine has and getting float64 back is getting half of what they asked for, without being told.
+
+It is the only name in the table whose answer changes with the machine rather than with the argument, so unlike `long` and `uint` it cannot be written down as a row. firepanda has no float wider than float64 on any platform, which puts it with `complex` and `void` and the rest of the types the refusal table exists for, and the message says so and points at `double` for the float64 the caller may have wanted anyway.
+
+Found by CI on Linux, on a test that passed on macOS for exactly this reason.
+
+### Fixed: the interpreter CI reached for stopped working
+
+`uv run` takes the newest interpreter it can find, the newest one is now a free threaded build of 3.14, and importing the extension into it segfaults inside `PyInit__firepanda` before a single test runs. Every platform failed at once, on pull requests that touched no Python at all, which is the signature of the environment moving rather than the code. The extension tests now name the version they run on.
+
+This is a stopgap and the comment on the step says so. An extension that does not declare whether it is safe without the GIL is supposed to make the interpreter turn the GIL back on and carry on, not crash in its init function, so something is wrong rather than merely unsupported. #400 has the reproduction and what has to be found out to close it.
+
+### Added: a category column can be written back out
+
+The other half of the dictionary encoded import. A frame with a category column in it can now be handed to pyarrow, pandas or anything else that speaks the Arrow protocol, and comes back the same. Until now it could be read in and not written out, which is worse than not reading it: a caller who read a Parquet file got a frame that failed at the far end of whatever they were doing, over a column they did not choose to have.
+
+The part that catches people is that a dictionary field carries the format of its index rather than of its values. `format_for` on a dictionary over int8 codes answers `c`, which is int8, and says nothing about the categories being text, because the field describes the buffer it actually has and the rest hangs off a second schema on the field's `dictionary` member. The ordered flag goes on the field's flags next to the nullable bit, and it is one bit and is the difference between `a < b` answering and refusing.
+
+Both hung structures are allocations, and both release callbacks now free them, finding them through the member rather than through a box. Getting that wrong is the kind of bug nothing fails over: no wrong answer, no traceback, one schema and one array left behind on every export of every category column, on a path a program reading Parquet in a loop takes once per file.
+
+The categories are the one thing this exporter copies, and the reason is that a borrow would need a keep alive naming whatever owns the column, which the two array exporters disagree about. A set of categories is as long as the cardinality rather than as long as the column, so a column of ten million rows over four categories copies four strings.
+
+The test worth naming is the round trip of a category nobody used. A column whose categories are `low`, `high` and `unused`, whose rows never say `unused`, comes back with three categories and not two. An implementation that round tripped through the values instead of through the codes would pass every assertion about rows and drop it silently, and the difference would surface later in a `value_counts` a long way from anything that mentions Arrow.
+
+Spec 25 has the reasoning. This is still not a `cat` namespace: working with a categorical from Python is separate work and is what the board asks for next.
+
 ### Added: dictionary encoded Arrow columns can be read
 
 A `pandas.Categorical`, a low cardinality string column out of Parquet, and anything else that arrives dictionary encoded now loads as a category column. Until now all of it was refused at the door with a message about an unsupported format string, which was a confusing thing to be told about a column type firepanda has had since the CSV reader learned about categories.
@@ -58,7 +86,7 @@ The check sits in `firepanda/py/cast.mojo` and not in the kernel, because it is 
 
 `Series.astype` and `DataFrame.astype`, with the pandas signature, and `dtype=` honoured in both constructors instead of refused. The frame form takes one type name for every column or a dict naming some of them, which is what pandas takes.
 
-The cast itself was already written and tested in Mojo and simply had no door into Python. Almost all of the new code is the other half of the method, which is working out what type the caller asked for. pandas resolves a dtype through numpy and numpy has spent thirty years collecting names, so `int64` is also `int`, `int_`, `intp`, `long`, `longlong`, `l`, `q`, `p` and `i8`, and a program written by somebody who learned numpy first uses whichever of those they learned. Every row of the table was measured against a running pandas 3.0.3 rather than remembered, which is how the surprises got in: `i` is int32 and not int64, `u` is not a name at all though `i`, `f` and `b` are, `long` is int64 while `longdouble` is float64, and `unicode`, `str_`, `U` and `O` are all the object dtype rather than text. The test walks the whole table and asks a live pandas what each name means, so a row added without being measured fails.
+The cast itself was already written and tested in Mojo and simply had no door into Python. Almost all of the new code is the other half of the method, which is working out what type the caller asked for. pandas resolves a dtype through numpy and numpy has spent thirty years collecting names, so `int64` is also `int`, `int_`, `intp`, `long`, `longlong`, `l`, `q`, `p` and `i8`, and a program written by somebody who learned numpy first uses whichever of those they learned. Every row of the table was measured against a running pandas 3.0.3 rather than remembered, which is how the surprises got in: `i` is int32 and not int64, `u` is not a name at all though `i`, `f` and `b` are, `long` is int64 while `longdouble` is not a float64 anywhere but on arm, and `unicode`, `str_`, `U` and `O` are all the object dtype rather than text. The test walks the whole table and asks a live pandas what each name means, so a row added without being measured fails.
 
 A type pandas has and firepanda does not is refused by name with the reason, rather than being absent and failing on the lookup. Four of those refusals are for types firepanda does have. A cast to `datetime64[ns]`, `timedelta64[ns]` or `date32[day]` falls through to the physical layout underneath and would hand back the integers the instants, spans and days are stored as, and a cast to `binary` hands back text. All four are worth fixing in the kernel and none of them is worth shipping as a silent wrong answer in the meantime.
 

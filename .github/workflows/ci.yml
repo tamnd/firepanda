@@ -225,11 +225,21 @@ jobs:
       # M3's exit criteria, and DuckDB is the consumer that accepts nothing but
       # the stream protocol, so it is the one that says whether the stream export
       # is actually conforming rather than merely self consistent.
+      # The interpreter is pinned because `uv run` otherwise takes the newest one
+      # it can find, and the newest one is now a free threaded build. Importing
+      # the extension into a free threaded interpreter segfaults inside
+      # `PyInit__firepanda` before any test runs, on every platform at once,
+      # which is what it did here. A C extension that does not declare whether it
+      # is safe without the GIL is supposed to make Python turn the GIL back on
+      # and carry on, so this is a defect rather than a thing we have not opted
+      # into yet, and #400 tracks it. Until that is answered the version this is
+      # known to work on is the version it runs on.
       - name: Extension tests
         if: needs.guard.outputs.has_python == 'true'
         run: >
-          uv run --no-project --with pytest --with pandas --with pyarrow
-          --with polars --with duckdb python -m pytest python/tests -q
+          uv run --no-project --python 3.13 --with pytest --with pandas
+          --with pyarrow --with polars --with duckdb python -m pytest
+          python/tests -q
 
       # Every fuzzer at once. The bound is per fuzzer, as it was when they ran
       # in sequence, so this shortens the step without shortening the fuzz.
