@@ -21,11 +21,6 @@ from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.dtype.logical import LogicalType, TypeKind, named_type
 from firepanda.frame.index import Index
 from firepanda.frame.series import Series
-from firepanda.kernel.dictionary import dictionary_codes
-from firepanda.kernel.dictionary import drop_unused_categories as drop_unused
-from firepanda.kernel.dictionary import rename_categories as relabel
-from firepanda.kernel.dictionary import set_categories as recategorized
-from firepanda.kernel.dictionary import set_ordered as with_order
 from firepanda.kernel.reduce import reduce_any
 from firepanda.py.args import flag, number, whole, words
 from firepanda.py.build import column_from, empty_column
@@ -443,17 +438,9 @@ struct PySeries(Movable, Writable):
         """
         ref held = Self._held(py_self)[].series[]
         try:
+            var names = held.cat_categories()
             return PythonObject(
-                alloc=PyIndex(
-                    ArcPointer(
-                        Index(
-                            AnyArray(
-                                StringArray(copy=held.values.categories())
-                            ),
-                            None,
-                        )
-                    )
-                )
+                alloc=PyIndex(ArcPointer(Index(names^.into_values(), None)))
             )
         except cause:
             raise retagged(DTYPE, cause)
@@ -478,9 +465,7 @@ struct PySeries(Movable, Writable):
         """
         ref held = Self._held(py_self)[].series[]
         try:
-            return Self._alongside(
-                held, AnyArray(dictionary_codes(held.values)), ""
-            )
+            return Self._wrapped(held.cat_codes())
         except cause:
             raise retagged(DTYPE, cause)
 
@@ -498,7 +483,7 @@ struct PySeries(Movable, Writable):
             Error: Tagged `dtype`, if the column is not a category column.
         """
         ref held = Self._held(py_self)[].series[]
-        if not held.values.is_dictionary():
+        if not held.cat_is_category():
             raise tagged(
                 DTYPE,
                 String(
@@ -507,7 +492,7 @@ struct PySeries(Movable, Writable):
                     " has no categories to order",
                 ),
             )
-        return PythonObject(held.values.type.ordered)
+        return PythonObject(held.cat_ordered())
 
     @staticmethod
     def set_ordered(
@@ -532,9 +517,7 @@ struct PySeries(Movable, Writable):
         ref held = Self._held(py_self)[].series[]
         var wanted = flag(ordered, "ordered")
         try:
-            return Self._alongside(
-                held, with_order(held.values, wanted), held.name
-            )
+            return Self._wrapped(held.cat_set_ordered(wanted))
         except cause:
             raise Self._category_error(held.values, cause)
 
@@ -571,9 +554,7 @@ struct PySeries(Movable, Writable):
         var wanted = Self._category_names(names)
         var order = flag(ordered, "ordered")
         try:
-            return Self._alongside(
-                held, relabel(held.values, wanted^, order), held.name
-            )
+            return Self._wrapped(held.cat_rename_categories(wanted^, order))
         except cause:
             raise Self._category_error(held.values, cause)
 
@@ -604,9 +585,7 @@ struct PySeries(Movable, Writable):
         var wanted = Self._category_names(names)
         var order = flag(ordered, "ordered")
         try:
-            return Self._alongside(
-                held, recategorized(held.values, wanted^, order), held.name
-            )
+            return Self._wrapped(held.cat_set_categories(wanted^, order))
         except cause:
             raise Self._category_error(held.values, cause)
 
@@ -629,7 +608,7 @@ struct PySeries(Movable, Writable):
         """
         ref held = Self._held(py_self)[].series[]
         try:
-            return Self._alongside(held, drop_unused(held.values), held.name)
+            return Self._wrapped(held.cat_drop_unused_categories())
         except cause:
             raise Self._category_error(held.values, cause)
 
@@ -673,25 +652,22 @@ struct PySeries(Movable, Writable):
         return retagged(VALUE, cause)
 
     @staticmethod
-    def _alongside(
-        held: Series, var values: AnyArray, name: String
-    ) raises -> PythonObject:
-        """Puts a rewritten column back under the row labels it came with.
+    def _wrapped(var out: Series) raises -> PythonObject:
+        """Hands a series that the core built back to Python.
 
-        Six doors above differ in what they do to the categories and agree about
-        everything else, so the part they agree about is written once. The row
-        labels come across because none of them moves a row.
+        The six category doors above are one line each because the core member
+        they call has already done the thinking, including carrying the row
+        labels across, and what is left is putting a reference count around it.
 
         Args:
-            held: The series the column came out of.
-            values: The rewritten column. Consumed.
-            name: The name to carry, and empty for none.
+            out: The series. Consumed.
 
         Returns:
-            A new series.
+            The Python object holding it.
+
+        Raises:
+            Error: If the reference count cannot be allocated.
         """
-        var out = Series(name, values^)
-        out.index = Index(copy=held.index)
         return PythonObject(alloc=Self(ArcPointer(out^)))
 
     @staticmethod
