@@ -185,16 +185,26 @@ def test_stacking_two_of_the_same_resolution_keeps_it() raises:
 
 def test_two_resolutions_are_not_the_same_column() raises:
     """The silent factor of a thousand, refused in the two places it could
-    happen."""
-    with assert_raises(contains="counts of different things"):
+    happen.
+
+    This was written against a message of its own, saying that the two are
+    counts of different things and that stacking them would put one of them out
+    by the ratio between their units. The message went away because the check
+    it belonged to did. Both kernels now compare the whole logical type rather
+    than the physical dtype, which catches a resolution mismatch on the way to
+    catching everything else, so a second check behind it would never run. What
+    is asserted here is the refusal, since that is the part a caller sees and
+    the part that would be a wrong answer if it stopped happening.
+    """
+    with assert_raises(contains="same dtype"):
         _ = concat_two_any(
             when([Int64(1)], TimeUnit.SECOND), when([Int64(2)], TimeUnit.MILLI)
         )
-    with assert_raises(contains="counts of different things"):
+    with assert_raises(contains="same dtype"):
         _ = coalesce_any(
             when([Int64(1)], TimeUnit.SECOND), when([Int64(2)], TimeUnit.MILLI)
         )
-    with assert_raises(contains="counts of different things"):
+    with assert_raises(contains="same dtype"):
         _ = concat_two_any(
             when([Int64(1)], TimeUnit.SECOND), span([Int64(2)], TimeUnit.SECOND)
         )

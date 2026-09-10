@@ -1,0 +1,28 @@
+"""Generated grammar tables. See tools/gen_grammar.py."""
+
+from .keywords import (
+    KEYWORD_CLASS_COUNT,
+    KEYWORD_COLUMN_NAME,
+    KEYWORD_COUNT,
+    KEYWORD_FUNC_NAME,
+    KEYWORD_MAX_LENGTH,
+    KEYWORD_RESERVED,
+    KEYWORD_TYPE_NAME,
+    KEYWORD_UNRESERVED,
+    KEYWORDS,
+)
+from .rules import (
+    FILTER_BITS,
+    FILTER_COUNT,
+    MATCHER_COUNT,
+    MEMOIZED_COUNT,
+    OVERRIDDEN_COUNT,
+    NODE_COUNT,
+    RULE_COUNT,
+    RULE_END_OF_INPUT,
+    RULE_PROGRAM,
+    RULE_WHITESPACE,
+    STRING_COUNT,
+    SUGGESTION_COUNT,
+    TABLE,
+)

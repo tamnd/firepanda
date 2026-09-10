@@ -33,6 +33,7 @@ the operation paid twice.
 """
 
 from std.memory import unsafe_memcpy
+from std.sys.intrinsics import PrefetchOptions, prefetch
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
@@ -65,6 +66,46 @@ and that is not the same for every row: indices that walk a small region are hot
 and indices that walk the whole column are not, and a join or a sort produces
 both in the same call. Eight thousand rows is around ten microseconds of work,
 which is four orders of magnitude more than the atomic that hands it out.
+"""
+
+comptime PARALLEL_FILTER_ROWS = 1 << 16
+"""Below this many input rows a variable width filter stays on one thread.
+
+Higher than it would be for a gather, because a filter reads its input in order
+and a gather does not, so a filtered row is a few nanoseconds rather than a cache
+miss. The same number as the take threshold in the end, which is a coincidence of
+two different arguments landing in the same place rather than a shared constant.
+"""
+
+comptime TAKE_LOOKAHEAD = 8
+"""Rows the gather runs ahead of itself when issuing prefetches.
+
+The index list is in memory before the loop starts, so where row `i` will read
+from is known long before row `i` is reached, and the only reason the load is
+late is that nothing asked for it early. Reading `indices[i + 8]` and prefetching
+the line it points at turns eight misses that would have been taken one after
+another into eight that are outstanding at once, which is the same trick the hash
+table's batch probe plays and for the same reason.
+
+Eight, matching `PROBE_LOOKAHEAD`, and picked the same way: far enough ahead that
+a miss to memory has time to land, close enough that the lines prefetched are
+still there when the loop arrives.
+
+What it is worth is entirely a question of whether the column being gathered from
+fits in cache, and the join queries in db-benchmark sit on both sides of that. The
+big join gathers from a hundred million rows, eight hundred megabytes against a
+thirty six megabyte L3, and there it is worth three per cent: four ABBA passes a
+side on a 13900K, every run with the prefetch below every run without it, 0.659
+to 0.667 seconds against 0.673 to 0.690, and 45.1 CPU seconds against 46.6. The
+medium join gathers from a million rows, eight megabytes, which is L3 resident,
+and there it is worth nothing measurable: the same eight passes come out fully
+interleaved. The join microbenchmarks gather from a hundred thousand rows and are
+interleaved too.
+
+So it never pays for itself on a small gather and it never costs anything either,
+which is what makes it worth having unconditionally rather than behind a size
+test. A branch and a load per row against a memory latency that a large gather
+takes on every row is not a trade that needs tuning.
 """
 
 
@@ -110,17 +151,20 @@ def take_any(
         If the column's dtype is not one firepanda has a physical layout for.
     """
     if col.is_string():
-        return AnyArray(_take_strings(col.strings(), indices, spread))
+        return AnyArray(_take_strings(col.strings(), indices, spread)).retyped(
+            col.type
+        )
     comptime for candidate in ALL:
         if col.dtype() == candidate:
-            var moved = _take_core(
-                col.unsafe_ptr[candidate](),
-                col.data.validity,
-                col.null_count() > 0,
-                indices,
-                spread,
-            )
-            return AnyArray(moved^.into_data(), col.type)
+            return AnyArray(
+                _take_core(
+                    col.unsafe_ptr[candidate](),
+                    col.data.validity,
+                    col.null_count() > 0,
+                    indices,
+                    spread,
+                )
+            ).retyped(col.type)
     raise Error("take: unsupported dtype")
 
 
@@ -329,6 +373,74 @@ def _take_core[
     def gather(start: Int, stop: Int) raises {mut out, mut built, imm}:
         var target = out.unsafe_ptr()
 
+        # A run of consecutive ascending indices is a copy, and it is not a rare
+        # shape. An inner join that matches every probe row once hands the left
+        # side an index list that is `0, 1, 2, ...`, because the output is in
+        # probe order and every probe row produced exactly one output row, so
+        # every column taken from the probe side is being gathered by the
+        # identity. A limit and a slice are the same thing offset.
+        #
+        # The check is a pass over the indices and it is almost free on the
+        # columns it does not help: an index list that is not a run stops the
+        # loop at the first row that is not, which for a genuinely scattered
+        # list is the second row. What it saves when it does hold is the eight
+        # byte index load and the branch on every row, and it hands the copy to
+        # a memcpy that moves a cache line at a time instead of an element.
+        #
+        # Four ABBA passes a side on a 13900K, join microbenchmarks at ten
+        # million rows, milliseconds without the run check against with it.
+        # `join/inner_1000`, four gathered columns, 24.06 23.96 24.06 24.36
+        # against 22.49 22.19 22.20 22.54. `join/inner_projected`, two of them,
+        # 15.13 15.12 15.14 15.48 against 14.73 14.55 14.51 14.75.
+        # `join/two_keys` 43.8 42.4 42.2 47.9 against 40.1 40.1 40.6 40.8.
+        # `join/outer` 37.4 37.8 37.8 40.8 against 36.2 36.1 36.8 37.1. Every
+        # run with it below every run without it in all four.
+        #
+        # The controls say the check costs nothing where it fails.
+        # `join/indices_1000` pairs without gathering anything and comes out
+        # 7.24 7.21 7.18 7.23 against 7.29 7.17 7.19 7.26, `join/semi` and
+        # `join/anti` are interleaved the same way, and `join/many_to_many`,
+        # whose left indices repeat and so are never a run, is interleaved too.
+        #
+        # The db-benchmark joins at a hundred million rows move less, because at
+        # that size the gather is waiting on memory rather than on instructions.
+        # CPU seconds for three timed runs, without against with: j1 6.22 6.27
+        # 6.23 6.16 against 5.94 5.81 5.97 6.11, j2 12.49 12.74 12.84 12.55
+        # against 11.98 12.10 12.16 12.34, j3 12.61 12.81 11.81 12.59 against
+        # 12.01 12.10 12.22 12.25. Four per cent of the CPU on j1 and j2, and
+        # one to two per cent of the wall clock, which is what is left once the
+        # eight hundred megabytes still have to be read either way.
+        #
+        # Only when the source has no nulls. With nulls the output's validity is
+        # a bit shifted copy of a range of the input's, which is a different and
+        # more delicate loop than the two here, and a join gathering from a
+        # column with nulls is not the case this is for.
+        if not has_nulls and stop > start and indices[start] >= 0:
+            var first = indices[start]
+            var run = True
+            for i in range(start + 1, stop):
+                if indices[i] != first + (i - start):
+                    run = False
+                    break
+            if run:
+                unsafe_memcpy(
+                    dest=target.unsafe_offset(start),
+                    src=source.unsafe_offset(first),
+                    count=stop - start,
+                )
+                # Every row of the run is valid, so the words are filled rather
+                # than accumulated. The last word of the last morsel is the only
+                # partial one, and the bits above `stop` in it belong to no row.
+                var w = start >> 6
+                while (w + 1) << 6 <= stop:
+                    built.unsafe_set_word(w, UInt64.MAX)
+                    w += 1
+                if stop & 63 != 0:
+                    built.unsafe_set_word(
+                        w, (UInt64(1) << UInt64(stop & 63)) - 1
+                    )
+                return
+
         # The output positions are consecutive, so the validity bits can be
         # built in a register and stored once every sixty four rows instead of
         # read-modify-writing a byte per row. The input side has no such luck; a
@@ -340,7 +452,21 @@ def _take_core[
         # source that usually does not have nulls, so the two halves of that
         # condition are worth keeping apart.
         var word = UInt64(0)
+        var ahead = min(start + TAKE_LOOKAHEAD, stop)
         for i in range(start, stop):
+            # The line row `i + 8` is going to read, asked for now. Only the
+            # values array, not the validity bitmap: a bitmap covering the whole
+            # column is a sixty fourth of its size and the row that misses on the
+            # values usually hits on the bits, so prefetching both would double
+            # the instructions to halve a cost that is already small.
+            if ahead < stop:
+                var next = indices[ahead]
+                if next >= 0:
+                    prefetch[PrefetchOptions().for_read().high_locality()](
+                        source.unsafe_offset(next)
+                    )
+                ahead += 1
+
             var at = indices[i]
             if at >= 0 and (not has_nulls or validity.get(at)):
                 target.unsafe_offset(i).unsafe_write(
@@ -411,16 +537,17 @@ def filter_any(col: AnyArray, mask: Array[DType.bool]) raises -> AnyArray:
         If the column's dtype is not one firepanda has a physical layout for.
     """
     if col.is_string():
-        return AnyArray(_filter_strings(col.strings(), mask))
+        return AnyArray(_filter_strings(col.strings(), mask)).retyped(col.type)
     comptime for candidate in ALL:
         if col.dtype() == candidate:
-            var kept = _filter_core(
-                col.unsafe_ptr[candidate](),
-                col.data.validity,
-                col.null_count() > 0,
-                mask,
-            )
-            return AnyArray(kept^.into_data(), col.type)
+            return AnyArray(
+                _filter_core(
+                    col.unsafe_ptr[candidate](),
+                    col.data.validity,
+                    col.null_count() > 0,
+                    mask,
+                )
+            ).retyped(col.type)
     raise Error("filter: unsupported dtype")
 
 
@@ -434,6 +561,16 @@ def _filter_strings(
     trick in `_filter_core` is to write every row and advance the cursor by the
     mask bit, which only works when a row that nobody keeps costs a fixed number
     of bytes that the next row overwrites.
+
+    What it does have is the split `_take_strings` uses, and it needs it more.
+    A filtered row is sixteen bytes of view wherever it lands, so the only thing
+    a worker has to be told is how many rows and how many payload bytes the
+    workers before it produced. Both come out of a counting pass, and then every
+    worker writes its own stretch of the output with no coordination at all.
+    Before this the loop went through `StringBuilder`, which appends a view and a
+    null flag to two growing lists and then copies both into the finished column,
+    and on six million single character labels that was ninety milliseconds
+    against eight for the same filter over a column of doubles.
 
     Args:
         col: The column to filter.
@@ -454,18 +591,136 @@ def _filter_strings(
                 len(col),
             )
         )
+    var n = len(col)
     var values = mask.unsafe_ptr()
-    var builder = StringBuilder(capacity=len(col))
-    for i in range(len(col)):
-        if not mask.data.validity.get(i):
-            continue
-        if not Bool(values.unsafe_offset(i).unsafe_load()):
-            continue
-        if col.is_valid(i):
-            builder.append(col.unsafe_bytes(i))
-        else:
-            builder.append_null()
-    return builder^.finish()
+    var workers = worker_count()
+    if n < PARALLEL_FILTER_ROWS or workers <= 1:
+        var builder = StringBuilder(capacity=n)
+        for i in range(n):
+            if not mask.data.validity.get(i):
+                continue
+            if not Bool(values.unsafe_offset(i).unsafe_load()):
+                continue
+            if col.is_valid(i):
+                builder.append(col.unsafe_bytes(i))
+            else:
+                builder.append_null()
+        return builder^.finish()
+
+    var most = n // PARALLEL_FILTER_ROWS
+    if workers > most:
+        workers = most
+    var bounds = _take_bounds(n, workers)
+    var source_views = col.views.unsafe_ptr().unsafe_bitcast[StringView]()
+    var source_bytes = col.payload.unsafe_ptr()
+    var wide_payload = len(col.payload) > 0
+
+    # Where a worker's rows land depends on how many rows the workers before it
+    # kept, and where their bytes land depends on how many bytes those workers
+    # copied, so both are counted before anything is written. The byte count is
+    # skipped when the column has no payload at all, which is every column of
+    # labels and is the case a filter over a status column actually hits.
+    var kept_totals = Buffer(workers * 8)
+    var byte_totals = Buffer(workers * 8)
+
+    def measure(w: Int) raises {mut kept_totals, mut byte_totals, imm}:
+        var rows = 0
+        var wide = 0
+        for i in range(bounds[w], bounds[w + 1]):
+            if not mask.data.validity.get(i):
+                continue
+            if not Bool(values.unsafe_offset(i).unsafe_load()):
+                continue
+            rows += 1
+            if wide_payload and col.is_valid(i):
+                var view = source_views.unsafe_offset(i)[]
+                if not view.is_inline():
+                    wide += len(view)
+        kept_totals.bitcast[DType.int64]().unsafe_offset(w).unsafe_store(
+            Int64(rows)
+        )
+        byte_totals.bitcast[DType.int64]().unsafe_offset(w).unsafe_store(
+            Int64(wide)
+        )
+
+    parallel_for(measure, workers)
+
+    var rows_before = List[Int](length=workers + 1, fill=0)
+    var bytes_before = List[Int](length=workers + 1, fill=0)
+    var counted_rows = kept_totals.bitcast[DType.int64]()
+    var counted_bytes = byte_totals.bitcast[DType.int64]()
+    for w in range(workers):
+        rows_before[w + 1] = rows_before[w] + Int(
+            counted_rows.unsafe_offset(w).unsafe_load()
+        )
+        bytes_before[w + 1] = bytes_before[w] + Int(
+            counted_bytes.unsafe_offset(w).unsafe_load()
+        )
+
+    var kept = rows_before[workers]
+    var views = Buffer(overwritten=kept * VIEW_SIZE)
+    var payload = Buffer(overwritten=bytes_before[workers])
+    var nulls = not col.validity.all_valid()
+    var built = Bitmap(kept, all_valid=not nulls)
+
+    def compact(w: Int) raises {mut views, mut payload, imm}:
+        var target = views.unsafe_ptr().unsafe_bitcast[StringView]()
+        var into = payload.unsafe_ptr()
+        var at = rows_before[w]
+        var cursor = bytes_before[w]
+        for i in range(bounds[w], bounds[w + 1]):
+            if not mask.data.validity.get(i):
+                continue
+            if not Bool(values.unsafe_offset(i).unsafe_load()):
+                continue
+            if not col.is_valid(i):
+                # The view of the empty string, so that reading a null's bytes
+                # gives an empty span rather than uninitialized memory, which is
+                # what `StringBuilder.append_null` writes for the same reason.
+                target.unsafe_offset(at)[] = StringView()
+            else:
+                var view = source_views.unsafe_offset(i)[]
+                if view.is_inline():
+                    target.unsafe_offset(at)[] = view
+                else:
+                    var count = len(view)
+                    var from_ = source_bytes.unsafe_offset(view.offset())
+                    unsafe_memcpy(
+                        dest=into.unsafe_offset(cursor),
+                        src=from_,
+                        count=count,
+                    )
+                    target.unsafe_offset(at)[] = make_long_at(
+                        from_, count, 0, cursor
+                    )
+                    cursor += count
+            at += 1
+
+    parallel_for(compact, workers)
+
+    # A worker's first output row can land in the middle of a validity word that
+    # the worker before it also writes to, which is the one thing the take route
+    # does not have to worry about because there the output row is the input row.
+    # Rather than lock a word or align the cuts, the bits go down in one pass
+    # here, and only when there is a null to record.
+    if nulls:
+        var at = 0
+        var word = UInt64(0)
+        for i in range(n):
+            if not mask.data.validity.get(i):
+                continue
+            if not Bool(values.unsafe_offset(i).unsafe_load()):
+                continue
+            if col.is_valid(i):
+                word |= UInt64(1) << UInt64(at & 63)
+            at += 1
+            if at & 63 == 0:
+                built.unsafe_set_word((at >> 6) - 1, word)
+                word = 0
+        if at & 63 != 0:
+            built.unsafe_set_word(at >> 6, word)
+
+    return StringArray(views^, payload^, built^, kept)
 
 
 def _filter_core[
