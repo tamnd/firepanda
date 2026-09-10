@@ -109,6 +109,7 @@ from .group import (
     group_var,
 )
 from .mask import apply_validity, combined_validity
+from .member import is_in, is_in_any, text_is_in
 from .nulls import (
     all_valid_mask,
     coalesce,
@@ -127,6 +128,20 @@ from .nulls import (
     present_bitmap_any,
     widen_for_missing,
     widens_for_missing,
+)
+from .pattern import (
+    find_bytes,
+    text_contains,
+    text_contains_in_order,
+    text_ends_with,
+    text_starts_with,
+)
+from .pick import (
+    pick,
+    pick_any,
+    pick_const,
+    pick_constants,
+    text_pick,
 )
 from .reduce import reduce_any
 from .select import (
@@ -147,12 +162,14 @@ from .sort import (
     sort_key,
     sort_rows,
 )
+from .substr import TO_END, text_substring
 from .temporal import (
     ROUND_DOWN,
     ROUND_HALF_EVEN,
     ROUND_UP,
     TemporalField,
     field_named,
+    instant_text,
     parse_format,
     temporal_as_unit,
     temporal_date,
@@ -163,6 +180,7 @@ from .temporal import (
     temporal_normalize,
     temporal_round,
     temporal_strftime,
+    temporal_text,
     temporal_to_duration,
     temporal_total_seconds,
     unit_named,

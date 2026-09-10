@@ -42,6 +42,10 @@ pandas defaults three parameters to a private sentinel, `lib.no_default`, and fi
 
 Every argument pandas declares and this does not implement raises rather than being ignored, the same way the reductions do. `axis=1` on a frame transformation, `skipna=False` on a scan, `numeric_only`, `limit_area`, `shift(freq=)`, a list of periods with a `suffix`, a `fill_value` on a shift, `dropna(how="all")`, a `thresh`, `inplace` and `ignore_index` each refuse by name with the reason in the message, and there is a test per refusal.
 
+### The corpus differential stops taking the process down with it
+
+`pixi run differential-sql` printed its whole report and then died in a destructor, with `corrupted double-linked list` on Linux and a heap trace on macOS, and CI hung afterwards until the runner cancelled the job twenty minutes later. The run had passed. What was lost was the exit status. The harness is a Mojo binary with CPython embedded in it, and importing DuckDB into that interpreter registers process exit handlers that run after the interpreter has been finalized and free a connection that is no longer there. The asking now happens in a child process, which costs one fork and one pipe for seventy thousand statements, and the parent never loads DuckDB at all. That closes #359.
+
 ### The twelve reductions a pandas program can finally call
 
 `s.sum()`, `s.mean()`, `s.min()`, `s.max()`, `s.median()`, `s.skew()`, `s.std()`, `s.var()`, `s.sem()`, `s.quantile()`, `s.nunique()` and the same list on a frame, plus `df.count()`, now work from Python. They worked in Mojo the whole time. The core has had seventeen reductions behind `AggKind` since the aggregation work landed, and the Python extension exposed none of them, which meant the second most written expression in pandas after `df["a"]` was not available to a pandas program. This is the binding catching up with the library rather than the library learning anything.
@@ -119,6 +123,45 @@ All of that is one function, `temporal_agg_type`, which both the grouped path an
 This also restores the median, the quantile and the distinct count over a temporal column. The previous entry left `_reduce_temporal` raising for every kind not on its fast route, which took those three away; they fall through to the grouped path over a single group again, and the refusals now happen before the fall through rather than after it.
 
 Concatenating or coalescing two temporal columns at different resolutions now raises. The two share a physical dtype, so the old behaviour was a silent factor of a thousand on half the rows, which is the worst answer available: right in shape, right in dtype, wrong by three orders of magnitude in the values. pandas reconciles the two at the finer unit and firepanda does not yet, and refusing is the smaller answer on purpose, because a missing feature costs less than one nobody reading the output can detect.
+Concatenating or coalescing two temporal columns at different resolutions raises. The two share a physical dtype, so the old behaviour was a silent factor of a thousand on half the rows, which is the worst answer available: right in shape, right in dtype, wrong by three orders of magnitude in the values. pandas reconciles the two at the finer unit and firepanda does not yet, and refusing is the smaller answer on purpose, because a missing feature costs less than one nobody reading the output can detect. The refusal arrives by way of both kernels comparing the whole logical type rather than the physical dtype, which is a check they now need for every other reason too.
+
+### A whole `SELECT` now reaches the AST
+
+The transformer used to stop at an expression. It now takes a statement, and the analytical `SELECT` surface goes in one side as text and comes out the other as the three arenas.
+
+Three things had to be worked out first. The walk holds one result per parse node, which is one slot, and several rules have more than one thing to hand their parent: a `SELECT` clause has a `DISTINCT` and a target list, a `WITH` has a `RECURSIVE` and its entries, and the four ways of writing a limit and an offset have both. Those rules put their parts in a short run of named slots and the rule above unpacks it, and none of those runs ever reaches the AST. Second, a rule that needs to tell its children apart cannot do it by position or by leading keyword, because `TableAliasColon` and a table name both start with an identifier and `FROM t AS at` is enough to sink a test for the word `AT`. So the rules that build nothing are marked in the same byte table the dispatch uses, and identifying a child is the array lookup identifying a rule already was. Third, no parse node may build to nothing, because a parent that asks for a child's value and gets zero back queues that child again forever. `ResultModifiers` matches the empty string and so is present on every statement, and the rule above it skips it rather than asking.
+
+What transforms is what the printer already prints: `WITH` including `RECURSIVE` and both spellings of `MATERIALIZED`, `DISTINCT` and `DISTINCT ON`, the `FROM` first form, joins with `ON` and with `USING`, subqueries and table functions and `LATERAL`, `WHERE`, `GROUP BY` including `ALL` and `GROUPING SETS` and `CUBE` and `ROLLUP`, `HAVING`, `QUALIFY`, set operations, `ORDER BY` including `ALL` and null placement, `LIMIT` and `OFFSET` and `FETCH`, `VALUES`, `TABLE`, and the three expression kinds that hold a statement. A join and a set operation are kept as the words they were written with rather than as a tag and some flags, which is why `NATURAL LEFT JOIN` and `UNION ALL BY NAME` and `ASOF JOIN` needed no cases of their own.
+
+One node kind is new. `GROUPING SETS ((a, b))` writes a set of columns the way SQL writes a row, and the grammar has no rule for the difference, so the tuple arrives as an expression. Reading it as one would group by a row rather than by two columns, so a grouping entry has a tag for it and the transformer looks for it. A row anywhere else is still refused, because the expression arena has no kind for one.
+
+What refuses, by name and with a position: `PIVOT` and `UNPIVOT`, window specifications, `TABLESAMPLE` and `USING SAMPLE`, `AT`, the `name: table` spelling of a table alias, `WITH ORDINALITY`, `USING KEY`, the `NEAREST` and `JOIN BY` joins, and named arguments to a table function.
+
+Two normalizations, both because the AST holds what a query means rather than how it was typed. `FROM t SELECT a` prints as `SELECT a FROM t`, since DuckDB takes the clauses either way round and means one query by both. `FETCH FIRST 10 ROWS ONLY` prints as `LIMIT 10`, since that is what it is.
+
+Forty eight tests, each of which prints the statement twice and checks the two agree, because the printer puts parentheses back around operands and a transformer that read its own output one paren deeper each time would still pass a single pass test.
+
+### The other two arenas
+
+Statements and table references, and a printer that turns either one back into SQL.
+
+The expression arena landed first because expressions are the self contained part of the grammar. These are the other two, and they are the ones that refer to each other in both directions. A `FROM` holds a subquery, which is a statement, and a `WHERE` holds an `EXISTS`, which is an expression holding a statement. Three expression kinds arrive with them for exactly that reason, which are the scalar subquery, `EXISTS` and the subquery form of `IN`. The last of those is its own kind rather than a flag on `EXPR_IN`, because the right side lives in a different arena and one kind holding an index that means one of two things is how a wrong arena read gets written.
+
+A statement node and a table reference node are the same six fields an expression node has, and two of them hold more than four parts. A table reference keeps its alias and its column aliases in one run, the alias name first, which works because column aliases without a table alias are not something SQL can write. A query node keeps its six clauses in a fixed length run read by named constant, because six clauses do not fit in four fields and splitting a `SELECT` across two nodes to make them fit would have been worse.
+
+The printer parenthesizes every operand of an operator, and it does the opposite for statements and joins: it prints a set operation's operands bare and a join's sides bare. That is not an inconsistency. The parentheses a query wrote around a select or around a join are already a node of their own, `STMT_SELECT` in the one case and `REF_PARENS` in the other, sitting exactly where the text had them, so putting them back there and nowhere else is what makes the printed text read back as the tree it came from. Guessing where else they might go would be a second implementation of the grammar's own precedence.
+
+What prints is the analytical `SELECT` surface: `WITH` including `RECURSIVE` and both spellings of `MATERIALIZED`, `DISTINCT` and `DISTINCT ON`, the `FROM` first form with no `SELECT` in front of it, joins with `ON` and with `USING`, subqueries and table functions and `LATERAL`, `WHERE`, `GROUP BY` including `ALL` and `GROUPING SETS` and `CUBE` and `ROLLUP`, `HAVING`, `QUALIFY`, set operations with the operator kept as the text that was written so `UNION ALL BY NAME` needs no table to print back, `ORDER BY` including `ALL` and null placement, `LIMIT` and `OFFSET`, `VALUES` and `TABLE`. What is not here yet is window specifications, `PIVOT` and `UNPIVOT`, and the statements that are not a `SELECT`.
+
+Fifty eight tests. Most of them name the SQL they are producing so a failure reads as a disagreement about SQL rather than about which field held what, and the round trip tests print a statement and parse the text back with the real parser, which is the property the transformer is going to lean on next.
+
+### Added: `DataFrame.add_column`, which adds a column without copying the frame
+
+`with_column` returns a new frame, and it has to, because the frame it was called on is still there afterwards and both of them have to own their columns. What that costs was not obvious until it was measured on a wide one. TPC-H q1 filters six columns of `lineitem` down to five point nine million rows and then adds two computed expressions to them, and written as two `with_column` calls that is two deep copies of the whole thing, around seven hundred megabytes moved in order to write two new columns. The two additions took ninety three milliseconds at sf1 and thirty seven with the copies gone.
+
+`add_column` is the same method with the copy taken out, mutating in place. It is for the common case where a caller built the frame it is adding to and is going to hand the result straight on, which is what building a wide frame for a group by looks like every time. `with_column` now calls it and keeps its own contract exactly, so nothing that used it changes.
+
+A column of the wrong height still raises, and it raises before anything is written, so a frame that refused a column is the frame it was.
 
 ### The elapsed time, and the arithmetic between two temporal columns
 
@@ -135,6 +178,476 @@ A constant carries a resolution the same way a column does, through the new `Val
 `Series.dt_days` floors rather than truncating, so minus one microsecond is minus one day, which is the rule that keeps the days and the remainder adding back up and is the thing a positive only test corpus cannot catch. `Series.dt_total_seconds` answers float64 at every resolution, including on a column of whole seconds, and is lossy past 2 to the 53 because pandas' is. `Series.to_timedelta` on an integer column is a relabelling and not a conversion: the integers are already the counts, so nothing is computed and no null turns into a zero length span on the way through. A column that already carries a resolution comes back unchanged.
 
 Eighteen tests in `tests/test_temporal_duration.mojo`, every expected value read off pandas 3.0.3 rather than worked out, covering both signs of the mean truncation and both signs of the day rounding. The fuzzer checks the two readers and the three reductions against one row at a time twins one case in eight, with the day twin using an explicitly floored division rather than the language operator so that agreement is evidence about the answer and not about the operator, and with the duration columns drawn by random bit width and separately drawn sign so a run sees spans of a few units beside spans of a few centuries. Four hundred thousand cases at seed 20260907 found nothing. The arithmetic between two temporal columns is deliberately not fuzzed, because it is a rescale in front of the add and subtract loops the fuzzer already runs over every dtype.
+### From a parse tree to something worth binding against
+
+`firepanda/sql/transform.mojo`, the piece between the matcher and the arenas, and the only file in the engine that knows a grammar rule name. A grammar bump therefore breaks this file or nothing.
+
+Dispatch is a jump table. The table is one byte per grammar rule and is built once, when the grammar is loaded, so nothing compares a rule name while a query is being transformed. A rule with no entry does not fall through to a default: it refuses and names itself, which is what keeps a coverage gap visible rather than turning it into a wrong answer.
+
+Precedence is flattened here. DuckDB's grammar spells sixteen levels as a chain of `X <- Y Tail*` rules, so `1 + 2 * 3` arrives as a tower of single child pass throughs twenty one deep for a bare literal. Every level folds through the same routine, left to right, which is the associativity the chain shape asks for. Getting that wrong is a wrong answer no syntax test would catch, which is why the printer landed first and why the test for it is a round trip rather than a comparison against an expected tree.
+
+Nothing is resolved. `a.b` becomes a two part name and not a column, and `count(x)` becomes a call with a name and not an overload. Every decision that needs to know what exists belongs to the binder.
+
+The walk is a loop over an explicit stack rather than a recursion. A form that needs the value of a child asks for it and either gets it or is run again once the child has been built, so depth costs heap and not stack, and a form with more than one operand asks for all of them at once so that it is only ever built once. Two things fall out of that. The matcher's own depth limit is now the only thing that refuses a deeply nested query, so when that limit goes this file will not be the next wall. And the transformer builds under Mojo 1.0 at all, which a recursive one does not: with this much control flow around the recursion cycle the compiler hangs outright, and #369 records the bisection.
+
+What it covers is the expression grammar: the sixteen precedence levels, `NOT`, the `IS` family, `BETWEEN`, `IN` over a list, the `LIKE` family, prefix operators, casts in both spellings, dotted names, calls with `DISTINCT`, `CASE` in both forms, list and struct constructors, the four parameter spellings, and a star with `EXCLUDE`, `REPLACE` and `RENAME`. What it refuses, by name and with a link, is anything holding a statement, window functions, ordered aggregates, `IS UNKNOWN`, slices and subscripts, and escaped string literals. The statement and table reference arenas are next, and the three expression kinds that hold a statement inside them arrive with those.
+
+### Filtering a text column is twenty two times faster
+
+`filter` over a column of six million single character labels took ninety milliseconds. The same filter over a column of doubles beside it took eight. The gap was not the strings, it was the route: the variable width path went through `StringBuilder`, which appends a view to one growing list and a null flag to another and then copies both into the finished column, so a filter that should have been one pass over the mask was three passes and two reallocating lists.
+
+It now uses the split `take` has had since the parallel gather landed. A filtered element is sixteen bytes of view wherever it ends up, so the only thing a worker needs to be told is how many rows and how many payload bytes the workers before it produced, and both come out of a counting pass in front. After that every worker writes its own stretch of views and its own stretch of payload with nothing shared. The byte count is skipped when the column has no payload at all, which is every column of labels.
+
+One thing the gather does not have to deal with is that a filtered row is not the row it came from, so a worker's first output row can land in the middle of a validity word its neighbour also writes. Rather than lock the word or align the cuts, the validity bits go down in a single pass afterwards, and only when the column has a null in it at all.
+
+Measured on an i9-13900K over six million rows: ninety milliseconds to four, with the same filter over doubles unchanged at eight as the control. This is the largest single cost in TPC-H q1, which filters two label columns out of `lineitem`, and it took that query from 0.383 s to 0.212 s against Polars at 0.092.
+
+### Fixed: a date printed and wrote as a day count
+
+The same erasure as the previous entry, one layer further out. A date is stored as a day count and a timestamp as a tick count, and both of the places that turn a column into text read the physical layout and dispatched on it, so `print(df)` showed a date as `10471` and `write_csv` wrote `10471`. The second is the worse of the two, because a reader parsing that file back gets an integer where the schema promised a date, and the round trip the writer claims for nulls did not hold for dates at all.
+
+Both now ask for the instant before they dispatch. `temporal_text` renders one value in ISO 8601, which is what pandas prints, what Polars prints, and what a reader of either parses back to a date. A date is `YYYY-MM-DD`, a naive timestamp is `YYYY-MM-DD HH:MM:SS` with a fractional part only when the value has one, and the fraction carries the column's own unit, so a microsecond column gets six digits and a nanosecond column gets nine.
+
+`read_csv` does not infer a date yet, so firepanda's own round trip gives back text rather than the date it started as. That is still the better half of a bad trade: text is visibly not a date, and the number it used to write was a plausible integer that read back without complaint and was wrong. Date inference in the reader is the other half and is not in this change.
+
+A timestamp carrying a time zone still prints its count. The stored instants are UTC and reading an hour off them would print a wrong number under the right name, which is worse than an obviously raw one, so that waits for a zone database.
+
+This was found the same way as the previous entry: the TPC-H answers for q3 and q18 both carry an order date, and the checker compared `9194` against `1995-03-05`.
+
+### The shape the engine will bind against
+
+The expression AST, and a printer that turns one back into SQL.
+
+The parse tree the matcher produces has one node per grammar rule, which for an ordinary comparison is a dozen nodes of pure syntax. Binding against that would tie every later stage to grammar rule names, and a grammar bump would then break the binder rather than a small translation layer. `firepanda/sql/ast.mojo` is the shape that layer produces instead. Three arenas were planned and this is the first of them. Expressions are the self contained part of the grammar, so they go first, and the statement and table reference arenas arrive with the transformer along with the three expression kinds that hold a statement inside them, which are a scalar subquery, `EXISTS` and the subquery form of `IN`.
+
+Nodes are fixed size and referenced by index rather than by pointer. A node that needs a variable number of children stores a run in a side list, where a run is a count followed by that many entries, so the node itself stays one size and nothing allocates per node. Index 0 is the null node, the same convention the matcher already uses, so an absent operand is 0 and no caller needs a separate flag to say a field is missing. The AST owns its text. A token keeps its quotes, its escapes and its original case, because that is what makes a token twelve bytes, and nothing downstream wants any of it, so text is decoded once on the way in and interned. Every node carries a token index, which is not for debugging: it is the thing that lets a binder error draw a caret under the right word.
+
+The printer is written now rather than later because it pays for itself three times. Round trip is the transformer's main test, it is the oracle for the statement generator, and it is how `EXPLAIN` will show a filter or a projection, which is how somebody works out why a pushdown did not happen. It parenthesizes every operand rather than working out which parentheses it could leave out, because a printer that minimizes parentheses is a second implementation of precedence and therefore a second place to get precedence wrong, inside the component whose whole job is to check the first one. It quotes an identifier whenever the bare text would not read back as itself, which covers a capital letter, a character no bare identifier may hold, and a reserved keyword.
+
+The round trip tests earned their place on the first run. They print an expression, put it in a `SELECT` and parse it with the real parser, and that caught the star `RENAME` clause being written with `TO`. The grammar says `RenameEntry <- ExcludeName 'AS' Identifier`, so it is `AS`, and `ALTER TABLE` spelling the same idea with `TO` a few rules away is what made the wrong one look right.
+
+Nothing calls any of this yet. The transformer that fills an `Ast` from a parse tree is the next piece.
+
+### Fixed: a date stayed a date only until something touched it
+
+A date is stored as a signed thirty two bit day count and a timestamp as a sixty four bit tick count, so every kernel that moves rows around builds its output through `Array[DType.int32]` or `Array[DType.int64]` and then erases it. Erasing a typed array labels the result from its layout, so the label that came back was int32, and the date was gone. This reached `filter`, `take`, and through `take` everything built on it, which is `sort_values`, `head`, `join` and `drop_duplicates`, plus `concat`, `coalesce`, `ffill`, `bfill` and `pick`.
+
+The bytes were always right, which is what made it quiet. The frame's schema still said date while the column underneath said int32, and the disagreement surfaced somewhere else entirely: on a Parquet file of more than one row group, `filter` raised `chunk dtype int32 does not match column dtype date32[day]`, a message that names neither the filter nor the date. On a single chunk nothing raised at all and the column simply stopped being a date. This is how it was found, trying to run TPC-H q1, whose first step is a filter on a shipping date.
+
+`AnyArray.retyped` puts the input's type back on the output, and it refuses to move a label onto a layout that is not already the right one, because relabelling an int32 buffer as a float32 one reads the same bits as a different number and that is what `cast_any` is for. Every one of the kernels above now calls it.
+
+The other half is that `concat` and `coalesce` were checking the layout and not the type. A date column and an int32 column are both int32 underneath, so the two would stack and the answer would be one of the two, having quietly picked which. Both now refuse, and `astype` is how a caller says which it meant. The same tightening went into `pick`, which had the same check written out by hand.
+
+Group aggregates are not covered here. The minimum of a group of dates is a date and the mean of them is not, so it is per aggregate rather than a blanket rule, and that is its own change.
+
+### A group's answer written back onto its own rows
+
+`DataFrame.group_broadcast`, which is a window aggregate with no frame and no ordering. SQL spells it `sum(x) over (partition by k)`, pandas spells it `df.groupby(k)[x].transform("sum")` and Polars spells it `.over(k)`. The result is as tall as the input, in the input's order and with the input's labels, and every row of a group holds that group's value.
+
+The shape it exists for is a predicate on an aggregate where the rows wanted back are the original ones. TPC-H asks for it twice, in q17 against a group's average and in q18 against a group's sum, and without it the only way to write either is to group, filter the groups, and join the surviving keys back onto the input. That is a build and a probe over a question that is a gather. Here the reduction runs once per group exactly as `group_by` runs it, and then each row reads its own group's answer through the ordinal it already has. Nothing is sorted, nothing is hashed twice, and no key column is materialized.
+
+Null keys are not dropped. A group by drops them by default because its result is one row per key and a null key is not a key. Here the result is one row per input row, and dropping would mean deciding that some input rows have no answer.
+
+Nanoseconds a row on an i9-13900K over 1,048,576 rows, one session, controls `text/equal_constant` at 1.840 and 1.889 either side of the measurements against an anchored 1.874. polars 1.44.2, pandas 3.0.5, duckdb 1.5.5.
+
+| shape | firepanda | polars | pandas | duckdb |
+| --- | --- | --- | --- | --- |
+| a partition key with a thousand values | 1.940 | 11.815 | 11.429 | 17.877 |
+| a partition key with a million values | 17.943 | 12.230 | 64.295 | 67.266 |
+
+Six times polars and pandas and nine times DuckDB on the narrow key. On the wide key it is 3.6 times pandas and 3.7 times DuckDB and 0.68 times polars, which is a loss, and it is the same loss the distinct rows entry above records for the same reason. In the same session `hash/factorize_all_distinct` is 12.739 nanoseconds a row, which is seventy one per cent of the whole wide broadcast and more than polars spends on the entire operation. Distinct on a million value key is 17.142 and is seventy four per cent the same pass. Both of these are one problem wearing two hats, and the problem is the hashed factorize over a column where nearly every value is its own group. That is where the work goes next.
+
+### Distinct rows over a frame
+
+`DataFrame.drop_duplicates`, with and without a subset of columns, which is pandas' spelling of it and Polars' `unique` and SQL's `select distinct`. Until now the only thing in the library that could remove a repeat was `Index.unique`, over one column of labels.
+
+It is built on `group_ordinals` and it differs from a group by with no reductions in two ways, which is why it is its own method rather than a call to that one. It gives back every column and not just the keys, taking each group's first row whole. And it keeps the rows whose key holds a null, because a null is a value when the question is whether a row repeats, and two nulls repeat each other. That second one is pandas' rule and Polars', and it is the opposite of `group_by`'s `dropna` default, which is also pandas' rule for a group by. Both have a test that fails if this ever becomes a thin wrapper over the other.
+
+The rows come back in the order they appear in the input, which is what pandas means by keeping the first of each duplicate, and today that costs nothing at all. Every factorize route hands its ordinals out in first appearance order, so the representative rows are already ascending and are taken as they stand. That is a fact about the routes rather than something `Grouping` promises, so it is checked at one comparison per group, and `_first_rows` walks the rows when the check says no. Nothing in the library reaches that walk, so it is a function of its own with a test of its own rather than a branch inside a method that has never run it.
+
+Nanoseconds a row on an i9-13900K over 1,048,576 rows of three columns, one session, control `text/equal_constant` at 1.860 against its anchored 1.874. polars 1.44.2, pandas 3.0.5, duckdb 1.5.5, DuckDB read back through `.arrow()`, polars asked for `maintain_order=True` so that all four answer the same question.
+
+| shape | firepanda | polars | pandas | duckdb |
+| --- | --- | --- | --- | --- |
+| distinct on a key of a thousand values | 0.618 | 4.281 | 3.433 | 16.230 |
+| distinct on a key of a million values | 17.142 | 23.776 | 20.564 | 52.497 |
+| distinct on the whole row | 35.535 | 31.593 | 77.739 | 36.178 |
+
+The first row is 5.6 times ahead of both polars and pandas and 26 times ahead of DuckDB, and the other two are where the honest reading is. On a key with a million distinct values it is 1.4 times polars and 1.2 times pandas, and on the whole row it is 0.89 times polars, which is a loss.
+
+The reason is structural and is the next thing to do rather than something to explain away. Distinct on three columns of mixed dtype runs three factorizes, then a pass that packs the three ordinals into one number, then a fourth factorize over that. Four hash passes over the rows to answer a question that needs one, because the question here is only whether a row has been seen before and not which dense group it belongs to. A single pass that hashes the key tuple straight into one table and writes a first-appearance mask would do it, and it would leave the ordinal column, the packing pass and the dense renumbering unwritten. That is the follow up, and the numbers above are the baseline it has to beat.
+
+### A conditional column, and a validity that costs nothing when nobody is null
+
+`CASE WHEN c THEN a ELSE b END`, which is `Series.pick` at the frame level and four functions in `kernel/pick.mojo`. TPC-H wants it three times and all three want a different shape of it: q8 and q14 put a column on the true side and a zero on the false side, q12 puts a one against a zero, and the general form takes two columns. Each of those is its own entry point rather than one function against a broadcast column, because broadcasting a constant is a second allocation and a second stream of loads for something that fits in a register.
+
+Two decisions in it are worth writing down.
+
+The first is what a null condition means, and the answer is that it takes the false side. That is SQL's rule, an unknown is not a true, and it is already what `filter` does when it drops a row on a null in its mask. polars answers null there instead, and the binding layer is where that difference gets paid. The part that makes it worth a paragraph is that it is free: `kernel/__init__.mojo` says a null value is zero in the values buffer, so a null in a bool column is already a `False` sitting in memory, and a loop that reads the condition's values and never looks at its validity gets exactly the rule above with no mask and no second pass. The same invariant covers the output, which is why this is the only elementwise kernel in the package that does not call `repair_range`: a row taking a null from either side copies that side's zero with it.
+
+The second is the output's validity, the one thing a SIMD select cannot compute in the value registers. When neither side has a null there is nothing to compute at all, and that is the common case. When one does, the bits are packed out of the condition bytes a word at a time inside the worker that just wrote those rows, which is the argument `kernel/mask.mojo` already makes for repairing in the worker. Building it in a serial pass afterwards was measured first and cost 0.738 nanoseconds a row against 0.289 for the same work moved into the workers, both anchored on the same control. That is the difference between a null on one side costing 2.7 times what no nulls cost and costing 1.4 times.
+
+Writing that build is also what turned up a bug in the version before it. `pick_const` builds the validity as "valid wherever the condition is false, because the constant is", and every bit past the end of the last word is a false. Left unmasked those come out set, and `count_ones` walks whole words, so a column would report fewer nulls than it has. Reading any row would never show it. There is a test that asks for the count rather than the rows, and it fails without the mask.
+
+Nanoseconds a row on an i9-13900K over 1,048,576 int64 rows, one session, control `text/equal_constant` at 1.857 against its anchored 1.874. polars 1.44.1, pandas 3.0.5, duckdb 1.5.5, DuckDB read back through `.arrow()`.
+
+| shape | firepanda | polars | pandas | duckdb |
+| --- | --- | --- | --- | --- |
+| two columns | 0.199 | 0.695 | 0.938 | 1.045 |
+| a column and a constant | 0.157 | 0.446 | 0.822 | 0.737 |
+| two constants | 0.142 | 0.183 | 0.737 | 0.954 |
+
+Between 2.8 and 6.7 times ahead everywhere except one, and the exception is worth naming rather than leaving for a reader to find. Against polars on two constants it is 1.29 times, not two. With two constants there is nothing to read but the condition and nothing to do but store, so all four are writing a column as fast as the machine will write one, and there is very little left in there to win.
+
+The text form is built through a builder on one core, unlike the three number forms. A text output is a payload whose length nobody knows until the rows are chosen, and the two pass shape `substr.mojo` uses is the right answer for it too, but the place to spend that work first is `filter` and `take`, which run on every query rather than on none of them.
+
+### Say which keyword the query meant
+
+A syntax error now names the word the query probably meant to write.
+
+```
+Parser Error: syntax error at or near "a"
+Did you mean "WHERE"?
+
+LINE 1: SELECT * FROM t WEHRE a = 1
+                              ^
+```
+
+DuckDB does not do this. Its parser error stops at the caret, because the candidate machinery upstream feeds autocomplete and binder errors and is never reached from the parser. So this is one of the few places where firepanda says more than the database does, and it is additive: the first line and the caret block are still DuckDB's byte for byte, and the suggestion goes on its own line between them, which is where DuckDB puts candidate bindings on a binder error.
+
+The set of word literals the grammar tried where a parse went wrong is the list of words that would have worked there, so one of them a single edit from what the query wrote is almost certainly what was meant. One edit means a substitution, an insertion, a deletion or a swap of two neighbours. The swap is in there because it is the typo people actually make on a keyboard, and WEHRE for WHERE is two edits to anything that counts them the plain way.
+
+None of this is carried on a parse that works. Collecting the set is a compile time flag, every ordinary parse runs with it off, and the set is built by a second parse that only starts once the first one has already failed. That second parse also runs with the first token filter off, because the filter refuses to walk a node that cannot match the token in hand, so a filtered run never reaches the terminals that would have said what they wanted.
+
+The awkward part is that a misspelled keyword usually does not fail at its own token. `SELCT 1` reads SELCT as an identifier and dies at the `1`, and `SELECT * FROM t WEHRE a = 1` reads WEHRE as an alias for t and dies at the `a`. So there are three places to look and the first one with an answer wins: the word being blamed, then the word before it against the set collected there, and then one more parse over the same tokens with the suspect word replaced by a token no rule can match, which forces the parse to stop on it and to collect everything the grammar would have accepted in its place. The third one is the interesting one, and it exists because PEG never gives an optional back once it has matched, so no amount of backtracking will go and ask what else could have stood where the alias went.
+
+Three parses of a query that has already failed sounds expensive and is not. The second and third only happen when the ones before them had nothing to say, and a query on its way to a person who is about to read the error is not the query anybody is timing.
+
+The guards matter as much as the search, because a hint that is a coin toss is worse than no hint. A word shorter than three bytes gets nothing, since every two letter word is one edit from a dozen keywords and means none of them. More than three candidates gets nothing, since that is a list rather than a hint. A keyword the query spelled right is never a candidate for itself. And the suggestions come out in the order the grammar tried them, which is the order the alternatives are written in and is therefore upstream's own opinion about what is likely.
+
+### The grammar now writes SQL as well as reading it
+
+`pixi run differential-sql-generated` generates 25,000 statements out of the vendored grammar and runs each one through both parsers. It found a bug on its first run, which was the point.
+
+DuckDB's test corpus is what the existing differential compares over, and it is bounded by what somebody happened to write a test for. Whole rules are in there once or not at all, and a rule with no test behind it is a rule where a mistake sits until a user finds it. The grammar is declarative, so it can be walked the other way: choose an alternative instead of trying each one, write a token instead of consuming it, and a statement comes out that is built from the same 1,187 rules the matcher reads.
+
+The walk terminates for three reasons. Every node carries a cost, meaning the fewest tokens that finish it, worked out once by fixpoint before anything is generated. A token budget counts down, and once it is gone every choice takes its cheapest alternative, which for any reachable rule is a finite string. And a depth cap stops the walk far below the matcher's own guard, because a statement the generator wrote and the matcher then refused for running out of stack teaches nobody anything.
+
+Not all of it parses, and the reason is worth stating rather than hiding. Satisfying a negative lookahead means knowing what it would have matched, which is the problem the parser exists to solve, so the walk skips those nodes and sometimes writes the thing the rule was there to forbid. About four in ten of the output is refused somewhere. That costs nothing, because the assertion is not that the generator writes good SQL, it is that the two parsers agree about whatever it writes.
+
+The two directions are read the way they are in the corpus differential. DuckDB accepting something firepanda rejects has a ceiling of zero. The other way runs at about 55 per cent, which is much higher than the corpus and is expected: the generator samples the grammar rather than the language people write, so it spends most of its time in rules the released oracle has never been asked about, where the corpus spends almost none. `DROP EXTENSION REPOSITORY` and `DISCONNECT` are both in the vendored development grammar and neither is in the oracle. That side is a rate rather than a count, so the ceiling still holds when somebody passes `--cases`.
+
+The bug it found is in the grammar rather than in the matcher. `CopyFileName` lists a bare `Identifier` ahead of `Identifier '.' ColId`, and PEG choice is ordered, so the bare one always wins and the qualified alternative can never be reached. `COPY t TO a.b` is a statement DuckDB's own parser accepts and DuckDB's own grammar cannot. The grammar is vendored byte for byte and CI enforces that, so the fix belongs upstream and not here. The harness carries the case in a `known` list with the reason instead, which is what lets the ceiling above stay at zero and mean something.
+
+## [0.6.53] - 2026-09-09
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A SQL front end that parses, a number saying how much of DuckDB's dialect it parses, and the text kernels TPC-H needs. Nothing executes through the front end yet.
+
+DuckDB replaced its Bison parser with a hand written PEG parser and shipped the grammar as data, forty MIT licensed `.gram` files, and that is the whole reason this work moved ahead of the milestones that were meant to come first. It is vendored here verbatim, a generator turns it into a rule table that is checked in, and a matcher walks the table. A grammar bump is now a regeneration rather than a rewrite, and the dialect decisions are made by a file DuckDB maintains rather than by anything in this repository.
+
+The claim that firepanda accepts what DuckDB accepts is now a measurement. Every statement in DuckDB's own test corpus, 71,438 of them, goes through both parsers on every push: 2 that DuckDB parses and firepanda does not, 1,130 the other way, 98.41 per cent agreement. The 2 are the recursion depth guard firing rather than a gap in the grammar, and most of the 1,130 are syntax added after the newest DuckDB anyone can install from conda-forge. It found two real tokenizer bugs on its first run, which is what it is for.
+
+The parse is four to five times faster than it was when the matcher landed, from two changes. Every node now carries a sixty four bit set of the tokens it can start with, so an ordered choice with fifty alternatives stops walking the forty nine that cannot match. And the memo table records successes as well as failures, which removed a doubling per level of nesting that made twelve nested function calls take a fifth of a second.
+
+On the kernel side the text work now covers the whole of `LIKE`, in four named shapes rather than one general matcher, plus `substring` and `IN`. Two results there are worth reading past the feature list. `substring` is the first text column in the library built on more than one core, and the two pass shape it uses, size every morsel's share of the payload first and then let each one fill its own stretch, is exactly what `filter` and `take` need next; it made the payload case 4.7 times faster. And `is_in` shipped with the wrong threshold twice before it shipped with the right one, because a string comparison and a SIMD equal cost nothing like each other and one constant cannot serve both. There are two now, and the sweep that placed them is in the entry.
+
+Away from those: a gather by consecutive indices that copies instead of gathering, a prefetch on the gather, and a streaming join that takes a text key. There is also a note on a parallel string build that was tried, measured and dropped, because a change that did not work is worth writing down once so nobody spends the week again.
+
+### Asking whether a column's value is one of a set, and two thresholds instead of one
+
+`Series` grew `is_in` and `kernel/member.mojo` holds it. This is pandas' `isin` and SQL's `IN`, and TPC-H wants it twice: q19 against four container names and q22 against seven country codes. Both are the same shape, a column of a million rows against a set of a handful, and that shape is what the kernel is built around.
+
+The set is a `Series` rather than a list, so it carries its own type and can itself be a column, which is what a decorrelated subquery hands over. Nothing is promoted: a set of a different type is refused rather than cast, because casting here would silently pick which side loses precision and a caller who meant to compare across types can say so with a cast of their own.
+
+A null row answers null, not false. That is SQL's answer for `NULL IN (...)` and it is what `equal` already does, so a caller who builds `IN` out of a chain of equalities and a caller who uses this get the same column back. pandas reports False there. That difference belongs in the binding layer, because a caller who wants False can fill the nulls afterwards and a caller who wants three valued logic cannot get it back out of a column that has already lost it.
+
+There are two routes. A small set is compared against one member at a time and builds nothing at all. A larger one builds a hash table once and every worker probes it. The table stores hashes rather than keys, which is exact for a fixed width dtype because `mix` is a bijection on sixty four bits, and cannot be for text, so the text route keeps the needles and settles a hash match by comparing bytes.
+
+There is one thing the text table cannot settle that way, and it is checked for rather than assumed away. Two needles that are different strings and hash alike would take one slot between them and the second would quietly go missing from the set. The build notices when an insert hands back an ordinal already spoken for by a different string and falls back to comparing against every needle. That branch will not be taken on real data, but a set that has silently lost a member is not the kind of wrong that shows up in a test.
+
+The interesting part is the threshold, because it started as one number for both routes and one number was wrong by more than an order of magnitude, in both directions at once.
+
+Sweeping the set size over a million rows on an i9-13900K. Every set holds the same single member the column actually contains and pads the rest with members it cannot, so every size matches exactly the same rows and the only thing that changes is the size. The threshold was moved to force each route at each size. Nanoseconds a row, with `text/equal_constant` alongside at 1.874 as the control.
+
+| set size | thirty two byte text | eight byte text | int64 |
+| --- | --- | --- | --- |
+| 1 | 2.236 | 1.320 | |
+| 2 | 3.890 | 1.792 | |
+| 3 | 5.323 | | |
+| 4 | 6.838 | 2.728 | 0.462 |
+| 8 | 14.430 | | 0.762 |
+| 9 | 4.330 (table) | 1.612 (table) | 2.315 (table) |
+| 64 | 4.262 (table) | | 4.267 (table) |
+
+Read down the text columns and the linear route climbs about a nanosecond and a half for every extra member, because two members of a set usually share a length and a prefix, which is what makes them a set, so the prefix settles nothing and the comparison runs to the end. The table does not care about the size at all. They cross between two and three for a wide column and between one and two for a short one.
+
+Read down the int64 column and it is a different kernel entirely. A comparison there is one SIMD equal against a block that is already loaded, so an extra member costs about seven hundredths of a nanosecond. Running both routes against each other at every size in one session gave, linear against table, 1.30 against 2.99 at nine, 2.03 against 4.84 at sixteen, 3.82 against 5.03 at thirty two and 7.06 against 5.15 at sixty four. It turns over between thirty two and sixty four.
+
+So there are two constants now, `TEXT_LINEAR_MAX` at two and `LINEAR_MAX` at thirty two. What that is worth, both sessions anchored on the same control:
+
+| row | one threshold of eight | two thresholds |
+| --- | --- | --- |
+| is_in_4, thirty two byte text | 6.838 | 4.343 |
+| is_in_short_4, eight byte text | 2.728 | 1.716 |
+| is_in_number_32, int64 | 5.031 | 2.429 |
+
+The first row is q19's set exactly, and it was giving away sixty percent.
+
+Against polars 1.44.1, pandas 3.0.5 and duckdb 1.5.5 on the same machine, the same columns and the same sets, all in one session. DuckDB is measured through `.arrow()`, which is the only way it hands back a materialized column.
+
+| row | firepanda | polars | pandas | duckdb |
+| --- | --- | --- | --- | --- |
+| thirty two byte text, set of 4 | 4.343 | 5.472 | 5.177 | 6.068 |
+| thirty two byte text, set of 64 | 4.311 | 5.527 | 5.442 | 6.819 |
+| eight byte text, set of 1 | 1.248 | 3.371 | 4.286 | 3.893 |
+| eight byte text, set of 4 | 1.716 | 3.435 | 3.835 | 5.159 |
+| int64, set of 4 | 0.457 | 2.125 | 0.608 | 1.688 |
+| int64, set of 64 | 4.402 | 2.537 | 6.482 | 3.085 |
+
+Short text is where this is comfortably ahead, 2.0 to 3.4 times, and short text is what q19 and q22 both look things up at. Wide text is ahead by only 1.2 to 1.6 times, because at thirty two bytes everybody is paying for the same memory traffic and the routes stop mattering much.
+
+The last row is the one to keep. A set of sixty four numbers goes through the table, and there polars is 1.7 times quicker and DuckDB 1.4 times, so the numeric table route has something left in it. It is not a shape any query in the suite asks for, which is why it is recorded here rather than fixed here. pandas is worth a note too: it is flat at about 0.6 nanoseconds for every set size up to nine and then falls off a cliff to 6.5 at sixty four, which is what a dense lookup table over a narrow integer range looks like when it stops being used. That is a real trick for `IN` over a small range of integers and firepanda does not have it.
+
+### Cutting a byte range out of a text column, and the first text column built in parallel
+
+`Series` grew `str_slice` and `kernel/substr.mojo` holds it. This is SQL's `substring`, and TPC-H q22 is the reason it exists now rather than later: it groups customers by the first two characters of a phone number, which is nothing but this call.
+
+It cuts by bytes and not by code points. That is what the rest of the column measures itself in, `StringView.__len__` is a byte length and so is `byte_length`, and the reader that filled the column never promised the bytes were UTF-8 in the first place. Anyone coming from pandas should know that up front, because `.str[:2]` there slices code points. A code point variant is a different kernel and it can be written when something asks for one. Both ends are clamped rather than checked, so a negative offset counts back from the end, an offset past the end is the empty string, and a length running off the end stops at the end. None of those is an error.
+
+The interesting part is that this is the first text column in the library built on more than one core, and the shape it uses is the one `filter` and `take` need. Both of those go through `StringBuilder` one element at a time today, because a payload offset is a running total and a running total is serial. The way out is to know the totals before any bytes move, and for a substring that is easy: an element's output length depends on its input length and nothing else, and an input length is already in the view. So the views are read once to size each morsel's share of the payload, the shares are summed into a base per morsel, and then every morsel writes its own views and copies into its own stretch of payload with nothing shared between them at all.
+
+Two things fall out of that. The sizing pass reads the views buffer and never touches the payload, so it costs sixteen bytes a row in order and follows no pointers. And it is skipped entirely when the requested length is twelve or less, because then every result fits inside its own view, the payload is provably empty, and there is nothing to size.
+
+Nanoseconds a row on an i9-13900K over a million rows of thirty two bytes, the serial builder this started as against the two pass build it shipped as, with `text/equal_constant` alongside as a control that neither version touches.
+
+| row | serial builder | two pass build |
+| --- | --- | --- |
+| substring_inline, two bytes | 2.580 | 2.664 |
+| substring_payload, twenty bytes | 19.802 | 4.234 |
+| equal_constant (control) | 1.850 | 1.866 |
+
+The inline row does not move, which is the point of it: it never had a payload to build, so there was never anything there to parallelize. The payload row is 4.7 times faster.
+
+Against the same column on the same machine, with polars 1.44.1, pandas 3.0.5 and duckdb 1.5.5 asked for the same two cuts. DuckDB is measured through `.arrow()`, which is the only way it hands back a materialized column.
+
+| row | firepanda | polars | pandas | duckdb |
+| --- | --- | --- | --- | --- |
+| two bytes | 2.664 | 8.422 | 9.287 | 1.163 |
+| twenty bytes | 4.234 | 11.418 | 16.131 | 2.004 |
+
+So 3.2 times polars and 3.5 times pandas on the short cut, 2.7 and 3.8 on the long one, and still behind DuckDB by 2.3 and 2.1 times. The remaining gap is mostly a difference in what the two engines write. A firepanda view is sixteen bytes whatever the string is, so the short cut writes sixteen bytes a row where Arrow writes a four byte offset and two bytes of data, and the long cut writes thirty six against Arrow's twenty four. That is the price of the inline representation and it is paid back everywhere a short string is compared without a pointer chase. It is not something this kernel can undo, and closing what is left of the gap means not copying at all, which needs a payload buffer two columns can share and a plan for how long the original then stays alive. That is a separate piece of work.
+
+### Every statement in DuckDB's test corpus, through both parsers
+
+The compatibility claim needed a number rather than a corpus of 135 statements somebody typed out by hand. `pixi run differential-sql` now takes DuckDB's own test suite, pulls 71,438 statements out of it, and runs every one through both parsers. The first reading is 2 statements DuckDB parses that firepanda does not, 1,130 the other way, and 98.41 per cent agreement.
+
+The corpus is fetched rather than vendored, which is the answer to a question the spec had left open. It is 33 MB against a repository whose pack is 5 MB, so vendoring it would make every clone six times larger, forever, to carry something only this one harness reads. `tools/fetch_corpus.sh` reads the commit out of the grammar's own `VENDOR` file and sparse fetches `test/sql` at exactly that commit, into a directory named after it, so the corpus and the grammar cannot drift apart and a bisect across a grammar bump still runs the corpus that belongs to the commit being tested. CI caches it on the same commit. Everything else in the repository still builds and tests with no network.
+
+`tools/corpus.py` flattens the `.test` files, taking the SQL out of every `statement` and `query` block and ignoring the expected output, because the annotation is not the oracle. A `statement error` is very often a binder error, which means the parser was perfectly happy. The oracle is DuckDB's `extract_statements`, which parses and binds nothing, so a missing column and an unknown function are not errors on that side either, which is exactly where the line has to be drawn. The whole corpus takes about two seconds there, and the harness crosses into Python once for all 71,438 rather than once each.
+
+The two directions are counted separately because they are not the same failure. DuckDB parsing something we reject is a compatibility failure and the target is zero. Us parsing something DuckDB rejects usually is not: the grammar is vendored from the development branch while conda-forge's newest DuckDB is 1.5.5, so `CREATE TRIGGER` alone is 357 of the 1,130, and the move from Bison to PEG pushed a pile of errors out of the parser and into the binder upstream. Both have a ceiling in the harness. Only the first has a target.
+
+It found two real bugs on its first run, both of them the tokenizer copying Postgres's answer where DuckDB has its own. `SELECT #1+#2` was tokenized with `+#` as one operator, because a dozen characters including `-` and `#` are their own token in DuckDB's tokenizer and never join a run. That also means `->` and `->>` have to be spelled out, since a minus otherwise joins nothing, and that a run gives back a trailing `+` but never a trailing `-`, because the minus was never in the run. And `E'it\'s a test'` was reported as an unterminated string, because the escape prefix set a flag that nothing read. While fixing that, `U&'...'` turned out not to be a string prefix at all: DuckDB reads it as an identifier, an operator and a string, and the four real prefixes are `E`, `X`, `B` and `N` with the quote immediately after.
+
+The 2 that are left are both the five hundred frame recursion cap firing, on a 57 KB generated expression and on a subquery nested a hundred deep. Raising the number is not safe, since an unoptimized build runs out of native stack at about 820 frames. The fix is the explicit stack machine, which is the same change the parse wants for speed.
+
+### Memoize successes, so nested function calls stop being exponential
+
+`SELECT f(f(f(f(f(f(f(f(f(f(f(f(1))))))))))))` took a fifth of a second, and every extra `f` doubled it. Twelve of anything is not an adversarial input, it is a query somebody writes, and the shape is not rare: nested list literals did the same thing.
+
+The cause is one line of the vendored grammar. `TypeModifiers <- Parens(List(Expression)?)` means `f(x)` is a parameterized type as well as a call, so `SingleExpression` reaches `TypeLiteral` first, walks the whole argument as a type, fails on the string literal a type literal needs, and then reaches `FunctionExpression` and walks the same bytes again as an expression. Two full walks per level of nesting is a factor of two per level. Memoizing failures cannot see any of it, because both walks succeed.
+
+So the memo table now records what a memoized rule did at a position rather than only that it failed there, and a rule that succeeded once hands back the node it built. That needed the arena to stop rolling back: a failed attempt now unwinds only the pending stack and leaves its nodes where they are, unreachable from the tree but reachable from the memo table. A hit copies the root of what it finds and shares everything under it, because the root is the one node a parent writes to and the same subtree can be adopted more than once.
+
+One thing the table now refuses to do is write anything from inside a negative lookahead. A terminal that fails in there failed on purpose and does not move the error position, so an entry written from in there would hand that silence to a later walk that meant it, and the error would point somewhere earlier than it should. Reading from inside a lookahead is still fine. This was already true of the failure entries and was already a latent way to get a wrong error message.
+
+The entry is four bytes per memoized rule per token position, up from one bit, so eighty eight bytes a token. Nothing is allocated until the first memoized rule finishes, so a `SELECT 1` still never touches it. The arena runs about half again the size of the tree it holds, which for TPC-H q1 is 1,376 nodes against a tree of 838.
+
+Twelve nested calls went from a fifth of a second to under a millisecond. Ordinary queries got faster too, because the doubling was there in miniature everywhere: TPC-H q1 is about one and a half times faster and `SELECT 1` about a quarter faster, measured back to back in one binary. Together with the first token filter below, a parse is now four to five times faster than it was when the matcher landed.
+
+There is a new test file for this, `tests/test_sql_pathological.mojo`, and it is where the bug came from rather than something written after it. Fourteen generated shapes, each with a wall clock ceiling, and the ones that could go exponential are asked at n and at 2n as well, because an absolute ceiling on a shared runner is a blunt instrument while a shape that takes sixty four times as long for twice the size is exponential however slow the machine was.
+
+### A first token filter, so the matcher stops walking rules that cannot match
+
+An ordered choice in this grammar runs to fifty alternatives, and the token in hand rules out nearly all of them. The matcher used to find that out one recursion at a time. Now every node in the generated table carries a sixty four bit word saying which tokens it can start with, the matcher tests that word against the token in hand before it walks the node, and a node that cannot match fails without recursing into anything.
+
+The word is a set of token keys, one bit each. A keyword is its own key, so telling `SELECT` from `INSERT` is one bit. Identifiers, quoted identifiers, numbers, strings and end of input get a key each, and punctuation, operators and parameters are keyed on the byte they start with, which is enough because a literal made of punctuation has to match every byte of itself anyway. Sixty four bits over seven hundred odd keys makes this a Bloom filter, so it can say yes where it should have said no, and the cost of that is one recursion that fails.
+
+The generator computes the words as FIRST sets over the rule graph, to a fixed point, because the graph has cycles in it. A node that can match the empty string gets every bit, since it can succeed without reading a token at all, and that is the one thing the filter must never get wrong. A negative lookahead therefore contributes nothing to what the node around it can start with, which is what lets `!X Y` filter on Y. The twenty four code matched rules get their words read off the matcher rather than off their bodies, for the same reason the matcher does not walk those bodies.
+
+2,972 of the 4,422 nodes filter, and one that does has 1.8 of its sixty four bits set on average. TPC-H q1 goes from 27,814 node visits and 10,504 rule entries to 9,918 and 3,197, and of those 9,918 the filter throws out 2,870 before they cost anything. `SELECT 1` goes from 1,436 visits and 541 rule entries to 451 and 140. Wall clock follows: q1 parses about three times faster and `SELECT 1` about four times faster, measured back to back in one binary against the same matcher with the check compiled out.
+
+A filter is only correct when it changes nothing, so there is a `parse_unfiltered` that runs the same matcher without it, and the whole 135 statement corpus goes through both. The two have to agree node for node, field for field, and word for word on the error text. That test is what makes the two halves of the filter safe to have: the generator computes the words and the matcher computes the keys, they are written in different languages in different files, and a disagreement between them would otherwise show up as a query that used to parse and no longer does.
+
+Still not done, and the reason is the same as before. The remaining gap to the sixty microsecond target is under a factor of two rather than of six. What is left is 7,048 node visits that the filter lets through, and shaving those means visiting differently rather than visiting less: an explicit stack machine instead of native recursion, which is also the change that lifts the five hundred frame nesting cap.
+
+### The PEG matcher, so a query now has a parse tree
+
+`parse(sql, grammar)` takes a query and hands back a tree of rule indices over the token vector. The matcher is recursive descent over the flat node array the generator produces, it knows what a sequence is and what an ordered choice is, and it knows nothing about SQL. Every dialect decision it makes comes out of the table it is walking, which is the property the generated grammar exists to buy: a grammar bump is a regeneration and not a rewrite.
+
+A node is twenty bytes and holds no pointers, just a rule index, a token range, a first child and a next sibling. The whole tree is one growing array, and a parent is always appended after its children, so throwing away a failed attempt is a truncation and there is nothing to unlink. That is also why the arena is the only thing the parse allocates: the tokens, the nodes and the memo table are three vectors and nothing else.
+
+Twenty four rules are matched from code instead of from their bodies, because their bodies upstream are placeholders that upstream's own matcher ignores. Twenty one of those are identifier rules and they split twelve to nine, and the nine that drop the keyword check are the whole of why `db.select` is a legal column reference while a bare `select` is not a column name. Which keyword class a position tolerates comes from the vendored suggestion rather than from anything in this file, which is also how `FROM 'data.parquet'` parses without a rule for it while `CAST(1 AS 'int')` stays a syntax error.
+
+Memoization records failures only, one bit per memoized rule per token position, on the twenty two rules DuckDB's own packrat list names. A PEG rule is a pure function of the grammar and the position, so a rule that failed once at a position fails every time, and that is the whole of the exponential blowup DuckDB measured at 10.640 seconds for nineteen unmatched parentheses. Successes are deliberately not memoized: a memoized success is a subtree in the arena, and a failing ancestor may have truncated it away since. The table is not allocated at all until the first memoized rule fails, so a `SELECT 1` never pays for it.
+
+Errors match DuckDB's text. The furthest token any terminal was tried at is where the message points, a terminal that fails inside a negative lookahead failed on purpose and does not move that position, and running off the end drops the caret entirely the way DuckDB does. All seven error messages in the test file are byte for byte what DuckDB 1.5.5 wrote for the same query, `Parser Error: syntax error at or near "FROM"` and `Parser Error: syntax error at end of input` included.
+
+The corpus in `tests/test_sql_matcher.mojo` is 135 statements run against DuckDB 1.5.5, and firepanda agrees with it on all of them. A statement counts as rejected only where DuckDB said `syntax error`, because a binder error means the parser was happy. It covers the select and join and window and CTE shapes, DDL and DML and `COPY` and `PRAGMA` and `PIVOT`, the friendly SQL extras, lambdas, casts, list and struct and map syntax, all four parameter forms, and the corners that only a database can settle, like `SELECT` on its own being a parser accept and `SELECT offset` being a syntax error.
+
+Two things are honestly not done. The parse is six times over its budget: on an M4, optimized, TPC-H q1 takes 380 microseconds against a target of 60 and a DuckDB measurement of 156, and `SELECT 1` takes 20 microseconds against a target of 3. The tokenizer is not the problem, at 1.7 microseconds for q1 and 64 nanoseconds for `SELECT 1`, and neither is allocation, which is five per cent of the parse. It is 27,814 node visits and 10,504 rule entries for a hundred tokens, so the fix is to visit fewer nodes rather than to shave the visit, and that is its own piece of work.
+
+And nesting is capped at five hundred rule frames, which is about twenty two parentheses or twenty eight subqueries, because this matcher recurses and the native stack does not grow. Past that it raises DuckDB's own `memory exhausted at or near` rather than dying. DuckDB accepts five thousand, because its matcher keeps an explicit stack. Turning this into a stack machine is the same change the parse wants for speed, so the two belong together.
+
+### A SQL tokenizer, written against the database rather than against the grammar
+
+Query text now comes apart into tokens. One pass, twelve bytes a token, nothing decoded: a string keeps its quotes, a number keeps its underscores, an identifier keeps its case, and a token holds a byte range into the query rather than any text of its own. The one thing the tokenizer does resolve is keywords, by folding a word into a fixed stack buffer and bisecting the generated table once, and the fold buffer is fixed because the longest keyword is fifteen bytes and a longer word cannot be one.
+
+DuckDB's `compiled_grammar.cpp` names twenty four rules whose bodies its own matcher ignores, so that list is now vendored beside the grammar the way the packrat list already was, and the generated table carries it as a section of its own naming the rule, its matcher and the suggestion it was built with. It is not an optimization: `OperatorLiteral <- Identifier` is what the grammar text says, and a matcher that believed it would read a bare `+` as an identifier.
+
+The obvious place to read that table from is the `matcher_rule_overrides` block in `grammar_types.yml`, which has the same twenty four names in it, and it is the wrong place. The yml feeds the transformer generator and its `matcher` field is a result type, so for `ReservedKeyword` it says `identifier_string` while the parser installs a `ReservedIdentifierMatcher`. The vendor script reads the C++ instead, because the C++ is what runs.
+
+The suggestion comes along for the same reason. It reads like autocomplete metadata and the identifier matcher uses it for parsing: which keyword class a position tolerates and whether a single quoted string is a name there both come from it, which is why `FROM 'data.parquet'` parses and `CAST(x AS 'int')` does not.
+
+Four of those twenty four are `NumberLiteral`, `StringLiteral`, `Identifier` and `OperatorLiteral`, which is exactly why the tokenizer could not be read off the grammar. The grammar says `NumberLiteral <- < [+-]?[0-9]*([.][0-9]*)? >`, which does not describe `1e5`, and it says `StringLiteral <- '\'' [^\']* '\''`, which does not describe `''` doubling let alone dollar quoting. So the rules came from running queries against DuckDB 1.5.5 and writing down what came back, and every awkward one has a test naming the query that settled it.
+
+Two of those answers contradict the research this milestone was planned from. There are no hex or binary literals: `SELECT 0x1F` returns 0 in a column named `x1F`, which is the number `0` followed by the identifier `x1F`, and `0b101` and `0o17` behave the same way. And there is no `:name` parameter, only `?`, `?1`, `$1` and `$name`, which is also all `expression.gram` has. Both notes have been corrected in `docs/specs/sql/04-the-parser.md` rather than quietly dropped.
+
+A parameter comes out as two tokens and not one, the marker and then the number or the name, because that is how the grammar spells it: every one of those four rules is `'?'` or `'$'` followed by something the grammar already has a rule for. The dollar still needs a scan the length of a tag before the marker can be handed back, since `$tag$` opens a string and `$1` does not, so the work happens either way and only the output shape changes.
+
+The rest of the awkward list, in short. An underscore is a digit separator only with a digit on both sides, so `1_000` is a thousand and `SELECT 1_` is `1` aliased `_`. An `e` with no digits after it is handed back, because `SELECT 1e` is `1` aliased `e` and not an error. Two string literals separated by whitespace containing a newline are one string, a line comment between them keeps the join and a block comment breaks it. A dollar quote tag is a word that does not start with a digit, which is what makes `$1` a parameter and `$_x$` a quote. Block comments nest. A form feed separates tokens and a vertical tab does not, whatever the grammar's `[ \t\n\r]` says. And an operator run that ends in `+` or `-` keeps them only if it also contains one of ``~ ! @ # ^ & | ` ``, which is why `1 =- 1` is `1 = -1` and `1 !=- 1` is an operator named `!=-`.
+
+The probes ran against 1.5.5 and the grammar is pinned at v2.0-cyanoptera, which is a newer parser. That gap is real, it is written down in `firepanda/sql/token.mojo`, and closing it is what the differential harness is for.
+
+### Four ways to ask whether a text column holds a run of bytes
+
+`Series` grew `str_contains`, `str_starts_with`, `str_ends_with` and `str_contains_in_order`, and `kernel/pattern.mojo` holds the search behind them. Between them they cover every `LIKE` pattern the twenty two TPC-H queries use: `%x%` is a contains, `x%` is a starts with, `%x` is an ends with, and `%a%b%` is the pair. They return a mask rather than a series, the way `is_null` does, because a mask is what `filter` takes.
+
+The pair is one call and not two on purpose. `LIKE '%a%b%'` requires the second run to begin after the first one ends, so `'abc'` does not match `'%bc%a%'` even though it holds both runs, and a conjunction of two independent searches would say it does.
+
+The search is a two ended filter with a vectorized skip. The needle's first and last bytes are each broadcast across a register, two sixteen byte blocks of the row are loaded a needle apart, and a candidate survives only where both agree. A block with no survivor moves the cursor by the whole block, and a block with one compares the middle bytes of that candidate. That beats a two way or a Boyer Moore search on the shapes that turn up here, needles of five to twenty bytes against rows of ten to eighty, because those spend their setup on tables a short needle never earns back.
+
+The width and the second end are both there because the first version did not have them and was measured. That version compared thirty two bytes at a time and filtered on the first byte only, and on a thirty two byte column it never entered the block loop once: a block starting at `i` reads through where the last candidate's needle would end, so it needs a row of at least `width + m - 1` bytes, which at thirty two is thirty six for a five byte needle. TPC-H's part type is about twenty five bytes and its name about forty. Sixteen puts the threshold at twenty, which those columns clear, and the second load costs one instruction and takes the survivors from one position in twenty odd down to one in five hundred.
+
+Nanoseconds a row on an i9-13900K over a million rows of thirty two bytes, first version against this one, with `text/equal_constant` alongside as a control that neither version touches.
+
+| row | first version | now |
+| --- | --- | --- |
+| contains_hit | 6.521 | 1.923 |
+| contains_miss | 12.149 | 1.595 |
+| contains_short | 2.793 | 1.730 |
+| contains_pair | 7.579 | 3.080 |
+| starts_with | 2.611 | 1.385 |
+| ends_with | 0.903 | 0.953 |
+| equal_constant (control) | 1.891 | 1.872 |
+
+Most of that is the block loop finally running. The last of it is one `@parameter for`: when a block has survivors, the loop over its lanes was indexing a register with a runtime value, which is a store and a reload, and unrolling it took the row that finds its needle from 2.903 to 1.923 and the pair from 3.803 to 3.080. That is why the row with a hit used to cost twice the row without one, which is backwards.
+
+Against the same column on the same machine, with polars 1.44.1, pandas 3.0.5 and duckdb 1.5.5 all producing the same mask. Polars and pandas hand back a materialized boolean, which is what firepanda does, so those columns compare directly. DuckDB has no way to hand back a column without either copying it to Python or fusing it into something, so it gets two columns: `fetchnumpy`, which pays a materialization tax firepanda also pays, and a `sum` over the mask inside the engine, which pays none and is the harder number to beat.
+
+| row | firepanda | polars | pandas | duckdb fetch | duckdb fused |
+| --- | --- | --- | --- | --- | --- |
+| contains_hit | 1.923 | 9.028 | 47.462 | 3.328 | 1.921 |
+| contains_miss | 1.595 | 9.253 | 45.674 | 4.528 | 2.270 |
+| starts_with | 1.385 | 3.234 | 47.635 | 3.518 | 1.950 |
+| ends_with | 0.953 | 3.390 | 44.286 | 2.523 | 1.179 |
+| constant equality (control) | 1.872 | 0.630 | 31.512 | 2.424 | 1.382 |
+
+Read honestly that says three things. Against polars, which is the like for like comparison, it is 2.3 to 5.8 times. Against DuckDB copying out, 1.7 to 2.8 times. Against DuckDB fused, it is a tie on contains with a hit and 1.2 to 1.4 times on the rest, and the control row explains why the margin narrows: DuckDB never writes the mask to memory in that form and firepanda always does, so a megabyte of stores is in every firepanda number and in none of the fused ones. Subtract each engine's own control and what is left is the search itself, and there firepanda's is the cheapest of the four by some distance.
+
+Starts with and ends with do not search at all. Both know where to look, so both are a length test and one run of bytes compared at a fixed offset, which is what `text/starts_with` and `text/ends_with` are in the benchmark suite to confirm: if they are ever close to `text/contains_hit` then the skipping has stopped working.
+
+There is no general pattern compiler and this is not a step towards one before it is needed. A matcher with a wildcard alphabet is a different piece of work, it would be slower on all four of these, and none of the queries ask for it.
+### DuckDB's grammar is in the tree, and a table is generated from it
+
+DuckDB replaced its Bison parser with a hand written PEG parser and shipped the grammar as data. Forty `.gram` files, five keyword lists, 61,190 bytes, MIT licensed, and executed by the reference implementation itself rather than being a description of it. That is the artifact the whole SQL milestone rests on, and it is now vendored at `firepanda/sql/grammar/` with a `VENDOR` file recording the upstream commit and a SHA-256 for each of the 47 files.
+
+The vendored directory is never edited, and CI checks the checksums on every pull request. The moment a local edit exists, compatible by construction becomes compatible except for the edits and nobody remembers what they were. `tools/vendor_grammar.sh` is the only thing that writes there. It takes a tag or a branch, resolves it to a commit, and stages everything in a temporary directory so that a partial fetch cannot leave half a grammar behind.
+
+`tools/gen_grammar.py` reads the vendored files and writes `firepanda/sql/generated/`. It reimplements upstream's own rule segmentation, which is whitespace sensitive in a way that a naive reader gets wrong, and it was checked against upstream's reader directly: the same 1,092 rule names, and the same token stream for all 1,087 rules with no differences either way. Parameterized rules such as `List(D)` are expanded at generation time, which is what lets the matcher have no environment to thread through it, and the five keyword lists become rules the same way upstream's build makes them, because `ReservedKeyword` is referenced everywhere in the grammar and defined nowhere in it.
+
+The output is one flat array of 4,422 nodes over 1,187 rules, emitted as a string rather than as a list of structs. A list literal with tens of thousands of entries is a compile time cost paid by everyone who builds firepanda whether or not they ever run a query, and a string literal costs one entry however long it is. `rules.mojo` is 92 KB, under the 100 KB the milestone budgeted, and it does not move the compile budget. `firepanda/sql/table.mojo` reads it back into a `Grammar`, and the generator round trips the table to PEG and compares it to the vendored text on every run, so a table that does not say what the grammar says fails before it is written.
+
+Keywords are one sorted table of 499 words with a class mask rather than five tables. The classes are not disjoint, 26 words are both a function name and a type name keyword, and most words in a query are not keywords at all, so five tables would mean five misses for the common case. One bisection answers the whole question.
+
+A weekly workflow re-fetches the grammar and opens an issue when upstream moves. That is the mechanism that makes one hundred per cent compatible with DuckDB a maintained property rather than a claim that was true once.
+
+### A gather by consecutive indices is a copy, and now it is one
+
+An inner join that matches every probe row exactly once hands the probe side an index list that reads `0, 1, 2` and so on, because the output comes out in probe order and every probe row produced one output row. Every column taken from that side was being gathered by the identity permutation: an eight byte index load, a sign test and a validity bit per row, to move data that was already in order. The same thing happens on a left join, on a limit, and on any take whose index list happens to be a slice.
+
+The gather now checks for that before it starts. If a morsel's indices ascend by one from wherever they begin, and the source has no nulls, the values go through a memcpy and the validity words are filled rather than accumulated a bit at a time. The check stops at the first index that breaks the run, so a genuinely scattered list pays for two loads and a comparison once per morsel and nothing else.
+
+Four ABBA passes a side on the join microbenchmarks at ten million rows, milliseconds before against after. `join/inner_1000`, which gathers four columns, 24.06 23.96 24.06 24.36 against 22.49 22.19 22.20 22.54. `join/inner_projected`, two columns, 15.13 15.12 15.14 15.48 against 14.73 14.55 14.51 14.75. `join/two_keys` 43.8 42.4 42.2 47.9 against 40.1 40.1 40.6 40.8. `join/outer` 37.4 37.8 37.8 40.8 against 36.2 36.1 36.8 37.1. Every run after below every run before, in all four.
+
+The controls say the check costs nothing where it fails. `join/indices_1000` pairs without gathering anything, `join/semi` and `join/anti` produce no gathered values, and `join/many_to_many` has repeating left indices that are never a run. All four come out interleaved.
+
+The db-benchmark joins at a hundred million rows move less, which is what you would expect once the gather is waiting on memory rather than on instructions. CPU seconds for three timed runs, before against after: j1 6.22 6.27 6.23 6.16 against 5.94 5.81 5.97 6.11, j2 12.49 12.74 12.84 12.55 against 11.98 12.10 12.16 12.34. Four per cent of the CPU and one to two per cent of the wall clock, because the eight hundred megabytes still have to be read either way.
+
+### The gather runs ahead of itself
+
+The hash table's probe has issued a prefetch eight rows ahead of itself for a long time, because where row `i + 8` will read is known as soon as its hash is, and asking for the line early turns eight misses taken one after another into eight outstanding at once. The gather that follows the probe never did the same thing, and it has exactly the same shape: the index list is in memory before the loop starts, so where every row will read from is known before the loop reaches it.
+
+It does now. What that is worth depends entirely on whether the column being gathered from fits in cache, and the join queries in db-benchmark sit on both sides of that line. The big join gathers from a hundred million rows, eight hundred megabytes against a thirty six megabyte L3, and there it is three per cent: four ABBA passes a side, every run with the prefetch below every run without it, and 45.1 CPU seconds against 46.6. The medium join gathers from a million rows, which is L3 resident, and there the same eight passes come out fully interleaved. The join microbenchmarks gather from a hundred thousand rows and are interleaved too.
+
+So it is a small win on the one shape where it can be a win and free everywhere else, which is why it is unconditional rather than behind a size test.
+
+### A join in a pipeline can take a text key, and whether it should depends on cache
+
+The streaming join node refused a text key and the refusal was written down as a fact about streams: a text key needs the ordinal space that comes from concatenating both key columns, and having both columns at once is the one thing a stream has not got. That was true of the route it had. It stopped being true when the join learned to build a table over one side and read it from the other, because that route never concatenates anything, and the refusal outlived its reason by one release.
+
+So it is gone. The node builds its table from the right frame the way it always did, and for text it also keeps one view per ordinal and hands the probe the right frame's key column back, because a view longer than twelve bytes is an offset into the payload of the column it came from and means nothing against anyone else's. The probe is read only, so every core still runs it, and a chunk still answers exactly what the whole frame would.
+
+What that is worth turns out to depend entirely on whether the table fits in cache, and the character join in db-benchmark is measured on both sides of that line. At a hundred million rows the build side is a million text keys, which is a thirty two megabyte table plus sixteen megabytes of kept views against a thirty six megabyte L3, and the pipeline loses: 0.37 s at its best chunk size out of four against 0.30 s for the whole frame route, and 28.4 CPU seconds against 21.5. At ten million rows the build side is a hundred thousand keys, about five megabytes all told, and the same comparison turns over: six pipeline medians between 17.6 and 20.9 ms against six whole frame medians between 25.3 and 25.9, with 2.1 CPU seconds against 2.8. Peak memory is lower on the pipeline at both sizes.
+
+That is the same thing the two big integer joins say, and it is not a statement about text. A pipeline wins when the thing it probes stays warm between chunks and loses when it does not, and which side of that a query falls on is a build side size question that belongs in an optimizer rather than in a comment. Until there is one, the benchmark driver keeps the character join on the whole frame route and a flag puts it on the pipeline, which is how the two big joins are already handled.
+
+### The parallel string build was tried and does not do anything
+
+The note beside the threshold that keeps a text key off the table route when the two sides are near the same height said the fix was a build that spreads across cores. Half of that is easy: the build hashes a row and then inserts it, hashing a row reads that row and writes eight bytes nobody else writes, so any number of threads can do it, while the insert reads and writes one shared table and cannot be split without partitioning it.
+
+The easy half was built and measured and it is worth nothing. On the shape the threshold excludes, ten million rows against ten million, hashing the whole build side on every core and then inserting serially gives 280 ms against the whole frame route's 226, where the interleaved build gives 0.78 of that route and this gives 0.80. On the shape already on the table route, a hundred thousand build rows against ten million probe rows, it does not move at all: six runs a side, fully interleaved, between 28.4 and 29.3 ms.
+
+So the hash was never the part that costs anything. The insert is, and spreading that means several tables built independently and a probe that knows which one to ask, which is a different piece of work. The code is not kept and the note beside the threshold now says what was measured rather than what was expected.
+
+## [0.6.52] - 2026-09-08
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Datetime fields, a join on a text key, and a claim about the benchmark suite that turned out to be wrong and is corrected here.
+
+The datetime work is the bulk of it and it arrives in three pieces. A datetime column will now give up its calendar and clock fields, round or restate itself at another resolution, and name its day, read its ISO calendar and render itself through a format string. Between them that is most of what a `.dt` accessor is for, and none of it existed a week ago.
+
+The join change is smaller and has a longer story. A join with one key column builds a table over the smaller side and asks it one read only question per row of the larger side, and a text key was excluded from that and made to copy both key columns instead. The exclusion was real rather than lazy, because the table stores a hash and a hash is not an exact answer for a string, so the bytes have to be compared and they live in the other side's column. Handing the probe that column is the whole change, and it is 1.56 times against a dimension of a thousand rows and 2.28 against one of a hundred thousand. It is declined when the two sides are close in height, where the serial build costs more than it saves, and the note beside the threshold says what would remove it.
+
+The correction is that the entry which motivated all of this said every db-benchmark join query joins on text. It does not. Four of the five join on an integer and only the fourth joins on a character key, and the suite in firepanda-bench had no character join at all until it was added there. That is written out in full in the join section below rather than being quietly dropped, along with the five gigabyte measurement confirming that none of the suite's join queries moved, which is exactly what an integer keyed suite should say about a change to the text key route.
+
+### A join on a text key can build a table on the small side and read it, instead of copying both sides
+
+A join with one key column pairs its rows by building a table over the smaller side and asking it one read only question per row of the larger side. Nothing is copied, and every core probes at once. A text key was excluded from that and went down a second route instead, which concatenates both key columns, factorizes the whole thing, and slices the codes back apart.
+
+The exclusion had a reason. The table stores a hash rather than a key, which is exact for a fixed width key because the mix is a bijection on sixty four bits, and is not exact for a string, because sixteen bytes of name do not fit in eight bytes of hash. So a string has to have its bytes compared when two hashes agree, and the bytes to compare against belong to the side the table was built from, which is not the column the probe is reading.
+
+What it cost is easy to state. Against a dimension table of a hundred thousand rows, ten million probe rows meant ten million strings copied and ten million keys inserted in order to learn a hundred thousand of them. The table route inserts the hundred thousand and reads the other ten million without writing anything.
+
+The comparison the table was missing already existed for the factorize, where both sides of it happen to be the same column. This adds the piece that was not there, which is telling the probe which column the views it kept belong to, since a long view carries an offset into its own payload and means nothing against anyone else's. A key of twelve bytes or fewer lives inside its own view and never reaches a payload at all, which is every key db-benchmark writes into id1, id2 and id3, so on that data the new comparison is the old one.
+
+Measured on an i9-13900K at ten million probe rows, three sessions a side in ABBA order, with four integer rows carried alongside that did not move:
+
+| build rows | before | after | ratio |
+| --- | --- | --- | --- |
+| a thousand | 41.1 ms | 26.4 ms | 1.56 |
+| a hundred thousand | 66.2 ms | 29.1 ms | 2.28 |
+
+Both are separated, with every run of one side below every run of the other. After the change `join/inner_1000_text` at 26.4 ms is ten percent above the integer row it is a twin of, and `join/inner_100k_text` at 29.1 is seventeen percent above its own, where before they were seventy and a hundred and seventy percent above.
+
+Two sides of the same height are the shape this does not fix. There the build is nearly all of the work, this route does it on one thread, and the route it would replace factorizes both sides on every core, so it measured at 0.78 times and is not taken. The line is drawn at a probe side eight times the build side, which is inside the region measured to win rather than next to an estimate of where winning stops. Moving it is not the fix. A build that spreads is, and then the line goes away instead.
+
+None of the five db-benchmark join queries in firepanda-bench moves, and that was checked rather than assumed. All five were run at the five gigabyte size on the same machine, old against new in ABBA order, and every one of them landed inside its own run to run spread, in the streaming mode they use by default and in the whole frame mode as well. The reason is that the suite generates id1, id2 and id3 as integers, so none of its joins has a text key for this to apply to. Upstream db-benchmark does have one, the fourth query, which joins on id5 against the medium table. Its shape is a build side a thousandth of the probe side, which is past the line here by a wide margin and near the row above that measured 2.28 times.
+
+Nothing about the result changes. The two routes hand out different ordinals, because each numbers its own groups, and they agree on which rows pair with which, which is the only thing anything downstream reads.
 
 ### The name of the day, the ISO calendar, and the format string
 
@@ -182,15 +695,17 @@ A column carrying a time zone is refused rather than answered. The stored intege
 
 Checked against pandas 3.0.3 two ways before any of it was written down: fourteen hand picked extremes and then five hundred random instants between the year 1 and the year 2262, each across all four resolutions and all twenty one outputs, byte identical both times. `tests/fuzz/kernel.mojo` now runs the kernel against its twin on a random temporal column one case in eight.
 
-### A join microbenchmark that joins on text, which is what the join queries actually do
+### A join microbenchmark that joins on text
 
-Every row in the `join/` family joined on an integer. All five db-benchmark join queries join on text: j1 on id1, j2 and j3 on id2, j4 and j5 on id3. So the family measured the pairing and nothing in it measured the part of a real join that comes before the pairing.
+Every row in the `join/` family joined on an integer, so the family measured the pairing and nothing in it measured what a text key costs before the pairing.
 
-`join/inner_equal_sides_text` is the existing `join/inner_equal_sides` with both key columns written as `id` and a number instead of as a number, which is the form db-benchmark uses, and with nothing else changed. Both sides are the same height, every probe row matches exactly one build row, and the only difference between the two rows is the type of the key.
+`join/inner_equal_sides_text` is the existing `join/inner_equal_sides` with both key columns written as `id` and a number instead of as a number, and with nothing else changed. Both sides are the same height, every probe row matches exactly one build row, and the only difference between the two rows is the type of the key.
 
 At ten million rows on an i9-13900K the integer row is 52.5, 50.8 and 57.1 milliseconds over three sessions and the text row is 228.8, 238.2 and 239.4. That is four and a half times, with the fastest text run still four times the slowest integer run, so there is nothing to argue about in the separation.
 
-The number matters because of what was about to be worked on. The plan was to go after the forty milliseconds of `join/inner_equal_sides` that the build side and the bucketing do not account for, on the grounds that it was the closest thing to j4 and j5 in the suite. It is the closest thing, and it turns out to be about a fifth of what those queries spend. An integer key whose values span the row count takes the direct route in the factorizer, which is an array index and a store per row. A text key is hashed, compared against whatever else landed in its slot, and stored in a map. That difference, not the pairing, is where the j4 and j5 time is.
+An integer key whose values span the row count takes the direct route in the factorizer, which is an array index and a store per row. A text key is hashed, compared against whatever else landed in its slot, and stored in a map. That difference, and not the pairing, is what the new row measures.
+
+The entry this replaces said that all five db-benchmark join queries join on text and that this row was therefore the closest thing in the suite to j4 and j5. That was wrong and it is corrected here rather than left standing. Upstream db-benchmark joins on an integer in four of the five, and the queries are named for it: small inner on int, medium inner on int, medium outer on int, medium inner on factor, big inner on int. Only the fourth joins on text, on id5 against the medium table. The suite in firepanda-bench does not have that query yet. It generates id1, id2 and id3 as integers, has no id4, id5 or id6 at all, and runs a big left join on id3 in the place where upstream runs the character join, so at the moment none of its five joins on a text key.
 
 Nothing outside `benchmarks/` changes.
 
