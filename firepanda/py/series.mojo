@@ -22,7 +22,7 @@ from firepanda.dtype.logical import LogicalType, TypeKind, named_type
 from firepanda.frame.index import Index
 from firepanda.frame.series import Series
 from firepanda.kernel.reduce import reduce_any
-from firepanda.py.args import flag, number, whole, words
+from firepanda.py.args import flag, maybe_whole, number, whole, words
 from firepanda.py.build import column_from, empty_column
 from firepanda.py.cast import refuse_if_not_finite
 from firepanda.io.arrow_export import export_array_borrowed, export_schema
@@ -38,6 +38,9 @@ from firepanda.py.ops import (
     unary_op,
 )
 from firepanda.py.reduce import reduction
+from firepanda.py.text import flag as text_flag
+from firepanda.py.text import number as text_number
+from firepanda.py.text import text as text_text
 from firepanda.py.temporal import column_part
 from firepanda.py.temporal import part as temporal_part
 from firepanda.py.temporal import word as temporal_word
@@ -704,6 +707,137 @@ struct PySeries(Movable, Writable):
             return PythonObject(column.is_monotonic_decreasing())
         except e:
             raise retagged(DTYPE, e)
+
+    @staticmethod
+    def string_text(
+        py_self: PythonObject,
+        kind: PythonObject,
+        arg: PythonObject,
+        start: PythonObject,
+        stop: PythonObject,
+        step: PythonObject,
+    ) raises -> PythonObject:
+        """Runs a `str` method that answers text and hands back a column.
+
+        The widest of the accessor's three doors, and it carries the arguments
+        the other two do not need because argument shape does not pick a door,
+        which is the argument `firepanda/py/text.mojo` makes at length.
+
+        Args:
+            py_self: The series.
+            kind: The method, as pandas spells it.
+            arg: The prefix, suffix or replacement, and the empty string for the
+                ones that take none.
+            start: The first position, or `None`, and the index for `get`.
+            stop: The position to stop before, or `None`.
+            step: How far to move between characters.
+
+        Returns:
+            A new series.
+
+        Raises:
+            Error: Tagged `value` if the column is not text or the name is not
+                one that answers text.
+        """
+        return PythonObject(
+            alloc=Self(
+                ArcPointer(
+                    text_text(
+                        Self._held(py_self)[].series[],
+                        words(kind, "kind"),
+                        words(arg, "arg"),
+                        maybe_whole(start, "start"),
+                        maybe_whole(stop, "stop"),
+                        whole(step, "step"),
+                    )
+                )
+            )
+        )
+
+    @staticmethod
+    def string_flag(
+        py_self: PythonObject, kind: PythonObject, arg: PythonObject
+    ) raises -> PythonObject:
+        """Runs a `str` method that answers a mask and hands back a column.
+
+        Args:
+            py_self: The series.
+            kind: The method, as pandas spells it.
+            arg: The prefix or the suffix.
+
+        Returns:
+            A new series of booleans.
+
+        Raises:
+            Error: Tagged `value` if the column is not text or the name is not
+                one that answers a mask.
+        """
+        return PythonObject(
+            alloc=Self(
+                ArcPointer(
+                    text_flag(
+                        Self._held(py_self)[].series[],
+                        words(kind, "kind"),
+                        words(arg, "arg"),
+                    )
+                )
+            )
+        )
+
+    @staticmethod
+    def string_number(
+        py_self: PythonObject,
+        kind: PythonObject,
+        arg: PythonObject,
+        start: PythonObject,
+        stop: PythonObject,
+    ) raises -> PythonObject:
+        """Runs a `str` method that answers a number and hands back a column.
+
+        Args:
+            py_self: The series.
+            kind: The method, as pandas spells it.
+            arg: The substring to look for, and the empty string for `len`.
+            start: The first position a match may start at, or `None`.
+            stop: The position to stop searching before, or `None`.
+
+        Returns:
+            A new series of integers.
+
+        Raises:
+            Error: Tagged `value` if the column is not text or the name is not
+                one that answers a number.
+        """
+        return PythonObject(
+            alloc=Self(
+                ArcPointer(
+                    text_number(
+                        Self._held(py_self)[].series[],
+                        words(kind, "kind"),
+                        words(arg, "arg"),
+                        maybe_whole(start, "start"),
+                        maybe_whole(stop, "stop"),
+                    )
+                )
+            )
+        )
+
+    @staticmethod
+    def string_is_text(py_self: PythonObject) raises -> PythonObject:
+        """Answers whether the column holds text at all.
+
+        Here so that the Python layer can refuse `s.str` on the wrong column
+        with pandas' own `AttributeError` rather than letting the first method
+        called on the accessor raise something else, which is the same reason
+        the categorical accessor has a question of its own.
+
+        Args:
+            py_self: The series.
+
+        Returns:
+            True if the column is text.
+        """
+        return PythonObject(Self._held(py_self)[].series[].chars_is_text())
 
     @staticmethod
     def temporal_part(
