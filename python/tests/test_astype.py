@@ -57,7 +57,9 @@ def names(firepanda: ModuleType) -> dict[str, str]:
 def test_every_spelling_means_what_pandas_says_it_means(firepanda: ModuleType) -> None:
     """The sweep, over the whole table, against a live pandas.
 
-    Two names are checked here and then excused from the pandas half of the
+    Three names are excused. `category` is skipped outright, for the reason in
+    the loop, and two are checked here and then excused from the pandas half of
+    the
     comparison. `str` and `string` both name text, and pandas 3 prints them as
     `str` and `string` where firepanda prints `string` for both, since firepanda
     has one text type and pandas has two spellings of one. That is a difference
@@ -68,6 +70,11 @@ def test_every_spelling_means_what_pandas_says_it_means(firepanda: ModuleType) -
 
     wrong: list[str] = []
     for name, want in names(firepanda).items():
+        # The one name in the table that is not a layout, so the boring integer
+        # values the rest of the sweep uses are the wrong input for it: firepanda
+        # can only encode text. It has its own tests below.
+        if name == "category":
+            continue
         mine = firepanda.Series(WHOLE).astype(name).dtype
         if mine != want:
             wrong.append(f"{name}: firepanda gave {mine} and the table says {want}")
@@ -124,6 +131,74 @@ def test_the_values_come_out_the_way_pandas_converts_them(
     assert mine == theirs
 
 
+@needs_pandas
+def test_a_text_column_becomes_a_category_the_way_pandas_makes_one(
+    firepanda: ModuleType,
+) -> None:
+    """The dtype name and the values, against a live pandas."""
+    import pandas as pd
+
+    words = ["rivet", "bolt", "rivet", "anchor"]
+    mine = firepanda.Series(words).astype("category")
+    theirs = pd.Series(words).astype("category")
+    assert mine.dtype == "category"
+    assert str(theirs.dtype) == "category"
+    assert mine.astype("str").tolist() == list(theirs.astype("str"))
+
+
+@needs_pandas
+def test_the_categories_are_sorted_and_not_in_the_order_they_appeared(
+    firepanda: ModuleType,
+) -> None:
+    """First appearance would be rivet, bolt, anchor, and pandas sorts.
+
+    Asserted through pyarrow rather than through a `.cat` namespace firepanda
+    does not have yet, which is the only way to see the categories from Python
+    today and is also the way a consumer would see them.
+    """
+    pa = pytest.importorskip("pyarrow")
+    import pandas as pd
+
+    words = ["rivet", "bolt", "rivet", "anchor"]
+    mine = pa.table(firepanda.DataFrame({"part": words}).astype({"part": "category"}))
+    assert mine.column("part").chunk(0).dictionary.to_pylist() == ["anchor", "bolt", "rivet"]
+    assert list(pd.Series(words).astype("category").cat.categories) == [
+        "anchor",
+        "bolt",
+        "rivet",
+    ]
+
+
+@needs_pandas
+def test_a_missing_value_is_not_one_of_the_categories(firepanda: ModuleType) -> None:
+    """A null stays a null and does not become a category of its own."""
+    pa = pytest.importorskip("pyarrow")
+    import pandas as pd
+
+    words = ["rivet", None, "bolt", None]
+    mine = pa.table(firepanda.DataFrame({"part": words}).astype({"part": "category"}))
+    assert mine.column("part").chunk(0).dictionary.to_pylist() == ["bolt", "rivet"]
+    assert mine.column("part").to_pylist() == words
+    assert list(pd.Series(words).astype("category").cat.categories) == ["bolt", "rivet"]
+
+
+def test_a_category_cast_back_gives_the_values_and_not_the_codes(
+    firepanda: ModuleType,
+) -> None:
+    """The codes here are 1, 0, 1 and the values are 20, 10, 20."""
+    made = firepanda.Series(["20", "10", "20"]).astype("category")
+    assert made.astype("int64").tolist() == [20, 10, 20]
+    assert made.astype("str").tolist() == ["20", "10", "20"]
+
+
+def test_a_column_that_is_not_text_cannot_be_encoded_yet(firepanda: ModuleType) -> None:
+    """Pandas does this, so it is a gap and says so rather than a type error."""
+    with pytest.raises(NotImplementedError, match="not supported"):
+        firepanda.Series(WHOLE).astype("category")
+    with pytest.raises(NotImplementedError, match="not supported"):
+        firepanda.DataFrame({"n": WHOLE}).astype({"n": "category"})
+
+
 def test_a_python_type_is_a_dtype_too(firepanda: ModuleType) -> None:
     """`astype(float)` is what a lot of code writes, and pandas takes it."""
     assert firepanda.Series(WHOLE).astype(float).dtype == "float64"
@@ -170,7 +245,6 @@ def test_a_name_nothing_answers_to_is_a_type_error(firepanda: ModuleType) -> Non
         ("U", "no type that holds anything"),
         ("unicode", "no type that holds anything"),
         ("str_", "no type that holds anything"),
-        ("category", "dictionary"),
         ("datetime64[ns]", "column of counts"),
         ("timedelta64[ns]", "column of counts"),
         ("date32[day]", "day numbers"),
