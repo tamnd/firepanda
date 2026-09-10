@@ -854,10 +854,17 @@ struct AnyArray(Copyable, Movable, Sized):
                 src=self.data.values.unsafe_ptr().unsafe_offset(start * width),
                 count=n * width,
             )
-        return Self(
+        var out = Self(
             ColumnData(values^, self.data.validity.slice(start, end), n),
             self.type,
         )
+        # A slice moves rows and a row moving cannot change what a code means,
+        # so the categories come across whole, unused ones included. Without
+        # this the result says it is a category and has nothing behind it, which
+        # is the state document 29 is about.
+        if self.dict_values:
+            out.dict_values = StringArray(copy=self.dict_values.value())
+        return out^
 
     def unsafe_ptr[dt: DType](self) -> Pointer[Scalar[dt], origin_of(self)]:
         """Returns a typed pointer to the values, for reading, dtype unchecked.

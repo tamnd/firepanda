@@ -97,6 +97,10 @@ from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL, FLOAT
 from firepanda.dtype.logical import LogicalType
 from firepanda.exec import MORSEL_ROWS, parallel_morsels
+from firepanda.kernel.dictionary import (
+    check_same_categories,
+    with_categories,
+)
 
 from .cast import cast_any
 
@@ -738,6 +742,7 @@ def coalesce_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
             + " are counts of different things, so a row filled from the second"
             " would be out by the ratio between their units"
         )
+    check_same_categories(a, b, "coalesce")
     if a.is_string():
         return AnyArray(_coalesce_strings(a.strings(), b.strings())).retyped(
             a.type
@@ -745,16 +750,19 @@ def coalesce_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
 
     comptime for candidate in ALL:
         if a.dtype() == candidate:
-            return AnyArray(
-                _coalesce_core(
-                    a.unsafe_ptr[candidate](),
-                    a.data.validity,
-                    len(a),
-                    b.unsafe_ptr[candidate](),
-                    b.data.validity,
-                    len(b),
-                )
-            ).retyped(a.type)
+            return with_categories(
+                AnyArray(
+                    _coalesce_core(
+                        a.unsafe_ptr[candidate](),
+                        a.data.validity,
+                        len(a),
+                        b.unsafe_ptr[candidate](),
+                        b.data.validity,
+                        len(b),
+                    )
+                ).retyped(a.type),
+                a,
+            )
     raise Error("coalesce: unsupported dtype " + String(a.dtype()))
 
 
@@ -917,14 +925,17 @@ def fill_forward_any(col: AnyArray, limit: Int = 0) raises -> AnyArray:
 
     comptime for candidate in ALL:
         if col.dtype() == candidate:
-            return AnyArray(
-                _fill_core[forward=True](
-                    col.unsafe_ptr[candidate](),
-                    col.data.validity,
-                    len(col),
-                    limit,
-                )
-            ).retyped(col.type)
+            return with_categories(
+                AnyArray(
+                    _fill_core[forward=True](
+                        col.unsafe_ptr[candidate](),
+                        col.data.validity,
+                        len(col),
+                        limit,
+                    )
+                ).retyped(col.type),
+                col,
+            )
     raise Error("fill_forward: unsupported dtype " + String(col.dtype()))
 
 
@@ -948,14 +959,17 @@ def fill_backward_any(col: AnyArray, limit: Int = 0) raises -> AnyArray:
 
     comptime for candidate in ALL:
         if col.dtype() == candidate:
-            return AnyArray(
-                _fill_core[forward=False](
-                    col.unsafe_ptr[candidate](),
-                    col.data.validity,
-                    len(col),
-                    limit,
-                )
-            ).retyped(col.type)
+            return with_categories(
+                AnyArray(
+                    _fill_core[forward=False](
+                        col.unsafe_ptr[candidate](),
+                        col.data.validity,
+                        len(col),
+                        limit,
+                    )
+                ).retyped(col.type),
+                col,
+            )
     raise Error("fill_backward: unsupported dtype " + String(col.dtype()))
 
 

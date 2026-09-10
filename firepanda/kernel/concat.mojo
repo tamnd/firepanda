@@ -54,6 +54,10 @@ from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer
 from firepanda.dtype.lists import ALL
 from firepanda.exec import parallel_for
+from firepanda.kernel.dictionary import (
+    check_same_categories,
+    with_categories,
+)
 
 comptime PARALLEL_ROWS = 1 << 16
 """Rows below which a concat stays on one thread.
@@ -171,6 +175,7 @@ def concat_refs_any(
                 + " and "
                 + String(parts[p][].type)
             )
+        check_same_categories(parts[0][], parts[p][], "concat")
         total += len(parts[p][])
 
     if parts[0][].is_string():
@@ -200,8 +205,11 @@ def concat_refs_any(
 
     comptime for candidate in ALL:
         if dt == candidate:
-            return AnyArray(_stack_fixed[candidate](fixed, total)).retyped(
-                parts[0][].type
+            return with_categories(
+                AnyArray(_stack_fixed[candidate](fixed, total)).retyped(
+                    parts[0][].type
+                ),
+                parts[0][],
             )
     raise Error("concat: unsupported dtype " + String(dt))
 
@@ -237,6 +245,7 @@ def concat_two_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
             + " and "
             + String(b.type)
         )
+    check_same_categories(a, b, "concat")
     if a.is_string():
         var out = _StringStack(
             len(a) + len(b),
@@ -252,9 +261,12 @@ def concat_two_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
 
     comptime for candidate in ALL:
         if a.dtype() == candidate:
-            return AnyArray(
-                _stack_fixed[candidate](fixed, len(a) + len(b))
-            ).retyped(a.type)
+            return with_categories(
+                AnyArray(
+                    _stack_fixed[candidate](fixed, len(a) + len(b))
+                ).retyped(a.type),
+                a,
+            )
     raise Error("concat: unsupported dtype " + String(a.dtype()))
 
 
