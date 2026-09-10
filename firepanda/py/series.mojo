@@ -16,7 +16,7 @@ from std.memory import ArcPointer, Pointer
 from std.python import Python, PythonObject
 from std.python.bindings import check_arguments_arity
 
-from firepanda.dtype.logical import LogicalType, named_type
+from firepanda.dtype.logical import LogicalType, TypeKind, named_type
 from firepanda.frame.index import Index
 from firepanda.frame.series import Series
 from firepanda.kernel.reduce import reduce_any
@@ -406,6 +406,14 @@ struct PySeries(Movable, Writable):
             # the message, which would be a second place the two could drift.
             if held.values.is_string():
                 raise retagged(VALUE, cause)
+            # A category asked for out of anything that is not text is the one
+            # refusal here that is a gap rather than a wrong type, since pandas
+            # does it and firepanda has nowhere to keep categories that are not
+            # strings. The kernel wrote that message and it says so; this only
+            # gets the class right, and it asks the types rather than reading
+            # the words back out of the error.
+            if wanted.kind == TypeKind.DICTIONARY:
+                raise retagged(UNSUPPORTED, cause)
             raise retagged(DTYPE, cause)
 
     @staticmethod
