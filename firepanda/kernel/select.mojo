@@ -47,6 +47,7 @@ from firepanda.buffer.buffer import Buffer
 from firepanda.dtype.lists import ALL
 from firepanda.exec import parallel_morsels
 from firepanda.exec.parallel import parallel_for, worker_count
+from firepanda.kernel.dictionary import with_categories
 
 
 comptime PARALLEL_TAKE_ROWS = 1 << 16
@@ -184,15 +185,18 @@ def take_any(
         )
     comptime for candidate in ALL:
         if col.dtype() == candidate:
-            return AnyArray(
-                _take_core(
-                    col.unsafe_ptr[candidate](),
-                    col.data.validity,
-                    col.null_count() > 0,
-                    indices,
-                    spread,
-                )
-            ).retyped(col.type)
+            return with_categories(
+                AnyArray(
+                    _take_core(
+                        col.unsafe_ptr[candidate](),
+                        col.data.validity,
+                        col.null_count() > 0,
+                        indices,
+                        spread,
+                    )
+                ).retyped(col.type),
+                col,
+            )
     raise Error("take: unsupported dtype")
 
 
@@ -572,14 +576,17 @@ def filter_any(col: AnyArray, mask: Array[DType.bool]) raises -> AnyArray:
         return AnyArray(_filter_strings(col.strings(), mask)).retyped(col.type)
     comptime for candidate in ALL:
         if col.dtype() == candidate:
-            return AnyArray(
-                _filter_core(
-                    col.unsafe_ptr[candidate](),
-                    col.data.validity,
-                    col.null_count() > 0,
-                    mask,
-                )
-            ).retyped(col.type)
+            return with_categories(
+                AnyArray(
+                    _filter_core(
+                        col.unsafe_ptr[candidate](),
+                        col.data.validity,
+                        col.null_count() > 0,
+                        mask,
+                    )
+                ).retyped(col.type),
+                col,
+            )
     raise Error("filter: unsupported dtype")
 
 
