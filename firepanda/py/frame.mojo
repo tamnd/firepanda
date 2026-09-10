@@ -15,15 +15,20 @@ at all. Nothing in this file is public API and nothing in it should be shaped to
 look like pandas.
 """
 
+from std.collections import Optional
 from std.os import abort
 from std.memory import ArcPointer, Pointer
 from std.python import Python, PythonObject
 from std.python.bindings import check_arguments_arity
 
 from firepanda.array.any import AnyArray
+from firepanda.array.strings import strings_from_list
 from firepanda.dtype.logical import LogicalType
 from firepanda.frame import DataFrame
+from firepanda.frame.concat import concat_series
 from firepanda.frame.index import Index
+from firepanda.frame.series import Series
+from firepanda.kernel.reduce import reduce_any
 from firepanda.io.arrow_c import (
     ArrowArray,
     ArrowArrayStream,
@@ -37,8 +42,8 @@ from firepanda.io.arrow_stream import (
     import_stream,
 )
 from firepanda.io.read import read_csv
-from firepanda.py.args import flag, whole, words
-from firepanda.py.build import frame_from
+from firepanda.py.args import flag, number, whole, words
+from firepanda.py.build import empty_column, frame_from
 from firepanda.py.convert import (
     array_capsule,
     schema_capsule,
@@ -68,6 +73,7 @@ from firepanda.py.ops import (
     fill,
     unary_op,
 )
+from firepanda.py.reduce import reduction
 from firepanda.py.series import PySeries
 
 
@@ -288,6 +294,83 @@ struct PyDataFrame(Movable, Writable):
             )
         except cause:
             raise retagged(COLUMN, cause)
+
+    @staticmethod
+    def reduce(
+        py_self: PythonObject, kind: PythonObject, param: PythonObject
+    ) raises -> PythonObject:
+        """Reduces every column to one value, and hands back a series of them.
+
+        `df.sum()` in pandas is a series with one entry per column, labelled by
+        the column names, and that is a different shape from the one row frame
+        `DataFrame.agg_all` produces. The turn from one into the other is here
+        rather than in the core because it is a pandas shape: a one row frame is
+        the answer that keeps every column's own type, and a series is the answer
+        that has to pick one type for all of them.
+
+        Picking it is the whole of the work. Every result of the same type stays
+        that type, since nothing has to be given up. A mix of numbers becomes
+        float64, which is what pandas gives for the same frame and is the only
+        type that holds an integer total and a float total at once. A mix that is
+        not all numbers is refused rather than widened to text, because a series
+        of strings that used to be a sum is not an answer anybody asked for.
+
+        Args:
+            py_self: The frame.
+            kind: The reduction, as pandas spells the method.
+            param: The delta degrees of freedom or the quantile, and zero for
+                the reductions that take neither.
+
+        Returns:
+            A series with one row per column, labelled by the column names.
+
+        Raises:
+            Error: Tagged `dtype`, if a column has a type the reduction cannot
+                read or the results have no type in common.
+        """
+        var wanted = reduction(words(kind, "kind"), number(param, "param"))
+        ref frame = Self._frame(py_self)[].frame[]
+        var names = List[String](capacity=frame.width())
+        var parts = List[Series](capacity=frame.width())
+        var same = True
+        var numeric = True
+        for i in range(frame.width()):
+            names.append(frame.schema[i].name)
+            var one: AnyArray
+            try:
+                one = reduce_any(frame.columns[i].only(), wanted)
+            except cause:
+                raise retagged(DTYPE, cause)
+            if not one.type.is_numeric():
+                numeric = False
+            if len(parts) > 0 and one.type != parts[0].values.type:
+                same = False
+            parts.append(Series(names[i], one^))
+
+        var labels = Index(
+            AnyArray(strings_from_list(names)), Optional[String](None)
+        )
+        if len(parts) == 0:
+            var out = Series(String(""), empty_column(0))
+            out.index = labels^
+            return PythonObject(alloc=PySeries(ArcPointer(out^)))
+
+        if not same:
+            if not numeric:
+                raise tagged(
+                    DTYPE,
+                    String(
+                        "the columns reduce to types with nothing in common, so"
+                        " there is no one type the answers can share"
+                    ),
+                )
+            for i in range(len(parts)):
+                parts[i] = parts[i].cast(DType.float64)
+
+        var out = concat_series(parts)
+        out.name = String("")
+        out.index = labels^
+        return PythonObject(alloc=PySeries(ArcPointer(out^)))
 
     @staticmethod
     def _other(

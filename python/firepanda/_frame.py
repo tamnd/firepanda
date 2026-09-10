@@ -126,6 +126,145 @@ class DataFrame(DataFrameMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def mean(
+        self, *, axis: Any = 0, skipna: bool = True, numeric_only: bool = False, **kwargs: Any
+    ) -> Series:
+        """The average of the values. Over the columns. One value per column."""
+        try:
+            return self._reduce("mean", 0.0, axis, skipna, numeric_only, 0)
+        except Exception as error:
+            raise translate(error) from None
+
+    def min(
+        self, *, axis: Any = 0, skipna: bool = True, numeric_only: bool = False, **kwargs: Any
+    ) -> Series:
+        """The smallest value. Over the columns. One value per column."""
+        try:
+            return self._reduce("min", 0.0, axis, skipna, numeric_only, 0)
+        except Exception as error:
+            raise translate(error) from None
+
+    def max(
+        self, *, axis: Any = 0, skipna: bool = True, numeric_only: bool = False, **kwargs: Any
+    ) -> Series:
+        """The largest value. Over the columns. One value per column."""
+        try:
+            return self._reduce("max", 0.0, axis, skipna, numeric_only, 0)
+        except Exception as error:
+            raise translate(error) from None
+
+    def median(
+        self, *, axis: Any = 0, skipna: bool = True, numeric_only: bool = False, **kwargs: Any
+    ) -> Series:
+        """The middle value. Over the columns. One value per column."""
+        try:
+            return self._reduce("median", 0.0, axis, skipna, numeric_only, 0)
+        except Exception as error:
+            raise translate(error) from None
+
+    def skew(
+        self, *, axis: Any = 0, skipna: bool = True, numeric_only: bool = False, **kwargs: Any
+    ) -> Series:
+        """The unbiased skew, normalised by N-1. Over the columns. One value per column."""
+        try:
+            return self._reduce("skew", 0.0, axis, skipna, numeric_only, 0)
+        except Exception as error:
+            raise translate(error) from None
+
+    def sum(
+        self,
+        *,
+        axis: Any = 0,
+        skipna: bool = True,
+        numeric_only: bool = False,
+        min_count: int = 0,
+        **kwargs: Any,
+    ) -> Series:
+        """The sum of the values. Over the columns. One value per column."""
+        try:
+            return self._reduce("sum", 0.0, axis, skipna, numeric_only, min_count)
+        except Exception as error:
+            raise translate(error) from None
+
+    def std(
+        self,
+        *,
+        axis: Any = 0,
+        skipna: bool = True,
+        ddof: int = 1,
+        numeric_only: bool = False,
+        **kwargs: Any,
+    ) -> Series:
+        """The sample standard deviation, normalised by N-1 by default. Over the columns.
+        One value per column.
+        """
+        try:
+            return self._reduce("std", float(ddof), axis, skipna, numeric_only, 0)
+        except Exception as error:
+            raise translate(error) from None
+
+    def var(
+        self,
+        *,
+        axis: Any = 0,
+        skipna: bool = True,
+        ddof: int = 1,
+        numeric_only: bool = False,
+        **kwargs: Any,
+    ) -> Series:
+        """The unbiased variance, normalised by N-1 by default. Over the columns. One value
+        per column.
+        """
+        try:
+            return self._reduce("var", float(ddof), axis, skipna, numeric_only, 0)
+        except Exception as error:
+            raise translate(error) from None
+
+    def sem(
+        self,
+        *,
+        axis: Any = 0,
+        skipna: bool = True,
+        ddof: int = 1,
+        numeric_only: bool = False,
+        **kwargs: Any,
+    ) -> Series:
+        """The unbiased standard error of the mean, normalised by N-1 by default. Over the
+        columns. One value per column.
+        """
+        try:
+            return self._reduce("sem", float(ddof), axis, skipna, numeric_only, 0)
+        except Exception as error:
+            raise translate(error) from None
+
+    def quantile(
+        self,
+        q: Any = 0.5,
+        axis: Any = 0,
+        numeric_only: bool = False,
+        interpolation: str = "linear",
+        method: str = "single",
+    ) -> Series:
+        """The value at the given quantile. Over the columns. One value per column."""
+        try:
+            return self._quantile(q, axis, numeric_only, interpolation, method)
+        except Exception as error:
+            raise translate(error) from None
+
+    def nunique(self, axis: Any = 0, dropna: bool = True) -> Series:
+        """How many distinct values there are. Over the columns. One value per column."""
+        try:
+            return self._nunique(axis, dropna)
+        except Exception as error:
+            raise translate(error) from None
+
+    def count(self, axis: Any = 0, numeric_only: bool = False) -> Series:
+        """How many values are not missing. Over the columns. One value per column."""
+        try:
+            return self._reduce("count", 0.0, axis, True, numeric_only, 0)
+        except Exception as error:
+            raise translate(error) from None
+
     def __add__(self, other: Any) -> Any:
         """`a + b`, against a frame, a series or a constant."""
         try:
@@ -595,6 +734,127 @@ class Series(SeriesMixin):
         """The column's Arrow data, as an arrow_schema and an arrow_array PyCapsule."""
         try:
             return tuple(self._inner.arrow_c_array(requested_schema))
+        except Exception as error:
+            raise translate(error) from None
+
+    def mean(
+        self, *, axis: Any = 0, skipna: bool = True, numeric_only: bool = False, **kwargs: Any
+    ) -> Any:
+        """The average of the values. Over the rows."""
+        try:
+            return self._reduce("mean", 0.0, axis, skipna, numeric_only, 0)
+        except Exception as error:
+            raise translate(error) from None
+
+    def min(
+        self, *, axis: Any = 0, skipna: bool = True, numeric_only: bool = False, **kwargs: Any
+    ) -> Any:
+        """The smallest value. Over the rows."""
+        try:
+            return self._reduce("min", 0.0, axis, skipna, numeric_only, 0)
+        except Exception as error:
+            raise translate(error) from None
+
+    def max(
+        self, *, axis: Any = 0, skipna: bool = True, numeric_only: bool = False, **kwargs: Any
+    ) -> Any:
+        """The largest value. Over the rows."""
+        try:
+            return self._reduce("max", 0.0, axis, skipna, numeric_only, 0)
+        except Exception as error:
+            raise translate(error) from None
+
+    def median(
+        self, *, axis: Any = 0, skipna: bool = True, numeric_only: bool = False, **kwargs: Any
+    ) -> Any:
+        """The middle value. Over the rows."""
+        try:
+            return self._reduce("median", 0.0, axis, skipna, numeric_only, 0)
+        except Exception as error:
+            raise translate(error) from None
+
+    def skew(
+        self, *, axis: Any = 0, skipna: bool = True, numeric_only: bool = False, **kwargs: Any
+    ) -> Any:
+        """The unbiased skew, normalised by N-1. Over the rows."""
+        try:
+            return self._reduce("skew", 0.0, axis, skipna, numeric_only, 0)
+        except Exception as error:
+            raise translate(error) from None
+
+    def sum(
+        self,
+        *,
+        axis: Any = None,
+        skipna: bool = True,
+        numeric_only: bool = False,
+        min_count: int = 0,
+        **kwargs: Any,
+    ) -> Any:
+        """The sum of the values. Over the rows."""
+        try:
+            return self._reduce("sum", 0.0, axis, skipna, numeric_only, min_count)
+        except Exception as error:
+            raise translate(error) from None
+
+    def std(
+        self,
+        *,
+        axis: Any = None,
+        skipna: bool = True,
+        ddof: int = 1,
+        numeric_only: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        """The sample standard deviation, normalised by N-1 by default. Over the rows."""
+        try:
+            return self._reduce("std", float(ddof), axis, skipna, numeric_only, 0)
+        except Exception as error:
+            raise translate(error) from None
+
+    def var(
+        self,
+        *,
+        axis: Any = None,
+        skipna: bool = True,
+        ddof: int = 1,
+        numeric_only: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        """The unbiased variance, normalised by N-1 by default. Over the rows."""
+        try:
+            return self._reduce("var", float(ddof), axis, skipna, numeric_only, 0)
+        except Exception as error:
+            raise translate(error) from None
+
+    def sem(
+        self,
+        *,
+        axis: Any = None,
+        skipna: bool = True,
+        ddof: int = 1,
+        numeric_only: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        """The unbiased standard error of the mean, normalised by N-1 by default. Over the
+        rows.
+        """
+        try:
+            return self._reduce("sem", float(ddof), axis, skipna, numeric_only, 0)
+        except Exception as error:
+            raise translate(error) from None
+
+    def quantile(self, q: Any = 0.5, interpolation: str = "linear") -> Any:
+        """The value at the given quantile. Over the rows."""
+        try:
+            return self._quantile(q, interpolation)
+        except Exception as error:
+            raise translate(error) from None
+
+    def nunique(self, dropna: bool = True) -> Any:
+        """How many distinct values there are. Over the rows."""
+        try:
+            return self._nunique(0, dropna)
         except Exception as error:
             raise translate(error) from None
 

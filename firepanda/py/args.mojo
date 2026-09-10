@@ -114,3 +114,40 @@ def words(value: PythonObject, name: String) raises -> String:
             ),
         )
     return String(value)
+
+
+def number(value: PythonObject, name: String) raises -> Float64:
+    """Reads a Python number as a float.
+
+    An integer is accepted, because the two arguments that reach this are a
+    delta degrees of freedom and a quantile and a caller writes `ddof=1` rather
+    than `ddof=1.0`. A boolean is accepted for the same reason `flag` gives in
+    reverse: Python makes a `bool` an `int` and refusing it here would be
+    stricter than the library being copied.
+
+    Args:
+        value: What Python passed.
+        name: The parameter name, for the message.
+
+    Returns:
+        The number.
+
+    Raises:
+        Error: Tagged `dtype`, if the value is not a number.
+    """
+    var builtins = Python.import_module("builtins")
+    var numeric = Bool(builtins.isinstance(value, builtins.float)) or Bool(
+        builtins.isinstance(value, builtins.int)
+    )
+    if not numeric:
+        raise tagged(
+            DTYPE,
+            String(
+                name,
+                " must be a number, got ",
+                Python.type(value).__name__,
+                " ",
+                value.__repr__(),
+            ),
+        )
+    return Float64(py=builtins.float(value))

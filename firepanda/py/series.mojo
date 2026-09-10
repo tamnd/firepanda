@@ -19,7 +19,8 @@ from std.python.bindings import check_arguments_arity
 from firepanda.dtype.logical import LogicalType
 from firepanda.frame.index import Index
 from firepanda.frame.series import Series
-from firepanda.py.args import flag, whole, words
+from firepanda.kernel.reduce import reduce_any
+from firepanda.py.args import flag, number, whole, words
 from firepanda.py.build import column_from, empty_column
 from firepanda.io.arrow_export import export_array_borrowed, export_schema
 from firepanda.py.convert import array_capsule, schema_capsule
@@ -33,7 +34,8 @@ from firepanda.py.ops import (
     fill,
     unary_op,
 )
-from firepanda.py.values import python_list
+from firepanda.py.reduce import reduction
+from firepanda.py.values import python_list, python_value
 
 
 @fieldwise_init
@@ -224,6 +226,44 @@ struct PySeries(Movable, Writable):
             A list with one element per row, with `None` for the missing ones.
         """
         return python_list(Self._held(py_self)[].series[].values)
+
+    @staticmethod
+    def reduce(
+        py_self: PythonObject, kind: PythonObject, param: PythonObject
+    ) raises -> PythonObject:
+        """Reduces the whole column to one Python value.
+
+        Twelve of the reductions come through here rather than through twelve
+        bound methods, for the reason `ops.mojo` gives about the operators: they
+        differ by a word and the word can cross.
+
+        The answer comes back out as an ordinary Python number and not as a one
+        row series, because that is what pandas hands back and because a caller
+        who wrote `s.sum() > 10` is holding it in a Python expression a moment
+        later. `python_value` is what decides what a missing answer looks like,
+        so `s.mean()` on a column with nothing in it is `None` here and the
+        Python layer is where that becomes the NaN pandas gives.
+
+        Args:
+            py_self: The series.
+            kind: The reduction, as pandas spells the method.
+            param: The delta degrees of freedom or the quantile, and zero for
+                the reductions that take neither.
+
+        Returns:
+            The value, or `None` if the reduction has no answer.
+
+        Raises:
+            Error: Tagged `dtype`, if the column has a type the reduction
+                cannot read, and tagged `value` if the name is not a reduction.
+        """
+        var wanted = reduction(words(kind, "kind"), number(param, "param"))
+        try:
+            return python_value(
+                reduce_any(Self._held(py_self)[].series[].values, wanted), 0
+            )
+        except e:
+            raise retagged(DTYPE, e)
 
     @staticmethod
     def _other(value: PythonObject, name: String) raises -> ArcPointer[Series]:

@@ -138,6 +138,95 @@ def _no_fill_against_a_series(fill_value: Any) -> None:
         )
 
 
+def _held_at(name: str, value: Any, default: Any, why: str) -> None:
+    """Refuses a declared argument that is only implemented at its default.
+
+    `_refuse` is this for the arguments whose default is None, which is most of
+    them. The twelve reductions are where that stopped being enough: `skipna`
+    defaults to True and `min_count` to zero, so there is no None to compare
+    against and the question is whether what arrived is the one value there is an
+    implementation for.
+
+    The reason it refuses rather than ignores is the one `_refuse` gives. A
+    caller who writes `skipna=False` is asking for a different answer, and
+    handing back the answer for `skipna=True` would be wrong in the way that
+    takes longest to find.
+
+    Args:
+        name: The parameter name.
+        value: What was passed.
+        default: The one value that is implemented.
+        why: What it would take to support the rest.
+
+    Raises:
+        NotImplementedError: If it is not the default.
+    """
+    if value != default:
+        raise NotImplementedError(f"{name}={value!r} is not supported yet, because {why}")
+
+
+def _reducing_axis(axis: Any, owner: str) -> None:
+    """Refuses a reduction along the second axis.
+
+    A series has one axis and this is a check on the spelling. A frame has two
+    and only one of them reduces: `df.sum()` runs down each column, which is a
+    pass over contiguous memory per column, and `df.sum(axis=1)` runs across each
+    row, which reads one value out of every column and is a different kernel
+    rather than the same one transposed.
+
+    Args:
+        axis: What was passed.
+        owner: The class name, for the message.
+
+    Raises:
+        InvalidArgumentError: If it is not an axis this class has.
+        NotImplementedError: If it is the second axis of a frame.
+    """
+    allowed = (0, 1) if owner == "DataFrame" else (0,)
+    if _axis_number(axis, owner, 0, allowed) == 1:
+        raise NotImplementedError(
+            "axis=1 is not supported yet, because reducing across a row reads one"
+            " value out of every column and is a different kernel from the one"
+            " that runs down a column"
+        )
+
+
+def _quantile_wanted(q: Any, interpolation: str) -> float:
+    """Reads the one quantile a reduction can answer.
+
+    pandas takes a list of quantiles as well as one, and answers a series for a
+    series and a frame for a frame. That is a different shape rather than a
+    longer loop, so it is refused by shape here and the scalar is what crosses.
+
+    Args:
+        q: The quantile, between zero and one.
+        interpolation: How to land between two values.
+
+    Returns:
+        The quantile as a float.
+
+    Raises:
+        InvalidArgumentError: If it is not a number between zero and one.
+        NotImplementedError: If it is a list, or if the interpolation is one of
+            the four that are not linear.
+    """
+    _held_at(
+        "interpolation",
+        interpolation,
+        "linear",
+        "the reduction lands between two values by weighting them and the other"
+        " four rules pick one of them instead",
+    )
+    if isinstance(q, bool) or not isinstance(q, (int, float)):
+        raise NotImplementedError(
+            "q has to be a single quantile for now, because a list of them"
+            " answers a Series rather than a value and that is a different shape"
+        )
+    if not 0.0 <= float(q) <= 1.0:
+        raise InvalidArgumentError(f"percentiles should all be in the interval [0, 1]. Try {q!r}")
+    return float(q)
+
+
 __all__ = ["DataFrameMixin", "IndexMixin", "SeriesMixin"]
 
 
@@ -273,6 +362,77 @@ class DataFrameMixin:
         except Exception as error:
             raise translate(error) from None
 
+    def _reduce(
+        self,
+        kind: str,
+        param: float,
+        axis: Any,
+        skipna: bool,
+        numeric_only: bool,
+        min_count: int,
+    ) -> Series:
+        """Runs one of the twelve reductions down every column.
+
+        The answer is a series labelled by the column names, which is a
+        different shape from the one row frame the core produces, and the turn
+        between them is in `PyDataFrame.reduce` where the type the answers have
+        to share is picked.
+        """
+        from ._frame import Series
+
+        _reducing_axis(axis, "DataFrame")
+        _held_at(
+            "skipna",
+            skipna,
+            True,
+            "a missing value is skipped by every reduction in the library and"
+            " there is no second pass that lets one through",
+        )
+        _held_at(
+            "numeric_only",
+            numeric_only,
+            False,
+            "dropping the columns a reduction cannot read is a choice about the"
+            " shape of the answer rather than about the reduction",
+        )
+        _held_at(
+            "min_count",
+            min_count,
+            0,
+            "a floor on how many values a sum needs before it answers at all is"
+            " a rule about the result rather than about the sum",
+        )
+        try:
+            return Series._wrap(self._inner.reduce(kind, param))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _quantile(
+        self, q: Any, axis: Any, numeric_only: bool, interpolation: str, method: str
+    ) -> Series:
+        """Runs the quantile down every column."""
+        _held_at(
+            "method",
+            method,
+            "single",
+            "computing one quantile over the whole frame at once rather than"
+            " over each column is a different reduction",
+        )
+        return self._reduce(
+            "quantile", _quantile_wanted(q, interpolation), axis, True, numeric_only, 0
+        )
+
+    def _nunique(self, axis: Any, dropna: bool) -> Series:
+        """Counts the distinct values in every column."""
+        _held_at(
+            "dropna",
+            dropna,
+            True,
+            "counting a missing value as one more distinct value needs the count"
+            " to know it saw one, and the kernel skips them before it counts",
+        )
+        return self._reduce("nunique", 0.0, axis, True, False, 0)
+
 
 class SeriesMixin:
     """The hand written half of `Series`."""
@@ -373,6 +533,69 @@ class SeriesMixin:
             return Series._wrap(self._inner.unary(op))
         except Exception as error:
             raise translate(error) from None
+
+    def _reduce(
+        self,
+        kind: str,
+        param: float,
+        axis: Any,
+        skipna: bool,
+        numeric_only: bool,
+        min_count: int,
+    ) -> Any:
+        """Runs one of the twelve reductions over the whole column.
+
+        The answer is an ordinary Python number rather than a one row series,
+        because that is what pandas hands back and because a caller who wrote
+        `s.sum() > 10` is holding it in a Python expression a moment later.
+
+        A reduction with no answer comes back from the boundary as `None` and
+        leaves here as a float NaN, because that is what pandas gives for the
+        mean of nothing and a caller comparing against it will be using `isnan`
+        rather than `is None`.
+        """
+        _reducing_axis(axis, "Series")
+        _held_at(
+            "skipna",
+            skipna,
+            True,
+            "a missing value is skipped by every reduction in the library and"
+            " there is no second pass that lets one through",
+        )
+        _held_at(
+            "numeric_only",
+            numeric_only,
+            False,
+            "refusing a column a reduction cannot read is what the reduction"
+            " already does, and it says so with the dtype in the message",
+        )
+        _held_at(
+            "min_count",
+            min_count,
+            0,
+            "a floor on how many values a sum needs before it answers at all is"
+            " a rule about the result rather than about the sum",
+        )
+        try:
+            answer = self._inner.reduce(kind, param)
+        except Exception as error:
+            raise translate(error) from None
+        return float("nan") if answer is None else answer
+
+    def _quantile(self, q: Any, interpolation: str) -> Any:
+        """Runs the quantile over the whole column."""
+        return self._reduce("quantile", _quantile_wanted(q, interpolation), 0, True, False, 0)
+
+    def _nunique(self, axis: Any, dropna: bool) -> Any:
+        """Counts the distinct values in the column."""
+        _held_at(
+            "dropna",
+            dropna,
+            True,
+            "counting a missing value as one more distinct value needs the count"
+            " to know it saw one, and the kernel skips them before it counts",
+        )
+        return self._reduce("nunique", 0.0, axis, True, False, 0)
 
 
 class IndexMixin:

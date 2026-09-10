@@ -60,6 +60,10 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = dataframe.def_method[PyDataFrame.select](
         "select", docstring="Several columns, as a frame."
     )
+    _ = dataframe.def_method[PyDataFrame.reduce](
+        "reduce",
+        docstring="Every column reduced to one value, as a series of them.",
+    )
     _ = dataframe.def_method[PyDataFrame.labels](
         "labels", docstring="The row labels, as an index."
     )
@@ -120,6 +124,9 @@ def register(mut module: PythonModuleBuilder) raises:
     )
     _ = series.def_method[PySeries.labels](
         "labels", docstring="The row labels, as an index."
+    )
+    _ = series.def_method[PySeries.reduce](
+        "reduce", docstring="The whole column reduced to one Python value."
     )
     _ = series.def_method[PySeries.binary_series](
         "binary_series",

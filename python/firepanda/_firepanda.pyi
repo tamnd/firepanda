@@ -34,6 +34,9 @@ class DataFrame:
     def select(self, names: list[str]) -> DataFrame:
         """Several columns, as a frame."""
         ...
+    def reduce(self, kind: str, param: float) -> Series:
+        """Every column reduced to one value, as a series of them."""
+        ...
     def labels(self) -> Index:
         """The row labels, as an index."""
         ...
@@ -92,6 +95,9 @@ class Series:
         ...
     def labels(self) -> Index:
         """The row labels, as an index."""
+        ...
+    def reduce(self, kind: str, param: float) -> object:
+        """The whole column reduced to one Python value."""
         ...
     def binary_series(
         self, other: Series, op: str, flip: bool, fill_value: object | None
