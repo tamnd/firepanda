@@ -40,6 +40,15 @@ from firepanda.frame.display import DisplayOptions, render_column
 from firepanda.frame.index import Index
 from firepanda.kernel.binary import BinaryOp, binary_any, binary_value_any
 from firepanda.kernel.cast import cast_any
+from firepanda.kernel.chars import (
+    text_character_get,
+    text_character_length,
+    text_character_slice,
+    text_find,
+    text_remove_prefix,
+    text_remove_suffix,
+    text_slice_replace,
+)
 from firepanda.kernel.cumulative import CumulativeOp, cumulative_any
 from firepanda.kernel.dictionary import (
     dictionary_codes,
@@ -715,6 +724,215 @@ struct Series(Copyable, Movable, Sized, Writable):
             self.name,
             AnyArray(text_substring(self.values.strings(), offset, length)),
         )
+
+    def chars_is_text(self) -> Bool:
+        """Answers whether this column holds text at all.
+
+        Here for the reason `cat_is_category` is, and pandas has the same pair:
+        `s.str` on a column of numbers is an `AttributeError` rather than a
+        column of nulls, so the caller wants a question they can ask before they
+        reach for the accessor.
+
+        Returns:
+            True if the column is text.
+        """
+        return self.values.type.kind == TypeKind.STRING
+
+    def chars_length(self) raises -> Self:
+        """Returns how many characters each row holds.
+
+        Not how many bytes, which is what `byte_length` and every other kernel
+        in the library measure. The two agree on ASCII and disagree on
+        everything else, and this is the pandas answer.
+
+        Returns:
+            An int64 series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name, AnyArray(text_character_length(self.values.strings()))
+        )
+
+    def chars_slice(
+        self, start: Optional[Int], stop: Optional[Int], step: Int
+    ) raises -> Self:
+        """Returns a range of characters cut out of every row.
+
+        These are Python's slice rules, so a missing bound means the far end in
+        whichever direction the step goes, a negative bound counts back from the
+        end, and a range that runs off a short row is the empty string rather
+        than an error.
+
+        Args:
+            start: The first character, or nothing for the near end.
+            stop: The character to stop before, or nothing for the far end.
+            step: How far to move between characters. Never zero.
+
+        Returns:
+            A text series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text, or the step is zero.
+        """
+        return self._relabelled(
+            self.name,
+            AnyArray(
+                text_character_slice(self.values.strings(), start, stop, step)
+            ),
+        )
+
+    def chars_get(self, at: Int) raises -> Self:
+        """Returns one character out of every row.
+
+        Args:
+            at: Which character, counting back from the end when negative.
+
+        Returns:
+            A text series of the same height, null wherever this one is null and
+            also wherever the row is too short to have that character.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name, AnyArray(text_character_get(self.values.strings(), at))
+        )
+
+    def chars_find(
+        self,
+        sub: StringSlice,
+        start: Optional[Int],
+        stop: Optional[Int],
+        from_end: Bool,
+    ) raises -> Self:
+        """Returns where a substring sits in each row, as a character position.
+
+        Args:
+            sub: The substring to look for.
+            start: The first character the match may start at, or nothing for
+                the beginning.
+            stop: The character to stop searching before, or nothing for the
+                end.
+            from_end: Whether to answer the last match rather than the first.
+
+        Returns:
+            An int64 series holding the character position, or -1 where the
+            substring is not there, and null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name,
+            AnyArray(
+                text_find(
+                    self.values.strings(), sub.as_bytes(), start, stop, from_end
+                )
+            ),
+        )
+
+    def chars_slice_replace(
+        self, start: Optional[Int], stop: Optional[Int], repl: StringSlice
+    ) raises -> Self:
+        """Returns every row with a range of characters swapped for a substring.
+
+        Args:
+            start: The first character replaced, or nothing for the beginning.
+            stop: The character to stop replacing before, or nothing for the
+                end.
+            repl: What to put there.
+
+        Returns:
+            A text series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name,
+            AnyArray(
+                text_slice_replace(
+                    self.values.strings(), start, stop, repl.as_bytes()
+                )
+            ),
+        )
+
+    def chars_remove_prefix(self, prefix: StringSlice) raises -> Self:
+        """Returns every row with a leading substring taken off, if it has one.
+
+        Args:
+            prefix: The substring to remove.
+
+        Returns:
+            A text series of the same height, unchanged wherever the row does
+            not begin with the prefix and null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name,
+            AnyArray(
+                text_remove_prefix(self.values.strings(), prefix.as_bytes())
+            ),
+        )
+
+    def chars_remove_suffix(self, suffix: StringSlice) raises -> Self:
+        """Returns every row with a trailing substring taken off, if it has one.
+
+        Args:
+            suffix: The substring to remove.
+
+        Returns:
+            A text series of the same height, unchanged wherever the row does
+            not end with the suffix and null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name,
+            AnyArray(
+                text_remove_suffix(self.values.strings(), suffix.as_bytes())
+            ),
+        )
+
+    def chars_starts_with(self, prefix: StringSlice) raises -> Self:
+        """Returns whether each row begins with a substring.
+
+        The mask kernel underneath this is the one `LIKE 'prefix%'` uses, and it
+        compares bytes. That is the same answer a character comparison would
+        give, because a prefix that is well formed UTF-8 can only match at a
+        character boundary, so there is nothing to convert.
+
+        Args:
+            prefix: The substring to look for at the front.
+
+        Returns:
+            A bool series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name, AnyArray(self.str_starts_with(prefix))
+        )
+
+    def chars_ends_with(self, suffix: StringSlice) raises -> Self:
+        """Returns whether each row ends with a substring.
+
+        Args:
+            suffix: The substring to look for at the back.
+
+        Returns:
+            A bool series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(self.name, AnyArray(self.str_ends_with(suffix)))
 
     def cat_is_category(self) -> Bool:
         """Answers whether this column holds categories at all.

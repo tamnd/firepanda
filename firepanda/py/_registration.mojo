@@ -192,6 +192,21 @@ def register(mut module: PythonModuleBuilder) raises:
         "monotonic",
         docstring="Whether the column is sorted, one way or the other.",
     )
+    _ = series.def_method[PySeries.string_text](
+        "string_text",
+        docstring="One str accessor method that answers text, as a column.",
+    )
+    _ = series.def_method[PySeries.string_flag](
+        "string_flag",
+        docstring="One str accessor method that answers a mask, as a column.",
+    )
+    _ = series.def_method[PySeries.string_number](
+        "string_number",
+        docstring="One str accessor method that answers a number, as a column.",
+    )
+    _ = series.def_method[PySeries.string_is_text](
+        "string_is_text", docstring="Whether the column holds text at all."
+    )
     _ = series.def_method[PySeries.temporal_part](
         "temporal_part", docstring="One part of a temporal column, as a column."
     )

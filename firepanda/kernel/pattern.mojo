@@ -179,6 +179,44 @@ def find_bytes(hay: Span[UInt8, _], needle: Span[UInt8, _], from_: Int) -> Int:
     return -1
 
 
+def rfind_bytes(
+    hay: Span[UInt8, _], needle: Span[UInt8, _], from_: Int, until: Int
+) -> Int:
+    """Finds the last occurrence of the needle inside a byte range.
+
+    The forward search above filters sixteen candidates at a time and this one
+    walks backwards a byte at a time. That is a deliberate gap rather than an
+    oversight: the same two ended filter mirrors onto a backwards scan without
+    changing an idea in it, and the only caller of this today is `str.rfind` on
+    a column of short strings, so writing the fast version now would be adding
+    a page of index arithmetic in exchange for a number nobody has asked for.
+    It should be mirrored the day something measures it.
+
+    Args:
+        hay: The bytes being searched.
+        needle: The bytes being looked for.
+        from_: The first position that may be returned.
+        until: The position the match must end at or before.
+
+    Returns:
+        The offset of the match, or -1 if there is none. An empty needle matches
+        at `until`, which is where Python's `rfind` puts it.
+
+    """
+    var m = len(needle)
+    var limit = min(until, len(hay)) - m
+    if limit < from_:
+        return -1
+    if m == 0:
+        return limit
+    var at = limit
+    while at >= from_:
+        if _starts_at(hay, needle, at):
+            return at
+        at -= 1
+    return -1
+
+
 def _starts_at(hay: Span[UInt8, _], needle: Span[UInt8, _], at: Int) -> Bool:
     """Whether the needle sits at a given offset, first and last byte included.
 
