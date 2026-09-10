@@ -30,6 +30,7 @@ says what was already decided and why.
 | [21-the-index-you-can-hold.md](21-the-index-you-can-hold.md) | The third bound type, why `df.index` returns an index rather than a list, and the divergences the Python facing index has |
 | [22-what-a-message-is-for.md](22-what-a-message-is-for.md) | Why an error message leads with pandas' sentence and follows with ours, which three kinds are deliberately not copied, and why the code asks a question rather than reading its own strings |
 | [23-a-typo-and-a-gap.md](23-a-typo-and-a-gap.md) | Why a value pandas refuses and a value pandas takes that firepanda has not written are different classes of error, why not every fixed vocabulary gets a check, and why an argument in a signature is not always an argument the call reads |
+| [24-a-column-that-arrives-as-codes.md](24-a-column-that-arrives-as-codes.md) | How a dictionary encoded Arrow column is read, why the value type has to be taken off the schema before it is released, why the codes travel by the ordinary path and the categories go around, and what happens when two batches disagree about what a code means |
 | [engine/](engine/00-README.md) | How DuckDB and Polars execute a query, and what firepanda is going to do about it |
 | [planner/](planner/00-README.md) | What decides the shape of a query: the plan, the passes, predicate transfer, and choosing an operator |
 | [sql/](sql/00-README.md) | DuckDB's dialect, the vendored grammar, the shared logical plan, and how compatibility gets measured |

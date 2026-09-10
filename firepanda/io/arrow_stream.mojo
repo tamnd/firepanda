@@ -70,11 +70,13 @@ from std.memory import Pointer
 from std.sys import size_of
 
 from firepanda.array.any import AnyArray
+from firepanda.array.strings import StringArray
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.frame.frame import DataFrame
 
 from .arrow_c import (
+    ARROW_FLAG_DICTIONARY_ORDERED,
     EINVAL,
     STRUCT_FORMAT,
     ArrayPtr,
@@ -96,8 +98,8 @@ from .arrow_c import (
     stream_schema,
 )
 from .arrow_export import export_frame_array, export_frame_schema
-from .arrow_import import ColumnSink, format_string
-from .assemble import ArrowLayout, assemble
+from .arrow_import import ColumnSink, build_column, format_string
+from .assemble import ArrowDictionary, ArrowLayout, assemble
 
 comptime MAX_BATCHES = 1 << 24
 """How many batches a stream may hand out before this gives up on it.
@@ -211,6 +213,193 @@ def frame_layout(schema: ArrowSchema) raises -> ArrowLayout:
     return out^
 
 
+@fieldwise_init
+struct _Encoded(Copyable, Movable):
+    """One dictionary encoded field, as the schema described it.
+
+    The schema and the categories arrive apart on this interface, which is the
+    whole reason this struct exists. A stream describes itself once and then
+    hands out batches, so the schema is read and released before the first batch
+    is asked for, while the categories live on the arrays. What the schema knows
+    is the value type and the ordered flag, and that is what is kept here until
+    a batch turns up with the values themselves.
+    """
+
+    var column: Int
+    """Which field of the struct this is."""
+
+    var values: String
+    """The C Data Interface format string of the categories.
+
+    The field's own format string is the index type, because that is where Arrow
+    puts it, so this is the only place the value type is recorded.
+    """
+
+    var ordered: Bool
+    """Whether the categories have a meaningful order."""
+
+
+def dictionary_plan(schema: ArrowSchema) raises -> List[_Encoded]:
+    """Reads which fields of a struct schema are dictionary encoded.
+
+    Read from the schema and not from a batch, because a stream releases its
+    schema before it hands out a batch, and the value type is only in the schema.
+
+    Args:
+        schema: The parent struct schema.
+
+    Returns:
+        One entry per dictionary encoded field, in schema order, and an empty
+        list for the frames that have none, which is almost all of them.
+
+    Raises:
+        Error: If a field claims a dictionary and does not have one.
+    """
+    var out = List[_Encoded]()
+    for i in range(Int(schema.n_children)):
+        var child = _child_schema(schema, i)
+        if not child[].dictionary:
+            continue
+        var values = child[].dictionary.value().unsafe_bitcast[ArrowSchema]()
+        var ordered = (
+            child[].flags & ARROW_FLAG_DICTIONARY_ORDERED
+        ) == ARROW_FLAG_DICTIONARY_ORDERED
+        out.append(_Encoded(i, format_string(values[]), ordered))
+    return out^
+
+
+def batch_categories(
+    array: ArrowArray, plan: List[_Encoded], names: List[String]
+) raises -> List[ArrowDictionary]:
+    """Reads the categories one batch arrived with, one per encoded column.
+
+    Args:
+        array: The struct array for this batch.
+        plan: What the schema said about the encoded fields.
+        names: The column names, for the error messages.
+
+    Returns:
+        One entry per entry of the plan, in the same order.
+
+    Raises:
+        Error: If a field the schema called dictionary encoded arrives without
+            its categories, or if the categories are not text.
+    """
+    var out = List[ArrowDictionary]()
+    for i in range(len(plan)):
+        var at = plan[i].column
+        var child = _child_array(array, at)
+        if not child[].dictionary:
+            raise Error(
+                String(
+                    "arrow: column '",
+                    names[at],
+                    (
+                        "' is dictionary encoded in the schema and a batch of"
+                        " it arrived with no categories"
+                    ),
+                )
+            )
+        var values = child[].dictionary.value().unsafe_bitcast[ArrowArray]()
+        var column = build_column(values[], plan[i].values)
+        try:
+            out.append(
+                ArrowDictionary(at, plan[i].ordered, column^.into_strings())
+            )
+        except:
+            # The inner error is dropped rather than appended. It says the
+            # column is not a string column, which is true and is the wrong end
+            # of the problem: what a reader needs to know is that the format is
+            # the dictionary's and not the field's, since the field's format is
+            # an index type and there is nothing wrong with it.
+            raise Error(
+                String(
+                    "arrow: the categories of column '",
+                    names[at],
+                    "' have format '",
+                    plan[i].values,
+                    (
+                        "', and categories of a type other than text are not"
+                        " supported, because firepanda holds them as a string"
+                        " column"
+                    ),
+                )
+            )
+    return out^
+
+
+def _same_categories(mine: StringArray, other: StringArray) -> Bool:
+    """Whether two batches agree about what their codes mean.
+
+    Args:
+        mine: One batch's categories.
+        other: Another batch's.
+
+    Returns:
+        True when they are the same length and every entry matches, missing
+        entries included, which is what makes one set of codes readable against
+        the other.
+    """
+    if len(mine) != len(other):
+        return False
+    for i in range(len(mine)):
+        if mine.is_valid(i) != other.is_valid(i):
+            return False
+        if mine.is_valid(i) and not mine.element_equals_foreign(
+            i, other.view(i), other
+        ):
+            return False
+    return True
+
+
+def reconcile_categories(
+    mut layout: ArrowLayout, found: List[ArrowDictionary]
+) raises:
+    """Folds one batch's categories into the layout, or refuses the disagreement.
+
+    A firepanda column holds one set of categories, and this interface hands out
+    a set per array. Every producer anybody has hands out the same set every
+    time, so the batches are checked rather than reconciled: matching sets are
+    the case that works and a real disagreement would need every code in every
+    later batch rewritten, which is a different piece of work and is not done
+    silently on the way past.
+
+    Args:
+        layout: The layout, whose dictionaries are filled on the first batch.
+        found: What this batch arrived with.
+
+    Raises:
+        Error: If a batch disagrees with the first about what a code means.
+    """
+    if len(layout.dictionaries) == 0:
+        layout.dictionaries = found.copy()
+        return
+    for i in range(len(found)):
+        var at = layout.dictionary_at(found[i].column)
+        if at < 0:
+            raise Error(
+                "arrow: a batch carries categories for a column the first batch"
+                " did not"
+            )
+        if not _same_categories(
+            layout.dictionaries[at].values, found[i].values
+        ):
+            raise Error(
+                String(
+                    "arrow: two batches of column '",
+                    layout.names[found[i].column],
+                    (
+                        "' carry different categories, so their codes do not"
+                        " mean the same thing; reading a dictionary that"
+                        " changes part way through a stream is not supported,"
+                        " and a producer that does it can usually be asked for"
+                        " one dictionary instead, which in pyarrow is"
+                        " table.unify_dictionaries()"
+                    ),
+                )
+            )
+
+
 def _check_struct(array: ArrowArray, width: Int) raises:
     """Rejects the struct arrays that cannot be a batch of a frame.
 
@@ -288,6 +477,12 @@ def struct_columns(array: ArrowArray, width: Int) raises -> List[ArrowArray]:
         window.length = array.length
         window.release = None
         window.private_data = None
+        # The categories come off the original by `batch_categories` and the
+        # codes are copied by the same path as any other integer column, so what
+        # goes into the batch is the codes alone. Left on, the column importer
+        # would refuse the array, and it is right to: a set of codes with no
+        # categories beside them is not a column anybody can read.
+        window.dictionary = None
         out.append(window^)
     return out^
 
@@ -326,7 +521,10 @@ def import_frame(
         if array.is_released():
             raise Error("arrow: the array has already been released")
         var layout = frame_layout(schema)
+        var plan = dictionary_plan(schema)
         var batch = struct_columns(array, len(layout))
+        if len(plan) > 0:
+            layout.dictionaries = batch_categories(array, plan, layout.names)
         var batches = List[List[ArrowArray]]()
         batches.append(batch^)
         out = assemble(layout, batches)
@@ -404,8 +602,13 @@ def _drain(mut stream: ArrowArrayStream) raises -> DataFrame:
         )
 
     var layout: ArrowLayout
+    var plan: List[_Encoded]
     try:
         layout = frame_layout(schema)
+        # Read here rather than off a batch, because the value type of a
+        # dictionary column is only in the schema and the schema goes away one
+        # line further down.
+        plan = dictionary_plan(schema)
     except error:
         release_schema(schema)
         raise error
@@ -440,9 +643,13 @@ def _drain(mut stream: ArrowArrayStream) raises -> DataFrame:
             if array.is_released():
                 break
             handed_out.append(array^)
-            batches.append(
-                struct_columns(handed_out[len(handed_out) - 1], width)
-            )
+            var last = len(handed_out) - 1
+            if len(plan) > 0:
+                reconcile_categories(
+                    layout,
+                    batch_categories(handed_out[last], plan, layout.names),
+                )
+            batches.append(struct_columns(handed_out[last], width))
 
         if len(batches) == 0:
             frame = _empty_frame(layout)
