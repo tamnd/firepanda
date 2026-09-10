@@ -32,6 +32,28 @@ Two of the answers are not the obvious ones and both are tested. A sum of a cons
 
 Nothing calls any of this yet. The logical nodes, binding, the passes and the lowering into the existing `exec` nodes follow, and the eager API does not change when they do.
 
+### Changed: an inner join builds on the shorter side rather than the one named right
+
+A join scans one side into a table and walks the other against it, and which side gets scanned was decided by which argument the caller passed second. So `customers.join(orders)` bucketed one and a half million rows in order to walk a hundred and fifty thousand, and the same join written the other way round did a tenth of the work for the same answer. Nothing about the data says which side is which. An inner join now exchanges them when the left is at least four times shorter, and puts the row order back with a counting sort over the result.
+
+The order is the whole reason this was not already true. The result is documented to come out in left row order, and in right row order within a left row, and that is pinned by tests because a join whose order moves between runs cannot be compared against another engine. Exchanging the sides produces the pairs in right row order instead. The sort that fixes it is a counting sort rather than a comparison sort, because the key is a left row number and left row numbers are exactly the integers below the left height, and it is stable, which is what keeps the right rows within a left row in the order they were already in. So the exchange is invisible to a caller, including a caller comparing against pandas.
+
+The margin is four and not two because what the sort costs is one pass over the output while what the exchange saves is one pass over the scanned side, so a join that fans out pays on more rows than it saves on. Four is where the two crossed on a dimension against fact join at scale factor one, and the crossover is shallow on either side of it.
+
+Measured on TPC-H at scale factor one on a 13900K, median of twenty one runs, twice through:
+
+```
+query   before    after
+q3      32.9 ms   23.5 ms   1.40x
+q5      63.0 ms   46.6 ms   1.35x
+q8      53.0 ms   35.8 ms   1.48x
+q9      98.5 ms   89.9 ms   1.10x
+```
+
+The other eighteen queries do not move, which is what should happen: they either join two sides of a similar height or they were already written with the taller side second. All twenty two produce byte identical answers before and after, checked by running the whole suite both ways and diffing the sums and hashes the driver reports. The total for the twenty two goes from 1266 ms to 1067 ms.
+
+This is the first entry in the planner milestone's stage zero, which is the set of decisions the engine currently makes from a parameter name or from a constant rather than from the data, and which need no plan layer to fix.
+
 ### Added: the `cat` namespace, so a category column has something on it
 
 A caller could build a category column and then do nothing with it. There was no way to read the categories or the codes, no way to say that the order meant something, and no way to change what the categories were. `Series.cat` now carries all eleven of the names pandas puts there: `categories`, `codes` and `ordered` answer a value, `as_ordered` and `as_unordered` flip the flag, and `add_categories`, `remove_categories`, `remove_unused_categories`, `rename_categories`, `reorder_categories` and `set_categories` hand back a column. Every one of them was compared against a live pandas, including all five of the errors, and `rename_categories` takes a list, a mapping or a callable the way pandas does.

@@ -137,6 +137,87 @@ def test_an_inner_join_pairs_every_combination_of_a_repeated_key() raises:
     assert_equal(b[3], 310)
 
 
+def small_left() raises -> DataFrame:
+    """Three left rows, short enough that an inner join exchanges the sides.
+
+    Key 7 is on two of them, which is what makes the sort that puts the order
+    back have something to keep stable.
+    """
+    return pair_frame(
+        Series("k", ints([7, 5, 7])),
+        Series("a", ints([10, 20, 30])),
+    )
+
+
+def big_right() raises -> DataFrame:
+    """Twelve right rows, four times the left, so the margin is met exactly.
+
+    Key 9 is on most of them and matches nothing, so the exchange is scanning a
+    side that is mostly waste, which is the case it exists for.
+    """
+    return pair_frame(
+        Series("k", ints([5, 7, 9, 7, 5, 9, 9, 9, 9, 9, 9, 9])),
+        Series(
+            "b",
+            ints([0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100]),
+        ),
+    )
+
+
+def test_an_inner_join_onto_a_much_taller_right_keeps_left_row_order() raises:
+    # The sides are exchanged here, so the pairing is produced in right row
+    # order and sorted back. Left row order, and right row order within a left
+    # row, is what it has to come out as.
+    var out = small_left().join(big_right(), on("k"))
+    var a = out.column("a").as_typed[DType.int64]()
+    var b = out.column("b").as_typed[DType.int64]()
+    assert_equal(len(out), 6)
+    var want_a: List[Int64] = [10, 10, 20, 20, 30, 30]
+    var want_b: List[Int64] = [100, 300, 0, 400, 100, 300]
+    for i in range(6):
+        assert_equal(a[i], want_a[i], "row " + String(i) + " left value")
+        assert_equal(b[i], want_b[i], "row " + String(i) + " right value")
+
+
+def test_the_exchanged_join_agrees_with_the_one_that_did_not_exchange() raises:
+    # The same join with one more left row, which matches nothing and so changes
+    # no output row, but takes the left height past the margin and leaves the
+    # sides where the caller put them. Both spellings have to answer the same
+    # rows in the same order, or the exchange is visible to a caller.
+    var padded = pair_frame(
+        Series("k", ints([7, 5, 7, 9999])),
+        Series("a", ints([10, 20, 30, 40])),
+    )
+    var exchanged = small_left().join(big_right(), on("k"))
+    var plain = padded.join(big_right(), on("k"))
+    assert_equal(len(exchanged), len(plain))
+    var left_a = exchanged.column("a").as_typed[DType.int64]()
+    var left_b = exchanged.column("b").as_typed[DType.int64]()
+    var right_a = plain.column("a").as_typed[DType.int64]()
+    var right_b = plain.column("b").as_typed[DType.int64]()
+    for i in range(len(exchanged)):
+        assert_equal(left_a[i], right_a[i], "row " + String(i) + " left value")
+        assert_equal(left_b[i], right_b[i], "row " + String(i) + " right value")
+
+
+def test_an_exchanged_join_onto_a_unique_right_key_keeps_its_order() raises:
+    var out = small_left().join(
+        pair_frame(
+            Series("k", ints([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])),
+            Series("b", ints([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])),
+        ),
+        on("k"),
+    )
+    # Every right key is on one row, so the build takes the unique shape rather
+    # than the buckets. Keys 5 and 7 are both there, so all three left rows pair
+    # once and the order still has to be the left's.
+    assert_equal(len(out), 3)
+    var a = out.column("a").as_typed[DType.int64]()
+    assert_equal(a[0], 10)
+    assert_equal(a[1], 20)
+    assert_equal(a[2], 30)
+
+
 def test_a_left_join_keeps_every_left_row() raises:
     var out = left_frame().join(right_frame(), on("k"), JoinKind.LEFT)
     assert_equal(len(out), 6)

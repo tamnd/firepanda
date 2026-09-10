@@ -111,10 +111,13 @@ from .ast import (
     STMT_ITEM,
     STMT_MODIFIERS,
     STMT_ORDER,
+    STMT_PIVOT,
+    STMT_PIVOT_ON,
     STMT_QUERY,
     STMT_SELECT,
     STMT_SET_OPERATION,
     STMT_TABLE,
+    STMT_UNPIVOT,
     STMT_VALUES,
     STMT_WINDOW,
 )
@@ -928,7 +931,138 @@ def _write_stmt(
         out += _names(ast, item.children, grammar)
         return
 
+    if kind == STMT_PIVOT:
+        _write_pivot(ast, node, grammar, out)
+        return
+
+    if kind == STMT_UNPIVOT:
+        _write_unpivot(ast, node, grammar, out)
+        return
+
     raise Error(String("the printer has no case for statement kind ", kind))
+
+
+def _write_pivot(
+    ast: Ast, node: UInt32, grammar: Grammar, mut out: String
+) raises:
+    """Appends a `PIVOT` statement.
+
+    The three lists are all optional in the grammar, so each one is written
+    only when it has something in it. A `PIVOT` with none of them is `PIVOT t`,
+    which parses and asks DuckDB to work the whole thing out.
+
+    Args:
+        ast: The AST.
+        node: The `STMT_PIVOT` index.
+        grammar: A loaded grammar.
+        out: The buffer.
+
+    Raises:
+        Error: If it has no table under it, or a part could not be printed.
+    """
+    ref item = ast.stmts[Int(node)]
+    if item.a == NO_NODE:
+        raise Error("a PIVOT with no table under it")
+    out += "PIVOT "
+    _write_ref(ast, item.a, grammar, out)
+
+    for i in range(ast.length(item.b)):
+        out += ", " if i > 0 else " ON "
+        _write_pivot_on(ast, ast.at(item.b, i), grammar, out)
+
+    for i in range(ast.length(item.children)):
+        out += ", " if i > 0 else " USING "
+        _write_item(ast, ast.at(item.children, i), grammar, out)
+
+    for i in range(ast.length(item.payload)):
+        out += ", " if i > 0 else " GROUP BY "
+        out += quote_name(ast.text(ast.at(item.payload, i)), grammar)
+
+
+def _write_pivot_on(
+    ast: Ast, node: UInt32, grammar: Grammar, mut out: String
+) raises:
+    """Appends one pivot column.
+
+    Args:
+        ast: The AST.
+        node: The `STMT_PIVOT_ON` index.
+        grammar: A loaded grammar.
+        out: The buffer.
+
+    Raises:
+        Error: If the node is not a pivot column, or has no header on it.
+    """
+    if node == NO_NODE:
+        raise Error("the printer was handed the null statement")
+    ref item = ast.stmts[Int(node)]
+    if item.kind != STMT_PIVOT_ON:
+        raise Error(String("an ON list holding statement kind ", item.kind))
+    if item.a == NO_NODE:
+        raise Error("a pivot column with no expression on it")
+    _write(ast, item.a, grammar, out)
+
+    if item.payload != NO_NODE:
+        out += " IN "
+        out += quote_name(ast.text(item.payload), grammar)
+        return
+    if item.b != NO_NODE:
+        out += " IN ("
+        _write_stmt(ast, item.b, grammar, out)
+        out += ")"
+        return
+    var values = ast.length(item.children)
+    if values == 0:
+        return
+    out += " IN ("
+    for i in range(values):
+        if i > 0:
+            out += ", "
+        _write_item(ast, ast.at(item.children, i), grammar, out)
+    out += ")"
+
+
+def _write_unpivot(
+    ast: Ast, node: UInt32, grammar: Grammar, mut out: String
+) raises:
+    """Appends an `UNPIVOT` statement.
+
+    `VALUE` and `VALUES` are the same word to the grammar, so the count picks
+    which one to write and a query that wrote the other one gets this one back.
+
+    Args:
+        ast: The AST.
+        node: The `STMT_UNPIVOT` index.
+        grammar: A loaded grammar.
+        out: The buffer.
+
+    Raises:
+        Error: If it has no table or no `ON` list, or a part could not be
+            printed.
+    """
+    ref item = ast.stmts[Int(node)]
+    if item.a == NO_NODE:
+        raise Error("an UNPIVOT with no table under it")
+    out += "UNPIVOT "
+    _write_ref(ast, item.a, grammar, out)
+
+    var columns = ast.length(item.children)
+    if columns == 0:
+        raise Error("an UNPIVOT with no columns to fold up")
+    for i in range(columns):
+        out += ", " if i > 0 else " ON "
+        _write_item(ast, ast.at(item.children, i), grammar, out)
+
+    if item.payload == NO_NODE:
+        return
+    out += " INTO NAME "
+    out += quote_name(ast.text(item.payload), grammar)
+    var values = ast.length(item.b)
+    out += " VALUES " if values > 1 else " VALUE "
+    for i in range(values):
+        if i > 0:
+            out += ", "
+        out += quote_name(ast.text(ast.at(item.b, i)), grammar)
 
 
 def _write_nested(
