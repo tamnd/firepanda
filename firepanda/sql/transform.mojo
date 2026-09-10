@@ -95,6 +95,7 @@ from .ast import (
     SORT_DEFAULT,
     SORT_DESCENDING,
 )
+from .generated.rules import NODE_REF, RULE_END_OF_INPUT
 from .matcher import Parse, parse_rule
 from .table import Grammar
 from .token import (
@@ -156,7 +157,14 @@ from .unsupported import (
 )
 
 comptime _NO_CASE: UInt8 = 0
-"""No case for this rule, so it refuses and names itself."""
+"""No case for this rule, so it refuses and names itself.
+
+Zero, so it is what a rule gets by not being registered, and `__init__` will
+not hand back a table where a rule the transformer can reach still has it. What
+is left holding it is the hundreds of rules under a statement that refuses,
+which are never looked at, and the dispatch arm is the backstop for a reachable
+one getting through anyway rather than the way any of them are meant to end up.
+"""
 
 comptime _DESCEND: UInt8 = 1
 """One child, which is the expression. The whole of the pass through rules."""
@@ -349,6 +357,25 @@ comptime _PIVOT_SUBQUERY: UInt8 = 72
 comptime _UNPIVOT: UInt8 = 73
 """`UnpivotStatement`, the `UNPIVOT t ON a INTO NAME n VALUE v` spelling."""
 
+comptime _CONSUMED: UInt8 = 74
+"""The rule above this one reads it, so nothing ever asks for its value.
+
+Not an action so much as an answer to a question. `AdditiveExpressionTail` is
+half of an operator and `AscendingOrder` is a direction, and neither is a node,
+so `_fold` and the `ORDER BY` case read them off the tree themselves rather
+than asking the walk for a value. The byte says that was on purpose.
+
+It exists so that the table can be total. A rule with no byte at all used to
+mean two different things, a rule somebody decided the parent would read and a
+rule nobody had got to yet, and the second one is a bug that only shows up when
+a user writes the query that reaches it. Now the first is this and the second
+is `_NO_CASE`, and `__init__` refuses to build a table that still has one of
+the second sort in reach.
+
+Reaching one of these anyway is a bug here rather than a query the user should
+change, so the dispatch says so in those words.
+"""
+
 # A marker is a rule that builds nothing. The rule above it reads it directly,
 # and the byte is here so that rule can pick it out of its siblings with the
 # same array lookup the dispatch uses. The alternative is guessing from a
@@ -495,7 +522,12 @@ struct Transform(Movable):
     """
 
     var actions: List[UInt8]
-    """One action per rule index. `_NO_CASE` means the rule refuses."""
+    """One action per rule index.
+
+    `_NO_CASE` is left only on rules the transformer cannot reach, which is
+    every rule under a statement that refuses before anything below it is read.
+    `__init__` checks that, so a reachable rule always has a byte of its own.
+    """
 
     var refusals: List[UInt16]
     """The refusal a `_REFUSE` rule raises, by rule index, 0 for the rest.
@@ -531,6 +563,14 @@ struct Transform(Movable):
         self.expression_rule = -1
         self.statement_rule = -1
         self.parens_rule = -1
+
+        # `Grammar.rule` is a linear scan over 1,187 names, which is the right
+        # shape for the handful of callers that ask once. Six hundred of them
+        # in a row is a different question, so the names go into a map first
+        # and every registration below reads that instead.
+        var names = Dict[String, Int]()
+        for i in range(len(grammar.names)):
+            names[grammar.names[i]] = i
 
         # The pass throughs. Every one of these is a rule that exists so
         # another rule could name it, and it has exactly one child.
@@ -596,7 +636,7 @@ struct Transform(Movable):
             "UnpivotTargetList",
         ]
         for name in descends:
-            self._set(grammar, name, _DESCEND)
+            self._set(names, name, _DESCEND)
 
         # The precedence chain, every level of it the same shape.
         var folds: List[StaticString] = [
@@ -613,90 +653,90 @@ struct Transform(Movable):
             "AtTimeZoneExpression",
         ]
         for name in folds:
-            self._set(grammar, name, _FOLD)
+            self._set(names, name, _FOLD)
 
-        self._set(grammar, "CollateExpression", _COLLATE)
-        self._set(grammar, "LogicalNotExpression", _NOT)
-        self._set(grammar, "IsExpression", _IS)
-        self._set(grammar, "BetweenInLikeExpression", _BETWEEN_IN_LIKE)
-        self._set(grammar, "PrefixExpression", _PREFIX)
-        self._set(grammar, "BaseExpression", _BASE)
-        self._set(grammar, "ColumnReference", _COLUMN)
-        self._set(grammar, "FunctionExpression", _FUNCTION)
-        self._set(grammar, "StarExpression", _STAR)
-        self._set(grammar, "CaseExpression", _CASE)
-        self._set(grammar, "CastExpression", _CAST)
-        self._set(grammar, "ListExpression", _LIST)
-        self._set(grammar, "StructExpression", _STRUCT)
-        self._set(grammar, "Parameter", _PARAMETER)
-        self._set(grammar, "CoalesceExpression", _COALESCE)
-        self._set(grammar, "NullIfExpression", _NULLIF)
-        self._set(grammar, "StringLiteral", _STRING)
-        self._set(grammar, "NumberLiteral", _NUMBER)
-        self._set(grammar, "NullLiteral", _NULL)
-        self._set(grammar, "TrueLiteral", _TRUE)
-        self._set(grammar, "FalseLiteral", _FALSE)
+        self._set(names, "CollateExpression", _COLLATE)
+        self._set(names, "LogicalNotExpression", _NOT)
+        self._set(names, "IsExpression", _IS)
+        self._set(names, "BetweenInLikeExpression", _BETWEEN_IN_LIKE)
+        self._set(names, "PrefixExpression", _PREFIX)
+        self._set(names, "BaseExpression", _BASE)
+        self._set(names, "ColumnReference", _COLUMN)
+        self._set(names, "FunctionExpression", _FUNCTION)
+        self._set(names, "StarExpression", _STAR)
+        self._set(names, "CaseExpression", _CASE)
+        self._set(names, "CastExpression", _CAST)
+        self._set(names, "ListExpression", _LIST)
+        self._set(names, "StructExpression", _STRUCT)
+        self._set(names, "Parameter", _PARAMETER)
+        self._set(names, "CoalesceExpression", _COALESCE)
+        self._set(names, "NullIfExpression", _NULLIF)
+        self._set(names, "StringLiteral", _STRING)
+        self._set(names, "NumberLiteral", _NUMBER)
+        self._set(names, "NullLiteral", _NULL)
+        self._set(names, "TrueLiteral", _TRUE)
+        self._set(names, "FalseLiteral", _FALSE)
 
-        self._set(grammar, "SubqueryExpression", _SUBQUERY)
-        self._set(grammar, "SelectStatementInternal", _SELECT)
-        self._set(grammar, "SelectSetOpChain", _SETOP)
-        self._set(grammar, "IntersectChain", _SETOP)
-        self._set(grammar, "SimpleSelect", _SIMPLE_SELECT)
-        self._set(grammar, "SelectFromClause", _BLOCK)
-        self._set(grammar, "FromSelectClause", _BLOCK)
-        self._set(grammar, "SelectClause", _SELECT_CLAUSE)
-        self._set(grammar, "TargetList", _TARGETS)
-        self._set(grammar, "ExpressionAsCollabel", _ITEM)
-        self._set(grammar, "ExpressionOptIdentifier", _ITEM)
-        self._set(grammar, "ColIdExpression", _ITEM_COLON)
-        self._set(grammar, "FromClause", _FROM)
-        self._set(grammar, "TableRef", _TABLE_REF)
-        self._set(grammar, "BaseTableRef", _BASE_TABLE)
-        self._set(grammar, "TableSubquery", _TABLE_SUBQUERY)
-        self._set(grammar, "ParensTableRef", _PARENS_TABLE)
-        self._set(grammar, "ValuesRef", _VALUES_REF)
-        self._set(grammar, "TableFunctionLateralOpt", _TABLE_FUNCTION)
-        self._set(grammar, "GroupByList", _GROUP_LIST)
-        self._set(grammar, "GroupByAll", _GROUP_ALL)
-        self._set(grammar, "GroupByBaseExpression", _GROUP_ITEM)
-        self._set(grammar, "EmptyGroupingItem", _GROUP_EMPTY)
-        self._set(grammar, "CubeOrRollupClause", _GROUP_NESTED)
-        self._set(grammar, "GroupingSetsClause", _GROUP_SETS)
-        self._set(grammar, "OrderByExpressionList", _ORDER_LIST)
-        self._set(grammar, "OrderByAll", _ORDER_ALL)
-        self._set(grammar, "OrderByExpression", _ORDER_ITEM)
-        self._set(grammar, "ResultModifiers", _MODIFIERS)
-        self._set(grammar, "LimitOffsetClause", _TAIL)
-        self._set(grammar, "OffsetLimitClause", _TAIL)
-        self._set(grammar, "OffsetFetchClause", _TAIL)
-        self._set(grammar, "FetchOnlyClause", _TAIL)
-        self._set(grammar, "LimitClause", _LIMIT)
-        self._set(grammar, "OffsetClause", _OFFSET)
-        self._set(grammar, "FetchClause", _FETCH)
-        self._set(grammar, "WithClause", _WITH)
-        self._set(grammar, "WithStatement", _CTE)
-        self._set(grammar, "ValuesClause", _VALUES)
-        self._set(grammar, "ValuesExpressions", _VALUES_ROW)
-        self._set(grammar, "TableStatement", _TABLE_STATEMENT)
+        self._set(names, "SubqueryExpression", _SUBQUERY)
+        self._set(names, "SelectStatementInternal", _SELECT)
+        self._set(names, "SelectSetOpChain", _SETOP)
+        self._set(names, "IntersectChain", _SETOP)
+        self._set(names, "SimpleSelect", _SIMPLE_SELECT)
+        self._set(names, "SelectFromClause", _BLOCK)
+        self._set(names, "FromSelectClause", _BLOCK)
+        self._set(names, "SelectClause", _SELECT_CLAUSE)
+        self._set(names, "TargetList", _TARGETS)
+        self._set(names, "ExpressionAsCollabel", _ITEM)
+        self._set(names, "ExpressionOptIdentifier", _ITEM)
+        self._set(names, "ColIdExpression", _ITEM_COLON)
+        self._set(names, "FromClause", _FROM)
+        self._set(names, "TableRef", _TABLE_REF)
+        self._set(names, "BaseTableRef", _BASE_TABLE)
+        self._set(names, "TableSubquery", _TABLE_SUBQUERY)
+        self._set(names, "ParensTableRef", _PARENS_TABLE)
+        self._set(names, "ValuesRef", _VALUES_REF)
+        self._set(names, "TableFunctionLateralOpt", _TABLE_FUNCTION)
+        self._set(names, "GroupByList", _GROUP_LIST)
+        self._set(names, "GroupByAll", _GROUP_ALL)
+        self._set(names, "GroupByBaseExpression", _GROUP_ITEM)
+        self._set(names, "EmptyGroupingItem", _GROUP_EMPTY)
+        self._set(names, "CubeOrRollupClause", _GROUP_NESTED)
+        self._set(names, "GroupingSetsClause", _GROUP_SETS)
+        self._set(names, "OrderByExpressionList", _ORDER_LIST)
+        self._set(names, "OrderByAll", _ORDER_ALL)
+        self._set(names, "OrderByExpression", _ORDER_ITEM)
+        self._set(names, "ResultModifiers", _MODIFIERS)
+        self._set(names, "LimitOffsetClause", _TAIL)
+        self._set(names, "OffsetLimitClause", _TAIL)
+        self._set(names, "OffsetFetchClause", _TAIL)
+        self._set(names, "FetchOnlyClause", _TAIL)
+        self._set(names, "LimitClause", _LIMIT)
+        self._set(names, "OffsetClause", _OFFSET)
+        self._set(names, "FetchClause", _FETCH)
+        self._set(names, "WithClause", _WITH)
+        self._set(names, "WithStatement", _CTE)
+        self._set(names, "ValuesClause", _VALUES)
+        self._set(names, "ValuesExpressions", _VALUES_ROW)
+        self._set(names, "TableStatement", _TABLE_STATEMENT)
 
         # The window side. `WindowFrame` is the three spellings of what follows
         # `OVER`, and the two that are nothing but a name go to the same form,
         # which tells them apart by whether there is a parenthesis in front.
-        self._set(grammar, "IdentifierWindowFrame", _WINDOW_NAME)
-        self._set(grammar, "ParensIdentifier", _WINDOW_NAME)
-        self._set(grammar, "WindowFrameContents", _WINDOW_CONTENTS)
-        self._set(grammar, "WindowFrameNameContents", _WINDOW_NAMED)
-        self._set(grammar, "FrameClause", _FRAME)
-        self._set(grammar, "WindowClause", _WINDOW_LIST)
-        self._set(grammar, "WindowDefinition", _WINDOW_DEFINITION)
+        self._set(names, "IdentifierWindowFrame", _WINDOW_NAME)
+        self._set(names, "ParensIdentifier", _WINDOW_NAME)
+        self._set(names, "WindowFrameContents", _WINDOW_CONTENTS)
+        self._set(names, "WindowFrameNameContents", _WINDOW_NAMED)
+        self._set(names, "FrameClause", _FRAME)
+        self._set(names, "WindowClause", _WINDOW_LIST)
+        self._set(names, "WindowDefinition", _WINDOW_DEFINITION)
 
         # `Statement` is thirty seven alternatives and one of them is the one
         # firepanda runs. It descends into whichever matched, and every other
         # one carries a refusal, so a `CREATE INDEX` gets a sentence naming it
         # rather than a syntax error about text that is perfectly good SQL.
         # docs/specs/sql/05-ast-and-binder.md section 4, tiers two and three.
-        self._set(grammar, "Statement", _DESCEND)
-        self._set(grammar, "TopLevelStatement", _TOP_LEVEL)
+        self._set(names, "Statement", _DESCEND)
+        self._set(names, "TopLevelStatement", _TOP_LEVEL)
 
         # Tier two. Each of these is a frame operation with SQL spelling, so it
         # says `not yet` and points at the milestone.
@@ -713,7 +753,7 @@ struct Transform(Movable):
             "PragmaStatement",
         ]
         for name in later:
-            self._set(grammar, name, _STATEMENT_LATER)
+            self._set(names, name, _STATEMENT_LATER)
 
         # Tier three. Each of these wants a catalog, a transaction, a file on
         # disk that outlives the process, or an extension, and firepanda has
@@ -749,48 +789,48 @@ struct Transform(Movable):
             "VacuumStatement",
         ]
         for name in never:
-            self._set(grammar, name, _STATEMENT_NEVER)
+            self._set(names, name, _STATEMENT_NEVER)
 
         # `DescribeStatement`, `PivotStatement` and `UnpivotStatement` hang off
         # `SelectStatementType` rather than off `Statement`, because all three
         # produce rows, so the loop above never reached them. The first one is
         # still the same kind of thing it refuses: a query firepanda will run
         # and does not run yet.
-        self._set(grammar, "DescribeStatement", _STATEMENT_LATER)
+        self._set(names, "DescribeStatement", _STATEMENT_LATER)
 
         # The pivot side. `PivotColumnEntry` is three alternatives and each one
         # builds the same node with a different thing after the `IN`, so they
         # get a case each and the entry above them descends.
-        self._set(grammar, "PivotStatement", _PIVOT)
-        self._set(grammar, "UnpivotStatement", _UNPIVOT)
-        self._set(grammar, "PivotColumnExpression", _PIVOT_BARE)
-        self._set(grammar, "PivotValueList", _PIVOT_VALUES)
-        self._set(grammar, "PivotColumnSubquery", _PIVOT_SUBQUERY)
+        self._set(names, "PivotStatement", _PIVOT)
+        self._set(names, "UnpivotStatement", _UNPIVOT)
+        self._set(names, "PivotColumnExpression", _PIVOT_BARE)
+        self._set(names, "PivotValueList", _PIVOT_VALUES)
+        self._set(names, "PivotColumnSubquery", _PIVOT_SUBQUERY)
 
         # `CTEDMLBody <- Parens(Statement)` is `WITH x AS (INSERT ...)`. Walking
         # into it costs nothing and the statement inside says its own name, so
         # the user reads `the INSERT statement yet` rather than the name of the
         # wrapper, which is a rule they did not write and cannot look up. Two
         # rules because the parentheses are a rule of their own.
-        self._set(grammar, "CTEDMLBody", _DESCEND)
-        self._set(grammar, "Parens_Statement", _DESCEND)
+        self._set(names, "CTEDMLBody", _DESCEND)
+        self._set(names, "Parens_Statement", _DESCEND)
 
         # Features with no form in the arena yet. Each of these is one sentence
         # of English in `unsupported.mojo` and no code at all, which is what the
         # refusal table is for.
-        self._refuse(grammar, "ParenthesisExpression", ROW_VALUE)
-        self._refuse(grammar, "RowExpression", ROW_VALUE)
-        self._refuse(grammar, "IntervalLiteral", INTERVAL)
-        self._refuse(grammar, "TypeLiteral", TYPE_LITERAL)
-        self._refuse(grammar, "LambdaExpression", LAMBDA)
-        self._refuse(grammar, "ListComprehensionExpression", LIST_COMPREHENSION)
-        self._refuse(grammar, "NamedFunctionArgument", NAMED_ARGUMENT)
-        self._refuse(grammar, "ColumnsExpression", COLUMNS)
-        self._refuse(grammar, "MapExpression", MAP_LITERAL)
-        self._refuse(grammar, "GroupingExpression", GROUPING)
-        self._refuse(grammar, "PositionalExpression", POSITIONAL)
-        self._refuse(grammar, "DefaultExpression", DEFAULT_VALUE)
-        self._refuse(grammar, "TableFunctionAliasColon", ALIAS_COLON)
+        self._refuse(names, "ParenthesisExpression", ROW_VALUE)
+        self._refuse(names, "RowExpression", ROW_VALUE)
+        self._refuse(names, "IntervalLiteral", INTERVAL)
+        self._refuse(names, "TypeLiteral", TYPE_LITERAL)
+        self._refuse(names, "LambdaExpression", LAMBDA)
+        self._refuse(names, "ListComprehensionExpression", LIST_COMPREHENSION)
+        self._refuse(names, "NamedFunctionArgument", NAMED_ARGUMENT)
+        self._refuse(names, "ColumnsExpression", COLUMNS)
+        self._refuse(names, "MapExpression", MAP_LITERAL)
+        self._refuse(names, "GroupingExpression", GROUPING)
+        self._refuse(names, "PositionalExpression", POSITIONAL)
+        self._refuse(names, "DefaultExpression", DEFAULT_VALUE)
+        self._refuse(names, "TableFunctionAliasColon", ALIAS_COLON)
 
         # The functions SQL spells with keywords inside the parentheses. The
         # message fills in whichever one it was, so they share an entry.
@@ -804,50 +844,596 @@ struct Transform(Movable):
             "UnpackExpression",
         ]
         for name in special:
-            self._refuse(grammar, name, SPECIAL_CALL)
+            self._refuse(names, name, SPECIAL_CALL)
 
         # The markers, which build nothing and are only ever recognized.
-        self._set(grammar, "TableAlias", _MARK_TABLE_ALIAS)
-        self._set(grammar, "TableAliasColon", _MARK_ALIAS_COLON)
-        self._set(grammar, "AtClause", _MARK_AT)
-        self._set(grammar, "SampleClause", _MARK_SAMPLE)
-        self._set(grammar, "Lateral", _MARK_LATERAL)
-        self._set(grammar, "WithOrdinality", _MARK_ORDINALITY)
-        self._set(grammar, "Recursive", _MARK_RECURSIVE)
-        self._set(grammar, "Materialized", _MARK_MATERIALIZED)
-        self._set(grammar, "UsingKey", _MARK_USING_KEY)
-        self._set(grammar, "InsertColumnList", _MARK_CTE_COLUMNS)
-        self._set(grammar, "InSelectStatement", _MARK_IN_SELECT)
-        self._set(grammar, "JoinClause", _MARK_JOIN)
-        self._set(grammar, "RegularJoinClause", _MARK_JOIN_ON)
-        self._set(grammar, "JoinWithoutOnClause", _MARK_JOIN_PLAIN)
-        self._set(grammar, "TablePivotClause", _MARK_TABLE_PIVOT)
-        self._set(grammar, "PivotOn", _MARK_PIVOT_ON)
-        self._set(grammar, "PivotUsing", _MARK_PIVOT_USING)
-        self._set(grammar, "PivotGroupByList", _MARK_PIVOT_GROUP)
-        self._set(grammar, "PivotEnumTarget", _MARK_PIVOT_ENUM)
-        self._set(grammar, "TableUnpivotClause", _MARK_TABLE_UNPIVOT)
-        self._set(grammar, "IncludeOrExcludeNulls", _MARK_UNPIVOT_NULLS)
-        self._set(grammar, "IntoNameValues", _MARK_UNPIVOT_INTO)
+        self._set(names, "TableAlias", _MARK_TABLE_ALIAS)
+        self._set(names, "TableAliasColon", _MARK_ALIAS_COLON)
+        self._set(names, "AtClause", _MARK_AT)
+        self._set(names, "SampleClause", _MARK_SAMPLE)
+        self._set(names, "Lateral", _MARK_LATERAL)
+        self._set(names, "WithOrdinality", _MARK_ORDINALITY)
+        self._set(names, "Recursive", _MARK_RECURSIVE)
+        self._set(names, "Materialized", _MARK_MATERIALIZED)
+        self._set(names, "UsingKey", _MARK_USING_KEY)
+        self._set(names, "InsertColumnList", _MARK_CTE_COLUMNS)
+        self._set(names, "InSelectStatement", _MARK_IN_SELECT)
+        self._set(names, "JoinClause", _MARK_JOIN)
+        self._set(names, "RegularJoinClause", _MARK_JOIN_ON)
+        self._set(names, "JoinWithoutOnClause", _MARK_JOIN_PLAIN)
+        self._set(names, "TablePivotClause", _MARK_TABLE_PIVOT)
+        self._set(names, "PivotOn", _MARK_PIVOT_ON)
+        self._set(names, "PivotUsing", _MARK_PIVOT_USING)
+        self._set(names, "PivotGroupByList", _MARK_PIVOT_GROUP)
+        self._set(names, "PivotEnumTarget", _MARK_PIVOT_ENUM)
+        self._set(names, "TableUnpivotClause", _MARK_TABLE_UNPIVOT)
+        self._set(names, "IncludeOrExcludeNulls", _MARK_UNPIVOT_NULLS)
+        self._set(names, "IntoNameValues", _MARK_UNPIVOT_INTO)
+
+        # The rules the case above them reads directly. See `_CONSUMED`.
+        # Kept in one list rather than beside each case because what
+        # matters is that the set is complete, and a set is easier to
+        # check when it is written out in one place and in one order.
+        var consumed: List[StaticString] = [
+            "AdditiveExpressionTail",
+            "AllKeyword",
+            "AnonymousParameter",
+            "AntiJoin",
+            "AnyAllOperator",
+            "AnyAllParsedOperator",
+            "AnyOp",
+            "AnyOrAll",
+            "ApproxOrExact",
+            "ArrayBoundedListExpression",
+            "ArrayBounds",
+            "ArrayKeyword",
+            "ArrayKeywordWithBounds",
+            "ArrayParensSelect",
+            "AscendingOrder",
+            "Asof",
+            "AtSpecifier",
+            "AtTimeZoneExpressionTail",
+            "AtTimeZoneOperator",
+            "AtUnit",
+            "BareNameList",
+            "BaseTableName",
+            "BaseWindowName",
+            "BetweenClause",
+            "BetweenFrameExtent",
+            "BetweenInLikeOp",
+            "BetweenInLikeOpExpression",
+            "BigintType",
+            "BitOperator",
+            "BitType",
+            "BitwiseExpressionTail",
+            "BooleanType",
+            "BoundedListExpression",
+            "ByName",
+            "CaseElse",
+            "CaseWhenThen",
+            "CastArguments",
+            "CastKeyword",
+            "CastOperator",
+            "CastOrTryCast",
+            "CatalogName",
+            "CatalogQualification",
+            "CatalogReservedSchemaFunctionName",
+            "CatalogReservedSchemaTable",
+            "CatalogReservedSchemaTableColumnName",
+            "CatalogReservedSchemaTypeName",
+            "CenturyKeyword",
+            "CharacterSimpleType",
+            "CharacterType",
+            "ColId",
+            "ColIdDot",
+            "ColIdOrString",
+            "ColIdType",
+            "ColIdTypeList",
+            "ColLabel",
+            "ColLabelIdentifier",
+            "ColLabelOrString",
+            "ColLabelParameter",
+            "CollateExpressionTail",
+            "CollateOperator",
+            "ColumnAliases",
+            "ColumnList",
+            "ColumnName",
+            "ColumnNameKeyword",
+            "ComparisonExpressionTail",
+            "ComparisonOperator",
+            "CrossJoinPrefix",
+            "CubeKeyword",
+            "CubeOrRollup",
+            "DayKeyword",
+            "DayToHour",
+            "DayToMinute",
+            "DayToSecond",
+            "DecType",
+            "DecadeKeyword",
+            "DecimalNumericType",
+            "DecimalType",
+            "DescOrAsc",
+            "DescendingOrder",
+            "DistanceOrSimilarity",
+            "DistinctAll",
+            "DistinctClause",
+            "DistinctKeyword",
+            "DistinctOn",
+            "DistinctOnTargets",
+            "DistinctOrAll",
+            "DotColLabel",
+            "DotColumnOperator",
+            "DotMethodOperator",
+            "DotOperator",
+            "DottedIdentifier",
+            "DoubleType",
+            "EndSliceBound",
+            "EndSliceMinus",
+            "EndSliceValue",
+            "EscapeClause",
+            "ExcludeColumnName",
+            "ExcludeCurrentRow",
+            "ExcludeDottedName",
+            "ExcludeGroup",
+            "ExcludeList",
+            "ExcludeName",
+            "ExcludeNameList",
+            "ExcludeNameSingle",
+            "ExcludeNames",
+            "ExcludeNoOthers",
+            "ExcludeNulls",
+            "ExcludeOrExcept",
+            "ExcludeTies",
+            "ExponentOperator",
+            "ExponentiationExpressionTail",
+            "ExportClause",
+            "ExtractArgument",
+            "ExtractArguments",
+            "ExtractDatePart",
+            "ExtractDatePartArgument",
+            "ExtractIdentifierArgument",
+            "ExtractStringArgument",
+            "Factor",
+            "FilterClause",
+            "FilterClauseContents",
+            "FilterClauseExpression",
+            "FirstOrNext",
+            "FloatType",
+            "FollowingFrame",
+            "ForExpression",
+            "FrameBound",
+            "FrameCurrentRow",
+            "FrameExpression",
+            "FrameExtent",
+            "FrameUnbounded",
+            "Framing",
+            "FromExpression",
+            "FullJoin",
+            "FuncNameKeyword",
+            "FunctionArgumentList",
+            "FunctionExpressionArgumentList",
+            "FunctionExpressionArguments",
+            "FunctionIdentifier",
+            "FunctionName",
+            "FunctionNameAsQualifiedName",
+            "GeometryType",
+            "GlobToken",
+            "GroupingIdKeyword",
+            "GroupingKeyword",
+            "GroupingOrGroupingId",
+            "GroupsFraming",
+            "HourKeyword",
+            "HourToMinute",
+            "HourToSecond",
+            "ILikeToken",
+            "Identifier",
+            "IdentifierDot",
+            "IdentifierOrStringLiteral",
+            "IgnoreNulls",
+            "IgnoreOrRespectNulls",
+            "InClause",
+            "InContainsExpression",
+            "InExpression",
+            "InExpressionList",
+            "IncludeNulls",
+            "Indirection",
+            "IndirectionList",
+            "InetOperator",
+            "InnerJoin",
+            "IntType",
+            "IntegerType",
+            "IntersectChainTail",
+            "Interval",
+            "IntervalInterval",
+            "IntervalNumber",
+            "IntervalParameter",
+            "IntervalStringParameter",
+            "IntervalToInterval",
+            "IntervalToIntervalAsType",
+            "IntervalType",
+            "IntervalWithRangeSpecifier",
+            "IntervalWithSimpleSpecifier",
+            "IntervalWithSpecifier",
+            "IntervalWithoutSpecifier",
+            "IsDistinctFromOp",
+            "IsDistinctFromTail",
+            "IsLiteral",
+            "IsNull",
+            "IsNullOperator",
+            "IsTest",
+            "JoinByClause",
+            "JoinOrPivot",
+            "JoinPrefix",
+            "JoinQualifier",
+            "JoinType",
+            "JsonOperator",
+            "LeftJoin",
+            "LikeClause",
+            "LikeToken",
+            "LikeVariations",
+            "LimitAll",
+            "LimitExpression",
+            "LimitLiteralPercent",
+            "LimitValue",
+            "ListComprehensionFilter",
+            "ListOperator",
+            "List_AliasedExpression",
+            "List_ColId",
+            "List_ColIdOrString",
+            "List_ColIdType",
+            "List_ColumnName",
+            "List_ExcludeName",
+            "List_Expression",
+            "List_FunctionArgument",
+            "List_GroupByExpression",
+            "List_MapStructField",
+            "List_OrderByExpression",
+            "List_PivotColumnEntry",
+            "List_RenameEntry",
+            "List_ReplaceEntry",
+            "List_StructField",
+            "List_TableRef",
+            "List_Type",
+            "List_ValuesExpressions",
+            "List_WindowDefinition",
+            "List_WithStatement",
+            "LogicalAndExpressionTail",
+            "LogicalOrExpressionTail",
+            "MapStructExpression",
+            "MapStructField",
+            "MapType",
+            "MethodExpression",
+            "MethodExpressionArgumentList",
+            "MethodExpressionArguments",
+            "MethodFunctionArguments",
+            "MicrosecondKeyword",
+            "MillenniumKeyword",
+            "MillisecondKeyword",
+            "MinusPrefixOperator",
+            "MinuteKeyword",
+            "MinuteToSecond",
+            "MonthKeyword",
+            "MultiplicativeExpressionTail",
+            "NamedOtherOperator",
+            "NamedParameter",
+            "NamedParameterAssignment",
+            "NaturalJoinPrefix",
+            "NearestApprox",
+            "NearestBareTableRef",
+            "NearestBaseTableRef",
+            "NearestDistance",
+            "NearestExact",
+            "NearestJoinAliased",
+            "NearestJoinBare",
+            "NearestJoinClause",
+            "NearestParensTableRef",
+            "NearestSimilarity",
+            "NearestTableFunction",
+            "NearestTableSubquery",
+            "NearestValuesRef",
+            "NestedColumnName",
+            "NestedSchemaTableColumnName",
+            "NotExpression",
+            "NotILikeOp",
+            "NotKeyword",
+            "NotLikeOp",
+            "NotNull",
+            "NotNullKeyword",
+            "NotNullOperator",
+            "NotRegexInsensitiveMatchOp",
+            "NotSimilarToOp",
+            "NullIfArguments",
+            "NullsFirst",
+            "NullsFirstOrLast",
+            "NullsLast",
+            "NumberedParameter",
+            "NumericModType",
+            "NumericType",
+            "OffsetValue",
+            "OperatorEqual",
+            "OperatorGreaterThan",
+            "OperatorGreaterThanEquals",
+            "OperatorLessThan",
+            "OperatorLessThanEquals",
+            "OperatorLiteral",
+            "OperatorNotEqual",
+            "OptionalParensNameList",
+            "OtherOperator",
+            "OtherOperatorTail",
+            "OverlayArguments",
+            "OverlayExpressionList",
+            "OverlayParameters",
+            "Parens_AtSpecifier",
+            "Parens_CastArguments",
+            "Parens_ColumnList",
+            "Parens_ExtractArguments",
+            "Parens_FilterClauseContents",
+            "Parens_FunctionExpressionArgumentList",
+            "Parens_Identifier",
+            "Parens_List_ColIdOrString",
+            "Parens_List_ColIdType",
+            "Parens_List_ColumnName",
+            "Parens_List_ExcludeName",
+            "Parens_List_Expression",
+            "Parens_List_GroupByExpression",
+            "Parens_List_RenameEntry",
+            "Parens_List_ReplaceEntry",
+            "Parens_List_Type",
+            "Parens_MethodExpressionArgumentList",
+            "Parens_NullIfArguments",
+            "Parens_NumberLiteral",
+            "Parens_OrderByClause",
+            "Parens_OverlayArguments",
+            "Parens_PositionArguments",
+            "Parens_QualifiedOperatorContents",
+            "Parens_SampleCount",
+            "Parens_SampleProperties",
+            "Parens_SampleSeed",
+            "Parens_SubstringArguments",
+            "Parens_TablePivotClauseBody",
+            "Parens_TableUnpivotClauseBody",
+            "Parens_TrimArguments",
+            "Parens_optListExpression",
+            "Parens_optListFunctionArgument",
+            "Parens_seqTYPEColLabel",
+            "ParenthesizedNameList",
+            "PivotColumnList",
+            "PivotKeyword",
+            "PivotValueTarget",
+            "PlainIdentifier",
+            "PlusPrefixOperator",
+            "PositionArguments",
+            "PositionalJoinPrefix",
+            "PostfixOperator",
+            "PrecedingFrame",
+            "PrecedingOrFollowing",
+            "PrefixOperator",
+            "QualifiedOperator",
+            "QualifiedOperatorContents",
+            "QualifiedSimpleType",
+            "QualifiedTableFunction",
+            "QualifiedTableName",
+            "QualifiedTypeName",
+            "QuarterKeyword",
+            "QuestionMarkNumberedParameter",
+            "QuotedIdentifier",
+            "RangeFraming",
+            "RealType",
+            "RegexInsensitiveMatchToken",
+            "RegexMatchToken",
+            "RenameEntries",
+            "RenameEntry",
+            "RenameEntryList",
+            "RenameList",
+            "RepeatableSample",
+            "ReplaceEntries",
+            "ReplaceEntry",
+            "ReplaceEntryList",
+            "ReplaceEntrySingle",
+            "ReplaceList",
+            "ReservedColumnName",
+            "ReservedFunctionName",
+            "ReservedKeyword",
+            "ReservedSchemaName",
+            "ReservedSchemaQualification",
+            "ReservedTableName",
+            "ReservedTableQualification",
+            "ReservedTypeName",
+            "RespectNulls",
+            "RightJoin",
+            "RollupKeyword",
+            "RowOrRows",
+            "RowOrStruct",
+            "RowType",
+            "RowsFraming",
+            "SampleCount",
+            "SampleEntry",
+            "SampleEntryCount",
+            "SampleEntryFunction",
+            "SampleFunction",
+            "SamplePercentage",
+            "SampleProperties",
+            "SampleRows",
+            "SampleSeed",
+            "SampleUnit",
+            "SampleValue",
+            "SchemaName",
+            "SchemaQualification",
+            "SchemaReservedFunctionName",
+            "SchemaReservedTable",
+            "SchemaReservedTableColumnName",
+            "SchemaReservedTypeName",
+            "SecondKeyword",
+            "SelectSetOpChainTail",
+            "SemiJoin",
+            "SetIntersectClause",
+            "SetofType",
+            "SetopClause",
+            "SetopExcept",
+            "SetopType",
+            "SetopUnion",
+            "SimilarToToken",
+            "SimpleNumericType",
+            "SimpleType",
+            "SingleArrowPair",
+            "SingleFrameExtent",
+            "SingleRenameEntry",
+            "SliceBound",
+            "SliceExpression",
+            "SmallintType",
+            "SquareBracketsArray",
+            "StarQualifierList",
+            "StarSymbol",
+            "StepSliceBound",
+            "StringLiteralIdentifier",
+            "StringOperator",
+            "StructField",
+            "SubqueryAll",
+            "SubqueryAny",
+            "SubqueryExists",
+            "SubqueryNot",
+            "SubstringArguments",
+            "SubstringExpressionList",
+            "SubstringFor",
+            "SubstringFromFor",
+            "SubstringFromOptionalFor",
+            "SubstringParameters",
+            "TableAliasAs",
+            "TableAliasWithoutAs",
+            "TableFunctionArguments",
+            "TableFunctionName",
+            "TableName",
+            "TablePivotClauseBody",
+            "TableQualification",
+            "TableReservedColumnName",
+            "TableSample",
+            "TableUnpivotClauseBody",
+            "Term",
+            "TildePrefixOperator",
+            "TimeOrTimestamp",
+            "TimeType",
+            "TimeTypeId",
+            "TimeZone",
+            "TimestampAtUnit",
+            "TimestampTypeId",
+            "TrimArguments",
+            "TrimBoth",
+            "TrimDirection",
+            "TrimLeading",
+            "TrimSource",
+            "TrimTrailing",
+            "TryCastKeyword",
+            "TupleType",
+            "Type",
+            "TypeFuncKeyword",
+            "TypeFuncName",
+            "TypeModifiers",
+            "TypeName",
+            "TypeNameAsQualifiedName",
+            "TypeNameKeyword",
+            "TypeVariations",
+            "UnionType",
+            "UnknownLiteral",
+            "UnpivotHeader",
+            "UnpivotHeaderList",
+            "UnpivotHeaderSingle",
+            "UnpivotKeyword",
+            "UnpivotValueList",
+            "UnqualifiedBaseTableName",
+            "UnreservedKeyword",
+            "UsingClause",
+            "UsingSample",
+            "ValueOrValues",
+            "VariantType",
+            "VersionAtUnit",
+            "WeekKeyword",
+            "WindowExcludeClause",
+            "WindowExcludeElement",
+            "WindowPartition",
+            "WithOrWithout",
+            "WithRule",
+            "WithinGroupClause",
+            "WithoutRule",
+            "YearKeyword",
+            "YearToMonth",
+        ]
+        for name in consumed:
+            self._set(names, name, _CONSUMED)
 
         self.expression_rule = grammar.rule("Expression")
         self.statement_rule = grammar.rule("TopLevelStatement")
         self.parens_rule = grammar.rule("ParenthesisExpression")
 
+        self._check_total(grammar)
+
+    def _check_total(self, grammar: Grammar) raises:
+        """Refuses to finish building a table with a hole in it.
+
+        The table is total when every rule the transformer can reach has a byte
+        of its own. A rule with no byte raises at the point a query reaches it,
+        which is months after the change that left it there and is somebody
+        else's Tuesday, so the check runs here instead, once, when the table is
+        built. Every test and every query goes through this constructor, so a
+        grammar bump that adds a rule fails on the first thing anyone runs and
+        names the rule.
+
+        Reachable is worked out from the grammar rather than from this file,
+        because this file is the thing being checked. The walk starts at
+        `Statement` and follows every rule reference, and stops at a rule that
+        refuses a whole statement, since nothing under one of those is ever
+        looked at. That over counts: a rule can be reachable in the grammar and
+        never asked for a value, and the answer for those is `_CONSUMED`, which
+        is a decision somebody wrote down rather than a gap.
+
+        Args:
+            grammar: The grammar the table was built against.
+
+        Raises:
+            Error: Naming the first rule with no case, which means the grammar
+                grew one and this file has to say what to do with it.
+        """
+        var seen = List[Bool](length=len(grammar.names), fill=False)
+        var pending = List[Int]()
+        pending.append(grammar.rule("Statement"))
+        while len(pending) > 0:
+            var rule = pending.pop()
+            if seen[rule]:
+                continue
+            seen[rule] = True
+            var action = self.actions[rule]
+            if action == _NO_CASE:
+                raise Error(
+                    String(
+                        "the transformer has no case for the grammar rule ",
+                        grammar.names[rule],
+                        (
+                            ", which every rule it can reach needs. Give it"
+                            " one, or add it to the consumed list if the rule"
+                            " above it reads it."
+                        ),
+                    )
+                )
+            if action == _STATEMENT_LATER or action == _STATEMENT_NEVER:
+                # The whole statement refuses before anything under it is read,
+                # so nothing under it needs a case.
+                continue
+            for target in _references(grammar, rule):
+                pending.append(target)
+
     def _set(
-        mut self, grammar: Grammar, name: StaticString, action: UInt8
+        mut self, names: Dict[String, Int], name: StaticString, action: UInt8
     ) raises:
         """Points one rule at one action.
 
         Args:
-            grammar: A loaded grammar.
+            names: Every rule name and its index.
             name: The rule name, spelled the way the grammar spells it.
             action: What to do with a node of that rule.
 
         Raises:
             Error: If there is no such rule.
         """
-        var index = grammar.rule(name)
+        var index = names.get(String(name), -1)
         if index < 0:
             raise Error(
                 String(
@@ -863,20 +1449,20 @@ struct Transform(Movable):
         self.actions[index] = action
 
     def _refuse(
-        mut self, grammar: Grammar, name: StaticString, feature: UInt16
+        mut self, names: Dict[String, Int], name: StaticString, feature: UInt16
     ) raises:
         """Points one rule at one refusal.
 
         Args:
-            grammar: A loaded grammar.
+            names: Every rule name and its index.
             name: The rule name, spelled the way the grammar spells it.
             feature: A key into the refusal table in `unsupported.mojo`.
 
         Raises:
             Error: If there is no such rule.
         """
-        self._set(grammar, name, _REFUSE)
-        self.refusals[grammar.rule(name)] = feature
+        self._set(names, name, _REFUSE)
+        self.refusals[names.get(String(name), 0)] = feature
 
     def parse_expression(
         self, sql: StringSlice, grammar: Grammar, mut ast: Ast
@@ -1285,6 +1871,18 @@ struct Transform(Movable):
             # these messages name the feature themselves.
             raise _unsupported(
                 tree, sql, node, self.refusals[rule], _word(tree, sql, node)
+            )
+
+        if action == _CONSUMED:
+            # Not a refusal. The query is fine and the rule above this one was
+            # supposed to read it and asked the walk for a value instead, which
+            # is a mistake in this file.
+            raise Error(
+                String(
+                    "the transformer asked for the value of grammar rule ",
+                    rule,
+                    ", which the rule above it is supposed to read itself",
+                )
             )
 
         raise _no_case(tree, sql, node)
@@ -4382,6 +4980,38 @@ struct Transform(Movable):
         for name in self._items(tree, self._only(tree, kids[1])):
             out.append(self._plain(tree, sql, name))
         return out^
+
+
+def _references(grammar: Grammar, rule: Int) -> List[Int]:
+    """Every rule one rule's body names.
+
+    Walks the body the way the matcher walks it, following the child and
+    sibling links, and collects the target of every reference. The end of input
+    reference is not a rule and is skipped, which is the same exception the
+    matcher makes.
+
+    Args:
+        grammar: A loaded grammar.
+        rule: The rule index.
+
+    Returns:
+        The rules it names, with repeats, since the caller is filling a set.
+    """
+    var out = List[Int]()
+    var pending = List[Int]()
+    pending.append(Int(grammar.roots[rule]))
+    while len(pending) > 0:
+        var node = pending.pop()
+        if node == 0:
+            continue
+        ref it = grammar.nodes[node]
+        if it.kind == NODE_REF:
+            if Int(it.payload) != RULE_END_OF_INPUT:
+                out.append(Int(it.payload))
+        else:
+            pending.append(Int(it.child))
+        pending.append(Int(it.sibling))
+    return out^
 
 
 def _no_case(tree: Parse, sql: StringSlice, node: UInt32) -> Error:
