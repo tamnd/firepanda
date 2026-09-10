@@ -470,10 +470,9 @@ def test_a_name_reads_back_as_the_type_that_printed_it() raises:
 def test_a_name_nothing_prints_is_refused() raises:
     """Including the ones a caller is most likely to try.
 
-    `datetime64[ns]` and `category` are real firepanda types and are still
-    refused here, because their spelling carries a unit or an index width that
-    a name has no room for and answering the bare kind would be answering a
-    different type than the one asked for.
+    `datetime64[ns]` is a real firepanda type and is still refused here, because
+    its spelling carries a unit that a name has no room for and answering the
+    bare kind would be answering a different type than the one asked for.
     """
     for name in [
         "int64 ",
@@ -481,7 +480,6 @@ def test_a_name_nothing_prints_is_refused() raises:
         "i8",
         "str",
         "object",
-        "category",
         "datetime64[ns]",
         "timedelta64[ns]",
         "date32",
@@ -489,6 +487,18 @@ def test_a_name_nothing_prints_is_refused() raises:
     ]:
         with assert_raises(contains="no type is named"):
             _ = named_type(name)
+
+
+def test_a_category_is_named_and_gets_its_width_from_the_encoder() raises:
+    # The one name that carries two things it does not say. Both come from the
+    # encoder rather than from the caller, which is what makes it nameable at
+    # all: int32 codes because that is what `encode_dictionary` builds, and
+    # unordered because that is what a bare `astype("category")` gives in pandas
+    # too. An ordering is asked for with a `CategoricalDtype` on both sides.
+    var made = named_type("category")
+    assert_true(made.is_dictionary())
+    assert_equal(made.physical, DType.int32)
+    assert_false(made.ordered)
 
 
 def main() raises:

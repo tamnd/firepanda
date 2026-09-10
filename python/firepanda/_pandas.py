@@ -408,6 +408,13 @@ _DTYPE_NAMES: dict[str, str] = {
     "f8": "float64",
     "str": "string",
     "string": "string",
+    # The only name here that is not a layout. It builds the categories as well
+    # as the codes, which is a pass over the column rather than a conversion of
+    # one, and it is spelled as a name anyway because that is how pandas asks
+    # for it. What comes back is unordered over int32 codes, and a caller who
+    # wants an ordering or a fixed set of categories asks with a
+    # `CategoricalDtype` rather than with a word.
+    "category": "category",
 }
 
 _NO_OBJECT = (
@@ -462,11 +469,6 @@ _REFUSED_DTYPES: dict[str, str] = {
     "str_": _NO_OBJECT,
     "O": _NO_OBJECT,
     "U": _NO_OBJECT,
-    "category": (
-        "building the dictionary is a conversion of its own rather than a"
-        " change of layout, and the cast underneath would hand back the index"
-        " width as a plain integer column"
-    ),
     "datetime64": (
         "the cast underneath converts layouts and these are int64 underneath,"
         " so the answer would be a column of counts rather than of instants."
@@ -1625,6 +1627,229 @@ class DatetimeMixin:
         from ._frame import _isocalendar
 
         return _isocalendar(self._series._inner)
+
+
+class CategoricalMixin:
+    """The hand written half of `CategoricalAccessor`.
+
+    Eleven names in pandas and three doors under them. A rename is decided by
+    position, setting the categories is decided by value, and dropping the unused
+    ones is decided by the codes, and everything else on the accessor is one of
+    those three with a list worked out first. That arithmetic is here rather than
+    in the extension because it is about the pandas surface: which disagreement
+    is a `ValueError`, what a `dict` passed to `rename_categories` means, and
+    whether a missing `ordered` keeps what the column had are all questions with
+    a pandas answer rather than a kernel answer.
+
+    The checks come before the call in every case, so a refusal names what the
+    caller passed rather than what the boundary made of it. The messages are the
+    pandas ones word for word, because a program catching a `ValueError` off
+    pandas and matching on its text is a program that exists.
+    """
+
+    __slots__ = ("_series",)
+    """The series the accessor was reached from, held for the reason
+    `DatetimeMixin` gives."""
+
+    _series: Series
+
+    def __init__(self, data: Series) -> None:
+        """Holds the series, and refuses one that is not a categorical.
+
+        The one accessor that checks the column's type when it is built rather
+        than when it is used. pandas does the same and raises an `AttributeError`
+        with this text, which reads oddly for a type complaint and is right: a
+        caller who wrote `s.cat` on a column of numbers asked for an attribute
+        the object does not have, and code that guards with `hasattr` should get
+        a False rather than an exception.
+        """
+        if data.dtype != "category":
+            raise AttributeError("Can only use .cat accessor with a 'category' dtype")
+        self._series = data
+
+    def _levels(self) -> Index:
+        """The categories, as an index."""
+        from ._frame import Index
+
+        try:
+            return Index._wrap(self._series._inner.categories())
+        except Exception as error:
+            raise translate(error) from None
+
+    def _ordered(self) -> bool:
+        """Whether the category order means anything."""
+        try:
+            return self._series._inner.ordered()
+        except Exception as error:
+            raise translate(error) from None
+
+    def _codes(self) -> Series:
+        """The codes, as a column of positions.
+
+        int32 here and int8 in pandas, which is a difference a caller can see
+        through `dtype` and is the one deliberate divergence on this accessor.
+        The width is what the encoder writes and the reason it writes it is in
+        document 26.
+        """
+        from ._frame import Series
+
+        try:
+            return Series._wrap(self._series._inner.codes())
+        except Exception as error:
+            raise translate(error) from None
+
+    def _with_order(self, ordered: bool) -> Series:
+        """The same column under a type that says whether the order matters."""
+        from ._frame import Series
+
+        try:
+            return Series._wrap(self._series._inner.set_ordered(ordered))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _thinned(self) -> Series:
+        """The same values over only the categories that appear in them."""
+        from ._frame import Series
+
+        try:
+            return Series._wrap(self._series._inner.drop_unused_categories())
+        except Exception as error:
+            raise translate(error) from None
+
+    def _held(self) -> list[str]:
+        """The categories the column has, as a plain list.
+
+        A category that is missing is refused here. Arrow permits one and pandas
+        does not, so a column that arrived over the C data interface can have one
+        and nothing on this accessor has an answer for it: a list of labels with
+        a hole in it cannot be compared against what the caller passed.
+        """
+        out: list[str] = []
+        for label in self._levels().tolist():
+            if not isinstance(label, str):
+                raise NotImplementedError(
+                    "one of this column's categories is missing, which Arrow permits"
+                    " and pandas does not, and a category that is nothing cannot be"
+                    " added to, removed or renamed"
+                )
+            out.append(label)
+        return out
+
+    def _wanted(self, value: Any, name: str) -> list[str]:
+        """Reads what a caller passed as a list of category labels.
+
+        A single label rather than a list is accepted, which pandas does too, so
+        `add_categories("z")` means what it looks like it means. Everything else
+        is iterated, and a label that is not a string is refused here rather than
+        at the boundary, because firepanda holds categories as text and the
+        message about that should name the value.
+        """
+        one = [value] if isinstance(value, str) else list(value)
+        for label in one:
+            if not isinstance(label, str):
+                raise NotImplementedError(
+                    f"{name} has to be text for now, because firepanda holds a"
+                    f" category column's categories in a text column, and {label!r} is"
+                    f" a {type(label).__name__}"
+                )
+        return one
+
+    def _distinct(self, names: list[str]) -> None:
+        """Refuses a category list with a repeat in it.
+
+        The kernel refuses one too and says so in its own words. This is here so
+        the message is the pandas one, since a caller catching the `ValueError`
+        and matching on its text is doing an ordinary thing. It sits on the two
+        doors rather than on the argument reader, because `reorder_categories`
+        reports a repeat as a disagreement with the old categories and has to get
+        its own answer in first.
+        """
+        if len(set(names)) != len(names):
+            raise InvalidArgumentError("Categorical categories must be unique")
+
+    def _relabel(self, names: list[str], ordered: bool) -> Series:
+        """The positional door, which leaves every code where it is."""
+        from ._frame import Series
+
+        self._distinct(names)
+        try:
+            return Series._wrap(self._series._inner.relabel_categories(names, ordered))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _against(self, names: list[str], ordered: bool) -> Series:
+        """The value door, which nulls the rows whose category is not in the list."""
+        from ._frame import Series
+
+        self._distinct(names)
+        try:
+            return Series._wrap(self._series._inner.recategorize(names, ordered))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _added(self, new_categories: Any) -> Series:
+        """Adds categories nothing uses yet, on the end of the ones there are."""
+        wanted = self._wanted(new_categories, "new_categories")
+        held = self._held()
+        clash = {label for label in wanted if label in held}
+        if clash:
+            raise InvalidArgumentError(f"new categories must not include old categories: {clash}")
+        return self._against(held + wanted, self._ordered())
+
+    def _removed(self, removals: Any) -> Series:
+        """Drops named categories, and the rows that were in them become missing."""
+        wanted = self._wanted(removals, "removals")
+        held = self._held()
+        missing = {label for label in wanted if label not in held}
+        if missing:
+            raise InvalidArgumentError(f"removals must all be in old categories: {missing}")
+        return self._against([label for label in held if label not in wanted], self._ordered())
+
+    def _renamed(self, new_categories: Any) -> Series:
+        """Gives the categories new labels, keeping every row where it is.
+
+        Three shapes arrive here and pandas takes all three. A list is one label
+        per category in order. A dict names the ones that change and leaves the
+        rest, and a key that is not a category is ignored rather than refused,
+        which is pandas and is worth knowing. A callable is applied to each.
+        """
+        held = self._held()
+        if callable(new_categories):
+            return self._relabel([new_categories(label) for label in held], self._ordered())
+        if isinstance(new_categories, dict):
+            return self._relabel(
+                [new_categories.get(label, label) for label in held], self._ordered()
+            )
+        wanted = self._wanted(new_categories, "new_categories")
+        if len(wanted) != len(held):
+            raise InvalidArgumentError(
+                "new categories need to have the same number of items as the old categories!"
+            )
+        return self._relabel(wanted, self._ordered())
+
+    def _reordered(self, new_categories: Any, ordered: Any) -> Series:
+        """Puts the same categories in another order, moving the codes to match."""
+        wanted = self._wanted(new_categories, "new_categories")
+        if set(wanted) != set(self._held()) or len(wanted) != len(self._held()):
+            raise InvalidArgumentError(
+                "items in new_categories are not the same as in old categories"
+            )
+        return self._against(wanted, self._ordered() if ordered is None else bool(ordered))
+
+    def _set(self, new_categories: Any, ordered: Any, rename: bool) -> Series:
+        """Sets the categories outright, by value or by position.
+
+        `rename=True` is the one place the positional door is reachable with a
+        count that does not match, and pandas is explicit about what that means:
+        a shorter list drops the categories off the end and the rows that were in
+        them go missing, and a longer one leaves the extra labels there with
+        nothing in them.
+        """
+        wanted = self._wanted(new_categories, "new_categories")
+        wants = self._ordered() if ordered is None else bool(ordered)
+        if rename:
+            return self._relabel(wanted, wants)
+        return self._against(wanted, wants)
 
 
 def _grouped(

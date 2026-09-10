@@ -8,6 +8,36 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the `cat` namespace, so a category column has something on it
+
+A caller could build a category column and then do nothing with it. There was no way to read the categories or the codes, no way to say that the order meant something, and no way to change what the categories were. `Series.cat` now carries all eleven of the names pandas puts there: `categories`, `codes` and `ordered` answer a value, `as_ordered` and `as_unordered` flip the flag, and `add_categories`, `remove_categories`, `remove_unused_categories`, `rename_categories`, `reorder_categories` and `set_categories` hand back a column. Every one of them was compared against a live pandas, including all five of the errors, and `rename_categories` takes a list, a mapping or a callable the way pandas does.
+
+Eleven names are three operations. A rename is decided by position, since no code moves and what changes is what a code is called. Setting the categories is decided by value, and adding, removing, reordering and setting are that one operation with the list worked out differently first. Dropping the unused ones is decided by the codes, which is why it is a door of its own rather than the second one called with the right list: working out which categories are used is a pass over the column, and a caller doing it over the boundary would have to read every code out into Python on a column that is dictionary encoded precisely because it is too big for that.
+
+The count check on a rename is deliberately not in the kernel, because two callers reach that door and disagree about whether a mismatch is a mistake. `rename_categories(["a", "b"])` on three categories is a `ValueError`, and `set_categories(["a", "b"], rename=True)` on the same column nulls the rows that fall off the end, which is what pandas does.
+
+`s.cat` on a column that is not a category is an `AttributeError` raised when the accessor is built rather than when a member is used, so a caller who guards with `hasattr` gets a `False` rather than an exception.
+
+Three differences from pandas are asserted in the tests rather than papered over. The codes are int32 where pandas has int8, for the reasons the previous entry gives. A row whose category is missing has no code at all, where pandas writes -1, because firepanda's codes are an Arrow column with a validity bitmap and pandas' are a numpy array with nowhere to record absence, so `codes >= 0` is a pandas idiom that finds nothing here. And a missing value reads back as `None` rather than as NaN, which is what every other firepanda column already does.
+
+`CategoricalDtype`, `Categorical` and `CategoricalIndex` are still missing, and none of them is blocked on anything now.
+
+### Fixed: an imported category column could not be read at all
+
+`decode_dictionary` asked for int32 codes and raised on anything else. A pandas categorical of fewer than 128 categories has int8 codes, the Arrow importer keeps the width the producer wrote rather than copying a buffer to normalise it, and so every categorical that arrived from pandas over the C data interface was unreadable. `astype("str")` on one failed, and so did anything else that had to see a value. Reading now widens whatever index width is there, all eight of them, so the common case works.
+
+`tolist()` on a category column raised as well, with a message about the column storing positions rather than values. It was dispatching on the physical dtype, which for a dictionary column is the index type, so the request never reached anything that knew what to do with it. It decodes first now and hands back the values, which is what pandas gives and what somebody at a prompt asked for. The codes are still reachable through `Series.cat.codes` for anybody who wanted those.
+
+### Added: astype("category") builds a category column
+
+Firepanda could read a dictionary encoded column and write one back out, and could not make one. `astype("category")` was refused with a message saying that building the dictionary is a conversion of its own rather than a change of layout, which was accurate and was also the whole reason, so the conversion is now written. It works on a text column, on a series and on a frame, and the result exports over Arrow as a real dictionary encoded column, so a caller can build a categorical in firepanda and hand it to pandas.
+
+It is a kernel of its own rather than an arm of the cast, because every other cast reads a value and writes the same value in another layout while this one cannot: what code a row gets depends on every row before it. The categories come out sorted rather than in first appearance order, which costs a sort over the distinct values and buys the order a caller can actually see, since it is what `.cat.categories` prints, what a groupby produces its groups in, and what an ordered comparison means. A null does not become a category, it becomes a null code beside categories that do not mention it, and an empty string does become one, because a value somebody wrote nothing into is not a value nobody wrote.
+
+Casting off a category is the half that was easier to get wrong. A dictionary column's physical dtype is its index type, so `astype("int64")` on one would have found the int64 arm of the number path and handed back the codes, which are integers and look like an answer. Both entry points now decode first, whatever the target is. A category cast to a category is a copy rather than a decode and a re-encode, which keeps the categories nobody used and keeps the order they were in, both of which pandas keeps.
+
+A column that is not text still cannot be encoded, and says so as a `NotImplementedError`, because firepanda holds categories in a string column and rendering the numbers as text would produce a column whose values round trip and whose category dtype does not. There is still no `.cat` namespace, no `codes` or `categories` on the Python series, and no way to ask for an ordering, since a type name cannot carry one in pandas either. That is the next piece and it is reachable now.
+
 ### Fixed: astype no longer halves the precision of a longdouble on x86
 
 `longdouble` and its character code `g` are refused by name now, where before they resolved to float64. That mapping was measured on an arm Mac, where numpy's `longdouble` really is a float64, and it is wrong on x86 Linux, where it is an eighty bit float that numpy prints as float128. Anyone asking for the widest float the machine has and getting float64 back is getting half of what they asked for, without being told.
@@ -82,6 +112,16 @@ The check sits in `firepanda/py/cast.mojo` and not in the kernel, because it is 
 
 `errors="ignore"` covers the new refusal the same as the old ones, because it covers every `ValueError` and this is one.
 
+### The README says what SQL will not do, and the table says it
+
+The README had nothing about SQL in it at all, which is a strange thing for a repository whose current milestone is a SQL dialect. It has a section now: what exists, which is the parser and the AST and the printer and no execution yet, what the refusal looks like when a query is on the far side of the line, and then the whole line, all forty one entries of it, in a table.
+
+The table is generated by `pixi run sql-support` out of `sql_support()` and lives between two markers in the file. That is the part worth having. A hand written list of what a library does not do is right on the day it is written and wrong the week after, every time, because nobody remembers the README when they are adding an entry to a table in another directory. `tests/test_sql_unsupported.mojo` reads the README and fails when the two disagree, so the way you find out is a test rather than a reader.
+
+`pixi run check-sql-support` is the same run with the file compared rather than written, for anyone who wants it outside the suite. There is no new CI step, since the test suite already runs.
+
+That is exit criterion 4 on #307.
+
 ### Added: astype, and about sixty ways to spell a type
 
 `Series.astype` and `DataFrame.astype`, with the pandas signature, and `dtype=` honoured in both constructors instead of refused. The frame form takes one type name for every column or a dict naming some of them, which is what pandas takes.
@@ -111,6 +151,22 @@ The fractions themselves are done the way pandas does them, whole part and fract
 Three parameter names were wrong and are now right. `Timestamp.fromisoformat` takes `object` rather than `date_string`, `Timedelta` collects its keyword fields into `kwargs` rather than `fields`, and `Timestamp.strftime` is written out rather than inherited, because the inherited one is a C level callable whose signature cannot be read and pandas spells its own out. None of the three changes what any call does. All three are what a program reading either library with `inspect` sees, and a new test compares every readable signature on both classes against pandas so that the next one fails here rather than on a scoreboard somewhere else.
 
 On the conformance board this opens the whole `Timedelta` namespace, which was reporting thirty two runs behind one message saying the namespace could not be built, because the board builds it by evaluating `Timedelta("1D")`. That closes #391.
+
+## [0.6.54] - 2026-09-10
+
+Built against Mojo 1.0.0 (ed45d567).
+
+The pandas binding catches up with the core it wraps, the temporal work reaches the point where a date stays a date all the way through, and two of the engine's remaining serial passes stop being serial. There is also a specification for the query planner, which is the first written argument in this repository about how the engine should decide anything rather than about how fast a loop runs.
+
+Most of the surface added here was already implemented and simply unreachable from Python. The core had a group by, a `dt` accessor, fourteen transformations and twelve reductions that the binding did not expose, so a pandas program hit an attribute error on code the library could already run. That is now four separate entries below and the gap they closed is the largest single jump in pandas coverage since the binding landed. The namespace another library imports is settled at the same time, so `import firepanda as fp` gives the same names in the same places whichever door it came through.
+
+On the temporal side, reading text or whole numbers now produces a column of instants rather than something that has to be cast afterwards, `Timestamp` and `Timedelta` are measured against pandas rather than described in a docstring, and the arithmetic between two temporal columns gives an elapsed time with the unit it should have. The thread running through those entries is that a date used to stay a date only until something touched it, and it now survives a reduction, a group by and a round trip through the reader.
+
+The two performance entries are a filter that compacts on every core and a join on two key columns that stops being a group by over both tables. The filter was the last kernel of its size still on one thread and the reason was structural rather than an oversight: a gather knows where every output row goes before it starts, and a filter does not, because where a row lands depends on how many rows before it survived. Counting per morsel and prefix summing the counts answers exactly that, and the copy becomes as independent as a gather's. It is three times on the projection at the front of TPC-H q6, which takes the query from about forty three milliseconds to about thirty one. The join change packs a compound integer key into a single value that both sides agree on, which turns a join on several columns into the single key join the library already had, dictionary on the smaller side and all. That is 1.27 times on a compound key join, 2.21 times when the two sides are the same height, and it moves exactly the two TPC-H queries that join on a pair of columns and none of the other twenty.
+
+The differential job that had been wedging CI for twenty minutes at a time is fixed, and the fix is worth stating plainly because the diagnosis took longer than the change. The program finished all of its work, printed its report, and then aborted during teardown, and the crash handler held the dead process open until the job timeout killed it. Building the three differential programs and running the binaries, rather than running them through the JIT, does not happen, in a hundred and twenty five runs against five failures in forty five. The underlying memory safety defect is still there and is now reproducible, which is a better position than it was in.
+
+The planner specification is eleven documents and it argues one thing: the engine today makes its interesting decisions in the wrong place, either from a parameter name, or from a constant with a row count in it, or not at all. Which side of a join is built is decided by which parameter is called right. Whether a filter runs before or after a join is decided by the order the user wrote them in. The first stage of the milestone it opens is the set of those decisions that need no plan layer to fix, and the compound key join above is the first of them.
 
 ### Added: the planner specification, and a milestone for it
 

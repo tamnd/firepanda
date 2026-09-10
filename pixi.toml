@@ -3,7 +3,7 @@
 # install rather than against this file; see docs/specs/01-research-2026.md.
 [workspace]
 name = "firepanda"
-version = "0.6.53"
+version = "0.6.54"
 description = "A dataframe library for Mojo with the pandas API"
 authors = ["tamnd <tamnd87@gmail.com>"]
 license = "Apache-2.0"
@@ -166,6 +166,14 @@ compile-budget = "python tools/compile_budget.py"
 vendor-grammar = "bash tools/vendor_grammar.sh"
 gen-grammar = "python tools/gen_grammar.py"
 check-grammar = "python tools/gen_grammar.py --check"
+
+# The README's list of what the SQL front end refuses, written out of
+# `sql_support()` rather than kept beside it. `--check` is the same run with the
+# file compared rather than written. There is no CI step for it, because
+# tests/test_sql_unsupported.mojo checks the same thing and the test suite
+# already runs.
+sql-support = "mojo run -I . tools/sql_support.mojo"
+check-sql-support = "mojo run -I . tools/sql_support.mojo --check"
 
 # A grep is not a sanitizer. It is what exists.
 check-shared-state = """
