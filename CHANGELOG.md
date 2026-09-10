@@ -22,6 +22,18 @@ Found by CI on Linux, on a test that passed on macOS for exactly this reason.
 
 This is a stopgap and the comment on the step says so. An extension that does not declare whether it is safe without the GIL is supposed to make the interpreter turn the GIL back on and carry on, not crash in its init function, so something is wrong rather than merely unsupported. #400 has the reproduction and what has to be found out to close it.
 
+### Fixed: the three ways a cast fails, all three of them wrong
+
+A conversion that cannot be made now fails the way pandas fails it, in the class it raises, in the sentence it says and in whether it fails at all.
+
+Text that will not read as a number was raising a `TypeError`. It is a `ValueError` in pandas and it is a `ValueError` here now, which matters more than it sounds: `except ValueError` around a cast is ordinary code and a `TypeError` walks straight past it. The message is the pandas one word for word, so `invalid literal for int() with base 10: 'x'` for an integer target and `could not convert string to float: 'x'` for a float one, with the row number added on the end. pandas says which value would not read and not where it was, and on a column of any size that is the first thing a person then has to go and find out.
+
+A float column holding a NaN, an infinity or a missing value converted to an integer was not failing at all, which was the worse of the two bugs. The first and the last handed back a null sitting in an integer column and the infinity handed back the largest int64 there is. Nothing raised, so a caller ended up holding a column pandas could not have made, having asked for one pandas would have refused. All three are now refused, with the class pandas gives that refusal, `IntCastingNaNError`, which is in `firepanda.errors` under the name it has in `pandas.errors`. It is a `ValueError` too, so a broad catch still fires.
+
+The check sits in `firepanda/py/cast.mojo` and not in the kernel, because it is a pandas rule and not an Arrow one. An Arrow integer column holding a null is perfectly legal and firepanda keeps making them. That leaves one door pandas does not have: `firepanda.Series([1, None, 3])` is an int64 column with a null where the pandas one is float64 with a NaN, so a caller here can ask to convert an integer column that already holds a missing value. It is refused too, since the column pandas would have had is the one pandas refuses.
+
+`errors="ignore"` covers the new refusal the same as the old ones, because it covers every `ValueError` and this is one.
+
 ### Added: astype, and about sixty ways to spell a type
 
 `Series.astype` and `DataFrame.astype`, with the pandas signature, and `dtype=` honoured in both constructors instead of refused. The frame form takes one type name for every column or a dict naming some of them, which is what pandas takes.
@@ -232,11 +244,41 @@ Every argument pandas declares and this does not implement raises rather than be
 
 The four outcomes are separated on purpose. A refusal starts with `Not Implemented Error:` and is the expected answer for anything outside the surface firepanda covers, so it is counted rather than failed. A statement the query rule does not match at all is a `CREATE TABLE` or an `ATTACH` and is the size of the work that is left rather than a defect. Anything else out of the transformer is a bug, and text that prints back to something different is a printer that lost something. Running them together in one number would have hidden the two that matter behind the fifty thousand that do not.
 
+### No refusal says a rule number any more
+
+`SELECT INTERVAL '1 day'` used to come back with `firepanda does not support grammar rule 472`, which is a fact about firepanda's build of the grammar and means nothing to the person who wrote the query. It now says it does not support an INTERVAL literal, and that a duration is its own type with its own arithmetic and arrives with the date and time work. Across DuckDB's corpus that was 3,385 statements blaming a number and it is now none of them.
+
+Thirteen entries went into the refusal table and no code went with them, which is the point of the table being a table. A row value written as `(a, b)` or `ROW(a, b)`, an `INTERVAL`, a typed literal such as `DATE '2020-01-01'`, a lambda, a list comprehension, an argument passed by name, `COLUMNS`, a `MAP` literal, `GROUPING`, a column written as `#1`, and `DEFAULT` where a value goes each name themselves and say what to write instead where there is something to write instead.
+
+The functions SQL spells with keywords inside the parentheses share one entry between them. `EXTRACT`, `SUBSTRING`, `TRIM`, `POSITION`, `OVERLAY`, `TRY` and `UNPACK` all get a rule of their own from the grammar because none of them is a plain name and arguments, and the message fills in whichever one was written, so `SELECT TRIM(BOTH ' ' FROM a)` says firepanda does not support TRIM yet.
+
+Three statements that produce rows were never reached by the tier tables, because `DESCRIBE`, `PIVOT` and `UNPIVOT` hang off the select rule rather than off the statement rule. All three now say they are coming, which is what they are. And `WITH x AS (INSERT INTO t VALUES (1))` used to blame the rule for the parentheses around a statement in a `WITH`, which is a rule nobody writes and nobody can look up. It now walks in and lets the statement inside say its own name.
+
+### Every statement says what firepanda does with it
+
+A statement firepanda does not run now refuses by name instead of coming back as a syntax error. `ATTACH 'x.db'` says firepanda does not support the ATTACH statement, points at the word, and says to read the data with SELECT and do the rest in Mojo. `CREATE TABLE t (a INT)` says firepanda does not support the CREATE statement yet, which is a different sentence on purpose: a reader who is told `not yet` waits for a release and a reader who is told `not this` writes the query another way. Telling somebody their perfectly good SQL has a syntax error in it tells them neither.
+
+The split is the one in `docs/specs/sql/05-ast-and-binder.md` section 4. Ten statements are tier two and say `yet`, from `CREATE` and `INSERT` through `PRAGMA`, because each is a frame operation with a SQL spelling. Twenty five are tier three and do not, because each wants a catalog, a transaction, a file that outlives the process, or an extension, and firepanda is a dataframe library rather than a database. `UPDATE` and `DELETE` are in the second group rather than the first, which is a judgement rather than a fact: both are expressible over an immutable frame as a rewrite, neither is what a dataframe user reaches for, and half of them would be worse than none of them.
+
+A trailing semicolon is part of a statement now. `SELECT 1;` was a syntax error at the semicolon, which is the shape of query anybody pastes out of a file or a shell, and the transformer starts at the whole statement rule rather than at the query rule so it now reads the same as `SELECT 1`. A file of nothing but whitespace, or a bare `;`, is a syntax error at end of input.
+
+Over DuckDB's corpus that moves 40,063 statements out of `syntax error` and into a sentence that names what they asked for. 69,153 statements go through the round trip, 28,871 come back as the same text twice, 40,171 refuse by name, and 108 are text the grammar itself will not take, which is the corpus testing that bad SQL is rejected and firepanda agreeing. Nothing is broken and nothing is unstable.
+
+`GROUPING SETS ((a, ))` also stopped being a special case. The trailing comma made the grammar hand back a row where `GROUPING SETS (a)` hands back an expression, and the two mean the same set of one column, so the row now builds as the column and the two spellings print the same.
+
+### Parse, print, reparse, over the whole corpus
+
+`pixi run differential-sql` now puts every statement firepanda parses through the transformer and the printer twice and checks that the two printings agree. That is 69,153 statements, and the counts are in the section above. Nothing is broken and nothing is unstable, and both of those numbers have a ceiling of zero so they stay that way.
+
+The four outcomes are separated on purpose. A refusal starts with `Not Implemented Error:` and is the expected answer for anything outside the surface firepanda covers, so it is counted rather than failed. Text the grammar will not take at all is not a defect either. Anything else out of the transformer is a bug, and text that prints back to something different is a printer that lost something. Running them together in one number would have hidden the two that matter behind the rest.
+
 The printer no longer calls itself once per child. `x + x + x` folds to the left, so the eight kilobyte expression in DuckDB's `overflow/expression_tree_depth.test` is a tree two thousand deep, and a recursive printer runs out of stack on it and takes the process down with it. The walk is now a loop over an explicit stack with a phase counter saying which part of a node is being written, which is the same shape the transformer's walk already had. Depth costs heap and the two thousand term chain prints in one pass. That closes #368.
 
 Two quoting bugs came out of the corpus and both were the printer writing a name bare that cannot stand bare. `SELECT "inner" FROM t` came back as a syntax error at the `FROM`, and `ORDER BY s COLLATE "is"` came back as one at the `s`. The rule was quoting reserved keywords only, and DuckDB has five keyword classes rather than two. A column name keyword such as `coalesce` may stand anywhere and stays bare, a function name or type name keyword such as `inner` or `left` may only stand where a function is being called, and a reserved keyword may stand nowhere. So the same word is quoted as a column and bare as a call, which is what the grammar says and what the round trip now checks on seventy thousand statements.
 
 One statement is left that firepanda prints correctly and cannot read back, and it is the two thousand term chain. The printer parenthesizes every operand, so the text opens with two thousand parentheses and the matcher's own depth guard stops at about twenty two. It has a ceiling of its own and a bucket of its own, because nothing was lost: the AST is right and the text is right, and the only thing that cannot read it is our matcher. It goes when the matcher becomes an explicit stack machine.
+
+Three statements are left that firepanda prints correctly and cannot read back. One is the two thousand term chain and the other two are wide generated CTEs. The printer parenthesizes every operand, so the text of the chain opens with two thousand parentheses and the matcher's own depth guard stops at about twenty two. They have a ceiling of their own and a bucket of their own, because nothing was lost: the AST is right and the text is right, and the only thing that cannot read it is our matcher. They go when the matcher becomes an explicit stack machine.
 
 ### The corpus differential stops taking the process down with it
 
@@ -955,7 +997,6 @@ Two Arrow types and a join that had been running on one core.
 The join is the one worth reading. An outer join was the only kind that would not spread across cores, because it has to remember which built side rows paired and it remembered them in a bitmap, whose set is a read modify write of a word that eight rows share. That was a real constraint on the bitmap and not on the remembering, and marking a byte per key code instead takes it away. Reading the byte before writing it is worth as much again, because a store is what takes a cache line off the other cores and a load is not. Together they are just under three times on `join/outer`.
 
 The types are dictionary and duration columns, which the Arrow reader and writer now handle in every unit and every index width. A dictionary is how Arrow spells a categorical, so this is the type a text column with few distinct values arrives as from Polars and pyarrow, and reading it was previously an error that stopped the whole file.
-
 
 ### An outer join runs on every core, three times faster
 

@@ -10,9 +10,13 @@ The property that ties the two directions together is the round trip. A number
 column rendered as text and read back has to be the same column, which is why the
 writer spells a float at enough digits rather than at the digits a person wants
 to read.
+
+`integer_ready` is tested here too. It is not a cast, it is the question a caller
+asks before one: whether a column has anything in it that an integer has nowhere
+to put. The kernel does not act on the answer and `firepanda/py/cast.mojo` does.
 """
 
-from std.math import isnan, nan
+from std.math import inf, isnan, nan
 from std.testing import (
     TestSuite,
     assert_almost_equal,
@@ -31,7 +35,12 @@ from firepanda.array.strings import (
 from firepanda.dtype.logical import LogicalType
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.series import Series
-from firepanda.kernel.cast import cast_any, cast_strings_to, cast_to_strings
+from firepanda.kernel.cast import (
+    cast_any,
+    cast_strings_to,
+    cast_to_strings,
+    integer_ready,
+)
 
 
 def text(var values: List[String]) -> StringArray:
@@ -116,6 +125,11 @@ def test_a_null_stays_null_and_is_not_read() raises:
 
 
 def test_a_word_is_refused_by_name() raises:
+    # The wording is the one pandas uses, so that a program matching on the
+    # message keeps working across the two libraries. It names `int()` rather
+    # than the target width because pandas names `int()`, and the row number is
+    # ours: pandas does not say where the bad value was and a person reading a
+    # failure on a million row column wants to know.
     var column = text(words("1", "banana", "3"))
     var message = String()
     try:
@@ -124,7 +138,20 @@ def test_a_word_is_refused_by_name() raises:
         message = String(error)
     assert_true("row 1" in message, message)
     assert_true("banana" in message, message)
-    assert_true("int64" in message, message)
+    assert_true("invalid literal for int() with base 10" in message, message)
+
+
+def test_a_word_where_a_float_was_asked_for_says_float() raises:
+    # A different sentence for a different target, again the pandas one. The
+    # two are worth keeping apart because they are what a caller sees most.
+    var column = text(words("1", "banana"))
+    var message = String()
+    try:
+        _ = cast_strings_to[DType.float64](column, True)
+    except error:
+        message = String(error)
+    assert_true("could not convert string to float" in message, message)
+    assert_true("banana" in message, message)
 
 
 def test_a_word_becomes_a_null_when_not_strict() raises:
@@ -464,6 +491,49 @@ def test_a_frame_column_makes_the_same_round_trip() raises:
     assert_true(
         isnan(out[0].unsafe_ptr[DType.float64]().unsafe_offset(1).unsafe_load())
     )
+
+
+def test_a_clean_float_column_is_ready_to_be_an_integer() raises:
+    var values = Array[DType.float64](3)
+    values.set_valid(0, 1.5)
+    values.set_valid(1, -2.0)
+    values.set_valid(2, 0.0)
+    assert_true(integer_ready(AnyArray(values^)))
+
+
+def test_a_nan_is_not_ready_to_be_an_integer() raises:
+    var values = Array[DType.float64](2)
+    values.set_valid(0, 1.0)
+    values.set_valid(1, nan[DType.float64]())
+    assert_false(integer_ready(AnyArray(values^)))
+
+
+def test_a_null_is_not_ready_to_be_an_integer() raises:
+    # Whatever the source dtype. An integer column holding a null is a perfectly
+    # good Arrow column and firepanda makes them, but pandas has no integer
+    # column that holds one, so a conversion asked for through the pandas
+    # surface has nowhere to put it.
+    var values = Array[DType.int64](2)
+    values.set_valid(0, 1)
+    values.set_null(1)
+    assert_false(integer_ready(AnyArray(values^)))
+
+
+def test_both_infinities_are_not_ready_to_be_integers() raises:
+    var up = Array[DType.float64](1)
+    up.set_valid(0, inf[DType.float64]())
+    assert_false(integer_ready(AnyArray(up^)))
+
+    var down = Array[DType.float64](1)
+    down.set_valid(0, -inf[DType.float64]())
+    assert_false(integer_ready(AnyArray(down^)))
+
+
+def test_text_is_always_ready_because_the_parser_decides() raises:
+    # Nothing here can tell whether "banana" is an integer without doing the
+    # work the cast is about to do anyway, so text is waved through and the
+    # parser reports what it finds.
+    assert_true(integer_ready(AnyArray(text(words("1", "banana")))))
 
 
 def main() raises:
