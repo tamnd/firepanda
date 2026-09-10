@@ -34,6 +34,7 @@ from firepanda.array.chunked import ChunkedArray
 from firepanda.dtype.logical import LogicalType, logical_for
 
 from .cast import cast_any
+from .nulls import nan_over_nulls, widens_for_missing
 from .select import filter_any, take_any
 
 
@@ -209,6 +210,37 @@ def cast_chunked(
     var out = ChunkedArray(logical_for(to))
     for c in range(col.num_chunks()):
         out.append(cast_any(col.chunks[c], to, strict))
+    return out^
+
+
+def widen_chunked_for_missing(col: ChunkedArray) raises -> ChunkedArray:
+    """Reads a column the way pandas would have read it, chunk by chunk.
+
+    The decision is made once for the whole column and then applied to every
+    piece, which is why it goes through `widens_for_missing` rather than
+    calling the single column entry point per chunk. Asking each chunk for
+    itself would widen the chunks that hold a missing row and leave the others
+    as they were, and a column whose first piece is int64 and whose second is
+    float64 is not a column.
+
+    Args:
+        col: The column as Arrow has it.
+
+    Returns:
+        The column as pandas would have read it, in the same number of pieces.
+
+    Raises:
+        Error: If the widening cast fails, which it cannot for a numeric column.
+    """
+    if not widens_for_missing(col.type, col.nulls):
+        return ChunkedArray(copy=col)
+    var floating = col.type.is_float()
+    var out = ChunkedArray(col.type if floating else LogicalType.FLOAT64)
+    for c in range(col.num_chunks()):
+        if floating:
+            out.append(nan_over_nulls(AnyArray(copy=col.chunks[c])))
+        else:
+            out.append(nan_over_nulls(cast_any(col.chunks[c], DType.float64)))
     return out^
 
 

@@ -759,6 +759,15 @@ def open_csv(path: PythonObject) raises -> PythonObject:
     reader does not: everything that goes wrong reading a file is an `OSError`
     to a Python caller.
 
+    The frame is widened on the way out. `read_csv` is a pandas name with a
+    pandas meaning, and what pandas means by it is that a column of numbers with
+    a gap in it comes back as float64 with a NaN in the gap, because a numpy
+    integer array has nowhere to record absence. Arrow does have somewhere, and
+    this library uses it everywhere else, but a caller who typed `read_csv` has
+    asked for the pandas reading of the file and should be handed the frame
+    pandas would have handed them. `firepanda.from_arrow` is the door that keeps
+    Arrow's answer, and `open_arrow` below says why. See #171 and document 20.
+
     Args:
         path: The path to read.
 
@@ -767,7 +776,9 @@ def open_csv(path: PythonObject) raises -> PythonObject:
     """
     try:
         return PythonObject(
-            alloc=PyDataFrame(ArcPointer(read_csv(String(path))))
+            alloc=PyDataFrame(
+                ArcPointer(read_csv(String(path)).widen_for_missing())
+            )
         )
     except cause:
         raise retagged(IO, cause)
