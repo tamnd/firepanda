@@ -165,6 +165,29 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = series.def_method[PySeries.cast](
         "cast", docstring="The column converted to another type."
     )
+    _ = series.def_method[PySeries.categories](
+        "categories", docstring="A category column's categories, as an index."
+    )
+    _ = series.def_method[PySeries.codes](
+        "codes", docstring="The codes of a category column, as positions."
+    )
+    _ = series.def_method[PySeries.ordered](
+        "ordered", docstring="Whether the categories have a meaningful order."
+    )
+    _ = series.def_method[PySeries.set_ordered](
+        "set_ordered", docstring="The same categories, ordered or not."
+    )
+    _ = series.def_method[PySeries.relabel_categories](
+        "relabel_categories",
+        docstring="New labels for the categories, matched by position.",
+    )
+    _ = series.def_method[PySeries.recategorize](
+        "recategorize", docstring="New categories, matched by value."
+    )
+    _ = series.def_method[PySeries.drop_unused_categories](
+        "drop_unused_categories",
+        docstring="Only the categories that appear in the values.",
+    )
     _ = series.def_method[PySeries.monotonic](
         "monotonic",
         docstring="Whether the column is sorted, one way or the other.",

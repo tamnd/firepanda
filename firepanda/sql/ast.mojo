@@ -36,11 +36,11 @@ the arena it came from, so every field says which arena it points into.
 
 A node whose kind needs more parts than the four fields hold keeps them in a
 fixed length run instead, and the entries are named by constant. The query node
-is the only one that does this, because six clauses do not fit in four fields
+is the only one that does this, because seven clauses do not fit in four fields
 and splitting a `SELECT` across two nodes to make them fit would be worse.
 
-What is not here yet is window specifications, `PIVOT` and `UNPIVOT`, and the
-statements that are not a `SELECT`. They arrive with the rest of S2.
+What is not here yet is `PIVOT` and `UNPIVOT`, and the statements that are not
+a `SELECT`. They arrive with the rest of S2.
 """
 
 comptime NO_NODE: UInt32 = 0
@@ -83,8 +83,8 @@ comptime EXPR_FUNCTION: UInt8 = 4
 
 `payload` is a run of interned name parts, so a qualified `main.f` keeps its
 qualification. `children` is a run of argument expressions. `a` is a bit set of
-the `CALL_` flags. `b` is reserved for the modifier node that carries `ORDER
-BY`, `FILTER` and `OVER`, and is 0 until that node exists.
+the `CALL_` flags. `b` is the `EXPR_WINDOW` the `OVER` names, and is 0 for a
+call with no `OVER` on it, which is most of them.
 
 An operator is not one of these even where the grammar spells it as one. The
 printer has to know that `+` goes between its operands and `f` goes before
@@ -195,6 +195,169 @@ comptime EXPR_IN_SUBQUERY: UInt8 = 17
 holding an index that means one of two things is how a wrong arena read gets
 written.
 """
+
+
+comptime EXPR_WINDOW: UInt8 = 18
+"""What follows `OVER`, and what `WINDOW w AS (...)` defines.
+
+`children` is a run of the `PARTITION BY` expressions, `a` is a run of
+`STMT_ORDER` nodes for the window's own `ORDER BY`, `b` is the `EXPR_FRAME`,
+and `payload` is the interned name of the window this one starts from, which
+is 0 for the usual case of a window written out in full.
+
+It is an expression rather than a statement because the only thing that holds
+one is a call, and a call is an expression. `OVER w` and `OVER (w)` both come
+out as a node with nothing but the name on it, because the two spellings mean
+the same thing and DuckDB's grammar gives them separate rules only so it can
+tell the parentheses apart.
+"""
+
+comptime EXPR_FRAME: UInt8 = 19
+"""The `ROWS`, `RANGE` or `GROUPS` clause inside a window.
+
+`a` is the expression on the start bound and `b` is the one on the end bound,
+either of which is 0 when that bound is written in keywords rather than as a
+count. `payload` is the tags, packed by `frame_tags`.
+
+A bound is a tag and an expression rather than a node of its own, because a
+bound has nothing else in it and a node per bound would be two more arena
+entries for every window that names a frame.
+"""
+
+
+comptime FRAME_ROWS: UInt32 = 1
+"""`ROWS`, which counts rows."""
+
+comptime FRAME_RANGE: UInt32 = 2
+"""`RANGE`, which counts by the value of the `ORDER BY` expression."""
+
+comptime FRAME_GROUPS: UInt32 = 3
+"""`GROUPS`, which counts peer groups."""
+
+
+comptime BOUND_NONE: UInt32 = 0
+"""No such bound, which is what the end bound of a frame with no `BETWEEN` is.
+"""
+
+comptime BOUND_PRECEDING: UInt32 = 1
+"""`n PRECEDING`, where `n` is the bound's expression."""
+
+comptime BOUND_FOLLOWING: UInt32 = 2
+"""`n FOLLOWING`, where `n` is the bound's expression."""
+
+comptime BOUND_UNBOUNDED_PRECEDING: UInt32 = 3
+"""`UNBOUNDED PRECEDING`, which carries no expression."""
+
+comptime BOUND_UNBOUNDED_FOLLOWING: UInt32 = 4
+"""`UNBOUNDED FOLLOWING`, which carries no expression."""
+
+comptime BOUND_CURRENT_ROW: UInt32 = 5
+"""`CURRENT ROW`, which carries no expression."""
+
+
+comptime EXCLUDE_NONE: UInt32 = 0
+"""No `EXCLUDE`, which is the same as `EXCLUDE NO OTHERS` and is the default."""
+
+comptime EXCLUDE_CURRENT_ROW: UInt32 = 1
+"""`EXCLUDE CURRENT ROW`."""
+
+comptime EXCLUDE_GROUP: UInt32 = 2
+"""`EXCLUDE GROUP`."""
+
+comptime EXCLUDE_TIES: UInt32 = 3
+"""`EXCLUDE TIES`."""
+
+comptime EXCLUDE_NO_OTHERS: UInt32 = 4
+"""`EXCLUDE NO OTHERS`, which is the default said out loud.
+
+It is a tag of its own rather than `EXCLUDE_NONE`, because the printer writes
+back what was written and dropping the words would be a change to the text for
+no reason.
+"""
+
+
+comptime _FRAME_FIELD: UInt32 = 15
+"""The mask one packed frame tag fits in, four bits."""
+
+comptime _FRAME_MODE_SHIFT: UInt32 = 0
+comptime _FRAME_START_SHIFT: UInt32 = 4
+comptime _FRAME_END_SHIFT: UInt32 = 8
+comptime _FRAME_EXCLUDE_SHIFT: UInt32 = 12
+
+
+def frame_tags(
+    mode: UInt32, start: UInt32, end: UInt32, exclude: UInt32
+) -> UInt32:
+    """Packs the four tags of a frame into one field.
+
+    Four tags and four usable fields on an `Expr`, two of which the bound
+    expressions need, so the tags share one. None of them has more than six
+    values, so four bits each is room to spare and the packing needs no
+    thought when a value gets added.
+
+    Args:
+        mode: One of the `FRAME_` constants.
+        start: One of the `BOUND_` constants.
+        end: One of the `BOUND_` constants, `BOUND_NONE` for no `BETWEEN`.
+        exclude: One of the `EXCLUDE_` constants.
+
+    Returns:
+        The packed value, for an `EXPR_FRAME` payload.
+    """
+    return (
+        (mode << _FRAME_MODE_SHIFT)
+        | (start << _FRAME_START_SHIFT)
+        | (end << _FRAME_END_SHIFT)
+        | (exclude << _FRAME_EXCLUDE_SHIFT)
+    )
+
+
+def frame_mode(tags: UInt32) -> UInt32:
+    """Reads the framing out of a packed frame payload.
+
+    Args:
+        tags: An `EXPR_FRAME` payload.
+
+    Returns:
+        One of the `FRAME_` constants.
+    """
+    return (tags >> _FRAME_MODE_SHIFT) & _FRAME_FIELD
+
+
+def frame_start(tags: UInt32) -> UInt32:
+    """Reads the start bound out of a packed frame payload.
+
+    Args:
+        tags: An `EXPR_FRAME` payload.
+
+    Returns:
+        One of the `BOUND_` constants.
+    """
+    return (tags >> _FRAME_START_SHIFT) & _FRAME_FIELD
+
+
+def frame_end(tags: UInt32) -> UInt32:
+    """Reads the end bound out of a packed frame payload.
+
+    Args:
+        tags: An `EXPR_FRAME` payload.
+
+    Returns:
+        One of the `BOUND_` constants, `BOUND_NONE` for no `BETWEEN`.
+    """
+    return (tags >> _FRAME_END_SHIFT) & _FRAME_FIELD
+
+
+def frame_exclude(tags: UInt32) -> UInt32:
+    """Reads the exclusion out of a packed frame payload.
+
+    Args:
+        tags: An `EXPR_FRAME` payload.
+
+    Returns:
+        One of the `EXCLUDE_` constants.
+    """
+    return (tags >> _FRAME_EXCLUDE_SHIFT) & _FRAME_FIELD
 
 
 comptime LITERAL_NULL: UInt32 = 0
@@ -411,8 +574,18 @@ entries are a run of further `STMT_GROUP` nodes in `children`. `GROUP_ALL` and
 `GROUP_EMPTY` carry nothing.
 """
 
+comptime STMT_WINDOW: UInt8 = 11
+"""One entry of a `WINDOW` clause, `w AS (PARTITION BY x)`.
 
-comptime CLAUSE_SLOTS: Int = 6
+`a` is the `EXPR_WINDOW` and `payload` is the interned name it is given.
+
+It is not a `STMT_ITEM` with the name in the alias slot, even though the two
+have the same shape, because a reader who finds a `STMT_ITEM` in a clause run
+has every reason to think it is part of a `SELECT` list.
+"""
+
+
+comptime CLAUSE_SLOTS: Int = 7
 """How many entries a query node's clause run always has."""
 
 comptime CLAUSE_PROJECTION: Int = 0
@@ -432,6 +605,9 @@ comptime CLAUSE_HAVING: Int = 4
 
 comptime CLAUSE_QUALIFY: Int = 5
 """The `QUALIFY` expression, or 0."""
+
+comptime CLAUSE_WINDOW: Int = 6
+"""The `WINDOW`, a run of `STMT_WINDOW` nodes, empty when there is none."""
 
 
 comptime SELECT_DISTINCT: UInt32 = 1
@@ -1239,6 +1415,71 @@ struct Ast(Movable):
             )
         )
 
+    def window(
+        mut self,
+        partition: List[UInt32] = List[UInt32](),
+        ordering: List[UInt32] = List[UInt32](),
+        frame: UInt32 = NO_NODE,
+        base: StringSlice = "",
+        token: UInt32 = 0,
+    ) -> UInt32:
+        """Builds the window a call is computed `OVER`.
+
+        Args:
+            partition: The `PARTITION BY` expressions, in order.
+            ordering: The window's `ORDER BY`, a list of `STMT_ORDER` nodes.
+            frame: The `EXPR_FRAME`, or 0 for a window with no frame.
+            base: The window this one starts from, empty for none.
+            token: The token it starts at.
+
+        Returns:
+            The expression node index.
+        """
+        return self.add(
+            Expr(
+                kind=EXPR_WINDOW,
+                token=token,
+                a=self.run(ordering),
+                b=frame,
+                children=self.run(partition),
+                payload=self.intern(base),
+            )
+        )
+
+    def frame(
+        mut self,
+        mode: UInt32,
+        start: UInt32,
+        end: UInt32 = BOUND_NONE,
+        exclude: UInt32 = EXCLUDE_NONE,
+        start_at: UInt32 = NO_NODE,
+        end_at: UInt32 = NO_NODE,
+        token: UInt32 = 0,
+    ) -> UInt32:
+        """Builds the `ROWS`, `RANGE` or `GROUPS` clause of a window.
+
+        Args:
+            mode: One of the `FRAME_` constants.
+            start: The start bound, one of the `BOUND_` constants.
+            end: The end bound, `BOUND_NONE` when there is no `BETWEEN`.
+            exclude: One of the `EXCLUDE_` constants.
+            start_at: The start bound's expression, or 0.
+            end_at: The end bound's expression, or 0.
+            token: The token it starts at.
+
+        Returns:
+            The expression node index.
+        """
+        return self.add(
+            Expr(
+                kind=EXPR_FRAME,
+                token=token,
+                a=start_at,
+                b=end_at,
+                payload=frame_tags(mode, start, end, exclude),
+            )
+        )
+
     def add_ref(mut self, var node: Ref) -> UInt32:
         """Puts a node in the table reference arena.
 
@@ -1489,6 +1730,7 @@ struct Ast(Movable):
         qualify: UInt32 = NO_NODE,
         flags: UInt32 = 0,
         distinct_on: List[UInt32] = List[UInt32](),
+        windows: List[UInt32] = List[UInt32](),
         token: UInt32 = 0,
     ) -> UInt32:
         """Builds one `SELECT ... FROM ... WHERE ...` block.
@@ -1502,6 +1744,7 @@ struct Ast(Movable):
             qualify: The `QUALIFY` expression, or 0.
             flags: A bit set of the `SELECT_` constants.
             distinct_on: The `DISTINCT ON` expressions, in order.
+            windows: The `WINDOW` clause, a list of `STMT_WINDOW` nodes.
             token: The token it starts at.
 
         Returns:
@@ -1514,6 +1757,7 @@ struct Ast(Movable):
         clauses[CLAUSE_GROUP] = self.run(grouping)
         clauses[CLAUSE_HAVING] = having
         clauses[CLAUSE_QUALIFY] = qualify
+        clauses[CLAUSE_WINDOW] = self.run(windows)
         return self.add_stmt(
             Stmt(
                 kind=STMT_QUERY,
@@ -1725,5 +1969,30 @@ struct Ast(Movable):
                 a=expression,
                 b=tag,
                 children=self.run(entries),
+            )
+        )
+
+    def window_definition(
+        mut self,
+        name: StringSlice,
+        specification: UInt32,
+        token: UInt32 = 0,
+    ) -> UInt32:
+        """Builds one entry of a `WINDOW` clause.
+
+        Args:
+            name: The name the window is given.
+            specification: The `EXPR_WINDOW` it stands for.
+            token: The token it starts at.
+
+        Returns:
+            The statement node index.
+        """
+        return self.add_stmt(
+            Stmt(
+                kind=STMT_WINDOW,
+                token=token,
+                a=specification,
+                payload=self.intern(name),
             )
         )
