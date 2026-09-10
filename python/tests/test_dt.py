@@ -127,6 +127,15 @@ def stamps(firepanda: ModuleType, values: list[Any] = STAMPS, unit: str = "us") 
     return firepanda.from_arrow(table)["t"]
 
 
+def zoned(series: Any) -> Any:
+    """Puts a zone on a timestamp column, for the tests that need one.
+
+    Both libraries take this spelling, so it is written once here rather than
+    twice in the parametrized rows.
+    """
+    return series.dt.tz_localize("UTC")
+
+
 def spans(firepanda: ModuleType) -> Any:
     """Builds a duration column, the same way."""
     import pyarrow as pa
@@ -388,15 +397,15 @@ def test_the_five_unwritten_names_are_absent_rather_than_refusing(
 @pytest.mark.parametrize(
     ("call", "expected"),
     [
-        (lambda dt_: dt_.floor("h", ambiguous="NaT"), "ambiguous="),
-        (lambda dt_: dt_.ceil("h", nonexistent="shift_forward"), "nonexistent="),
-        (lambda dt_: dt_.round("h", ambiguous="infer"), "ambiguous="),
-        (lambda dt_: dt_.as_unit("s", round_ok=False), "round_ok="),
-        (lambda dt_: dt_.tz_localize("UTC", ambiguous="NaT"), "ambiguous="),
-        (lambda dt_: dt_.tz_localize("UTC", nonexistent="NaT"), "nonexistent="),
-        (lambda dt_: dt_.tz_convert(None), r"tz_convert\(None\)"),
-        (lambda dt_: dt_.floor(1), "freq has to be a string"),
-        (lambda dt_: dt_.tz_localize(3), "tz has to be a zone name"),
+        (lambda s: zoned(s).dt.floor("h", ambiguous="NaT"), "ambiguous="),
+        (lambda s: zoned(s).dt.ceil("h", nonexistent="shift_forward"), "nonexistent="),
+        (lambda s: zoned(s).dt.round("h", ambiguous="infer"), "ambiguous="),
+        (lambda s: s.dt.as_unit("s", round_ok=False), "round_ok="),
+        (lambda s: s.dt.tz_localize("UTC", ambiguous="NaT"), "ambiguous="),
+        (lambda s: s.dt.tz_localize("UTC", nonexistent="NaT"), "nonexistent="),
+        (lambda s: s.dt.tz_convert(None), r"tz_convert\(None\)"),
+        (lambda s: s.dt.floor(1), "freq has to be a string"),
+        (lambda s: s.dt.tz_localize(3), "tz has to be a zone name"),
     ],
 )
 def test_a_declared_argument_that_is_not_written_says_so(
@@ -408,9 +417,61 @@ def test_a_declared_argument_that_is_not_written_says_so(
     for the transformations. A parameter that is accepted and ignored is right at
     its default and wrong everywhere else, and where it is wrong is where a real
     program uses it.
+
+    The first three rounding rows put a zone on the column before they call,
+    because pandas reads the two daylight saving policies there only when there
+    is one, and a naive column comes back rounded with them unread. That is what
+    the test below this one is about.
     """
     with pytest.raises(NotImplementedError, match=expected):
-        call(stamps(firepanda).dt)
+        call(stamps(firepanda))
+
+
+@both
+@pytest.mark.parametrize("policy", ["nonexistent", "ambiguous"])
+def test_a_naive_column_reads_neither_daylight_saving_policy(
+    firepanda: ModuleType, policy: str
+) -> None:
+    """A column with no zone rounds with whatever was passed for the two policies.
+
+    Measured against pandas rather than reasoned about. There is no daylight
+    saving without a zone, so there is nothing for a policy to decide, and pandas
+    hands the column straight back with a misspelling in its arguments unread.
+    Refusing here would be firepanda turning away input pandas takes, which is
+    the one direction of difference this library does not get to have, and it is
+    worse than a wrong message because the caller's program stops.
+    """
+    mine = stamps(firepanda).dt.floor("h", **{policy: "not a policy"})
+    assert like(read(mine), list(theirs().dt.floor("h", **{policy: "not a policy"})))
+
+
+@both
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda s: s.dt.tz_localize("UTC", nonexistent="not a policy"),
+        lambda s: zoned(s).dt.floor("h", nonexistent="not a policy"),
+        lambda s: zoned(s).dt.ceil("h", nonexistent="not a policy"),
+        lambda s: zoned(s).dt.round("h", nonexistent="not a policy"),
+    ],
+)
+def test_a_misspelled_policy_is_a_typo_and_not_a_gap(firepanda: ModuleType, call: Any) -> None:
+    """The class says which of the two mistakes this is, and they are different.
+
+    A word pandas takes and firepanda has not written is a schedule, and it comes
+    back `NotImplementedError` naming the issue. A word pandas does not take
+    either is a typo in the caller's own line, and pandas answers that with a
+    `ValueError` listing the words that would have worked, so this does too.
+    Handing somebody who misspelled `shift_forward` a `NotImplementedError` sends
+    them to read a changelog about a feature they never wanted.
+
+    `ambiguous` has no row here on purpose. pandas does not check that word on a
+    column at all, and the reason is written where the check is not.
+    """
+    with pytest.raises(ValueError, match="nonexistent argument must be one of"):
+        call(stamps(firepanda))
+    with pytest.raises(ValueError, match="nonexistent argument must be one of"):
+        call(theirs())
 
 
 @both

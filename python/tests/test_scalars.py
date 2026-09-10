@@ -471,6 +471,67 @@ def test_tz_localize_agrees_with_pandas(firepanda: ModuleType, text: str, tz: An
 
 
 @needs_pandas
+@pytest.mark.parametrize(
+    ("policy", "given"),
+    [
+        ("ambiguous", "not a policy"),
+        ("ambiguous", "infer"),
+        ("ambiguous", 3),
+        ("nonexistent", "not a policy"),
+        ("nonexistent", 3),
+    ],
+)
+def test_a_misspelled_zone_policy_fails_the_way_pandas_fails(
+    firepanda: ModuleType, policy: str, given: Any
+) -> None:
+    """Neither policy is written yet, and the class still has to be the right one.
+
+    A word pandas takes and firepanda has not written is a schedule, and it comes
+    back `NotImplementedError` naming the issue. A word pandas does not take
+    either is a typo in the caller's own line, and pandas answers that with a
+    `ValueError` listing the words that would have worked. `agree` asks only
+    which of those two happened, which is the whole question.
+
+    `infer` is on the list because it is the surprise. It is a real word on a
+    column and is not one on a scalar, since a single moment has no neighbours to
+    infer a direction from, and pandas refuses it here while taking it there.
+    """
+    import pandas as pd
+
+    agree(
+        lambda: firepanda.Timestamp("2026-09-05 13:45:06").tz_localize("UTC", **{policy: given}),
+        lambda: pd.Timestamp("2026-09-05 13:45:06").tz_localize("UTC", **{policy: given}),
+        f"tz_localize({policy}={given!r})",
+    )
+
+
+@needs_pandas
+@pytest.mark.parametrize("policy", ["ambiguous", "nonexistent"])
+@pytest.mark.parametrize("tz", ["UTC", None])
+def test_rounding_reads_the_zone_policies_only_when_there_is_a_zone(
+    firepanda: ModuleType, policy: str, tz: Any
+) -> None:
+    """A naive moment rounds with a misspelled policy in its arguments unread.
+
+    Measured against pandas rather than reasoned about. There is no daylight
+    saving without a zone, so there is nothing for either policy to decide, and
+    pandas hands the moment straight back. Refusing it would be firepanda turning
+    away input pandas takes, which is the one direction of difference this
+    library does not get to have. Put a zone on the same moment and both
+    libraries refuse the same misspelling.
+    """
+    import pandas as pd
+
+    agree(
+        lambda: firepanda.Timestamp("2026-09-05 13:45:06", tz=tz).floor(
+            "h", **{policy: "not a policy"}
+        ),
+        lambda: pd.Timestamp("2026-09-05 13:45:06", tz=tz).floor("h", **{policy: "not a policy"}),
+        f"floor({policy}=) at tz={tz!r}",
+    )
+
+
+@needs_pandas
 @pytest.mark.parametrize("tz", ["UTC", "Europe/Paris", "America/New_York", "+01:00", None])
 @pytest.mark.parametrize("text", ["2026-09-05 13:45:06.123456789", "2026-01-05 13:45:06"])
 def test_tz_convert_agrees_with_pandas(firepanda: ModuleType, text: str, tz: Any) -> None:
