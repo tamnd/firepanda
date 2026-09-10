@@ -39,9 +39,16 @@ def stage(root: Path) -> Path:
     """
     package = root / "firepanda"
     package.mkdir()
+    junk = shutil.ignore_patterns("__pycache__")
     for source in PACKAGE.iterdir():
         if source.is_file():
             shutil.copy2(source, package / source.name)
+        elif source.is_dir() and source.name != "__pycache__":
+            # `firepanda.api` is a subpackage and a wheel carries it whole, so
+            # staging that copied only the top level files would import a
+            # firepanda with no `api` in it and every test of it would fail on a
+            # layout the wheel does not have.
+            shutil.copytree(source, package / source.name, ignore=junk)
     for source in BUILT.iterdir():
         shutil.copy2(source, package / source.name)
     return package

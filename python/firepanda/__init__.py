@@ -34,7 +34,7 @@ whichever function they called first.
 
 from __future__ import annotations
 
-from . import _firepanda, errors
+from . import _firepanda, api, errors
 from ._frame import DataFrame, Index, Series, from_arrow, read_csv
 from ._pandas import to_datetime
 
@@ -43,6 +43,7 @@ __all__ = [
     "Index",
     "Series",
     "__version__",
+    "api",
     "errors",
     "from_arrow",
     "read_csv",

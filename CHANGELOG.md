@@ -8,6 +8,26 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### The namespace other libraries import
+
+`firepanda.api.types` exists and carries forty five names. This is the corner of pandas that other libraries reach for rather than the corner a person types: scikit-learn asks `is_numeric_dtype` before it fits, seaborn asks it before it picks a chart, and a good deal of pandas' own argument handling asks `is_list_like` on the way in. None of that code knows it is talking to firepanda, which is what the compatibility claim is really about. The board reported ninety unimplemented runs behind this namespace and every one of them reported the same sentence, which is that `firepanda` has no attribute called `api`.
+
+Fifteen of the names are questions about a Python object, twenty four are questions about a dtype, four are the dtype classes that carry parameters a name cannot, and the last two are `infer_dtype` and `union_categoricals`. Nothing crosses the language boundary and nothing in the core changed, so all of it is written by hand rather than generated. The generator earns its place when the bodies are the same shape, and here they are not.
+
+Every answer is measured against a running pandas rather than read out of the documentation, because the answers are not what anybody remembers. `is_numeric_dtype` says yes to a bool and yes to a complex number, `is_any_real_numeric_dtype` says no to both, and that is the entire difference between the two. `is_string_dtype` says yes to `object`, because pandas said yes to it long before there was a string dtype and code was written against that answer. `is_number` says yes to a bool and no to a numpy bool, which is the one place the two spellings of the same idea disagree. `IntervalDtype.name` is the bare word `interval` while `str` of the same object is `interval[int64, right]`, which reads like an oversight until you notice that `select_dtypes` matches on the name. Four of those were wrong in the first draft and the differential tests caught all four before the board did.
+
+The dtype vocabulary was already decided and this follows it. `Series.dtype` hands back `'int64'` rather than a numpy dtype object, so a dtype here is normalised to its pandas spelling as a string and every predicate reads the string. `pandas_dtype` hands back that string for the dtypes with no parameters and one of the four classes for the dtypes that have them, since the name alone would lose the categories, the zone, the endpoints or the frequency.
+
+Several of these have to answer correctly about a `numpy.float32`, because a caller who has numpy will hand one over, and firepanda has no dependencies. None of them import numpy. A value the caller is holding cannot be a numpy scalar unless numpy is already imported, so the numpy scalar types are reached through `sys.modules`, which costs a dictionary hit and never pulls numpy into an install that does not have it. Where that is not enough the builtin ABCs in `numbers` do the work, since numpy registers its scalar types with them.
+
+Five names are deprecated in pandas 3.0 and warn here too, with the same message, because a program running under `-W error::DeprecationWarning` has to break in the same place in both libraries. The class is `DeprecationWarning` rather than the pandas subclass of it, since that name belongs to the pandas release schedule and firepanda has no version four to point at.
+
+Two deliberate differences, both written down where they happen. `is_re_compilable` answers False for a string that is not a valid pattern, where pandas raises `re.PatternError`, because pandas catches TypeError and not `re.error`. The name is a question and this answers it, and it goes in the divergence registry with that reason. `union_categoricals` refuses, because firepanda stores a categorical column as an Arrow dictionary and has no `Categorical` object to take or to hand back.
+
+Three firepanda dtypes that pandas cannot be asked about get their answers written down with the reason attached. A date column is not a datetime64, which surprises people and is still right, since the two have different widths and different arithmetic. A nested column is nothing pandas has. A binary column reads as a string dtype, which is the exception, because numpy's fixed width bytes dtype does in pandas and it is the same idea.
+
+`pandas.api.extensions`, `indexers`, `interchange` and `typing` stay absent. Each hands out machinery for extending pandas rather than for reading it, firepanda has none to hand out, and an empty module that resolves and then fails on the first name is the shape of failure this project spends most of its effort avoiding. That closes #364.
+
 ### The groupby a pandas program can finally reach
 
 `df.groupby("k").sum()` works, along with fourteen more reductions on a frame group and the same fifteen on a narrowed one. Until now 120 rows of the conformance board reported the same sentence, which was that `DataFrame` has no attribute called `groupby`, and behind that sentence the whole implementation was already written and tested. This is the fourth time the gap has been the binding rather than the library.
