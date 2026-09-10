@@ -92,7 +92,37 @@ from .token import (
     TOKEN_QUOTED_IDENTIFIER,
     TOKEN_STRING,
     Token,
+    caret_at,
     token_text,
+)
+from .unsupported import (
+    ALIAS_COLON,
+    ARRAY_SUBQUERY,
+    CALL_ARGUMENT,
+    CALL_MODIFIER,
+    CUSTOM_OPERATOR,
+    DOTTED_NAME,
+    ESCAPE_STRING,
+    FIELD_ACCESS,
+    IN_BARE_VALUE,
+    IS_UNKNOWN,
+    JOIN_FORM,
+    LIKE_ESCAPE,
+    METHOD_CALL,
+    NOT_SUBQUERY,
+    NO_CASE,
+    OPERATOR,
+    POSTFIX_OPERATOR,
+    QUOTED_NAME,
+    SELECT_CLAUSE,
+    SELECT_SAMPLE,
+    SUBSCRIPT,
+    TABLE_AT,
+    TABLE_MODIFIER,
+    TABLE_SAMPLE,
+    WITH_ORDINALITY,
+    WITH_USING_KEY,
+    not_implemented,
 )
 
 comptime _NO_CASE: UInt8 = 0
@@ -999,9 +1029,7 @@ struct Transform(Movable):
 
         var operator = _span(tree, sql, start, cut)
         if Int(cut) - Int(start) > 1 and not _multiword(operator):
-            raise _unsupported(
-                tree, sql, tail, String(operator, " as an operator")
-            )
+            raise _unsupported(tree, sql, tail, OPERATOR, operator)
 
         var right = work.value(operand)
         if negation != NO_NODE:
@@ -1085,9 +1113,7 @@ struct Transform(Movable):
         var built = work.value(node)
         ref item = ast.exprs[Int(built)]
         if item.kind != EXPR_COLUMN or ast.length(item.children) != 1:
-            raise _unsupported(
-                tree, sql, node, "anything but a plain name here"
-            )
+            raise _unsupported(tree, sql, node, QUOTED_NAME)
         return String(ast.text(ast.at(item.children, 0)))
 
     def _is(
@@ -1154,7 +1180,7 @@ struct Transform(Movable):
             var value = self._only(tree, test)
             var negated = Int(tree.nodes[Int(value)].token_start) - Int(at) > 1
             if _word(tree, sql, value) == "UNKNOWN":
-                raise _unsupported(tree, sql, test, "IS UNKNOWN")
+                raise _unsupported(tree, sql, test, IS_UNKNOWN)
             operators.append("IS NOT" if negated else "IS")
             values.append(value)
             wheres.append(at)
@@ -1233,9 +1259,7 @@ struct Transform(Movable):
                     left, work.value(self._only(tree, right)), negated, at
                 )
             if _first_byte(tree, sql, right) != _LEFT_PAREN:
-                raise _unsupported(
-                    tree, sql, right, "IN over an unparenthesized value"
-                )
+                raise _unsupported(tree, sql, right, IN_BARE_VALUE)
             var candidates = List[UInt32]()
             var items = self._items(tree, self._only(tree, right))
             work.warm(items)
@@ -1245,7 +1269,7 @@ struct Transform(Movable):
 
         # `LikeClause <- LikeVariations OtherOperatorExpression EscapeClause?`.
         if len(inner) > 2:
-            raise _unsupported(tree, sql, inner[2], "ESCAPE on a LIKE")
+            raise _unsupported(tree, sql, inner[2], LIKE_ESCAPE)
         if len(inner) != 2:
             raise _malformed(tree, sql, which, "a like without an operand")
         var operator = _span(
@@ -1288,9 +1312,7 @@ struct Transform(Movable):
         for i in range(last - 1, -1, -1):
             var operator = kids[i]
             if _tokens(tree, operator) != 1:
-                raise _unsupported(
-                    tree, sql, operator, "OPERATOR(...) as a prefix"
-                )
+                raise _unsupported(tree, sql, operator, CUSTOM_OPERATOR)
             var at = tree.nodes[Int(operator)].token_start
             built = ast.unary(_span(tree, sql, at, at + 1), built, at)
         return built
@@ -1333,9 +1355,9 @@ struct Transform(Movable):
                 # else is a struct field access, which needs a kind of its own
                 # and a binder that can tell a field from a column.
                 if _tokens(tree, what) != 2:
-                    raise _unsupported(tree, sql, what, "a method call")
+                    raise _unsupported(tree, sql, what, METHOD_CALL)
                 if ast.exprs[Int(built)].kind != EXPR_COLUMN:
-                    raise _unsupported(tree, sql, what, "a field access")
+                    raise _unsupported(tree, sql, what, FIELD_ACCESS)
                 var names = ast.exprs[Int(built)].children
                 var parts = List[String]()
                 for i in range(ast.length(names)):
@@ -1357,9 +1379,9 @@ struct Transform(Movable):
                 continue
 
             if lead == _LEFT_BRACKET:
-                raise _unsupported(tree, sql, what, "a slice or a subscript")
+                raise _unsupported(tree, sql, what, SUBSCRIPT)
 
-            raise _unsupported(tree, sql, what, "a postfix operator")
+            raise _unsupported(tree, sql, what, POSTFIX_OPERATOR)
         return built
 
     def _function(
@@ -1392,7 +1414,8 @@ struct Transform(Movable):
                 tree,
                 sql,
                 kids[2],
-                String(_word(tree, sql, kids[2]), " on a call"),
+                CALL_MODIFIER,
+                _word(tree, sql, kids[2]),
             )
 
         var parts = self._parts(tree, sql, self._only(tree, kids[0]))
@@ -1416,9 +1439,7 @@ struct Transform(Movable):
                 # The default, so it carries nothing and is not written back.
                 continue
             if lead == "ORDER" or lead == "IGNORE" or lead == "RESPECT":
-                raise _unsupported(
-                    tree, sql, group, String(lead, " inside a call")
-                )
+                raise _unsupported(tree, sql, group, CALL_ARGUMENT, lead)
             var items = self._items(tree, group)
             work.warm(items)
             for item in items:
@@ -1693,7 +1714,7 @@ struct Transform(Movable):
         """
         var bounded = self._only(tree, self._only(tree, node))
         if _first_byte(tree, sql, bounded) != _LEFT_BRACKET:
-            raise _unsupported(tree, sql, bounded, "ARRAY over a subquery")
+            raise _unsupported(tree, sql, bounded, ARRAY_SUBQUERY)
         var elements = List[UInt32]()
         var items = self._items(tree, bounded)
         work.warm(items)
@@ -1832,7 +1853,7 @@ struct Transform(Movable):
                 nowhere to put.
         """
         if _tokens(tree, node) != 1:
-            raise _unsupported(tree, sql, node, "a dotted name here")
+            raise _unsupported(tree, sql, node, DOTTED_NAME)
         return _identifier(
             sql, tree.tokens[Int(tree.nodes[Int(node)].token_start)]
         )
@@ -2004,7 +2025,7 @@ struct Transform(Movable):
         if exists:
             return ast.exists(statement, negated, at)
         if negated:
-            raise _unsupported(tree, sql, node, "NOT in front of a subquery")
+            raise _unsupported(tree, sql, node, NOT_SUBQUERY)
         return ast.subquery(statement, at)
 
     def _select(
@@ -2166,11 +2187,9 @@ struct Transform(Movable):
             elif lead == "QUALIFY":
                 qualify = kids[i]
             elif self._marked(tree, kids[i], _MARK_SAMPLE):
-                raise _unsupported(tree, sql, kids[i], "a sample on a SELECT")
+                raise _unsupported(tree, sql, kids[i], SELECT_SAMPLE)
             else:
-                raise _unsupported(
-                    tree, sql, kids[i], String(lead, " in a SELECT")
-                )
+                raise _unsupported(tree, sql, kids[i], SELECT_CLAUSE, lead)
 
         var wanted = List[UInt32]()
         wanted.append(block)
@@ -2430,14 +2449,14 @@ struct Transform(Movable):
         var clause = self._only(tree, node)
         if not self._marked(tree, clause, _MARK_JOIN):
             raise _unsupported(
-                tree, sql, node, String(_word(tree, sql, node), " on a table")
+                tree, sql, node, TABLE_MODIFIER, _word(tree, sql, node)
             )
         var form = self._only(tree, clause)
         if self._marked(tree, form, _MARK_JOIN_ON) or self._marked(
             tree, form, _MARK_JOIN_PLAIN
         ):
             return form
-        raise _unsupported(tree, sql, form, "this kind of join")
+        raise _unsupported(tree, sql, form, JOIN_FORM)
 
     def _join_right(self, tree: Parse, form: UInt32) raises -> UInt32:
         """The right side of a join.
@@ -2528,11 +2547,11 @@ struct Transform(Movable):
             if self._marked(tree, kid, _MARK_TABLE_ALIAS):
                 named = kid
             elif self._marked(tree, kid, _MARK_AT):
-                raise _unsupported(tree, sql, kid, "AT on a table")
+                raise _unsupported(tree, sql, kid, TABLE_AT)
             elif self._marked(tree, kid, _MARK_SAMPLE):
-                raise _unsupported(tree, sql, kid, "a sample on a table")
+                raise _unsupported(tree, sql, kid, TABLE_SAMPLE)
             elif self._marked(tree, kid, _MARK_ALIAS_COLON):
-                raise _unsupported(tree, sql, kid, "the name: table spelling")
+                raise _unsupported(tree, sql, kid, ALIAS_COLON)
             else:
                 name = kid
         if name == NO_NODE:
@@ -2576,7 +2595,7 @@ struct Transform(Movable):
             elif self._marked(tree, kid, _MARK_LATERAL):
                 lateral = True
             elif self._marked(tree, kid, _MARK_ALIAS_COLON):
-                raise _unsupported(tree, sql, kid, "the name: table spelling")
+                raise _unsupported(tree, sql, kid, ALIAS_COLON)
             else:
                 reference = kid
         if reference == NO_NODE:
@@ -2622,9 +2641,9 @@ struct Transform(Movable):
             if self._marked(tree, kid, _MARK_TABLE_ALIAS):
                 named = kid
             elif self._marked(tree, kid, _MARK_SAMPLE):
-                raise _unsupported(tree, sql, kid, "a sample on a table")
+                raise _unsupported(tree, sql, kid, TABLE_SAMPLE)
             elif self._marked(tree, kid, _MARK_ALIAS_COLON):
-                raise _unsupported(tree, sql, kid, "the name: table spelling")
+                raise _unsupported(tree, sql, kid, ALIAS_COLON)
             else:
                 inner = kid
         if inner == NO_NODE:
@@ -2668,7 +2687,7 @@ struct Transform(Movable):
             if self._marked(tree, kid, _MARK_TABLE_ALIAS):
                 named = kid
             elif self._marked(tree, kid, _MARK_ALIAS_COLON):
-                raise _unsupported(tree, sql, kid, "the name: table spelling")
+                raise _unsupported(tree, sql, kid, ALIAS_COLON)
             else:
                 rows = kid
         if rows == NO_NODE:
@@ -2714,7 +2733,7 @@ struct Transform(Movable):
             elif self._marked(tree, kid, _MARK_LATERAL):
                 lateral = True
             elif self._marked(tree, kid, _MARK_ORDINALITY):
-                raise _unsupported(tree, sql, kid, "WITH ORDINALITY")
+                raise _unsupported(tree, sql, kid, WITH_ORDINALITY)
             elif name == NO_NODE:
                 name = kid
             else:
@@ -3128,7 +3147,7 @@ struct Transform(Movable):
                 for name in self._items(tree, listed):
                     columns.append(self._plain(tree, sql, name))
             elif self._marked(tree, kids[i], _MARK_USING_KEY):
-                raise _unsupported(tree, sql, kids[i], "USING KEY on a WITH")
+                raise _unsupported(tree, sql, kids[i], WITH_USING_KEY)
             elif self._marked(tree, kids[i], _MARK_MATERIALIZED):
                 # `Materialized <- 'NOT'? 'MATERIALIZED'`.
                 materialize = (
@@ -3233,40 +3252,55 @@ def _no_case(tree: Parse, sql: StringSlice, node: UInt32) -> Error:
     Returns:
         The error.
     """
-    return Error(
-        String(
-            "firepanda does not support this yet: grammar rule ",
-            tree.nodes[Int(node)].rule,
-            " at ",
-            _here(tree, sql, node),
-            ". See https://github.com/tamnd/firepanda/issues/307",
-        )
+    return _unsupported(
+        tree, sql, node, NO_CASE, String(tree.nodes[Int(node)].rule)
     )
 
 
 def _unsupported(
-    tree: Parse, sql: StringSlice, node: UInt32, what: StringSlice
+    tree: Parse,
+    sql: StringSlice,
+    node: UInt32,
+    feature: UInt16,
+    detail: StringSlice = "",
 ) -> Error:
     """Builds the error a form with no case raises.
+
+    The words are the refusal table's rather than this file's, because a
+    refusal is worth nothing unless somebody can find out what the whole set of
+    them is, and a `raise` written where the cases ran out is not in any set.
+    All this adds is the position, which is the one part of the message the
+    table cannot know.
+
+    Args:
+        tree: The parse.
+        sql: The query.
+        node: The node the caret goes under.
+        feature: The entry in firepanda/sql/unsupported.mojo.
+        detail: The text from the query the entry holds a `{}` for.
+
+    Returns:
+        The error.
+    """
+    return not_implemented(feature, detail, _at(tree, sql, node))
+
+
+def _at(tree: Parse, sql: StringSlice, node: UInt32) -> String:
+    """The caret block pointing at where a node starts.
 
     Args:
         tree: The parse.
         sql: The query.
         node: The node.
-        what: The form, named the way somebody reading the query would name it.
 
     Returns:
-        The error.
+        The two lines a refusal quotes, empty if the node starts past the end
+        of the query.
     """
-    return Error(
-        String(
-            "firepanda does not support ",
-            what,
-            " yet, at ",
-            _here(tree, sql, node),
-            ". See https://github.com/tamnd/firepanda/issues/307",
-        )
-    )
+    var start = Int(tree.nodes[Int(node)].token_start)
+    if start >= len(tree.tokens):
+        return String()
+    return caret_at(sql.as_bytes(), Int(tree.tokens[start].start))
 
 
 def _malformed(
@@ -3541,12 +3575,8 @@ def _string_value(sql: StringSlice, token: Token) raises -> String:
     """
     var text = token_text(sql, token)
     if token.flags & FLAG_ESCAPE != 0:
-        raise Error(
-            String(
-                "firepanda does not support an E'...' string yet, at ",
-                text,
-                ". See https://github.com/tamnd/firepanda/issues/307",
-            )
+        raise not_implemented(
+            ESCAPE_STRING, "", caret_at(sql.as_bytes(), Int(token.start))
         )
 
     var bytes = text.as_bytes()

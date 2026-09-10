@@ -42,6 +42,21 @@ Nothing downstream had to be told about any of this, because the harder half was
 
 The one thing this breaks is the answer `firepanda.read_csv` gives for a numeric column with a missing value, which used to be an integer column with a null and is now a float column with a NaN. A caller who wants the Arrow answer should read the file into pyarrow and use `firepanda.from_arrow`.
 
+### Every refusal is now an entry in one table
+
+SQL is where the grammar accepts everything DuckDB accepts and the engine runs rather less than that, so there is a line somewhere and `firepanda/sql/unsupported.mojo` is where it is written down. Twenty six entries, each one a name, the sentence the user reads, what firepanda is instead, and the issue to go and read. `firepanda.sql_support()` returns the whole list.
+
+The reason for a table rather than a message written at the point the cases ran out is that a scattered raise cannot be counted. Nobody can ask what firepanda does not do without reading the source, the README compatibility table has to be maintained by hand against a set nobody can see, and the conformance harness cannot tell a corpus file that failed for a refusal from one that failed for a crash. Those last two are very different failures and a harness that cannot separate them reports the wrong number.
+
+The message has four parts and the table is what makes the third one survive. It names the feature, quotes the line with a caret under it, says what firepanda is instead, and links the issue. The third is the part that gets dropped when a message is written in a hurry, and it is the one that stops the user filing the bug.
+
+    Not Implemented Error: firepanda does not support a slice or a subscript.
+    LINE 1: SELECT a[1] FROM t
+                    ^
+    firepanda reads a list element and a substring with a function rather than with brackets. See https://github.com/tamnd/firepanda/issues/13
+
+The caret is the tokenizer's, which already drew one for a syntax error, so a refusal and a syntax error now point at a position the same way rather than each having their own idea of what a line number counts from. An entry may hold one hole for the text from the query, so `ORDER BY` and `FILTER` on a call are one entry that keeps both names rather than two entries or one that has lost them.
+
 ### The zones that need no database
 
 A zone name is either a rule or a number. `America/New_York` is a rule, and what it is ahead of UTC changes twice a year, changed on different days before 2007, and will change again when somebody legislates, so reading a clock against it needs the IANA database. `UTC` and `+05:30` are numbers. They state the whole answer in themselves, every instant in such a column is read against the same offset forever, and no database can tell you anything about them the name does not. `TimeZone.fixed_offset` is that split, and the line is a property of the name rather than a list of zones somebody has to keep up to date. The spellings it reads are `UTC` in any case, the Arrow form `+HH:MM` with the colon and the minutes both optional, and the `UTC+HH:MM` form pandas prints when it made the zone itself. `Etc/GMT+5` is deliberately not one of them, because its sign runs the other way from every spelling in that list and reading it as a number would be five hours out in the direction nobody checks.
