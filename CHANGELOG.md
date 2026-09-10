@@ -212,6 +212,16 @@ pandas defaults three parameters to a private sentinel, `lib.no_default`, and fi
 
 Every argument pandas declares and this does not implement raises rather than being ignored, the same way the reductions do. `axis=1` on a frame transformation, `skipna=False` on a scan, `numeric_only`, `limit_area`, `shift(freq=)`, a list of periods with a `suffix`, a `fill_value` on a shift, `dropna(how="all")`, a `thresh`, `inplace` and `ignore_index` each refuse by name with the reason in the message, and there is a test per refusal.
 
+### No refusal says a rule number any more
+
+`SELECT INTERVAL '1 day'` used to come back with `firepanda does not support grammar rule 472`, which is a fact about firepanda's build of the grammar and means nothing to the person who wrote the query. It now says it does not support an INTERVAL literal, and that a duration is its own type with its own arithmetic and arrives with the date and time work. Across DuckDB's corpus that was 3,385 statements blaming a number and it is now none of them.
+
+Thirteen entries went into the refusal table and no code went with them, which is the point of the table being a table. A row value written as `(a, b)` or `ROW(a, b)`, an `INTERVAL`, a typed literal such as `DATE '2020-01-01'`, a lambda, a list comprehension, an argument passed by name, `COLUMNS`, a `MAP` literal, `GROUPING`, a column written as `#1`, and `DEFAULT` where a value goes each name themselves and say what to write instead where there is something to write instead.
+
+The functions SQL spells with keywords inside the parentheses share one entry between them. `EXTRACT`, `SUBSTRING`, `TRIM`, `POSITION`, `OVERLAY`, `TRY` and `UNPACK` all get a rule of their own from the grammar because none of them is a plain name and arguments, and the message fills in whichever one was written, so `SELECT TRIM(BOTH ' ' FROM a)` says firepanda does not support TRIM yet.
+
+Three statements that produce rows were never reached by the tier tables, because `DESCRIBE`, `PIVOT` and `UNPIVOT` hang off the select rule rather than off the statement rule. All three now say they are coming, which is what they are. And `WITH x AS (INSERT INTO t VALUES (1))` used to blame the rule for the parentheses around a statement in a `WITH`, which is a rule nobody writes and nobody can look up. It now walks in and lets the statement inside say its own name.
+
 ### Every statement says what firepanda does with it
 
 A statement firepanda does not run now refuses by name instead of coming back as a syntax error. `ATTACH 'x.db'` says firepanda does not support the ATTACH statement, points at the word, and says to read the data with SELECT and do the rest in Mojo. `CREATE TABLE t (a INT)` says firepanda does not support the CREATE statement yet, which is a different sentence on purpose: a reader who is told `not yet` waits for a release and a reader who is told `not this` writes the query another way. Telling somebody their perfectly good SQL has a syntax error in it tells them neither.

@@ -159,7 +159,43 @@ comptime STATEMENT_LATER: UInt16 = 25
 comptime STATEMENT_NEVER: UInt16 = 26
 """A statement that asks for something a dataframe library does not have."""
 
-comptime NO_CASE: UInt16 = 27
+comptime ROW_VALUE: UInt16 = 27
+"""`(a, b)` or `ROW(a, b)`, several values written as one."""
+
+comptime INTERVAL: UInt16 = 28
+"""`INTERVAL '1 day'` and the other spellings of a duration."""
+
+comptime TYPE_LITERAL: UInt16 = 29
+"""A type name in front of a string, as in `DATE '2020-01-01'`."""
+
+comptime SPECIAL_CALL: UInt16 = 30
+"""A function the grammar gives a rule of its own, such as `EXTRACT`."""
+
+comptime LAMBDA: UInt16 = 31
+"""`lambda x: x + 1`, a function written in the query."""
+
+comptime LIST_COMPREHENSION: UInt16 = 32
+"""`[x + 1 FOR x IN l]`, a list built by running an expression."""
+
+comptime NAMED_ARGUMENT: UInt16 = 33
+"""`f(a := 1)`, an argument passed by name."""
+
+comptime COLUMNS: UInt16 = 34
+"""`COLUMNS('regex')`, a pattern standing for a set of columns."""
+
+comptime MAP_LITERAL: UInt16 = 35
+"""`MAP {'a': 1}`, a map written out in the query."""
+
+comptime GROUPING: UInt16 = 36
+"""`GROUPING(a)`, which reports the grouping set a row came from."""
+
+comptime POSITIONAL: UInt16 = 37
+"""`#1`, a column named by its place in the select list."""
+
+comptime DEFAULT_VALUE: UInt16 = 38
+"""`DEFAULT` where a value goes."""
+
+comptime NO_CASE: UInt16 = 39
 """A grammar rule the transformer has no case for at all."""
 
 
@@ -408,6 +444,125 @@ def sql_support() -> List[Refusal]:
                 "It asks for a catalog, a transaction or an extension, and"
                 " firepanda is a dataframe library rather than a database."
                 " Read the data with SELECT and do the rest in Mojo."
+            ),
+            SQL_ISSUE,
+        ),
+        Refusal(
+            "row-value",
+            "a row value",
+            (
+                "Several expressions in one pair of parentheses make a single"
+                " value with fields in it, and a firepanda column holds one"
+                " scalar. Select the parts as separate columns."
+            ),
+            STAGE_ISSUE,
+        ),
+        Refusal(
+            "interval",
+            "an INTERVAL literal",
+            (
+                "A duration is its own type with its own arithmetic, and"
+                " firepanda has no column type for one yet. It arrives with the"
+                " date and time work."
+            ),
+            STAGE_ISSUE,
+        ),
+        Refusal(
+            "type-literal",
+            "a typed literal such as DATE '2020-01-01'",
+            (
+                "The type in front of the string decides how the string is"
+                " read, which is a cast, and firepanda has not wired the cast"
+                " up yet. Write CAST('2020-01-01' AS DATE) instead."
+            ),
+            STAGE_ISSUE,
+        ),
+        Refusal(
+            "special-call",
+            "{} yet",
+            (
+                "The grammar gives a handful of functions a rule of their own,"
+                " because SQL spells them with keywords inside the parentheses"
+                " where the commas would go. Each one needs a form the plain"
+                " call form cannot hold, and they are coming."
+            ),
+            STAGE_ISSUE,
+        ),
+        Refusal(
+            "lambda",
+            "a lambda",
+            (
+                "A function written inside the query has to be compiled along"
+                " with the query, and firepanda runs the functions it already"
+                " has. Pass a named one."
+            ),
+            SQL_ISSUE,
+        ),
+        Refusal(
+            "list-comprehension",
+            "a list comprehension",
+            (
+                "It runs an expression once for every element, which is a"
+                " lambda in different brackets, and firepanda runs the"
+                " functions it already has."
+            ),
+            SQL_ISSUE,
+        ),
+        Refusal(
+            "named-argument",
+            "an argument passed by name",
+            (
+                "firepanda matches arguments by position, so f(a := 1) has"
+                " nowhere to put the name. Pass it in order."
+            ),
+            STAGE_ISSUE,
+        ),
+        Refusal(
+            "columns",
+            "COLUMNS",
+            (
+                "It stands for however many columns the pattern matches, so the"
+                " shape of the result is not known until the table is, and"
+                " firepanda works out the shape first. Name the columns."
+            ),
+            STAGE_ISSUE,
+        ),
+        Refusal(
+            "map-literal",
+            "a MAP literal",
+            (
+                "A map holds keys and values in one value and a firepanda"
+                " column holds one scalar. It arrives with the nested types."
+            ),
+            STAGE_ISSUE,
+        ),
+        Refusal(
+            "grouping",
+            "GROUPING",
+            (
+                "It reports which grouping set a row came from, which only"
+                " means anything next to ROLLUP, CUBE and GROUPING SETS, and"
+                " firepanda does not carry that number out of the aggregate"
+                " yet."
+            ),
+            STAGE_ISSUE,
+        ),
+        Refusal(
+            "positional",
+            "a column written as #1",
+            (
+                "firepanda reads a column by name. Write the name, or the"
+                " expression the column was built from."
+            ),
+            STAGE_ISSUE,
+        ),
+        Refusal(
+            "default-value",
+            "DEFAULT where a value goes",
+            (
+                "It stands for whatever a table declares as the default for a"
+                " column, and that lives in a catalog. firepanda is a dataframe"
+                " library and has no catalog to ask."
             ),
             SQL_ISSUE,
         ),

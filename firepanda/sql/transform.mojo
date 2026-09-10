@@ -100,28 +100,40 @@ from .unsupported import (
     ARRAY_SUBQUERY,
     CALL_ARGUMENT,
     CALL_MODIFIER,
+    COLUMNS,
     CUSTOM_OPERATOR,
+    DEFAULT_VALUE,
     DOTTED_NAME,
     ESCAPE_STRING,
     FIELD_ACCESS,
+    GROUPING,
+    INTERVAL,
     IN_BARE_VALUE,
     IS_UNKNOWN,
     JOIN_FORM,
+    LAMBDA,
     LIKE_ESCAPE,
+    LIST_COMPREHENSION,
+    MAP_LITERAL,
     METHOD_CALL,
+    NAMED_ARGUMENT,
     NOT_SUBQUERY,
     NO_CASE,
     OPERATOR,
+    POSITIONAL,
     POSTFIX_OPERATOR,
     QUOTED_NAME,
+    ROW_VALUE,
     SELECT_CLAUSE,
     SELECT_SAMPLE,
+    SPECIAL_CALL,
     STATEMENT_LATER,
     STATEMENT_NEVER,
     SUBSCRIPT,
     TABLE_AT,
     TABLE_MODIFIER,
     TABLE_SAMPLE,
+    TYPE_LITERAL,
     WITH_ORDINALITY,
     WITH_USING_KEY,
     not_implemented,
@@ -280,6 +292,14 @@ place the transformer has to look at a missing child instead of trusting the
 grammar to have provided one.
 """
 
+comptime _REFUSE: UInt8 = 62
+"""A rule that refuses by name, with the name in `refusals`.
+
+There are a lot of these and there will be more, and a feature whose whole
+implementation is one sentence of English does not need an action byte and a
+dispatch arm of its own. It needs a row in a table.
+"""
+
 # A marker is a rule that builds nothing. The rule above it reads it directly,
 # and the byte is here so that rule can pick it out of its siblings with the
 # same array lookup the dispatch uses. The alternative is guessing from a
@@ -420,6 +440,15 @@ struct Transform(Movable):
     var actions: List[UInt8]
     """One action per rule index. `_NO_CASE` means the rule refuses."""
 
+    var refusals: List[UInt16]
+    """The refusal a `_REFUSE` rule raises, by rule index, 0 for the rest.
+
+    A second table rather than a second action byte per feature. A rule that
+    does nothing but refuse carries no code, only a table entry, and there are
+    enough of them that giving each one an action byte and a dispatch arm would
+    be a hundred lines saying the same thing a hundred times.
+    """
+
     var expression_rule: Int
     """The index of `Expression`, so a caller can parse one directly."""
 
@@ -441,6 +470,7 @@ struct Transform(Movable):
                 means a bump renamed something and this file has to follow.
         """
         self.actions = List[UInt8](length=len(grammar.names), fill=_NO_CASE)
+        self.refusals = List[UInt16](length=len(grammar.names), fill=0)
         self.expression_rule = -1
         self.statement_rule = -1
         self.parens_rule = -1
@@ -634,6 +664,54 @@ struct Transform(Movable):
         for name in never:
             self._set(grammar, name, _STATEMENT_NEVER)
 
+        # `DescribeStatement`, `PivotStatement` and `UnpivotStatement` hang off
+        # `SelectStatementType` rather than off `Statement`, because all three
+        # produce rows, so the loop above never reached them. They are the same
+        # kind of thing it refuses: a query firepanda will run and does not run
+        # yet.
+        self._set(grammar, "DescribeStatement", _STATEMENT_LATER)
+        self._set(grammar, "PivotStatement", _STATEMENT_LATER)
+        self._set(grammar, "UnpivotStatement", _STATEMENT_LATER)
+
+        # `CTEDMLBody <- Parens(Statement)` is `WITH x AS (INSERT ...)`. Walking
+        # into it costs nothing and the statement inside says its own name, so
+        # the user reads `the INSERT statement yet` rather than the name of the
+        # wrapper, which is a rule they did not write and cannot look up. Two
+        # rules because the parentheses are a rule of their own.
+        self._set(grammar, "CTEDMLBody", _DESCEND)
+        self._set(grammar, "Parens_Statement", _DESCEND)
+
+        # Features with no form in the arena yet. Each of these is one sentence
+        # of English in `unsupported.mojo` and no code at all, which is what the
+        # refusal table is for.
+        self._refuse(grammar, "ParenthesisExpression", ROW_VALUE)
+        self._refuse(grammar, "RowExpression", ROW_VALUE)
+        self._refuse(grammar, "IntervalLiteral", INTERVAL)
+        self._refuse(grammar, "TypeLiteral", TYPE_LITERAL)
+        self._refuse(grammar, "LambdaExpression", LAMBDA)
+        self._refuse(grammar, "ListComprehensionExpression", LIST_COMPREHENSION)
+        self._refuse(grammar, "NamedFunctionArgument", NAMED_ARGUMENT)
+        self._refuse(grammar, "ColumnsExpression", COLUMNS)
+        self._refuse(grammar, "MapExpression", MAP_LITERAL)
+        self._refuse(grammar, "GroupingExpression", GROUPING)
+        self._refuse(grammar, "PositionalExpression", POSITIONAL)
+        self._refuse(grammar, "DefaultExpression", DEFAULT_VALUE)
+        self._refuse(grammar, "TableFunctionAliasColon", ALIAS_COLON)
+
+        # The functions SQL spells with keywords inside the parentheses. The
+        # message fills in whichever one it was, so they share an entry.
+        var special: List[StaticString] = [
+            "ExtractExpression",
+            "SubstringExpression",
+            "TrimExpression",
+            "PositionExpression",
+            "OverlayExpression",
+            "TryExpression",
+            "UnpackExpression",
+        ]
+        for name in special:
+            self._refuse(grammar, name, SPECIAL_CALL)
+
         # The markers, which build nothing and are only ever recognized.
         self._set(grammar, "TableAlias", _MARK_TABLE_ALIAS)
         self._set(grammar, "TableAliasColon", _MARK_ALIAS_COLON)
@@ -681,6 +759,22 @@ struct Transform(Movable):
                 )
             )
         self.actions[index] = action
+
+    def _refuse(
+        mut self, grammar: Grammar, name: StaticString, feature: UInt16
+    ) raises:
+        """Points one rule at one refusal.
+
+        Args:
+            grammar: A loaded grammar.
+            name: The rule name, spelled the way the grammar spells it.
+            feature: A key into the refusal table in `unsupported.mojo`.
+
+        Raises:
+            Error: If there is no such rule.
+        """
+        self._set(grammar, name, _REFUSE)
+        self.refusals[grammar.rule(name)] = feature
 
     def parse_expression(
         self, sql: StringSlice, grammar: Grammar, mut ast: Ast
@@ -1039,6 +1133,14 @@ struct Transform(Movable):
         if action == _STATEMENT_NEVER:
             raise _unsupported(
                 tree, sql, node, STATEMENT_NEVER, _word(tree, sql, node)
+            )
+
+        if action == _REFUSE:
+            # The first word goes along whether the message has a slot for it or
+            # not, because `filled` drops it when there is no `{}` and most of
+            # these messages name the feature themselves.
+            raise _unsupported(
+                tree, sql, node, self.refusals[rule], _word(tree, sql, node)
             )
 
         raise _no_case(tree, sql, node)
