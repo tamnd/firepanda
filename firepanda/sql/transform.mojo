@@ -332,6 +332,18 @@ comptime _WINDOW_LIST: UInt8 = 67
 comptime _WINDOW_DEFINITION: UInt8 = 68
 """`WindowDefinition`, one name and one window in that clause."""
 
+comptime _PIVOT: UInt8 = 69
+"""`PivotStatement`, the `PIVOT t ON a USING sum(x)` spelling."""
+
+comptime _PIVOT_BARE: UInt8 = 70
+"""`PivotColumnExpression`, a pivot column with no `IN` after it."""
+
+comptime _PIVOT_VALUES: UInt8 = 71
+"""`PivotValueList`, a pivot column with an `IN` list or an enum name."""
+
+comptime _PIVOT_SUBQUERY: UInt8 = 72
+"""`PivotColumnSubquery`, a pivot column whose values are a `SELECT`."""
+
 # A marker is a rule that builds nothing. The rule above it reads it directly,
 # and the byte is here so that rule can pick it out of its siblings with the
 # same array lookup the dispatch uses. The alternative is guessing from a
@@ -350,6 +362,11 @@ comptime _MARK_IN_SELECT: UInt8 = 210
 comptime _MARK_JOIN: UInt8 = 211
 comptime _MARK_JOIN_ON: UInt8 = 212
 comptime _MARK_JOIN_PLAIN: UInt8 = 213
+comptime _MARK_TABLE_PIVOT: UInt8 = 214
+comptime _MARK_PIVOT_ON: UInt8 = 215
+comptime _MARK_PIVOT_USING: UInt8 = 216
+comptime _MARK_PIVOT_GROUP: UInt8 = 217
+comptime _MARK_PIVOT_ENUM: UInt8 = 218
 
 # Where the parts of a statement sit in the small runs that carry them up. A
 # rule that has more than one thing to hand its parent puts them in a run of
@@ -560,6 +577,14 @@ struct Transform(Movable):
             "WindowFrameContentsParens",
             "Parens_WindowFrameNameContents",
             "Parens_WindowFrameContents",
+            # The pivot side, same story. `PivotHeader` is a `BaseExpression`
+            # under another name, and the three below it are the wrapping the
+            # grammar puts around the parenthesized `IN` list.
+            "PivotHeader",
+            "PivotColumnEntry",
+            "PivotListTarget",
+            "PivotTargetList",
+            "Parens_TargetList",
         ]
         for name in descends:
             self._set(grammar, name, _DESCEND)
@@ -719,12 +744,19 @@ struct Transform(Movable):
 
         # `DescribeStatement`, `PivotStatement` and `UnpivotStatement` hang off
         # `SelectStatementType` rather than off `Statement`, because all three
-        # produce rows, so the loop above never reached them. They are the same
-        # kind of thing it refuses: a query firepanda will run and does not run
-        # yet.
+        # produce rows, so the loop above never reached them. Two of them are
+        # still the same kind of thing it refuses: a query firepanda will run
+        # and does not run yet.
         self._set(grammar, "DescribeStatement", _STATEMENT_LATER)
-        self._set(grammar, "PivotStatement", _STATEMENT_LATER)
         self._set(grammar, "UnpivotStatement", _STATEMENT_LATER)
+
+        # The pivot side. `PivotColumnEntry` is three alternatives and each one
+        # builds the same node with a different thing after the `IN`, so they
+        # get a case each and the entry above them descends.
+        self._set(grammar, "PivotStatement", _PIVOT)
+        self._set(grammar, "PivotColumnExpression", _PIVOT_BARE)
+        self._set(grammar, "PivotValueList", _PIVOT_VALUES)
+        self._set(grammar, "PivotColumnSubquery", _PIVOT_SUBQUERY)
 
         # `CTEDMLBody <- Parens(Statement)` is `WITH x AS (INSERT ...)`. Walking
         # into it costs nothing and the statement inside says its own name, so
@@ -780,6 +812,11 @@ struct Transform(Movable):
         self._set(grammar, "JoinClause", _MARK_JOIN)
         self._set(grammar, "RegularJoinClause", _MARK_JOIN_ON)
         self._set(grammar, "JoinWithoutOnClause", _MARK_JOIN_PLAIN)
+        self._set(grammar, "TablePivotClause", _MARK_TABLE_PIVOT)
+        self._set(grammar, "PivotOn", _MARK_PIVOT_ON)
+        self._set(grammar, "PivotUsing", _MARK_PIVOT_USING)
+        self._set(grammar, "PivotGroupByList", _MARK_PIVOT_GROUP)
+        self._set(grammar, "PivotEnumTarget", _MARK_PIVOT_ENUM)
 
         self.expression_rule = grammar.rule("Expression")
         self.statement_rule = grammar.rule("TopLevelStatement")
@@ -1205,6 +1242,27 @@ struct Transform(Movable):
 
         if action == _WINDOW_DEFINITION:
             return self._window_definition(tree, sql, node, ast, work)
+
+        if action == _PIVOT:
+            return self._pivot(tree, sql, node, ast, work)
+
+        if action == _PIVOT_BARE:
+            var header = self._only(tree, node)
+            var wanted = List[UInt32]()
+            wanted.append(header)
+            work.warm(wanted)
+            return ast.pivot_on(work.value(header), token=at)
+
+        if action == _PIVOT_VALUES:
+            return self._pivot_values(tree, sql, node, ast, work)
+
+        if action == _PIVOT_SUBQUERY:
+            # `PivotColumnSubquery <- BaseExpression 'IN' Parens(Select...)`.
+            var kids = tree.children(node)
+            work.warm(kids)
+            return ast.pivot_on(
+                work.value(kids[0]), statement=work.value(kids[1]), token=at
+            )
 
         if action == _REFUSE:
             # The first word goes along whether the message has a slot for it or
@@ -2684,6 +2742,11 @@ struct Transform(Movable):
         nested and the fold matches the shape the grammar gives it. That is
         also why the printer never has to put parentheses around a join side.
 
+        A `PIVOT` in that list is not a join and does not fold like one. It
+        takes everything to its left and becomes a `STMT_PIVOT` over it, inside
+        a subquery reference, which is the one node shape the two spellings of
+        a pivot share. See `STMT_PIVOT` in `ast.mojo` for why that direction.
+
         Args:
             tree: The parse.
             sql: The query.
@@ -2702,6 +2765,11 @@ struct Transform(Movable):
         var wanted = List[UInt32]()
         wanted.append(kids[0])
         for i in range(1, len(kids)):
+            var clause = self._only(tree, kids[i])
+            if self._marked(tree, clause, _MARK_TABLE_PIVOT):
+                for want in self._pivot_clause_parts(tree, clause):
+                    wanted.append(want)
+                continue
             var form = self._join_form(tree, sql, kids[i])
             wanted.append(self._join_right(tree, form))
             var on = self._join_on(tree, sql, form)
@@ -2711,6 +2779,10 @@ struct Transform(Movable):
 
         var built = work.value(kids[0])
         for i in range(1, len(kids)):
+            var clause = self._only(tree, kids[i])
+            if self._marked(tree, clause, _MARK_TABLE_PIVOT):
+                built = self._table_pivot(tree, sql, clause, built, ast, work)
+                continue
             var form = self._join_form(tree, sql, kids[i])
             var at = tree.nodes[Int(form)].token_start
             var text = _join_text(tree, sql, form)
@@ -2822,6 +2894,104 @@ struct Transform(Movable):
             return NO_NODE
         var kids = tree.children(form)
         return self._only(tree, kids[len(kids) - 1])
+
+    def _pivot_clause_body(self, tree: Parse, node: UInt32) raises -> UInt32:
+        """The body inside the parentheses of a `TablePivotClause`.
+
+        Args:
+            tree: The parse.
+            node: The `TablePivotClause` node.
+
+        Returns:
+            The `TablePivotClauseBody` node.
+
+        Raises:
+            Error: If the clause is shaped in a way the grammar forbids.
+        """
+        # `TablePivotClause <- 'PIVOT' Parens(TablePivotClauseBody)
+        # TableAlias?`, and the alias is the one that comes second, so the
+        # first child is the parentheses either way.
+        return self._only(tree, self._only(tree, node))
+
+    def _pivot_clause_parts(
+        self, tree: Parse, node: UInt32
+    ) raises -> List[UInt32]:
+        """The nodes under a `TablePivotClause` that have to be built.
+
+        Args:
+            tree: The parse.
+            node: The `TablePivotClause` node.
+
+        Returns:
+            The aggregate list and every pivot column, in order.
+
+        Raises:
+            Error: If the clause is shaped in a way the grammar forbids.
+        """
+        # `TablePivotClauseBody <- TargetList 'FOR' PivotValueList+
+        # PivotGroupByList?`. The `GROUP BY` is names and nothing else, so it
+        # is read straight off the parse and never asked for here.
+        var out = List[UInt32]()
+        for kid in tree.children(self._pivot_clause_body(tree, node)):
+            if not self._marked(tree, kid, _MARK_PIVOT_GROUP):
+                out.append(kid)
+        return out^
+
+    def _table_pivot(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        left: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds the `FROM t PIVOT (...)` spelling over the reference to its
+        left.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `TablePivotClause` node.
+            left: The table reference being pivoted.
+            ast: Where to put the nodes.
+            work: The walk, for the aggregates and the columns.
+
+        Returns:
+            The table reference node.
+
+        Raises:
+            Error: If a part is not built yet, or a name is dotted.
+        """
+        var kids = tree.children(self._pivot_clause_body(tree, node))
+        var on = List[UInt32]()
+        var groups = List[String]()
+        for i in range(1, len(kids)):
+            if self._marked(tree, kids[i], _MARK_PIVOT_GROUP):
+                groups = self._pivot_groups(tree, sql, kids[i])
+            else:
+                on.append(work.value(kids[i]))
+
+        var named = NO_NODE
+        for kid in tree.children(node):
+            if self._marked(tree, kid, _MARK_TABLE_ALIAS):
+                named = kid
+
+        var at = tree.nodes[Int(node)].token_start
+        var pivot = ast.pivot(
+            left, on, ast.items(work.value(kids[0])), groups, at
+        )
+        # The `SELECT` wrapper is here so that this and the statement spelling
+        # of the same pivot come out as the same nodes rather than as two
+        # shapes that happen to print alike. Reading the printed text back
+        # builds exactly this, because a subquery is a whole statement.
+        return ast.subquery_ref(
+            ast.select(pivot, token=at),
+            self._alias_name(tree, sql, named),
+            self._alias_columns(tree, sql, named),
+            False,
+            at,
+        )
 
     def _base_table(
         self, tree: Parse, sql: StringSlice, node: UInt32, mut ast: Ast
@@ -3417,6 +3587,144 @@ struct Transform(Movable):
             work.value(kids[1]),
             tree.nodes[Int(node)].token_start,
         )
+
+    def _pivot(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds a `PIVOT` written as a statement.
+
+        The keyword out front is `PIVOT` or `PIVOT_WIDER`, which DuckDB takes
+        as two spellings of one thing, so it is read and not kept and the
+        printer writes the first one back.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `PivotStatement` node.
+            ast: Where to put the nodes.
+            work: The walk, for the table and the lists.
+
+        Returns:
+            The statement node.
+
+        Raises:
+            Error: If a part is not built yet, or a `GROUP BY` name is dotted.
+        """
+        # `PivotStatement <- PivotKeyword TableRef PivotOn? PivotUsing?
+        # PivotGroupByList?`, so the keyword and the table are the two that are
+        # always there and the rest are told apart by their markers.
+        var kids = tree.children(node)
+        var source = kids[1]
+        var using = NO_NODE
+        var groups = List[String]()
+        var entries = List[UInt32]()
+        for i in range(2, len(kids)):
+            if self._marked(tree, kids[i], _MARK_PIVOT_ON):
+                entries = self._items(tree, self._only(tree, kids[i]))
+            elif self._marked(tree, kids[i], _MARK_PIVOT_USING):
+                using = self._only(tree, kids[i])
+            else:
+                groups = self._pivot_groups(tree, sql, kids[i])
+
+        var wanted = List[UInt32]()
+        wanted.append(source)
+        for entry in entries:
+            wanted.append(entry)
+        if using != NO_NODE:
+            wanted.append(using)
+        work.warm(wanted)
+
+        var on = List[UInt32]()
+        for entry in entries:
+            on.append(work.value(entry))
+        return ast.pivot(
+            work.value(source),
+            on,
+            ast.items(work.value(using)) if using
+            != NO_NODE else List[UInt32](),
+            groups,
+            tree.nodes[Int(node)].token_start,
+        )
+
+    def _pivot_values(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds a pivot column that says what its values are.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `PivotValueList` node.
+            ast: Where to put the nodes.
+            work: The walk, for the header and the values.
+
+        Returns:
+            The statement node.
+
+        Raises:
+            Error: If the enum name is dotted, or a part is not built yet.
+        """
+        # `PivotValueList <- PivotHeader 'IN' PivotValueTarget`, and the target
+        # is either a name standing for an enum type or a list in parentheses.
+        var kids = tree.children(node)
+        var target = self._only(tree, kids[1])
+        var at = tree.nodes[Int(node)].token_start
+        var wanted = List[UInt32]()
+        wanted.append(kids[0])
+
+        if self._marked(tree, target, _MARK_PIVOT_ENUM):
+            work.warm(wanted)
+            return ast.pivot_on(
+                work.value(kids[0]),
+                name=self._plain(tree, sql, self._only(tree, target)),
+                token=at,
+            )
+
+        wanted.append(target)
+        work.warm(wanted)
+        return ast.pivot_on(
+            work.value(kids[0]),
+            values=ast.items(work.value(target)),
+            token=at,
+        )
+
+    def _pivot_groups(
+        self, tree: Parse, sql: StringSlice, node: UInt32
+    ) raises -> List[String]:
+        """Reads the names of a pivot's `GROUP BY`.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `PivotGroupByList` node.
+
+        Returns:
+            The names, in order.
+
+        Raises:
+            Error: If one of them is dotted, which a group name cannot be.
+        """
+        # `PivotGroupByList <- 'GROUP' 'BY' OptionalParensNameList`, and the
+        # list is written with or without parentheses around it, which the
+        # first byte is enough to tell apart.
+        var inside = self._only(tree, self._only(tree, node))
+        var names = self._items(tree, inside)
+        if _first_byte(tree, sql, inside) == _LEFT_PAREN:
+            names = self._items(tree, self._only(tree, inside))
+        var out = List[String]()
+        for name in names:
+            out.append(self._plain(tree, sql, name))
+        return out^
 
     def _frame(
         self,

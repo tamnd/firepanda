@@ -39,8 +39,8 @@ fixed length run instead, and the entries are named by constant. The query node
 is the only one that does this, because seven clauses do not fit in four fields
 and splitting a `SELECT` across two nodes to make them fit would be worse.
 
-What is not here yet is `PIVOT` and `UNPIVOT`, and the statements that are not
-a `SELECT`. They arrive with the rest of S2.
+What is not here yet is `UNPIVOT`, and the statements that are not a `SELECT`.
+They arrive with the rest of S2.
 """
 
 comptime NO_NODE: UInt32 = 0
@@ -582,6 +582,44 @@ comptime STMT_WINDOW: UInt8 = 11
 It is not a `STMT_ITEM` with the name in the alias slot, even though the two
 have the same shape, because a reader who finds a `STMT_ITEM` in a clause run
 has every reason to think it is part of a `SELECT` list.
+"""
+
+comptime STMT_PIVOT: UInt8 = 12
+"""A `PIVOT`, in the spelling that is a statement of its own.
+
+`a` is the table reference being pivoted, `b` is a run of `STMT_PIVOT_ON`
+nodes, `children` is a run of `STMT_ITEM` nodes for the `USING` aggregates, and
+`payload` is a run of interned `GROUP BY` names. Every one of the three lists
+can be empty, because the grammar makes all three optional.
+
+DuckDB has two spellings and only one of them is here. `PIVOT t ON a USING
+sum(x)` is this node. `FROM t PIVOT (sum(x) FOR a IN (1, 2))` is the standard
+one, and it becomes this node inside a subquery reference, so `FROM (PIVOT t ON
+a IN (1, 2) USING sum(x))` is what comes back out.
+
+Normalizing that way round and not the other is forced rather than chosen. The
+standard spelling requires an `IN` on every pivot column, this one does not, so
+`PIVOT t ON a USING sum(x)` cannot be written in the standard form at all. A
+printer that picked a spelling per query would be deciding which features each
+one can carry, which is a rule nobody could read off the node.
+
+`PIVOT_WIDER` is the same word as `PIVOT` and is not recorded, so a query that
+wrote it gets `PIVOT` back.
+"""
+
+comptime STMT_PIVOT_ON: UInt8 = 13
+"""One pivot column, which is one entry of an `ON` list.
+
+`a` is the header expression, which every entry has. The rest say what the
+column's values are, and at most one of them is set:
+
+- `children` is a run of `STMT_ITEM` nodes for `a IN (1, 2)`
+- `payload` is an interned name for `a IN an_enum`
+- `b` is a statement index for `a IN (SELECT ...)`
+
+All three being empty is the bare `ON a`, which asks DuckDB to find the values
+by reading the column. `IN ()` is not a thing the grammar can write, so an
+empty run and no run mean the same and there is nothing to tell apart.
 """
 
 
@@ -1827,6 +1865,71 @@ struct Ast(Movable):
         """
         return self.add_stmt(
             Stmt(kind=STMT_TABLE, token=token, children=self.names(parts))
+        )
+
+    def pivot(
+        mut self,
+        source: UInt32,
+        on: List[UInt32] = List[UInt32](),
+        using: List[UInt32] = List[UInt32](),
+        groups: List[String] = List[String](),
+        token: UInt32 = 0,
+    ) -> UInt32:
+        """Builds a `PIVOT` statement.
+
+        Args:
+            source: The table reference being pivoted.
+            on: The `STMT_PIVOT_ON` nodes, in order.
+            using: The `STMT_ITEM` nodes of the `USING` list, in order.
+            groups: The `GROUP BY` names, in order.
+            token: The token it starts at.
+
+        Returns:
+            The statement node index.
+        """
+        return self.add_stmt(
+            Stmt(
+                kind=STMT_PIVOT,
+                token=token,
+                a=source,
+                b=self.run(on),
+                children=self.run(using),
+                payload=self.names(groups),
+            )
+        )
+
+    def pivot_on(
+        mut self,
+        header: UInt32,
+        values: List[UInt32] = List[UInt32](),
+        name: StringSlice = "",
+        statement: UInt32 = NO_NODE,
+        token: UInt32 = 0,
+    ) -> UInt32:
+        """Builds one pivot column.
+
+        At most one of `values`, `name` and `statement` says anything. All
+        three empty is the bare `ON a`.
+
+        Args:
+            header: The header expression.
+            values: The `STMT_ITEM` nodes after `IN`, in order.
+            name: The enum name after `IN`, empty for none.
+            statement: The subquery after `IN`, or 0.
+            token: The token the header starts at.
+
+        Returns:
+            The statement node index.
+        """
+        return self.add_stmt(
+            Stmt(
+                kind=STMT_PIVOT_ON,
+                token=token,
+                a=header,
+                b=statement,
+                children=self.run(values),
+                payload=self.intern(name),
+            )
         )
 
     def modifiers(

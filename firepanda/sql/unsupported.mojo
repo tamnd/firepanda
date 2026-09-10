@@ -133,7 +133,7 @@ comptime TABLE_SAMPLE: UInt16 = 17
 """`TABLESAMPLE` or `USING SAMPLE` on one table."""
 
 comptime TABLE_MODIFIER: UInt16 = 18
-"""`PIVOT` or `UNPIVOT` after a table."""
+"""`UNPIVOT` after a table."""
 
 comptime TABLE_AT: UInt16 = 19
 """`AT` after a table, which reads it as of a version or a timestamp."""
@@ -374,7 +374,7 @@ def sql_support() -> List[Refusal]:
         Refusal(
             "table-modifier",
             "{} on a table",
-            "PIVOT and UNPIVOT are the rest of this stage.",
+            "PIVOT is read now and UNPIVOT is the rest of this stage.",
             STAGE_ISSUE,
         ),
         Refusal(
