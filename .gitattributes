@@ -1,0 +1,11 @@
+# Two branches that both add an entry under `## [Unreleased]` conflict on every
+# merge, and the resolution is always the same: keep both entries. That is what
+# the union driver does, so it does it rather than a person doing it by hand
+# once per branch per day. The entries are whole paragraphs separated by blank
+# lines, so a union keeps each one intact and only the order of the two blocks
+# is decided by which side git reads first, which the release notes reorder
+# anyway.
+#
+# Nothing else in the tree gets this. A union merge on source is how you get a
+# file that contains both halves of a disagreement and compiles.
+CHANGELOG.md merge=union

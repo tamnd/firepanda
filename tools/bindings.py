@@ -785,6 +785,122 @@ def _datetime_members() -> tuple[Member, ...]:
     return tuple(out)
 
 
+def _string_members() -> tuple[Member, ...]:
+    """Writes the members of the `str` accessor.
+
+    Twelve of pandas' fifty seven, and they are the twelve whose only idea is
+    that a position in a string is a character rather than a byte. The rest of
+    the accessor is case conversion, the predicates, splitting and the regex
+    methods, and each of those groups has an idea of its own that is worth
+    landing on its own.
+
+    `index` and `rindex` are here without being in the extension, because they
+    are `find` and `rfind` that raise rather than answering -1, and where that
+    exception is thrown is a pandas question rather than a kernel one.
+
+    Returns:
+        The members, in the order they should be written out.
+    """
+    return (
+        Member(
+            name="len",
+            kind="method",
+            signature="",
+            body='self._number("len")',
+            doc="How many characters each row holds.",
+            returns="Series",
+        ),
+        Member(
+            name="slice",
+            kind="method",
+            signature="start: Any = None, stop: Any = None, step: Any = None",
+            body="self._sliced(start, stop, step)",
+            doc="A range of characters out of every row, under Python's slice rules.",
+            returns="Series",
+        ),
+        Member(
+            name="slice_replace",
+            kind="method",
+            signature="start: Any = None, stop: Any = None, repl: Any = None",
+            body="self._replaced_slice(start, stop, repl)",
+            doc="Every row with a range of characters swapped for a string.",
+            returns="Series",
+        ),
+        Member(
+            name="get",
+            kind="method",
+            signature="i: Any",
+            body="self._at(i)",
+            doc="One character out of every row, and nothing where the row is too short.",
+            returns="Series",
+        ),
+        Member(
+            name="find",
+            kind="method",
+            signature="sub: Any, start: Any = 0, end: Any = None",
+            body='self._found("find", sub, start, end)',
+            doc="Where a substring first sits in every row, or -1 where it is absent.",
+            returns="Series",
+        ),
+        Member(
+            name="rfind",
+            kind="method",
+            signature="sub: Any, start: Any = 0, end: Any = None",
+            body='self._found("rfind", sub, start, end)',
+            doc="Where a substring last sits in every row, or -1 where it is absent.",
+            returns="Series",
+        ),
+        Member(
+            name="index",
+            kind="method",
+            signature="sub: Any, start: Any = 0, end: Any = None",
+            body='self._demanded("find", sub, start, end)',
+            doc="The same as find, except that a row without the substring is an error.",
+            returns="Series",
+        ),
+        Member(
+            name="rindex",
+            kind="method",
+            signature="sub: Any, start: Any = 0, end: Any = None",
+            body='self._demanded("rfind", sub, start, end)',
+            doc="The same as rfind, except that a row without the substring is an error.",
+            returns="Series",
+        ),
+        Member(
+            name="startswith",
+            kind="method",
+            signature="pat: Any, na: Any = None",
+            body='self._begins("startswith", pat, na)',
+            doc="Whether every row begins with a string, or with any of several.",
+            returns="Series",
+        ),
+        Member(
+            name="endswith",
+            kind="method",
+            signature="pat: Any, na: Any = None",
+            body='self._begins("endswith", pat, na)',
+            doc="Whether every row ends with a string, or with any of several.",
+            returns="Series",
+        ),
+        Member(
+            name="removeprefix",
+            kind="method",
+            signature="prefix: Any",
+            body='self._text("removeprefix", prefix)',
+            doc="Every row with a leading string taken off, if it has one.",
+            returns="Series",
+        ),
+        Member(
+            name="removesuffix",
+            kind="method",
+            signature="suffix: Any",
+            body='self._text("removesuffix", suffix)',
+            doc="Every row with a trailing string taken off, if it has one.",
+            returns="Series",
+        ),
+    )
+
+
 def _categorical_members() -> tuple[Member, ...]:
     """Writes the members of the `cat` accessor.
 
@@ -925,6 +1041,158 @@ that cannot be asked to skip a missing value, since one counts rows and the
 other counts the values that are there, and pandas leaves the arguments off
 rather than declaring them and ignoring them.
 """
+
+
+WINDOWED: tuple[tuple[str, str], ...] = (
+    ("sum", "The total of the values in the window."),
+    ("mean", "The mean of the values in the window."),
+    ("count", "How many rows of the window hold a value."),
+    ("min", "The smallest value in the window."),
+    ("max", "The largest value in the window."),
+)
+"""The five reductions a window can be folded through, and what each answers.
+
+Five rather than pandas' twenty six, and the five are the ones that can be
+carried from one window to the next rather than recomputed. `firepanda/kernel/
+window.mojo` says which of the other twenty one need a different data structure
+and why each of them is its own piece of work.
+"""
+
+
+WINDOW_STATE: tuple[tuple[str, str, str, str], ...] = (
+    (
+        "window",
+        "self._window",
+        "int | None",
+        "How many rows wide, and None for an expanding window.",
+    ),
+    (
+        "min_periods",
+        "self._min_periods",
+        "int | None",
+        "How many values a window needs before it answers, and None for the default.",
+    ),
+    (
+        "center",
+        "self._center",
+        "bool",
+        "Whether the window sits around its row rather than behind it.",
+    ),
+    (
+        "closed",
+        "self._closed",
+        "str | None",
+        "Which of the two ends the window keeps, and None for the default.",
+    ),
+    (
+        "step",
+        "self._step",
+        "int | None",
+        "How many rows apart the answered rows are, and None for every row.",
+    ),
+    (
+        "obj",
+        "self._data",
+        "Series | DataFrame",
+        "The column or the frame the windows are read out of.",
+    ),
+    (
+        "ndim",
+        "2 if self._over_frame() else 1",
+        "int",
+        "The number of dimensions of what is being windowed.",
+    ),
+    (
+        "method",
+        '"single"',
+        "str",
+        "Whether the columns are reduced together, which here they are not.",
+    ),
+    (
+        "win_type",
+        "None",
+        "str | None",
+        "The weighting over the window, which here is always none.",
+    ),
+    (
+        "on",
+        "None",
+        "str | None",
+        "The column the window is ordered by, which here is always the rows.",
+    ),
+    (
+        "exclusions",
+        "frozenset()",
+        "frozenset[str]",
+        "The columns held out of the reduction, which here is none of them.",
+    ),
+)
+"""The eleven things a window object reports about itself, and how each is read.
+
+pandas puts these on the window object and code in the wild reads them, mostly
+to find out what a window it was handed is going to do before asking it to do
+it. Six of the eleven are the arguments back, which is why `_hold` keeps them as
+they arrived rather than resolved: `df.rolling(2).closed` is None in pandas and
+answering `right` here would be reporting a decision rather than an argument.
+The other five are constant, because they describe the choices this library has
+made once rather than per window.
+"""
+
+
+def _window_members(py: str) -> tuple[Member, ...]:
+    """Writes the eleven properties and five reduction members for one window class.
+
+    Same restriction as `_group_members`, which is that nothing here decides
+    what a reduction does. The word crosses the boundary and
+    `firepanda/py/window.mojo` reads it, and every body is one call to a mixin
+    helper that already holds where the window sits.
+
+    The two classes take the same arguments and answer the same thing, and the
+    only difference between them is which parameters their constructor accepted,
+    so this is one function rather than two tables.
+
+    Args:
+        py: The class name, `Rolling` or `Expanding`, used in the sentences.
+
+    Returns:
+        The members, in the order they should be written out.
+    """
+    engines = "engine: Any = None, engine_kwargs: Any = None"
+    over = "rolling" if py == "Rolling" else "expanding"
+    out: list[Member] = []
+    for name, body, returns, what in WINDOW_STATE:
+        out.append(
+            Member(
+                name=name,
+                kind="property",
+                body=body,
+                doc=what,
+                returns=returns,
+            )
+        )
+    for name, what in WINDOWED:
+        # `count` is the one pandas gives no engine arguments, because it never
+        # had a numba path to choose, and copying that is free here.
+        counting = name == "count"
+        out.append(
+            Member(
+                name=name,
+                kind="method",
+                signature=(
+                    "numeric_only: bool = False"
+                    if counting
+                    else f"numeric_only: bool = False, {engines}"
+                ),
+                body=(
+                    f'self._reduce("{name}", numeric_only)'
+                    if counting
+                    else f'self._reduce("{name}", numeric_only, engine, engine_kwargs)'
+                ),
+                doc=f"{what} Over every {over} window.",
+                returns="Series | DataFrame",
+            )
+        )
+    return tuple(out)
 
 
 def _group_members(py: str) -> tuple[Member, ...]:
@@ -1255,6 +1523,20 @@ FRAME = Exposed(
             returns="DataFrame",
         ),
         Binding(
+            mojo="PyDataFrame.window_agg",
+            name="window_agg",
+            doc="One reduction over every window of every column.",
+            params=(
+                ("kind", "str"),
+                ("window", "int | None"),
+                ("min_periods", "int | None"),
+                ("center", "bool"),
+                ("closed", "str"),
+                ("step", "int | None"),
+            ),
+            returns="DataFrame",
+        ),
+        Binding(
             mojo="PyDataFrame.dropna",
             name="dropna",
             doc="The rows with no missing value in them.",
@@ -1455,6 +1737,26 @@ FRAME = Exposed(
             doc="The frame as a stream of one batch, as an arrow_array_stream PyCapsule.",
             returns="object",
         ),
+        Member(
+            name="rolling",
+            kind="method",
+            signature=(
+                "window: Any, min_periods: int | None = None, center: bool = False,"
+                " win_type: str | None = None, on: str | None = None,"
+                ' closed: str | None = None, step: int | None = None, method: str = "single"'
+            ),
+            body="_rolling(self, window, min_periods, center, win_type, on, closed, step, method)",
+            doc="A window of a fixed width over every column, computing nothing until reduced.",
+            returns="Rolling",
+        ),
+        Member(
+            name="expanding",
+            kind="method",
+            signature='min_periods: int = 1, method: str = "single"',
+            body="_expanding(self, min_periods, method)",
+            doc="A window over every column that starts at the first row and grows.",
+            returns="Expanding",
+        ),
         *_reductions("DataFrame"),
         *_transformations("DataFrame"),
         *_operators("DataFrame"),
@@ -1600,6 +1902,59 @@ SERIES = Exposed(
             name="monotonic",
             doc="Whether the column is sorted, one way or the other.",
             params=(("increasing", "bool"),),
+            returns="bool",
+        ),
+        Binding(
+            mojo="PySeries.string_text",
+            name="string_text",
+            doc="One str accessor method that answers text, as a column.",
+            params=(
+                ("kind", "str"),
+                ("arg", "str"),
+                ("start", "int | None"),
+                ("stop", "int | None"),
+                ("step", "int"),
+            ),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.window_agg",
+            name="window_agg",
+            doc="One reduction over every window of the column.",
+            params=(
+                ("kind", "str"),
+                ("window", "int | None"),
+                ("min_periods", "int | None"),
+                ("center", "bool"),
+                ("closed", "str"),
+                ("step", "int | None"),
+            ),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.string_flag",
+            name="string_flag",
+            doc="One str accessor method that answers a mask, as a column.",
+            params=(("kind", "str"), ("arg", "str")),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.string_number",
+            name="string_number",
+            doc="One str accessor method that answers a number, as a column.",
+            params=(
+                ("kind", "str"),
+                ("arg", "str"),
+                ("start", "int | None"),
+                ("stop", "int | None"),
+            ),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.string_is_text",
+            name="string_is_text",
+            doc="Whether the column holds text at all.",
+            params=(),
             returns="bool",
         ),
         Binding(
@@ -1790,6 +2145,26 @@ SERIES = Exposed(
         *_reductions("Series"),
         *_transformations("Series"),
         Member(
+            name="rolling",
+            kind="method",
+            signature=(
+                "window: Any, min_periods: int | None = None, center: bool = False,"
+                " win_type: str | None = None, on: str | None = None,"
+                ' closed: str | None = None, step: int | None = None, method: str = "single"'
+            ),
+            body="_rolling(self, window, min_periods, center, win_type, on, closed, step, method)",
+            doc="A window of a fixed width, which computes nothing until it is reduced.",
+            returns="Rolling",
+        ),
+        Member(
+            name="expanding",
+            kind="method",
+            signature='min_periods: int = 1, method: str = "single"',
+            body="_expanding(self, min_periods, method)",
+            doc="A window that starts at the first row and grows, reduced the same way.",
+            returns="Expanding",
+        ),
+        Member(
             name="dt",
             kind="accessor",
             body="DatetimeProperties",
@@ -1798,6 +2173,16 @@ SERIES = Exposed(
                 " temporal column live."
             ),
             returns="DatetimeProperties",
+        ),
+        Member(
+            name="str",
+            kind="accessor",
+            body="StringAccessor",
+            doc=(
+                "The string accessor, which is where the methods that read a text"
+                " column character by character live."
+            ),
+            returns="StringAccessor",
         ),
         Member(
             name="cat",
@@ -2348,7 +2733,8 @@ class Accessor:
     """The class name, which is the pandas one."""
 
     owner: str
-    """The class the accessor is reached from."""
+    """The class the accessor is reached from, and both of them where a namespace
+    hangs off a column and a frame alike."""
 
     doc: str
     """The Python class docstring."""
@@ -2381,6 +2767,24 @@ ACCESSORS: tuple[Accessor, ...] = (
         members=_datetime_members(),
     ),
     Accessor(
+        py="StringAccessor",
+        owner="Series",
+        doc=(
+            "The `str` accessor, which is the largest namespace pandas has.\n\n"
+            "Reached from `s.str`, and only on a column of text, which pandas also"
+            " refuses at the accessor rather than at the method: `s.str` on a column"
+            " of numbers is an `AttributeError` there and here. The same reasoning"
+            " the `cat` accessor gives applies, since a caller writing `s.str` has"
+            " already decided what the column is.\n\n"
+            "Twelve of the fifty seven names so far, and the twelve share one idea:"
+            " a position in a string is a character and not a byte. Every other"
+            " kernel in this library counts bytes, which is right for a `LIKE`"
+            " pattern and for a sort order and is not what `s.str.len()` answers."
+        ),
+        mixin="StringMixin",
+        members=_string_members(),
+    ),
+    Accessor(
         py="CategoricalAccessor",
         owner="Series",
         doc=(
@@ -2400,6 +2804,49 @@ ACCESSORS: tuple[Accessor, ...] = (
         ),
         mixin="CategoricalMixin",
         members=_categorical_members(),
+    ),
+    Accessor(
+        py="Rolling",
+        owner="Series and DataFrame",
+        doc=(
+            "A window of a fixed width, waiting for a reduction.\n\n"
+            "Reached from `s.rolling(...)` and from `df.rolling(...)`, and it"
+            " holds what it was given and the five numbers that say where each"
+            " window sits rather than computing anything, which is what pandas"
+            " does as well. The five are one question,"
+            " `firepanda/kernel/window.mojo` states it as a pair of row numbers,"
+            " and this class is where a caller's spelling of that question is"
+            " checked.\n\n"
+            "One class for both owners rather than pandas' two, because a window"
+            " is a pair of row numbers and every column of a frame has the same"
+            " rows, so a frame window is the columns windowed one at a time. The"
+            " only place the difference is visible is `numeric_only`, which asks"
+            " a question a frame can answer and a column cannot.\n\n"
+            "Five of pandas' twenty six reductions so far, and they are the five"
+            " a window can be carried through. A total can have the row that"
+            " left subtracted from it and the row that arrived added to it, and"
+            " a median cannot, which is the line between what is here and what"
+            " is not."
+        ),
+        mixin="RollingMixin",
+        members=_window_members("Rolling"),
+    ),
+    Accessor(
+        py="Expanding",
+        owner="Series and DataFrame",
+        doc=(
+            "A window that starts at the first row and grows, waiting for a"
+            " reduction.\n\n"
+            "Reached from `s.expanding(...)` and from `df.expanding(...)`. The"
+            " same five reductions as `Rolling` over a window with no near end,"
+            " which is why the two classes share everything below the"
+            " constructor: an expanding window is a rolling one whose width is"
+            " the height of what it reads. The one thing that is genuinely"
+            " different is the default for `min_periods`, which is one here and"
+            " the full width there, and pandas has the same split."
+        ),
+        mixin="ExpandingMixin",
+        members=_window_members("Expanding"),
     ),
     Accessor(
         py="DataFrameGroupBy",
@@ -2785,6 +3232,11 @@ def wrapper() -> str:
     # arguments have to be read before there is an object to read them into.
     if any("_grouped(" in m.body for m in every):
         mixins.add("_grouped")
+    # `s.rolling(...)` and `s.expanding(...)` are the same case as `groupby`
+    # above, for the same reason, so they are hand written functions too.
+    for builder in ("_rolling", "_expanding"):
+        if any(f"{builder}(" in m.body for m in every):
+            mixins.add(builder)
     if mixins:
         out.extend(_imported(sorted(mixins, key=_import_order)))
     out.append("from .errors import translate")

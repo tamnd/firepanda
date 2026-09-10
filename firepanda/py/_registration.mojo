@@ -80,6 +80,10 @@ def register(mut module: PythonModuleBuilder) raises:
         "transform",
         docstring="Every column put through one named transformation.",
     )
+    _ = dataframe.def_method[PyDataFrame.window_agg](
+        "window_agg",
+        docstring="One reduction over every window of every column.",
+    )
     _ = dataframe.def_method[PyDataFrame.dropna](
         "dropna", docstring="The rows with no missing value in them."
     )
@@ -191,6 +195,24 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = series.def_method[PySeries.monotonic](
         "monotonic",
         docstring="Whether the column is sorted, one way or the other.",
+    )
+    _ = series.def_method[PySeries.string_text](
+        "string_text",
+        docstring="One str accessor method that answers text, as a column.",
+    )
+    _ = series.def_method[PySeries.window_agg](
+        "window_agg", docstring="One reduction over every window of the column."
+    )
+    _ = series.def_method[PySeries.string_flag](
+        "string_flag",
+        docstring="One str accessor method that answers a mask, as a column.",
+    )
+    _ = series.def_method[PySeries.string_number](
+        "string_number",
+        docstring="One str accessor method that answers a number, as a column.",
+    )
+    _ = series.def_method[PySeries.string_is_text](
+        "string_is_text", docstring="Whether the column holds text at all."
     )
     _ = series.def_method[PySeries.temporal_part](
         "temporal_part", docstring="One part of a temporal column, as a column."

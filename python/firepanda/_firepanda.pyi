@@ -40,6 +40,17 @@ class DataFrame:
     def transform(self, kind: str, periods: int) -> DataFrame:
         """Every column put through one named transformation."""
         ...
+    def window_agg(
+        self,
+        kind: str,
+        window: int | None,
+        min_periods: int | None,
+        center: bool,
+        closed: str,
+        step: int | None,
+    ) -> DataFrame:
+        """One reduction over every window of every column."""
+        ...
     def dropna(self, subset: list[str]) -> DataFrame:
         """The rows with no missing value in them."""
         ...
@@ -145,6 +156,31 @@ class Series:
         ...
     def monotonic(self, increasing: bool) -> bool:
         """Whether the column is sorted, one way or the other."""
+        ...
+    def string_text(
+        self, kind: str, arg: str, start: int | None, stop: int | None, step: int
+    ) -> Series:
+        """One str accessor method that answers text, as a column."""
+        ...
+    def window_agg(
+        self,
+        kind: str,
+        window: int | None,
+        min_periods: int | None,
+        center: bool,
+        closed: str,
+        step: int | None,
+    ) -> Series:
+        """One reduction over every window of the column."""
+        ...
+    def string_flag(self, kind: str, arg: str) -> Series:
+        """One str accessor method that answers a mask, as a column."""
+        ...
+    def string_number(self, kind: str, arg: str, start: int | None, stop: int | None) -> Series:
+        """One str accessor method that answers a number, as a column."""
+        ...
+    def string_is_text(self) -> bool:
+        """Whether the column holds text at all."""
         ...
     def temporal_part(self, kind: str, arg: str) -> Series:
         """One part of a temporal column, as a column."""
