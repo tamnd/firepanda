@@ -326,5 +326,27 @@ def test_a_result_that_is_still_a_time_goes_back_on_the_clock() raises:
         )
 
 
+def test_the_two_zone_refusals_carry_the_words_pandas_uses() raises:
+    """The phrase a user searches for is part of the message, not a nicety.
+
+    Somebody who converts a naive column has made the mistake everybody makes
+    once, and what they do next is paste the message into a search box. A
+    sentence that describes our internals accurately and shares no words with
+    the pandas documentation sends them nowhere, so pandas' own sentence goes
+    first and ours follows it. The exact strings are asserted here rather than
+    left to the conformance suite, because the suite runs somewhere else and a
+    reworded message should fail next to the reword.
+    """
+    var naive = stamps(noon(), TimeUnit.SECOND, "")
+    var utc = temporal_tz_localize(naive, "UTC")
+
+    with assert_raises(
+        contains="Cannot convert tz-naive timestamps, use tz_localize to"
+    ):
+        _ = temporal_tz_convert(naive, "UTC")
+    with assert_raises(contains="Already tz-aware, use tz_convert to convert"):
+        _ = temporal_tz_localize(utc, "UTC")
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

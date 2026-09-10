@@ -330,6 +330,39 @@ def test_an_operation_across_two_dtypes_that_have_none_is_a_type_error(
         frame + None
 
 
+def test_two_columns_with_no_operation_between_them_say_so_pandas_way(
+    firepanda: ModuleType,
+) -> None:
+    """The class was already right and the words were about type promotion.
+
+    The core's message is `no common type for int64 and string`, which is a true
+    statement about the promotion table and is not a statement about anything the
+    user wrote. pandas says `operation 'add' not supported for dtype 'int64' with
+    dtype 'str'`, which names the call, and `not supported for dtype` is what
+    somebody pastes into a search box. The dtype spellings are ours, because
+    firepanda calls a text column `string` where pandas 3 calls it `str`, and the
+    part of the sentence that has to match is the part a person searches for.
+
+    The constant form is deliberately left alone and is asserted here so that it
+    stays that way. pandas answers `s + "x"` with a numpy `UFuncTypeError` saying
+    `ufunc 'add' did not contain a loop with signature matching types`, which is
+    an implementation detail leaking through rather than a message pandas wrote,
+    and copying it would be copying the leak.
+    """
+    numbers = firepanda.Series([1, 2, 3])
+    words = firepanda.Series(["a", "b", "c"])
+
+    for call in (lambda: numbers + words, lambda: numbers.add(words)):
+        with pytest.raises(TypeError, match="not supported for dtype"):
+            call()
+
+    with pytest.raises(TypeError, match="operation 'mul' not supported"):
+        words * numbers
+
+    with pytest.raises(TypeError, match="no common type"):
+        numbers + "x"
+
+
 def test_a_result_keeps_a_name_only_when_both_sides_agree_on_it(
     firepanda: ModuleType,
 ) -> None:

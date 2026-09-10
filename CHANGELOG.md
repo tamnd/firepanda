@@ -22,6 +22,18 @@ Found by CI on Linux, on a test that passed on macOS for exactly this reason.
 
 This is a stopgap and the comment on the step says so. An extension that does not declare whether it is safe without the GIL is supposed to make the interpreter turn the GIL back on and carry on, not crash in its init function, so something is wrong rather than merely unsupported. #400 has the reproduction and what has to be found out to close it.
 
+### Fixed: four messages that described our internals instead of the user's mistake
+
+A message is a product surface. Somebody who hits one of these has stopped reading their own code and has started pasting a sentence into a search box, and a sentence that is accurate about firepanda's insides and shares no words with the pandas documentation sends them nowhere. These four had the right exception class and the wrong words, which is the failure mode that looks like nothing is wrong.
+
+`dt.tz_convert` on a column with no zone said `tz_convert has nothing to convert this column from`. It now says `Cannot convert tz-naive timestamps, use tz_localize to localize`, which is pandas' own sentence, followed by ours saying which column and what to reach for. `dt.tz_localize` on a column that already carries one said `this column is already on UTC` and now leads with `Already tz-aware, use tz_convert to convert`. A frequency nobody can round to said `'not a frequency' is not a fixed frequency` and now says `Invalid frequency: not a frequency`, still followed by the list of the seven that work. The frequency message also names the whole string the caller wrote rather than the letters after the count, so `2xyz` reports `2xyz` and not `xyz`.
+
+An operation between two dtypes with nothing between them said `no common type for int64 and string`, which is a true statement about the promotion table and is not a statement about anything the user wrote. It now leads with `operation 'add' not supported for dtype 'int64' with dtype 'string'` and keeps the promotion complaint after the colon, because the second half is often the more useful of the two and both fit in one string. Whether the failure is that one is decided by asking `promote` rather than by reading the message text, and `promote` is asked instead of `binary_type` on purpose: `bool - bool` promotes perfectly well and is refused further along by numpy's own sentence naming `bitwise_xor` as the operator that works, which is a better message than this one and would have been buried by it. The sentence is only added when each side is a single dtype, since two frames are lined up by name and there is no pair to name here without doing the alignment a second time.
+
+The constant form is deliberately left alone. pandas answers `s + "x"` with a numpy `UFuncTypeError` saying `ufunc 'add' did not contain a loop with signature matching types`, which is an implementation detail leaking through rather than a message pandas wrote, and there is nothing there worth copying.
+
+All four were found by the conformance suite the day it started routing L4 to the Python module, which is [firepanda-compat #82](https://github.com/tamnd/firepanda-compat/pull/82), and they had been invisible until then.
+
 ### Fixed: the three ways a cast fails, all three of them wrong
 
 A conversion that cannot be made now fails the way pandas fails it, in the class it raises, in the sentence it says and in whether it fails at all.

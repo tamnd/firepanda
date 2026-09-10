@@ -429,6 +429,30 @@ def test_a_locale_is_refused_rather_than_answered_in_english(firepanda: ModuleTy
 
 
 @both
+def test_the_temporal_refusals_share_the_words_pandas_uses(firepanda: ModuleType) -> None:
+    """Three messages, asserted against both libraries with one pattern each.
+
+    A user who converts a naive column, localizes a zoned one, or misspells a
+    frequency does the same thing next in every case, which is to paste the
+    message into a search box and land on the pandas documentation page that
+    explains what to do. A message that describes our internals accurately and
+    shares no words with that page sends them nowhere, so pandas' sentence goes
+    first here and ours follows it.
+
+    Running the same pattern against pandas is the point of `@both`. A test that
+    only asserted our string would keep passing on the day pandas reworded
+    theirs, which is the day the phrase stops being the one anybody searches for.
+    """
+    naive = stamps(firepanda)
+    with pytest.raises(TypeError, match="tz-naive"):
+        naive.dt.tz_convert("UTC")
+    with pytest.raises(TypeError, match="Already tz-aware"):
+        naive.dt.tz_localize("UTC").dt.tz_localize("UTC")
+    with pytest.raises(ValueError, match="Invalid frequency"):
+        naive.dt.floor("not a frequency")
+
+
+@both
 def test_naming_a_zone_with_a_transition_table_is_refused(firepanda: ModuleType) -> None:
     """Every zone but UTC, until there is a zone database to read.
 

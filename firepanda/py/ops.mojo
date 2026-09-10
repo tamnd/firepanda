@@ -41,14 +41,21 @@ from std.collections import Optional
 from std.python import Python, PythonObject
 
 from firepanda.array.value import Value
-from firepanda.dtype.logical import LogicalType, TypeKind
+from firepanda.dtype.logical import LogicalType, TypeKind, promote
 from firepanda.kernel.binary import (
     BinaryOp,
     resolve_constant,
     unsupported_on_bool,
 )
 from firepanda.kernel.unary import UnaryOp
-from firepanda.py.errors import DTYPE, OVERFLOW, UNSUPPORTED, VALUE, tagged
+from firepanda.py.errors import (
+    DTYPE,
+    OVERFLOW,
+    UNSUPPORTED,
+    VALUE,
+    retagged,
+    tagged,
+)
 
 
 def binary_op(name: String) raises -> BinaryOp:
@@ -245,6 +252,76 @@ def binary_tag(
     if not _holds_bool(left) or not _holds_bool(right):
         return DTYPE
     return UNSUPPORTED
+
+
+def binary_failure(
+    spelling: String,
+    op: BinaryOp,
+    left: List[LogicalType],
+    right: List[LogicalType],
+    cause: Error,
+) -> Error:
+    """Turns a failed operation between two columns into the error pandas gives.
+
+    The tag comes from `binary_tag` and the sentence in front of the message is
+    the part this adds. The core's message for the ordinary failure is `no
+    common type for int64 and string`, which is a true statement about type
+    promotion and is not a statement about anything the user wrote. pandas says
+    `operation 'add' not supported for dtype 'int64' with dtype 'str'`, which
+    names the call, and the phrase `not supported for dtype` is what somebody
+    pastes into a search box.
+
+    So pandas' sentence goes first and the core's goes after it, rather than
+    replacing it. The core's half is often the more useful of the two, since it
+    says why the pair has no answer and sometimes what to write instead, and
+    replacing it would trade an explanation for a searchable phrase when both
+    fit in one string.
+
+    Whether this is that failure is asked rather than sniffed out of the message
+    text. `promote` is the function that decides it, it is a function of the two
+    types alone, and asking it a second time here costs nothing and cannot
+    disagree with what the core already decided. It is asked rather than
+    `binary_type` on purpose: `bool - bool` promotes perfectly well and is
+    refused further along by numpy's own sentence naming `bitwise_xor` as the
+    operator that works, which is a better message than this one and would have
+    been buried by it.
+
+    The sentence is only added when each side is one dtype, which is a series
+    against a series or a series against a constant. Two frames carry one dtype
+    per column and are lined up by name, so there is no pair here to name
+    without doing the alignment a second time, and a message naming two dtypes
+    that never met each other would be worse than the general one.
+
+    Args:
+        spelling: The operation as pandas names it, so `add` rather than `+`.
+        op: The same operation, as the core spells it.
+        left: The left operand's dtypes, one for a series and one per column for
+            a frame.
+        right: The right operand's dtypes, read the same way.
+        cause: What the core raised.
+
+    Returns:
+        The error to raise, tagged.
+    """
+    var tag = binary_tag(op, left, right)
+    if tag == DTYPE and len(left) == 1 and len(right) == 1:
+        try:
+            _ = promote(left[0], right[0])
+        except:
+            return tagged(
+                tag,
+                String(
+                    "operation '",
+                    spelling,
+                    "' not supported for dtype '",
+                    left[0],
+                    "' with dtype '",
+                    right[0],
+                    "': ",
+                    cause,
+                ),
+            )
+    return retagged(tag, cause)
 
 
 def _holds_bool(dtypes: List[LogicalType]) -> Bool:
