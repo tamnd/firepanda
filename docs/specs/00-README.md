@@ -53,11 +53,14 @@ Three divergences are worth knowing before reading further, because they are wha
 | 10 | `10-benchmarks.md` | `tamnd/firepanda-bench`, against pandas, Polars, DuckDB, cuDF and MojoFrame |
 | 11 | `11-package-layout.md` | the tree, Mojo 1.0's re-export rules, stability tiers |
 | | `engine/` | how DuckDB and Polars execute a query, and the firepanda plan that came out of reading them |
+| | `planner/` | what decides the shape of a query, and the milestone that makes firepanda decide it |
 | | `sql/` | DuckDB's dialect, the vendored grammar, the shared logical plan, and how compatibility gets measured |
 
 Read 04 first if you only read one, because the product is the developer experience and everything else is in service of it. Read 03 second, because it is where the engine differs from every other dataframe library.
 
 `engine/` was added later, in August 2026, after several releases of kernel level optimization gave diminishing returns and the reason turned out to be that the execution model above the kernels was the one pandas has. It is the newest and most consequential part of this specification and `engine/01-what-we-take.md` is the summary.
+
+`planner/` was added in September 2026 for the same kind of reason. Hand planning the twenty two TPC-H queries in the benchmark driver took them from 6.671 seconds to about 1.4 at sf1 with one kernel changed, which is a factor of four point eight from decisions firepanda does not make. `planner/` is what it would take to make the engine decide them. It is the other half of `engine/` and neither one finishes the job alone.
 
 ## The decisions already made
 

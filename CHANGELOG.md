@@ -8,6 +8,24 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the planner specification, and a milestone for it
+
+`docs/specs/planner/`, eleven documents, on what decides the shape of a query rather than on how the query runs. `engine/` next door is morsels, pipelines and spilling, and it says almost nothing about who chose the join order or which physical group by to use. This is that half.
+
+It exists now because we just measured what it is worth by hand, twenty two times. The TPC-H driver in the benchmark repository started at 6.671 seconds for the twenty two queries at sf1 and is at about 1.4. One kernel changed in that time. Everything else was projection pushdown, predicate pushdown, join reordering and operator selection, written out by a person query by query, and none of it transfers to a query a user writes.
+
+The documents are the IR and binding, the pass pipeline with each pass carrying what it bought us on TPC-H, join ordering and why we are not starting there, predicate transfer, cardinality and cost, runtime filters, operator selection, the build order, the refactoring, and the milestone checklist.
+
+The strategy document is `04-predicate-transfer.md`. The classical answer to fast joins is to find the right order, finding the right order needs cardinality estimates, and the estimates are wrong by orders of magnitude on anything past three relations. The 2024 Predicate Transfer paper and the 2025 Robust Predicate Transfer paper say you can sidestep most of that by filtering every table with what every other table implies about it before joining anything, after which the join order stops mattering very much. Their DuckDB integration measures the worst to best ratio over random join orders dropping to 1.6 on an acyclic query, and 1.5 times end to end as a geometric mean, across all of TPC-H, JOB and TPC-DS. That is a much better fit for a young engine than a cost model is.
+
+The uncomfortable part is `07-operator-selection.md`, which lists choices we already have both implementations of and do not make. `group_broadcast` beats group by plus a semi join by a factor of eight on q17 at two hundred thousand groups, and loses to it by a factor of three on q18 at one and a half million. The join buckets the right side because the parameter is called right, whatever the two heights are. A join on more than one key column concatenates every key column across both sides and factorizes the tuple over the sum of the two heights, where a join on one integer key builds a dictionary on the smaller side and probes the larger. None of that needs a plan layer and it is the first stage of the milestone.
+
+`08-milestones.md` gains M2c, which takes the plan, the binder and the optimizer passes out of M4 and does them first, because the plan is the thing the passes rewrite and building the lazy user surface against an API that does not exist yet means building it twice. M4 keeps `LazyFrame`, `collect`, `profile` and the error model.
+
+There is a second reason it is now rather than later. M2b's chunked engine already exists: `firepanda/exec/` has nine physical operators and a pipeline driver, and the only thing in the repository that calls it is a test file. The plan layer is what makes it reachable.
+
+No code changes.
+
 ### Changed: a filter runs on every core
 
 `filter_rows` and `filter_any` were the last two kernels of their size still running on one thread. The reason was structural rather than an oversight. A gather knows where every output row goes before it starts, so it splits by output row and the workers never meet; a filter does not, because where a row lands depends on how many rows before it survived, and a worker handed the middle of the mask has no idea where to write.
