@@ -1532,9 +1532,7 @@ def frequency_period(freq: StringSlice, t: LogicalType) raises -> Int64:
     if negative:
         count = -count
 
-    var nanos = _alias_nanos(
-        freq[byte=at:stop], String(freq[byte=start:stop])
-    )
+    var nanos = _alias_nanos(freq[byte=at:stop], String(freq[byte=start:stop]))
     var magnitude = count if count >= 0 else -count
     if magnitude > Int64.MAX // nanos:
         raise Error(
