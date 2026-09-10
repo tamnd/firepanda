@@ -67,12 +67,17 @@ So each kind gets a named class that subclasses the builtin its row promises.
 | `column` | `ColumnNotFoundError` | `KeyError` |
 | `dtype` | `DTypeError` | `TypeError` |
 | `value` | `InvalidArgumentError` | `ValueError` |
+| `nonfinite` | `IntCastingNaNError` | `ValueError` |
+| `overflow` | `NumericOverflowError` | `OverflowError` |
+| `position` | `OutOfBoundsError` | `IndexError` |
 | `io` | `ReaderError` | `OSError` |
 | `unsupported` | `UnsupportedError` | `NotImplementedError` |
 | `cancelled` | `CancelledError` | `KeyboardInterrupt` |
 | anything else | `RuntimeError` | `RuntimeError` |
 
-Every one of the first six also subclasses `FirepandaError`, which carries no behaviour and exists so that `except firepanda.errors.FirepandaError` can mean "anything this library considers its own fault or its user's". A traceback now reads `DTypeError` and an `except TypeError` written years ago still fires.
+Every one of them except `CancelledError` and `RuntimeError` also subclasses `FirepandaError`, which carries no behaviour and exists so that `except firepanda.errors.FirepandaError` can mean "anything this library considers its own fault or its user's". A traceback now reads `DTypeError` and an `except TypeError` written years ago still fires.
+
+`nonfinite` is the one row that is a subclass of another row rather than a sibling of it. `IntCastingNaNError` subclasses `InvalidArgumentError`, so it is a `ValueError` by two routes, and the reason it exists at all is that pandas has a class with that exact name in `pandas.errors` for that exact case. A program catching it by name is asking whether a column had a NaN in it where an integer was wanted, which is a specific enough question to be worth answering specifically, and a caller who does not care still catches it with the broad one.
 
 There is one deliberate exception to that, and it is a trap I walked into while writing this and want to leave a sign on. `CancelledError` does not subclass `FirepandaError`. `FirepandaError` is an `Exception`, `KeyboardInterrupt` is a `BaseException` and specifically not an `Exception`, and a class inheriting from both linearises with `Exception` in its ancestry. The result is a cancellation that any library with a bare `except Exception` in it will quietly swallow, which is the exact outcome `KeyboardInterrupt` sits outside `Exception` to prevent. So the marker is what gets dropped, the `BaseException` is what gets kept, and `test_a_cancellation_is_not_swallowed_by_except_exception` asserts it in those words.
 

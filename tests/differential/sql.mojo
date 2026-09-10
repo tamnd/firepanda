@@ -12,6 +12,15 @@ not an error on that side, which is exactly where the line has to be. firepanda
 would refuse those in the binder, and a binder refusal is not a compatibility
 failure.
 
+Every statement firepanda parses also goes through the transformer and the
+printer, twice, and the two printings have to agree. That is the round trip the
+printer exists for, and running it here rather than on a handful of hand written
+queries is the point: a precedence mistake or a clause the transformer drops
+shows up as text that says something else, on real SQL, at corpus scale. A
+statement outside the surface firepanda covers refuses by name and is counted
+rather than failed, which is what the table in `firepanda/sql/unsupported.mojo`
+is for.
+
 Some divergence is expected and is not a bug in this repository. The grammar is
 vendored from DuckDB's development branch and the oracle is whatever DuckDB the
 differential environment resolved, so a statement upstream taught its parser
@@ -27,7 +36,7 @@ Usage:
 from std.python import Python, PythonObject
 from std.sys import argv
 
-from firepanda.sql import Grammar
+from firepanda.sql import Ast, Grammar, Transform, print_stmt
 from firepanda.sql.matcher import parse
 
 comptime ACCEPTED = Byte(ord("1"))
@@ -35,6 +44,35 @@ comptime ACCEPTED = Byte(ord("1"))
 
 comptime REJECTED = Byte(ord("0"))
 """DuckDB called it a syntax error."""
+
+comptime REFUSAL = "Not Implemented Error:"
+"""What a refusal starts with, and what tells one from a crash.
+
+The whole point of the table in `firepanda/sql/unsupported.mojo` is that a
+harness can make this distinction. A statement outside the surface firepanda
+covers is supposed to refuse, and a statement that refuses is not a failure
+here. One that fails any other way is.
+"""
+
+comptime SYNTAX = "Parser Error:"
+"""What the matcher says when a rule did not match the text.
+
+Now that the transformer is aimed at the whole statement rule, what is left in
+this bucket is text the grammar itself will not take. The corpus is a test suite
+and part of what it tests is that bad SQL is rejected, so a hundred or so of
+these are the corpus checking DuckDB's error messages and firepanda agreeing
+with it. That is not a bug and it is not a refusal either, so it keeps a count
+of its own.
+"""
+
+comptime EXHAUSTED = "memory exhausted"
+"""What the matcher's depth guard says, in DuckDB's own words.
+
+Told apart from an ordinary syntax error because the two mean different things
+about the printer. A syntax error in printed text means the printer wrote
+something wrong. This means it wrote something right and too deeply nested for
+our own matcher to read back, which is a limit of the matcher.
+"""
 
 comptime SHOWN = 40
 """How many disagreements of each kind to print before summarizing the rest."""
@@ -70,6 +108,41 @@ Bison with the PEG grammar, which is the same thing firepanda will do.
 So this one is a ceiling rather than a target. It exists to catch the parser
 going slack, not to be driven to zero, and it should come down on its own the
 next time the oracle catches up with the grammar.
+"""
+
+comptime BROKEN_CEILING = 0
+"""How many statements the transformer may fail on for a reason that is not a
+refusal.
+
+Zero, and it stays zero. A refusal is a sentence naming a feature, and the
+refusal table is what makes one recognisable from the outside. Anything else out
+of the transformer is a bug here: a parse tree shape nobody expected, or a
+message written where a table entry belongs.
+"""
+
+comptime UNSTABLE_CEILING = 0
+"""How many statements may print back to something that is not themselves.
+
+Also zero. Print the AST, parse the text, print it again: if the two texts
+differ then one of the two passes lost something, and a printer that loses
+something is a wrong answer with no error attached to it. This is the property
+document 05 section 6 says the printer exists for.
+"""
+
+comptime TOO_DEEP_CEILING = 3
+"""How many statements may print to text the matcher will not read back.
+
+The printer parenthesizes every operand, so a chain of two thousand additions
+prints with two thousand nested parentheses in front of it, and the matcher's
+own depth guard stops at about twenty two. The three that are left are the eight
+kilobyte expression in `overflow/expression_tree_depth.test` and two wide
+generated CTEs in `cte/materialized/test_materialized_cte.test`, and they are the
+same `MAX_DEPTH` that `DUCKDB_ONLY_CEILING` above is about. All of them go when
+the matcher becomes an explicit stack machine.
+
+It is a bucket of its own rather than an unstable one because nothing was lost.
+The AST is right, the text is right, and the only thing that cannot read it is
+our own matcher.
 """
 
 
@@ -216,6 +289,72 @@ def report(kind: StringSlice, cases: List[Statement], of: Int) -> None:
         print("   ", len(cases) - SHOWN, "more")
 
 
+comptime STABLE: UInt8 = 0
+"""It transformed, printed, parsed and printed to the same text twice."""
+
+comptime REFUSED_BY_TABLE: UInt8 = 1
+"""The transformer refused it by name, which is the expected answer for
+everything outside the surface it covers."""
+
+comptime NOT_A_QUERY: UInt8 = 2
+"""It is a statement the transformer is not aimed at yet, so the query rule did
+not match it and the matcher said so."""
+
+comptime BROKEN: UInt8 = 3
+"""The transformer failed for a reason that was not either of those."""
+
+comptime UNSTABLE: UInt8 = 4
+"""It printed back to text that says something else."""
+
+comptime TOO_DEEP: UInt8 = 5
+"""It printed to text the matcher's depth guard will not read back."""
+
+
+def round_trip(sql: StringSlice, grammar: Grammar, rules: Transform) -> UInt8:
+    """Puts one statement through the transformer and the printer twice.
+
+    Once is not enough. The printer parenthesizes every operand, so a
+    transformer that read its own output one level deeper each time would still
+    print something that parses, and only the second pass shows the text
+    drifting. Comparing the two prints rather than comparing a print against the
+    query is also what lets the printer normalize: `FETCH FIRST 10 ROWS ONLY` is
+    allowed to come back as `LIMIT 10`, and it is not allowed to come back as
+    something different again the next time round.
+
+    Args:
+        sql: The statement, which the parser has already accepted.
+        grammar: A loaded grammar.
+        rules: A loaded transformer.
+
+    Returns:
+        One of `STABLE`, `REFUSED_BY_TABLE`, `NOT_A_QUERY`, `BROKEN`,
+        `UNSTABLE` or `TOO_DEEP`.
+    """
+    var once: String
+    try:
+        var ast = Ast()
+        var node = rules.parse_statement(sql, grammar, ast)
+        once = print_stmt(ast, node, grammar)
+    except error:
+        var message = String(error)
+        if message.startswith(REFUSAL):
+            return REFUSED_BY_TABLE
+        if message.startswith(SYNTAX):
+            return NOT_A_QUERY
+        return BROKEN
+
+    try:
+        var ast = Ast()
+        var node = rules.parse_statement(once, grammar, ast)
+        if print_stmt(ast, node, grammar) != once:
+            return UNSTABLE
+    except error:
+        if String(error).find(EXHAUSTED) >= 0:
+            return TOO_DEEP
+        return UNSTABLE
+    return STABLE
+
+
 def main() raises:
     var python_path = Python.import_module("sys").path
     python_path.insert(0, "tools")
@@ -238,25 +377,47 @@ def main() raises:
     var answers = theirs.as_bytes()
 
     var grammar = Grammar()
+    var rules = Transform(grammar)
     var compared = 0
     var undecided = 0
     var we_reject = List[Statement]()
     var we_accept = List[Statement]()
+    var transformed = 0
+    var refused = 0
+    var other_statements = 0
+    var broken = List[Statement]()
+    var unstable = List[Statement]()
+    var too_deep = List[Statement]()
 
     for i in range(len(statements)):
         var answer = answers[i]
-        if answer != ACCEPTED and answer != REJECTED:
-            # DuckDB refused it for a reason that was not a syntax error, so it
-            # is not an oracle for this question.
-            undecided += 1
-            continue
-
         ref statement = statements[i]
         var ours = True
         try:
             _ = parse(statement.sql, grammar)
         except:
             ours = False
+
+        if ours:
+            var outcome = round_trip(statement.sql, grammar, rules)
+            if outcome == STABLE:
+                transformed += 1
+            elif outcome == REFUSED_BY_TABLE:
+                refused += 1
+            elif outcome == NOT_A_QUERY:
+                other_statements += 1
+            elif outcome == BROKEN:
+                broken.append(statement)
+            elif outcome == TOO_DEEP:
+                too_deep.append(statement)
+            else:
+                unstable.append(statement)
+
+        if answer != ACCEPTED and answer != REJECTED:
+            # DuckDB refused it for a reason that was not a syntax error, so it
+            # is not an oracle for this question.
+            undecided += 1
+            continue
 
         compared += 1
         if ours and answer == REJECTED:
@@ -274,6 +435,43 @@ def main() raises:
 
     report("DuckDB parses these and firepanda does not:", we_reject, compared)
     report("firepanda parses these and DuckDB does not:", we_accept, compared)
+
+    var round_tripped = (
+        transformed
+        + refused
+        + other_statements
+        + len(broken)
+        + len(unstable)
+        + len(too_deep)
+    )
+    print()
+    print(
+        "round trip:",
+        transformed,
+        "stable,",
+        refused,
+        "refused by name,",
+        other_statements,
+        "not a query yet,",
+        len(broken),
+        "broken,",
+        len(unstable),
+        "unstable,",
+        len(too_deep),
+        "too deep to read back, of",
+        round_tripped,
+    )
+    report(
+        "the transformer failed on these without refusing:",
+        broken,
+        round_tripped,
+    )
+    report("these print back to something else:", unstable, round_tripped)
+    report(
+        "these print to text the matcher will not read back:",
+        too_deep,
+        round_tripped,
+    )
 
     var arguments = argv()
     if len(arguments) > 1:
@@ -315,5 +513,36 @@ def main() raises:
                 len(we_accept),
                 " statements DuckDB rejects, against a ceiling of ",
                 FIREPANDA_ONLY_CEILING,
+            )
+        )
+    if len(broken) > BROKEN_CEILING:
+        raise Error(
+            String(
+                "the transformer failed on ",
+                len(broken),
+                " statements without refusing, against a ceiling of ",
+                BROKEN_CEILING,
+            )
+        )
+    if len(unstable) > UNSTABLE_CEILING:
+        raise Error(
+            String(
+                len(unstable),
+                (
+                    " statements print back to something else, against a"
+                    " ceiling of "
+                ),
+                UNSTABLE_CEILING,
+            )
+        )
+    if len(too_deep) > TOO_DEEP_CEILING:
+        raise Error(
+            String(
+                len(too_deep),
+                (
+                    " statements print to text the matcher will not read back,"
+                    " against a ceiling of "
+                ),
+                TOO_DEEP_CEILING,
             )
         )

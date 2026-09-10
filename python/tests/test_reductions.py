@@ -201,3 +201,27 @@ def test_a_quantile_outside_the_interval_is_a_value_error(firepanda: ModuleType)
     """With the pandas message, which is the one a caller will have seen before."""
     with pytest.raises(ValueError, match=r"\[0, 1\]"):
         firepanda.Series(VALUES).quantile(1.5)
+
+
+def test_a_misspelled_quantile_rule_is_a_typo_and_not_a_gap(firepanda: ModuleType) -> None:
+    """`interpolation='lower'` and `interpolation='lowr'` are two different mistakes.
+
+    The first is one of the twelve rules pandas has and firepanda has not written,
+    and it comes back a `NotImplementedError` saying so. The second is not a rule
+    in either library, and pandas answers it with a `ValueError` listing the
+    thirteen names, so this does too. Handing the second caller a
+    `NotImplementedError` would tell them to wait for a feature that already
+    exists under the spelling they meant.
+
+    `method=` on the frame is the same shape of question with a two word
+    vocabulary, and it is here rather than in its own test because it is the same
+    decision.
+    """
+    with pytest.raises(ValueError, match="is not a valid method"):
+        firepanda.Series(VALUES).quantile(0.5, interpolation="lowr")
+    with pytest.raises(NotImplementedError, match="interpolation"):
+        firepanda.Series(VALUES).quantile(0.5, interpolation="lower")
+    with pytest.raises(ValueError, match="Method must be in"):
+        firepanda.DataFrame({"a": VALUES}).quantile(0.5, method="tabel")
+    with pytest.raises(NotImplementedError, match="method"):
+        firepanda.DataFrame({"a": VALUES}).quantile(0.5, method="table")

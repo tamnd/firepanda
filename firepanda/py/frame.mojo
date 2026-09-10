@@ -44,6 +44,11 @@ from firepanda.io.arrow_stream import (
 from firepanda.io.read import read_csv
 from firepanda.py.args import flag, number, whole, words
 from firepanda.py.build import empty_column, frame_from
+from firepanda.py.cast import (
+    NOT_FINITE,
+    checks_finite,
+    refuse_if_not_finite,
+)
 from firepanda.py.convert import (
     array_capsule,
     schema_capsule,
@@ -57,6 +62,7 @@ from firepanda.py.errors import (
     COLUMN,
     DTYPE,
     IO,
+    NONFINITE,
     OVERFLOW,
     POSITION,
     UNSUPPORTED,
@@ -66,9 +72,9 @@ from firepanda.py.errors import (
 )
 from firepanda.py.index import PyIndex
 from firepanda.py.ops import (
+    binary_failure,
     binary_op,
     constant,
-    binary_tag,
     constant_tag,
     fill,
     unary_op,
@@ -464,10 +470,12 @@ struct PyDataFrame(Movable, Writable):
             A new frame with those columns converted and the rest untouched.
 
         Raises:
-            Error: Tagged `value` if the two lists are different lengths or a
-                name is not one this layer prints, tagged `column` if a column
-                is not in the frame, and tagged `dtype` if the conversion is not
-                one firepanda has or a text value is not a number.
+            Error: Tagged `value` if the two lists are different lengths, a name
+                is not one this layer prints or a text value is not a number,
+                tagged `column` if a column is not in the frame, tagged
+                `nonfinite` if an integer column was asked for and there is a
+                missing value, a NaN or an infinity in the way, and tagged
+                `dtype` if the conversion is not one firepanda has.
         """
         if len(names) != len(dtypes):
             raise tagged(
@@ -491,9 +499,21 @@ struct PyDataFrame(Movable, Writable):
                 raise retagged(VALUE, cause)
             if not out.schema.has(name):
                 raise tagged(COLUMN, String("no column named ", name))
+            var text = out.schema[
+                out.schema.index_of(name)
+            ].dtype.is_variable_width()
+            # `column` copies the column and flattens it, so it is only asked
+            # for when the answer can matter, which the predicate decides.
+            if checks_finite(wanted):
+                refuse_if_not_finite(out.column(name).values, wanted)
             try:
                 out = out.cast(name, wanted, strictly)
             except cause:
+                # The source decides the tag, for the reason `PySeries.cast`
+                # gives: out of text the only failure left is a value that will
+                # not read, which is a value error in pandas.
+                if text:
+                    raise retagged(VALUE, cause)
                 raise retagged(DTYPE, cause)
         return PythonObject(alloc=Self(ArcPointer(out^)))
 
@@ -683,7 +703,8 @@ struct PyDataFrame(Movable, Writable):
                 operation is not defined on a pair of columns it reached.
         """
         var right = Self._other(other, "other")
-        var which = binary_op(words(op, "op"))
+        var spelling = words(op, "op")
+        var which = binary_op(spelling)
         var filled = fill(fill_value)
         var flipped = flag(flip, "flip")
         try:
@@ -697,12 +718,11 @@ struct PyDataFrame(Movable, Writable):
                 )
             )
         except cause:
-            raise retagged(
-                binary_tag(
-                    which,
-                    Self._dtypes_of(Self._frame(py_self)[].frame[]),
-                    Self._dtypes_of(right[]),
-                ),
+            raise binary_failure(
+                spelling,
+                which,
+                Self._dtypes_of(Self._frame(py_self)[].frame[]),
+                Self._dtypes_of(right[]),
                 cause,
             )
 
@@ -742,7 +762,8 @@ struct PyDataFrame(Movable, Writable):
                 operation is not defined on a pair it reached.
         """
         var right = PySeries._other(other, "other")
-        var which = binary_op(words(op, "op"))
+        var spelling = words(op, "op")
+        var which = binary_op(spelling)
         var along = whole(axis, "axis")
         var flipped = flag(flip, "flip")
         try:
@@ -758,12 +779,11 @@ struct PyDataFrame(Movable, Writable):
         except cause:
             var theirs = List[LogicalType](capacity=1)
             theirs.append(right[].logical())
-            raise retagged(
-                binary_tag(
-                    which,
-                    Self._dtypes_of(Self._frame(py_self)[].frame[]),
-                    theirs,
-                ),
+            raise binary_failure(
+                spelling,
+                which,
+                Self._dtypes_of(Self._frame(py_self)[].frame[]),
+                theirs,
                 cause,
             )
 
@@ -1313,6 +1333,8 @@ def raise_for_test(kind: PythonObject) raises -> PythonObject:
         raise tagged(DTYPE, "cannot add int64 and float64")
     if which == "value":
         raise tagged(VALUE, "n must not be negative")
+    if which == "nonfinite":
+        raise tagged(NONFINITE, NOT_FINITE)
     if which == "overflow":
         raise tagged(OVERFLOW, "Python integer 128 out of bounds for int8")
     if which == "position":

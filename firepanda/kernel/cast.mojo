@@ -42,7 +42,7 @@ widest type, would silently lose precision on exactly the int64 and uint64 round
 trips a join key most needs to survive.
 """
 
-from std.math import isnan
+from std.math import isinf, isnan
 from std.sys.info import simd_width_of
 
 from firepanda.array.any import AnyArray
@@ -59,6 +59,7 @@ from firepanda.exec import parallel_morsels
 # question and gets the same answer, rather than a second one that rounds
 # differently from the reader.
 from firepanda.io.parse import parse_bool, parse_float, parse_int
+from firepanda.kernel.nulls import missing_count_any
 
 
 def cast_to[src: DType, dst: DType](col: Array[src]) raises -> Array[dst]:
@@ -170,18 +171,103 @@ def cast_strings_to[
                 continue
 
         if strict:
-            raise Error(
-                String(
-                    "cast: row ",
-                    i,
-                    " holds ",
-                    col[i],
-                    ", which is not a ",
-                    dst,
-                )
-            )
+            raise Error(_unreadable[dst](col[i], i))
         out.set_null(i)
     return out^
+
+
+def _unreadable[dst: DType](value: String, row: Int) -> String:
+    """What to say about a text value that will not read as a number.
+
+    The two numeric sentences are the ones CPython's own `int` and `float`
+    raise. They are borrowed rather than invented because this function is
+    answering the same question those two answer, and a caller who has seen one
+    of them before knows immediately what went wrong. pandas ends up saying the
+    same words for the same reason, which is that it calls `int` and `float`
+    directly, so borrowing them costs nothing and buys a message a program
+    written against pandas already matches on.
+
+    The row is added on the end, which is the part neither of them says. A
+    column has a length and the caller has no other way to find the value that
+    stopped the conversion.
+
+    There is no sentence to borrow for a bool, because nothing in Python parses
+    text into a boolean. `bool("x")` is `True` and never fails, which is the
+    divergence recorded in `python/tests/test_astype.py`, so the bool arm keeps
+    the message firepanda wrote for itself.
+
+    Args:
+        value: The text that did not read.
+        row: Where it is.
+
+    Parameters:
+        dst: What it was being read as.
+
+    Returns:
+        The message, with no tag on it.
+    """
+    comptime if dst == DType.bool:
+        return String(
+            "cast: row ", row, " holds ", value, ", which is not a bool"
+        )
+    elif contains[INTEGER](dst):
+        return String(
+            "invalid literal for int() with base 10: '",
+            value,
+            "' at row ",
+            row,
+        )
+    else:
+        return String(
+            "could not convert string to float: '", value, "' at row ", row
+        )
+
+
+def integer_ready(col: AnyArray) raises -> Bool:
+    """Whether every row of a column is something an integer column can hold.
+
+    False if any row is missing, or holds a NaN, or holds an infinity. True for
+    anything else, including a text column, which this says nothing about: text
+    fails in its own way, one value at a time, and `cast_strings_to` reports
+    that with the value in the message, which is better than a yes or no.
+
+    This exists because the module docstring above says the range and finiteness
+    check belongs in the layer above the kernel, and a layer above the kernel
+    cannot ask this question without a loop that knows the dtype. So the loop is
+    here and the decision to run it is not. Nothing in this file calls it.
+
+    The three failing conditions are one question rather than three, because
+    they are one question to a caller: pandas raises a single error for all of
+    them and firepanda has nothing useful to add by telling them apart. A NaN
+    and a cleared validity bit are already the same thing everywhere else in the
+    package, and an infinity converted to an integer is undefined rather than
+    large.
+
+    Args:
+        col: The column that is about to be converted.
+
+    Returns:
+        Whether the conversion has anything in front of it that it cannot do.
+
+    Raises:
+        Error: If the column's dtype is not one firepanda has a layout for.
+    """
+    if col.is_string():
+        return True
+    # A NaN and a cleared bit are the same thing to `missing_count_any`, which is
+    # what makes this two conditions rather than three: it answers the missing
+    # value and the NaN together, and only the infinity is left to look for.
+    if missing_count_any(col) > 0:
+        return False
+    comptime for source in ALL:
+        if col.dtype() == source:
+            comptime if source.is_floating_point():
+                ref view = col.as_typed_view[source]()
+                for i in range(len(view)):
+                    if isinf(view[i]):
+                        return False
+            return True
+    raise Error("cast: unsupported source dtype")
 
 
 def cast_to_strings[src: DType](col: Array[src]) raises -> StringArray:

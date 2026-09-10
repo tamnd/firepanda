@@ -27,7 +27,7 @@ It quotes an identifier whenever the bare text would not read back as itself.
 The tokenizer folds an unquoted word to lower case, so a name with a capital in
 it can only have arrived quoted and has to leave quoted. The same goes for a
 name holding a character no bare identifier may hold, and for a name that is a
-reserved keyword.
+keyword in a class that cannot stand where the name stands.
 """
 
 from .ast import (
@@ -96,7 +96,12 @@ from .ast import (
     STMT_TABLE,
     STMT_VALUES,
 )
-from .generated.keywords import KEYWORD_RESERVED
+from .generated.keywords import (
+    KEYWORD_COLUMN_NAME,
+    KEYWORD_FUNC_NAME,
+    KEYWORD_TYPE_NAME,
+    KEYWORD_UNRESERVED,
+)
 from .table import Grammar
 
 comptime DOUBLE_QUOTE = Byte(ord('"'))
@@ -169,18 +174,22 @@ def print_ref(ast: Ast, node: UInt32, grammar: Grammar) raises -> String:
     return out^
 
 
-def quote_name(name: StringSlice, grammar: Grammar) -> String:
+def quote_name(
+    name: StringSlice, grammar: Grammar, calling: Bool = False
+) -> String:
     """Quotes an identifier if the bare text would not read back as itself.
 
     Args:
         name: The name, as the AST holds it.
         grammar: A loaded grammar, for the keyword table.
+        calling: Whether this is the name of a function being called, which is
+            a position two more keyword classes may stand in.
 
     Returns:
         The name, in double quotes when it needs them, with any double quote in
         it doubled.
     """
-    if not needs_quoting(name, grammar):
+    if not needs_quoting(name, grammar, calling):
         return String(name)
     return _wrapped(name, DOUBLE_QUOTE)
 
@@ -202,12 +211,15 @@ def quote_string(value: StringSlice) -> String:
     return _wrapped(value, SINGLE_QUOTE)
 
 
-def needs_quoting(name: StringSlice, grammar: Grammar) -> Bool:
+def needs_quoting(
+    name: StringSlice, grammar: Grammar, calling: Bool = False
+) -> Bool:
     """Says whether an identifier has to be written in double quotes.
 
     Args:
         name: The name.
         grammar: A loaded grammar, for the keyword table.
+        calling: Whether this is the name of a function being called.
 
     Returns:
         Whether printing it bare would read back as something else.
@@ -233,9 +245,23 @@ def needs_quoting(name: StringSlice, grammar: Grammar) -> Bool:
         )
         if not ordinary:
             return True
-    # A reserved keyword cannot stand where a name is wanted. An unreserved one
-    # can, so it is left alone rather than quoted for the sake of it.
-    return grammar.keyword_class(name) & KEYWORD_RESERVED != 0
+    # Which keywords may stand bare is a property of the position and not of the
+    # word, and DuckDB's own classes are what say which. An unreserved keyword
+    # and a column name keyword may be a name anywhere, so `coalesce(a, b)`
+    # keeps its bare name. A function name keyword and a type name keyword may
+    # only be a name where a function is being called, so `left(a, 1)` is bare
+    # and the same word as a column is not. A reserved keyword may be neither.
+    #
+    # Getting this wrong in the quoting direction costs quotes nobody asked for
+    # and getting it wrong the other way costs a query that does not parse. The
+    # corpus found the second kind: `SELECT "inner" FROM t`, in
+    # copy/parquet/parquet_1618_struct_strings.test, printed bare and came back
+    # as a syntax error at the FROM.
+    var allowed = KEYWORD_UNRESERVED | KEYWORD_COLUMN_NAME
+    if calling:
+        allowed |= KEYWORD_FUNC_NAME | KEYWORD_TYPE_NAME
+    var classes = grammar.keyword_class(name)
+    return classes != 0 and classes & allowed == 0
 
 
 def _wrapped(value: StringSlice, quote: Byte) -> String:
@@ -281,27 +307,78 @@ def _is_word(text: StringSlice) -> Bool:
     )
 
 
-def _names(ast: Ast, run: UInt32, grammar: Grammar) -> String:
+def _names(
+    ast: Ast, run: UInt32, grammar: Grammar, calling: Bool = False
+) -> String:
     """Joins a run of interned name parts with dots.
 
     Args:
         ast: The AST.
         run: A run of pool indices.
         grammar: A loaded grammar, for the quoting rule.
+        calling: Whether the last part is the name of a function being called.
+            Only the last part is, since everything before it is a schema or a
+            catalog and stands where an ordinary name stands.
 
     Returns:
         The dotted name, empty for an empty run.
     """
     var out = String()
-    for i in range(ast.length(run)):
+    var count = ast.length(run)
+    for i in range(count):
         if i > 0:
             out += "."
-        out += quote_name(ast.text(ast.at(run, i)), grammar)
+        out += quote_name(
+            ast.text(ast.at(run, i)), grammar, calling and i == count - 1
+        )
     return out^
+
+
+@fieldwise_init
+struct _Step(ImplicitlyCopyable, Movable):
+    """A node, and which part of it is being written.
+
+    Eight bytes, so a chain two thousand deep is sixteen kilobytes of heap
+    rather than two thousand call frames of stack.
+    """
+
+    var node: UInt32
+    """The expression node."""
+
+    var phase: UInt32
+    """How much of it has been written already.
+
+    Phase 0 is the text before the first child. After that the meaning is the
+    node kind's own, and for the kinds with a run of children it is the index
+    into that run plus a fixed offset, which is what lets one counter stand for
+    a loop that has been turned inside out.
+    """
 
 
 def _write(ast: Ast, node: UInt32, grammar: Grammar, mut out: String) raises:
     """Appends one expression to a buffer.
+
+    The walk is a loop over an explicit stack rather than a function that calls
+    itself once per child, for the reason the transformer's walk is. Expression
+    depth is not bounded by anything the user cannot type: `x + x + x` folds to
+    the left, so two thousand terms is a tree two thousand deep, and the corpus
+    has exactly that in `overflow/expression_tree_depth.test`. A recursive
+    printer runs out of stack on it and takes the process with it, which is a
+    crash rather than an error somebody can read.
+
+    Writing a node is split into phases. Phase 0 writes the text before the
+    first child and pushes two things: the same node again at phase 1, and the
+    first child at phase 0. The child is on top so it is written first, and when
+    it is done the node comes back at the phase after it and writes the text
+    between that child and the next. So the text that a recursive printer would
+    have written after the recursive call is written by the node's next visit
+    instead, and nothing is held on the stack between the two.
+
+    The parts that reach into another arena are still recursive calls, and that
+    is deliberate. A subquery goes through `_write_stmt` and a star modifier
+    goes through `_write_replace`, and getting to either one costs a set of
+    parentheses in the query text, which the matcher caps. Those are bounded by
+    what somebody typed, and this is not.
 
     Args:
         ast: The AST the node lives in.
@@ -313,6 +390,36 @@ def _write(ast: Ast, node: UInt32, grammar: Grammar, mut out: String) raises:
         Error: If the node is null, or its kind is not one this knows, or it is
             missing a part the kind says it always has.
     """
+    var stack = List[_Step]()
+    stack.append(_Step(node, 0))
+    while len(stack) > 0:
+        var step = stack.pop()
+        _write_step(ast, step, grammar, out, stack)
+
+
+def _write_step(
+    ast: Ast,
+    step: _Step,
+    grammar: Grammar,
+    mut out: String,
+    mut stack: List[_Step],
+) raises:
+    """Writes one phase of one node, and pushes whatever comes after it.
+
+    Args:
+        ast: The AST the node lives in.
+        step: The node and the phase.
+        grammar: A loaded grammar.
+        out: The buffer.
+        stack: The work stack, which this appends to.
+
+    Raises:
+        Error: If the node is null, or its kind is not one this knows, or it is
+            missing a part the kind says it always has.
+    """
+    var node = step.node
+    var phase = Int(step.phase)
+
     if node == NO_NODE:
         raise Error("the printer was handed the null node")
 
@@ -348,109 +455,187 @@ def _write(ast: Ast, node: UInt32, grammar: Grammar, mut out: String) raises:
         return
 
     if kind == EXPR_FUNCTION:
-        if ast.length(item.payload) == 0:
-            raise Error("a function call with no name on it")
-        out += _names(ast, item.payload, grammar)
-        out += "("
-        if item.a & CALL_STAR != 0:
-            out += "*"
-        else:
+        # Phase 0 is the name and the opening parenthesis, and phase 1 onwards
+        # walks the argument run, one argument per phase. The same shape does
+        # the list, the struct and the two IN forms below.
+        var count = ast.length(item.children)
+        if phase == 0:
+            if ast.length(item.payload) == 0:
+                raise Error("a function call with no name on it")
+            out += _names(ast, item.payload, grammar, calling=True)
+            out += "("
+            if item.a & CALL_STAR != 0:
+                out += "*)"
+                return
             if item.a & CALL_DISTINCT != 0:
                 out += "DISTINCT "
-            _write_list(ast, item.children, grammar, out)
-        out += ")"
+            stack.append(_Step(node, 1))
+            return
+        if phase == count + 1:
+            out += ")"
+            return
+        var argument = phase - 1
+        if argument > 0:
+            out += ", "
+        stack.append(_Step(node, UInt32(phase + 1)))
+        stack.append(_Step(ast.at(item.children, argument), 0))
         return
 
     if kind == EXPR_UNARY:
-        ref operator = ast.text(item.payload)
-        out += "("
-        out += operator
-        if _is_word(operator):
-            out += " "
-        _write(ast, item.a, grammar, out)
+        if phase == 0:
+            ref operator = ast.text(item.payload)
+            out += "("
+            out += operator
+            if _is_word(operator):
+                out += " "
+            stack.append(_Step(node, 1))
+            stack.append(_Step(item.a, 0))
+            return
         out += ")"
         return
 
     if kind == EXPR_BINARY:
-        out += "("
-        _write(ast, item.a, grammar, out)
-        out += " "
-        out += ast.text(item.payload)
-        out += " "
-        _write(ast, item.b, grammar, out)
+        if phase == 0:
+            out += "("
+            stack.append(_Step(node, 1))
+            stack.append(_Step(item.a, 0))
+            return
+        if phase == 1:
+            out += " "
+            out += ast.text(item.payload)
+            out += " "
+            stack.append(_Step(node, 2))
+            stack.append(_Step(item.b, 0))
+            return
         out += ")"
         return
 
     if kind == EXPR_CAST:
-        out += "TRY_CAST(" if item.b == 1 else "CAST("
-        _write(ast, item.a, grammar, out)
+        if phase == 0:
+            out += "TRY_CAST(" if item.b == 1 else "CAST("
+            stack.append(_Step(node, 1))
+            stack.append(_Step(item.a, 0))
+            return
         out += " AS "
         out += ast.text(item.payload)
         out += ")"
         return
 
     if kind == EXPR_CASE:
-        out += "CASE"
-        if item.a != NO_NODE:
-            out += " "
-            _write(ast, item.a, grammar, out)
         var arms = ast.length(item.children)
-        if arms == 0 or arms % 2 != 0:
-            raise Error(String("a CASE with ", arms, " arm entries in it"))
-        for i in range(0, arms, 2):
-            out += " WHEN "
-            _write(ast, ast.at(item.children, i), grammar, out)
-            out += " THEN "
-            _write(ast, ast.at(item.children, i + 1), grammar, out)
-        if item.b != NO_NODE:
+        if phase == 0:
+            if arms == 0 or arms % 2 != 0:
+                raise Error(String("a CASE with ", arms, " arm entries in it"))
+            out += "CASE"
+            stack.append(_Step(node, 1))
+            if item.a != NO_NODE:
+                out += " "
+                stack.append(_Step(item.a, 0))
+            return
+        if phase == arms + 1:
+            if item.b == NO_NODE:
+                out += " END"
+                return
             out += " ELSE "
-            _write(ast, item.b, grammar, out)
-        out += " END"
+            stack.append(_Step(node, UInt32(phase + 1)))
+            stack.append(_Step(item.b, 0))
+            return
+        if phase == arms + 2:
+            out += " END"
+            return
+        var entry = phase - 1
+        out += " WHEN " if entry % 2 == 0 else " THEN "
+        stack.append(_Step(node, UInt32(phase + 1)))
+        stack.append(_Step(ast.at(item.children, entry), 0))
         return
 
     if kind == EXPR_BETWEEN:
-        if ast.length(item.children) != 2:
-            raise Error("a BETWEEN without exactly two bounds on it")
-        out += "("
-        _write(ast, item.a, grammar, out)
-        out += " NOT BETWEEN " if item.payload == 1 else " BETWEEN "
-        _write(ast, ast.at(item.children, 0), grammar, out)
-        out += " AND "
-        _write(ast, ast.at(item.children, 1), grammar, out)
+        if phase == 0:
+            if ast.length(item.children) != 2:
+                raise Error("a BETWEEN without exactly two bounds on it")
+            out += "("
+            stack.append(_Step(node, 1))
+            stack.append(_Step(item.a, 0))
+            return
+        if phase == 1:
+            out += " NOT BETWEEN " if item.payload == 1 else " BETWEEN "
+            stack.append(_Step(node, 2))
+            stack.append(_Step(ast.at(item.children, 0), 0))
+            return
+        if phase == 2:
+            out += " AND "
+            stack.append(_Step(node, 3))
+            stack.append(_Step(ast.at(item.children, 1), 0))
+            return
         out += ")"
         return
 
     if kind == EXPR_IN:
-        out += "("
-        _write(ast, item.a, grammar, out)
-        out += " NOT IN (" if item.payload == 1 else " IN ("
-        _write_list(ast, item.children, grammar, out)
-        out += "))"
+        var count = ast.length(item.children)
+        if phase == 0:
+            out += "("
+            stack.append(_Step(node, 1))
+            stack.append(_Step(item.a, 0))
+            return
+        if phase == 1:
+            out += " NOT IN (" if item.payload == 1 else " IN ("
+            stack.append(_Step(node, 2))
+            return
+        if phase == count + 2:
+            out += "))"
+            return
+        var entry = phase - 2
+        if entry > 0:
+            out += ", "
+        stack.append(_Step(node, UInt32(phase + 1)))
+        stack.append(_Step(ast.at(item.children, entry), 0))
         return
 
     if kind == EXPR_LIST:
-        out += "["
-        _write_list(ast, item.children, grammar, out)
-        out += "]"
+        var count = ast.length(item.children)
+        if phase == 0:
+            out += "["
+            stack.append(_Step(node, 1))
+            return
+        if phase == count + 1:
+            out += "]"
+            return
+        var entry = phase - 1
+        if entry > 0:
+            out += ", "
+        stack.append(_Step(node, UInt32(phase + 1)))
+        stack.append(_Step(ast.at(item.children, entry), 0))
         return
 
     if kind == EXPR_STRUCT:
+        # The run alternates an interned key and a value, so one phase covers a
+        # pair and the phase count is half the run length.
         var entries = ast.length(item.children)
-        if entries % 2 != 0:
-            raise Error(String("a struct with ", entries, " entries in it"))
-        out += "{"
-        for i in range(0, entries, 2):
-            if i > 0:
-                out += ", "
-            out += quote_string(ast.text(ast.at(item.children, i)))
-            out += ": "
-            _write(ast, ast.at(item.children, i + 1), grammar, out)
-        out += "}"
+        var pairs = entries // 2
+        if phase == 0:
+            if entries % 2 != 0:
+                raise Error(String("a struct with ", entries, " entries in it"))
+            out += "{"
+            stack.append(_Step(node, 1))
+            return
+        if phase == pairs + 1:
+            out += "}"
+            return
+        var pair = phase - 1
+        if pair > 0:
+            out += ", "
+        out += quote_string(ast.text(ast.at(item.children, pair * 2)))
+        out += ": "
+        stack.append(_Step(node, UInt32(phase + 1)))
+        stack.append(_Step(ast.at(item.children, pair * 2 + 1), 0))
         return
 
     if kind == EXPR_COLLATE:
-        out += "("
-        _write(ast, item.a, grammar, out)
+        if phase == 0:
+            out += "("
+            stack.append(_Step(node, 1))
+            stack.append(_Step(item.a, 0))
+            return
         out += " COLLATE "
         out += quote_name(ast.text(item.payload), grammar)
         out += ")"
@@ -474,8 +659,11 @@ def _write(ast: Ast, node: UInt32, grammar: Grammar, mut out: String) raises:
         return
 
     if kind == EXPR_IN_SUBQUERY:
-        out += "("
-        _write(ast, item.a, grammar, out)
+        if phase == 0:
+            out += "("
+            stack.append(_Step(node, 1))
+            stack.append(_Step(item.a, 0))
+            return
         out += " NOT IN (" if item.payload == 1 else " IN ("
         _write_stmt(ast, item.b, grammar, out)
         out += "))"
@@ -869,7 +1057,7 @@ def _write_ref(
             out += "LATERAL "
         if ast.length(item.a) == 0:
             raise Error("a table function with no name on it")
-        out += _names(ast, item.a, grammar)
+        out += _names(ast, item.a, grammar, calling=True)
         out += "("
         _write_list(ast, item.children, grammar, out)
         out += ")"

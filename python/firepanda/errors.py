@@ -42,6 +42,7 @@ __all__ = [
     "ColumnNotFoundError",
     "DTypeError",
     "FirepandaError",
+    "IntCastingNaNError",
     "InvalidArgumentError",
     "NumericOverflowError",
     "OutOfBoundsError",
@@ -83,6 +84,21 @@ class InvalidArgumentError(FirepandaError, ValueError):
 
     A `ValueError`, on the same distinction Python itself draws: the type was
     acceptable and the value was not.
+    """
+
+
+class IntCastingNaNError(InvalidArgumentError):
+    """A missing value, a NaN or an infinity where an integer column was asked for.
+
+    pandas has a class with this exact name and this exact purpose, in
+    `pandas.errors`, and it is the error that exists to explain why the nullable
+    integer dtypes exist. A program that catches it by name is asking a specific
+    question and gets nothing if the answer arrives as a plain `ValueError`, so
+    the name is worth carrying.
+
+    It subclasses `InvalidArgumentError` rather than sitting beside it, which
+    makes it a `ValueError` by two routes: the pandas one is a `ValueError` too,
+    and a caller who catches the broad one still catches this either way.
     """
 
 
@@ -144,6 +160,7 @@ BY_KIND: dict[str, type[BaseException]] = {
     "column": ColumnNotFoundError,
     "dtype": DTypeError,
     "value": InvalidArgumentError,
+    "nonfinite": IntCastingNaNError,
     "overflow": NumericOverflowError,
     "position": OutOfBoundsError,
     "io": ReaderError,

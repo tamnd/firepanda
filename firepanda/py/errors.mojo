@@ -62,6 +62,16 @@ Its own kind rather than a shape of `value`, because `OverflowError` is not a
 does not catch one. Folding it into `value` would be a difference nobody would
 find until it mattered."""
 
+comptime NONFINITE = "firepanda:nonfinite: "
+"""A missing value, a NaN or an infinity where an integer was wanted. Becomes
+`IntCastingNaNError`.
+
+Its own kind rather than a shape of `value` for the reason `overflow` is its
+own: the class is what a caller catches, pandas has a named class for exactly
+this and nothing else, and a program that catches it by name gets nothing if it
+arrives as a plain `ValueError`. It is a `ValueError` underneath, so a caller who
+catches the broad one still catches it either way."""
+
 comptime IO = "firepanda:io: "
 """A file that is missing, unreadable or malformed. Becomes `OSError`."""
 
