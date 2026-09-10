@@ -34,6 +34,7 @@ from firepanda.array.strings import StringBuilder
 from firepanda.array.value import Value
 from firepanda.dtype.lists import ALL
 from firepanda.dtype.logical import LogicalType
+from firepanda.kernel.dictionary import with_categories
 
 from .binary import all_null
 from .concat import concat_two_any
@@ -82,13 +83,24 @@ def shift_any(col: AnyArray, periods: Int, fill: Value) raises -> AnyArray:
     if periods == 0:
         return AnyArray(copy=col)
     var gap = periods if periods > 0 else -periods
+    # The gap block is built from the type alone, and for a category column the
+    # type does not carry the categories, so every path below produces codes
+    # with nothing behind them until the list is put back on. The gap itself is
+    # missing rather than in any category, which is why the block needs no
+    # categories of its own and the source's list is the whole answer.
     if gap >= rows:
-        return _gap_block(col.type, rows, fill)
+        return with_categories(_gap_block(col.type, rows, fill), col)
     if periods > 0:
-        return concat_two_any(
-            _gap_block(col.type, gap, fill), col.slice(0, rows - gap)
+        return with_categories(
+            concat_two_any(
+                _gap_block(col.type, gap, fill), col.slice(0, rows - gap)
+            ),
+            col,
         )
-    return concat_two_any(col.slice(gap, rows), _gap_block(col.type, gap, fill))
+    return with_categories(
+        concat_two_any(col.slice(gap, rows), _gap_block(col.type, gap, fill)),
+        col,
+    )
 
 
 def _gap_block(type: LogicalType, rows: Int, fill: Value) raises -> AnyArray:

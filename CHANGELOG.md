@@ -8,6 +8,24 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a category column survives being filtered, taken, stacked and filled
+
+`s.dropna()` on a category column raised, and not with a message about categories. It came out of the Arrow writer, several layers away, saying the column was a categorical with no categories behind it.
+
+Every kernel that moves rows around is written against the physical layout rather than the logical type, because a filter over a date column runs through `Array[DType.int32]` and the erased result would say it was an int32. So each of them puts the input's logical type back on the output at the end, and for every type in the library that is the whole of the correctness argument: the bytes moved, the meaning did not. A dictionary column is the one type whose meaning is not all in the buffer. The codes are, the categories are beside it, and the relabelling neither knew nor could know to bring them along. So `filter`, `take`, `slice`, `shift`, `fill_forward`, `fill_backward`, `concat` and `coalesce` all produced a column whose type said `category` and whose category list was empty, and had been doing it since dictionary columns were added. That is `dropna`, `head`, `tail`, `ffill`, `bfill` and `shift` on the Python surface, which is most of what a caller does to a column without changing what is in it.
+
+A column in that state is not obviously broken. Its length is right, its codes are right, and it prints as a category. It fails at whatever eventually asks for the categories, which is why the message named the writer, and it does not fail at all for anything that reads the buffer as the plain integers it is stored as.
+
+The one input kernels now carry the category list across, which is correct without qualification, since a row moving cannot change what a code means. A filter that empties a category leaves it in the list, unused, the same as pandas, because `drop_unused_categories` is what a caller has for that.
+
+The kernels with two inputs got a refusal rather than a carry. A code is a position in a list, so two columns whose categories differ give the same code to different values, and stacking their code buffers would produce rows nobody wrote. `concat`, `coalesce` and `pick` now require both sides to name the same categories in the same order, and the message says to use `set_categories` to bring them onto one list first. Unifying the lists automatically would mean rewriting one side's codes, which is a pass over the data for operations whose point is that they are not one, and pandas refuses the same shapes.
+
+`pick`, which is what `where` and `mask` are underneath, had never corrupted anything: it reads its sides through a typed view that refuses a dictionary outright, so `where` on a category column simply did not work. It works now, reading the codes the way the rest of the categorical files do. Its result is int32 coded whatever went in, which is the width every rewrite in this library already produces.
+
+Six of the eight came out of following the one failure. The other two were found by walking the whole `Series` surface, calling every member on a category column and asking each answer for its categories, which is the only way to know a list like this is complete rather than merely long.
+
+The conformance suite found this, on the first day it could ask. `categorical/dropna` had been reporting absent because the Mojo `Series` had no category surface for the driver to reach, so nobody had ever filtered a category column and then written it to Arrow.
+
 ### Added: the Mojo `Series` can reach a category column too
 
 The `cat` namespace went in on the Python side and called the kernels directly, past the Mojo `Series` rather than through it. That left the two front doors disagreeing about what the library can do. A caller writing Python could read a category column's codes; a caller writing Mojo could not, and had to import `firepanda.kernel.dictionary` and hold an `AnyArray`, which is the layer the frame package exists to cover.
