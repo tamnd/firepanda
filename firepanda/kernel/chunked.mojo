@@ -244,6 +244,41 @@ def widen_chunked_for_missing(col: ChunkedArray) raises -> ChunkedArray:
     return out^
 
 
+def nan_over_nulls_chunked(col: ChunkedArray) raises -> ChunkedArray:
+    """Puts a float column's missing rows back into its values, chunk by chunk.
+
+    The half of the rule above that does not widen anything. A column that is
+    already float has room for a NaN and only needs the missing rows moved out
+    of the bitmap, which is what a cast out of text produces and what the layer
+    above has to undo before a pandas program sees the column. It is the caller
+    that decides when that applies, and `DataFrame.cast` applies it only when
+    the column it converted was text, because between two numbers there is no
+    change of spelling to make.
+
+    The type does not change, so unlike the widening this could have been
+    decided per chunk. It is decided once anyway, for the same reason: a chunk
+    that answers a question differently from the chunk beside it is how a column
+    stops being one column.
+
+    Args:
+        col: The column, which comes back untouched unless it is float and has
+            a cleared bit somewhere.
+
+    Returns:
+        The column with a NaN wherever a bit was cleared, in the same number of
+        pieces.
+
+    Raises:
+        Error: Only what building the pieces raises.
+    """
+    if not col.type.is_float() or col.nulls == 0:
+        return ChunkedArray(copy=col)
+    var out = ChunkedArray(col.type)
+    for c in range(col.num_chunks()):
+        out.append(nan_over_nulls(AnyArray(copy=col.chunks[c])))
+    return out^
+
+
 def take_chunked(col: ChunkedArray, indices: List[Int]) raises -> ChunkedArray:
     """Gathers rows by position, flattening the column first if it has to.
 

@@ -19,6 +19,17 @@ a `strict` flag while the numeric loop does not is that a number always converts
 to some number, correctly or not, and a string does not always convert to
 anything at all.
 
+Crossing into text is also the one place in this file where a missing row changes
+its spelling. A float column says missing with a NaN and a text column says it
+with a cleared validity bit, and no text column has a NaN to hold, so the NaN has
+to move into the bitmap on the way across or the answer is a column of values
+where one of them is the word nan. The rest of the package already reads a float
+NaN as absent, in `present_bitmap_any`, in `missing_count_any` and in the mask
+`dropna` is built on, so this is that same reading applied at the one boundary
+where it has somewhere else to go. The reverse direction needs nothing, because
+a text null read as a number is a cleared bit and the layer above puts the NaN
+back.
+
 `cast_any` is the erased entry point a `DataFrame` calls, and it is the most
 expensive function in the package to compile: it dispatches on both ends, so it
 instantiates the loop once per ordered pair of the twelve physical dtypes, which
@@ -31,6 +42,7 @@ widest type, would silently lose precision on exactly the int64 and uint64 round
 trips a join key most needs to survive.
 """
 
+from std.math import isnan
 from std.sys.info import simd_width_of
 
 from firepanda.array.any import AnyArray
@@ -175,12 +187,20 @@ def cast_strings_to[
 def cast_to_strings[src: DType](col: Array[src]) raises -> StringArray:
     """Writes a number column as text.
 
-    A null stays null, and is not the empty string. Every other value is spelled
-    the way the CSV writer spells it, which for a float means enough digits to
-    read back as the same float rather than the rounded form the display layer
-    shows. A column that survives `cast(STRING).cast(FLOAT64)` unchanged is the
-    property worth having, and it is not the property a person reading a screen
-    wants, so the two spellings stay separate.
+    A null stays null, and is not the empty string. A NaN becomes a null as
+    well, which is the one thing here that is not a straight rendering: a float
+    column has no other way to say a row is missing and a text column has no NaN
+    to say it with, so the missing row moves out of the values and into the
+    bitmap rather than arriving as the word nan. Both infinities are values and
+    are spelled, since a column can hold one on purpose.
+
+    Every other value is spelled the way the CSV writer spells it, which for a
+    float means enough digits to read back as the same float rather than the
+    rounded form the display layer shows. A column that survives
+    `cast(STRING).cast(FLOAT64)` unchanged is the property worth having, and it
+    is not the property a person reading a screen wants, so the two spellings
+    stay separate. The NaN survives that round trip too, as a null on the way
+    out and as a NaN again once the layer above has widened the column back.
 
     Args:
         col: The number column.
@@ -189,7 +209,7 @@ def cast_to_strings[src: DType](col: Array[src]) raises -> StringArray:
         src: The source dtype.
 
     Returns:
-        A text column, null in the same places.
+        A text column, null where the input was null and where it was a NaN.
 
     Raises:
         Error: If the builder cannot grow.
@@ -206,6 +226,10 @@ def cast_to_strings[src: DType](col: Array[src]) raises -> StringArray:
             var text = String("true") if value else String("false")
             builder.append(text.as_bytes())
         else:
+            comptime if src.is_floating_point():
+                if isnan(value):
+                    builder.append_null()
+                    continue
             var text = String(value)
             builder.append(text.as_bytes())
     return builder^.finish()
