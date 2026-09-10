@@ -80,6 +80,10 @@ def register(mut module: PythonModuleBuilder) raises:
         "transform",
         docstring="Every column put through one named transformation.",
     )
+    _ = dataframe.def_method[PyDataFrame.window_agg](
+        "window_agg",
+        docstring="One reduction over every window of every column.",
+    )
     _ = dataframe.def_method[PyDataFrame.dropna](
         "dropna", docstring="The rows with no missing value in them."
     )

@@ -571,13 +571,18 @@ class CategoricalAccessor(CategoricalMixin):
 
 
 class Rolling(RollingMixin):
-    """A window of a fixed width over a column, waiting for a reduction.
+    """A window of a fixed width, waiting for a reduction.
 
-    Reached from `s.rolling(...)`, and it holds the column and the five numbers that say
-    where each window sits rather than computing anything, which is what pandas does as
-    well. The five are one question, `firepanda/kernel/window.mojo` states it as a pair
-    of row numbers, and this class is where a caller's spelling of that question is
-    checked.
+    Reached from `s.rolling(...)` and from `df.rolling(...)`, and it holds what it was
+    given and the five numbers that say where each window sits rather than computing
+    anything, which is what pandas does as well. The five are one question,
+    `firepanda/kernel/window.mojo` states it as a pair of row numbers, and this class is
+    where a caller's spelling of that question is checked.
+
+    One class for both owners rather than pandas' two, because a window is a pair of row
+    numbers and every column of a frame has the same rows, so a frame window is the
+    columns windowed one at a time. The only place the difference is visible is
+    `numeric_only`, which asks a question a frame can answer and a column cannot.
 
     Five of pandas' twenty six reductions so far, and they are the five a window can be
     carried through. A total can have the row that left subtracted from it and the row
@@ -587,9 +592,97 @@ class Rolling(RollingMixin):
 
     __slots__ = ()
 
+    @property
+    def window(self) -> int | None:
+        """How many rows wide, and None for an expanding window."""
+        try:
+            return self._window
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def min_periods(self) -> int | None:
+        """How many values a window needs before it answers, and None for the default."""
+        try:
+            return self._min_periods
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def center(self) -> bool:
+        """Whether the window sits around its row rather than behind it."""
+        try:
+            return self._center
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def closed(self) -> str | None:
+        """Which of the two ends the window keeps, and None for the default."""
+        try:
+            return self._closed
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def step(self) -> int | None:
+        """How many rows apart the answered rows are, and None for every row."""
+        try:
+            return self._step
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def obj(self) -> Series | DataFrame:
+        """The column or the frame the windows are read out of."""
+        try:
+            return self._data
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def ndim(self) -> int:
+        """The number of dimensions of what is being windowed."""
+        try:
+            return 2 if self._over_frame() else 1
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def method(self) -> str:
+        """Whether the columns are reduced together, which here they are not."""
+        try:
+            return "single"
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def win_type(self) -> str | None:
+        """The weighting over the window, which here is always none."""
+        try:
+            return None
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def on(self) -> str | None:
+        """The column the window is ordered by, which here is always the rows."""
+        try:
+            return None
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def exclusions(self) -> frozenset[str]:
+        """The columns held out of the reduction, which here is none of them."""
+        try:
+            return frozenset()
+        except Exception as error:
+            raise translate(error) from None
+
     def sum(
         self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
-    ) -> Series:
+    ) -> Series | DataFrame:
         """The total of the values in the window. Over every rolling window."""
         try:
             return self._reduce("sum", numeric_only, engine, engine_kwargs)
@@ -598,14 +691,14 @@ class Rolling(RollingMixin):
 
     def mean(
         self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
-    ) -> Series:
+    ) -> Series | DataFrame:
         """The mean of the values in the window. Over every rolling window."""
         try:
             return self._reduce("mean", numeric_only, engine, engine_kwargs)
         except Exception as error:
             raise translate(error) from None
 
-    def count(self, numeric_only: bool = False) -> Series:
+    def count(self, numeric_only: bool = False) -> Series | DataFrame:
         """How many rows of the window hold a value. Over every rolling window."""
         try:
             return self._reduce("count", numeric_only)
@@ -614,7 +707,7 @@ class Rolling(RollingMixin):
 
     def min(
         self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
-    ) -> Series:
+    ) -> Series | DataFrame:
         """The smallest value in the window. Over every rolling window."""
         try:
             return self._reduce("min", numeric_only, engine, engine_kwargs)
@@ -623,7 +716,7 @@ class Rolling(RollingMixin):
 
     def max(
         self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
-    ) -> Series:
+    ) -> Series | DataFrame:
         """The largest value in the window. Over every rolling window."""
         try:
             return self._reduce("max", numeric_only, engine, engine_kwargs)
@@ -634,18 +727,107 @@ class Rolling(RollingMixin):
 class Expanding(ExpandingMixin):
     """A window that starts at the first row and grows, waiting for a reduction.
 
-    Reached from `s.expanding(...)`. The same five reductions as `Rolling` over a window
-    with no near end, which is why the two classes share everything below the
-    constructor: an expanding window is a rolling one whose width is the height of the
-    column. The one thing that is genuinely different is the default for `min_periods`,
-    which is one here and the full width there, and pandas has the same split.
+    Reached from `s.expanding(...)` and from `df.expanding(...)`. The same five
+    reductions as `Rolling` over a window with no near end, which is why the two classes
+    share everything below the constructor: an expanding window is a rolling one whose
+    width is the height of what it reads. The one thing that is genuinely different is
+    the default for `min_periods`, which is one here and the full width there, and
+    pandas has the same split.
     """
 
     __slots__ = ()
 
+    @property
+    def window(self) -> int | None:
+        """How many rows wide, and None for an expanding window."""
+        try:
+            return self._window
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def min_periods(self) -> int | None:
+        """How many values a window needs before it answers, and None for the default."""
+        try:
+            return self._min_periods
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def center(self) -> bool:
+        """Whether the window sits around its row rather than behind it."""
+        try:
+            return self._center
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def closed(self) -> str | None:
+        """Which of the two ends the window keeps, and None for the default."""
+        try:
+            return self._closed
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def step(self) -> int | None:
+        """How many rows apart the answered rows are, and None for every row."""
+        try:
+            return self._step
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def obj(self) -> Series | DataFrame:
+        """The column or the frame the windows are read out of."""
+        try:
+            return self._data
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def ndim(self) -> int:
+        """The number of dimensions of what is being windowed."""
+        try:
+            return 2 if self._over_frame() else 1
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def method(self) -> str:
+        """Whether the columns are reduced together, which here they are not."""
+        try:
+            return "single"
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def win_type(self) -> str | None:
+        """The weighting over the window, which here is always none."""
+        try:
+            return None
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def on(self) -> str | None:
+        """The column the window is ordered by, which here is always the rows."""
+        try:
+            return None
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def exclusions(self) -> frozenset[str]:
+        """The columns held out of the reduction, which here is none of them."""
+        try:
+            return frozenset()
+        except Exception as error:
+            raise translate(error) from None
+
     def sum(
         self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
-    ) -> Series:
+    ) -> Series | DataFrame:
         """The total of the values in the window. Over every expanding window."""
         try:
             return self._reduce("sum", numeric_only, engine, engine_kwargs)
@@ -654,14 +836,14 @@ class Expanding(ExpandingMixin):
 
     def mean(
         self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
-    ) -> Series:
+    ) -> Series | DataFrame:
         """The mean of the values in the window. Over every expanding window."""
         try:
             return self._reduce("mean", numeric_only, engine, engine_kwargs)
         except Exception as error:
             raise translate(error) from None
 
-    def count(self, numeric_only: bool = False) -> Series:
+    def count(self, numeric_only: bool = False) -> Series | DataFrame:
         """How many rows of the window hold a value. Over every expanding window."""
         try:
             return self._reduce("count", numeric_only)
@@ -670,7 +852,7 @@ class Expanding(ExpandingMixin):
 
     def min(
         self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
-    ) -> Series:
+    ) -> Series | DataFrame:
         """The smallest value in the window. Over every expanding window."""
         try:
             return self._reduce("min", numeric_only, engine, engine_kwargs)
@@ -679,7 +861,7 @@ class Expanding(ExpandingMixin):
 
     def max(
         self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
-    ) -> Series:
+    ) -> Series | DataFrame:
         """The largest value in the window. Over every expanding window."""
         try:
             return self._reduce("max", numeric_only, engine, engine_kwargs)
@@ -1143,6 +1325,30 @@ class DataFrame(DataFrameMixin):
         """The frame as a stream of one batch, as an arrow_array_stream PyCapsule."""
         try:
             return self._inner.arrow_c_stream(requested_schema)
+        except Exception as error:
+            raise translate(error) from None
+
+    def rolling(
+        self,
+        window: Any,
+        min_periods: int | None = None,
+        center: bool = False,
+        win_type: str | None = None,
+        on: str | None = None,
+        closed: str | None = None,
+        step: int | None = None,
+        method: str = "single",
+    ) -> Rolling:
+        """A window of a fixed width over every column, computing nothing until reduced."""
+        try:
+            return _rolling(self, window, min_periods, center, win_type, on, closed, step, method)
+        except Exception as error:
+            raise translate(error) from None
+
+    def expanding(self, min_periods: int = 1, method: str = "single") -> Expanding:
+        """A window over every column that starts at the first row and grows."""
+        try:
+            return _expanding(self, min_periods, method)
         except Exception as error:
             raise translate(error) from None
 
