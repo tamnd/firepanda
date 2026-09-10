@@ -148,6 +148,25 @@ def unit_for_code(code: Int) raises -> TimeUnit:
     return TimeUnit(UInt8(code))
 
 
+def finer_unit(a: TimeUnit, b: TimeUnit) -> TimeUnit:
+    """Returns whichever of two resolutions is the finer one.
+
+    This is the rule pandas reconciles two temporal columns with, and it is the
+    same rule for every pair and every operation: a second column against a
+    nanosecond one is read in nanoseconds. It goes one way only because it is
+    the only direction that loses nothing. Meeting in the middle, or taking the
+    left operand's unit, would throw away digits the user still has.
+
+    Args:
+        a: One resolution.
+        b: The other.
+
+    Returns:
+        The one with more of itself in a second.
+    """
+    return a if a.per_second() >= b.per_second() else b
+
+
 @fieldwise_init
 struct TimeZone(Equatable, ImplicitlyCopyable, Movable, Writable):
     """The wall clock a column of instants is read against, or none at all."""

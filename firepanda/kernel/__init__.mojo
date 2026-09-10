@@ -164,12 +164,15 @@ from .temporal import (
     temporal_as_unit,
     temporal_date,
     temporal_day_name,
+    temporal_duration_days,
     temporal_field,
     temporal_month_name,
     temporal_normalize,
     temporal_round,
     temporal_strftime,
     temporal_text,
+    temporal_to_duration,
+    temporal_total_seconds,
     unit_named,
 )
 from .text import compare_text, compare_text_const

@@ -913,6 +913,165 @@ def temporal_normalize(a: AnyArray) raises -> AnyArray:
     )
 
 
+def _check_elapsed(t: LogicalType) raises:
+    """Refuses a column that is not a length of time.
+
+    Args:
+        t: The column type.
+
+    Raises:
+        Error: If the type is anything other than a duration, with the two
+            temporal types that are a point in time named separately, since
+            asking a timestamp how many days it is is a different mistake from
+            asking an integer.
+    """
+    if t.kind == TypeKind.DURATION:
+        return
+    if t.kind == TypeKind.TIMESTAMP or t.kind == TypeKind.DATE:
+        raise Error(
+            "temporal: "
+            + String(t)
+            + " is a point in time rather than a length of one, and how long a"
+            " point in time is has no answer"
+        )
+    raise Error("temporal: " + String(t) + " is not a length of time")
+
+
+def temporal_total_seconds(a: AnyArray) raises -> AnyArray:
+    """Counts a column of elapsed times in seconds, fractions included.
+
+    This is `dt.total_seconds`, and pandas answers it in float64 whatever the
+    column's resolution is. That is a lossy answer on a long duration, since a
+    float64 runs out of mantissa at 2**53 and a count of microseconds passes
+    that at about 285 years, so a difference of one microsecond between two
+    century long spans does not survive the division. The same answer is given
+    here, because the number a caller compares against came out of pandas.
+
+    Args:
+        a: A duration column.
+
+    Returns:
+        A float64 column of seconds, null wherever the input is null.
+
+    Raises:
+        Error: If the column is not a duration, or what the morsel runtime
+            raises.
+    """
+    _check_elapsed(a.type)
+    comptime width = simd_width_of[DType.int64]()
+
+    ref counts = a.as_typed_view[DType.int64]()
+    var per_second = Float64(a.type.unit.per_second())
+    var n = len(counts)
+    var out = Array[DType.float64](overwritten=n)
+    var validity = Bitmap(copy=counts.data.validity)
+
+    def compute(start: Int, stop: Int) raises {mut out, imm}:
+        var source = counts.unsafe_ptr()
+        var target = out.unsafe_ptr()
+        var i = start
+        while i < stop:
+            var value = source.unsafe_offset(i).unsafe_load[width=width]()
+            target.unsafe_offset(i).unsafe_store(
+                value.cast[DType.float64]() / per_second
+            )
+            i += width
+
+        repair_range(out, validity, start, stop)
+
+    parallel_morsels(compute, n)
+    out.data.validity = validity^
+    return AnyArray(out^)
+
+
+def temporal_duration_days(a: AnyArray) raises -> AnyArray:
+    """Counts the whole days in a column of elapsed times.
+
+    This is `dt.days`, and the rounding is downward rather than toward zero,
+    which is what pandas gives and is worth saying because the sign makes it
+    visible: minus one microsecond is minus one day here and would be zero days
+    under a truncating division. `//` in Mojo floors, so the loop does not have
+    to correct anything.
+
+    pandas answers int64 on a column with no nulls and float64 on a column with
+    some, because a numpy int64 has no missing value to put in the gap. This
+    answers int64 either way and puts the missing behind the validity bit. That
+    is the package's general position on the question and it is written down in
+    issue #170 rather than here.
+
+    Args:
+        a: A duration column.
+
+    Returns:
+        An int64 column of whole days, null wherever the input is null.
+
+    Raises:
+        Error: If the column is not a duration, or what the morsel runtime
+            raises.
+    """
+    _check_elapsed(a.type)
+    comptime width = simd_width_of[DType.int64]()
+
+    ref counts = a.as_typed_view[DType.int64]()
+    var per_day = a.type.unit.per_second() * SECONDS_PER_DAY
+    var n = len(counts)
+    var out = Array[DType.int64](overwritten=n)
+    var validity = Bitmap(copy=counts.data.validity)
+
+    def compute(start: Int, stop: Int) raises {mut out, imm}:
+        var source = counts.unsafe_ptr()
+        var target = out.unsafe_ptr()
+        var i = start
+        while i < stop:
+            var value = source.unsafe_offset(i).unsafe_load[width=width]()
+            target.unsafe_offset(i).unsafe_store(value // per_day)
+            i += width
+
+        repair_range(out, validity, start, stop)
+
+    parallel_morsels(compute, n)
+    out.data.validity = validity^
+    return AnyArray(out^)
+
+
+def temporal_to_duration(a: AnyArray, unit: TimeUnit) raises -> AnyArray:
+    """Reads a column of whole numbers as a column of elapsed times.
+
+    This is `pandas.to_timedelta` with a unit given, and on an integer column it
+    is a relabelling and not a conversion: the integers are already the counts
+    and the unit says what they are counts of. So this allocates nothing and
+    copies the buffer once, and a null stays a null rather than becoming a zero
+    length span.
+
+    A column that is already a duration is answered unchanged rather than
+    rescaled, because that is what pandas does with one: the unit argument is
+    ignored when the column already carries a resolution of its own.
+
+    Args:
+        a: An integer column, or a duration column.
+        unit: The resolution the integers are counts of.
+
+    Returns:
+        A duration column at that unit, null wherever the input is null.
+
+    Raises:
+        Error: If the column is neither an integer nor a duration, since text
+            parsing is a different piece of work and float seconds are another.
+    """
+    if a.type.kind == TypeKind.DURATION:
+        return AnyArray(copy=a)
+    if a.type.physical != DType.int64:
+        raise Error(
+            "temporal: to_timedelta needs a column of whole numbers and this"
+            " one is "
+            + String(a.type)
+        )
+    return AnyArray(
+        Array[DType.int64](copy=a.as_typed_view[DType.int64]()).into_data(),
+        LogicalType.duration(unit),
+    )
+
+
 comptime MAX_COUNT = Int64(922_337_203_685_477_580)
 """The largest count a frequency can carry before one more digit would leave the
 range of an int64. It is `Int64.MAX // 10`, written out so the check in front of
@@ -1345,34 +1504,42 @@ def _rescale[
 
 
 def temporal_as_unit(a: AnyArray, unit: TimeUnit) raises -> AnyArray:
-    """Restates a timestamp column at a different resolution.
+    """Restates a timestamp or a duration column at a different resolution.
 
-    This is `dt.as_unit`. Going down in precision throws away what will not fit
-    and rounds down while doing it, so the last second of 1969 in nanoseconds is
-    still the last second of 1969 in seconds and not the epoch. Going up is a
-    multiply and does not recover what an earlier trip down removed.
+    This is `dt.as_unit` on both column types, and it is the same arithmetic for
+    both because both are a count of the type's own unit. Going down in
+    precision throws away what will not fit and rounds down while doing it, so
+    the last second of 1969 in nanoseconds is still the last second of 1969 in
+    seconds and not the epoch, and minus one nanosecond is minus one second and
+    not zero. Going up is a multiply and does not recover what an earlier trip
+    down removed.
 
     The zone comes through untouched and a zoned column is allowed, because
     nothing here reads the calendar. Which second an instant is does not depend
     on which clock it is being read against, so there is no zone database in the
-    way of this one.
+    way of this one. A duration has no zone to carry.
+
+    The binary arithmetic uses this to reconcile two columns at the finer of
+    their resolutions, which is why it takes a duration at all: `s - t` on a
+    second column and a nanosecond one is a nanosecond answer and the second
+    column has to be multiplied to get there.
 
     Args:
-        a: A timestamp column.
+        a: A timestamp or duration column.
         unit: The resolution to restate it at.
 
     Returns:
-        A timestamp column at the new resolution, null wherever the input is
-        null.
+        A column of the same kind at the new resolution, null wherever the input
+        is null.
 
     Raises:
-        Error: If the column is not a timestamp, or if going up in precision
-            would put an instant outside the range of an int64.
+        Error: If the column is neither a timestamp nor a duration, or if going
+            up in precision would put a value outside the range of an int64.
     """
-    if a.type.kind != TypeKind.TIMESTAMP:
+    if a.type.kind != TypeKind.TIMESTAMP and a.type.kind != TypeKind.DURATION:
         raise Error(
-            "temporal: a resolution is something only a timestamp column has,"
-            " and this one is "
+            "temporal: a resolution is something only a timestamp or a duration"
+            " column has, and this one is "
             + String(a.type)
         )
 
@@ -1382,7 +1549,9 @@ def temporal_as_unit(a: AnyArray, unit: TimeUnit) raises -> AnyArray:
         return AnyArray(copy=a)
 
     ref stamps = a.as_typed_view[DType.int64]()
-    var result = LogicalType.timestamp(unit, a.type.zone)
+    var result = LogicalType.timestamp(
+        unit, a.type.zone
+    ) if a.type.kind == TypeKind.TIMESTAMP else LogicalType.duration(unit)
     if want < have:
         return AnyArray(
             _rescale[False](stamps, have // want).into_data(), result
@@ -1393,7 +1562,7 @@ def temporal_as_unit(a: AnyArray, unit: TimeUnit) raises -> AnyArray:
         raise Error(
             "temporal: restating this column in "
             + String(unit)
-            + " multiplies every instant by "
+            + " multiplies every value by "
             + String(ratio)
             + ", and at least one of them does not fit in an int64 afterwards,"
             " which is the range pandas calls out of bounds"

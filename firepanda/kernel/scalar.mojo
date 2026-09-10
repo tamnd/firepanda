@@ -1979,6 +1979,60 @@ def rescale_scalar[
     return out^
 
 
+def duration_days_scalar(
+    a: Array[DType.int64], per_day: Int64
+) -> Array[DType.int64]:
+    """Counts the whole days in a column of elapsed times, one row at a time.
+
+    The twin for `temporal_duration_days`. The division is
+    `_floored_int_quotient` and not `//` for the reason `temporal_field_scalar`
+    gives, which is that the kernel's whole claim is that it rounds downward and
+    a twin written with the same operator would agree with it for the same
+    reason rather than for an independent one.
+
+    Args:
+        a: The column, holding whole units of elapsed time.
+        per_day: How many of that unit make a day.
+
+    Returns:
+        A column of whole days, null wherever the input is null.
+    """
+    var out = Array[DType.int64](len(a))
+    for i in range(len(a)):
+        if not _is_there(a, i):
+            out.set_null(i)
+            continue
+        out.set_valid(i, _floored_int_quotient(a[i], per_day))
+    return out^
+
+
+def total_seconds_scalar(
+    a: Array[DType.int64], per_second: Int64
+) -> Array[DType.float64]:
+    """Counts a column of elapsed times in seconds, one row at a time.
+
+    The twin for `temporal_total_seconds`. This one is a float division on both
+    sides, because the kernel's claim is not about rounding but about the
+    conversion happening at all and about it happening in float64 rather than in
+    the column's own integer.
+
+    Args:
+        a: The column, holding whole units of elapsed time.
+        per_second: How many of that unit make a second.
+
+    Returns:
+        A column of seconds, null wherever the input is null.
+    """
+    var rate = Float64(per_second)
+    var out = Array[DType.float64](len(a))
+    for i in range(len(a)):
+        if not _is_there(a, i):
+            out.set_null(i)
+            continue
+        out.set_valid(i, Float64(a[i]) / rate)
+    return out^
+
+
 def _string_find_scalar(hay: String, needle: String, from_: Int) -> Int:
     """Finds a substring by comparing characters one at a time.
 
