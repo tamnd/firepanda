@@ -153,7 +153,13 @@ comptime WITH_USING_KEY: UInt16 = 23
 comptime ESCAPE_STRING: UInt16 = 24
 """An `E'...'` string, which reads backslash escapes."""
 
-comptime NO_CASE: UInt16 = 25
+comptime STATEMENT_LATER: UInt16 = 25
+"""A statement that maps onto something a dataframe already does."""
+
+comptime STATEMENT_NEVER: UInt16 = 26
+"""A statement that asks for something a dataframe library does not have."""
+
+comptime NO_CASE: UInt16 = 27
 """A grammar rule the transformer has no case for at all."""
 
 
@@ -385,6 +391,25 @@ def sql_support() -> List[Refusal]:
                 " a quote to hold one."
             ),
             STAGE_ISSUE,
+        ),
+        Refusal(
+            "statement-later",
+            "the {} statement yet",
+            (
+                "It maps onto something a dataframe already does and it is"
+                " coming. firepanda runs SELECT today."
+            ),
+            STAGE_ISSUE,
+        ),
+        Refusal(
+            "statement-never",
+            "the {} statement",
+            (
+                "It asks for a catalog, a transaction or an extension, and"
+                " firepanda is a dataframe library rather than a database."
+                " Read the data with SELECT and do the rest in Mojo."
+            ),
+            SQL_ISSUE,
         ),
         Refusal(
             "no-case",

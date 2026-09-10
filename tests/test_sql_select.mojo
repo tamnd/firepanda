@@ -613,6 +613,77 @@ def test_a_refusal_says_where_it_was() raises:
         _ = _printed("SELECT a FROM t TABLESAMPLE 10%", g, rules)
 
 
+def test_a_grouping_set_of_one_column_is_the_column() raises:
+    # `GROUPING SETS ((a, ))` is a set of one column, and so is
+    # `GROUPING SETS (a)`. The trailing comma makes the grammar hand back a row
+    # where the plain spelling hands back an expression, and if the row stayed
+    # it would print as `(a)`, which reads back as the plain spelling. The two
+    # texts would differ with nothing between them having changed meaning.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(
+        _printed("SELECT a FROM t GROUP BY GROUPING SETS ((a, ))", g, rules),
+        "SELECT a FROM t GROUP BY GROUPING SETS (a)",
+    )
+
+
+def test_a_trailing_semicolon_is_part_of_the_statement() raises:
+    # A query copied out of a file or a shell has one on the end, and a reader
+    # told that is a syntax error will not believe it.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("SELECT 1;", g, rules), "SELECT 1")
+    assert_equal(_printed("SELECT 1 ;;;", g, rules), "SELECT 1")
+
+
+def test_nothing_at_all_is_a_syntax_error() raises:
+    var g = Grammar()
+    var rules = Transform(g)
+    with assert_raises(contains="syntax error"):
+        _ = _printed("", g, rules)
+    with assert_raises(contains="syntax error"):
+        _ = _printed(";", g, rules)
+
+
+def test_a_statement_firepanda_will_run_later_refuses_by_name() raises:
+    # Tier two. The word `yet` is the whole point of the entry being separate:
+    # it tells a reader to wait rather than to rewrite the query.
+    var g = Grammar()
+    var rules = Transform(g)
+    with assert_raises(contains="the CREATE statement yet"):
+        _ = _printed("CREATE TABLE t (a INT)", g, rules)
+    with assert_raises(contains="the INSERT statement yet"):
+        _ = _printed("INSERT INTO t VALUES (1)", g, rules)
+
+
+def test_a_statement_firepanda_will_not_run_refuses_by_name() raises:
+    # Tier three, and the message has no `yet` in it.
+    var g = Grammar()
+    var rules = Transform(g)
+    with assert_raises(contains="the ATTACH statement."):
+        _ = _printed("ATTACH 'x.db'", g, rules)
+    with assert_raises(contains="the UPDATE statement."):
+        _ = _printed("UPDATE t SET a = 1", g, rules)
+
+
+def test_a_statement_refusal_says_where_it_was_and_where_to_read() raises:
+    var g = Grammar()
+    var rules = Transform(g)
+    with assert_raises(contains="LINE 1: DROP TABLE t"):
+        _ = _printed("DROP TABLE t", g, rules)
+    with assert_raises(contains="issues/"):
+        _ = _printed("DROP TABLE t", g, rules)
+
+
+def test_a_statement_that_is_not_sql_at_all_is_still_a_syntax_error() raises:
+    # The tier tables must not turn a typo into a refusal. `SELCT` is not a
+    # statement keyword, so nothing matches and the matcher says so.
+    var g = Grammar()
+    var rules = Transform(g)
+    with assert_raises(contains="syntax error"):
+        _ = _printed("SELCT 1", g, rules)
+
+
 def test_the_table_has_an_entry_for_the_statement_rule() raises:
     var g = Grammar()
     var rules = Transform(g)
