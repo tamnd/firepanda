@@ -348,6 +348,7 @@ comptime _PIVOT_SUBQUERY: UInt8 = 72
 
 comptime _UNPIVOT: UInt8 = 73
 """`UnpivotStatement`, the `UNPIVOT t ON a INTO NAME n VALUE v` spelling."""
+
 # A marker is a rule that builds nothing. The rule above it reads it directly,
 # and the byte is here so that rule can pick it out of its siblings with the
 # same array lookup the dispatch uses. The alternative is guessing from a
@@ -1277,6 +1278,7 @@ struct Transform(Movable):
             return ast.pivot_on(
                 work.value(kids[0]), statement=work.value(kids[1]), token=at
             )
+
         if action == _REFUSE:
             # The first word goes along whether the message has a slot for it or
             # not, because `filled` drops it when there is no `{}` and most of
