@@ -33,6 +33,18 @@ different data, which is a conversation about the dtype vocabulary rather than
 about this kernel. Everything in here reads codes through `dictionary_codes`,
 which widens, so a column that arrived over Arrow at int8 is read like any other.
 
+A row moving does not change what a code means, and that one sentence is the
+whole of `same_categories` and `carried_categories` at the end of the file. A
+filter, a take, a concatenation and a coalesce all build their output through the
+codes' own dtype, because that is the layout the codes are stored in, and then
+put the input's logical type back on the result. For every other type that is the
+end of it. For a dictionary it is not, because the type says `category` and the
+categories themselves live beside the buffer rather than in it, so the result
+said it was a category and had nothing behind it. Those kernels now carry the
+list across, and the ones with more than one input refuse when the inputs do not
+agree about it, because two columns whose categories differ give the same code to
+different values and stacking their codes would answer confidently and wrongly.
+
 The rest of the file is what a caller does to a categorical after it exists.
 Pandas puts eleven names on `Series.cat` and there are three operations under
 them. A rename is decided by position and leaves every code where it is. Setting
@@ -474,3 +486,105 @@ def _moved_to(categories: StringArray, names: StringArray) raises -> List[Int]:
             continue
         out[at] = slot[Int(found.codes[wanted + at]) - shift]
     return out^
+
+
+def same_categories(a: StringArray, b: StringArray) -> Bool:
+    """Reports whether two category lists are the same list in the same order.
+
+    Order counts. A code is a position, so two columns whose categories hold the
+    same labels in a different order give the same code to different values, and
+    an operation that put the codes side by side would answer confidently and
+    wrongly.
+
+    Args:
+        a: The left column's categories.
+        b: The right column's categories.
+
+    Returns:
+        True if the two lists match label for label.
+    """
+    if len(a) != len(b):
+        return False
+    for k in range(len(a)):
+        if a.is_valid(k) != b.is_valid(k):
+            return False
+        if a.is_valid(k) and a[k] != b[k]:
+            return False
+    return True
+
+
+def with_categories(var out: AnyArray, source: AnyArray) raises -> AnyArray:
+    """Puts a source column's categories onto a result built from its codes.
+
+    This is the second half of `retyped` for a dictionary column, and it is safe
+    to call on any column, because a source that is not a dictionary has no
+    categories to carry and the result is handed straight back. A kernel that
+    moves rows around builds its output through the codes' own dtype and then
+    relabels it with the input's logical type, which for every other type is the
+    whole job. A dictionary's categories are not in that buffer, so without this
+    the result is a column whose type says `category` and which has nothing
+    behind it. Everything downstream then either raises somewhere unrelated or,
+    worse, reads the codes as the plain integers they are stored as.
+
+    Nothing is dropped. A filter that removes every row in a category leaves that
+    category in the list, unused, which is what pandas does and what
+    `drop_unused_categories` exists to undo for a caller who wants otherwise.
+
+    Args:
+        out: The result, holding the moved codes and already carrying the
+            source's logical type. Consumed.
+        source: The column the rows came from.
+
+    Returns:
+        The result, with the categories attached if there were any.
+
+    Raises:
+        Error: If the source is a dictionary whose categories cannot be read.
+    """
+    if not source.is_dictionary():
+        return out^
+    out.dict_values = StringArray(copy=source.categories())
+    return out^
+
+
+def check_same_categories(a: AnyArray, b: AnyArray, what: String) raises:
+    """Refuses two dictionary columns that do not name the same categories.
+
+    A concatenation, a coalesce and a pick all read codes from two columns into
+    one result, and a code is only meaningful against the list it was assigned
+    from. So either both sides name the same categories in the same order, in
+    which case the result names them too, or the operation has no answer and says
+    so rather than producing one. Anything that is not a pair of dictionaries
+    passes through, because the dtype check each of those kernels already does is
+    what catches the rest.
+
+    Unifying the two lists instead is a defensible library to build. It would
+    mean rewriting the codes of whichever side did not already agree, which is a
+    pass over the data for an operation whose whole point is that it is not one,
+    and it would quietly turn a caller's mistake into a slow success. pandas
+    refuses the same shapes, so this is the smaller surprise as well as the
+    cheaper one.
+
+    Args:
+        a: The left column.
+        b: The right column.
+        what: The operation's name, for the message.
+
+    Raises:
+        Error: If both are dictionaries and their categories differ.
+    """
+    if not a.is_dictionary() or not b.is_dictionary():
+        return
+    if same_categories(a.categories(), b.categories()):
+        return
+    raise Error(
+        String(
+            what,
+            (
+                ": the two columns do not have the same categories, and a code"
+                " is a position in a category list, so putting these together"
+                " would give the same code to different values. Bring them onto"
+                " one list with set_categories first"
+            ),
+        )
+    )
