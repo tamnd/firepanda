@@ -1349,6 +1349,14 @@ struct _Run[
         # the statement down one token later. So when the blamed token has
         # nothing near it, the word before it is the one to ask about, against
         # the set collected where that word stands.
+        #
+        # There is no word before the first token, and `earlier_at` starts at
+        # -1, so without the bound the two agree at position 0 and the read
+        # walks off the front of the vector. A parse that fails on its very
+        # first token is what `parse_rule` does every time it is aimed at a
+        # rule the query is not, which is most of a corpus.
+        if position == 0:
+            return String()
         if self.earlier_at == position - 1 and self._word(position - 1):
             return _suggest(
                 self.grammar[], self._text(position - 1), self.earlier
