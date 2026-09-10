@@ -3769,6 +3769,41 @@ def aggregate_group_many[
     return out^
 
 
+def agg_type(kind: AggKind, input: LogicalType) -> LogicalType:
+    """Returns the logical type a reduction produces over a column.
+
+    Lived in `exec/node.mojo` while the only caller was the group node. It is
+    here now because binding a plan needs the same answer before any row moves,
+    and the two have to agree, so there is one of it and it sits next to the
+    tag it reads.
+
+    `AggKind.result_dtype` answers this in physical dtypes, which is the right
+    answer for a kernel and not enough for a schema: a minimum over a column of
+    timestamps is a timestamp and not an int64, and the only way to keep that is
+    to hand the input type straight back for the reductions that report a value
+    the column held.
+
+    Args:
+        kind: The reduction.
+        input: The logical type of the column being reduced.
+
+    Returns:
+        The logical type of the output column.
+    """
+    if kind == AggKind.COUNT or kind == AggKind.SIZE:
+        return LogicalType.INT64
+    if kind == AggKind.MEAN:
+        return LogicalType.FLOAT64
+    if kind == AggKind.SUM:
+        var acc = accumulator(input.physical)
+        if acc == DType.float64:
+            return LogicalType.FLOAT64
+        if acc == DType.int64:
+            return LogicalType.INT64
+        return LogicalType.UINT64
+    return input
+
+
 def temporal_agg_type(
     t: LogicalType, kind: AggKind, whole_column: Bool
 ) raises -> LogicalType:

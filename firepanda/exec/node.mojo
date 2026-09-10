@@ -114,7 +114,7 @@ from firepanda.kernel.binary import (
 )
 from firepanda.kernel.cast import cast_any
 from firepanda.kernel.concat import concat_two_any
-from firepanda.kernel.group import AggKind, aggregate_group_any
+from firepanda.kernel.group import AggKind, agg_type, aggregate_group_any
 from firepanda.kernel.reduce import reduce_any
 from firepanda.kernel.running import (
     accumulate_any,
@@ -1168,36 +1168,6 @@ def _merge_kind(kind: AggKind) -> AggKind:
     return kind
 
 
-def _agg_type(kind: AggKind, input: LogicalType) -> LogicalType:
-    """Returns the logical type a reduction produces over a column.
-
-    `AggKind.result_dtype` answers this in physical dtypes, which is the right
-    answer for a kernel and not enough for a schema: a minimum over a column of
-    timestamps is a timestamp and not an int64, and the only way to keep that is
-    to hand the input type straight back for the reductions that report a value
-    the column held.
-
-    Args:
-        kind: The reduction.
-        input: The logical type of the column being reduced.
-
-    Returns:
-        The logical type of the output column.
-    """
-    if kind == AggKind.COUNT or kind == AggKind.SIZE:
-        return LogicalType.INT64
-    if kind == AggKind.MEAN:
-        return LogicalType.FLOAT64
-    if kind == AggKind.SUM:
-        var acc = accumulator(input.physical)
-        if acc == DType.float64:
-            return LogicalType.FLOAT64
-        if acc == DType.int64:
-            return LogicalType.INT64
-        return LogicalType.UINT64
-    return input
-
-
 def _mean_of(sums: AnyArray, counts: AnyArray) raises -> AnyArray:
     """Divides a running sum by a running count, one group at a time.
 
@@ -1483,7 +1453,7 @@ struct Group(Movable):
                     raise Error(
                         "group: two output columns would both be called " + name
                     )
-            fields.append(Field(name, _agg_type(kind, source)))
+            fields.append(Field(name, agg_type(kind, source)))
 
             self._at.append(len(self._source))
             if kind == AggKind.MEAN:
@@ -1956,7 +1926,7 @@ struct Reduce(Movable):
                         "reduce: two output columns would both be called "
                         + name
                     )
-            fields.append(Field(name, _agg_type(kind, source)))
+            fields.append(Field(name, agg_type(kind, source)))
 
             self._at.append(len(self._source))
             if kind == AggKind.MEAN:
