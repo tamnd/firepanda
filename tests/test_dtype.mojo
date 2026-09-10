@@ -305,7 +305,9 @@ def test_a_temporal_type_promotes_with_itself_at_the_finer_unit() raises:
     with assert_raises(contains="differ in kind or in time zone"):
         _ = promote(micro, LogicalType.duration(TimeUnit.MICRO))
     with assert_raises(contains="differ in kind or in time zone"):
-        _ = promote(micro, LogicalType.timestamp(TimeUnit.MICRO, TimeZone("UTC")))
+        _ = promote(
+            micro, LogicalType.timestamp(TimeUnit.MICRO, TimeZone("UTC"))
+        )
     with assert_raises(contains="scales an elapsed time by a number"):
         _ = promote(LogicalType.duration(TimeUnit.MICRO), LogicalType.INT64)
 
