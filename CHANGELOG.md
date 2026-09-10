@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### The fourteen transformations a pandas program can finally call
+
+`s.dropna()`, `s.isna()`, `s.notna()`, `s.ffill()`, `s.bfill()`, `s.shift()`, `s.diff()`, `s.pct_change()`, `s.cumsum()`, `s.cumprod()`, `s.cummax()`, `s.cummin()`, `s.is_monotonic_increasing` and `s.is_monotonic_decreasing` now work from Python, along with the same list on a frame minus the monotonic pair, and `df.dropna()` on top. Every one of them worked in Mojo already. This is the same gap the reductions turned out to be, in the same place, and it is the binding catching up with the library rather than the library learning anything new.
+
+The door is one method and not fourteen, for the reason the reductions gave. A transformation crosses the boundary as a word beside a whole number, because `shift`, `diff` and `pct_change` take a `periods` and `ffill` and `bfill` take a `limit`, both are always a whole number, and no transformation in the list takes two of them. So one integer carries every argument there is and the seven that take neither are handed a zero.
+
+Three doors rather than one, though, and the rule for which is which is the shape of the answer. Twelve transformations hand back a column and go through `transform`. The two monotonic questions hand back a bool and go through their own door. A frame `dropna` removes rows rather than transforming columns, so no per column loop produces it and it has a door of its own, which the boundary refuses to let anything reach through `transform` rather than trusting the layer above to keep them apart.
+
+`limit=0` is refused rather than being read. The core spells no limit as zero and pandas spells it as `None`, so the Python layer turns a `None` into a zero on the way in and a caller who typed `limit=0` and meant it gets the pandas message back, because reading a literal zero as its exact opposite is the kind of quiet wrong answer that takes a week to find.
+
+pandas defaults three parameters to a private sentinel, `lib.no_default`, and firepanda now has its own `NO_DEFAULT` to put in the same three places. `shift(fill_value=)`, `dropna(how=)` and `dropna(thresh=)` are the three. It is not the pandas object, because importing a private name out of pandas to spell a default would make pandas a hard dependency of a library that does not otherwise need it, and it is not `None`, because `None` is a value a caller can pass to `fill_value` and it has to be distinguishable from not passing anything.
+
+Every argument pandas declares and this does not implement raises rather than being ignored, the same way the reductions do. `axis=1` on a frame transformation, `skipna=False` on a scan, `numeric_only`, `limit_area`, `shift(freq=)`, a list of periods with a `suffix`, a `fill_value` on a shift, `dropna(how="all")`, a `thresh`, `inplace` and `ignore_index` each refuse by name with the reason in the message, and there is a test per refusal.
+
 ### The corpus differential stops taking the process down with it
 
 `pixi run differential-sql` printed its whole report and then died in a destructor, with `corrupted double-linked list` on Linux and a heap trace on macOS, and CI hung afterwards until the runner cancelled the job twenty minutes later. The run had passed. What was lost was the exit status. The harness is a Mojo binary with CPython embedded in it, and importing DuckDB into that interpreter registers process exit handlers that run after the interpreter has been finalized and free a connection that is no longer there. The asking now happens in a child process, which costs one fork and one pipe for seventy thousand statements, and the parent never loads DuckDB at all. That closes #359.

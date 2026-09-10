@@ -64,6 +64,13 @@ def register(mut module: PythonModuleBuilder) raises:
         "reduce",
         docstring="Every column reduced to one value, as a series of them.",
     )
+    _ = dataframe.def_method[PyDataFrame.transform](
+        "transform",
+        docstring="Every column put through one named transformation.",
+    )
+    _ = dataframe.def_method[PyDataFrame.dropna](
+        "dropna", docstring="The rows with no missing value in them."
+    )
     _ = dataframe.def_method[PyDataFrame.labels](
         "labels", docstring="The row labels, as an index."
     )
@@ -127,6 +134,14 @@ def register(mut module: PythonModuleBuilder) raises:
     )
     _ = series.def_method[PySeries.reduce](
         "reduce", docstring="The whole column reduced to one Python value."
+    )
+    _ = series.def_method[PySeries.transform](
+        "transform",
+        docstring="The column put through one named transformation.",
+    )
+    _ = series.def_method[PySeries.monotonic](
+        "monotonic",
+        docstring="Whether the column is sorted, one way or the other.",
     )
     _ = series.def_method[PySeries.binary_series](
         "binary_series",

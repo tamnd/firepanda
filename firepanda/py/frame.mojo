@@ -75,6 +75,7 @@ from firepanda.py.ops import (
 )
 from firepanda.py.reduce import reduction
 from firepanda.py.series import PySeries
+from firepanda.py.transform import transformation, transformed
 
 
 @fieldwise_init
@@ -371,6 +372,104 @@ struct PyDataFrame(Movable, Writable):
         out.name = String("")
         out.index = labels^
         return PythonObject(alloc=PySeries(ArcPointer(out^)))
+
+    @staticmethod
+    def transform(
+        py_self: PythonObject, kind: PythonObject, periods: PythonObject
+    ) raises -> PythonObject:
+        """Applies one named transformation to every column.
+
+        Eleven of the twelve, because a frame `dropna` is not this operation.
+        The other eleven are per column and a frame is the columns run one at a
+        time and put back together, which is what pandas does and is why
+        `df.cumsum()` totals down each column rather than across the row.
+
+        A column type can change on the way through and that is not a slip.
+        `shift` on a complete integer column makes a gap and pandas has no
+        integer that means absent, so the column widens to float64, which means
+        a frame of integers can come back holding floats. The rule is the core's
+        and it is the same one the read path applies to a file.
+
+        Args:
+            py_self: The frame.
+            kind: The transformation, as pandas spells the method.
+            periods: The `periods` or the `limit`, and zero for the ones that
+                take neither.
+
+        Returns:
+            A new frame with the same column names in the same order.
+
+        Raises:
+            Error: Tagged `dtype`, if a column has a type the transformation
+                cannot read, and tagged `value` if the name is not one of the
+                eleven.
+        """
+        var wanted = transformation(words(kind, "kind"))
+        if wanted == "dropna":
+            raise tagged(
+                VALUE,
+                String(
+                    "dropna on a frame removes rows rather than transforming"
+                    " columns, so it does not come through here"
+                ),
+            )
+        ref frame = Self._frame(py_self)[].frame[]
+        var moved = whole(periods, "periods")
+        var parts = List[Series](capacity=frame.width())
+        for i in range(frame.width()):
+            try:
+                parts.append(
+                    transformed(
+                        frame.column(frame.schema[i].name), wanted, moved
+                    )
+                )
+            except cause:
+                raise retagged(DTYPE, cause)
+        if len(parts) == 0:
+            return PythonObject(alloc=Self(ArcPointer(DataFrame(copy=frame))))
+        var out = DataFrame.from_series(parts^)
+        out.index = Index(copy=frame.index)
+        return PythonObject(alloc=Self(ArcPointer(out^)))
+
+    @staticmethod
+    def dropna(
+        py_self: PythonObject, subset: PythonObject
+    ) raises -> PythonObject:
+        """Removes the rows that have a missing value in them.
+
+        Its own door, because it is the one name on the transformation list that
+        does something different to a frame than it does to a column. On a
+        column it removes the missing values. On a frame it removes whole rows,
+        which means the answer to `df.dropna()` depends on every column at once
+        and no per column loop produces it.
+
+        `subset` narrows which columns are allowed to disqualify a row. An empty
+        list means all of them, which is the pandas default.
+
+        Args:
+            py_self: The frame.
+            subset: The column names to look at, or an empty list for all of
+                them.
+
+        Returns:
+            A new frame with the same columns and fewer rows.
+
+        Raises:
+            Error: Tagged `column`, if a named column is not in the frame.
+        """
+        var wanted = List[String](capacity=Int(len(subset)))
+        for name in subset:
+            wanted.append(String(name))
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        Self._frame(py_self)[].frame[].drop_nulls(wanted)
+                    )
+                )
+            )
+        except cause:
+            raise retagged(COLUMN, cause)
 
     @staticmethod
     def _other(
