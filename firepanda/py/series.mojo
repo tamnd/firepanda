@@ -16,7 +16,7 @@ from std.memory import ArcPointer, Pointer
 from std.python import Python, PythonObject
 from std.python.bindings import check_arguments_arity
 
-from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.logical import LogicalType, named_type
 from firepanda.frame.index import Index
 from firepanda.frame.series import Series
 from firepanda.kernel.reduce import reduce_any
@@ -354,6 +354,50 @@ struct PySeries(Movable, Writable):
             )
         except e:
             raise retagged(DTYPE, e)
+
+    @staticmethod
+    def cast(
+        py_self: PythonObject, dtype: PythonObject, strict: PythonObject
+    ) raises -> PythonObject:
+        """Converts the column to another type and hands back a new one.
+
+        The name that arrives here is already canonical, because the Python
+        layer resolves what pandas accepts, which is aliases and python types
+        and numpy dtypes, down to one of the spellings `dtype` prints. So this
+        reads a name and nothing else, and a name it does not know is a bug on
+        the other side rather than a caller's mistake.
+
+        Args:
+            py_self: The series.
+            dtype: The target type, spelled the way `dtype` prints it.
+            strict: Whether a text value that is not a number raises rather
+                than becoming a null.
+
+        Returns:
+            A new series of that type.
+
+        Raises:
+            Error: Tagged `value` if the name is not one this layer prints, and
+                tagged `dtype` if the conversion is not one firepanda has or a
+                text value is not a number.
+        """
+        var wanted: LogicalType
+        try:
+            wanted = named_type(words(dtype, "dtype"))
+        except cause:
+            raise retagged(VALUE, cause)
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        Self._held(py_self)[]
+                        .series[]
+                        .cast(wanted, flag(strict, "strict"))
+                    )
+                )
+            )
+        except cause:
+            raise retagged(DTYPE, cause)
 
     @staticmethod
     def monotonic(

@@ -43,6 +43,9 @@ class DataFrame:
     def dropna(self, subset: list[str]) -> DataFrame:
         """The rows with no missing value in them."""
         ...
+    def cast(self, names: list[str], dtypes: list[str], strict: bool) -> DataFrame:
+        """Some columns converted to other types, as a new frame."""
+        ...
     def group_agg(
         self, by: list[str], kind: str, param: float, dropna: bool, sort: bool, as_index: bool
     ) -> DataFrame:
@@ -115,6 +118,9 @@ class Series:
         ...
     def transform(self, kind: str, periods: int) -> Series:
         """The column put through one named transformation."""
+        ...
+    def cast(self, dtype: str, strict: bool) -> Series:
+        """The column converted to another type."""
         ...
     def monotonic(self, increasing: bool) -> bool:
         """Whether the column is sorted, one way or the other."""

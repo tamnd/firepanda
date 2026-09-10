@@ -487,6 +487,51 @@ struct LogicalType(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write(self.physical)
 
 
+def named_type(name: String) raises -> LogicalType:
+    """Returns the type a caller named, reading what `write_to` prints.
+
+    This is the inverse of `LogicalType.write_to` and it is written as one on
+    purpose, so that the two can be checked against each other over every type
+    rather than being two tables that agree until somebody edits one of them.
+    A name this does not know is an error rather than a guess.
+
+    It reads the spellings that are a single word and nothing else. The
+    parameterised ones are left out because each carries something this
+    signature has no room for: a timestamp carries a unit and a zone, a
+    duration a unit, a dictionary an index width and an ordering, and a list
+    an element type that does not live on the type at all. Those columns are
+    built by the code that knows those things and are converted by calls that
+    name them, so a name is never the way one is asked for.
+
+    Nothing here is case insensitive and nothing is abbreviated, because the
+    aliases a user writes are pandas vocabulary rather than firepanda's and
+    belong in the layer that speaks pandas. `int64` is a name and `i8` is not.
+
+    Args:
+        name: The type name, spelled the way `dtype` prints it.
+
+    Returns:
+        The type with that name.
+
+    Raises:
+        Error: If the name is not one of the single word spellings.
+    """
+    if name == "null":
+        return LogicalType.NULL
+    if name == "bool":
+        return LogicalType.BOOL
+    if name == "string":
+        return LogicalType.STRING
+    if name == "binary":
+        return LogicalType.BINARY
+    if name == "date32[day]":
+        return LogicalType.DATE32
+    comptime for dt in ALL:
+        if name == String(dt):
+            return logical_for(dt)
+    raise Error("no type is named " + name)
+
+
 def logical_for(dt: DType) -> LogicalType:
     """Returns the default logical type for a physical dtype.
 

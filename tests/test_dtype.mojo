@@ -28,7 +28,13 @@ from firepanda.dtype.lists import (
     contains,
     dtype_size,
 )
-from firepanda.dtype.logical import LogicalType, TypeKind, logical_for, promote
+from firepanda.dtype.logical import (
+    LogicalType,
+    TypeKind,
+    logical_for,
+    named_type,
+    promote,
+)
 from firepanda.dtype.temporal import TimeUnit, TimeZone, unit_for_code
 
 
@@ -429,6 +435,60 @@ def test_a_logical_type_stays_one_cache_line() raises:
     somebody adds a field after the zone, this is the test that says so.
     """
     assert_equal(size_of[LogicalType](), 64)
+
+
+def test_a_name_reads_back_as_the_type_that_printed_it() raises:
+    """The round trip, which is the whole reason `named_type` is written as an inverse.
+
+    Every single word type is printed and the printing is read back, so the two
+    halves cannot drift without this failing. A second table of names would
+    agree with the printer on the day it was written and nobody would find out
+    when it stopped.
+    """
+    comptime named = [
+        LogicalType.NULL,
+        LogicalType.BOOL,
+        LogicalType.INT8,
+        LogicalType.INT16,
+        LogicalType.INT32,
+        LogicalType.INT64,
+        LogicalType.UINT8,
+        LogicalType.UINT16,
+        LogicalType.UINT32,
+        LogicalType.UINT64,
+        LogicalType.FLOAT16,
+        LogicalType.FLOAT32,
+        LogicalType.FLOAT64,
+        LogicalType.STRING,
+        LogicalType.BINARY,
+        LogicalType.DATE32,
+    ]
+    comptime for one in named:
+        assert_true(named_type(String(one)) == one)
+
+
+def test_a_name_nothing_prints_is_refused() raises:
+    """Including the ones a caller is most likely to try.
+
+    `datetime64[ns]` and `category` are real firepanda types and are still
+    refused here, because their spelling carries a unit or an index width that
+    a name has no room for and answering the bare kind would be answering a
+    different type than the one asked for.
+    """
+    for name in [
+        "int64 ",
+        "INT64",
+        "i8",
+        "str",
+        "object",
+        "category",
+        "datetime64[ns]",
+        "timedelta64[ns]",
+        "date32",
+        "",
+    ]:
+        with assert_raises(contains="no type is named"):
+            _ = named_type(name)
 
 
 def main() raises:

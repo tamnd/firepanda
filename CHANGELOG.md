@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: astype, and about sixty ways to spell a type
+
+`Series.astype` and `DataFrame.astype`, with the pandas signature, and `dtype=` honoured in both constructors instead of refused. The frame form takes one type name for every column or a dict naming some of them, which is what pandas takes.
+
+The cast itself was already written and tested in Mojo and simply had no door into Python. Almost all of the new code is the other half of the method, which is working out what type the caller asked for. pandas resolves a dtype through numpy and numpy has spent thirty years collecting names, so `int64` is also `int`, `int_`, `intp`, `long`, `longlong`, `l`, `q`, `p` and `i8`, and a program written by somebody who learned numpy first uses whichever of those they learned. Every row of the table was measured against a running pandas 3.0.3 rather than remembered, which is how the surprises got in: `i` is int32 and not int64, `u` is not a name at all though `i`, `f` and `b` are, `long` is int64 while `longdouble` is float64, and `unicode`, `str_`, `U` and `O` are all the object dtype rather than text. The test walks the whole table and asks a live pandas what each name means, so a row added without being measured fails.
+
+A type pandas has and firepanda does not is refused by name with the reason, rather than being absent and failing on the lookup. Four of those refusals are for types firepanda does have. A cast to `datetime64[ns]`, `timedelta64[ns]` or `date32[day]` falls through to the physical layout underneath and would hand back the integers the instants, spans and days are stored as, and a cast to `binary` hands back text. All four are worth fixing in the kernel and none of them is worth shipping as a silent wrong answer in the meantime.
+
+`copy=` warns and does nothing, which is what pandas 3 does with it. `errors="ignore"` hands the column back unchanged, and it is read in the Python layer rather than passed to the kernel, because the kernel's flag asks a different question: it turns a value that will not convert into a missing one, and pandas never asks for that.
+
+One deliberate divergence, written down as a test. `astype("bool")` on a column of text is truthiness in pandas, so `"x"`, `"0"` and `"false"` are all True and only the empty string is False, and nothing is parsed and no input is ever rejected. firepanda parses, and a value that is not a boolean is an error.
+
 ### Fixed: the type check that failed over a dependency we do not have
 
 `_numpy` imports numpy inside a `try` so that the three names handing back a numpy scalar can say what is missing rather than raise `ImportError` at anyone. mypy runs with no numpy installed, which is the whole point of the guard, and reported the guarded import as a missing library stub. That took the Format job down on every branch and there was nothing on any of those branches to fix. numpy is now declared to mypy as a module it will not find, which is true and is going to stay true, since firepanda has no dependencies.
