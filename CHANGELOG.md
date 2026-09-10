@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the plan layer starts with the expression tree and the three analyses over it
+
+The engine has nine physical operators and a pipeline driver, and nothing in the repository calls it except one test. The reason is that there is nothing between the eager API and the operators to decide anything, so `df.filter(...).select(...)` runs the filter, materializes it, runs the select, materializes that, and by the time anything downstream is reached the fact that a filter happened is gone. `firepanda/plan/` is where that decision layer goes, and this is its first file.
+
+`Expressions` is an arena and an expression is an index into it. The nine kinds are column reference, literal, unary, binary, cast, call, aggregate, conditional and window, which is the list in `docs/specs/planner/01-what-a-plan-is.md`, and the builders are the only way to make one so that every operand is checked against the arena as it goes in. Indices are handed out in creation order, so a child is always at a lower index than its parent and a pass that wants to visit every node after its children can walk the list backwards instead of traversing.
+
+The three analyses land with the arena rather than with the first pass that wants one, because every pass in the pipeline spec is written in terms of them. `elementwise` asks whether the value at a row depends only on that row, which is what a fusion pass checks before it folds two operators into one loop. `input_independent` asks whether the expression reads the input at all, which is what stops q1 evaluating the same date subtraction six million times. `tables` asks which inputs an expression reads, as a bitmask, which is what predicate pushdown and predicate transfer are both written on.
+
+Two of the answers are not the obvious ones and both are tested. A sum of a constant is not input independent, because `sum(1)` is the row count and folding it to one at plan time would be wrong. And the table set of an unbound column raises rather than coming back empty, because empty is a real answer that an input independent expression has, and handing it back for a column whose table is simply not known yet would tell pushdown that a predicate is safe to move past the only node able to evaluate it.
+
+Nothing calls any of this yet. The logical nodes, binding, the passes and the lowering into the existing `exec` nodes follow, and the eager API does not change when they do.
+
 ### Added: the `cat` namespace, so a category column has something on it
 
 A caller could build a category column and then do nothing with it. There was no way to read the categories or the codes, no way to say that the order meant something, and no way to change what the categories were. `Series.cat` now carries all eleven of the names pandas puts there: `categories`, `codes` and `ordered` answer a value, `as_ordered` and `as_unordered` flip the flag, and `add_categories`, `remove_categories`, `remove_unused_categories`, `rename_categories`, `reorder_categories` and `set_categories` hand back a column. Every one of them was compared against a live pandas, including all five of the errors, and `rename_categories` takes a list, a mapping or a callable the way pandas does.
