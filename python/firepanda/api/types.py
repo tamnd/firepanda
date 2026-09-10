@@ -533,6 +533,19 @@ def pandas_dtype(dtype: Any) -> Any:
     four that carry parameters come back as the classes above, because the name
     alone would lose the categories, the zone, the endpoints or the frequency.
 
+    This is stricter than the predicates and pandas is stricter here too. The
+    predicates read a bare `list` as the object dtype and say so, because a
+    column of Python lists is an object column and that is a useful answer. This
+    refuses it, with pandas' own message, because a caller asking to be handed a
+    dtype back is asking a different question from a caller asking whether a
+    column is one, and answering `object` would let a typo through as a dtype.
+
+    `None` is the exception to that strictness and it is numpy's exception rather
+    than pandas'. `numpy.dtype(None)` is float64, pandas passes it through, and
+    so the answer here is float64 as well. It does not agree with
+    `is_float_dtype(None)`, which is False in pandas and False here. Both halves
+    of that are copied deliberately.
+
     Args:
         dtype: A dtype, a string, a type, or something holding a dtype.
 
@@ -544,9 +557,15 @@ def pandas_dtype(dtype: Any) -> Any:
     """
     if isinstance(dtype, CategoricalDtype | DatetimeTZDtype | IntervalDtype | PeriodDtype):
         return dtype
+    if dtype is None:
+        return "float64"
+    if isinstance(dtype, type) and dtype not in _FROM_TYPE and _sorted(dtype.__name__) == "":
+        raise DTypeError(f"dtype '{dtype}' not understood")
     family = _family(dtype)
     if family == "":
-        raise DTypeError(f"data type {_named(dtype)!r} not understood")
+        if isinstance(dtype, str):
+            raise DTypeError(f"data type {dtype!r} not understood")
+        raise DTypeError(f"Cannot interpret '{dtype}' as a data type")
     if family == "category":
         return CategoricalDtype()
     name = _named(dtype)
@@ -571,15 +590,38 @@ def is_dtype_equal(source: Any, target: Any) -> bool:
         source: A dtype, or something naming one.
         target: The other.
 
+    This reads its arguments the way the predicates do rather than the way
+    `pandas_dtype` does, and the difference is visible from outside. A bare
+    `list` is the object dtype here, so `is_dtype_equal(list, "object")` is True
+    even though `pandas_dtype(list)` refuses. `None` is not a dtype here, so
+    `is_dtype_equal(None, None)` is False even though `pandas_dtype(None)` is
+    float64. Both of those are measured pandas answers, and both would come out
+    the other way round if this were written as two calls to `pandas_dtype`.
+
+    Args:
+        source: A dtype, or something naming one.
+        target: The other.
+
     Returns:
         True if they are the same dtype. False if they are not, and False rather
         than an exception if either of them names no dtype at all, which is what
         pandas does.
     """
-    try:
-        return bool(pandas_dtype(source) == pandas_dtype(target))
-    except TypeError:
-        return False
+    left = _comparable(source)
+    return left != "" and left == _comparable(target)
+
+
+def _comparable(value: Any) -> str:
+    """Reduces a dtype to the string two of them can be compared on.
+
+    Returns:
+        The spelling, or an empty string when the value names no dtype, which the
+        caller treats as unequal to everything including itself.
+    """
+    if isinstance(value, CategoricalDtype | DatetimeTZDtype | IntervalDtype | PeriodDtype):
+        return str(value)
+    name = _named(value)
+    return name if _sorted(name) != "" else ""
 
 
 def is_bool_dtype(arr_or_dtype: Any) -> bool:

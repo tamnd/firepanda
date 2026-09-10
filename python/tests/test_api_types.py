@@ -395,8 +395,55 @@ def test_pandas_dtype_refuses_what_names_no_dtype(firepanda: ModuleType) -> None
 
 
 @needs_pandas
+def test_pandas_dtype_is_stricter_about_classes_than_the_predicates_are(
+    firepanda: ModuleType,
+) -> None:
+    """The place where being handed a dtype and being asked about one differ.
+
+    `is_object_dtype(list)` is True in pandas, because a column of Python lists
+    is an object column. `pandas_dtype(list)` raises in pandas, because a class
+    that is not a dtype is not a dtype. Both halves are copied, and the first
+    draft here had the second one answering `object`, which no test would have
+    caught without measuring pandas.
+    """
+    import pandas as pd
+
+    for cls in (list, tuple, dict, set):
+        assert firepanda.api.types.is_object_dtype(cls) is True
+        assert pd.api.types.is_object_dtype(cls) is True
+        with pytest.raises(TypeError, match="not understood"):
+            firepanda.api.types.pandas_dtype(cls)
+        with pytest.raises(TypeError, match="not understood"):
+            pd.api.types.pandas_dtype(cls)
+
+
+@needs_pandas
+def test_pandas_dtype_of_none_is_float64_and_the_predicates_disagree(
+    firepanda: ModuleType,
+) -> None:
+    """An inconsistency inside pandas, copied on purpose.
+
+    `numpy.dtype(None)` is float64 and pandas passes that straight through, so
+    `pandas_dtype(None)` is float64. `is_float_dtype(None)` is False all the
+    same, because the predicates screen None out before they look at anything.
+    A library that fixed either half would break a program that reads the other.
+    """
+    import pandas as pd
+
+    assert firepanda.api.types.pandas_dtype(None) == "float64"
+    assert pd.api.types.pandas_dtype(None) == "float64"
+    assert firepanda.api.types.is_float_dtype(None) is False
+    assert pd.api.types.is_float_dtype(None) is False
+
+
+@needs_pandas
 def test_is_dtype_equal_agrees_with_pandas(firepanda: ModuleType) -> None:
-    """Including on the pairs where one side names nothing, which is False rather than a raise."""
+    """Including on the pairs where one side names nothing, which is False rather than a raise.
+
+    The last three pairs are the ones that pin this to the predicates rather
+    than to `pandas_dtype`. Writing it as two calls to `pandas_dtype` gets all
+    three wrong, and gets them wrong in opposite directions.
+    """
     import pandas as pd
 
     pairs: list[tuple[Any, Any]] = [
@@ -408,6 +455,9 @@ def test_is_dtype_equal_agrees_with_pandas(firepanda: ModuleType) -> None:
         ("nope", "int64"),
         ("category", "category"),
         ("datetime64[ns]", "datetime64[us]"),
+        (list, "object"),
+        (None, None),
+        (None, "float64"),
     ]
     wrong = [
         pair
