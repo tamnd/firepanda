@@ -419,11 +419,11 @@ def test_case_does_not_change_the_tree() raises:
     )
 
 
-def test_a_subquery_refuses_and_names_the_rule() raises:
+def test_a_subquery_in_an_expression_reaches_the_statement_arena() raises:
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="does not support"):
-        _ = _printed("(SELECT 1)", g, rules)
+    assert_equal(_printed("(SELECT 1)", g, rules), "(SELECT 1)")
+    assert_equal(_printed("a + (SELECT 1)", g, rules), "(a + (SELECT 1))")
 
 
 def test_a_window_function_refuses_and_names_the_clause() raises:

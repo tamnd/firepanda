@@ -55,11 +55,31 @@ from .ast import (
     EXPR_FUNCTION,
     EXPR_STAR,
     Expr,
+    GROUP_ALL,
+    GROUP_CUBE,
+    GROUP_EMPTY,
+    GROUP_EXPRESSION,
+    GROUP_ROLLUP,
+    GROUP_SETS,
+    GROUP_TUPLE,
+    LIMIT_ALL,
+    LIMIT_PERCENT,
     LITERAL_BOOLEAN,
     LITERAL_NULL,
     LITERAL_NUMBER,
     LITERAL_STRING,
+    MATERIALIZE_DEFAULT,
+    MATERIALIZE_NO,
+    MATERIALIZE_YES,
     NO_NODE,
+    NULLS_DEFAULT,
+    NULLS_FIRST,
+    NULLS_LAST,
+    SELECT_ALL,
+    SELECT_DISTINCT,
+    SORT_ASCENDING,
+    SORT_DEFAULT,
+    SORT_DESCENDING,
 )
 from .matcher import Parse, parse_rule
 from .table import Grammar
@@ -138,6 +158,113 @@ comptime _NULL: UInt8 = 21
 comptime _TRUE: UInt8 = 22
 comptime _FALSE: UInt8 = 23
 
+comptime _SUBQUERY: UInt8 = 24
+"""`SubqueryExpression`, a scalar subquery or an `EXISTS`."""
+
+comptime _SELECT: UInt8 = 25
+"""`SelectStatementInternal`, a whole statement with its `WITH` and its tail."""
+
+comptime _SETOP: UInt8 = 26
+"""`SelectSetOpChain` and `IntersectChain`, folded left to right."""
+
+comptime _SIMPLE_SELECT: UInt8 = 27
+"""`SimpleSelect`, the `SELECT ... FROM ... WHERE ...` block itself."""
+
+comptime _BLOCK: UInt8 = 28
+"""`SelectFromClause` and `FromSelectClause`, the two orders of the two."""
+
+comptime _SELECT_CLAUSE: UInt8 = 29
+"""`SelectClause`, the `SELECT` word with its `DISTINCT` and its targets."""
+
+comptime _TARGETS: UInt8 = 30
+"""`TargetList`, one `STMT_ITEM` per entry."""
+
+comptime _ITEM: UInt8 = 31
+"""`ExpressionAsCollabel` and `ExpressionOptIdentifier`, value then name."""
+
+comptime _ITEM_COLON: UInt8 = 32
+"""`ColIdExpression`, the `name: value` spelling, which is name then value."""
+
+comptime _FROM: UInt8 = 33
+"""`FromClause`, one table reference per entry."""
+
+comptime _TABLE_REF: UInt8 = 34
+"""`TableRef`, a reference with however many joins hang off it."""
+
+comptime _BASE_TABLE: UInt8 = 35
+comptime _TABLE_SUBQUERY: UInt8 = 36
+comptime _PARENS_TABLE: UInt8 = 37
+comptime _VALUES_REF: UInt8 = 38
+comptime _TABLE_FUNCTION: UInt8 = 39
+
+comptime _GROUP_LIST: UInt8 = 40
+comptime _GROUP_ALL: UInt8 = 41
+comptime _GROUP_ITEM: UInt8 = 42
+comptime _GROUP_EMPTY: UInt8 = 43
+comptime _GROUP_NESTED: UInt8 = 44
+comptime _GROUP_SETS: UInt8 = 45
+
+comptime _ORDER_LIST: UInt8 = 46
+comptime _ORDER_ALL: UInt8 = 47
+comptime _ORDER_ITEM: UInt8 = 48
+
+comptime _MODIFIERS: UInt8 = 49
+"""`ResultModifiers`, the `ORDER BY`, `LIMIT` and `OFFSET` on the end."""
+
+comptime _TAIL: UInt8 = 50
+"""The four orders `LimitOffset` allows, all of them the same three parts."""
+
+comptime _LIMIT: UInt8 = 51
+comptime _OFFSET: UInt8 = 52
+comptime _FETCH: UInt8 = 53
+
+comptime _WITH: UInt8 = 54
+comptime _CTE: UInt8 = 55
+comptime _VALUES: UInt8 = 56
+comptime _VALUES_ROW: UInt8 = 57
+comptime _TABLE_STATEMENT: UInt8 = 58
+
+# A marker is a rule that builds nothing. The rule above it reads it directly,
+# and the byte is here so that rule can pick it out of its siblings with the
+# same array lookup the dispatch uses. The alternative is guessing from a
+# keyword, and `FROM t AS at` is enough to show why that is not good enough.
+comptime _MARK_TABLE_ALIAS: UInt8 = 200
+comptime _MARK_ALIAS_COLON: UInt8 = 201
+comptime _MARK_AT: UInt8 = 202
+comptime _MARK_SAMPLE: UInt8 = 203
+comptime _MARK_LATERAL: UInt8 = 204
+comptime _MARK_ORDINALITY: UInt8 = 205
+comptime _MARK_RECURSIVE: UInt8 = 206
+comptime _MARK_MATERIALIZED: UInt8 = 207
+comptime _MARK_USING_KEY: UInt8 = 208
+comptime _MARK_CTE_COLUMNS: UInt8 = 209
+comptime _MARK_IN_SELECT: UInt8 = 210
+comptime _MARK_JOIN: UInt8 = 211
+comptime _MARK_JOIN_ON: UInt8 = 212
+comptime _MARK_JOIN_PLAIN: UInt8 = 213
+
+# Where the parts of a statement sit in the small runs that carry them up. A
+# rule that has more than one thing to hand its parent puts them in a run of
+# named slots, because a walk that holds one result per parse node has one slot
+# to put an answer in. These never reach the AST: the rule above unpacks them.
+comptime _SELECT_FLAGS: Int = 0
+comptime _SELECT_DISTINCT: Int = 1
+comptime _SELECT_TARGETS: Int = 2
+comptime _SELECT_SLOTS: Int = 3
+
+comptime _BLOCK_TARGETS: Int = 0
+comptime _BLOCK_TABLES: Int = 1
+comptime _BLOCK_SLOTS: Int = 2
+
+comptime _TAIL_LIMIT: Int = 0
+comptime _TAIL_OFFSET: Int = 1
+comptime _TAIL_FLAGS: Int = 2
+comptime _TAIL_SLOTS: Int = 3
+
+comptime _WITH_RECURSIVE: Int = 0
+comptime _WITH_ENTRIES: Int = 1
+comptime _WITH_SLOTS: Int = 2
+
 comptime _LEFT_PAREN = Byte(ord("("))
 comptime _LEFT_BRACKET = Byte(ord("["))
 comptime _DOT = Byte(ord("."))
@@ -150,7 +277,7 @@ comptime _UNDERSCORE = Byte(ord("_"))
 comptime _PENDING = "the transformer is waiting for a child"
 """What a form raises when a value it asked for is not built yet.
 
-This never reaches a caller. `Transform.expression` catches it, sees the
+This never reaches a caller. `Transform.walk` catches it, sees the
 requests the form left behind in `Work.wants`, builds those first and runs the
 form again. It is spelled as an error because a form asks for a value in the
 middle of an expression, where there is nothing sensible to return instead.
@@ -240,6 +367,13 @@ struct Transform(Movable):
     var expression_rule: Int
     """The index of `Expression`, so a caller can parse one directly."""
 
+    var statement_rule: Int
+    """The index of `SelectStatement`, for the same reason."""
+
+    var parens_rule: Int
+    """The index of `ParenthesisExpression`, which a grouping entry looks for.
+    """
+
     def __init__(out self, grammar: Grammar) raises:
         """Builds the table.
 
@@ -252,6 +386,8 @@ struct Transform(Movable):
         """
         self.actions = List[UInt8](length=len(grammar.names), fill=_NO_CASE)
         self.expression_rule = -1
+        self.statement_rule = -1
+        self.parens_rule = -1
 
         # The pass throughs. Every one of these is a rule that exists so
         # another rule could name it, and it has exactly one child.
@@ -266,6 +402,36 @@ struct Transform(Movable):
             "SpecialFunctionExpression",
             "FunctionArgument",
             "PositionalFunctionArgument",
+            # The statement side. Every one of these is a rule the grammar
+            # needed a name for and the language does not, so it is one child
+            # and nothing else.
+            "SelectStatement",
+            "SelectAtom",
+            "SelectParens",
+            "SelectStatementType",
+            "OptionalParensSimpleSelect",
+            "SimpleSelectParens",
+            "SelectFrom",
+            "AliasedExpression",
+            "SubqueryReference",
+            "InnerTableRef",
+            "TableFunction",
+            "CTEBody",
+            "CTESelectBody",
+            "WhereClause",
+            "HavingClause",
+            "QualifyClause",
+            "OnClause",
+            "GroupByClause",
+            "GroupByExpressions",
+            "GroupByExpression",
+            "OrderByClause",
+            "OrderByExpressions",
+            "LimitOffset",
+            "FetchValue",
+            "Parens_SelectStatementInternal",
+            "Parens_SimpleSelect",
+            "Parens_TableRef",
         ]
         for name in descends:
             self._set(grammar, name, _DESCEND)
@@ -309,7 +475,67 @@ struct Transform(Movable):
         self._set(grammar, "TrueLiteral", _TRUE)
         self._set(grammar, "FalseLiteral", _FALSE)
 
+        self._set(grammar, "SubqueryExpression", _SUBQUERY)
+        self._set(grammar, "SelectStatementInternal", _SELECT)
+        self._set(grammar, "SelectSetOpChain", _SETOP)
+        self._set(grammar, "IntersectChain", _SETOP)
+        self._set(grammar, "SimpleSelect", _SIMPLE_SELECT)
+        self._set(grammar, "SelectFromClause", _BLOCK)
+        self._set(grammar, "FromSelectClause", _BLOCK)
+        self._set(grammar, "SelectClause", _SELECT_CLAUSE)
+        self._set(grammar, "TargetList", _TARGETS)
+        self._set(grammar, "ExpressionAsCollabel", _ITEM)
+        self._set(grammar, "ExpressionOptIdentifier", _ITEM)
+        self._set(grammar, "ColIdExpression", _ITEM_COLON)
+        self._set(grammar, "FromClause", _FROM)
+        self._set(grammar, "TableRef", _TABLE_REF)
+        self._set(grammar, "BaseTableRef", _BASE_TABLE)
+        self._set(grammar, "TableSubquery", _TABLE_SUBQUERY)
+        self._set(grammar, "ParensTableRef", _PARENS_TABLE)
+        self._set(grammar, "ValuesRef", _VALUES_REF)
+        self._set(grammar, "TableFunctionLateralOpt", _TABLE_FUNCTION)
+        self._set(grammar, "GroupByList", _GROUP_LIST)
+        self._set(grammar, "GroupByAll", _GROUP_ALL)
+        self._set(grammar, "GroupByBaseExpression", _GROUP_ITEM)
+        self._set(grammar, "EmptyGroupingItem", _GROUP_EMPTY)
+        self._set(grammar, "CubeOrRollupClause", _GROUP_NESTED)
+        self._set(grammar, "GroupingSetsClause", _GROUP_SETS)
+        self._set(grammar, "OrderByExpressionList", _ORDER_LIST)
+        self._set(grammar, "OrderByAll", _ORDER_ALL)
+        self._set(grammar, "OrderByExpression", _ORDER_ITEM)
+        self._set(grammar, "ResultModifiers", _MODIFIERS)
+        self._set(grammar, "LimitOffsetClause", _TAIL)
+        self._set(grammar, "OffsetLimitClause", _TAIL)
+        self._set(grammar, "OffsetFetchClause", _TAIL)
+        self._set(grammar, "FetchOnlyClause", _TAIL)
+        self._set(grammar, "LimitClause", _LIMIT)
+        self._set(grammar, "OffsetClause", _OFFSET)
+        self._set(grammar, "FetchClause", _FETCH)
+        self._set(grammar, "WithClause", _WITH)
+        self._set(grammar, "WithStatement", _CTE)
+        self._set(grammar, "ValuesClause", _VALUES)
+        self._set(grammar, "ValuesExpressions", _VALUES_ROW)
+        self._set(grammar, "TableStatement", _TABLE_STATEMENT)
+
+        # The markers, which build nothing and are only ever recognized.
+        self._set(grammar, "TableAlias", _MARK_TABLE_ALIAS)
+        self._set(grammar, "TableAliasColon", _MARK_ALIAS_COLON)
+        self._set(grammar, "AtClause", _MARK_AT)
+        self._set(grammar, "SampleClause", _MARK_SAMPLE)
+        self._set(grammar, "Lateral", _MARK_LATERAL)
+        self._set(grammar, "WithOrdinality", _MARK_ORDINALITY)
+        self._set(grammar, "Recursive", _MARK_RECURSIVE)
+        self._set(grammar, "Materialized", _MARK_MATERIALIZED)
+        self._set(grammar, "UsingKey", _MARK_USING_KEY)
+        self._set(grammar, "InsertColumnList", _MARK_CTE_COLUMNS)
+        self._set(grammar, "InSelectStatement", _MARK_IN_SELECT)
+        self._set(grammar, "JoinClause", _MARK_JOIN)
+        self._set(grammar, "RegularJoinClause", _MARK_JOIN_ON)
+        self._set(grammar, "JoinWithoutOnClause", _MARK_JOIN_PLAIN)
+
         self.expression_rule = grammar.rule("Expression")
+        self.statement_rule = grammar.rule("SelectStatement")
+        self.parens_rule = grammar.rule("ParenthesisExpression")
 
     def _set(
         mut self, grammar: Grammar, name: StaticString, action: UInt8
@@ -357,9 +583,29 @@ struct Transform(Movable):
                 does not transform yet.
         """
         var tree = parse_rule(sql, grammar, self.expression_rule)
-        return self.expression(tree, sql, tree.root, ast)
+        return self.walk(tree, sql, tree.root, ast)
 
-    def expression(
+    def parse_statement(
+        self, sql: StringSlice, grammar: Grammar, mut ast: Ast
+    ) raises -> UInt32:
+        """Parses one `SELECT` and transforms it.
+
+        Args:
+            sql: The statement text, with no trailing semicolon.
+            grammar: The grammar it was parsed against.
+            ast: Where to put the nodes.
+
+        Returns:
+            The root statement node.
+
+        Raises:
+            Error: If the text is not a `SELECT`, or holds something this does
+                not transform yet.
+        """
+        var tree = parse_rule(sql, grammar, self.statement_rule)
+        return self.walk(tree, sql, tree.root, ast)
+
+    def walk(
         self, tree: Parse, sql: StringSlice, node: UInt32, mut ast: Ast
     ) raises -> UInt32:
         """Transforms one parse node, and everything under it, into the AST.
@@ -534,6 +780,132 @@ struct Transform(Movable):
 
         if action == _FALSE:
             return ast.literal(LITERAL_BOOLEAN, "FALSE", at)
+
+        if action == _SUBQUERY:
+            return self._subquery(tree, sql, node, ast, work)
+
+        if action == _SELECT:
+            return self._select(tree, sql, node, ast, work)
+
+        if action == _SETOP:
+            return self._setop(tree, sql, node, ast, work)
+
+        if action == _SIMPLE_SELECT:
+            return self._simple_select(tree, sql, node, ast, work)
+
+        if action == _BLOCK:
+            return self._block(tree, node, ast, work)
+
+        if action == _SELECT_CLAUSE:
+            return self._select_clause(tree, sql, node, ast, work)
+
+        if action == _TARGETS:
+            return self._collect(tree, self._items(tree, node), ast, work)
+
+        if action == _ITEM:
+            return self._item(tree, sql, node, ast, work, False)
+
+        if action == _ITEM_COLON:
+            return self._item(tree, sql, node, ast, work, True)
+
+        if action == _FROM:
+            return self._collect(tree, self._items(tree, node), ast, work)
+
+        if action == _TABLE_REF:
+            return self._table_ref(tree, sql, node, ast, work)
+
+        if action == _BASE_TABLE:
+            return self._base_table(tree, sql, node, ast)
+
+        if action == _TABLE_SUBQUERY:
+            return self._table_subquery(tree, sql, node, ast, work)
+
+        if action == _PARENS_TABLE:
+            return self._parens_table(tree, sql, node, ast, work)
+
+        if action == _VALUES_REF:
+            return self._values_ref(tree, sql, node, ast, work)
+
+        if action == _TABLE_FUNCTION:
+            return self._table_function(tree, sql, node, ast, work)
+
+        if action == _GROUP_LIST:
+            return self._collect(tree, self._items(tree, node), ast, work)
+
+        if action == _GROUP_ALL:
+            var only = List[UInt32]()
+            only.append(ast.group(GROUP_ALL, NO_NODE, List[UInt32](), at))
+            return ast.run(only)
+
+        if action == _GROUP_ITEM:
+            return self._group_item(tree, node, ast, work)
+
+        if action == _GROUP_EMPTY:
+            return ast.group(GROUP_EMPTY, NO_NODE, List[UInt32](), at)
+
+        if action == _GROUP_NESTED:
+            return self._group_nested(tree, sql, node, ast, work)
+
+        if action == _GROUP_SETS:
+            var entries = self._items(tree, self._only(tree, node))
+            work.warm(entries)
+            var nested = List[UInt32]()
+            for entry in entries:
+                nested.append(work.value(entry))
+            return ast.group(GROUP_SETS, NO_NODE, nested, at)
+
+        if action == _ORDER_LIST:
+            return self._collect(tree, self._items(tree, node), ast, work)
+
+        if action == _ORDER_ALL or action == _ORDER_ITEM:
+            return self._order(tree, sql, node, ast, work, action == _ORDER_ALL)
+
+        if action == _MODIFIERS:
+            return self._modifiers(tree, sql, node, ast, work)
+
+        if action == _TAIL:
+            return self._tail_parts(tree, node, ast, work)
+
+        if action == _LIMIT:
+            return self._limit(tree, node, ast, work)
+
+        if action == _OFFSET:
+            # `OffsetClause <- 'OFFSET' OffsetValue` and
+            # `OffsetValue <- Expression RowOrRows?`, so the `ROWS` is a
+            # spelling and the expression is the first child under it.
+            return work.value(tree.children(self._only(tree, node))[0])
+
+        if action == _FETCH:
+            var kids = tree.children(node)
+            if len(kids) < 2:
+                raise _malformed(tree, sql, node, "a FETCH with no count")
+            var parts = List[UInt32](length=_TAIL_SLOTS, fill=NO_NODE)
+            parts[_TAIL_LIMIT] = work.value(kids[1])
+            return ast.run(parts)
+
+        if action == _WITH:
+            return self._with(tree, node, ast, work)
+
+        if action == _CTE:
+            return self._cte(tree, sql, node, ast, work)
+
+        if action == _VALUES:
+            var rows = List[List[UInt32]]()
+            var items = self._items(tree, node)
+            work.warm(items)
+            for item in items:
+                rows.append(ast.items(work.value(item)))
+            return ast.values(rows, at)
+
+        if action == _VALUES_ROW:
+            return self._collect(
+                tree, self._items(tree, self._only(tree, node)), ast, work
+            )
+
+        if action == _TABLE_STATEMENT:
+            return ast.table_statement(
+                self._name_parts(tree, sql, self._only(tree, node)), at
+            )
 
         raise _no_case(tree, sql, node)
 
@@ -850,11 +1222,16 @@ struct Transform(Movable):
             )
 
         if lead == "IN":
-            # `InExpression` has three forms and only the parenthesized list is
-            # representable here. The subquery form refuses inside the walk,
-            # naming the statement rule, and the unparenthesized form refuses
-            # here because `x IN y` over a list column is not `x IN (y)`.
+            # `InExpression` has three forms. The subquery form is a kind of
+            # its own because the right side lives in the statement arena, the
+            # parenthesized list is an ordinary list, and the unparenthesized
+            # form refuses because `x IN y` over a list column is not
+            # `x IN (y)`.
             var right = self._only(tree, self._only(tree, which))
+            if self._marked(tree, right, _MARK_IN_SELECT):
+                return ast.in_subquery(
+                    left, work.value(self._only(tree, right)), negated, at
+                )
             if _first_byte(tree, sql, right) != _LEFT_PAREN:
                 raise _unsupported(
                     tree, sql, right, "IN over an unparenthesized value"
@@ -1533,6 +1910,1317 @@ struct Transform(Movable):
             )
         return first
 
+    def _action(self, tree: Parse, node: UInt32) -> UInt8:
+        """The action byte a node's rule carries.
+
+        Args:
+            tree: The parse.
+            node: The node.
+
+        Returns:
+            The action, `_NO_CASE` for a rule with none.
+        """
+        return self.actions[Int(tree.nodes[Int(node)].rule)]
+
+    def _marked(self, tree: Parse, node: UInt32, mark: UInt8) -> Bool:
+        """Says whether a node is the rule a marker stands for.
+
+        Args:
+            tree: The parse.
+            node: The node.
+            mark: The marker.
+
+        Returns:
+            Whether it matches.
+        """
+        return self._action(tree, node) == mark
+
+    def _collect(
+        self, tree: Parse, nodes: List[UInt32], mut ast: Ast, mut work: Work
+    ) raises -> UInt32:
+        """Builds every node in a list and puts the results in one run.
+
+        This is what a rule that is a list and nothing else does, and there are
+        six of them, so they share it.
+
+        Args:
+            tree: The parse.
+            nodes: The item nodes, in order.
+            ast: Where to put the nodes.
+            work: The walk, for the values.
+
+        Returns:
+            The run handle, which is 0 for an empty list.
+
+        Raises:
+            Error: If an item is not built yet, having asked for all of them.
+        """
+        work.warm(nodes)
+        var out = List[UInt32]()
+        for item in nodes:
+            out.append(work.value(item))
+        return ast.run(out)
+
+    def _subquery(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds a scalar subquery or an `EXISTS`.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `SubqueryExpression` node.
+            ast: Where to put the nodes.
+            work: The walk, for the statement.
+
+        Returns:
+            The expression node.
+
+        Raises:
+            Error: If it is a `NOT` in front of a subquery that is not an
+                `EXISTS`, which is not something the AST holds.
+        """
+        var at = tree.nodes[Int(node)].token_start
+        var negated = False
+        var exists = False
+        var reference = NO_NODE
+        for kid in tree.children(node):
+            var lead = _word(tree, sql, kid)
+            if lead == "NOT":
+                negated = True
+            elif lead == "EXISTS":
+                exists = True
+            else:
+                reference = kid
+        if reference == NO_NODE:
+            raise _malformed(tree, sql, node, "a subquery with no statement")
+
+        var statement = work.value(reference)
+        if exists:
+            return ast.exists(statement, negated, at)
+        if negated:
+            raise _unsupported(tree, sql, node, "NOT in front of a subquery")
+        return ast.subquery(statement, at)
+
+    def _select(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds a whole statement, with its `WITH` and its trailing clauses.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `SelectStatementInternal` node.
+            ast: Where to put the nodes.
+            work: The walk, for the parts.
+
+        Returns:
+            The statement node.
+
+        Raises:
+            Error: If there is no query under it, or a part is not built yet.
+        """
+        var with_clause = NO_NODE
+        var chain = NO_NODE
+        var tail = NO_NODE
+        for kid in tree.children(node):
+            var action = self._action(tree, kid)
+            if action == _WITH:
+                with_clause = kid
+            elif action == _MODIFIERS:
+                # `ResultModifiers` matches the empty string, so the node is
+                # there even on a statement that ends at the query, and an
+                # empty one has nothing to build.
+                if tree.nodes[Int(kid)].first_child != NO_NODE:
+                    tail = kid
+            else:
+                chain = kid
+        if chain == NO_NODE:
+            raise _malformed(tree, sql, node, "a statement with no query")
+
+        var wanted = List[UInt32]()
+        wanted.append(chain)
+        if with_clause != NO_NODE:
+            wanted.append(with_clause)
+        if tail != NO_NODE:
+            wanted.append(tail)
+        work.warm(wanted)
+
+        var ctes = List[UInt32]()
+        var recursive = False
+        if with_clause != NO_NODE:
+            var carried = work.value(with_clause)
+            recursive = ast.slot(carried, _WITH_RECURSIVE) == 1
+            ctes = ast.items(ast.slot(carried, _WITH_ENTRIES))
+        var modifiers = NO_NODE
+        if tail != NO_NODE:
+            modifiers = work.value(tail)
+        return ast.select(
+            work.value(chain),
+            modifiers,
+            ctes,
+            recursive,
+            tree.nodes[Int(node)].token_start,
+        )
+
+    def _setop(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Folds a chain of `UNION`, `EXCEPT` or `INTERSECT` left to right.
+
+        The two chain rules are the two precedence levels a set operation has,
+        and they are the same shape as the expression chains, so this is the
+        same fold with a statement on each side.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `SelectSetOpChain` or `IntersectChain` node.
+            ast: Where to put the nodes.
+            work: The walk, for the operands.
+
+        Returns:
+            The statement node.
+
+        Raises:
+            Error: If a tail has no operand, or one is not built yet.
+        """
+        var kids = tree.children(node)
+        var wanted = List[UInt32]()
+        wanted.append(kids[0])
+        for i in range(1, len(kids)):
+            var tail = tree.children(kids[i])
+            if len(tail) != 2:
+                raise _malformed(
+                    tree, sql, kids[i], "a set operation with one side"
+                )
+            wanted.append(tail[1])
+        work.warm(wanted)
+
+        var built = work.value(kids[0])
+        for i in range(1, len(kids)):
+            var tail = tree.children(kids[i])
+            var start = tree.nodes[Int(tail[0])].token_start
+            # The operator is kept as the words that were written, so that
+            # `UNION ALL BY NAME` needs no flags and prints back as itself.
+            var operator = _span(
+                tree, sql, start, tree.nodes[Int(tail[0])].token_end
+            )
+            built = ast.set_operation(
+                operator, built, work.value(tail[1]), start
+            )
+        return built
+
+    def _simple_select(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds one `SELECT ... FROM ... WHERE ...` block.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `SimpleSelect` node.
+            ast: Where to put the nodes.
+            work: The walk, for the clauses.
+
+        Returns:
+            The statement node.
+
+        Raises:
+            Error: If it carries a clause this has no case for.
+        """
+        var kids = tree.children(node)
+        var block = kids[0]
+        var filter = NO_NODE
+        var grouping = NO_NODE
+        var having = NO_NODE
+        var qualify = NO_NODE
+        for i in range(1, len(kids)):
+            var lead = _word(tree, sql, kids[i])
+            if lead == "WHERE":
+                filter = kids[i]
+            elif lead == "GROUP":
+                grouping = kids[i]
+            elif lead == "HAVING":
+                having = kids[i]
+            elif lead == "QUALIFY":
+                qualify = kids[i]
+            elif self._marked(tree, kids[i], _MARK_SAMPLE):
+                raise _unsupported(tree, sql, kids[i], "a sample on a SELECT")
+            else:
+                raise _unsupported(
+                    tree, sql, kids[i], String(lead, " in a SELECT")
+                )
+
+        var wanted = List[UInt32]()
+        wanted.append(block)
+        if filter != NO_NODE:
+            wanted.append(filter)
+        if grouping != NO_NODE:
+            wanted.append(grouping)
+        if having != NO_NODE:
+            wanted.append(having)
+        if qualify != NO_NODE:
+            wanted.append(qualify)
+        work.warm(wanted)
+
+        var parts = work.value(block)
+        var targets = ast.slot(parts, _BLOCK_TARGETS)
+        var flags = UInt32(0)
+        var distinct_on = List[UInt32]()
+        var projection = List[UInt32]()
+        if targets != NO_NODE:
+            flags = ast.slot(targets, _SELECT_FLAGS)
+            distinct_on = ast.items(ast.slot(targets, _SELECT_DISTINCT))
+            projection = ast.items(ast.slot(targets, _SELECT_TARGETS))
+
+        var grouped = List[UInt32]()
+        if grouping != NO_NODE:
+            grouped = ast.items(work.value(grouping))
+        return ast.query(
+            projection,
+            ast.items(ast.slot(parts, _BLOCK_TABLES)),
+            work.value(filter) if filter != NO_NODE else NO_NODE,
+            grouped,
+            work.value(having) if having != NO_NODE else NO_NODE,
+            work.value(qualify) if qualify != NO_NODE else NO_NODE,
+            flags,
+            distinct_on,
+            tree.nodes[Int(node)].token_start,
+        )
+
+    def _block(
+        self, tree: Parse, node: UInt32, mut ast: Ast, mut work: Work
+    ) raises -> UInt32:
+        """Carries the `SELECT` list and the `FROM` up in one run.
+
+        The two rules for this are the two orders DuckDB allows them in, and
+        both mean the same thing, so both come out of here the same way round.
+
+        Args:
+            tree: The parse.
+            node: The `SelectFromClause` or `FromSelectClause` node.
+            ast: Where to put the run.
+            work: The walk, for the two parts.
+
+        Returns:
+            A run of `_BLOCK_SLOTS` entries.
+
+        Raises:
+            Error: If a part is not built yet.
+        """
+        var targets = NO_NODE
+        var tables = NO_NODE
+        for kid in tree.children(node):
+            if self._action(tree, kid) == _FROM:
+                tables = kid
+            else:
+                targets = kid
+
+        var wanted = List[UInt32]()
+        if targets != NO_NODE:
+            wanted.append(targets)
+        if tables != NO_NODE:
+            wanted.append(tables)
+        work.warm(wanted)
+
+        var parts = List[UInt32](length=_BLOCK_SLOTS, fill=NO_NODE)
+        if targets != NO_NODE:
+            parts[_BLOCK_TARGETS] = work.value(targets)
+        if tables != NO_NODE:
+            parts[_BLOCK_TABLES] = work.value(tables)
+        return ast.run(parts)
+
+    def _select_clause(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Carries the `DISTINCT` and the target list up in one run.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `SelectClause` node.
+            ast: Where to put the run.
+            work: The walk, for the targets.
+
+        Returns:
+            A run of `_SELECT_SLOTS` entries.
+
+        Raises:
+            Error: If a part is not built yet.
+        """
+        var flags = UInt32(0)
+        var on = NO_NODE
+        var targets = NO_NODE
+        for kid in tree.children(node):
+            if self._action(tree, kid) == _TARGETS:
+                targets = kid
+                continue
+            # `DistinctClause <- DistinctOn / DistinctAll`, and `ALL` is the
+            # default, so it is kept only because writing it back is what the
+            # query said.
+            var which = self._only(tree, kid)
+            if _word(tree, sql, which) == "ALL":
+                flags |= SELECT_ALL
+                continue
+            flags |= SELECT_DISTINCT
+            var inner = tree.children(which)
+            if len(inner) > 0:
+                on = inner[0]
+
+        var wanted = List[UInt32]()
+        var chosen = List[UInt32]()
+        if on != NO_NODE:
+            chosen = self._items(tree, self._only(tree, on))
+            for item in chosen:
+                wanted.append(item)
+        if targets != NO_NODE:
+            wanted.append(targets)
+        work.warm(wanted)
+
+        var picked = List[UInt32]()
+        for item in chosen:
+            picked.append(work.value(item))
+
+        var parts = List[UInt32](length=_SELECT_SLOTS, fill=NO_NODE)
+        parts[_SELECT_FLAGS] = flags
+        parts[_SELECT_DISTINCT] = ast.run(picked)
+        if targets != NO_NODE:
+            parts[_SELECT_TARGETS] = work.value(targets)
+        return ast.run(parts)
+
+    def _item(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+        name_first: Bool,
+    ) raises -> UInt32:
+        """Builds one entry of a `SELECT` list.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `AliasedExpression` alternative.
+            ast: Where to put the nodes.
+            work: The walk, for the value.
+            name_first: Whether this is the `name: value` spelling.
+
+        Returns:
+            The statement node.
+
+        Raises:
+            Error: If the value is not built yet.
+        """
+        var kids = tree.children(node)
+        var at = tree.nodes[Int(node)].token_start
+        if name_first:
+            if len(kids) != 2:
+                raise _malformed(tree, sql, node, "a name: with no value")
+            return ast.item(
+                work.value(kids[1]), self._plain(tree, sql, kids[0]), at
+            )
+        var value = work.value(kids[0])
+        if len(kids) == 1:
+            return ast.item(value, "", at)
+        return ast.item(value, self._plain(tree, sql, kids[1]), at)
+
+    def _table_ref(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds a table reference and folds however many joins hang off it.
+
+        `TableRef <- InnerTableRef JoinOrPivot*`, so a chain of joins is left
+        nested and the fold matches the shape the grammar gives it. That is
+        also why the printer never has to put parentheses around a join side.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `TableRef` node.
+            ast: Where to put the nodes.
+            work: The walk, for the sides and the conditions.
+
+        Returns:
+            The table reference node.
+
+        Raises:
+            Error: If a join is one this has no case for, or a side is not
+                built yet.
+        """
+        var kids = tree.children(node)
+        var wanted = List[UInt32]()
+        wanted.append(kids[0])
+        for i in range(1, len(kids)):
+            var form = self._join_form(tree, sql, kids[i])
+            wanted.append(self._join_right(tree, form))
+            var on = self._join_on(tree, sql, form)
+            if on != NO_NODE:
+                wanted.append(on)
+        work.warm(wanted)
+
+        var built = work.value(kids[0])
+        for i in range(1, len(kids)):
+            var form = self._join_form(tree, sql, kids[i])
+            var at = tree.nodes[Int(form)].token_start
+            var text = _join_text(tree, sql, form)
+            var right = work.value(self._join_right(tree, form))
+            var on = self._join_on(tree, sql, form)
+            if on != NO_NODE:
+                built = ast.join(text, built, right, work.value(on), at)
+                continue
+            var using = self._join_using(tree, form)
+            if using == NO_NODE:
+                built = ast.join(text, built, right, NO_NODE, at)
+                continue
+            var columns = List[String]()
+            for name in self._items(tree, self._only(tree, using)):
+                columns.append(self._plain(tree, sql, name))
+            built = ast.join_using(text, built, right, columns, at)
+        return built
+
+    def _join_form(
+        self, tree: Parse, sql: StringSlice, node: UInt32
+    ) raises -> UInt32:
+        """Steps from a `JoinOrPivot` down to the join form itself.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `JoinOrPivot` node.
+
+        Returns:
+            The `RegularJoinClause` or `JoinWithoutOnClause` node.
+
+        Raises:
+            Error: If it is a pivot, or a join form this has no case for.
+        """
+        var clause = self._only(tree, node)
+        if not self._marked(tree, clause, _MARK_JOIN):
+            raise _unsupported(
+                tree, sql, node, String(_word(tree, sql, node), " on a table")
+            )
+        var form = self._only(tree, clause)
+        if self._marked(tree, form, _MARK_JOIN_ON) or self._marked(
+            tree, form, _MARK_JOIN_PLAIN
+        ):
+            return form
+        raise _unsupported(tree, sql, form, "this kind of join")
+
+    def _join_right(self, tree: Parse, form: UInt32) raises -> UInt32:
+        """The right side of a join.
+
+        `JoinWithoutOnClause` ends with its table and `RegularJoinClause` ends
+        with its qualifier, and everything in front of either is a keyword the
+        join text already carries.
+
+        Args:
+            tree: The parse.
+            form: The join form node.
+
+        Returns:
+            The node for the right side.
+
+        Raises:
+            Error: If the form has no right side, which the grammar forbids.
+        """
+        var kids = tree.children(form)
+        var back = 1 if self._marked(tree, form, _MARK_JOIN_PLAIN) else 2
+        if len(kids) < back:
+            raise Error(
+                "the parse tree holds a join with no right side, which is a"
+                " bug in firepanda rather than in the query"
+            )
+        return kids[len(kids) - back]
+
+    def _join_on(
+        self, tree: Parse, sql: StringSlice, form: UInt32
+    ) raises -> UInt32:
+        """The `ON` clause of a join, or nothing.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            form: The join form node.
+
+        Returns:
+            The `OnClause` node, or 0 for a `USING` or a join that takes none.
+
+        Raises:
+            Error: If the form is shaped in a way the grammar forbids.
+        """
+        if self._marked(tree, form, _MARK_JOIN_PLAIN):
+            return NO_NODE
+        var kids = tree.children(form)
+        var which = self._only(tree, kids[len(kids) - 1])
+        return which if _word(tree, sql, which) == "ON" else NO_NODE
+
+    def _join_using(self, tree: Parse, form: UInt32) raises -> UInt32:
+        """The `USING` clause of a join, or nothing.
+
+        Args:
+            tree: The parse.
+            form: The join form node.
+
+        Returns:
+            The `UsingClause` node, or 0.
+
+        Raises:
+            Error: If the form is shaped in a way the grammar forbids.
+        """
+        if self._marked(tree, form, _MARK_JOIN_PLAIN):
+            return NO_NODE
+        var kids = tree.children(form)
+        return self._only(tree, kids[len(kids) - 1])
+
+    def _base_table(
+        self, tree: Parse, sql: StringSlice, node: UInt32, mut ast: Ast
+    ) raises -> UInt32:
+        """Builds a named table reference.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `BaseTableRef` node.
+            ast: Where to put the nodes.
+
+        Returns:
+            The table reference node.
+
+        Raises:
+            Error: If it carries a modifier this has no case for.
+        """
+        var name = NO_NODE
+        var named = NO_NODE
+        for kid in tree.children(node):
+            if self._marked(tree, kid, _MARK_TABLE_ALIAS):
+                named = kid
+            elif self._marked(tree, kid, _MARK_AT):
+                raise _unsupported(tree, sql, kid, "AT on a table")
+            elif self._marked(tree, kid, _MARK_SAMPLE):
+                raise _unsupported(tree, sql, kid, "a sample on a table")
+            elif self._marked(tree, kid, _MARK_ALIAS_COLON):
+                raise _unsupported(tree, sql, kid, "the name: table spelling")
+            else:
+                name = kid
+        if name == NO_NODE:
+            raise _malformed(tree, sql, node, "a table with no name")
+        return ast.table(
+            self._name_parts(tree, sql, name),
+            self._alias_name(tree, sql, named),
+            self._alias_columns(tree, sql, named),
+            tree.nodes[Int(node)].token_start,
+        )
+
+    def _table_subquery(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds a subquery in a `FROM`.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `TableSubquery` node.
+            ast: Where to put the nodes.
+            work: The walk, for the statement.
+
+        Returns:
+            The table reference node.
+
+        Raises:
+            Error: If it carries a modifier this has no case for.
+        """
+        var reference = NO_NODE
+        var named = NO_NODE
+        var lateral = False
+        for kid in tree.children(node):
+            if self._marked(tree, kid, _MARK_TABLE_ALIAS):
+                named = kid
+            elif self._marked(tree, kid, _MARK_LATERAL):
+                lateral = True
+            elif self._marked(tree, kid, _MARK_ALIAS_COLON):
+                raise _unsupported(tree, sql, kid, "the name: table spelling")
+            else:
+                reference = kid
+        if reference == NO_NODE:
+            raise _malformed(tree, sql, node, "a subquery with no statement")
+        return ast.subquery_ref(
+            work.value(reference),
+            self._alias_name(tree, sql, named),
+            self._alias_columns(tree, sql, named),
+            lateral,
+            tree.nodes[Int(node)].token_start,
+        )
+
+    def _parens_table(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds a parenthesized table reference.
+
+        This node is the reason the printer can print a join's sides bare. The
+        parentheses a query wrote are here, and nowhere else, so writing them
+        back here is enough.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `ParensTableRef` node.
+            ast: Where to put the nodes.
+            work: The walk, for the reference inside.
+
+        Returns:
+            The table reference node.
+
+        Raises:
+            Error: If it carries a modifier this has no case for.
+        """
+        var inner = NO_NODE
+        var named = NO_NODE
+        for kid in tree.children(node):
+            if self._marked(tree, kid, _MARK_TABLE_ALIAS):
+                named = kid
+            elif self._marked(tree, kid, _MARK_SAMPLE):
+                raise _unsupported(tree, sql, kid, "a sample on a table")
+            elif self._marked(tree, kid, _MARK_ALIAS_COLON):
+                raise _unsupported(tree, sql, kid, "the name: table spelling")
+            else:
+                inner = kid
+        if inner == NO_NODE:
+            raise _malformed(tree, sql, node, "empty parentheses in a FROM")
+        return ast.parens_ref(
+            work.value(inner),
+            self._alias_name(tree, sql, named),
+            self._alias_columns(tree, sql, named),
+            tree.nodes[Int(node)].token_start,
+        )
+
+    def _values_ref(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds a `VALUES` used as a table.
+
+        It becomes a subquery reference holding a `VALUES` statement, because
+        that is what it is and it prints back the way it was written.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `ValuesRef` node.
+            ast: Where to put the nodes.
+            work: The walk, for the rows.
+
+        Returns:
+            The table reference node.
+
+        Raises:
+            Error: If it carries a modifier this has no case for.
+        """
+        var rows = NO_NODE
+        var named = NO_NODE
+        for kid in tree.children(node):
+            if self._marked(tree, kid, _MARK_TABLE_ALIAS):
+                named = kid
+            elif self._marked(tree, kid, _MARK_ALIAS_COLON):
+                raise _unsupported(tree, sql, kid, "the name: table spelling")
+            else:
+                rows = kid
+        if rows == NO_NODE:
+            raise _malformed(tree, sql, node, "a VALUES with no rows")
+        return ast.subquery_ref(
+            work.value(rows),
+            self._alias_name(tree, sql, named),
+            self._alias_columns(tree, sql, named),
+            False,
+            tree.nodes[Int(node)].token_start,
+        )
+
+    def _table_function(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds a table function call in a `FROM`.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `TableFunctionLateralOpt` node.
+            ast: Where to put the nodes.
+            work: The walk, for the arguments.
+
+        Returns:
+            The table reference node.
+
+        Raises:
+            Error: If it carries a modifier this has no case for.
+        """
+        var name = NO_NODE
+        var arguments = NO_NODE
+        var named = NO_NODE
+        var lateral = False
+        for kid in tree.children(node):
+            if self._marked(tree, kid, _MARK_TABLE_ALIAS):
+                named = kid
+            elif self._marked(tree, kid, _MARK_LATERAL):
+                lateral = True
+            elif self._marked(tree, kid, _MARK_ORDINALITY):
+                raise _unsupported(tree, sql, kid, "WITH ORDINALITY")
+            elif name == NO_NODE:
+                name = kid
+            else:
+                arguments = kid
+        if name == NO_NODE or arguments == NO_NODE:
+            raise _malformed(tree, sql, node, "a table function with no call")
+
+        var items = self._items(tree, self._only(tree, arguments))
+        work.warm(items)
+        var values = List[UInt32]()
+        for item in items:
+            values.append(work.value(item))
+        return ast.function_ref(
+            self._parts(tree, sql, name),
+            values,
+            self._alias_name(tree, sql, named),
+            self._alias_columns(tree, sql, named),
+            lateral,
+            tree.nodes[Int(node)].token_start,
+        )
+
+    def _group_item(
+        self, tree: Parse, node: UInt32, mut ast: Ast, mut work: Work
+    ) raises -> UInt32:
+        """Builds one ordinary `GROUP BY` entry.
+
+        `GROUPING SETS ((a, b))` writes a set of columns the way SQL writes a
+        row, so the grammar hands that back as an expression and the tuple has
+        to be recognized here. Everywhere else a row is still refused, because
+        the AST has no expression kind for one.
+
+        Args:
+            tree: The parse.
+            node: The `GroupByBaseExpression` node.
+            ast: Where to put the nodes.
+            work: The walk, for the expression.
+
+        Returns:
+            The statement node.
+
+        Raises:
+            Error: If the expression is not built yet.
+        """
+        var at = tree.nodes[Int(node)].token_start
+        var tuple = self._tuple(tree, self._only(tree, node))
+        if tuple == NO_NODE:
+            return ast.group(
+                GROUP_EXPRESSION,
+                work.value(self._only(tree, node)),
+                List[UInt32](),
+                at,
+            )
+
+        # `ParenthesisExpression <- Parens(List(Expression)?)`.
+        var items = self._items(tree, self._only(tree, tuple))
+        work.warm(items)
+        var nested = List[UInt32]()
+        for item in items:
+            nested.append(
+                ast.group(
+                    GROUP_EXPRESSION, work.value(item), List[UInt32](), at
+                )
+            )
+        return ast.group(GROUP_TUPLE, NO_NODE, nested, at)
+
+    def _tuple(self, tree: Parse, node: UInt32) raises -> UInt32:
+        """Finds the row a grouping entry is, if it is one.
+
+        An entry that is a row is a chain of pass through rules down to a
+        `ParenthesisExpression` and nothing else, so following the chain while
+        it stays one child wide either lands on that rule or does not.
+
+        Args:
+            tree: The parse.
+            node: The entry's expression node.
+
+        Returns:
+            The `ParenthesisExpression` node, or 0 for an entry that is not a
+            row.
+        """
+        var here = node
+        while True:
+            if Int(tree.nodes[Int(here)].rule) == self.parens_rule:
+                return here
+            var first = tree.nodes[Int(here)].first_child
+            if first == NO_NODE or tree.nodes[Int(first)].next_sibling != 0:
+                return NO_NODE
+            here = first
+
+    def _group_nested(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds a `CUBE` or a `ROLLUP`.
+
+        Both hold plain expressions rather than grouping entries, so each one
+        is wrapped here to give the entry list one shape.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `CubeOrRollupClause` node.
+            ast: Where to put the nodes.
+            work: The walk, for the expressions.
+
+        Returns:
+            The statement node.
+
+        Raises:
+            Error: If an expression is not built yet.
+        """
+        var kids = tree.children(node)
+        var at = tree.nodes[Int(node)].token_start
+        var tag = (
+            GROUP_CUBE if _word(tree, sql, kids[0]) == "CUBE" else GROUP_ROLLUP
+        )
+        var items = self._items(tree, kids[1])
+        work.warm(items)
+        var nested = List[UInt32]()
+        for item in items:
+            nested.append(
+                ast.group(
+                    GROUP_EXPRESSION, work.value(item), List[UInt32](), at
+                )
+            )
+        return ast.group(tag, NO_NODE, nested, at)
+
+    def _order(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+        every: Bool,
+    ) raises -> UInt32:
+        """Builds one `ORDER BY` entry, or the run that `ORDER BY ALL` is.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `OrderByExpression` or `OrderByAll` node.
+            ast: Where to put the nodes.
+            work: The walk, for the expression.
+            every: Whether this is `ALL`.
+
+        Returns:
+            The statement node, or a run of one for `ALL`.
+
+        Raises:
+            Error: If the expression is not built yet.
+        """
+        var kids = tree.children(node)
+        var at = tree.nodes[Int(node)].token_start
+        var start = 0 if every else 1
+        var expression = NO_NODE
+        if not every:
+            expression = work.value(kids[0])
+        var built = ast.order(
+            expression,
+            self._direction(tree, sql, kids, start),
+            self._nulls(tree, sql, kids, start),
+            at,
+        )
+        if not every:
+            return built
+        var only = List[UInt32]()
+        only.append(built)
+        return ast.run(only)
+
+    def _direction(
+        self, tree: Parse, sql: StringSlice, kids: List[UInt32], start: Int
+    ) -> UInt32:
+        """Reads the `ASC` or `DESC` off an `ORDER BY` entry.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            kids: The entry's children.
+            start: The first child that can be a modifier.
+
+        Returns:
+            One of the `SORT_` constants.
+        """
+        for i in range(start, len(kids)):
+            var lead = _word(tree, sql, kids[i])
+            if lead == "DESC" or lead == "DESCENDING":
+                return SORT_DESCENDING
+            if lead == "ASC" or lead == "ASCENDING":
+                return SORT_ASCENDING
+        return SORT_DEFAULT
+
+    def _nulls(
+        self, tree: Parse, sql: StringSlice, kids: List[UInt32], start: Int
+    ) -> UInt32:
+        """Reads the null placement off an `ORDER BY` entry.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            kids: The entry's children.
+            start: The first child that can be a modifier.
+
+        Returns:
+            One of the `NULLS_` constants.
+        """
+        for i in range(start, len(kids)):
+            if _word(tree, sql, kids[i]) != "NULLS":
+                continue
+            var text = _span(
+                tree,
+                sql,
+                tree.nodes[Int(kids[i])].token_start,
+                tree.nodes[Int(kids[i])].token_end,
+            )
+            return NULLS_LAST if text == "NULLS LAST" else NULLS_FIRST
+        return NULLS_DEFAULT
+
+    def _modifiers(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds the `ORDER BY`, `LIMIT` and `OFFSET` that trail a statement.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `ResultModifiers` node.
+            ast: Where to put the nodes.
+            work: The walk, for the parts.
+
+        Returns:
+            The statement node.
+
+        Raises:
+            Error: If a part is not built yet.
+        """
+        var order = NO_NODE
+        var tail = NO_NODE
+        for kid in tree.children(node):
+            if _word(tree, sql, kid) == "ORDER":
+                order = kid
+            else:
+                tail = kid
+
+        var wanted = List[UInt32]()
+        if order != NO_NODE:
+            wanted.append(order)
+        if tail != NO_NODE:
+            wanted.append(tail)
+        work.warm(wanted)
+
+        var entries = List[UInt32]()
+        if order != NO_NODE:
+            entries = ast.items(work.value(order))
+        var limit = NO_NODE
+        var offset = NO_NODE
+        var flags = UInt32(0)
+        if tail != NO_NODE:
+            var parts = work.value(tail)
+            limit = ast.slot(parts, _TAIL_LIMIT)
+            offset = ast.slot(parts, _TAIL_OFFSET)
+            flags = ast.slot(parts, _TAIL_FLAGS)
+        return ast.modifiers(
+            entries, limit, offset, flags, tree.nodes[Int(node)].token_start
+        )
+
+    def _tail_parts(
+        self, tree: Parse, node: UInt32, mut ast: Ast, mut work: Work
+    ) raises -> UInt32:
+        """Carries a limit and an offset up in one run, in either order.
+
+        `FETCH FIRST n ROWS ONLY` lands on the same slot `LIMIT n` does, so it
+        prints back as `LIMIT n`. Both spellings reparse to the node they came
+        from, and the printer is not a formatter.
+
+        Args:
+            tree: The parse.
+            node: One of the four `LimitOffset` alternatives.
+            ast: Where to put the run.
+            work: The walk, for the two parts.
+
+        Returns:
+            A run of `_TAIL_SLOTS` entries.
+
+        Raises:
+            Error: If a part is not built yet.
+        """
+        var kids = tree.children(node)
+        work.warm(kids)
+        var parts = List[UInt32](length=_TAIL_SLOTS, fill=NO_NODE)
+        for kid in kids:
+            if self._action(tree, kid) == _OFFSET:
+                parts[_TAIL_OFFSET] = work.value(kid)
+                continue
+            var carried = work.value(kid)
+            parts[_TAIL_LIMIT] = ast.slot(carried, _TAIL_LIMIT)
+            parts[_TAIL_FLAGS] = ast.slot(carried, _TAIL_FLAGS)
+        return ast.run(parts)
+
+    def _limit(
+        self, tree: Parse, node: UInt32, mut ast: Ast, mut work: Work
+    ) raises -> UInt32:
+        """Builds a `LIMIT`, in its three spellings.
+
+        Args:
+            tree: The parse.
+            node: The `LimitClause` node.
+            ast: Where to put the run.
+            work: The walk, for the count.
+
+        Returns:
+            A run of `_TAIL_SLOTS` entries.
+
+        Raises:
+            Error: If the count is not built yet.
+        """
+        var form = self._only(tree, self._only(tree, node))
+        var parts = List[UInt32](length=_TAIL_SLOTS, fill=NO_NODE)
+
+        # `LimitAll` is the only one of the three with nothing under it.
+        if tree.nodes[Int(form)].first_child == NO_NODE:
+            parts[_TAIL_FLAGS] = LIMIT_ALL
+            return ast.run(parts)
+
+        var inner = self._only(tree, form)
+        parts[_TAIL_LIMIT] = work.value(inner)
+        if self._action(tree, inner) == _NUMBER:
+            # `LimitLiteralPercent <- NumberLiteral 'PERCENT'`, which is the
+            # only spelling that reaches a bare literal.
+            parts[_TAIL_FLAGS] = LIMIT_PERCENT
+        elif _tokens(tree, form) > _tokens(tree, inner):
+            # `LimitExpression <- Expression '%'?`, and the extra token is the
+            # per cent sign.
+            parts[_TAIL_FLAGS] = LIMIT_PERCENT
+        return ast.run(parts)
+
+    def _with(
+        self, tree: Parse, node: UInt32, mut ast: Ast, mut work: Work
+    ) raises -> UInt32:
+        """Carries a `WITH` and its `RECURSIVE` up in one run.
+
+        Args:
+            tree: The parse.
+            node: The `WithClause` node.
+            ast: Where to put the run.
+            work: The walk, for the entries.
+
+        Returns:
+            A run of `_WITH_SLOTS` entries.
+
+        Raises:
+            Error: If an entry is not built yet.
+        """
+        var recursive = False
+        var listed = NO_NODE
+        for kid in tree.children(node):
+            if self._marked(tree, kid, _MARK_RECURSIVE):
+                recursive = True
+            else:
+                listed = kid
+
+        var entries = List[UInt32]()
+        if listed != NO_NODE:
+            entries = tree.children(listed)
+        var parts = List[UInt32](length=_WITH_SLOTS, fill=NO_NODE)
+        parts[_WITH_RECURSIVE] = UInt32(1) if recursive else UInt32(0)
+        parts[_WITH_ENTRIES] = self._collect(tree, entries, ast, work)
+        return ast.run(parts)
+
+    def _cte(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds one entry of a `WITH`.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `WithStatement` node.
+            ast: Where to put the nodes.
+            work: The walk, for the statement.
+
+        Returns:
+            The statement node.
+
+        Raises:
+            Error: If it carries a modifier this has no case for.
+        """
+        var kids = tree.children(node)
+        var columns = List[String]()
+        var materialize = MATERIALIZE_DEFAULT
+        var body = NO_NODE
+        for i in range(1, len(kids)):
+            if self._marked(tree, kids[i], _MARK_CTE_COLUMNS):
+                # `InsertColumnList <- Parens(ColumnList)` and
+                # `ColumnList <- List(ColId)`.
+                var listed = self._only(tree, self._only(tree, kids[i]))
+                for name in self._items(tree, listed):
+                    columns.append(self._plain(tree, sql, name))
+            elif self._marked(tree, kids[i], _MARK_USING_KEY):
+                raise _unsupported(tree, sql, kids[i], "USING KEY on a WITH")
+            elif self._marked(tree, kids[i], _MARK_MATERIALIZED):
+                # `Materialized <- 'NOT'? 'MATERIALIZED'`.
+                materialize = (
+                    MATERIALIZE_NO if _tokens(tree, kids[i])
+                    == 2 else MATERIALIZE_YES
+                )
+            else:
+                body = kids[i]
+        if body == NO_NODE:
+            raise _malformed(tree, sql, node, "a WITH entry with no statement")
+        return ast.cte(
+            self._plain(tree, sql, kids[0]),
+            work.value(body),
+            columns,
+            materialize,
+            tree.nodes[Int(node)].token_start,
+        )
+
+    def _name_parts(
+        self, tree: Parse, sql: StringSlice, node: UInt32
+    ) raises -> List[String]:
+        """Reads a `BaseTableName`, which is one level deeper when qualified.
+
+        `UnqualifiedBaseTableName <- TableName` holds its one part directly and
+        `QualifiedTableName` holds a rule that holds the parts, so the parts
+        are under whichever of the two has children of its own.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `BaseTableName` node.
+
+        Returns:
+            The name parts, outermost first.
+
+        Raises:
+            Error: If there are no parts.
+        """
+        var inner = self._only(tree, node)
+        var holder = inner
+        var below = self._only(tree, inner)
+        if tree.nodes[Int(below)].first_child != NO_NODE:
+            holder = below
+        return self._parts(tree, sql, holder)
+
+    def _alias_name(
+        self, tree: Parse, sql: StringSlice, node: UInt32
+    ) raises -> String:
+        """Reads the name off a `TableAlias`.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `TableAlias` node, or 0 for none.
+
+        Returns:
+            The name, empty for none.
+
+        Raises:
+            Error: If the alias is not one name.
+        """
+        if node == NO_NODE:
+            return String()
+        return self._plain(tree, sql, tree.children(self._only(tree, node))[0])
+
+    def _alias_columns(
+        self, tree: Parse, sql: StringSlice, node: UInt32
+    ) raises -> List[String]:
+        """Reads the column aliases off a `TableAlias`.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `TableAlias` node, or 0 for none.
+
+        Returns:
+            The column names, in order, empty for none.
+
+        Raises:
+            Error: If one of them is not one name.
+        """
+        var out = List[String]()
+        if node == NO_NODE:
+            return out^
+        var kids = tree.children(self._only(tree, node))
+        if len(kids) < 2:
+            return out^
+        # `ColumnAliases <- Parens(List(ColIdOrString))`.
+        for name in self._items(tree, self._only(tree, kids[1])):
+            out.append(self._plain(tree, sql, name))
+        return out^
+
 
 def _no_case(tree: Parse, sql: StringSlice, node: UInt32) -> Error:
     """Builds the error a rule with no case raises.
@@ -1713,6 +3401,36 @@ def _span(tree: Parse, sql: StringSlice, start: UInt32, end: UInt32) -> String:
         else:
             out += text
     return out^
+
+
+def _join_text(tree: Parse, sql: StringSlice, form: UInt32) raises -> String:
+    """Reads a join back as the words it was written with.
+
+    Everything a join says about itself sits in front of the word `JOIN`, so
+    the text runs from the form's first token through that word. That is what
+    makes `LEFT OUTER JOIN`, `CROSS JOIN` and `NATURAL LEFT JOIN` all come out
+    whole with no flags anywhere.
+
+    Args:
+        tree: The parse.
+        sql: The query.
+        form: The join form node.
+
+    Returns:
+        The join as SQL spells it.
+
+    Raises:
+        Error: If there is no `JOIN` in it, which the grammar forbids.
+    """
+    var start = Int(tree.nodes[Int(form)].token_start)
+    for i in range(start, Int(tree.nodes[Int(form)].token_end)):
+        if String(token_text(sql, tree.tokens[i])).upper() != "JOIN":
+            continue
+        return _span(tree, sql, UInt32(start), UInt32(i + 1))
+    raise Error(
+        "the parse tree holds a join with no JOIN in it, which is a bug in"
+        " firepanda rather than in the query"
+    )
 
 
 def _multiword(operator: StringSlice) -> Bool:
