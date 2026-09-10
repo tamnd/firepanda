@@ -1169,7 +1169,10 @@ def is_re_compilable(obj: object) -> bool:
     because it catches the wrong exception, and `is_re_compilable("[")` is a
     `PatternError` rather than a False. firepanda answers False, which is what
     the name promises. It is the one behaviour in this file that is deliberately
-    not what pandas does, and it is in the divergence registry with that reason.
+    not what pandas does. It is not in the divergence registry, because a
+    registry entry is checked by running a case and the conformance board has no
+    way to run one of these yet, so it is recorded in the specification and in
+    `python/tests/test_api_types.py` instead.
 
     Args:
         obj: Any value.

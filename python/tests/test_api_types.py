@@ -310,9 +310,11 @@ def test_is_re_compilable_answers_rather_than_raising(firepanda: ModuleType) -> 
 
     pandas catches TypeError and not `re.error`, so asking it whether an
     unterminated character class is compilable raises `re.PatternError` instead
-    of answering False. The name is a question and firepanda answers it. This is
-    in the divergence registry with that reason, and it is not compared against
-    pandas here because pandas has no answer to compare against.
+    of answering False. The name is a question and firepanda answers it. This
+    test is where that decision is recorded, because the conformance board's
+    divergence registry checks its entries by running a case and it has no way
+    to run one of these yet. There is nothing compared against pandas below,
+    since pandas has no answer to compare against.
     """
     kinds = firepanda.api.types
     assert kinds.is_re_compilable("a.*b") is True
