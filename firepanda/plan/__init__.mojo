@@ -23,10 +23,15 @@ computed.
 `print.mojo` writes a plan out as an indented tree with the expressions in the
 notation they were written in.
 
-Binding, the passes and the lowering into `exec` follow. Nothing calls any of
-this yet and the eager API does not change when they do.
+`bind.mojo` turns every name into a position and gives every expression a type,
+which is what stops execution looking columns up by name and what makes a type
+error a plan error rather than a kernel error.
+
+The passes and the lowering into `exec` follow. Nothing calls any of this yet
+and the eager API does not change when they do.
 """
 
+from .bind import Bound, bind, bind_expr
 from .expr import UNBOUND, Expr, ExprKind, Expressions
 from .node import NO_LIMIT, NodeKind, Plan, PlanNode
 from .print import explain, render_expr

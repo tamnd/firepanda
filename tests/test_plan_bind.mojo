@@ -1,0 +1,534 @@
+"""Tests for binding a plan: names to positions, and a type on every node.
+
+Three kinds of test here and they are worth telling apart.
+
+The first kind asserts a position. That is the whole point of binding and it is
+the thing that lets execution stop looking columns up by name, so the tests
+reach into `Expr.at` and say what number it should be rather than asserting
+something prettier that would pass whatever the number was.
+
+The second kind asserts a type, and most of those are really asserting that
+binding asks the kernel rather than deciding for itself. A sum over an int32
+column is an int64 because `accumulator` says so, and if that ever changes this
+test should change with it rather than keep a second opinion alive.
+
+The third kind asserts a refusal, and there is one for each thing that can be
+wrong with a query before it runs: a name that is not there, a predicate that is
+not a question, an operation with no answer for its operands, two join keys with
+nothing in common, and two union arms of different widths.
+"""
+
+from std.testing import TestSuite, assert_equal, assert_false, assert_raises
+from std.testing import assert_true
+
+from firepanda.array.value import Value
+from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.schema import Field, Schema
+from firepanda.join.pairs import JoinKind
+from firepanda.kernel.binary import BinaryOp
+from firepanda.kernel.group import AggKind
+from firepanda.kernel.unary import UnaryOp
+from firepanda.plan.bind import bind, bind_expr
+from firepanda.plan.expr import UNBOUND, Expressions
+from firepanda.plan.node import NO_LIMIT, Plan
+
+
+def _customer() -> Schema:
+    """Returns a schema shaped like the TPC-H customer table.
+
+    Returns:
+        Four columns, the key not nullable and the rest of them nullable.
+    """
+    var out = Schema()
+    out.append(Field("c_custkey", LogicalType.INT64, False))
+    out.append(Field("c_name", LogicalType.STRING, True))
+    out.append(Field("c_mktsegment", LogicalType.STRING, True))
+    out.append(Field("c_acctbal", LogicalType.FLOAT64, True))
+    return out^
+
+
+def _orders() -> Schema:
+    """Returns a schema shaped like the TPC-H orders table.
+
+    Returns:
+        Three columns, the two keys not nullable.
+    """
+    var out = Schema()
+    out.append(Field("o_orderkey", LogicalType.INT64, False))
+    out.append(Field("o_custkey", LogicalType.INT64, False))
+    out.append(Field("o_totalprice", LogicalType.FLOAT64, True))
+    return out^
+
+
+def test_a_scan_binds_its_columns_to_the_table_it_reads() raises:
+    var plan = Plan()
+    var scan = plan.scan("customer", ["c_name", "c_acctbal"], 0)
+    var out = bind(plan, scan, [_customer()])
+    assert_equal(len(out), 2, "two columns were asked for")
+    assert_equal(out[0].name, "c_name", "in the order they were asked for")
+    assert_equal(out[1].dtype, LogicalType.FLOAT64, "with the table's type")
+
+
+def test_a_scan_with_no_column_list_reads_the_whole_table() raises:
+    var plan = Plan()
+    var scan = plan.scan("customer", List[String](), 0)
+    var out = bind(plan, scan, [_customer()])
+    assert_equal(len(out), 4, "every column of the table")
+    assert_equal(out[3].name, "c_acctbal", "in the table's own order")
+
+
+def test_a_scan_of_a_relation_with_no_schema_is_refused() raises:
+    var plan = Plan()
+    var scan = plan.scan("orders", ["o_orderkey"], 3)
+    with assert_raises(contains="is relation 3 and 1 schemas were given"):
+        _ = bind(plan, scan, [_customer()])
+
+
+def test_a_name_that_is_close_to_a_column_gets_a_suggestion() raises:
+    var plan = Plan()
+    var scan = plan.scan("customer", ["c_acctbl"], 0)
+    with assert_raises(contains="Did you mean 'c_acctbal'?"):
+        _ = bind(plan, scan, [_customer()])
+
+
+def test_a_name_that_is_close_to_nothing_gets_no_suggestion() raises:
+    var plan = Plan()
+    var scan = plan.scan("customer", ["l_shipdate"], 0)
+    with assert_raises(contains="there is no column named 'l_shipdate'"):
+        _ = bind(plan, scan, [_customer()])
+    var caught = String()
+    try:
+        _ = bind(plan, scan, [_customer()])
+    except e:
+        caught = String(e)
+    assert_false("Did you mean" in caught, "nothing here is close to it")
+
+
+def test_a_filter_binds_its_predicate_to_positions() raises:
+    var plan = Plan()
+    var scan = plan.scan("customer", ["c_custkey", "c_mktsegment"], 0)
+    var seg = plan.exprs.column("c_mktsegment")
+    var want = plan.exprs.literal(Value(String("BUILDING")))
+    var is_it = plan.exprs.binary(BinaryOp.EQ, seg, want)
+    var kept = plan.filter(scan, is_it)
+    _ = bind(plan, kept, [_customer()])
+    assert_equal(plan.exprs.nodes[seg].at, 1, "the second column scanned")
+    assert_equal(plan.exprs.nodes[seg].table, 0, "read from relation zero")
+    assert_equal(
+        plan.exprs.nodes[is_it].type,
+        LogicalType.BOOL,
+        "a comparison answers a yes or a no",
+    )
+
+
+def test_a_filter_keeps_the_schema_it_was_given() raises:
+    var plan = Plan()
+    var scan = plan.scan("customer", ["c_custkey", "c_acctbal"], 0)
+    var bal = plan.exprs.column("c_acctbal")
+    var zero = plan.exprs.literal(Value(Float64(0.0)))
+    var rich = plan.exprs.binary(BinaryOp.GT, bal, zero)
+    var kept = plan.filter(scan, rich)
+    var out = bind(plan, kept, [_customer()])
+    assert_equal(len(out), 2, "a filter drops rows and not columns")
+    assert_equal(out[1].name, "c_acctbal", "unchanged")
+
+
+def test_a_predicate_that_is_not_a_question_is_refused() raises:
+    var plan = Plan()
+    var scan = plan.scan("customer", ["c_acctbal"], 0)
+    var bal = plan.exprs.column("c_acctbal")
+    var kept = plan.filter(scan, bal)
+    with assert_raises(contains="and this one asks float64"):
+        _ = bind(plan, kept, [_customer()])
+
+
+def test_arithmetic_takes_its_type_from_the_kernel() raises:
+    var plan = Plan()
+    var scan = plan.scan("customer", ["c_custkey", "c_acctbal"], 0)
+    var key = plan.exprs.column("c_custkey")
+    var bal = plan.exprs.column("c_acctbal")
+    var both = plan.exprs.binary(BinaryOp.ADD, key, bal)
+    var out = plan.project(scan, [both], ["mixed"])
+    var schema = bind(plan, out, [_customer()])
+    assert_equal(
+        schema[0].dtype,
+        LogicalType.FLOAT64,
+        "int64 with float64 promotes the way binary_type says",
+    )
+
+
+def test_an_operation_with_no_answer_is_a_plan_error() raises:
+    var plan = Plan()
+    var scan = plan.scan("customer", ["c_name", "c_acctbal"], 0)
+    var name = plan.exprs.column("c_name")
+    var bal = plan.exprs.column("c_acctbal")
+    var nonsense = plan.exprs.binary(BinaryOp.SUB, name, bal)
+    var out = plan.project(scan, [nonsense], ["nonsense"])
+    with assert_raises():
+        _ = bind(plan, out, [_customer()])
+
+
+def test_a_unary_operation_keeps_the_type_it_was_handed() raises:
+    var tree = Expressions()
+    var bal = tree.column("c_acctbal")
+    var owed = tree.unary(UnaryOp.NEG, bal)
+    bind_expr(tree, owed, _customer(), [0, 0, 0, 0])
+    assert_equal(
+        tree.nodes[owed].type, LogicalType.FLOAT64, "a negation of a float"
+    )
+
+
+def test_a_cast_answers_what_it_was_asked_for() raises:
+    var tree = Expressions()
+    var key = tree.column("c_custkey")
+    var wider = tree.cast(LogicalType.FLOAT64, key)
+    bind_expr(tree, wider, _customer(), [0, 0, 0, 0])
+    assert_equal(tree.nodes[wider].type, LogicalType.FLOAT64, "as asked")
+    assert_equal(
+        tree.nodes[key].type, LogicalType.INT64, "under it, the column"
+    )
+
+
+def test_a_conditional_promotes_its_two_answers() raises:
+    var tree = Expressions()
+    var bal = tree.column("c_acctbal")
+    var zero = tree.literal(Value(Float64(0.0)))
+    var rich = tree.binary(BinaryOp.GT, bal, zero)
+    var one = tree.literal(Value(Int64(1)))
+    var picked = tree.conditional(rich, one, bal)
+    bind_expr(tree, picked, _customer(), [0, 0, 0, 0])
+    assert_equal(
+        tree.nodes[picked].type,
+        LogicalType.FLOAT64,
+        "int64 and float64 both fit in float64",
+    )
+
+
+def test_a_conditional_that_asks_no_question_is_refused() raises:
+    var tree = Expressions()
+    var bal = tree.column("c_acctbal")
+    var one = tree.literal(Value(Int64(1)))
+    var picked = tree.conditional(bal, one, one)
+    with assert_raises(contains="asks a yes or no question"):
+        bind_expr(tree, picked, _customer(), [0, 0, 0, 0])
+
+
+def test_the_connectives_are_calls_and_answer_a_yes_or_a_no() raises:
+    var tree = Expressions()
+    var bal = tree.column("c_acctbal")
+    var zero = tree.literal(Value(Float64(0.0)))
+    var rich = tree.binary(BinaryOp.GT, bal, zero)
+    var name = tree.column("c_mktsegment")
+    var want = tree.literal(Value(String("BUILDING")))
+    var building = tree.binary(BinaryOp.EQ, name, want)
+    var both = tree.call("and", [rich, building], rowwise=True)
+    bind_expr(tree, both, _customer(), [0, 0, 0, 0])
+    assert_equal(tree.nodes[both].type, LogicalType.BOOL, "a conjunction")
+
+
+def test_a_connective_over_something_that_is_not_a_question_is_refused() raises:
+    var tree = Expressions()
+    var bal = tree.column("c_acctbal")
+    var name = tree.column("c_name")
+    var both = tree.call("and", [bal, name], rowwise=True)
+    with assert_raises(contains="'and' reads yes or no and argument 0 is"):
+        bind_expr(tree, both, _customer(), [0, 0, 0, 0])
+
+
+def test_a_function_nobody_has_written_yet_is_refused_by_name() raises:
+    var tree = Expressions()
+    var name = tree.column("c_name")
+    var shouted = tree.call("upper", [name], rowwise=True)
+    with assert_raises(contains="there is no function named 'upper' yet"):
+        bind_expr(tree, shouted, _customer(), [0, 0, 0, 0])
+
+
+def test_a_sum_widens_the_way_the_accumulator_does() raises:
+    var narrow = Schema()
+    narrow.append(Field("n", LogicalType.INT32, True))
+    var plan = Plan()
+    var scan = plan.scan("counts", ["n"], 0)
+    var n = plan.exprs.column("n")
+    var total = plan.exprs.aggregate(AggKind.SUM, n)
+    var out = plan.aggregate(scan, List[Int](), [total], ["total"])
+    var schema = bind(plan, out, [narrow^])
+    assert_equal(
+        schema[0].dtype,
+        LogicalType.INT64,
+        "a sum of int32 accumulates in int64",
+    )
+
+
+def test_a_group_key_keeps_its_own_type_and_the_aggregate_gets_its_own() raises:
+    var plan = Plan()
+    var scan = plan.scan("orders", ["o_custkey", "o_totalprice"], 0)
+    var key = plan.exprs.column("o_custkey")
+    var price = plan.exprs.column("o_totalprice")
+    var spent = plan.exprs.aggregate(AggKind.SUM, price)
+    var out = plan.aggregate(scan, [key], [spent], ["o_custkey", "spent"])
+    var schema = bind(plan, out, [_orders()])
+    assert_equal(len(schema), 2, "the key and then the aggregate")
+    assert_equal(schema[0].dtype, LogicalType.INT64, "the key as it was")
+    assert_equal(schema[1].dtype, LogicalType.FLOAT64, "a total of floats")
+
+
+def test_a_count_is_a_number_whatever_it_counted() raises:
+    var plan = Plan()
+    var scan = plan.scan("customer", ["c_name"], 0)
+    var name = plan.exprs.column("c_name")
+    var how_many = plan.exprs.aggregate(AggKind.COUNT, name)
+    var out = plan.aggregate(scan, List[Int](), [how_many], ["n"])
+    var schema = bind(plan, out, [_customer()])
+    assert_equal(schema[0].dtype, LogicalType.INT64, "a count of text")
+
+
+def test_a_projected_literal_cannot_be_null() raises:
+    var plan = Plan()
+    var scan = plan.scan("customer", ["c_name"], 0)
+    var one = plan.exprs.literal(Value(Int64(1)))
+    var out = plan.project(scan, [one], ["one"])
+    var schema = bind(plan, out, [_customer()])
+    assert_false(schema[0].nullable, "a constant that is not null never is")
+    assert_equal(schema[0].dtype, LogicalType.INT64, "and it knows its type")
+
+
+def test_a_projected_column_keeps_the_nullability_it_had() raises:
+    var plan = Plan()
+    var scan = plan.scan("customer", ["c_custkey", "c_name"], 0)
+    var key = plan.exprs.column("c_custkey")
+    var name = plan.exprs.column("c_name")
+    var out = plan.project(scan, [key, name], ["k", "n"])
+    var schema = bind(plan, out, [_customer()])
+    assert_false(schema[0].nullable, "the key was not nullable in the table")
+    assert_true(schema[1].nullable, "and the name was")
+
+
+def test_a_column_above_a_projection_binds_to_the_projection() raises:
+    var plan = Plan()
+    var scan = plan.scan("customer", ["c_name", "c_acctbal"], 0)
+    var bal = plan.exprs.column("c_acctbal")
+    var out = plan.project(scan, [bal], ["balance"])
+    var again = plan.exprs.column("balance")
+    var zero = plan.exprs.literal(Value(Float64(0.0)))
+    var rich = plan.exprs.binary(BinaryOp.GT, again, zero)
+    var kept = plan.filter(out, rich)
+    _ = bind(plan, kept, [_customer()])
+    assert_equal(
+        plan.exprs.nodes[bal].at, 1, "under the projection, position 1"
+    )
+    assert_equal(plan.exprs.nodes[again].at, 0, "above it, position 0")
+
+
+def test_a_computed_column_over_one_table_keeps_that_table() raises:
+    var plan = Plan()
+    var scan = plan.scan("customer", ["c_acctbal"], 2)
+    var bal = plan.exprs.column("c_acctbal")
+    var two = plan.exprs.literal(Value(Float64(2.0)))
+    var doubled = plan.exprs.binary(BinaryOp.MUL, bal, two)
+    var out = plan.project(scan, [doubled], ["doubled"])
+    var again = plan.exprs.column("doubled")
+    var big = plan.exprs.binary(BinaryOp.GT, again, two)
+    var kept = plan.filter(out, big)
+    _ = bind(plan, kept, [Schema(), Schema(), _customer()])
+    assert_equal(plan.exprs.nodes[again].table, 2, "still relation two")
+    assert_equal(plan.exprs.tables(big), UInt64(4), "and the mask says so")
+
+
+def test_a_computed_column_over_no_table_has_none() raises:
+    var plan = Plan()
+    var scan = plan.scan("customer", ["c_name"], 0)
+    var one = plan.exprs.literal(Value(Int64(1)))
+    var out = plan.project(scan, [one], ["one"])
+    var again = plan.exprs.column("one")
+    var same = plan.exprs.binary(BinaryOp.EQ, again, one)
+    var kept = plan.filter(out, same)
+    _ = bind(plan, kept, [_customer()])
+    assert_equal(
+        plan.exprs.nodes[again].table,
+        UNBOUND,
+        "a constant column came from no relation",
+    )
+    with assert_raises(contains="has no table until binding has run"):
+        _ = plan.exprs.tables(same)
+
+
+def test_a_join_stacks_the_two_schemas_end_to_end() raises:
+    var plan = Plan()
+    var c = plan.scan("customer", ["c_custkey", "c_name"], 0)
+    var o = plan.scan("orders", ["o_custkey", "o_totalprice"], 1)
+    var ck = plan.exprs.column("c_custkey")
+    var ok = plan.exprs.column("o_custkey")
+    var joined = plan.join(c, o, [ck], [ok], JoinKind.INNER)
+    var schema = bind(plan, joined, [_customer(), _orders()])
+    assert_equal(len(schema), 4, "two from each side")
+    assert_equal(schema[2].name, "o_custkey", "the right side after the left")
+    assert_equal(plan.exprs.nodes[ok].at, 0, "a right key is bound on its own")
+    assert_equal(plan.exprs.nodes[ok].table, 1, "to relation one")
+
+
+def test_a_column_above_a_join_is_bound_across_both_sides() raises:
+    var plan = Plan()
+    var c = plan.scan("customer", ["c_custkey", "c_name"], 0)
+    var o = plan.scan("orders", ["o_custkey", "o_totalprice"], 1)
+    var ck = plan.exprs.column("c_custkey")
+    var ok = plan.exprs.column("o_custkey")
+    var joined = plan.join(c, o, [ck], [ok], JoinKind.INNER)
+    var price = plan.exprs.column("o_totalprice")
+    var floor = plan.exprs.literal(Value(Float64(100.0)))
+    var big = plan.exprs.binary(BinaryOp.GT, price, floor)
+    var kept = plan.filter(joined, big)
+    _ = bind(plan, kept, [_customer(), _orders()])
+    assert_equal(plan.exprs.nodes[price].at, 3, "the fourth column of the join")
+    assert_equal(plan.exprs.nodes[price].table, 1, "still from orders")
+    assert_equal(
+        plan.exprs.tables(big), UInt64(2), "so the mask is orders only"
+    )
+
+
+def test_a_left_join_makes_the_right_side_able_to_go_missing() raises:
+    var plan = Plan()
+    var c = plan.scan("customer", ["c_custkey"], 0)
+    var o = plan.scan("orders", ["o_custkey", "o_orderkey"], 1)
+    var ck = plan.exprs.column("c_custkey")
+    var ok = plan.exprs.column("o_custkey")
+    var joined = plan.join(c, o, [ck], [ok], JoinKind.LEFT)
+    var schema = bind(plan, joined, [_customer(), _orders()])
+    assert_false(schema[0].nullable, "the left side is all still there")
+    assert_true(schema[2].nullable, "a right key that matched nothing is null")
+
+
+def test_a_semi_join_keeps_only_the_side_it_was_asking_about() raises:
+    var plan = Plan()
+    var c = plan.scan("customer", ["c_custkey", "c_name"], 0)
+    var o = plan.scan("orders", ["o_custkey"], 1)
+    var ck = plan.exprs.column("c_custkey")
+    var ok = plan.exprs.column("o_custkey")
+    var joined = plan.join(c, o, [ck], [ok], JoinKind.SEMI)
+    var schema = bind(plan, joined, [_customer(), _orders()])
+    assert_equal(len(schema), 2, "the left side and nothing else")
+    assert_equal(schema[1].name, "c_name", "unchanged")
+
+
+def test_a_join_key_pair_with_nothing_in_common_is_refused() raises:
+    var plan = Plan()
+    var c = plan.scan("customer", ["c_name"], 0)
+    var o = plan.scan("orders", ["o_custkey"], 1)
+    var name = plan.exprs.column("c_name")
+    var key = plan.exprs.column("o_custkey")
+    var joined = plan.join(c, o, [name], [key], JoinKind.INNER)
+    with assert_raises(contains="there is no type that holds both"):
+        _ = bind(plan, joined, [_customer(), _orders()])
+
+
+def test_a_union_promotes_the_types_of_the_columns_it_stacks() raises:
+    var narrow = Schema()
+    narrow.append(Field("n", LogicalType.INT32, False))
+    var wide = Schema()
+    wide.append(Field("n", LogicalType.FLOAT64, False))
+    var plan = Plan()
+    var a = plan.scan("small", ["n"], 0)
+    var b = plan.scan("large", ["n"], 1)
+    var both = plan.union([a, b], all=True)
+    var schema = bind(plan, both, [narrow^, wide^])
+    assert_equal(
+        schema[0].dtype, LogicalType.FLOAT64, "the type that holds both arms"
+    )
+
+
+def test_a_union_of_two_different_widths_is_refused() raises:
+    var plan = Plan()
+    var a = plan.scan("customer", ["c_custkey", "c_name"], 0)
+    var b = plan.scan("orders", ["o_custkey"], 1)
+    var both = plan.union([a, b], all=True)
+    with assert_raises(contains="stacks a 2 column input on a 1 column one"):
+        _ = bind(plan, both, [_customer(), _orders()])
+
+
+def test_a_union_of_two_relations_leaves_the_column_with_neither() raises:
+    var plan = Plan()
+    var a = plan.scan("customer", ["c_custkey"], 0)
+    var b = plan.scan("orders", ["o_custkey"], 1)
+    var both = plan.union([a, b], all=True)
+    var key = plan.exprs.column("c_custkey")
+    var floor = plan.exprs.literal(Value(Int64(0)))
+    var big = plan.exprs.binary(BinaryOp.GT, key, floor)
+    var kept = plan.filter(both, big)
+    _ = bind(plan, kept, [_customer(), _orders()])
+    assert_equal(
+        plan.exprs.nodes[key].table,
+        UNBOUND,
+        "the column is two columns stacked, from two relations",
+    )
+
+
+def test_sort_limit_and_distinct_pass_the_schema_through() raises:
+    var plan = Plan()
+    var scan = plan.scan("customer", ["c_custkey", "c_acctbal"], 0)
+    var bal = plan.exprs.column("c_acctbal")
+    var ranked = plan.sort(scan, [bal], [True], [False])
+    var top = plan.limit(ranked, 0, 10)
+    var key = plan.exprs.column("c_custkey")
+    var once = plan.distinct(top, [key])
+    var schema = bind(plan, once, [_customer()])
+    assert_equal(len(schema), 2, "none of the three touches a column")
+    assert_equal(plan.exprs.nodes[bal].at, 1, "and the sort key still bound")
+    assert_equal(plan.exprs.nodes[key].at, 0, "and so did the distinct key")
+
+
+def test_a_node_that_is_not_under_the_root_is_left_alone() raises:
+    var plan = Plan()
+    var good = plan.scan("customer", ["c_custkey"], 0)
+    # A scan a rewrite has already detached, naming a column that is not in the
+    # schema. Binding the root should not look at it, and would refuse it if it
+    # did.
+    var stale = plan.scan("customer", ["gone"], 0)
+    var key = plan.exprs.column("c_custkey")
+    var floor = plan.exprs.literal(Value(Int64(0)))
+    var big = plan.exprs.binary(BinaryOp.GT, key, floor)
+    var kept = plan.filter(good, big)
+    var schema = bind(plan, kept, [_customer()])
+    assert_equal(len(schema), 1, "the live subtree bound")
+    assert_true(stale > 0, "and the detached one was still in the plan")
+
+
+def test_binding_a_node_that_is_not_in_the_plan_is_refused() raises:
+    var plan = Plan()
+    _ = plan.scan("customer", ["c_custkey"], 0)
+    with assert_raises(contains="plan node 4 is not in a plan of 1"):
+        _ = bind(plan, 4, [_customer()])
+
+
+def test_the_whole_of_q3_binds() raises:
+    var plan = Plan()
+    var c = plan.scan("customer", ["c_custkey", "c_mktsegment"], 0)
+    var seg = plan.exprs.column("c_mktsegment")
+    var want = plan.exprs.literal(Value(String("BUILDING")))
+    var building = plan.exprs.binary(BinaryOp.EQ, seg, want)
+    var kept = plan.filter(c, building)
+
+    var o = plan.scan("orders", ["o_orderkey", "o_custkey", "o_totalprice"], 1)
+    var ck = plan.exprs.column("c_custkey")
+    var ok = plan.exprs.column("o_custkey")
+    var joined = plan.join(kept, o, [ck], [ok], JoinKind.INNER)
+
+    var key = plan.exprs.column("o_orderkey")
+    var price = plan.exprs.column("o_totalprice")
+    var revenue = plan.exprs.aggregate(AggKind.SUM, price)
+    var grouped = plan.aggregate(
+        joined, [key], [revenue], ["o_orderkey", "revenue"]
+    )
+    var out = plan.exprs.column("revenue")
+    var ranked = plan.sort(grouped, [out], [True], [False])
+    var top = plan.limit(ranked, 0, 10)
+
+    var schema = bind(plan, top, [_customer(), _orders()])
+    assert_equal(len(schema), 2, "the group key and the total")
+    assert_equal(schema[0].dtype, LogicalType.INT64, "the order key")
+    assert_equal(schema[1].dtype, LogicalType.FLOAT64, "the revenue")
+    assert_equal(plan.exprs.nodes[key].at, 2, "o_orderkey sits after customer")
+    assert_equal(plan.exprs.nodes[key].table, 1, "and comes from orders")
+    assert_equal(plan.exprs.nodes[out].at, 1, "revenue is the second output")
+
+
+def main() raises:
+    TestSuite.discover_tests[__functions_in_module()]().run()
