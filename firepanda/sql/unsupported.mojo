@@ -643,6 +643,38 @@ def refusal(feature: UInt16) -> Refusal:
     return table[Int(feature)]
 
 
+def support_table() -> String:
+    """The whole table as markdown, for the README.
+
+    A list of what a library will not do goes stale the week after it is
+    written, every time, because nobody remembers the README when they are
+    adding a table entry. So the README does not have a list, it has this, and
+    a test fails when the file and the table disagree.
+
+    Returns:
+        A markdown table with a header row, ending in a newline.
+    """
+    var out = String(
+        "| Name | firepanda does not support | Instead | Issue |\n",
+        "| --- | --- | --- | --- |\n",
+    )
+    for entry in sql_support():
+        out += String(
+            "| `",
+            entry.feature,
+            "` | ",
+            entry.message,
+            " | ",
+            entry.explanation,
+            " | [#",
+            entry.issue,
+            "](https://github.com/tamnd/firepanda/issues/",
+            entry.issue,
+            ") |\n",
+        )
+    return out^
+
+
 def issue_link(issue: UInt32) -> String:
     """The URL a refusal points the reader at.
 
