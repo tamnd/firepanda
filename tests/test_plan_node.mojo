@@ -1,0 +1,364 @@
+"""Tests for the logical plan arena, its checks, and what it prints.
+
+Most of these are a plan in and a printed plan out, compared as text. That is
+the shape `docs/specs/planner/01-what-a-plan-is.md` asks for and it is the shape
+worth having, because the alternative is a test that reaches into the node's
+fields and asserts the thing the builder just wrote, which passes whatever the
+node means.
+
+The checks are the other half. A plan node holds expressions by index and an
+index on its own says nothing about whether the expression makes sense in the
+position it was put in, so every builder checks what it can without a schema:
+that the inputs exist, that the lists that have to be the same length are, and
+that the expressions in the positions read once per row can be. The last one is
+the only interesting check and it has a test for each of the four positions.
+
+The TPC-H shaped plan at the end is there to say that nine node kinds are enough
+to write a real query in, which is the claim the spec makes and is the only
+thing that would show it was wrong.
+"""
+
+from std.testing import TestSuite, assert_equal, assert_raises, assert_true
+
+from firepanda.array.value import Value
+from firepanda.dtype.logical import LogicalType
+from firepanda.join.pairs import JoinKind
+from firepanda.kernel.binary import BinaryOp
+from firepanda.kernel.group import AggKind
+from firepanda.kernel.unary import UnaryOp
+from firepanda.plan.expr import Expressions
+from firepanda.plan.node import NO_LIMIT, NodeKind, Plan
+from firepanda.plan.print import explain, render_expr
+
+
+def test_a_scan_prints_its_source_and_its_columns() raises:
+    var plan = Plan()
+    var scan = plan.scan("lineitem", ["l_shipdate", "l_discount"], 0)
+    assert_equal(
+        explain(plan, scan),
+        "SCAN lineitem [l_shipdate, l_discount]\n",
+        "the source and the columns read",
+    )
+
+
+def test_a_filter_prints_above_what_it_filters() raises:
+    var plan = Plan()
+    var scan = plan.scan("lineitem", ["l_quantity"], 0)
+    var q = plan.exprs.column("l_quantity")
+    var limit = plan.exprs.literal(Value(Float64(24.0)))
+    var small = plan.exprs.binary(BinaryOp.LT, q, limit)
+    var kept = plan.filter(scan, small)
+    assert_equal(
+        explain(plan, kept),
+        "FILTER l_quantity < 24.0\n  SCAN lineitem [l_quantity]\n",
+        "the filter over its input",
+    )
+
+
+def test_a_compound_operand_gets_brackets() raises:
+    var tree = Expressions()
+    var a = tree.column("a")
+    var b = tree.column("b")
+    var two = tree.literal(Value(Int64(2)))
+    var scaled = tree.binary(BinaryOp.MUL, b, two)
+    var total = tree.binary(BinaryOp.ADD, a, scaled)
+    # Noisier than precedence needs on this one and right on everything else,
+    # because a printed plan that leans on the reader knowing the precedence
+    # table is a printed plan that gets misread.
+    assert_equal(render_expr(tree, total), "a + (b * 2)", "brackets go on")
+
+
+def test_a_projection_drops_a_name_that_says_nothing() raises:
+    var plan = Plan()
+    var scan = plan.scan("lineitem", ["l_extendedprice", "l_discount"], 0)
+    var price = plan.exprs.column("l_extendedprice")
+    var discount = plan.exprs.column("l_discount")
+    var revenue = plan.exprs.binary(BinaryOp.MUL, price, discount)
+    var out = plan.project(
+        scan, [price, revenue], ["l_extendedprice", "revenue"]
+    )
+    assert_equal(
+        explain(plan, out),
+        (
+            "PROJECT [l_extendedprice, l_extendedprice * l_discount as"
+            " revenue]\n  SCAN lineitem [l_extendedprice, l_discount]\n"
+        ),
+        "only the one that renames something prints its name",
+    )
+
+
+def test_an_aggregate_prints_its_keys_and_its_folds() raises:
+    var plan = Plan()
+    var scan = plan.scan("lineitem", ["l_returnflag", "l_quantity"], 0)
+    var flag = plan.exprs.column("l_returnflag")
+    var quantity = plan.exprs.column("l_quantity")
+    var total = plan.exprs.aggregate(AggKind.SUM, quantity)
+    var counted = plan.exprs.aggregate(AggKind.COUNT, quantity)
+    var grouped = plan.aggregate(
+        scan, [flag], [total, counted], ["l_returnflag", "sum_qty", "n"]
+    )
+    assert_equal(
+        explain(plan, grouped),
+        (
+            "AGGREGATE [l_returnflag] -> [sum(l_quantity), count(l_quantity)]\n"
+            "  SCAN lineitem [l_returnflag, l_quantity]\n"
+        ),
+        "keys on the left of the arrow and folds on the right",
+    )
+
+
+def test_a_reduction_is_an_aggregate_with_no_keys() raises:
+    var plan = Plan()
+    var scan = plan.scan("lineitem", ["l_quantity"], 0)
+    var quantity = plan.exprs.column("l_quantity")
+    var total = plan.exprs.aggregate(AggKind.SUM, quantity)
+    var reduced = plan.aggregate(scan, List[Int](), [total], ["revenue"])
+    # Whether to hash every row to find its group or to know there is one group
+    # is a physical choice, so an empty key list is the same logical node.
+    assert_true(
+        plan.nodes[reduced].kind == NodeKind.AGGREGATE, "still an aggregate"
+    )
+    assert_equal(
+        explain(plan, reduced),
+        "AGGREGATE [] -> [sum(l_quantity)]\n  SCAN lineitem [l_quantity]\n",
+        "with nothing on the left of the arrow",
+    )
+
+
+def test_a_join_prints_both_inputs_under_it() raises:
+    var plan = Plan()
+    var orders = plan.scan("orders", ["o_custkey"], 0)
+    var customer = plan.scan("customer", ["c_custkey"], 1)
+    var o = plan.exprs.column("o_custkey")
+    var c = plan.exprs.column("c_custkey")
+    var joined = plan.join(orders, customer, [o], [c], JoinKind.INNER)
+    assert_equal(
+        explain(plan, joined),
+        (
+            "JOIN inner [o_custkey = c_custkey]\n"
+            "  SCAN orders [o_custkey]\n"
+            "  SCAN customer [c_custkey]\n"
+        ),
+        "the left input first and the indent says which is which",
+    )
+
+
+def test_a_sort_prints_a_direction_for_each_key() raises:
+    var plan = Plan()
+    var scan = plan.scan("orders", ["o_orderdate", "o_totalprice"], 0)
+    var date = plan.exprs.column("o_orderdate")
+    var price = plan.exprs.column("o_totalprice")
+    var sorted = plan.sort(scan, [price, date], [True, False], [False, True])
+    assert_equal(
+        explain(plan, sorted),
+        (
+            "SORT [o_totalprice desc, o_orderdate asc nulls last]\n"
+            "  SCAN orders [o_orderdate, o_totalprice]\n"
+        ),
+        "a direction each and the null placement when it is not the default",
+    )
+
+
+def test_a_limit_prints_its_offset_only_when_it_has_one() raises:
+    var plan = Plan()
+    var scan = plan.scan("orders", ["o_orderkey"], 0)
+    var ten = plan.limit(scan, 0, 10)
+    var skipped = plan.limit(scan, 5, 10)
+    var rest = plan.limit(scan, 5, NO_LIMIT)
+    assert_true(explain(plan, ten).startswith("LIMIT 10\n"), "no offset")
+    assert_true(
+        explain(plan, skipped).startswith("LIMIT 10 offset 5\n"), "an offset"
+    )
+    assert_true(
+        explain(plan, rest).startswith("LIMIT all offset 5\n"), "no length"
+    )
+
+
+def test_a_distinct_with_no_keys_is_the_whole_row() raises:
+    var plan = Plan()
+    var scan = plan.scan("nation", ["n_name"], 0)
+    var whole = plan.distinct(scan, List[Int]())
+    var name = plan.exprs.column("n_name")
+    var by_name = plan.distinct(scan, [name])
+    assert_true(explain(plan, whole).startswith("DISTINCT [*]\n"), "all of it")
+    assert_true(
+        explain(plan, by_name).startswith("DISTINCT [n_name]\n"), "one key"
+    )
+
+
+def test_a_union_says_whether_duplicates_survive() raises:
+    var plan = Plan()
+    var a = plan.scan("a", ["k"], 0)
+    var b = plan.scan("b", ["k"], 1)
+    var kept = plan.union([a, b], all=True)
+    var dropped = plan.union([a, b], all=False)
+    assert_equal(
+        explain(plan, kept),
+        "UNION all\n  SCAN a [k]\n  SCAN b [k]\n",
+        "concat is a union that keeps them",
+    )
+    assert_true(explain(plan, dropped).startswith("UNION\n"), "and this drops")
+
+
+def test_an_input_outside_the_plan_is_refused() raises:
+    var plan = Plan()
+    _ = plan.scan("lineitem", ["l_quantity"], 0)
+    var q = plan.exprs.column("l_quantity")
+    with assert_raises(contains="is not in a plan of 1"):
+        _ = plan.filter(4, q)
+
+
+def test_a_projection_needs_a_name_for_each_output() raises:
+    var plan = Plan()
+    var scan = plan.scan("lineitem", ["a", "b"], 0)
+    var a = plan.exprs.column("a")
+    var b = plan.exprs.column("b")
+    with assert_raises(contains="2 outputs and 1 names"):
+        _ = plan.project(scan, [a, b], ["a"])
+
+
+def test_an_aggregate_needs_a_name_for_every_column_it_makes() raises:
+    var plan = Plan()
+    var scan = plan.scan("lineitem", ["k", "v"], 0)
+    var k = plan.exprs.column("k")
+    var v = plan.exprs.column("v")
+    var total = plan.exprs.aggregate(AggKind.SUM, v)
+    with assert_raises(contains="produces 2 columns and has 1 names"):
+        _ = plan.aggregate(scan, [k], [total], ["k"])
+
+
+def test_a_join_needs_the_same_number_of_keys_on_both_sides() raises:
+    var plan = Plan()
+    var left = plan.scan("a", ["k", "j"], 0)
+    var right = plan.scan("b", ["k"], 1)
+    var k = plan.exprs.column("k")
+    var j = plan.exprs.column("j")
+    with assert_raises(contains="2 keys on the left and 1 on the right"):
+        _ = plan.join(left, right, [k, j], [k], JoinKind.INNER)
+
+
+def test_a_sort_needs_a_direction_for_each_key() raises:
+    var plan = Plan()
+    var scan = plan.scan("a", ["k", "j"], 0)
+    var k = plan.exprs.column("k")
+    var j = plan.exprs.column("j")
+    with assert_raises(contains="2 keys has 1 directions"):
+        _ = plan.sort(scan, [k, j], [True], [False, False])
+
+
+def test_a_limit_cannot_be_negative() raises:
+    var plan = Plan()
+    var scan = plan.scan("a", ["k"], 0)
+    with assert_raises(contains="cannot skip -1 rows"):
+        _ = plan.limit(scan, -1, 10)
+    with assert_raises(contains="cannot keep -2 rows"):
+        _ = plan.limit(scan, 0, -2)
+
+
+def test_a_union_needs_something_to_stack() raises:
+    var plan = Plan()
+    with assert_raises(contains="needs something to stack"):
+        _ = plan.union(List[Int](), all=True)
+
+
+def test_a_fold_cannot_be_a_filter_predicate() raises:
+    var plan = Plan()
+    var scan = plan.scan("a", ["v"], 0)
+    var v = plan.exprs.column("v")
+    var total = plan.exprs.aggregate(AggKind.SUM, v)
+    var big = plan.exprs.binary(BinaryOp.GT, v, total)
+    # This is a query the caller has not written yet rather than a filter with
+    # an aggregate in it, and saying so here names the position.
+    with assert_raises(contains="a filter predicate has to be read a row"):
+        _ = plan.filter(scan, big)
+
+
+def test_a_fold_cannot_be_a_group_key() raises:
+    var plan = Plan()
+    var scan = plan.scan("a", ["v"], 0)
+    var v = plan.exprs.column("v")
+    var total = plan.exprs.aggregate(AggKind.SUM, v)
+    with assert_raises(contains="a group key has to be read a row"):
+        _ = plan.aggregate(scan, [total], List[Int](), ["k"])
+
+
+def test_a_fold_cannot_be_a_join_key() raises:
+    var plan = Plan()
+    var left = plan.scan("a", ["v"], 0)
+    var right = plan.scan("b", ["v"], 1)
+    var v = plan.exprs.column("v")
+    var total = plan.exprs.aggregate(AggKind.SUM, v)
+    with assert_raises(contains="a join key has to be read a row"):
+        _ = plan.join(left, right, [v], [total], JoinKind.INNER)
+
+
+def test_a_fold_cannot_be_a_sort_key() raises:
+    var plan = Plan()
+    var scan = plan.scan("a", ["v"], 0)
+    var v = plan.exprs.column("v")
+    var total = plan.exprs.aggregate(AggKind.SUM, v)
+    with assert_raises(contains="a sort key has to be read a row"):
+        _ = plan.sort(scan, [total], [True], [False])
+
+
+def test_an_input_is_always_built_before_the_node_that_reads_it() raises:
+    var plan = Plan()
+    var a = plan.scan("a", ["k"], 0)
+    var b = plan.scan("b", ["k"], 1)
+    var k = plan.exprs.column("k")
+    var joined = plan.join(a, b, [k], [k], JoinKind.INNER)
+    var limited = plan.limit(joined, 0, 10)
+    # A pass that walks the arena backwards visits every node after its inputs
+    # only if this holds.
+    for at in range(len(plan)):
+        ref node = plan.nodes[at]
+        for i in range(len(node.inputs)):
+            assert_true(node.inputs[i] < at, "an input sits below its reader")
+    assert_true(limited > joined, "and the plan was built bottom up")
+
+
+def test_nine_kinds_are_enough_for_a_real_query() raises:
+    # TPC-H q3, which is the smallest query that needs a join, an aggregate, a
+    # sort and a limit at once. If nine kinds were not enough this is where it
+    # would show.
+    var plan = Plan()
+    var customer = plan.scan("customer", ["c_custkey", "c_mktsegment"], 0)
+    var orders = plan.scan("orders", ["o_orderkey", "o_custkey"], 1)
+
+    var segment = plan.exprs.column("c_mktsegment")
+    var building = plan.exprs.literal(Value(String("BUILDING")))
+    var wanted = plan.exprs.binary(BinaryOp.EQ, segment, building)
+    var kept = plan.filter(customer, wanted)
+
+    var c_key = plan.exprs.column("c_custkey")
+    var o_custkey = plan.exprs.column("o_custkey")
+    var joined = plan.join(kept, orders, [c_key], [o_custkey], JoinKind.INNER)
+
+    var o_key = plan.exprs.column("o_orderkey")
+    var price = plan.exprs.column("o_totalprice")
+    var revenue = plan.exprs.aggregate(AggKind.SUM, price)
+    var grouped = plan.aggregate(
+        joined, [o_key], [revenue], ["o_orderkey", "revenue"]
+    )
+
+    var out = plan.exprs.column("revenue")
+    var ranked = plan.sort(grouped, [out], [True], [False])
+    var top = plan.limit(ranked, 0, 10)
+
+    assert_equal(
+        explain(plan, top),
+        (
+            "LIMIT 10\n"
+            "  SORT [revenue desc]\n"
+            "    AGGREGATE [o_orderkey] -> [sum(o_totalprice)]\n"
+            "      JOIN inner [c_custkey = o_custkey]\n"
+            "        FILTER c_mktsegment == BUILDING\n"
+            "          SCAN customer [c_custkey, c_mktsegment]\n"
+            "        SCAN orders [o_orderkey, o_custkey]\n"
+        ),
+        "the whole query, indented by depth",
+    )
+
+
+def main() raises:
+    TestSuite.discover_tests[__functions_in_module()]().run()

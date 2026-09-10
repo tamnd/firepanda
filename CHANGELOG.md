@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the nine logical plan nodes, and a plan that prints as a tree
+
+`firepanda/plan/node.mojo` has the nine kinds the plan spec names, which are scan, filter, project, aggregate, join, sort, limit, distinct and union, and `Plan` is the arena they live in. It holds the expression arena inside it, because a node holds expressions by index and an index only means something against an arena, so a plan is one value to pass around rather than a pair a caller has to keep together. Node indices come out in creation order like expression indices do, so an input always sits below the node that reads it.
+
+Union covers concat as well. The difference between the two is whether duplicates survive, and that is a flag rather than a node. An aggregate with no group keys is a whole frame reduction for the same reason: hashing every row to find its group and knowing there is one group are two implementations of one thing.
+
+Every builder checks what it can without a schema. That the inputs exist, that a projection has a name for each output, that an aggregation has a name for every column it makes, that a join has as many keys on one side as the other, that a sort has a direction and a null placement for each key, and that a limit is not negative. The interesting one is the last: a filter predicate, a group key, a join key and a sort key are all read once per row, so an aggregate in one of them is refused with the position named. That is a query the caller has not written yet rather than a filter with an aggregate in it, and catching it here beats a kernel error about a length mismatch several layers down.
+
+`firepanda/plan/print.mojo` writes a plan as an indented tree, one node a line, children under their parent, with the expressions in the notation they were written in rather than as trees. Brackets go around every compound operand rather than only where precedence needs them, which is noisier on `a + (b * 2)` and right on everything else, because a printed plan that leans on the reader knowing the precedence table is one that gets misread. A projection prints an alias only when the name is not what the expression already said.
+
+Nothing calls any of this yet. Binding, the passes and the lowering into the existing `exec` nodes follow.
+
 ### Added: the plan layer starts with the expression tree and the three analyses over it
 
 The engine has nine physical operators and a pipeline driver, and nothing in the repository calls it except one test. The reason is that there is nothing between the eager API and the operators to decide anything, so `df.filter(...).select(...)` runs the filter, materializes it, runs the select, materializes that, and by the time anything downstream is reached the fact that a filter happened is gone. `firepanda/plan/` is where that decision layer goes, and this is its first file.
