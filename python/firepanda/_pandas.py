@@ -26,6 +26,7 @@ exactly the shape the generator cannot write and exactly the shape `_refuse` and
 
 from __future__ import annotations
 
+import datetime
 import warnings
 from typing import TYPE_CHECKING, Any
 
@@ -173,6 +174,93 @@ def _held_at(name: str, value: Any, default: Any, why: str) -> None:
         raise NotImplementedError(f"{name}={value!r} is not supported yet, because {why}")
 
 
+# The thirteen interpolations pandas takes, in the order numpy lists them, since
+# pandas hands the name straight to `numpy.quantile` and the message it raises
+# prints numpy's own dictionary. firepanda has written `linear`. The other twelve
+# are a schedule and are refused as one, which is why this list is longer than
+# anything firepanda answers: it is what pandas accepts, and a name that is not
+# on it is a typo rather than a gap.
+_INTERPOLATIONS = (
+    "inverted_cdf",
+    "averaged_inverted_cdf",
+    "closest_observation",
+    "interpolated_inverted_cdf",
+    "hazen",
+    "weibull",
+    "linear",
+    "median_unbiased",
+    "normal_unbiased",
+    "lower",
+    "higher",
+    "midpoint",
+    "nearest",
+)
+
+# The four spellings of `nonexistent`, and the sentence pandas refuses a fifth
+# with. pandas takes a timedelta here as well, which is not a string and would
+# fail this check, so the call sites let one through to `_held_at` and it comes
+# back a NotImplementedError. That is the right class for it: a timedelta is a
+# value pandas accepts and firepanda has not written, which is the schedule and
+# not the typo.
+#
+# `ambiguous` has no list like this and is deliberately not given one. pandas
+# does not check the argument's vocabulary on a column at all: it carries
+# whatever arrived down to the point where a wall clock hour turns out to be two
+# instants, and `.dt.tz_localize('UTC', ambiguous=3)` comes back with an answer
+# in it. Adding a check here would be firepanda refusing input pandas accepts,
+# which is the direction of difference this library does not get to have. The
+# scalar in `_scalars.py` does check it, because `Timestamp.tz_localize` does,
+# and the two files differ there because pandas differs there.
+_NONEXISTENT = ("raise", "NaT", "shift_forward", "shift_backward")
+_NONEXISTENT_REFUSAL = (
+    "The nonexistent argument must be one of 'raise', 'NaT', 'shift_forward',"
+    " 'shift_backward' or a timedelta object"
+)
+
+
+def _spelled(value: Any, allowed: tuple[str, ...], message: str) -> None:
+    """Refuses a value that is not in the argument's vocabulary at all.
+
+    This is the question `_held_at` is not asking, and running the two together
+    is what put the wrong class on three refusals.
+
+    An argument like `interpolation` has a fixed vocabulary and two ways to be
+    wrong. `interpolation="lower"` is a value pandas accepts and firepanda has
+    not implemented, which is `NotImplementedError` and is a schedule. And
+    `interpolation="not a method"` is a value pandas does not accept either,
+    which is a typo, and pandas answers it with a `ValueError` naming the words
+    that would have worked. Answering both with `NotImplementedError` tells
+    somebody who misspelled `midpoint` that firepanda has not got round to their
+    spelling yet, which is not true and sends them to the changelog instead of to
+    their own line.
+
+    So this is asked first and `_held_at` second. The message is built by the
+    caller rather than assembled here, because each of these is pandas' own
+    sentence and pandas words every one of them differently: `Invalid method: x.
+    Method must be in {'table', 'single'}.` for one, `'x' is not a valid method.
+    Use one of:` for another. Document 22 is why the wording follows pandas and
+    where it deliberately does not.
+
+    Not every argument with a fixed vocabulary gets one of these, and the test
+    is whether pandas checks. `ambiguous` reads like the same shape and is not:
+    pandas carries whatever arrived down to the point where an hour turns out to
+    be two instants and complains about the hour rather than about the argument.
+    A check here would refuse input pandas accepts, which is the one direction of
+    difference this library does not get to have.
+
+    Args:
+        value: What was passed.
+        allowed: The values pandas accepts, which is not the same list as the
+            values firepanda implements and is usually longer.
+        message: The refusal, worded the way pandas words it.
+
+    Raises:
+        InvalidArgumentError: If the value is not one of them.
+    """
+    if value not in allowed:
+        raise InvalidArgumentError(message)
+
+
 def _reducing_axis(axis: Any, owner: str) -> None:
     """Refuses a reduction along the second axis.
 
@@ -214,16 +302,22 @@ def _quantile_wanted(q: Any, interpolation: str) -> float:
         The quantile as a float.
 
     Raises:
-        InvalidArgumentError: If it is not a number between zero and one.
-        NotImplementedError: If it is a list, or if the interpolation is one of
-            the four that are not linear.
+        InvalidArgumentError: If it is not a number between zero and one, or if
+            the interpolation is not one of the thirteen pandas takes.
+        NotImplementedError: If it is a list, or if the interpolation is one
+            pandas takes and firepanda has not written.
     """
+    _spelled(
+        interpolation,
+        _INTERPOLATIONS,
+        f"{interpolation!r} is not a valid method. Use one of: " + ", ".join(_INTERPOLATIONS),
+    )
     _held_at(
         "interpolation",
         interpolation,
         "linear",
         "the reduction lands between two values by weighting them and the other"
-        " four rules pick one of them instead",
+        " twelve rules pick one of them or reweight the whole sample instead",
     )
     if isinstance(q, bool) or not isinstance(q, (int, float)):
         raise NotImplementedError(
@@ -824,6 +918,11 @@ class DataFrameMixin:
         self, q: Any, axis: Any, numeric_only: bool, interpolation: str, method: str
     ) -> Series:
         """Runs the quantile down every column."""
+        _spelled(
+            method,
+            ("single", "table"),
+            f"Invalid method: {method}. Method must be in {{'table', 'single'}}.",
+        )
         _held_at(
             "method",
             method,
@@ -1413,22 +1512,35 @@ class DatetimeMixin:
             raise translate(error) from None
 
     def _rounded(self, kind: str, freq: Any, ambiguous: Any, nonexistent: Any) -> Series:
-        """Moves every clock to a frequency, one of three ways."""
-        _held_at(
-            "ambiguous",
-            ambiguous,
-            "raise",
-            "picking which of the two readings a repeated wall clock hour means"
-            " needs the zone's transition table, which is the same work"
-            " tz_localize over a fold needs",
-        )
-        _held_at(
-            "nonexistent",
-            nonexistent,
-            "raise",
-            "shifting a wall clock time that a spring forward skipped needs the"
-            " zone's transition table",
-        )
+        """Moves every clock to a frequency, one of three ways.
+
+        The two zone policies are read here only when the column already carries
+        a zone, which is measured rather than reasoned about: pandas hands a naive
+        column back rounded with a misspelled `nonexistent` in its arguments
+        unread, because there is no daylight saving to have a policy about.
+        Refusing that would be firepanda turning away input pandas takes, which is
+        the direction of difference this library does not get to have. The zone is
+        asked for only when one of the two is not the default, since asking is a
+        boundary crossing and the default changes no answer either way.
+        """
+        if (ambiguous != "raise" or nonexistent != "raise") and self._zone() is not None:
+            _held_at(
+                "ambiguous",
+                ambiguous,
+                "raise",
+                "picking which of the two readings a repeated wall clock hour means"
+                " needs the zone's transition table, which is the same work"
+                " tz_localize over a fold needs",
+            )
+            if not isinstance(nonexistent, datetime.timedelta):
+                _spelled(nonexistent, _NONEXISTENT, _NONEXISTENT_REFUSAL)
+            _held_at(
+                "nonexistent",
+                nonexistent,
+                "raise",
+                "shifting a wall clock time that a spring forward skipped needs the"
+                " zone's transition table",
+            )
         if not isinstance(freq, str):
             raise NotImplementedError(
                 "freq has to be a string for now, because an offset object carries"
@@ -1485,6 +1597,8 @@ class DatetimeMixin:
             "a wall clock hour that a fall back repeats is two instants and"
             " choosing between them needs the zone's transition table",
         )
+        if not isinstance(nonexistent, datetime.timedelta):
+            _spelled(nonexistent, _NONEXISTENT, _NONEXISTENT_REFUSAL)
         _held_at(
             "nonexistent",
             nonexistent,

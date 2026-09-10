@@ -262,3 +262,124 @@ def test_the_two_ways_of_refusing_arrive_as_two_exceptions(
         firepanda.from_arrow(pa.table({"of": pa.array([[1], [2]])}))
     with pytest.raises(ValueError):
         firepanda.from_arrow(pa.array([1, 2, 3]))
+
+
+@needs["pyarrow"]
+def test_a_dictionary_encoded_column_arrives_as_a_category(firepanda: ModuleType) -> None:
+    """The commonest encoding in an Arrow file, and until now a refusal.
+
+    What can be asserted from here is the shape and not the values, because a
+    categorical cannot be exported yet and there is no `codes` or `categories` on
+    the Python series either. The values are measured in Mojo, in
+    `tests/test_arrow_stream.mojo`, where the column can be opened up. Both halves
+    are needed and neither is the other one's substitute.
+    """
+    import pyarrow as pa
+
+    table = pa.table(
+        {
+            "grade": pa.array(["a", "b", "a", None]).dictionary_encode(),
+            "qty": pa.array([1, 2, 3, 4]),
+        }
+    )
+    frame = firepanda.from_arrow(table)
+    assert len(frame) == 4
+    assert list(frame.columns) == ["grade", "qty"]
+    assert frame["grade"].dtype == "category"
+    assert frame["qty"].dtype == "int64"
+
+
+@needs["pandas"]
+@needs["pyarrow"]
+def test_a_pandas_categorical_crosses_as_a_category(firepanda: ModuleType) -> None:
+    """Which is the way most of these will actually arrive.
+
+    A pandas categorical column becomes a dictionary encoded Arrow field on the
+    way out, so a frame anybody hands over with a `Categorical` in it comes down
+    this path without either side asking for it.
+    """
+    import pandas as pd
+    import pyarrow as pa
+
+    theirs = pd.DataFrame({"grade": pd.Categorical(["a", "b", "a"])})
+    frame = firepanda.from_arrow(pa.table(theirs))
+    assert frame["grade"].dtype == "category"
+    assert len(frame) == 3
+
+
+@needs["pandas"]
+@needs["pyarrow"]
+def test_an_ordered_categorical_stays_ordered(firepanda: ModuleType) -> None:
+    """The flag is the only thing that tells `low < high` from a refusal.
+
+    A flag that does not cross would make every ordered categorical arrive
+    unordered, which is a wrong answer rather than a missing one, and nothing
+    downstream would have any way to notice.
+    """
+    import pandas as pd
+    import pyarrow as pa
+
+    theirs = pd.DataFrame(
+        {"grade": pd.Categorical(["low", "high"], categories=["low", "high"], ordered=True)}
+    )
+    assert firepanda.from_arrow(pa.table(theirs))["grade"].dtype == "category"
+
+
+@needs["pyarrow"]
+def test_several_chunks_sharing_a_dictionary_become_one_column(
+    firepanda: ModuleType,
+) -> None:
+    """A stream hands out one dictionary per batch, and a frame holds one column.
+
+    pyarrow chunks a table whenever it is concatenated or read back from a file,
+    so this is not an unusual shape, it is what a table of any size looks like.
+    """
+    import pyarrow as pa
+
+    chunk = pa.table({"grade": pa.array(["a", "b"]).dictionary_encode()})
+    frame = firepanda.from_arrow(pa.concat_tables([chunk, chunk]))
+    assert len(frame) == 4
+    assert frame["grade"].dtype == "category"
+
+
+@needs["pyarrow"]
+def test_chunks_that_disagree_about_their_categories_are_refused(
+    firepanda: ModuleType,
+) -> None:
+    """Because the codes in one batch would not mean what they mean in the other.
+
+    Arrow calls this a dictionary replacement and it is legal on the wire, so this
+    is a gap in firepanda rather than a producer bug, and it arrives as one. It is
+    refused rather than silently unified because unifying it is a rewrite of every
+    code in every batch that came before, and a caller who did not know it was
+    happening would be paying for it on every read. Since pyarrow will do that
+    rewrite on request, the message names the call.
+    """
+    import pyarrow as pa
+
+    first = pa.table({"grade": pa.array(["a", "b"]).dictionary_encode()})
+    second = pa.table({"grade": pa.array(["x", "y"]).dictionary_encode()})
+    joined = pa.concat_tables([first, second])
+    with pytest.raises(NotImplementedError) as caught:
+        firepanda.from_arrow(joined)
+    assert "grade" in str(caught.value)
+    assert "different categories" in str(caught.value)
+    # And the fix the message names is a fix, rather than a phrase.
+    assert firepanda.from_arrow(joined.unify_dictionaries())["grade"].dtype == "category"
+
+
+@needs["pyarrow"]
+def test_categories_that_are_not_text_are_refused_by_name(firepanda: ModuleType) -> None:
+    """firepanda stores categories as strings, so a dictionary of numbers has no home.
+
+    The message names the column and the type rather than saying the format was
+    unsupported, because the format that was unsupported is the dictionary's and
+    not the field's, and a caller reading the field's format would find nothing
+    wrong with it.
+    """
+    import pyarrow as pa
+
+    table = pa.table({"grade": pa.array([1, 2, 1]).dictionary_encode()})
+    with pytest.raises(NotImplementedError) as caught:
+        firepanda.from_arrow(table)
+    assert "grade" in str(caught.value)
