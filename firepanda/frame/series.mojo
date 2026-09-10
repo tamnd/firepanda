@@ -34,7 +34,7 @@ from firepanda.array.array import Array
 from firepanda.array.strings import StringArray
 from firepanda.array.value import Value
 from firepanda.bitmap.bitmap import Bitmap
-from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.logical import LogicalType, TypeKind
 from firepanda.frame.align import align_pair, fill_one_sided, keep_rows
 from firepanda.frame.display import DisplayOptions, render_column
 from firepanda.frame.index import Index
@@ -76,6 +76,9 @@ from firepanda.kernel.temporal import (
     temporal_strftime,
     temporal_to_duration,
     temporal_total_seconds,
+    temporal_tz_convert,
+    temporal_tz_localize,
+    temporal_tz_localize_none,
     unit_named,
 )
 from firepanda.kernel.unary import UnaryOp, unary_any
@@ -899,6 +902,80 @@ struct Series(Copyable, Movable, Sized, Writable):
         """
         return self._relabelled(
             self.name, temporal_as_unit(self.values, unit_named(unit))
+        )
+
+    def dt_tz(self) raises -> String:
+        """Returns the name of the clock this series is read against.
+
+        Returns:
+            The zone name, or the empty string when there is none, which is
+            what pandas prints for `None`.
+
+        Raises:
+            If the series is not a timestamp.
+        """
+        if self.values.type.kind != TypeKind.TIMESTAMP:
+            raise Error(
+                "temporal: only a timestamp column is read against a clock,"
+                " and this one is "
+                + String(self.values.type)
+            )
+        return String(self.values.type.zone)
+
+    def dt_tz_convert(self, zone: StringSlice) raises -> Self:
+        """Returns the series read against another clock.
+
+        Nothing moves. The instants are the same instants and the name on them
+        changes, which is the difference between this and `dt_tz_localize` and
+        is why this one works for every zone there is.
+
+        Args:
+            zone: The name to read the series against.
+
+        Returns:
+            A timestamp series of the same height on that clock.
+
+        Raises:
+            If the series is not a timestamp, or carries no zone to convert
+            from.
+        """
+        return self._relabelled(
+            self.name, temporal_tz_convert(self.values, zone)
+        )
+
+    def dt_tz_localize(self, zone: StringSlice) raises -> Self:
+        """Returns the series with a clock put on its readings.
+
+        The readings stay and the instants move, which is the opposite of what
+        `dt_tz_convert` does. It works for a zone that names its own offset,
+        such as `UTC` or `+05:30`, and refuses one that names a rule.
+
+        Args:
+            zone: The name to put on the series.
+
+        Returns:
+            A timestamp series of the same height on that clock.
+
+        Raises:
+            If the series is not a naive timestamp, or if the zone names a rule
+            rather than a number.
+        """
+        return self._relabelled(
+            self.name, temporal_tz_localize(self.values, zone)
+        )
+
+    def dt_tz_localize_none(self) raises -> Self:
+        """Returns the series with its clock taken off and its readings kept.
+
+        Returns:
+            A naive timestamp series of the same height.
+
+        Raises:
+            If the series is not a timestamp, if it carries no zone, or if the
+            zone names a rule rather than a number.
+        """
+        return self._relabelled(
+            self.name, temporal_tz_localize_none(self.values)
         )
 
     def dt_day_name(self, locale: StringSlice = "") raises -> Self:

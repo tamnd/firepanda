@@ -1,0 +1,2606 @@
+running 74 test files, 8 at a time
+=== tests/test_array.mojo
+/Users/apple/github/tamnd/fp-merge/tests/test_array.mojo:466:13: warning: ref 'view' was never used, remove it?
+        ref view = column.as_typed_view[DType.float64]()
+            ^
+
+Running 33 tests for /Users/apple/github/tamnd/fp-merge/tests/test_array.mojo 
+    PASS [ 0.029 ] test_every_dtype_round_trips
+    PASS [ 0.001 ] test_from_list_and_to_list
+    PASS [ 0.001 ] test_new_array_is_zero_and_valid
+    PASS [ 0.001 ] test_set_null_zeroes_the_value
+    PASS [ 0.001 ] test_set_valid
+    PASS [ 0.001 ] test_simd_load_and_store
+    PASS [ 0.001 ] test_load_may_run_past_the_end
+    PASS [ 0.001 ] test_slice_copies_values_and_validity
+    PASS [ 0.001 ] test_copy_is_deep
+    PASS [ 0.001 ] test_any_array_as_typed_copies
+    PASS [ 0.009 ] test_as_typed_with_the_wrong_dtype_raises
+    PASS [ 0.001 ] test_any_array_carries_its_logical_type
+    PASS [ 0.011 ] test_a_dictionary_column_holds_its_categories_apart_from_its_values
+    PASS [ 0.005 ] test_a_dictionary_column_is_not_a_string_column
+    PASS [ 0.008 ] test_the_codes_of_a_dictionary_column_are_not_its_values
+    PASS [ 0.002 ] test_a_dictionary_column_counts_both_halves_of_itself
+    PASS [ 0.001 ] test_copying_a_dictionary_column_copies_its_categories
+    PASS [ 0.007 ] test_chunked_lengths_add_up
+    PASS [ 0.001 ] test_chunked_rejects_a_mismatched_chunk
+    PASS [ 0.002 ] test_chunked_locate
+    PASS [ 0.001 ] test_chunked_null_count_sums_chunks
+    PASS [ 0.001 ] test_empty_chunked_column
+    PASS [ 0.009 ] test_chunked_locate_walks_a_column_of_many_chunks
+    PASS [ 0.001 ] test_chunked_drops_an_empty_chunk
+    PASS [ 0.002 ] test_chunked_only_borrows_the_single_chunk
+    PASS [ 0.001 ] test_chunked_combine_of_one_chunk_moves_rather_than_copies
+    PASS [ 0.006 ] test_chunked_combine_stacks_several_chunks
+    PASS [ 0.001 ] test_chunked_combine_of_nothing_is_an_empty_column
+    PASS [ 0.001 ] test_a_typed_array_has_the_layout_of_the_storage_it_holds
+    PASS [ 0.001 ] test_a_typed_view_reads_the_column_without_copying_it
+    PASS [ 0.001 ] test_a_typed_view_refuses_the_wrong_dtype
+    PASS [ 0.001 ] test_a_column_survives_being_put_in_an_optional
+    PASS [ 0.001 ] test_a_column_has_no_trailing_padding
+--------
+Summary [ 0.100 ] 33 tests run: 33 passed , 0 failed , 0 skipped 
+
+=== tests/test_arrow_c.mojo
+
+Running 21 tests for /Users/apple/github/tamnd/fp-merge/tests/test_arrow_c.mojo 
+    PASS [ 0.003 ] test_schema_is_seventy_two_bytes
+    PASS [ 0.001 ] test_array_is_eighty_bytes
+    PASS [ 0.001 ] test_nullable_pointer_is_one_word
+    PASS [ 0.001 ] test_a_function_pointer_is_one_word
+    PASS [ 0.001 ] test_none_is_the_null_pointer
+    PASS [ 0.001 ] test_default_schema_is_all_zero
+    PASS [ 0.001 ] test_default_array_is_all_zero
+    PASS [ 0.001 ] test_schema_field_order
+    PASS [ 0.001 ] test_array_field_order
+    PASS [ 0.001 ] test_flag_values
+    PASS [ 0.001 ] test_a_c_callback_can_be_stored_and_called
+    PASS [ 0.001 ] test_releasing_twice_is_a_no_op
+    PASS [ 0.001 ] test_releasing_a_zero_structure_is_a_no_op
+    PASS [ 0.004 ] test_format_strings
+    PASS [ 0.006 ] test_every_format_string_round_trips
+    PASS [ 0.002 ] test_temporal_format_strings
+    PASS [ 0.017 ] test_a_malformed_temporal_format_string_is_refused
+    PASS [ 0.001 ] test_case_matters
+    PASS [ 0.002 ] test_offset_string_formats_are_refused
+    PASS [ 0.001 ] test_unknown_formats_are_refused
+    PASS [ 0.001 ] test_buffer_counts
+--------
+Summary [ 0.036 ] 21 tests run: 21 passed , 0 failed , 0 skipped 
+
+=== tests/test_arrow_export.mojo
+
+Running 27 tests for /Users/apple/github/tamnd/fp-merge/tests/test_arrow_export.mojo 
+    PASS [ 0.013 ] test_a_schema_carries_the_format_string
+    PASS [ 0.005 ] test_a_top_level_schema_has_a_null_name
+    PASS [ 0.001 ] test_releasing_a_schema_clears_it
+    PASS [ 0.007 ] test_an_exported_array_describes_itself
+    PASS [ 0.004 ] test_the_values_buffer_is_not_copied
+    PASS [ 0.001 ] test_a_consumer_reads_the_right_values
+    PASS [ 0.004 ] test_no_nulls_means_no_validity_buffer
+    PASS [ 0.001 ] test_the_validity_bitmap_is_not_copied_either
+    PASS [ 0.001 ] test_the_validity_bits_mean_what_arrow_thinks_they_mean
+    PASS [ 0.001 ] test_releasing_an_array_twice_is_a_no_op
+    PASS [ 0.001 ] test_an_empty_column_exports
+    PASS [ 0.008 ] test_every_fixed_width_type_exports
+    PASS [ 0.001 ] test_a_bool_column_is_packed_to_a_bit_per_value
+    PASS [ 0.001 ] test_the_bool_values_buffer_is_the_packed_one_not_the_column
+    PASS [ 0.009 ] test_a_string_column_exports_four_buffers
+    PASS [ 0.002 ] test_the_string_views_are_not_copied
+    PASS [ 0.003 ] test_the_view_layout_is_arrows_view_layout
+    PASS [ 0.002 ] test_the_sizes_buffer_reports_the_payload_length
+    PASS [ 0.002 ] test_a_column_of_only_short_strings_still_has_four_buffers
+    PASS [ 0.001 ] test_the_format_string_of_a_string_column_is_the_view_one
+    PASS [ 0.009 ] test_a_frame_is_a_struct_with_one_child_per_column
+    PASS [ 0.012 ] test_a_schema_with_the_wrong_number_of_names_is_refused
+    PASS [ 0.045 ] test_a_frames_columns_are_not_copied_on_the_way_out
+    PASS [ 0.007 ] test_the_export_keeps_the_frame_alive_after_the_last_other_holder_goes
+    PASS [ 0.006 ] test_a_struct_array_has_one_null_buffer_and_no_nulls
+    PASS [ 0.007 ] test_a_column_of_the_wrong_length_is_refused
+    PASS [ 0.005 ] test_releasing_a_struct_twice_is_a_no_op
+--------
+Summary [ 0.159 ] 27 tests run: 27 passed , 0 failed , 0 skipped 
+
+=== tests/test_arrow_import.mojo
+
+Running 18 tests for /Users/apple/github/tamnd/fp-merge/tests/test_arrow_import.mojo 
+    PASS [ 0.043 ] test_an_int64_column_round_trips
+    PASS [ 0.011 ] test_the_imported_column_owns_its_memory
+    PASS [ 0.002 ] test_nulls_round_trip
+    PASS [ 0.009 ] test_every_fixed_width_type_round_trips
+    PASS [ 0.001 ] test_an_empty_column_round_trips
+    PASS [ 0.001 ] test_a_bool_column_round_trips
+    PASS [ 0.006 ] test_a_string_column_round_trips
+    PASS [ 0.004 ] test_a_string_column_with_nulls_round_trips
+    PASS [ 0.010 ] test_a_released_structure_is_refused
+    PASS [ 0.001 ] test_a_type_firepanda_cannot_read_is_refused
+    PASS [ 0.002 ] test_a_wrong_buffer_count_is_refused
+    PASS [ 0.001 ] test_a_slice_with_a_byte_aligned_offset_is_read_from_its_start
+    PASS [ 0.001 ] test_a_slice_with_an_unaligned_offset_shifts_the_validity_bits
+    PASS [ 0.002 ] test_the_offset_based_string_layout_is_read
+    PASS [ 0.002 ] test_a_view_array_with_two_data_buffers_is_read
+    PASS [ 0.005 ] test_a_view_naming_a_data_buffer_that_is_not_there_is_refused
+    PASS [ 0.001 ] test_a_view_that_runs_past_its_data_buffer_is_refused
+    PASS [ 0.001 ] test_offsets_that_go_backwards_are_refused
+--------
+Summary [ 0.103 ] 18 tests run: 18 passed , 0 failed , 0 skipped 
+
+=== tests/test_arrow_ipc_write.mojo
+
+Running 22 tests for /Users/apple/github/tamnd/fp-merge/tests/test_arrow_ipc_write.mojo 
+    PASS [ 0.225 ] test_a_temporal_frame_round_trips_with_its_units_and_its_zone
+    PASS [ 0.078 ] test_a_categorical_frame_round_trips_with_its_categories
+    PASS [ 0.043 ] test_a_categorical_file_round_trips_through_its_footer
+    PASS [ 0.013 ] test_a_categorical_column_with_no_categories_is_refused
+    PASS [ 0.028 ] test_a_stream_round_trips
+    PASS [ 0.030 ] test_a_file_round_trips
+    PASS [ 0.057 ] test_the_reader_tells_what_was_written_apart
+    PASS [ 0.015 ] test_a_file_begins_and_ends_with_the_magic_number
+    PASS [ 0.014 ] test_a_stream_starts_with_a_message
+    PASS [ 0.011 ] test_the_default_is_one_batch
+    PASS [ 0.049 ] test_rows_per_batch_splits_the_stream
+    PASS [ 0.051 ] test_rows_per_batch_splits_a_file_and_the_footer_agrees
+    PASS [ 0.077 ] test_a_batch_per_row_still_round_trips
+    PASS [ 0.011 ] test_a_column_with_no_nulls_writes_an_empty_validity_buffer
+    PASS [ 0.014 ] test_a_bool_column_goes_out_one_bit_per_row
+    PASS [ 0.131 ] test_a_long_string_column_round_trips_its_payload
+    PASS [ 0.015 ] test_an_empty_frame_keeps_its_schema
+    PASS [ 0.002 ] test_a_frame_of_no_columns_round_trips
+    PASS [ 0.009 ] test_a_column_that_is_not_nullable_and_holds_nulls_is_written_nullable
+    PASS [ 0.002 ] test_a_null_column_cannot_be_written
+    PASS [ 0.660 ] test_a_file_on_disk_reads_back
+    PASS [ 0.199 ] test_a_stream_on_disk_reads_back
+--------
+Summary [ 1.734 ] 22 tests run: 22 passed , 0 failed , 0 skipped 
+
+=== tests/test_arrow_ipc.mojo
+
+Running 39 tests for /Users/apple/github/tamnd/fp-merge/tests/test_arrow_ipc.mojo 
+    PASS [ 0.212 ] test_a_stream_of_two_batches_reads_as_one_frame
+    PASS [ 0.025 ] test_the_strings_of_a_two_batch_stream_survive_the_boundary
+    PASS [ 0.031 ] test_a_file_reads_through_its_footer
+    PASS [ 0.018 ] test_a_bool_column_unpacks_from_bits
+    PASS [ 0.020 ] test_a_null_in_the_middle_keeps_the_values_around_it
+    PASS [ 0.023 ] test_a_file_of_three_batches_reads_in_order
+    PASS [ 0.008 ] test_a_string_view_column_reads
+    PASS [ 0.014 ] test_a_large_string_column_reads
+    PASS [ 0.007 ] test_a_schema_with_no_batches_is_an_empty_frame_not_no_frame
+    PASS [ 0.029 ] test_a_view_column_split_across_batches_keeps_every_payload
+    PASS [ 0.022 ] test_the_rows_of_a_split_view_column_still_line_up_with_their_number
+    PASS [ 25.491 ] test_a_batch_bigger_than_a_piece_is_copied_by_more_than_one_task
+    PASS [ 0.111 ] test_the_reader_tells_a_file_from_a_stream
+    PASS [ 0.566 ] test_a_file_on_disk_reads_through_the_mapping
+    PASS [ 0.036 ] test_a_timestamp_column_reads_at_the_unit_the_file_says
+    PASS [ 0.020 ] test_a_timestamp_column_holds_the_integers_arrow_wrote
+    PASS [ 0.014 ] test_a_zoned_timestamp_keeps_the_zone_and_a_naive_one_does_not_get_utc
+    PASS [ 0.015 ] test_a_date_column_reads_as_a_count_of_days
+    PASS [ 0.004 ] test_a_date64_column_is_refused_by_name
+    PASS [ 0.006 ] test_a_duration_column_reads_as_an_elapsed_count
+    PASS [ 0.019 ] test_a_list_column_reads_with_its_elements_in_a_child
+    PASS [ 0.007 ] test_the_offsets_of_a_list_are_not_reachable_as_values
+    PASS [ 0.015 ] test_a_struct_column_reads_one_child_per_field
+    PASS [ 0.015 ] test_a_large_list_keeps_the_wider_offsets_the_file_wrote
+    PASS [ 0.011 ] test_a_struct_of_a_list_keeps_both_levels
+    PASS [ 0.007 ] test_a_nested_column_in_more_than_one_batch_is_refused_by_name
+    PASS [ 0.009 ] test_a_nested_column_cannot_be_written_back_out_yet
+    PASS [ 0.017 ] test_a_dictionary_encoded_column_reads_as_a_categorical
+    PASS [ 0.009 ] test_the_codes_of_a_categorical_are_not_reachable_as_values
+    PASS [ 0.012 ] test_an_ordered_dictionary_in_a_file_keeps_its_order_and_its_index_width
+    PASS [ 0.001 ] test_an_ordered_dictionary_is_not_the_same_type_as_an_unordered_one
+    PASS [ 0.005 ] test_a_dictionary_over_something_other_than_strings_is_refused
+    PASS [ 0.008 ] test_a_code_that_points_past_the_categories_is_refused
+    PASS [ 0.008 ] test_categories_that_arrive_in_pieces_are_refused
+    PASS [ 0.006 ] test_a_file_without_the_magic_number_is_refused
+    PASS [ 0.006 ] test_a_file_truncated_at_the_footer_is_refused
+    PASS [ 0.011 ] test_a_stream_truncated_in_a_body_is_refused
+    PASS [ 0.006 ] test_a_stream_that_does_not_begin_with_a_schema_is_refused
+    PASS [ 0.001 ] test_a_stream_of_nothing_is_refused
+--------
+Summary [ 26.844 ] 39 tests run: 39 passed , 0 failed , 0 skipped 
+
+=== tests/test_arrow_stream.mojo
+
+Running 21 tests for /Users/apple/github/tamnd/fp-merge/tests/test_arrow_stream.mojo 
+    PASS [ 0.111 ] test_a_frame_round_trips_through_one_struct_array
+    PASS [ 0.022 ] test_the_imported_frame_owns_its_memory
+    PASS [ 0.011 ] test_both_structures_are_released_by_the_import
+    PASS [ 0.006 ] test_a_refused_import_still_releases_what_it_was_handed
+    PASS [ 0.001 ] test_a_single_column_is_not_a_frame
+    PASS [ 0.010 ] test_a_struct_with_null_rows_is_refused
+    PASS [ 0.004 ] test_a_child_too_short_for_the_parent_is_refused
+    PASS [ 0.006 ] test_the_windows_a_struct_hands_out_own_nothing
+    PASS [ 0.004 ] test_a_parents_offset_is_added_to_every_child
+    PASS [ 0.011 ] test_a_stream_of_one_batch_is_a_frame
+    PASS [ 0.034 ] test_a_stream_of_several_batches_is_one_frame
+    PASS [ 0.005 ] test_a_stream_of_no_batches_is_a_frame_with_no_rows
+    PASS [ 0.007 ] test_a_stream_that_fails_part_way_says_what_the_producer_said
+    PASS [ 0.001 ] test_a_released_stream_is_refused
+    PASS [ 0.009 ] test_an_exported_stream_describes_the_frame
+    PASS [ 0.003 ] test_an_exported_stream_describes_itself_as_often_as_it_is_asked
+    PASS [ 0.004 ] test_an_exported_stream_hands_out_one_batch_and_then_ends
+    PASS [ 0.003 ] test_an_exported_stream_borrows_rather_than_copies
+    PASS [ 0.012 ] test_an_exported_stream_keeps_the_frame_alive
+    PASS [ 0.012 ] test_a_frame_round_trips_through_its_own_stream
+    PASS [ 0.003 ] test_an_exported_stream_released_without_being_read_is_not_a_leak
+--------
+Summary [ 0.278 ] 21 tests run: 21 passed , 0 failed , 0 skipped 
+
+=== tests/test_binary.mojo
+/Users/apple/github/tamnd/fp-merge/tests/test_binary.mojo:148:8: warning: doc string summary should begin with a capital letter or non-alpha character, but this begins with 'p'
+    """pandas answers float32, because `promote` has already decided that an
+       ^
+/Users/apple/github/tamnd/fp-merge/tests/test_binary.mojo:444:8: warning: doc string summary should begin with a capital letter or non-alpha character, but this begins with 'p'
+    """pandas answers `a + b` on two bools with the or, and this is that."""
+       ^
+
+Running 74 tests for /Users/apple/github/tamnd/fp-merge/tests/test_binary.mojo 
+    PASS [ 0.036 ] test_two_columns_of_one_type_keep_that_type
+    PASS [ 0.032 ] test_a_narrower_operand_is_widened_to_the_other
+    PASS [ 0.027 ] test_an_integer_wider_than_the_mantissa_forces_float64
+    PASS [ 0.004 ] test_uint64_with_a_signed_type_goes_to_float64
+    PASS [ 0.013 ] test_dividing_two_integers_answers_float64
+    PASS [ 0.012 ] test_division_keeps_a_float_operand_at_its_own_width
+    PASS [ 0.012 ] test_a_float32_divided_by_an_integer_stays_float32
+    PASS [ 0.008 ] test_an_int64_divided_by_a_float32_is_float64
+    PASS [ 0.018 ] test_a_float32_column_divided_by_a_constant_stays_float32
+    PASS [ 0.011 ] test_floor_division_keeps_the_operand_type_and_floors
+    PASS [ 0.003 ] test_the_remainder_takes_the_sign_of_the_divisor
+    PASS [ 0.005 ] test_an_integer_divided_by_zero_is_null_and_stays_an_integer
+    PASS [ 0.016 ] test_a_zero_divisor_past_the_last_full_register_is_still_found
+    PASS [ 5.590 ] test_a_zero_divisor_is_found_in_every_morsel_of_a_long_column
+    PASS [ 0.016 ] test_a_float_divided_by_zero_is_an_infinity_rather_than_a_null
+    PASS [ 0.004 ] test_a_float_remainder_by_zero_is_a_nan_rather_than_a_null
+    PASS [ 0.007 ] test_a_power_keeps_the_operand_type
+    PASS [ 0.023 ] test_a_negative_integer_exponent_is_refused
+    PASS [ 0.006 ] test_a_negative_float_exponent_is_a_fraction_and_not_an_error
+    PASS [ 0.002 ] test_a_float_power_is_the_answer_numpy_gives_to_the_last_bit
+    PASS [ 0.012 ] test_a_null_row_does_not_look_like_a_zero_divisor
+    PASS [ 0.020 ] test_a_comparison_answers_bool_whatever_went_in
+    PASS [ 0.012 ] test_a_comparison_across_widths_compares_the_values
+    PASS [ 0.002 ] test_a_null_on_either_side_makes_the_answer_null
+    PASS [ 0.002 ] test_a_null_survives_the_conversion_the_promotion_asks_for
+    PASS [ 0.005 ] test_bool_columns_compare
+    PASS [ 0.010 ] test_adding_two_bool_columns_is_the_logical_or
+    PASS [ 0.002 ] test_multiplying_two_bool_columns_is_the_logical_and
+    PASS [ 0.002 ] test_a_null_in_a_bool_operand_propagates
+    PASS [ 0.002 ] test_subtracting_two_bool_columns_names_the_operator_that_works
+    PASS [ 0.003 ] test_three_bool_operations_are_refused_on_two_columns
+    PASS [ 0.008 ] test_the_remainder_of_two_bool_columns_widens_to_int8
+    PASS [ 0.002 ] test_a_bool_with_a_number_takes_the_number
+    PASS [ 0.010 ] test_text_with_a_number_has_no_common_type
+    PASS [ 0.003 ] test_text_with_text_compares_the_elements_not_the_bytes
+    PASS [ 0.002 ] test_arithmetic_on_text_is_still_an_error
+    PASS [ 0.007 ] test_columns_of_different_lengths_are_refused
+    PASS [ 0.001 ] test_the_result_type_is_known_without_a_column
+    PASS [ 0.002 ] test_the_bool_result_types_are_the_seven_pandas_answers
+    PASS [ 0.005 ] test_every_operation_prints_as_the_symbol_it_is_written_with
+    PASS [ 0.001 ] test_only_the_six_comparisons_say_they_are_comparisons
+    PASS [ 0.007 ] test_a_constant_on_the_right_is_applied_to_every_row
+    PASS [ 0.003 ] test_a_constant_promotes_on_its_type_not_its_value
+    PASS [ 0.007 ] test_a_float_constant_promotes_an_integer_column
+    PASS [ 0.006 ] test_subtraction_knows_which_side_the_constant_is_on
+    PASS [ 0.010 ] test_division_knows_which_side_the_constant_is_on
+    PASS [ 0.011 ] test_floor_division_knows_which_side_the_constant_is_on
+    PASS [ 0.003 ] test_the_remainder_knows_which_side_the_constant_is_on
+    PASS [ 0.001 ] test_a_constant_zero_divisor_makes_every_row_null
+    PASS [ 0.001 ] test_a_zero_in_the_column_nulls_a_row_of_a_flipped_division
+    PASS [ 0.007 ] test_a_constant_negative_exponent_is_refused_on_either_side
+    PASS [ 0.002 ] test_a_constant_power_applies_to_every_row
+    PASS [ 0.012 ] test_a_constant_on_the_left_of_a_comparison_is_turned_round
+    PASS [ 0.001 ] test_the_ordered_comparisons_mirror_and_the_others_do_not
+    PASS [ 0.005 ] test_a_comparison_against_a_constant_answers_bool
+    PASS [ 0.001 ] test_a_null_in_the_column_stays_null_against_a_constant
+    PASS [ 0.001 ] test_a_null_constant_makes_every_row_null
+    PASS [ 0.001 ] test_a_null_constant_in_a_comparison_answers_a_bool_column_of_nulls
+    PASS [ 0.001 ] test_a_text_constant_against_a_number_has_no_common_type
+    PASS [ 0.008 ] test_a_bool_constant_ors_and_ands_a_bool_column
+    PASS [ 0.005 ] test_a_bool_constant_remainder_widens_to_int8
+    PASS [ 0.003 ] test_three_bool_operations_are_refused_against_a_constant
+    PASS [ 0.001 ] test_a_number_constant_against_a_bool_column_is_ordinary_arithmetic
+    PASS [ 0.002 ] test_a_weak_integer_takes_the_dtype_of_the_column
+    PASS [ 0.002 ] test_a_constant_that_arrived_with_a_dtype_still_promotes
+    PASS [ 0.001 ] test_a_weak_integer_too_large_for_the_column_is_refused
+    PASS [ 0.002 ] test_a_comparison_against_a_weak_integer_never_narrows
+    PASS [ 0.001 ] test_a_weak_float_takes_the_width_of_a_float_column
+    PASS [ 0.002 ] test_a_weak_float_still_widens_an_integer_column
+    PASS [ 0.001 ] test_a_weak_float_too_large_for_a_float32_column_is_not_refused
+    PASS [ 0.002 ] test_a_weak_bool_takes_the_dtype_of_a_number_column
+    PASS [ 0.002 ] test_a_weak_constant_against_text_is_left_alone
+    PASS [ 0.001 ] test_which_dtype_a_weak_scalar_lands_on
+    PASS [ 0.001 ] test_resolving_a_constant_twice_is_the_same_answer
+--------
+Summary [ 6.068 ] 74 tests run: 74 passed , 0 failed , 0 skipped 
+
+=== tests/test_bitmap.mojo
+
+Running 19 tests for /Users/apple/github/tamnd/fp-merge/tests/test_bitmap.mojo 
+    PASS [ 0.001 ] test_bytes_for
+    PASS [ 0.002 ] test_defaults_to_all_valid
+    PASS [ 0.001 ] test_can_start_all_null
+    PASS [ 0.001 ] test_set_and_get
+    PASS [ 0.001 ] test_bit_order_is_arrow_lsb_first
+    PASS [ 0.006 ] test_tail_bits_stay_clear
+    PASS [ 0.001 ] test_set_range
+    PASS [ 0.001 ] test_set_range_within_one_byte
+    PASS [ 0.001 ] test_empty_range_is_a_no_op
+    PASS [ 0.001 ] test_and_with
+    PASS [ 0.001 ] test_or_with
+    PASS [ 0.001 ] test_slice_byte_aligned
+    PASS [ 0.001 ] test_slice_unaligned
+    PASS [ 0.001 ] test_slice_leaves_the_source_alone
+    PASS [ 0.255 ] test_paste_matches_a_loop_over_bits
+    PASS [ 0.001 ] test_paste_leaves_the_tail_zero
+    PASS [ 0.001 ] test_copy_is_deep
+    PASS [ 0.001 ] test_to_list
+    PASS [ 0.001 ] test_zero_length
+--------
+Summary [ 0.268 ] 19 tests run: 19 passed , 0 failed , 0 skipped 
+
+=== tests/test_buffer.mojo
+
+Running 15 tests for /Users/apple/github/tamnd/fp-merge/tests/test_buffer.mojo 
+    PASS [ 0.001 ] test_round_up
+    PASS [ 0.013 ] test_capacity_is_a_whole_number_of_blocks
+    PASS [ 0.013 ] test_alignment_holds_for_every_size
+    PASS [ 0.001 ] test_new_buffers_are_zeroed
+    PASS [ 0.001 ] test_padding_is_zeroed_too
+    PASS [ 0.001 ] test_copy_is_deep
+    PASS [ 0.001 ] test_bitcast_reads_the_same_bytes
+    PASS [ 0.001 ] test_zero_clears_everything
+    PASS [ 0.010 ] test_overwritten_still_zeroes_the_pad
+    PASS [ 0.001 ] test_overwritten_of_nothing_is_still_a_buffer
+    PASS [ 0.001 ] test_size_classes_are_monotonic_and_sufficient
+    PASS [ 0.001 ] test_size_class_capacity_round_trips
+    PASS [ 0.004 ] test_pool_recycles_and_counts
+    PASS [ 0.002 ] test_pool_hands_back_zeroed_memory
+    PASS [ 0.004 ] test_pool_respects_its_limit
+--------
+Summary [ 0.048 ] 15 tests run: 15 passed , 0 failed , 0 skipped 
+
+=== tests/test_concat.mojo
+
+Running 28 tests for /Users/apple/github/tamnd/fp-merge/tests/test_concat.mojo 
+    PASS [ 0.034 ] test_concat_stacks_in_order
+    PASS [ 0.002 ] test_concat_carries_the_nulls
+    PASS [ 0.001 ] test_concat_of_nothing_is_empty
+    PASS [ 0.002 ] test_concat_of_one_part_is_a_copy
+    PASS [ 0.004 ] test_concat_of_empty_parts
+    PASS [ 0.022 ] test_concat_at_an_unaligned_offset
+    PASS [ 0.042 ] test_concat_any_matches_the_typed_one
+    PASS [ 0.005 ] test_the_two_argument_spelling_agrees_with_the_list_one
+    PASS [ 0.005 ] test_concat_any_refuses_a_different_dtype
+    PASS [ 0.004 ] test_concat_any_refuses_an_empty_list
+    PASS [ 0.015 ] test_concat_series_keeps_the_first_name
+    PASS [ 0.018 ] test_concat_frames_stacks_the_rows
+    PASS [ 0.018 ] test_concat_frames_matches_on_names_not_positions
+    PASS [ 0.020 ] test_concat_frames_takes_more_than_two
+    PASS [ 0.005 ] test_concat_frames_refuses_a_different_width
+    PASS [ 0.003 ] test_concat_frames_refuses_a_missing_column
+    PASS [ 0.004 ] test_concat_frames_refuses_a_different_dtype
+    PASS [ 0.001 ] test_concat_of_no_frames_is_empty
+    PASS [ 0.002 ] test_concat_of_one_frame_is_a_copy
+    PASS [ 0.004 ] test_concat_leaves_its_inputs_alone
+    PASS [ 0.019 ] test_concat_agrees_with_its_twin
+    PASS [ 0.013 ] test_concat_strings_stacks_payloads
+    PASS [ 0.056 ] test_concat_strings_agrees_with_element_by_element
+    PASS [ 0.007 ] test_concat_strings_through_any_and_pairs
+    PASS [ 27.828 ] test_concat_strings_over_the_parallel_threshold
+    PASS [ 38.172 ] test_concat_strings_through_any_over_the_threshold
+    PASS [ 4.293 ] test_concat_fixed_over_the_parallel_threshold
+    PASS [ 0.021 ] test_concat_refs_any_matches_the_owning_spelling
+--------
+Summary [ 70.618 ] 28 tests run: 28 passed , 0 failed , 0 skipped 
+
+=== tests/test_csv.mojo
+
+Running 30 tests for /Users/apple/github/tamnd/fp-merge/tests/test_csv.mojo 
+    PASS [ 0.069 ] test_a_header_names_the_columns
+    PASS [ 0.022 ] test_a_file_without_a_header_gets_positional_names
+    PASS [ 0.008 ] test_integers_infer_as_int64
+    PASS [ 0.003 ] test_one_float_makes_the_whole_column_a_float
+    PASS [ 0.026 ] test_a_float_after_the_sample_is_still_seen_by_default
+    PASS [ 0.012 ] test_a_bounded_sample_can_be_told_to_stop_looking
+    PASS [ 18.595 ] test_a_split_file_settles_on_the_types_full_inference_would_give
+    PASS [ 2.948 ] test_a_declared_schema_still_refuses_a_bad_value_in_a_split_file
+    PASS [ 0.008 ] test_text_stops_the_ladder_at_the_top
+    PASS [ 0.012 ] test_true_and_false_infer_as_bool
+    PASS [ 0.002 ] test_ones_and_zeros_are_integers_not_booleans
+    PASS [ 0.004 ] test_missing_values_do_not_decide_the_type
+    PASS [ 0.003 ] test_a_column_with_no_values_at_all_is_text
+    PASS [ 0.002 ] test_a_quoted_empty_field_is_the_empty_string_not_a_null
+    PASS [ 0.003 ] test_a_quoted_field_holding_a_delimiter_is_one_value
+    PASS [ 0.002 ] test_quoting_does_not_change_the_inferred_type
+    PASS [ 0.006 ] test_a_quoted_empty_field_in_a_number_column_is_still_a_null
+    PASS [ 0.002 ] test_a_doubled_quote_is_one_literal_quote
+    PASS [ 0.004 ] test_a_declared_schema_skips_inference
+    PASS [ 0.002 ] test_a_declared_schema_of_the_wrong_width_is_refused
+    PASS [ 0.009 ] test_a_ragged_file_is_refused
+    PASS [ 0.001 ] test_an_error_names_the_column_and_the_file_row
+    PASS [ 0.001 ] test_an_empty_file_reads_as_an_empty_frame
+    PASS [ 0.002 ] test_a_header_with_no_rows_keeps_its_columns
+    PASS [ 0.016 ] test_the_writer_only_quotes_what_needs_it
+    PASS [ 0.002 ] test_the_writer_spells_a_null_as_an_empty_field
+    PASS [ 0.002 ] test_the_writer_can_be_told_to_leave_the_header_off
+    PASS [ 0.018 ] test_a_frame_survives_a_round_trip
+    PASS [ 0.004 ] test_a_semicolon_file_round_trips_through_its_own_dialect
+    PASS [ 0.001 ] test_inference_reads_the_header_as_a_name_not_a_value
+--------
+Summary [ 21.789 ] 30 tests run: 30 passed , 0 failed , 0 skipped 
+
+=== tests/test_dispatch.mojo
+
+Running 6 tests for /Users/apple/github/tamnd/fp-merge/tests/test_dispatch.mojo 
+    PASS [ 0.016 ] test_dispatch_selects_the_right_instantiation
+    PASS [ 0.013 ] test_dispatch_over_a_narrower_list_raises
+    PASS [ 0.006 ] test_dispatch_rejects_a_dtype_outside_the_list
+    PASS [ 0.001 ] test_the_error_lists_what_was_supported
+    PASS [ 0.001 ] test_dispatch_typed
+    PASS [ 0.001 ] test_list_names
+--------
+Summary [ 0.037 ] 6 tests run: 6 passed , 0 failed , 0 skipped 
+
+=== tests/test_display.mojo
+
+Running 22 tests for /Users/apple/github/tamnd/fp-merge/tests/test_display.mojo 
+    PASS [ 0.059 ] test_a_small_frame_renders_exactly
+    PASS [ 0.009 ] test_a_column_is_as_wide_as_its_own_name
+    PASS [ 0.004 ] test_an_empty_frame_says_so
+    PASS [ 0.018 ] test_a_tall_frame_elides_its_middle
+    PASS [ 0.090 ] test_a_wide_frame_elides_its_columns
+    PASS [ 0.008 ] test_the_limits_are_options_not_constants
+    PASS [ 0.008 ] test_a_null_and_a_nan_do_not_look_the_same
+    PASS [ 0.001 ] test_bools_print_the_way_python_spells_them
+    PASS [ 0.013 ] test_every_dtype_renders_something
+    PASS [ 0.001 ] test_a_null_renders_as_the_null_text
+    PASS [ 0.006 ] test_a_series_prints_its_values_and_its_dtype
+    PASS [ 0.002 ] test_an_unnamed_series_leaves_the_name_out
+    PASS [ 0.011 ] test_a_long_series_reports_its_length
+    PASS [ 0.002 ] test_a_short_series_does_not_report_its_length
+    PASS [ 0.001 ] test_an_empty_series_is_one_line
+    PASS [ 0.001 ] test_a_float_series_reports_the_float_dtype
+    PASS [ 0.002 ] test_floats_are_rounded_and_stripped
+    PASS [ 0.001 ] test_the_precision_is_configurable
+    PASS [ 0.001 ] test_the_special_values_have_their_own_spellings
+    PASS [ 0.001 ] test_the_extremes_fall_back_to_mojo_formatting
+    PASS [ 0.001 ] test_visible_keeps_both_ends_and_marks_the_gap
+    PASS [ 0.008 ] test_a_frame_can_still_report_its_schema_without_its_values
+--------
+Summary [ 0.247 ] 22 tests run: 22 passed , 0 failed , 0 skipped 
+
+=== tests/test_distinct.mojo
+
+Running 9 tests for /Users/apple/github/tamnd/fp-merge/tests/test_distinct.mojo 
+    PASS [ 0.091 ] test_every_column_comes_back_and_not_just_the_keys
+    PASS [ 0.016 ] test_a_repeat_is_decided_by_the_subset_alone
+    PASS [ 0.048 ] test_a_null_key_is_a_group_like_any_other
+    PASS [ 0.024 ] test_with_no_subset_every_column_counts
+    PASS [ 0.014 ] test_the_walk_finds_the_first_row_of_each_group
+    PASS [ 0.009 ] test_the_rows_come_back_in_the_order_they_appeared
+    PASS [ 0.005 ] test_a_frame_with_nothing_repeated_comes_back_whole
+    PASS [ 0.004 ] test_an_empty_frame_stays_empty
+    PASS [ 0.003 ] test_a_missing_or_repeated_column_is_refused
+--------
+Summary [ 0.214 ] 9 tests run: 9 passed , 0 failed , 0 skipped 
+
+=== tests/test_dtype.mojo
+
+Running 32 tests for /Users/apple/github/tamnd/fp-merge/tests/test_dtype.mojo 
+    PASS [ 0.004 ] test_list_membership
+    PASS [ 0.001 ] test_list_sizes
+    PASS [ 0.001 ] test_dtype_size
+    PASS [ 0.001 ] test_logical_for
+    PASS [ 0.001 ] test_predicates
+    PASS [ 0.001 ] test_bit_width
+    PASS [ 0.001 ] test_promote_identical
+    PASS [ 0.004 ] test_promote_null
+    PASS [ 0.001 ] test_promote_same_signedness_takes_the_wider
+    PASS [ 0.001 ] test_promote_mixed_signedness_goes_up_a_width
+    PASS [ 0.001 ] test_promote_uint64_with_signed_goes_to_float64
+    PASS [ 0.001 ] test_promote_float_beats_integer
+    PASS [ 0.001 ] test_promote_bool_with_numeric
+    PASS [ 0.005 ] test_promote_is_symmetric
+    PASS [ 0.011 ] test_promote_string_with_number_raises
+    PASS [ 0.001 ] test_type_kind_equality
+    PASS [ 0.001 ] test_types_print
+    PASS [ 0.002 ] test_a_timestamp_prints_the_way_pandas_spells_its_dtype
+    PASS [ 0.001 ] test_two_timestamps_differing_only_in_unit_are_not_the_same_type
+    PASS [ 0.001 ] test_a_naive_timestamp_is_not_a_zoned_one
+    PASS [ 0.009 ] test_the_longest_zone_name_there_is_fits_and_a_longer_one_does_not
+    PASS [ 0.015 ] test_a_temporal_type_promotes_with_itself_at_the_finer_unit
+    PASS [ 0.001 ] test_a_temporal_type_promotes_with_null_the_way_everything_does
+    PASS [ 0.001 ] test_a_temporal_type_is_not_numeric_even_though_it_holds_integers
+    PASS [ 0.001 ] test_a_dictionary_is_spelled_the_way_pandas_spells_a_categorical
+    PASS [ 0.001 ] test_two_dictionaries_differing_in_index_or_in_order_are_not_one_type
+    PASS [ 0.003 ] test_a_dictionary_promotes_with_nothing_including_itself
+    PASS [ 0.001 ] test_a_bare_int64_array_is_never_a_timestamp
+    PASS [ 0.001 ] test_a_time_unit_knows_how_many_of_it_make_a_second
+    PASS [ 0.001 ] test_a_time_unit_is_spelled_one_way_in_a_dtype_and_another_in_a_format
+    PASS [ 0.001 ] test_an_unknown_time_unit_code_is_refused
+    PASS [ 0.001 ] test_a_logical_type_stays_one_cache_line
+--------
+Summary [ 0.058 ] 32 tests run: 32 passed , 0 failed , 0 skipped 
+
+=== tests/test_flatbuf.mojo
+
+Running 20 tests for /Users/apple/github/tamnd/fp-merge/tests/test_flatbuf.mojo 
+    PASS [ 0.023 ] test_a_table_of_scalars_round_trips
+    PASS [ 0.001 ] test_a_field_equal_to_its_default_is_not_written
+    PASS [ 0.001 ] test_a_field_past_the_end_of_the_vtable_reads_as_its_default
+    PASS [ 0.004 ] test_trailing_empty_slots_are_trimmed
+    PASS [ 0.006 ] test_a_string_field_round_trips
+    PASS [ 0.001 ] test_an_absent_string_reads_as_empty
+    PASS [ 0.001 ] test_an_empty_string_is_written_and_read
+    PASS [ 0.005 ] test_a_vector_of_scalars_round_trips
+    PASS [ 0.001 ] test_a_vector_of_bytes_round_trips
+    PASS [ 0.010 ] test_a_vector_of_tables_round_trips
+    PASS [ 0.002 ] test_identical_tables_share_one_vtable
+    PASS [ 0.002 ] test_tables_with_different_shapes_do_not_share
+    PASS [ 0.008 ] test_a_table_cannot_be_opened_inside_another
+    PASS [ 0.001 ] test_finishing_with_a_table_open_is_refused
+    PASS [ 0.002 ] test_a_slot_outside_the_table_is_refused
+    PASS [ 0.002 ] test_a_truncated_buffer_raises
+    PASS [ 0.001 ] test_a_root_offset_pointing_past_the_end_raises
+    PASS [ 0.002 ] test_an_element_past_the_end_of_a_vector_raises
+    PASS [ 0.006 ] test_a_real_arrow_schema_message_decodes
+    PASS [ 0.001 ] test_a_string_reads_the_same_through_both_paths
+--------
+Summary [ 0.080 ] 20 tests run: 20 passed , 0 failed , 0 skipped 
+
+=== tests/test_frame_arith.mojo
+/Users/apple/github/tamnd/fp-merge/tests/test_frame_arith.mojo:535:8: warning: doc string summary should begin with a capital letter or non-alpha character, but this begins with 'p'
+    """pandas takes the argument and does nothing with it, because a constant is
+       ^
+
+Running 39 tests for /Users/apple/github/tamnd/fp-merge/tests/test_frame_arith.mojo 
+    PASS [ 0.113 ] test_two_frames_on_the_same_labels_and_columns_add_cell_by_cell
+    PASS [ 0.089 ] test_two_frames_align_on_both_the_rows_and_the_columns
+    PASS [ 0.016 ] test_a_column_only_one_frame_has_comes_back_holding_nothing
+    PASS [ 0.033 ] test_a_fill_value_puts_a_one_sided_column_back
+    PASS [ 0.023 ] test_a_fill_value_leaves_a_cell_both_sides_are_missing_alone
+    PASS [ 0.015 ] test_the_column_order_is_kept_when_the_two_frames_agree
+    PASS [ 0.010 ] test_the_column_order_is_sorted_when_the_two_frames_differ
+    PASS [ 0.040 ] test_every_column_lands_on_the_same_rows
+    PASS [ 0.076 ] test_the_seven_operators_against_a_constant
+    PASS [ 0.013 ] test_a_constant_on_the_left_is_not_the_same_as_one_on_the_right
+    PASS [ 0.028 ] test_the_six_comparisons_against_a_constant
+    PASS [ 0.027 ] test_comparing_two_frames_needs_the_same_labels_and_columns
+    PASS [ 0.005 ] test_two_frames_with_the_same_names_in_a_different_order_do_not_compare
+    PASS [ 0.022 ] test_comparing_two_shaped_alike_frames_is_cell_by_cell
+    PASS [ 0.019 ] test_the_erased_comparison_aligns_where_the_operator_refuses
+    PASS [ 0.021 ] test_a_series_is_broadcast_along_the_columns_by_name
+    PASS [ 0.012 ] test_a_label_no_column_answers_to_is_still_a_column
+    PASS [ 0.011 ] test_a_column_the_series_says_nothing_about_holds_nothing
+    PASS [ 0.014 ] test_a_series_broadcast_along_the_columns_can_be_turned_round
+    PASS [ 0.020 ] test_a_series_along_the_index_is_used_as_one_more_column
+    PASS [ 0.006 ] test_a_series_along_the_index_can_be_turned_round
+    PASS [ 0.008 ] test_a_series_with_labels_that_are_not_text_cannot_name_columns
+    PASS [ 0.007 ] test_an_axis_that_is_neither_the_rows_nor_the_columns_is_refused
+    PASS [ 0.026 ] test_the_four_unary_operations_on_an_integer_frame
+    PASS [ 0.008 ] test_a_unary_operation_keeps_the_labels_and_the_column_names
+    PASS [ 0.005 ] test_negating_a_bool_frame_is_the_logical_not
+    PASS [ 0.008 ] test_a_duplicated_row_label_is_refused_when_the_labels_differ
+    PASS [ 0.007 ] test_two_equal_indexes_with_duplicates_still_align
+    PASS [ 0.017 ] test_the_erased_entry_point_takes_the_operation_as_a_value
+    PASS [ 0.046 ] test_the_named_forms_reach_the_same_loops_as_the_operators
+    PASS [ 0.017 ] test_the_reflected_named_forms_turn_the_operands_round
+    PASS [ 0.023 ] test_a_named_form_takes_a_fill_value_between_two_frames
+    PASS [ 0.004 ] test_a_named_form_ignores_a_fill_value_against_a_constant
+    PASS [ 0.003 ] test_a_named_form_refuses_a_fill_value_against_a_series
+    PASS [ 0.031 ] test_a_named_form_takes_an_axis_against_a_series
+    PASS [ 0.016 ] test_a_reflected_named_form_against_a_series_along_the_rows
+    PASS [ 0.017 ] test_the_flexible_comparisons_align_where_the_operators_refuse
+    PASS [ 0.023 ] test_the_six_comparison_named_forms_against_a_constant
+    PASS [ 0.019 ] test_the_comparison_named_forms_reach_a_series_too
+--------
+Summary [ 0.898 ] 39 tests run: 39 passed , 0 failed , 0 skipped 
+
+=== tests/test_frame.mojo
+/Users/apple/github/tamnd/fp-merge/tests/test_frame.mojo:302:42: warning: transfer from an owned value has no effect and can be removed
+    var cut_keys = cut_text.column("key")^.into_values().into_strings()
+                                         ^
+                                         
+/Users/apple/github/tamnd/fp-merge/tests/test_frame.mojo:303:44: warning: transfer from an owned value has no effect and can be removed
+    var flat_keys = flat_text.column("key")^.into_values().into_strings()
+                                           ^
+                                           
+
+Running 57 tests for /Users/apple/github/tamnd/fp-merge/tests/test_frame.mojo 
+    PASS [ 0.047 ] test_a_frame_reports_its_shape
+    PASS [ 0.001 ] test_an_empty_frame_is_zero_by_zero
+    PASS [ 0.011 ] test_the_schema_matches_the_columns
+    PASS [ 0.017 ] test_columns_of_different_lengths_are_rejected
+    PASS [ 0.002 ] test_duplicate_column_names_are_rejected
+    PASS [ 0.003 ] test_a_missing_column_name_raises
+    PASS [ 0.003 ] test_a_column_can_be_borrowed_by_position
+    PASS [ 0.011 ] test_a_frame_takes_a_column_rather_than_copying_it
+    PASS [ 0.026 ] test_a_column_of_several_chunks_refuses_the_whole_column_borrow
+    PASS [ 0.078 ] test_filter_and_slice_keep_the_chunk_boundaries
+    PASS [ 0.020 ] test_a_filter_that_keeps_nothing_leaves_one_empty_chunk
+    PASS [ 0.016 ] test_a_slice_of_no_rows_leaves_one_empty_chunk
+    PASS [ 0.624 ] test_cast_and_take_agree_across_a_chunked_column
+    PASS [ 0.016 ] test_a_column_can_be_copied_by_name
+    PASS [ 0.010 ] test_select_keeps_the_named_columns_in_order
+    PASS [ 0.004 ] test_select_rejects_a_repeated_name
+    PASS [ 0.005 ] test_drop_removes_columns_and_keeps_the_rest_in_order
+    PASS [ 0.011 ] test_rename_changes_one_name_and_nothing_else
+    PASS [ 0.005 ] test_rename_to_the_same_name_is_allowed
+    PASS [ 0.022 ] test_with_column_replaces_in_place_by_name
+    PASS [ 0.008 ] test_with_column_appends_a_new_name
+    PASS [ 0.006 ] test_with_column_rejects_the_wrong_height
+    PASS [ 0.001 ] test_with_column_on_an_empty_frame_sets_the_height
+    PASS [ 0.004 ] test_add_column_appends_without_copying_the_frame
+    PASS [ 0.009 ] test_add_column_replaces_in_place_by_name
+    PASS [ 0.004 ] test_add_column_rejects_the_wrong_height
+    PASS [ 0.001 ] test_add_column_on_an_empty_frame_sets_the_height
+    PASS [ 0.015 ] test_cast_converts_one_column
+    PASS [ 0.010 ] test_cast_carries_nulls_across
+    PASS [ 0.084 ] test_cast_round_trips_every_dtype
+    PASS [ 0.010 ] test_filter_keeps_the_true_rows_of_every_column
+    PASS [ 0.010 ] test_filter_drops_the_rows_the_mask_is_null_on
+    PASS [ 0.003 ] test_filter_rejects_the_wrong_mask_length
+    PASS [ 0.038 ] test_take_gathers_rows_and_a_negative_index_is_a_null
+    PASS [ 0.032 ] test_slice_head_and_tail_agree_with_each_other
+    PASS [ 0.009 ] test_head_and_tail_clamp_rather_than_raise
+    PASS [ 0.048 ] test_a_negative_head_or_tail_counts_from_the_other_end
+    PASS [ 0.007 ] test_a_series_takes_a_negative_head_or_tail_too
+    PASS [ 0.007 ] test_slice_out_of_range_raises
+    PASS [ 0.022 ] test_slice_carries_validity_across_a_word_boundary
+    PASS [ 0.030 ] test_sort_by_one_key_is_stable
+    PASS [ 0.067 ] test_sort_by_descending_reverses_without_breaking_stability
+    PASS [ 0.018 ] test_sort_places_nulls_at_the_chosen_end
+    PASS [ 0.014 ] test_sort_on_two_keys_makes_the_first_dominant
+    PASS [ 0.014 ] test_sort_carries_every_column_by_the_same_permutation
+    PASS [ 0.023 ] test_sort_rejects_a_bad_key_list
+    PASS [ 0.223 ] test_sort_agrees_with_the_kernel_on_a_random_column
+    PASS [ 0.003 ] test_the_series_argsort_hands_back_the_signed_width_pandas_uses
+    PASS [ 0.036 ] test_a_sort_leaves_its_key_marked_sorted
+    PASS [ 0.005 ] test_proving_sortedness_scans_once_and_remembers
+    PASS [ 0.012 ] test_a_null_is_never_monotonic
+    PASS [ 0.017 ] test_sortedness_survives_a_column_in_pieces
+    PASS [ 0.002 ] test_a_series_answers_the_monotonic_question_itself
+    PASS [ 0.002 ] test_a_series_reports_itself
+    PASS [ 0.012 ] test_a_series_slices_takes_and_filters
+    PASS [ 0.005 ] test_a_series_sorts_itself
+    PASS [ 0.070 ] test_a_series_round_trips_through_every_dtype
+--------
+Summary [ 1.812 ] 57 tests run: 57 passed , 0 failed , 0 skipped 
+
+=== tests/test_group_broadcast.mojo
+
+Running 11 tests for /Users/apple/github/tamnd/fp-merge/tests/test_group_broadcast.mojo 
+    PASS [ 0.125 ] test_a_group_sum_lands_on_every_row_of_the_group
+    PASS [ 0.029 ] test_the_rows_stay_in_the_input_order
+    PASS [ 0.019 ] test_a_null_key_gets_its_own_answer_rather_than_being_dropped
+    PASS [ 0.015 ] test_a_null_value_is_skipped_the_way_a_group_by_skips_it
+    PASS [ 0.078 ] test_a_mean_over_a_group_reaches_every_row_of_it
+    PASS [ 0.026 ] test_the_group_used_as_a_filter_on_its_own_rows
+    PASS [ 0.042 ] test_two_keys_and_two_aggregates
+    PASS [ 0.012 ] test_a_text_aggregate_broadcasts_too
+    PASS [ 0.007 ] test_every_row_its_own_group
+    PASS [ 0.006 ] test_an_empty_frame_broadcasts_nothing
+    PASS [ 0.019 ] test_the_refusals
+--------
+Summary [ 0.378 ] 11 tests run: 11 passed , 0 failed , 0 skipped 
+
+=== tests/test_group_node.mojo
+
+Running 32 tests for /Users/apple/github/tamnd/fp-merge/tests/test_group_node.mojo 
+    PASS [ 0.214 ] test_a_sum_folds_across_chunks
+    PASS [ 0.029 ] test_groups_come_out_in_first_seen_order
+    PASS [ 0.052 ] test_a_mean_is_a_sum_and_a_count_until_the_end
+    PASS [ 0.078 ] test_a_count_skips_nulls_and_a_size_does_not
+    PASS [ 0.021 ] test_a_group_of_only_nulls_has_a_null_mean
+    PASS [ 0.017 ] test_a_null_key_is_a_group_of_its_own
+    PASS [ 0.019 ] test_the_extremes_fold
+    PASS [ 0.031 ] test_first_and_last_skip_nulls_across_a_chunk_boundary
+    PASS [ 0.068 ] test_two_key_columns_group_on_the_tuple
+    PASS [ 0.026 ] test_a_text_key_groups_by_its_bytes
+    PASS [ 0.037 ] test_the_extremes_of_a_text_column_fold
+    PASS [ 0.126 ] test_the_node_agrees_with_the_frame_method
+    PASS [ 1.326 ] test_the_node_agrees_with_the_frame_method_on_random_data
+    PASS [ 0.012 ] test_a_group_by_is_a_breaker
+    PASS [ 0.011 ] test_a_pipeline_cuts_at_a_group_by
+    PASS [ 0.018 ] test_the_output_flows_into_the_operators_after_it
+    PASS [ 0.015 ] test_the_schema_is_known_before_a_row_moves
+    PASS [ 0.003 ] test_an_empty_input_gives_an_empty_frame_with_a_schema
+    PASS [ 0.071 ] test_a_filter_after_a_group_by_runs_in_the_second_stage
+    PASS [ 0.013 ] test_a_reduction_that_does_not_fold_is_refused_at_plan_time
+    PASS [ 0.007 ] test_a_distinct_count_does_not_fold_either
+    PASS [ 0.012 ] test_a_key_outside_the_schema_is_caught_at_plan_time
+    PASS [ 0.007 ] test_a_repeated_key_is_caught_at_plan_time
+    PASS [ 0.017 ] test_no_keys_at_all_is_caught_at_plan_time
+    PASS [ 0.010 ] test_a_sum_of_text_is_caught_at_plan_time
+    PASS [ 0.007 ] test_two_outputs_with_the_same_name_are_caught_at_plan_time
+    PASS [ 0.007 ] test_an_output_colliding_with_a_key_is_caught_at_plan_time
+    PASS [ 0.012 ] test_no_aggregates_gives_the_distinct_keys
+    PASS [ 0.097 ] test_a_key_that_is_new_in_every_chunk_keeps_first_seen_order
+    PASS [ 0.040 ] test_a_null_key_arriving_late_still_groups_where_it_first_appeared
+    PASS [ 2.167 ] test_the_lookup_table_keeps_its_ordinals_when_it_outgrows_itself
+    PASS [ 0.266 ] test_a_key_that_walks_out_of_the_direct_window_keeps_its_ordinals
+--------
+Summary [ 4.836 ] 32 tests run: 32 passed , 0 failed , 0 skipped 
+
+=== tests/test_group.mojo
+/Users/apple/github/tamnd/fp-merge/tests/test_group.mojo:2365:32: warning: constant value on left side of 'True and ...'
+        ROWS >= PARTITION_ROWS and GROUPS > SLAB_SERIAL_GROUPS and parts >= 2,
+                               ^
+/Users/apple/github/tamnd/fp-merge/tests/test_group.mojo:2365:43: warning: unreachable code after 'if True'
+        ROWS >= PARTITION_ROWS and GROUPS > SLAB_SERIAL_GROUPS and parts >= 2,
+                                          ^
+
+Running 136 tests for /Users/apple/github/tamnd/fp-merge/tests/test_group.mojo 
+    PASS [ 0.017 ] test_size_counts_every_row_including_nulls
+    PASS [ 0.005 ] test_count_skips_nulls
+    PASS [ 0.005 ] test_sum_treats_a_null_as_zero
+    PASS [ 0.001 ] test_sum_of_an_all_null_group_is_zero_and_present
+    PASS [ 0.001 ] test_count_of_an_all_null_group_is_zero_and_present
+    PASS [ 0.011 ] test_mean_divides_by_the_present_count
+    PASS [ 0.002 ] test_a_grouped_mean_is_not_computed_from_a_wrapped_sum
+    PASS [ 0.007 ] test_mean_of_an_all_null_group_is_nan
+    PASS [ 0.008 ] test_min_and_max_ignore_nulls
+    PASS [ 0.005 ] test_min_and_max_of_an_all_null_group_are_null
+    PASS [ 0.009 ] test_min_and_max_of_an_all_null_float_group_are_nan
+    PASS [ 0.002 ] test_first_and_last_of_an_all_null_float_group_are_nan
+    PASS [ 0.002 ] test_first_and_last_skip_nulls
+    PASS [ 0.001 ] test_first_and_last_of_an_all_null_group_are_null
+    PASS [ 0.001 ] test_an_empty_column_gives_no_groups
+    PASS [ 0.010 ] test_a_group_with_no_rows_still_appears
+    PASS [ 0.021 ] test_the_erased_entry_point_matches_the_typed_one
+    PASS [ 0.006 ] test_a_code_out_of_range_is_refused
+    PASS [ 3.713 ] test_fused_reductions_agree_with_one_at_a_time
+    PASS [ 18.138 ] test_a_fused_pass_carries_the_ones_it_cannot_fuse
+    PASS [ 0.587 ] test_a_fused_pass_of_integer_sums_touches_only_one_of_the_tables
+    PASS [ 44.638 ] test_a_wide_key_answers_what_one_reduction_at_a_time_answers
+    PASS [ 0.380 ] test_a_fused_pass_of_one_is_the_route_it_replaces
+    PASS [ 0.014 ] test_a_fused_pass_refuses_mismatched_lists
+    PASS [ 0.048 ] test_trusted_codes_reduce_to_what_checked_codes_reduce_to
+    PASS [ 0.001 ] test_a_length_mismatch_is_refused
+    PASS [ 0.003 ] test_the_reduction_names_itself
+    PASS [ 0.014 ] test_ordinals_on_one_key_are_dense
+    PASS [ 0.003 ] test_ordinals_agree_on_equal_keys
+    PASS [ 0.532 ] test_no_shape_of_column_factorizes_to_a_sparse_ordinal
+    PASS [ 0.004 ] test_a_numeric_key_with_nulls_is_still_renumbered
+    PASS [ 0.009 ] test_a_numeric_key_without_nulls_keeps_the_factorize_ordinals
+    PASS [ 0.003 ] test_a_direct_route_key_keeps_them_too
+    PASS [ 0.004 ] test_a_null_key_lands_where_its_first_null_is
+    PASS [ 0.021 ] test_the_packed_column_keeps_the_factorize_ordinals
+    PASS [ 1.022 ] test_the_fused_tuple_pack_agrees_with_the_route_it_replaces
+    PASS [ 0.510 ] test_a_key_pair_of_two_dtypes_groups_the_same_as_one_dtype
+    PASS [ 4.827 ] test_both_packing_routes_give_first_appearance_order
+    PASS [ 0.119 ] test_a_key_space_too_wide_for_a_uint32_still_packs_in_one_pass
+    PASS [ 0.022 ] test_a_null_in_the_first_of_two_keys_still_lands_in_place
+    PASS [ 0.008 ] test_two_keys_do_not_merge_groups
+    PASS [ 0.021 ] test_two_keys_collapse_when_the_pairs_repeat
+    PASS [ 2.252 ] test_two_keys_whose_packed_space_is_wider_than_the_cache_table
+    PASS [ 0.146 ] test_enough_keys_to_overflow_the_packed_space_still_groups
+    PASS [ 0.021 ] test_no_keys_is_refused
+    PASS [ 0.105 ] test_group_by_produces_one_row_per_group
+    PASS [ 0.060 ] test_group_by_sorts_by_the_key
+    PASS [ 0.036 ] test_group_by_keeps_null_keys_when_asked
+    PASS [ 0.047 ] test_dropna_on_two_keys_where_only_one_has_nulls
+    PASS [ 0.018 ] test_group_by_unsorted_keeps_first_seen_order
+    PASS [ 0.015 ] test_group_by_with_no_specs_gives_the_distinct_keys
+    PASS [ 0.036 ] test_several_reductions_of_one_column
+    PASS [ 0.026 ] test_an_explicit_output_name_wins
+    PASS [ 0.008 ] test_colliding_output_names_are_refused
+    PASS [ 0.007 ] test_an_output_colliding_with_a_key_is_refused
+    PASS [ 0.004 ] test_a_repeated_key_is_refused
+    PASS [ 0.004 ] test_an_unknown_column_is_refused
+    PASS [ 0.019 ] test_group_agg_reduces_every_other_column
+    PASS [ 0.025 ] test_group_count_counts_rows_not_values
+    PASS [ 0.025 ] test_grouping_on_a_float_key
+    PASS [ 0.023 ] test_grouping_on_a_bool_key
+    PASS [ 0.027 ] test_grouping_on_two_keys_through_the_frame
+    PASS [ 0.015 ] test_grouping_an_empty_frame
+    PASS [ 0.002 ] test_a_spec_renders_as_it_reads
+    PASS [ 0.017 ] test_variance_uses_a_sample_divisor_by_default
+    PASS [ 0.007 ] test_variance_of_a_single_value_is_nan_at_the_default_ddof
+    PASS [ 0.003 ] test_variance_of_a_single_value_is_zero_at_ddof_zero
+    PASS [ 0.003 ] test_variance_skips_nulls_rather_than_counting_them_as_zero
+    PASS [ 0.003 ] test_variance_of_an_all_null_group_is_nan
+    PASS [ 0.004 ] test_standard_deviation_is_the_root_of_the_variance
+    PASS [ 0.015 ] test_the_standard_error_is_the_deviation_over_the_root_of_the_count
+    PASS [ 0.003 ] test_the_standard_error_divides_by_the_plain_count_not_the_divisor
+    PASS [ 0.004 ] test_the_standard_error_matches_pandas_on_a_spread_column
+    PASS [ 0.003 ] test_the_standard_error_of_an_all_null_group_is_nan
+    PASS [ 0.004 ] test_skewness_matches_pandas_on_a_right_leaning_column
+    PASS [ 0.005 ] test_skewness_carries_the_adjustment_pandas_applies
+    PASS [ 0.003 ] test_skewness_of_a_constant_group_is_zero_rather_than_null
+    PASS [ 0.003 ] test_skewness_of_a_symmetric_group_is_zero
+    PASS [ 0.004 ] test_skewness_needs_three_values
+    PASS [ 0.004 ] test_skewness_skips_nulls_rather_than_counting_them_as_zero
+    PASS [ 0.009 ] test_variance_keeps_its_digits_on_large_values
+    PASS [ 0.008 ] test_the_spread_of_a_column_does_not_change_when_the_column_is_shifted
+    PASS [ 0.003 ] test_the_skewness_of_a_column_does_not_change_when_the_column_is_shifted
+    PASS [ 0.008 ] test_median_interpolates_between_two_middle_values
+    PASS [ 0.003 ] test_median_of_an_even_count_of_integers_can_be_a_half
+    PASS [ 0.003 ] test_median_of_an_all_null_group_is_nan
+    PASS [ 0.002 ] test_median_does_not_need_the_input_sorted
+    PASS [ 0.011 ] test_quantile_at_zero_and_one_are_the_extremes
+    PASS [ 0.002 ] test_quantile_interpolates_linearly
+    PASS [ 0.005 ] test_quantile_outside_zero_to_one_is_refused
+    PASS [ 0.004 ] test_distinct_count_ignores_repeats_and_nulls
+    PASS [ 0.002 ] test_distinct_count_of_an_all_null_group_is_zero_and_present
+    PASS [ 0.002 ] test_distinct_count_is_per_group_rather_than_overall
+    PASS [ 0.038 ] test_the_new_reductions_agree_with_their_erased_spelling
+    PASS [ 0.001 ] test_a_bare_code_carries_the_reduction_default
+    PASS [ 0.001 ] test_two_kinds_are_equal_by_reduction_and_not_by_parameter
+    PASS [ 0.002 ] test_the_new_reductions_name_themselves
+    PASS [ 0.009 ] test_a_perfect_line_correlates_at_one_or_minus_one
+    PASS [ 0.002 ] test_a_correlation_matches_the_value_computed_by_hand
+    PASS [ 0.003 ] test_a_correlation_of_a_column_that_does_not_vary_is_nan
+    PASS [ 0.009 ] test_a_correlation_of_fewer_than_two_pairs_is_nan
+    PASS [ 0.002 ] test_a_correlation_drops_a_row_where_either_value_is_null
+    PASS [ 0.002 ] test_a_correlation_keeps_its_digits_on_large_values
+    PASS [ 0.431 ] test_a_parallel_correlation_keeps_its_digits_on_large_values
+    PASS [ 1.099 ] test_a_parallel_covariance_of_a_column_with_itself_is_its_variance
+    PASS [ 0.004 ] test_a_covariance_divides_by_the_count_it_was_asked_for
+    PASS [ 0.003 ] test_a_covariance_of_one_pair_is_nan_at_the_default_divisor
+    PASS [ 0.006 ] test_a_covariance_of_a_column_with_itself_is_its_variance
+    PASS [ 0.010 ] test_the_pair_reductions_agree_through_their_erased_spelling
+    PASS [ 0.034 ] test_the_pair_reductions_agree_when_the_two_dtypes_differ
+    PASS [ 0.017 ] test_a_pair_reduction_over_columns_of_different_lengths_is_refused
+    PASS [ 0.003 ] test_a_single_column_kind_is_refused_by_the_pair_entry_point
+    PASS [ 0.061 ] test_a_frame_correlates_two_columns_within_each_group
+    PASS [ 0.002 ] test_a_pair_spec_names_both_of_its_columns
+    PASS [ 0.096 ] test_a_frame_groups_by_the_new_reductions
+    PASS [ 0.027 ] test_a_frame_wide_variance_keeps_its_degrees_of_freedom
+    PASS [ 0.024 ] test_a_frame_groups_by_the_standard_error
+    PASS [ 0.019 ] test_a_frame_groups_by_the_skewness
+    PASS [ 0.009 ] test_two_quantiles_of_one_column_need_explicit_names
+    PASS [ 1.535 ] test_a_group_by_past_the_parallel_threshold_agrees_with_a_serial_loop
+    PASS [ 4.941 ] test_three_keys_past_the_morsel_size_pack_the_same_as_one_loop
+    PASS [ 12.527 ] test_the_spread_reductions_past_the_threshold_agree_with_a_serial_loop
+    PASS [ 44.093 ] test_a_group_count_too_large_to_replicate_agrees_with_a_serial_loop
+    PASS [ 4.555 ] test_a_slab_too_wide_to_fill_on_one_core_agrees_with_a_hand_answer
+    PASS [ 0.006 ] test_a_grouped_count_does_not_count_a_nan
+    PASS [ 0.002 ] test_a_grouped_sum_steps_over_a_nan
+    PASS [ 0.019 ] test_a_grouped_mean_divides_by_what_is_left_after_the_nans
+    PASS [ 0.005 ] test_a_group_of_nothing_but_nan_has_no_minimum
+    PASS [ 0.003 ] test_a_grouped_extreme_steps_over_a_nan_without_losing_the_group
+    PASS [ 0.003 ] test_a_grouped_first_and_last_step_over_a_nan
+    PASS [ 0.008 ] test_a_grouped_median_steps_over_a_nan
+    PASS [ 0.004 ] test_a_grouped_nunique_does_not_count_a_nan
+    PASS [ 0.007 ] test_a_grouped_variance_steps_over_a_nan
+    PASS [ 0.005 ] test_a_grouped_covariance_drops_the_row_where_either_side_is_a_nan
+    PASS [ 0.004 ] test_an_int_group_never_reads_a_nan_bit_pattern
+    PASS [ 17.021 ] test_a_partitioned_grouped_sum_steps_over_a_nan
+--------
+Summary [ 164.472 ] 136 tests run: 136 passed , 0 failed , 0 skipped 
+
+=== tests/test_hash.mojo
+
+Running 89 tests for /Users/apple/github/tamnd/fp-merge/tests/test_hash.mojo 
+    PASS [ 0.486 ] test_the_parallel_direct_route_agrees_on_a_narrow_range
+    PASS [ 0.867 ] test_the_parallel_direct_route_agrees_past_one_claim_block
+    PASS [ 0.209 ] test_the_parallel_direct_route_agrees_when_every_row_is_a_group
+    PASS [ 0.329 ] test_the_parallel_direct_route_agrees_with_nulls_present
+    PASS [ 0.417 ] test_the_parallel_direct_route_leaves_most_of_its_range_unused
+    PASS [ 0.033 ] test_a_direct_slice_is_read_to_its_last_row_for_one_group
+    PASS [ 0.051 ] test_a_direct_slice_stops_once_it_has_seen_everything
+    PASS [ 0.181 ] test_the_parallel_route_agrees_on_a_low_cardinality_column
+    PASS [ 0.609 ] test_the_parallel_route_agrees_on_a_high_cardinality_column
+    PASS [ 0.643 ] test_the_parallel_route_agrees_when_every_row_is_its_own_group
+    PASS [ 0.484 ] test_the_parallel_route_agrees_on_an_uneven_slice_count
+    PASS [ 0.156 ] test_the_parallel_route_on_one_worker_is_the_serial_route
+    PASS [ 1.371 ] test_the_parallel_route_agrees_with_nulls_scattered_through_it
+    PASS [ 0.103 ] test_the_parallel_route_agrees_when_every_row_is_null
+    PASS [ 0.047 ] test_the_parallel_route_keeps_first_appearance_order_across_slices
+    PASS [ 0.697 ] test_the_parallel_merge_agrees_across_many_buckets
+    PASS [ 4.630 ] test_the_parallel_merge_agrees_past_one_ranking_block
+    PASS [ 0.070 ] test_the_parallel_merge_leaves_most_of_its_buckets_empty
+    PASS [ 0.600 ] test_the_partitioned_route_agrees_with_the_serial_one
+    PASS [ 4.142 ] test_the_partitioned_route_agrees_when_every_row_is_its_own_group
+    PASS [ 0.545 ] test_the_partitioned_route_agrees_with_nulls_scattered_through_it
+    PASS [ 0.260 ] test_the_partitioned_route_agrees_when_every_row_is_null
+    PASS [ 0.118 ] test_the_partitioned_route_keeps_first_appearance_order
+    PASS [ 0.182 ] test_the_partitioned_route_leaves_most_of_its_partitions_empty
+    PASS [ 0.831 ] test_the_parallel_route_sizes_a_slice_past_the_late_checkpoint
+    PASS [ 0.194 ] test_the_parallel_route_agrees_on_floats
+    PASS [ 0.001 ] test_key_bits_widens_signed_values_consistently
+    PASS [ 0.001 ] test_key_bits_canonicalizes_nan
+    PASS [ 0.001 ] test_key_bits_folds_negative_zero_onto_zero
+    PASS [ 0.001 ] test_key_bits_keeps_distinct_floats_distinct
+    PASS [ 0.001 ] test_mix_depends_on_the_seed
+    PASS [ 0.138 ] test_mix_is_injective_on_a_run_of_values
+    PASS [ 0.002 ] test_hash_into_matches_the_scalar_hash
+    PASS [ 0.001 ] test_next_power_of_two
+    PASS [ 0.001 ] test_project_groups_reads_a_collapsing_discovery_rate
+    PASS [ 0.001 ] test_project_groups_reads_a_steady_discovery_rate
+    PASS [ 0.002 ] test_reserve_sizes_for_a_group_count_and_never_shrinks
+    PASS [ 0.005 ] test_reserve_keeps_the_keys_it_already_had
+    PASS [ 0.143 ] test_a_chunked_build_sizes_itself_like_a_whole_one
+    PASS [ 0.002 ] test_table_assigns_dense_ordinals_in_insertion_order
+    PASS [ 0.002 ] test_table_returns_the_same_ordinal_for_a_repeated_key
+    PASS [ 0.001 ] test_table_find_reports_absence
+    PASS [ 0.189 ] test_table_survives_growth
+    PASS [ 0.001 ] test_table_handles_zero_key_bits
+    PASS [ 0.006 ] test_table_respects_a_custom_seed
+    PASS [ 0.021 ] test_radix_partition_covers_every_row_once
+    PASS [ 0.010 ] test_radix_partition_groups_by_the_high_bits
+    PASS [ 0.005 ] test_radix_partition_is_stable
+    PASS [ 0.001 ] test_factorize_of_an_empty_column
+    PASS [ 0.011 ] test_factorize_small_integers
+    PASS [ 0.008 ] test_factorize_assigns_ordinals_in_first_appearance_order
+    PASS [ 0.006 ] test_factorize_gives_nulls_group_zero
+    PASS [ 0.001 ] test_factorize_of_an_all_null_column
+    PASS [ 0.002 ] test_factorize_of_a_column_with_no_nulls_has_no_null_group
+    PASS [ 3.560 ] test_factorize_takes_the_direct_route_under_the_limit
+    PASS [ 10.236 ] test_factorize_takes_the_hashed_route_over_the_limit
+    PASS [ 13.658 ] test_factorize_takes_a_table_wider_than_the_limit_on_a_long_column
+    PASS [ 21.714 ] test_a_wide_direct_table_still_puts_the_nulls_at_ordinal_zero
+    PASS [ 64.367 ] test_a_wide_direct_table_numbers_its_rows_on_every_core
+    PASS [ 64.963 ] test_a_wide_direct_table_split_across_cores_keeps_nulls_at_zero
+    PASS [ 0.116 ] test_the_two_routes_agree_on_the_same_data
+    PASS [ 0.325 ] test_factorize_dense_takes_a_table_wider_than_the_scan_would
+    PASS [ 0.058 ] test_factorize_dense_declines_a_table_wider_than_the_column
+    PASS [ 0.014 ] test_factorize_of_negative_integers
+    PASS [ 0.063 ] test_factorize_of_a_narrow_dtype
+    PASS [ 0.069 ] test_factorize_of_an_unsigned_dtype
+    PASS [ 0.005 ] test_factorize_of_a_single_repeated_value
+    PASS [ 0.115 ] test_factorize_when_every_row_is_its_own_group
+    PASS [ 0.010 ] test_factorize_floats
+    PASS [ 0.002 ] test_factorize_puts_all_nans_in_one_group
+    PASS [ 0.001 ] test_factorize_groups_the_two_zeros_together
+    PASS [ 0.113 ] test_factorize_is_seed_independent
+    PASS [ 0.979 ] test_factorize_with_nulls_on_the_hashed_route
+    PASS [ 0.001 ] test_estimate_groups_on_a_sample_that_stopped_discovering
+    PASS [ 0.001 ] test_estimate_groups_when_every_row_is_a_new_key
+    PASS [ 0.003 ] test_estimate_groups_recovers_a_middling_cardinality
+    PASS [ 0.002 ] test_estimate_groups_recovers_a_high_cardinality
+    PASS [ 0.339 ] test_estimate_groups_stays_between_what_was_seen_and_the_column
+    PASS [ 0.003 ] test_parallel_workers_takes_every_core_on_few_groups
+    PASS [ 0.001 ] test_parallel_workers_splits_a_column_of_distinct_keys
+    PASS [ 0.001 ] test_parallel_workers_splits_a_middling_column
+    PASS [ 0.001 ] test_parallel_workers_stops_short_of_the_cores_it_has
+    PASS [ 0.015 ] test_parallel_workers_never_slices_below_the_minimum
+    PASS [ 0.002 ] test_parallel_workers_is_monotone_in_cardinality
+    PASS [ 0.001 ] test_a_chunk_sized_factorize_stays_on_one_thread
+    PASS [ 0.001 ] test_the_split_thresholds_leave_room_for_more_than_a_few_slices
+    PASS [ 0.001 ] test_text_splits_earlier_than_numbers
+    PASS [ 14.301 ] test_the_range_scan_agrees_across_the_row_it_splits_at
+    PASS [ 1.186 ] test_the_range_scan_skips_nulls_on_both_sides_of_the_split
+--------
+Summary [ 215.030 ] 89 tests run: 89 passed , 0 failed , 0 skipped 
+
+=== tests/test_index_edit.mojo
+
+Running 50 tests for /Users/apple/github/tamnd/fp-merge/tests/test_index_edit.mojo 
+    PASS [ 0.034 ] test_append_concatenates_and_keeps_every_duplicate
+    PASS [ 0.013 ] test_append_keeps_a_name_both_sides_agree_on
+    PASS [ 0.003 ] test_append_drops_a_name_the_sides_disagree_on
+    PASS [ 0.004 ] test_appending_two_adjacent_ranges_stays_a_range
+    PASS [ 0.005 ] test_appending_two_ranges_that_do_not_meet_materializes
+    PASS [ 0.007 ] test_appending_an_empty_index_changes_nothing
+    PASS [ 0.011 ] test_append_takes_several_indexes_at_once
+    PASS [ 0.009 ] test_append_of_several_keeps_only_a_name_all_of_them_share
+    PASS [ 0.025 ] test_delete_removes_one_position
+    PASS [ 0.003 ] test_delete_counts_a_negative_position_from_the_end
+    PASS [ 0.003 ] test_delete_takes_a_list_of_positions
+    PASS [ 0.023 ] test_delete_refuses_a_position_off_the_end
+    PASS [ 0.003 ] test_delete_on_a_range_gives_the_labels_that_are_left
+    PASS [ 0.002 ] test_delete_keeps_the_name
+    PASS [ 0.009 ] test_insert_puts_a_label_in_the_middle
+    PASS [ 0.004 ] test_insert_at_the_length_appends
+    PASS [ 0.004 ] test_insert_counts_a_negative_position_from_the_end
+    PASS [ 0.002 ] test_insert_refuses_a_position_past_the_length
+    PASS [ 0.002 ] test_insert_refuses_more_than_one_label
+    PASS [ 0.003 ] test_inserting_a_null_keeps_the_dtype
+    PASS [ 0.013 ] test_insert_works_on_a_string_index
+    PASS [ 0.024 ] test_drop_removes_every_row_carrying_a_label
+    PASS [ 0.027 ] test_drop_refuses_a_label_the_index_does_not_have
+    PASS [ 0.007 ] test_drop_names_the_missing_label_in_the_message
+    PASS [ 0.014 ] test_drop_ignores_a_missing_label_when_asked
+    PASS [ 0.002 ] test_drop_refuses_a_word_that_is_neither
+    PASS [ 0.006 ] test_drop_matches_a_missing_label_with_a_missing_label
+    PASS [ 0.005 ] test_putmask_replaces_with_one_label
+    PASS [ 0.004 ] test_putmask_replaces_row_for_row_from_a_column
+    PASS [ 0.004 ] test_putmask_with_nothing_set_returns_the_index_unchanged
+    PASS [ 0.002 ] test_putmask_refuses_a_mask_of_the_wrong_length
+    PASS [ 0.002 ] test_putmask_refuses_a_replacement_of_the_wrong_length
+    PASS [ 0.009 ] test_a_bound_on_an_ascending_index
+    PASS [ 0.001 ] test_a_bound_for_a_label_the_index_does_not_have
+    PASS [ 0.002 ] test_a_bound_outside_the_index_clamps
+    PASS [ 0.008 ] test_a_bound_lands_on_the_edge_of_a_run_of_duplicates
+    PASS [ 0.002 ] test_bounds_on_a_descending_index
+    PASS [ 0.001 ] test_bounds_on_a_descending_index_with_duplicates
+    PASS [ 0.001 ] test_slice_locs_with_no_bounds_is_the_whole_index
+    PASS [ 0.002 ] test_slice_locs_with_one_bound
+    PASS [ 0.001 ] test_a_bound_on_a_non_monotonic_index_looks_the_label_up
+    PASS [ 0.008 ] test_a_bound_on_a_non_monotonic_index_refuses_a_missing_label
+    PASS [ 0.002 ] test_a_bound_on_a_non_monotonic_index_refuses_a_repeated_label
+    PASS [ 0.002 ] test_a_bound_refuses_a_side_that_is_neither
+    PASS [ 0.002 ] test_a_bound_refuses_more_than_one_label
+    PASS [ 0.007 ] test_a_bound_on_a_range_agrees_with_the_general_route
+    PASS [ 0.002 ] test_a_missing_label_sorts_past_the_end
+    PASS [ 0.004 ] test_bounds_on_a_string_index
+    PASS [ 0.001 ] test_bounds_on_an_empty_index
+    PASS [ 0.002 ] test_slice_indexer_carries_the_step_through
+--------
+Summary [ 0.336 ] 50 tests run: 50 passed , 0 failed , 0 skipped 
+
+=== tests/test_index_lookup.mojo
+
+Running 27 tests for /Users/apple/github/tamnd/fp-merge/tests/test_index_lookup.mojo 
+    PASS [ 0.005 ] test_a_range_is_unique_without_being_looked_at
+    PASS [ 0.043 ] test_labels_are_unique_when_they_are_all_different
+    PASS [ 0.012 ] test_two_missing_labels_are_one_label
+    PASS [ 0.001 ] test_a_range_is_increasing_and_is_not_decreasing
+    PASS [ 0.002 ] test_labels_are_scanned_for_monotonicity
+    PASS [ 0.001 ] test_a_missing_label_makes_an_index_neither
+    PASS [ 0.001 ] test_a_range_finds_a_label_by_subtracting
+    PASS [ 0.006 ] test_a_range_says_nothing_is_there_when_it_is_outside
+    PASS [ 0.025 ] test_the_range_route_agrees_with_the_label_route
+    PASS [ 0.008 ] test_labels_are_found_wherever_they_sit
+    PASS [ 0.005 ] test_a_label_that_is_not_there_is_not_found
+    PASS [ 0.004 ] test_a_null_finds_a_null
+    PASS [ 0.014 ] test_text_labels_are_found_too
+    PASS [ 0.014 ] test_get_indexer_refuses_a_repeated_label
+    PASS [ 0.004 ] test_get_indexer_refuses_a_label_of_another_type
+    PASS [ 0.010 ] test_the_non_unique_form_gives_every_position
+    PASS [ 0.005 ] test_the_non_unique_form_reports_what_it_did_not_find
+    PASS [ 0.004 ] test_the_non_unique_form_works_on_a_unique_index
+    PASS [ 0.009 ] test_get_loc_gives_every_position_a_label_sits_at
+    PASS [ 0.003 ] test_get_loc_raises_rather_than_answering_with_a_sentinel
+    PASS [ 0.002 ] test_get_loc_takes_one_label
+    PASS [ 0.002 ] test_a_range_equals_the_labels_it_stands_for
+    PASS [ 0.001 ] test_two_ranges_compare_without_materializing
+    PASS [ 0.002 ] test_equality_ignores_the_name_and_identical_does_not
+    PASS [ 0.002 ] test_a_missing_label_equals_a_missing_label
+    PASS [ 0.005 ] test_text_labels_compare_by_value
+    PASS [ 0.003 ] test_an_empty_index_looks_up_nothing_and_finds_nothing
+--------
+Summary [ 0.192 ] 27 tests run: 27 passed , 0 failed , 0 skipped 
+
+=== tests/test_index_setops.mojo
+
+Running 24 tests for /Users/apple/github/tamnd/fp-merge/tests/test_index_setops.mojo 
+    PASS [ 0.092 ] test_a_union_sorts_by_default
+    PASS [ 0.013 ] test_an_unsorted_union_is_this_index_then_the_new_labels
+    PASS [ 0.013 ] test_a_union_keeps_the_larger_of_the_two_counts
+    PASS [ 0.039 ] test_a_union_with_itself_does_not_sort
+    PASS [ 0.015 ] test_a_union_with_an_empty_index_does_not_sort_either
+    PASS [ 0.001 ] test_a_union_of_two_default_ranges_never_materializes
+    PASS [ 0.016 ] test_an_intersection_keeps_this_index_s_order
+    PASS [ 0.007 ] test_an_intersection_is_unique_even_when_both_sides_are_not
+    PASS [ 0.012 ] test_an_intersection_with_itself_is_itself
+    PASS [ 0.005 ] test_an_intersection_with_nothing_in_common_is_empty
+    PASS [ 0.014 ] test_a_difference_sorts_by_default_and_is_unique
+    PASS [ 0.010 ] test_a_difference_from_itself_is_empty
+    PASS [ 0.009 ] test_a_symmetric_difference_is_what_only_one_side_has
+    PASS [ 0.021 ] test_an_unsorted_symmetric_difference_is_ours_then_theirs
+    PASS [ 0.046 ] test_the_name_survives_when_both_sides_agree
+    PASS [ 0.008 ] test_an_unnamed_index_stays_unnamed
+    PASS [ 0.008 ] test_a_symmetric_difference_takes_a_name_to_use
+    PASS [ 0.026 ] test_a_missing_label_is_an_ordinary_label
+    PASS [ 0.009 ] test_two_missing_labels_on_one_side_are_one_label
+    PASS [ 0.071 ] test_text_labels_take_the_same_four_routes
+    PASS [ 0.011 ] test_two_dtypes_are_refused_rather_than_guessed_at
+    PASS [ 0.008 ] test_unique_keeps_the_first_of_each_label
+    PASS [ 0.001 ] test_unique_on_a_range_is_the_range
+    PASS [ 0.014 ] test_get_indexer_for_answers_whichever_kind_of_index_it_has
+--------
+Summary [ 0.467 ] 24 tests run: 24 passed , 0 failed , 0 skipped 
+
+=== tests/test_index.mojo
+
+Running 30 tests for /Users/apple/github/tamnd/fp-merge/tests/test_index.mojo 
+    PASS [ 0.009 ] test_a_new_index_is_the_default_range
+    PASS [ 0.026 ] test_a_range_materializes_to_the_labels_it_stands_for
+    PASS [ 0.003 ] test_a_range_that_does_not_start_at_zero_is_not_default
+    PASS [ 0.001 ] test_slicing_from_the_front_keeps_the_default
+    PASS [ 0.006 ] test_slicing_from_the_back_keeps_a_range_and_loses_the_default
+    PASS [ 0.010 ] test_slicing_a_materialized_index_slices_the_labels
+    PASS [ 0.002 ] test_taking_materializes_and_permutes
+    PASS [ 0.009 ] test_a_negative_position_gathers_a_null_label
+    PASS [ 0.005 ] test_filtering_keeps_the_labels_of_the_rows_it_keeps
+    PASS [ 0.006 ] test_filtering_a_gathered_index_keeps_the_original_labels
+    PASS [ 0.002 ] test_a_name_survives_every_operation_that_chooses_rows
+    PASS [ 0.001 ] test_an_empty_index_is_still_a_default_range
+    PASS [ 0.031 ] test_the_range_fast_path_agrees_with_gathering_the_labels
+    PASS [ 0.044 ] test_the_filter_fast_path_agrees_with_filtering_the_labels
+    PASS [ 0.009 ] test_a_frame_starts_with_the_default_index
+    PASS [ 0.009 ] test_a_frame_head_keeps_the_default_and_tail_does_not
+    PASS [ 0.023 ] test_a_frame_sort_carries_the_labels_of_the_rows_it_moved
+    PASS [ 0.020 ] test_dropping_nulls_leaves_holes_in_the_labels
+    PASS [ 0.007 ] test_a_series_carries_labels_the_same_way_a_frame_does
+    PASS [ 0.003 ] test_labels_survive_two_operations_in_a_row
+    PASS [ 0.074 ] test_a_grouped_result_gets_fresh_labels
+    PASS [ 0.005 ] test_choosing_columns_does_not_choose_rows
+    PASS [ 0.005 ] test_dropping_a_column_keeps_the_labels_too
+    PASS [ 0.003 ] test_selecting_no_columns_keeps_the_height_and_the_labels
+    PASS [ 0.013 ] test_as_index_puts_the_key_in_the_labels
+    PASS [ 0.014 ] test_the_labels_follow_the_group_order_that_was_asked_for
+    PASS [ 0.026 ] test_the_values_are_the_same_whichever_shape_is_asked_for
+    PASS [ 0.074 ] test_as_index_with_two_keys_says_why_it_cannot
+    PASS [ 0.032 ] test_a_column_of_a_frame_carries_the_frame_labels
+    PASS [ 0.044 ] test_group_agg_and_group_count_pass_as_index_through
+--------
+Summary [ 0.515 ] 30 tests run: 30 passed , 0 failed , 0 skipped 
+
+=== tests/test_join_keys.mojo
+
+Running 28 tests for /Users/apple/github/tamnd/fp-merge/tests/test_join_keys.mojo 
+    PASS [ 0.105 ] test_rows_with_the_same_key_get_the_same_ordinal
+    PASS [ 0.015 ] test_a_key_on_only_one_side_gets_the_miss_ordinal
+    PASS [ 0.003 ] test_the_miss_ordinal_is_one_past_every_real_one
+    PASS [ 0.010 ] test_every_ordinal_indexes_a_table_of_the_group_count
+    PASS [ 0.003 ] test_the_smaller_side_is_built_whichever_side_it_is
+    PASS [ 0.001 ] test_a_key_below_the_build_range_matches_nothing
+    PASS [ 0.002 ] test_a_key_above_the_build_range_matches_nothing
+    PASS [ 0.010 ] test_keys_too_far_apart_for_a_table_still_align
+    PASS [ 0.001 ] test_a_null_key_on_the_probe_side_matches_nothing
+    PASS [ 0.001 ] test_a_null_key_on_the_build_side_is_flagged
+    PASS [ 0.002 ] test_a_column_with_no_nulls_leaves_the_flag_list_empty
+    PASS [ 0.040 ] test_two_key_columns_align_on_the_tuple
+    PASS [ 0.019 ] test_a_string_key_aligns
+    PASS [ 0.029 ] test_a_string_key_against_a_much_smaller_side_aligns
+    PASS [ 0.236 ] test_a_string_key_aligns_the_same_way_on_either_route
+    PASS [ 0.009 ] test_a_null_string_key_matches_nothing_on_the_string_table
+    PASS [ 5.850 ] test_a_string_probe_past_the_split_aligns_what_one_thread_would
+    PASS [ 0.014 ] test_a_float_key_aligns
+    PASS [ 0.020 ] test_every_nan_is_the_same_key
+    PASS [ 0.003 ] test_negative_zero_is_the_same_key_as_zero
+    PASS [ 0.023 ] test_an_empty_side_leaves_every_row_unmatched
+    PASS [ 0.006 ] test_a_side_of_one_repeated_key_gives_one_group_and_a_miss
+    PASS [ 3.472 ] test_a_probe_past_the_split_aligns_what_one_thread_would
+    PASS [ 0.007 ] test_a_table_probed_in_two_pieces_answers_as_it_would_in_one
+    PASS [ 0.015 ] test_a_wide_key_table_probed_in_two_pieces_answers_the_same_way
+    PASS [ 0.003 ] test_a_probe_of_nothing_leaves_the_table_ready_for_the_next_one
+    PASS [ 0.019 ] test_a_table_built_from_one_dtype_refuses_a_probe_of_another
+    PASS [ 0.545 ] test_probing_on_one_core_gives_what_probing_on_all_of_them_gives
+--------
+Summary [ 10.463 ] 28 tests run: 28 passed , 0 failed , 0 skipped 
+
+=== tests/test_join.mojo
+
+Running 50 tests for /Users/apple/github/tamnd/fp-merge/tests/test_join.mojo 
+    PASS [ 0.147 ] test_an_inner_join_keeps_only_the_matches
+    PASS [ 0.033 ] test_an_inner_join_pairs_every_combination_of_a_repeated_key
+    PASS [ 0.020 ] test_a_left_join_keeps_every_left_row
+    PASS [ 0.020 ] test_a_left_join_nulls_the_right_columns_of_an_unmatched_row
+    PASS [ 0.016 ] test_a_null_key_matches_nothing_including_another_null
+    PASS [ 0.016 ] test_a_left_join_still_emits_the_row_whose_key_is_null
+    PASS [ 0.026 ] test_a_right_join_comes_out_in_right_row_order
+    PASS [ 0.017 ] test_a_right_join_fills_the_shared_key_from_the_right
+    PASS [ 0.015 ] test_an_outer_join_keeps_both_sides
+    PASS [ 0.016 ] test_an_outer_join_puts_the_unmatched_right_rows_last
+    PASS [ 0.015 ] test_an_outer_join_fills_the_shared_key_from_whichever_side_had_it
+    PASS [ 0.021 ] test_a_semi_join_returns_each_matching_left_row_once
+    PASS [ 0.013 ] test_a_semi_join_has_no_right_columns
+    PASS [ 0.015 ] test_an_anti_join_returns_the_left_rows_that_matched_nothing
+    PASS [ 0.015 ] test_an_anti_join_keeps_a_row_whose_key_is_null
+    PASS [ 0.036 ] test_a_cross_join_is_the_product
+    PASS [ 0.017 ] test_a_cross_join_refuses_key_columns
+    PASS [ 0.018 ] test_a_colliding_right_column_gets_the_suffix
+    PASS [ 0.022 ] test_a_suffix_that_still_collides_is_refused
+    PASS [ 0.015 ] test_a_suffix_can_be_chosen
+    PASS [ 0.064 ] test_two_keys_must_both_match
+    PASS [ 0.009 ] test_key_columns_of_different_dtypes_are_refused
+    PASS [ 0.018 ] test_keys_named_differently_keep_both_columns
+    PASS [ 0.007 ] test_a_missing_key_column_is_refused
+    PASS [ 0.014 ] test_the_key_lists_must_be_the_same_length
+    PASS [ 0.008 ] test_a_key_given_twice_is_refused
+    PASS [ 0.034 ] test_an_empty_right_frame_leaves_a_left_join_intact
+    PASS [ 0.017 ] test_an_empty_right_frame_gives_an_empty_inner_join
+    PASS [ 0.019 ] test_an_empty_left_frame_leaves_a_right_join_intact
+    PASS [ 0.037 ] test_every_nan_key_is_the_same_key
+    PASS [ 0.015 ] test_negative_zero_is_the_same_key_as_zero
+    PASS [ 0.045 ] test_the_pairing_matches_the_nested_twin
+    PASS [ 0.009 ] test_an_unmatched_left_row_uses_a_negative_index
+    PASS [ 0.016 ] test_a_join_leaves_both_inputs_alone
+    PASS [ 171.378 ] test_a_frame_past_the_split_pairs_what_one_loop_would
+    PASS [ 6.491 ] test_a_null_key_past_the_split_still_matches_nothing
+    PASS [ 10.924 ] test_a_unique_right_key_past_the_split_pairs_what_one_loop_would
+    PASS [ 0.050 ] test_a_projection_keeps_only_the_named_columns
+    PASS [ 0.024 ] test_a_projection_keeps_them_in_the_order_they_were_asked_for
+    PASS [ 0.159 ] test_a_projection_changes_nothing_but_which_columns_are_built
+    PASS [ 0.023 ] test_a_projected_key_of_an_outer_join_still_comes_from_both_sides
+    PASS [ 0.014 ] test_an_empty_projection_keeps_every_column
+    PASS [ 0.013 ] test_a_projected_name_the_result_does_not_have_is_refused
+    PASS [ 0.011 ] test_a_projected_name_asked_for_twice_is_refused
+    PASS [ 0.019 ] test_a_projection_can_name_a_suffixed_column
+    PASS [ 0.096 ] test_pairing_a_side_in_two_pieces_gives_what_pairing_it_once_gives
+    PASS [ 0.098 ] test_pairing_in_pieces_agrees_on_a_key_unique_on_the_built_side
+    PASS [ 0.021 ] test_a_piece_of_no_rows_pairs_with_nothing
+    PASS [ 1.921 ] test_pairing_on_one_core_gives_what_pairing_on_all_of_them_gives
+    PASS [ 2.794 ] test_an_outer_join_marks_the_same_built_rows_however_many_cores_it_used
+--------
+Summary [ 194.861 ] 50 tests run: 50 passed , 0 failed , 0 skipped 
+
+=== tests/test_jsonscan.mojo
+
+Running 26 tests for /Users/apple/github/tamnd/fp-merge/tests/test_jsonscan.mojo 
+    PASS [ 0.021 ] test_an_object_reports_a_member_per_key
+    PASS [ 0.001 ] test_a_string_span_is_inside_its_quotes_and_after_is_outside
+    PASS [ 0.005 ] test_a_number_keeps_the_bytes_it_was_written_as
+    PASS [ 0.001 ] test_null_true_and_false_are_three_different_things
+    PASS [ 0.001 ] test_whitespace_anywhere_it_is_allowed_is_ignored
+    PASS [ 0.003 ] test_an_empty_object_has_no_members
+    PASS [ 0.002 ] test_a_nested_value_is_one_span_and_is_not_descended_into
+    PASS [ 0.004 ] test_a_brace_inside_a_string_is_a_brace
+    PASS [ 0.001 ] test_a_repeated_key_is_reported_twice
+    PASS [ 0.001 ] test_a_string_with_no_backslash_says_it_has_none
+    PASS [ 0.001 ] test_the_eight_escapes_turn_into_what_they_mean
+    PASS [ 0.001 ] test_a_unicode_escape_becomes_utf8
+    PASS [ 0.001 ] test_a_surrogate_pair_becomes_one_character
+    PASS [ 0.002 ] test_a_string_that_never_closes_is_an_error
+    PASS [ 0.001 ] test_an_escape_that_is_not_one_is_an_error
+    PASS [ 0.001 ] test_a_short_unicode_escape_is_an_error
+    PASS [ 0.001 ] test_a_number_with_a_leading_zero_is_an_error
+    PASS [ 0.001 ] test_a_number_with_nothing_after_its_point_is_an_error
+    PASS [ 0.001 ] test_a_number_with_nothing_after_its_exponent_is_an_error
+    PASS [ 0.001 ] test_a_missing_colon_is_an_error
+    PASS [ 0.001 ] test_a_key_that_is_not_a_string_is_an_error
+    PASS [ 0.001 ] test_a_missing_comma_is_an_error
+    PASS [ 0.001 ] test_an_object_that_never_closes_is_an_error
+    PASS [ 0.001 ] test_a_nested_value_that_never_closes_is_an_error
+    PASS [ 0.001 ] test_something_that_is_not_a_value_is_an_error
+    PASS [ 0.001 ] test_scanning_a_value_on_its_own_works_too
+--------
+Summary [ 0.053 ] 26 tests run: 26 passed , 0 failed , 0 skipped 
+
+=== tests/test_kernel.mojo
+
+Running 49 tests for /Users/apple/github/tamnd/fp-merge/tests/test_kernel.mojo 
+    PASS [ 0.044 ] test_sum_matches_the_twin_for_every_numeric_dtype
+    PASS [ 0.058 ] test_min_and_max_match_the_twin_for_every_numeric_dtype
+    PASS [ 0.003 ] test_min_and_max_see_the_last_partial_word
+    PASS [ 0.005 ] test_min_ignores_the_zeros_under_the_nulls
+    PASS [ 0.007 ] test_count_and_mean_match_the_twin
+    PASS [ 0.003 ] test_sum_of_all_null_is_zero
+    PASS [ 0.001 ] test_min_of_all_null_is_invalid
+    PASS [ 0.001 ] test_every_reduction_steps_over_a_nan
+    PASS [ 0.003 ] test_a_column_of_nothing_but_nan_has_no_minimum
+    PASS [ 0.003 ] test_a_real_infinity_is_not_mistaken_for_an_empty_block
+    PASS [ 0.003 ] test_a_nan_inside_a_full_validity_word_is_still_skipped
+    PASS [ 1.484 ] test_a_nan_past_the_morsel_split_is_still_skipped
+    PASS [ 0.001 ] test_an_int_column_never_reads_a_nan_bit_pattern
+    PASS [ 0.001 ] test_reductions_over_an_empty_column
+    PASS [ 0.003 ] test_sum_widens_so_it_does_not_overflow
+    PASS [ 0.001 ] test_setitem_into_a_null_breaks_the_invariant
+    PASS [ 0.112 ] test_arithmetic_matches_the_twin
+    PASS [ 0.102 ] test_floor_division_and_the_remainder_match_the_twin
+    PASS [ 0.003 ] test_a_float_quotient_of_an_infinity_is_a_nan
+    PASS [ 0.007 ] test_a_float_remainder_takes_the_sign_of_the_divisor
+    PASS [ 0.003 ] test_a_float_remainder_stays_exact_past_the_whole_integers
+    PASS [ 0.002 ] test_a_float32_remainder_stays_exact_past_its_own_line
+    PASS [ 0.052 ] test_the_power_matches_the_twin
+    PASS [ 0.016 ] test_a_negative_exponent_stops_the_integer_loops_and_not_the_float_ones
+    PASS [ 0.083 ] test_the_unary_operations_match_the_twin
+    PASS [ 0.003 ] test_subtraction_matches_the_twin_on_signed_values
+    PASS [ 0.005 ] test_arithmetic_nulls_where_either_side_is_null
+    PASS [ 0.002 ] test_division_is_float_and_does_not_null_on_zero
+    PASS [ 0.042 ] test_comparison_matches_the_twin
+    PASS [ 0.006 ] test_comparison_covers_the_six_operators
+    PASS [ 0.001 ] test_comparison_against_a_null_is_null
+    PASS [ 1.656 ] test_reductions_past_the_split_agree_with_one_thread
+    PASS [ 1.125 ] test_a_reduction_over_nothing_but_nulls_past_the_split_is_invalid
+    PASS [ 3.620 ] test_arithmetic_and_comparison_past_the_split_are_right_everywhere
+    PASS [ 0.014 ] test_cast_matches_the_twin_and_keeps_the_nulls
+    PASS [ 1.131 ] test_a_cast_past_the_split_converts_every_row
+    PASS [ 0.022 ] test_take_matches_the_twin
+    PASS [ 0.470 ] test_a_take_past_the_split_gathers_the_right_rows
+    PASS [ 0.443 ] test_a_take_past_the_split_from_a_column_with_no_nulls
+    PASS [ 0.426 ] test_a_take_by_consecutive_indices_is_the_slice_it_looks_like
+    PASS [ 0.527 ] test_a_take_by_almost_consecutive_indices_falls_back
+    PASS [ 0.481 ] test_a_take_by_consecutive_indices_still_carries_nulls
+    PASS [ 0.002 ] test_take_turns_a_negative_index_into_a_null
+    PASS [ 0.007 ] test_filter_matches_the_twin
+    PASS [ 0.003 ] test_filter_drops_the_rows_the_mask_is_null_at
+    PASS [ 0.001 ] test_filter_carries_the_nulls_of_the_values_across
+    PASS [ 0.002 ] test_slice_copies_values_and_validity
+    PASS [ 0.001 ] test_slice_from_an_unaligned_start
+    PASS [ 0.001 ] test_bitmap_word_accessors_agree_with_the_bits
+--------
+Summary [ 11.990 ] 49 tests run: 49 passed , 0 failed , 0 skipped 
+
+=== tests/test_mapped.mojo
+
+Running 8 tests for /Users/apple/github/tamnd/fp-merge/tests/test_mapped.mojo 
+    PASS [ 0.473 ] test_a_mapping_holds_the_bytes_that_are_in_the_file
+    PASS [ 0.317 ] test_a_mapping_survives_a_file_larger_than_one_page
+    PASS [ 0.017 ] test_a_file_that_is_not_there_maps_to_nothing
+    PASS [ 0.061 ] test_an_empty_file_maps_to_nothing
+    PASS [ 0.190 ] test_reading_a_file_agrees_with_reading_its_bytes
+    PASS [ 0.117 ] test_reading_a_file_as_a_declared_schema
+    PASS [ 0.104 ] test_a_declared_schema_that_does_not_fit_the_file_is_refused
+    PASS [ 0.065 ] test_reading_an_empty_file_goes_through_the_fallback
+--------
+Summary [ 1.344 ] 8 tests run: 8 passed , 0 failed , 0 skipped 
+
+=== tests/test_member.mojo
+
+Running 11 tests for /Users/apple/github/tamnd/fp-merge/tests/test_member.mojo 
+    PASS [ 0.121 ] test_numbers_match_the_twin
+    PASS [ 0.011 ] test_a_duplicate_member_changes_nothing
+    PASS [ 0.005 ] test_an_empty_set_is_all_false_and_not_all_null
+    PASS [ 0.001 ] test_a_null_row_stays_null_on_both_routes
+    PASS [ 0.001 ] test_a_null_member_is_not_a_member
+    PASS [ 0.078 ] test_text_matches_the_twin
+    PASS [ 0.002 ] test_text_nulls_stay_null
+    PASS [ 7.112 ] test_a_column_either_side_of_the_morsel_split_matches_the_twin
+    PASS [ 39.869 ] test_a_text_column_either_side_of_the_morsel_split_matches_the_twin
+    PASS [ 0.054 ] test_a_series_lookup_is_a_mask_and_then_a_filter
+    PASS [ 0.013 ] test_a_series_lookup_across_types_is_refused
+--------
+Summary [ 47.267 ] 11 tests run: 11 passed , 0 failed , 0 skipped 
+
+=== tests/test_morsel.mojo
+
+Running 14 tests for /Users/apple/github/tamnd/fp-merge/tests/test_morsel.mojo 
+    PASS [ 0.001 ] test_a_queue_hands_out_every_row_once
+    PASS [ 0.001 ] test_a_drained_queue_stays_drained
+    PASS [ 0.001 ] test_the_last_morsel_is_short_rather_than_over_the_end
+    PASS [ 0.001 ] test_a_queue_over_nothing_hands_out_nothing
+    PASS [ 0.001 ] test_a_morsel_of_zero_rows_is_treated_as_one
+    PASS [ 0.001 ] test_the_morsel_count_is_the_rounded_up_division
+    PASS [ 0.001 ] test_an_empty_morsel_is_false_and_a_real_one_is_true
+    PASS [ 2.771 ] test_running_over_rows_touches_each_one_exactly_once
+    PASS [ 0.001 ] test_a_job_smaller_than_a_morsel_still_runs
+    PASS [ 0.003 ] test_a_job_of_no_rows_does_nothing_and_does_not_hang
+    PASS [ 0.020 ] test_a_failure_in_one_morsel_comes_back_to_the_caller
+    PASS [ 0.292 ] test_a_failure_does_not_stop_the_other_workers_finishing
+    PASS [ 0.020 ] test_uneven_work_is_shared_out_rather_than_split_in_advance
+    PASS [ 0.001 ] test_the_default_morsel_is_a_chunk
+--------
+Summary [ 3.107 ] 14 tests run: 14 passed , 0 failed , 0 skipped 
+
+=== tests/test_ndjson.mojo
+
+Running 29 tests for /Users/apple/github/tamnd/fp-merge/tests/test_ndjson.mojo 
+    PASS [ 0.323 ] test_one_object_per_line_becomes_one_row_per_line
+    PASS [ 0.020 ] test_a_column_of_whole_numbers_is_an_integer_column
+    PASS [ 0.007 ] test_a_number_written_with_a_point_is_a_float_column
+    PASS [ 0.005 ] test_an_exponent_is_a_float_too
+    PASS [ 0.010 ] test_true_and_false_make_a_boolean_column
+    PASS [ 0.020 ] test_a_missing_key_is_a_null
+    PASS [ 0.005 ] test_an_explicit_null_is_the_same_as_a_missing_key
+    PASS [ 0.006 ] test_a_column_of_nothing_but_nulls_is_a_string_column
+    PASS [ 0.021 ] test_a_column_appears_where_the_file_first_mentions_it
+    PASS [ 0.008 ] test_mixed_kinds_in_one_column_fall_to_text
+    PASS [ 0.011 ] test_a_nested_value_is_kept_as_the_text_it_was_written_as
+    PASS [ 0.006 ] test_a_string_with_escapes_comes_out_unescaped
+    PASS [ 0.005 ] test_blank_lines_are_not_rows
+    PASS [ 0.005 ] test_a_file_with_no_trailing_newline_still_reads_its_last_line
+    PASS [ 0.001 ] test_an_empty_buffer_is_an_empty_frame
+    PASS [ 0.005 ] test_an_object_with_no_members_is_a_row_of_nothing
+    PASS [ 0.005 ] test_a_repeated_key_takes_the_first_one
+    PASS [ 0.005 ] test_a_key_with_an_escape_in_it_is_the_key_it_spells
+    PASS [ 0.005 ] test_a_bound_on_the_sample_is_a_bound_on_what_gets_looked_at
+    PASS [ 0.012 ] test_a_line_that_is_not_an_object_is_an_error
+    PASS [ 0.006 ] test_a_line_that_never_closes_is_an_error
+    PASS [ 0.747 ] test_reading_a_file_from_disk_gives_the_same_frame
+    PASS [ 0.013 ] test_a_file_that_is_not_there_is_an_error
+    PASS [ 0.102 ] test_an_empty_file_is_an_empty_frame
+    PASS [ 0.001 ] test_cutting_a_buffer_into_blocks_lands_on_line_starts
+    PASS [ 0.007 ] test_a_newline_inside_a_string_would_be_illegal_so_a_brace_is_safe
+    PASS [ 0.001 ] test_scanning_one_block_reports_its_lines_and_their_members
+    PASS [ 21.381 ] test_a_file_big_enough_to_split_reads_the_same_as_a_small_one
+    PASS [ 32.974 ] test_a_big_file_with_ragged_lines_lines_its_nulls_up
+--------
+Summary [ 55.717 ] 29 tests run: 29 passed , 0 failed , 0 skipped 
+
+=== tests/test_nested.mojo
+
+Running 19 tests for /Users/apple/github/tamnd/fp-merge/tests/test_nested.mojo 
+    PASS [ 0.038 ] test_the_children_of_a_node_are_the_ones_that_name_it
+    PASS [ 0.006 ] test_a_subtree_is_the_node_and_everything_under_it
+    PASS [ 0.007 ] test_a_subtree_comes_back_with_a_parent_before_its_children
+    PASS [ 0.005 ] test_a_field_is_found_by_name_only_at_the_top_level
+    PASS [ 0.001 ] test_a_type_with_nothing_under_it_prints_as_itself
+    PASS [ 0.007 ] test_a_list_with_two_children_is_refused_rather_than_printed
+    PASS [ 0.001 ] test_an_empty_struct_is_still_a_struct
+    PASS [ 0.004 ] test_a_nested_column_needs_at_least_the_node_it_is
+    PASS [ 0.001 ] test_a_node_that_holds_no_strings_says_so
+    PASS [ 0.012 ] test_a_nested_column_does_not_fit_in_one_node
+    PASS [ 0.005 ] test_the_type_name_of_a_column_is_the_whole_type
+    PASS [ 0.008 ] test_a_field_lifted_out_carries_the_part_of_the_tree_below_it
+    PASS [ 0.005 ] test_the_element_column_of_a_list_is_not_as_long_as_the_list
+    PASS [ 0.005 ] test_a_field_that_is_not_there_is_refused_by_name
+    PASS [ 0.002 ] test_the_calls_that_want_a_tree_refuse_a_column_that_is_not_one
+    PASS [ 0.003 ] test_a_struct_is_not_a_list_and_has_no_offsets
+    PASS [ 0.010 ] test_the_offsets_of_a_list_are_not_reachable_as_values
+    PASS [ 0.003 ] test_slicing_a_nested_column_is_refused_rather_than_guessed
+    PASS [ 0.004 ] test_a_nested_column_counts_the_bytes_of_every_level
+--------
+Summary [ 0.127 ] 19 tests run: 19 passed , 0 failed , 0 skipped 
+
+=== tests/test_nulls.mojo
+
+Running 51 tests for /Users/apple/github/tamnd/fp-merge/tests/test_nulls.mojo 
+    PASS [ 0.026 ] test_is_null_reports_the_missing_rows
+    PASS [ 0.015 ] test_is_not_null_is_the_opposite
+    PASS [ 0.003 ] test_the_mask_is_never_null_itself
+    PASS [ 0.031 ] test_is_null_crosses_a_word_boundary
+    PASS [ 0.001 ] test_is_null_on_a_column_with_no_nulls
+    PASS [ 2.791 ] test_is_null_past_the_split_reports_every_row
+    PASS [ 0.036 ] test_is_null_erased_matches_the_typed_one
+    PASS [ 0.008 ] test_coalesce_takes_the_second_where_the_first_is_missing
+    PASS [ 0.016 ] test_coalesce_leaves_a_row_null_when_both_are
+    PASS [ 0.001 ] test_coalesce_broadcasts_a_single_row
+    PASS [ 3.073 ] test_coalesce_past_the_split_picks_the_right_side
+    PASS [ 0.018 ] test_coalesce_refuses_a_length_that_is_neither
+    PASS [ 0.008 ] test_coalesce_refuses_a_different_dtype
+    PASS [ 0.003 ] test_fill_forward_carries_the_last_value
+    PASS [ 0.001 ] test_fill_forward_leaves_the_leading_nulls
+    PASS [ 0.005 ] test_fill_backward_carries_the_next_value
+    PASS [ 0.001 ] test_fill_backward_leaves_the_trailing_nulls
+    PASS [ 0.001 ] test_the_two_directions_disagree
+    PASS [ 0.001 ] test_a_limit_stops_the_carry
+    PASS [ 0.001 ] test_a_limit_resets_at_each_present_value
+    PASS [ 0.001 ] test_a_column_of_nothing_but_nulls_is_unchanged
+    PASS [ 0.007 ] test_fill_crosses_a_word_boundary
+    PASS [ 0.026 ] test_fill_erased_matches_the_typed_one
+    PASS [ 0.009 ] test_all_valid_mask_is_the_intersection
+    PASS [ 0.001 ] test_all_valid_mask_of_no_columns_is_all_true
+    PASS [ 0.011 ] test_series_drop_nulls
+    PASS [ 0.002 ] test_series_fill_null_with_a_scalar
+    PASS [ 0.002 ] test_series_fill_directions
+    PASS [ 0.004 ] test_series_is_null_returns_a_usable_mask
+    PASS [ 0.002 ] test_a_nan_is_missing_and_a_cleared_bit_is_missing
+    PASS [ 0.001 ] test_an_int_column_never_reads_its_values
+    PASS [ 0.001 ] test_a_nan_counts_as_missing_and_a_count_says_so
+    PASS [ 0.001 ] test_a_count_over_a_float_column_with_no_nans_is_unchanged
+    PASS [ 0.007 ] test_a_nan_past_a_word_boundary_is_still_found
+    PASS [ 0.004 ] test_a_cleared_row_cannot_contribute_a_nan
+    PASS [ 0.002 ] test_series_null_count_is_the_pandas_one
+    PASS [ 0.020 ] test_drop_nulls_drops_a_nan_row
+    PASS [ 0.009 ] test_frame_drop_nulls_looks_at_every_column
+    PASS [ 0.006 ] test_frame_drop_nulls_narrows_to_a_subset
+    PASS [ 0.002 ] test_frame_drop_nulls_refuses_a_missing_column
+    PASS [ 0.006 ] test_frame_fill_null_leaves_the_other_columns_alone
+    PASS [ 0.087 ] test_the_kernels_agree_with_their_twins
+    PASS [ 0.011 ] test_is_null_agrees_with_its_twin_on_a_float_column
+    PASS [ 0.001 ] test_a_fill_carries_over_a_nan_and_not_from_one
+    PASS [ 0.001 ] test_a_backward_fill_carries_over_a_nan_and_not_from_one
+    PASS [ 0.001 ] test_a_float_row_that_cannot_be_filled_comes_back_as_a_nan
+    PASS [ 0.001 ] test_an_int_row_that_cannot_be_filled_is_still_a_null
+    PASS [ 0.002 ] test_a_float_column_with_nothing_to_carry_fills_to_nothing
+    PASS [ 0.001 ] test_a_nan_counts_against_the_fill_limit
+    PASS [ 0.003 ] test_a_float_fill_crosses_a_word_boundary
+    PASS [ 0.092 ] test_the_fills_agree_with_their_twin_on_a_float_column
+--------
+Summary [ 6.359 ] 51 tests run: 51 passed , 0 failed , 0 skipped 
+
+=== tests/test_parallel.mojo
+
+Running 8 tests for /Users/apple/github/tamnd/fp-merge/tests/test_parallel.mojo 
+    PASS [ 0.054 ] test_every_index_runs
+    PASS [ 0.003 ] test_a_count_of_zero_does_nothing
+    PASS [ 0.001 ] test_a_count_of_one_still_runs_the_body
+    PASS [ 0.033 ] test_a_failure_is_raised_rather_than_aborted
+    PASS [ 0.001 ] test_a_single_index_failure_is_raised_unchanged
+    PASS [ 0.015 ] test_the_indices_that_did_not_fail_still_ran
+    PASS [ 0.012 ] test_the_first_failure_by_index_is_the_one_reported
+    PASS [ 0.001 ] test_there_is_at_least_one_worker
+--------
+Summary [ 0.119 ] 8 tests run: 8 passed , 0 failed , 0 skipped 
+
+=== tests/test_parquet.mojo
+
+Running 16 tests for /Users/apple/github/tamnd/fp-merge/tests/test_parquet.mojo 
+    PASS [ 86.439 ] test_a_parquet_file_reads_with_its_schema
+    PASS [ 7.562 ] test_the_numbers_come_back_the_way_they_went_in
+    PASS [ 9.429 ] test_a_double_column_keeps_its_null_and_its_extremes
+    PASS [ 7.774 ] test_a_string_column_reads_empty_null_and_long
+    PASS [ 9.366 ] test_a_bool_column_unpacks_from_bits
+    PASS [ 9.836 ] test_naming_columns_reads_only_those_and_in_that_order
+    PASS [ 9.684 ] test_a_partitioned_directory_reads_its_directories_as_columns
+    PASS [ 8.807 ] test_turning_the_partitioning_off_leaves_just_the_files
+    PASS [ 8.032 ] test_a_partition_column_can_be_projected_like_any_other
+    PASS [ 10.493 ] test_asking_where_a_row_came_from_adds_a_filename_column
+    PASS [ 12.104 ] test_every_option_at_once_is_still_one_query
+    PASS [ 16.904 ] test_a_glob_of_two_files_reads_as_one_frame
+    PASS [ 0.002 ] test_asking_for_no_columns_is_refused
+    PASS [ 10.879 ] test_a_file_that_is_not_there_says_so
+    PASS [ 7.527 ] test_a_column_that_is_not_there_says_so
+    PASS [ 0.001 ] test_a_path_with_an_apostrophe_is_a_path_and_not_syntax
+--------
+Summary [ 214.839 ] 16 tests run: 16 passed , 0 failed , 0 skipped 
+
+=== tests/test_parse.mojo
+
+Running 27 tests for /Users/apple/github/tamnd/fp-merge/tests/test_parse.mojo 
+    PASS [ 0.008 ] test_a_plain_integer_parses
+    PASS [ 0.001 ] test_a_signed_integer_parses
+    PASS [ 0.001 ] test_zero_parses_in_every_spelling
+    PASS [ 0.001 ] test_an_integer_with_trailing_junk_fails
+    PASS [ 0.001 ] test_an_empty_or_sign_only_field_is_not_an_integer
+    PASS [ 0.001 ] test_the_extreme_signed_values_parse
+    PASS [ 0.001 ] test_one_past_the_extreme_signed_values_fails
+    PASS [ 0.001 ] test_a_narrow_dtype_range_checks
+    PASS [ 0.001 ] test_an_unsigned_dtype_refuses_a_negative
+    PASS [ 0.001 ] test_a_number_too_long_for_the_accumulator_fails
+    PASS [ 0.005 ] test_a_plain_float_parses
+    PASS [ 0.001 ] test_a_float_with_no_point_parses
+    PASS [ 0.001 ] test_a_float_with_an_exponent_parses
+    PASS [ 0.001 ] test_a_float_with_a_leading_or_trailing_point_parses
+    PASS [ 0.001 ] test_a_float_with_no_digits_fails
+    PASS [ 0.001 ] test_a_float_with_trailing_junk_fails
+    PASS [ 0.001 ] test_the_specials_parse
+    PASS [ 0.001 ] test_a_float_is_exact_where_it_promises_to_be
+    PASS [ 0.005 ] test_a_float_outside_the_exact_range_is_exact_too
+    PASS [ 0.022 ] test_a_float_with_more_digits_than_fit_is_still_correctly_rounded
+    PASS [ 0.001 ] test_the_fallback_does_not_widen_what_is_accepted
+    PASS [ 0.002 ] test_an_absurd_exponent_saturates
+    PASS [ 0.001 ] test_a_float_narrows_to_float32
+    PASS [ 0.001 ] test_booleans_parse_in_the_three_cases
+    PASS [ 0.001 ] test_a_digit_is_not_a_boolean
+    PASS [ 0.002 ] test_the_missing_sentinels
+    PASS [ 0.001 ] test_a_value_is_not_missing
+--------
+Summary [ 0.060 ] 27 tests run: 27 passed , 0 failed , 0 skipped 
+
+=== tests/test_pattern.mojo
+
+Running 12 tests for /Users/apple/github/tamnd/fp-merge/tests/test_pattern.mojo 
+    PASS [ 0.070 ] test_contains_matches_the_twin
+    PASS [ 0.032 ] test_starts_with_matches_the_twin
+    PASS [ 0.020 ] test_ends_with_matches_the_twin
+    PASS [ 0.039 ] test_two_substrings_in_order_match_the_twin
+    PASS [ 0.005 ] test_two_substrings_in_order_is_not_two_contains
+    PASS [ 0.002 ] test_two_substrings_in_order_do_not_overlap
+    PASS [ 0.006 ] test_a_null_row_stays_null
+    PASS [ 0.001 ] test_find_reports_the_first_match_and_not_any_match
+    PASS [ 0.001 ] test_find_does_not_read_past_the_end
+    PASS [ 0.003 ] test_a_needle_longer_than_the_haystack_is_absent
+    PASS [ 0.004 ] test_an_empty_needle_is_everywhere
+    PASS [ 22.815 ] test_a_column_either_side_of_the_morsel_split_matches_the_twin
+--------
+Summary [ 22.996 ] 12 tests run: 12 passed , 0 failed , 0 skipped 
+
+=== tests/test_pick.mojo
+
+Running 13 tests for /Users/apple/github/tamnd/fp-merge/tests/test_pick.mojo 
+    PASS [ 0.032 ] test_a_condition_with_no_nulls_matches_the_twins
+    PASS [ 0.012 ] test_a_null_condition_takes_the_false_side
+    PASS [ 0.010 ] test_a_null_on_the_chosen_side_comes_through
+    PASS [ 0.004 ] test_a_null_under_the_output_still_holds_a_zero
+    PASS [ 0.001 ] test_a_constant_on_the_false_side_is_never_null
+    PASS [ 0.004 ] test_two_constants_never_produce_a_null
+    PASS [ 0.015 ] test_a_word_hanging_over_the_end_of_the_column
+    PASS [ 0.030 ] test_a_column_ending_part_way_through_a_word
+    PASS [ 1.736 ] test_a_column_either_side_of_the_morsel_split_matches_the_twin
+    PASS [ 0.017 ] test_text_matches_the_twin
+    PASS [ 0.007 ] test_a_length_mismatch_is_refused
+    PASS [ 0.010 ] test_a_series_pick_is_the_q14_shape
+    PASS [ 0.006 ] test_a_series_pick_across_types_is_refused
+--------
+Summary [ 1.884 ] 13 tests run: 13 passed , 0 failed , 0 skipped 
+
+=== tests/test_pipeline.mojo
+
+Running 77 tests for /Users/apple/github/tamnd/fp-merge/tests/test_pipeline.mojo 
+    PASS [ 0.051 ] test_a_chunk_refuses_columns_of_different_lengths
+    PASS [ 0.051 ] test_a_scan_hands_out_the_chunks_the_frame_was_made_of
+    PASS [ 0.016 ] test_a_scan_refuses_columns_cut_in_different_places
+    PASS [ 0.043 ] test_a_pipeline_of_nothing_gives_the_frame_back
+    PASS [ 1.190 ] test_a_filter_and_a_projection_agree_with_the_frame_methods
+    PASS [ 0.054 ] test_a_filter_keeps_the_chunk_boundaries
+    PASS [ 0.014 ] test_a_filter_that_empties_a_chunk_drops_it
+    PASS [ 0.021 ] test_a_projection_may_repeat_a_column
+    PASS [ 0.009 ] test_a_projection_outside_the_schema_is_refused_when_it_is_added
+    PASS [ 0.014 ] test_a_limit_stops_the_scan
+    PASS [ 0.010 ] test_a_limit_says_it_is_finished_and_the_driver_believes_it
+    PASS [ 0.007 ] test_a_limit_of_zero_reads_nothing
+    PASS [ 0.034 ] test_a_fallback_runs_a_whole_frame_operation
+    PASS [ 0.014 ] test_a_fallback_is_a_breaker_and_cuts_the_pipeline
+    PASS [ 0.020 ] test_operators_after_a_breaker_see_what_it_produced
+    PASS [ 0.018 ] test_a_fallback_that_changes_the_schema_has_to_say_so
+    PASS [ 0.016 ] test_a_fallback_that_lies_about_its_schema_is_caught
+    PASS [ 0.001 ] test_a_sink_that_saw_nothing_still_has_the_right_shape
+    PASS [ 0.072 ] test_a_computed_column_goes_on_the_end_with_the_name_it_was_given
+    PASS [ 0.046 ] test_a_comparison_makes_the_mask_a_filter_then_reads
+    PASS [ 0.019 ] test_a_computed_column_keeps_the_chunk_boundaries
+    PASS [ 0.008 ] test_a_compute_over_a_missing_column_is_caught_when_the_plan_is_built
+    PASS [ 0.024 ] test_a_compute_with_no_answer_on_those_types_is_caught_at_plan_time
+    PASS [ 0.041 ] test_a_cast_changes_a_column_in_place_and_says_so_in_the_schema
+    PASS [ 0.008 ] test_a_cast_over_a_missing_column_is_caught_when_the_plan_is_built
+    PASS [ 0.001 ] test_none_of_the_elementwise_nodes_break_a_pipeline
+    PASS [ 0.034 ] test_a_constant_is_an_operand_like_a_column_is
+    PASS [ 0.036 ] test_the_predicate_the_engine_exists_for_runs_end_to_end
+    PASS [ 0.026 ] test_a_constant_on_the_left_of_a_plan_comparison_is_turned_round
+    PASS [ 0.013 ] test_a_constant_computes_its_result_type_at_plan_time
+    PASS [ 0.008 ] test_a_constant_with_no_answer_on_that_type_is_caught_at_plan_time
+    PASS [ 0.023 ] test_a_text_predicate_runs_end_to_end
+    PASS [ 0.024 ] test_two_text_columns_compare_against_each_other
+    PASS [ 0.007 ] test_a_text_comparison_is_a_bool_column_at_plan_time
+    PASS [ 0.010 ] test_arithmetic_on_text_is_caught_at_plan_time
+    PASS [ 0.002 ] test_the_elementwise_nodes_are_the_row_local_ones
+    PASS [ 0.001 ] test_only_a_limit_can_end_before_its_input_does
+    PASS [ 0.001 ] test_a_stateful_node_refuses_to_be_applied_without_being_mutated
+    PASS [ 2.329 ] test_the_parallel_prefix_keeps_the_rows_in_the_order_the_source_had_them
+    PASS [ 0.543 ] test_the_parallel_prefix_agrees_with_the_frame_methods
+    PASS [ 1.120 ] test_a_breaker_after_the_parallel_prefix_sees_every_row
+    PASS [ 0.085 ] test_a_limit_over_many_chunks_still_reads_one_chunk
+    PASS [ 0.002 ] test_only_the_operators_that_do_arithmetic_are_worth_a_task
+    PASS [ 0.158 ] test_a_projection_on_its_own_still_returns_every_row_in_order
+    PASS [ 0.061 ] test_a_reduction_over_chunks_gives_the_whole_frame_answer
+    PASS [ 0.021 ] test_a_mean_over_uneven_chunks_is_not_a_mean_of_means
+    PASS [ 0.533 ] test_a_reduction_reduces_what_reached_it
+    PASS [ 0.010 ] test_a_reduction_holds_everything_until_the_input_is_done
+    PASS [ 0.012 ] test_a_reduction_that_does_not_fold_is_refused_at_plan_time
+    PASS [ 0.006 ] test_a_reduction_with_nothing_to_reduce_is_an_error
+    PASS [ 0.011 ] test_two_reductions_cannot_be_given_the_same_name
+    PASS [ 0.011 ] test_a_reduction_of_a_column_that_is_not_there_is_an_error
+    PASS [ 0.020 ] test_a_sum_of_a_column_of_names_is_an_error
+    PASS [ 0.133 ] test_a_join_in_a_pipeline_gives_what_the_frame_join_gives
+    PASS [ 0.090 ] test_a_join_over_chunks_agrees_with_a_join_over_one_chunk
+    PASS [ 0.154 ] test_a_join_over_forty_chunks_matches_the_whole_frame_join
+    PASS [ 0.032 ] test_a_left_join_keeps_a_row_that_matched_nothing
+    PASS [ 0.026 ] test_a_semi_join_keeps_the_left_columns_and_nothing_else
+    PASS [ 0.039 ] test_an_anti_join_keeps_the_rows_that_matched_nothing
+    PASS [ 0.049 ] test_a_join_builds_only_the_columns_it_was_asked_for
+    PASS [ 0.037 ] test_a_join_feeding_a_reduction_never_writes_its_output
+    PASS [ 0.004 ] test_a_join_is_row_local_and_does_not_break_the_pipeline
+    PASS [ 0.027 ] test_a_join_that_matched_nothing_in_a_chunk_drops_the_chunk
+    PASS [ 0.023 ] test_a_null_key_matches_nothing_on_either_side
+    PASS [ 0.011 ] test_an_outer_join_in_a_pipeline_is_refused
+    PASS [ 0.010 ] test_a_right_join_in_a_pipeline_is_refused
+    PASS [ 0.087 ] test_a_join_on_a_text_key_gives_what_the_frame_join_gives
+    PASS [ 0.065 ] test_a_text_join_over_chunks_agrees_with_one_over_one_chunk
+    PASS [ 0.050 ] test_a_left_join_on_a_text_key_keeps_a_row_that_matched_nothing
+    PASS [ 0.012 ] test_a_join_on_keys_of_different_dtypes_is_refused
+    PASS [ 0.013 ] test_a_join_of_a_text_key_against_a_byte_key_is_refused
+    PASS [ 0.018 ] test_a_join_asked_for_a_column_the_result_has_not_got_is_refused
+    PASS [ 0.014 ] test_a_right_column_that_collides_is_suffixed
+    PASS [ 0.379 ] test_a_mean_folded_on_every_core_is_not_a_mean_of_means
+    PASS [ 0.561 ] test_folding_on_every_core_gives_what_folding_on_one_gives
+    PASS [ 0.153 ] test_a_reduction_behind_a_join_folds_on_the_core_that_probed
+    PASS [ 0.005 ] test_a_partial_row_of_the_wrong_width_is_refused
+--------
+Summary [ 8.900 ] 77 tests run: 77 passed , 0 failed , 0 skipped 
+
+=== tests/test_reduce.mojo
+
+Running 31 tests for /Users/apple/github/tamnd/fp-merge/tests/test_reduce.mojo 
+    PASS [ 0.174 ] test_sum_agrees_with_the_group_by
+    PASS [ 0.028 ] test_mean_agrees_with_the_group_by
+    PASS [ 0.007 ] test_a_mean_is_not_computed_from_a_wrapped_sum
+    PASS [ 0.017 ] test_min_agrees_with_the_group_by
+    PASS [ 0.009 ] test_max_agrees_with_the_group_by
+    PASS [ 0.009 ] test_count_agrees_with_the_group_by
+    PASS [ 0.008 ] test_size_agrees_with_the_group_by
+    PASS [ 0.008 ] test_first_agrees_with_the_group_by
+    PASS [ 0.008 ] test_last_agrees_with_the_group_by
+    PASS [ 0.026 ] test_var_agrees_with_the_group_by
+    PASS [ 0.017 ] test_std_agrees_with_the_group_by
+    PASS [ 0.013 ] test_sem_agrees_with_the_group_by
+    PASS [ 0.015 ] test_skew_agrees_with_the_group_by
+    PASS [ 0.033 ] test_median_agrees_with_the_group_by
+    PASS [ 0.010 ] test_quantile_agrees_with_the_group_by
+    PASS [ 0.018 ] test_nunique_agrees_with_the_group_by
+    PASS [ 0.064 ] test_a_float_column_agrees_too
+    PASS [ 0.002 ] test_a_sum_widens_the_way_the_group_by_widens
+    PASS [ 0.004 ] test_a_column_of_all_nulls_follows_the_pandas_policy
+    PASS [ 0.007 ] test_an_all_null_float_column_reduces_to_nan_and_not_to_a_null
+    PASS [ 0.002 ] test_an_empty_column_sums_to_zero_and_has_no_minimum
+    PASS [ 0.009 ] test_a_boolean_column_reduces_one_value_at_a_time
+    PASS [ 0.006 ] test_a_string_column_counts_without_reading_the_values
+    PASS [ 0.006 ] test_a_string_column_takes_the_grouped_route_for_a_minimum
+    PASS [ 0.005 ] test_a_string_column_refuses_a_sum
+    PASS [ 0.009 ] test_agg_returns_one_row_named_by_the_specs
+    PASS [ 0.006 ] test_agg_refuses_two_outputs_with_the_same_name
+    PASS [ 0.008 ] test_agg_refuses_an_empty_spec_list
+    PASS [ 0.004 ] test_agg_refuses_a_column_that_is_not_there
+    PASS [ 0.008 ] test_agg_all_reduces_every_column_and_keeps_the_names
+    PASS [ 0.039 ] test_a_correlation_over_the_whole_frame_agrees_with_the_group_by
+--------
+Summary [ 0.579 ] 31 tests run: 31 passed , 0 failed , 0 skipped 
+
+=== tests/test_scan.mojo
+
+Running 23 tests for /Users/apple/github/tamnd/fp-merge/tests/test_scan.mojo 
+    PASS [ 0.024 ] test_a_plain_file_splits_into_rows_and_fields
+    PASS [ 0.002 ] test_a_file_with_no_trailing_newline_is_the_same
+    PASS [ 0.002 ] test_carriage_returns_are_not_data
+    PASS [ 0.001 ] test_blank_lines_are_skipped
+    PASS [ 0.001 ] test_an_empty_buffer_has_no_rows
+    PASS [ 0.002 ] test_empty_fields_are_fields
+    PASS [ 0.005 ] test_a_trailing_delimiter_opens_one_more_field
+    PASS [ 0.002 ] test_a_single_column_file_scans
+    PASS [ 0.001 ] test_a_quoted_field_loses_its_quotes
+    PASS [ 0.001 ] test_a_quoted_field_can_hold_the_delimiter
+    PASS [ 0.002 ] test_a_quoted_field_can_hold_a_newline
+    PASS [ 0.005 ] test_a_doubled_quote_is_one_quote
+    PASS [ 0.001 ] test_an_empty_quoted_field_is_empty
+    PASS [ 0.001 ] test_an_empty_unquoted_field_says_it_was_not_quoted
+    PASS [ 0.001 ] test_a_quoted_field_at_the_end_of_the_buffer_closes
+    PASS [ 0.002 ] test_an_unterminated_quote_is_refused
+    PASS [ 0.002 ] test_a_value_after_a_closing_quote_is_refused
+    PASS [ 0.002 ] test_ragged_rows_are_reported_not_refused
+    PASS [ 0.017 ] test_a_field_longer_than_a_simd_register
+    PASS [ 0.126 ] test_a_delimiter_at_every_offset_in_a_register
+    PASS [ 3.185 ] test_the_packed_length_boundary_is_exact
+    PASS [ 0.001 ] test_a_custom_dialect
+    PASS [ 1.592 ] test_the_two_scanners_agree_on_random_input
+--------
+Summary [ 4.978 ] 23 tests run: 23 passed , 0 failed , 0 skipped 
+
+=== tests/test_schema.mojo
+
+Running 10 tests for /Users/apple/github/tamnd/fp-merge/tests/test_schema.mojo 
+    PASS [ 0.003 ] test_fields_default_to_nullable
+    PASS [ 0.011 ] test_length_and_indexing
+    PASS [ 0.001 ] test_index_of
+    PASS [ 0.002 ] test_index_of_unknown_column_raises
+    PASS [ 0.002 ] test_select_keeps_the_requested_order
+    PASS [ 0.001 ] test_select_unknown_column_raises
+    PASS [ 0.004 ] test_equality_is_order_sensitive
+    PASS [ 0.001 ] test_equality_covers_nullability
+    PASS [ 0.004 ] test_printing
+    PASS [ 0.001 ] test_empty_schema
+--------
+Summary [ 0.029 ] 10 tests run: 10 passed , 0 failed , 0 skipped 
+
+=== tests/test_series_arith.mojo
+
+Running 43 tests for /Users/apple/github/tamnd/fp-merge/tests/test_series_arith.mojo 
+    PASS [ 0.065 ] test_two_series_on_the_same_labels_add_row_by_row
+    PASS [ 0.071 ] test_two_series_on_different_labels_add_on_the_union
+    PASS [ 0.015 ] test_an_aligned_integer_result_stays_an_integer
+    PASS [ 0.033 ] test_a_fill_value_fills_the_side_that_is_missing
+    PASS [ 0.007 ] test_a_fill_value_leaves_a_row_both_sides_are_missing_from
+    PASS [ 0.004 ] test_the_result_keeps_a_name_both_operands_agree_on
+    PASS [ 0.004 ] test_the_result_drops_a_name_the_operands_disagree_on
+    PASS [ 0.019 ] test_the_reflected_forms_turn_the_operands_round
+    PASS [ 0.645 ] test_a_reordered_index_still_matches_by_label
+    PASS [ 0.071 ] test_the_seven_operators_against_a_constant
+    PASS [ 0.014 ] test_a_constant_on_the_left_is_not_the_same_as_one_on_the_right
+    PASS [ 0.003 ] test_a_constant_base_raised_to_every_row
+    PASS [ 0.028 ] test_the_six_comparisons_against_a_constant
+    PASS [ 0.009 ] test_arithmetic_against_a_constant_keeps_the_labels
+    PASS [ 0.031 ] test_comparing_two_series_needs_the_same_labels
+    PASS [ 0.003 ] test_comparing_two_series_of_different_lengths_is_refused
+    PASS [ 0.026 ] test_comparing_two_series_on_the_same_labels_is_row_by_row
+    PASS [ 0.030 ] test_the_flexible_comparison_aligns_where_the_operator_refuses
+    PASS [ 0.022 ] test_a_duplicated_label_is_refused_when_the_labels_differ
+    PASS [ 0.010 ] test_two_equal_indexes_with_duplicates_still_align
+    PASS [ 0.004 ] test_an_integer_row_divided_by_zero_is_missing
+    PASS [ 0.003 ] test_dividing_answers_float64_whatever_went_in
+    PASS [ 0.011 ] test_a_text_column_has_no_arithmetic
+    PASS [ 0.005 ] test_comparing_a_text_column_with_a_string
+    PASS [ 0.010 ] test_the_six_comparisons_against_a_string
+    PASS [ 0.003 ] test_a_string_on_the_left_turns_the_comparison_round
+    PASS [ 0.015 ] test_comparing_two_text_columns_is_row_by_row
+    PASS [ 0.008 ] test_adding_two_text_columns_is_refused_for_now
+    PASS [ 0.006 ] test_dividing_two_series_answers_a_pair
+    PASS [ 0.010 ] test_dividing_a_constant_by_a_series_answers_a_pair
+    PASS [ 0.019 ] test_dividing_two_series_by_each_other_answers_a_pair
+    PASS [ 0.014 ] test_a_cast_keeps_the_row_labels
+    PASS [ 0.008 ] test_a_fill_keeps_the_row_labels
+    PASS [ 0.016 ] test_the_four_unary_operations_on_an_integer_column
+    PASS [ 0.004 ] test_a_unary_operation_keeps_the_labels_and_the_name
+    PASS [ 0.010 ] test_negating_a_bool_column_is_the_logical_not
+    PASS [ 0.002 ] test_inverting_a_bool_column_negates_a_mask
+    PASS [ 0.002 ] test_taking_the_absolute_value_of_a_bool_column_changes_nothing
+    PASS [ 0.007 ] test_inverting_a_float_column_is_refused
+    PASS [ 0.004 ] test_negating_a_float_zero_sets_the_sign_bit
+    PASS [ 0.003 ] test_an_integer_raised_to_a_negative_power_is_refused
+    PASS [ 0.096 ] test_the_named_forms_reach_the_same_loops_as_the_operators
+    PASS [ 0.011 ] test_the_erased_entry_point_takes_the_operation_as_a_value
+--------
+Summary [ 1.381 ] 43 tests run: 43 passed , 0 failed , 0 skipped 
+
+=== tests/test_sort.mojo
+
+Running 35 tests for /Users/apple/github/tamnd/fp-merge/tests/test_sort.mojo 
+    PASS [ 0.004 ] test_sort_key_orders_unsigned_values_by_widening
+    PASS [ 0.001 ] test_sort_key_moves_negatives_below_positives
+    PASS [ 0.001 ] test_sort_key_widens_narrow_signed_values_to_the_same_key
+    PASS [ 0.001 ] test_sort_key_orders_floats_across_the_sign_bit
+    PASS [ 0.001 ] test_sort_key_puts_negative_zero_below_positive_zero
+    PASS [ 0.001 ] test_sort_key_puts_nan_above_every_finite_value
+    PASS [ 0.001 ] test_sort_key_agrees_between_float32_and_float64
+    PASS [ 0.001 ] test_key_width_is_the_dtype_width_for_unsigned_and_eight_otherwise
+    PASS [ 0.009 ] test_argsort_of_an_empty_column_is_empty
+    PASS [ 0.003 ] test_argsort_of_one_row_is_that_row
+    PASS [ 0.012 ] test_argsort_orders_a_small_signed_column
+    PASS [ 0.004 ] test_argsort_is_stable_on_ties
+    PASS [ 0.003 ] test_argsort_is_stable_on_ties_when_descending
+    PASS [ 0.004 ] test_argsort_puts_nulls_last_by_default
+    PASS [ 0.001 ] test_argsort_puts_nulls_first_when_asked
+    PASS [ 0.001 ] test_argsort_of_an_all_null_column_is_the_identity
+    PASS [ 0.003 ] test_argsort_orders_floats_including_the_specials
+    PASS [ 0.001 ] test_argsort_orders_bools
+    PASS [ 0.002 ] test_argsort_spans_the_full_uint64_range
+    PASS [ 4.160 ] test_argsort_agrees_with_the_twin_on_random_columns
+    PASS [ 0.780 ] test_argsort_agrees_with_the_twin_across_dtypes
+    PASS [ 0.004 ] test_sort_rows_returns_the_values_in_order
+    PASS [ 0.021 ] test_sort_rows_carries_validity_to_the_right_end
+    PASS [ 0.005 ] test_sort_rows_crosses_a_validity_word_boundary
+    PASS [ 0.109 ] test_is_sorted_reads_what_argsort_wrote
+    PASS [ 0.002 ] test_is_sorted_rejects_a_column_that_is_not
+    PASS [ 0.001 ] test_is_sorted_rejects_a_null_in_the_wrong_place
+    PASS [ 0.003 ] test_argsort_into_refines_rather_than_replaces
+    PASS [ 0.018 ] test_argsort_multi_makes_the_first_key_dominant
+    PASS [ 0.004 ] test_argsort_multi_takes_a_direction_per_key
+    PASS [ 0.006 ] test_argsort_multi_mixes_dtypes_across_keys
+    PASS [ 0.006 ] test_argsort_multi_places_nulls_per_key
+    PASS [ 0.021 ] test_argsort_multi_rejects_a_mismatched_flag_list
+    PASS [ 0.006 ] test_argsort_multi_rejects_columns_of_different_lengths
+    PASS [ 0.012 ] test_argsort_multi_rejects_an_empty_key_list
+--------
+Summary [ 5.205 ] 35 tests run: 35 passed , 0 failed , 0 skipped 
+
+=== tests/test_split.mojo
+
+Running 22 tests for /Users/apple/github/tamnd/fp-merge/tests/test_split.mojo 
+    PASS [ 0.022 ] test_one_block_is_the_whole_buffer
+    PASS [ 0.097 ] test_every_boundary_follows_a_newline
+    PASS [ 0.018 ] test_the_bounds_never_go_backwards
+    PASS [ 0.014 ] test_the_quote_count_is_the_files_own
+    PASS [ 0.086 ] test_counting_a_byte_matches_a_loop
+    PASS [ 0.001 ] test_a_row_boundary_is_found_from_outside_a_quote
+    PASS [ 0.001 ] test_a_newline_inside_a_quote_is_not_a_boundary
+    PASS [ 0.001 ] test_a_file_with_no_line_feeds_has_no_boundary
+    PASS [ 5.992 ] test_blocks_find_the_same_fields_as_one_pass
+    PASS [ 0.219 ] test_blocks_find_the_same_fields_when_quotes_hold_newlines
+    PASS [ 0.035 ] test_a_bare_quote_makes_the_split_untrustworthy
+    PASS [ 7.270 ] test_a_bare_quote_still_reads_the_file
+    PASS [ 3.871 ] test_an_unterminated_quote_is_reported_by_the_single_pass
+    PASS [ 14.063 ] test_a_large_file_reads_the_same_values
+    PASS [ 12.513 ] test_a_large_file_with_quoted_newlines_reads_the_same_values
+    PASS [ 7.120 ] test_a_value_in_the_last_block_still_lifts_the_type
+    PASS [ 5.855 ] test_a_block_of_nothing_but_nulls_does_not_force_text
+    PASS [ 3.582 ] test_a_bad_value_names_the_row_it_is_actually_on
+    PASS [ 5.174 ] test_carriage_returns_split_on_the_feed
+    PASS [ 5.711 ] test_a_headerless_file_numbers_its_columns_once
+    PASS [ 16.470 ] test_a_declared_schema_reads_a_large_file
+    PASS [ 6.590 ] test_a_bounded_sample_still_stops_where_it_says
+--------
+Summary [ 94.702 ] 22 tests run: 22 passed , 0 failed , 0 skipped 
+
+=== tests/test_sql_ast.mojo
+
+Running 36 tests for /Users/apple/github/tamnd/fp-merge/tests/test_sql_ast.mojo 
+    PASS [ 0.024 ] test_index_zero_is_the_null_node
+    PASS [ 0.001 ] test_an_empty_run_is_run_zero
+    PASS [ 0.001 ] test_a_run_is_a_count_and_then_its_entries
+    PASS [ 0.008 ] test_the_same_text_is_interned_once
+    PASS [ 0.001 ] test_the_empty_string_is_pool_index_zero
+    PASS [ 0.269 ] test_text_stays_readable_after_the_pool_grows
+    PASS [ 0.503 ] test_a_literal_prints_as_sql_spells_it
+    PASS [ 0.462 ] test_a_string_literal_gets_its_quotes_doubled
+    PASS [ 0.463 ] test_a_column_prints_every_part_it_has
+    PASS [ 0.462 ] test_a_column_with_no_parts_is_an_error
+    PASS [ 0.463 ] test_a_star_prints_its_qualifier_and_its_exclusions
+    PASS [ 0.450 ] test_a_star_prints_replace_and_rename
+    PASS [ 0.456 ] test_a_call_prints_its_name_before_its_arguments
+    PASS [ 0.461 ] test_a_call_prints_its_flags
+    PASS [ 0.454 ] test_an_operator_prints_where_sql_puts_it
+    PASS [ 0.455 ] test_a_word_operator_gets_a_space_and_a_symbol_does_not
+    PASS [ 0.461 ] test_every_operand_is_parenthesized
+    PASS [ 0.455 ] test_a_cast_prints_the_type_as_it_was_written
+    PASS [ 0.458 ] test_a_searched_case_prints_its_arms_in_order
+    PASS [ 0.461 ] test_a_simple_case_prints_its_operand_after_the_keyword
+    PASS [ 0.003 ] test_a_case_wants_an_even_number_of_arm_entries
+    PASS [ 0.451 ] test_between_stays_one_node_and_prints_as_one
+    PASS [ 0.458 ] test_in_prints_its_candidates
+    PASS [ 0.453 ] test_a_list_prints_in_brackets
+    PASS [ 0.451 ] test_a_struct_prints_its_field_names_as_strings
+    PASS [ 0.004 ] test_a_struct_wants_one_value_per_name
+    PASS [ 0.454 ] test_collate_prints_after_its_operand
+    PASS [ 2.799 ] test_a_parameter_prints_the_form_it_was_written_in
+    PASS [ 0.457 ] test_the_null_node_is_not_printable
+    PASS [ 0.998 ] test_a_plain_name_is_left_alone
+    PASS [ 0.473 ] test_a_name_that_would_not_read_back_is_quoted
+    PASS [ 1.155 ] test_a_quote_inside_a_name_is_doubled
+    PASS [ 0.463 ] test_a_reserved_keyword_is_quoted_and_an_unreserved_one_is_not
+    PASS [ 1.516 ] test_printed_expressions_parse
+    PASS [ 0.537 ] test_a_star_with_every_modifier_parses
+    PASS [ 0.760 ] test_an_awkward_name_survives_the_round_trip
+--------
+Summary [ 18.199 ] 36 tests run: 36 passed , 0 failed , 0 skipped 
+
+=== tests/test_sql_generator.mojo
+
+Running 7 tests for /Users/apple/github/tamnd/fp-merge/tests/test_sql_generator.mojo 
+    PASS [ 2.068 ] test_a_statement_comes_out_at_all
+    PASS [ 5.282 ] test_the_same_seed_writes_the_same_run
+    PASS [ 7.238 ] test_different_seeds_write_different_runs
+    PASS [ 7.588 ] test_a_run_of_statements_stays_near_the_budget
+    PASS [ 7.361 ] test_every_statement_is_one_line
+    PASS [ 35.088 ] test_most_of_what_it_writes_parses
+    PASS [ 55.475 ] test_one_rule_can_be_aimed_at
+--------
+Summary [ 120.100 ] 7 tests run: 7 passed , 0 failed , 0 skipped 
+
+=== tests/test_sql_grammar.mojo
+
+Running 26 tests for /Users/apple/github/tamnd/fp-merge/tests/test_sql_grammar.mojo 
+    PASS [ 0.641 ] test_the_table_loads_and_the_counts_agree
+    PASS [ 0.560 ] test_node_zero_is_the_null_node
+    PASS [ 2.456 ] test_every_index_in_the_table_is_in_range
+    PASS [ 1.130 ] test_every_node_kind_is_one_the_reader_knows
+    PASS [ 1.252 ] test_the_shape_of_a_node_matches_its_kind
+    PASS [ 1.555 ] test_every_node_is_reachable_from_exactly_one_rule
+    PASS [ 0.688 ] test_rule_names_are_unique_and_sorted_after_the_first
+    PASS [ 0.506 ] test_a_rule_can_be_found_by_name
+    PASS [ 0.513 ] test_rules_render_back_as_the_grammar_wrote_them
+    PASS [ 4.475 ] test_parameterized_rules_are_expanded_at_generation_time
+    PASS [ 0.544 ] test_the_keyword_classes_are_reachable_as_rules
+    PASS [ 3.085 ] test_word_literals_are_flagged_and_upper_cased
+    PASS [ 0.532 ] test_the_memoized_rules_are_duckdbs_list
+    PASS [ 0.532 ] test_the_overridden_rules_are_duckdbs_list
+    PASS [ 0.749 ] test_the_suggestions_say_which_names_each_position_takes
+    PASS [ 1.044 ] test_only_an_overridden_rule_carries_a_suggestion
+    PASS [ 0.571 ] test_an_overridden_rule_keeps_the_body_the_grammar_gave_it
+    PASS [ 0.772 ] test_no_rule_names_a_matcher_this_build_does_not_have
+    PASS [ 0.806 ] test_the_keyword_table_is_sorted_and_bisects
+    PASS [ 2.034 ] test_keywords_are_lower_case_and_within_the_declared_length
+    PASS [ 0.586 ] test_a_word_that_is_not_a_keyword_is_in_no_class
+    PASS [ 0.549 ] test_the_classes_a_word_is_in
+    PASS [ 0.028 ] test_a_truncated_table_is_an_error_rather_than_a_wrong_grammar
+    PASS [ 0.001 ] test_a_section_header_that_is_not_there_is_an_error
+    PASS [ 0.001 ] test_trailing_text_on_a_record_is_an_error
+    PASS [ 0.001 ] test_a_length_prefixed_string_keeps_its_spaces
+--------
+Summary [ 25.610 ] 26 tests run: 26 passed , 0 failed , 0 skipped 
+
+=== tests/test_sql_matcher.mojo
+
+Running 27 tests for /Users/apple/github/tamnd/fp-merge/tests/test_sql_matcher.mojo 
+    PASS [ 3.876 ] test_every_statement_duckdb_parses_parses_here
+    PASS [ 1.744 ] test_every_statement_duckdb_refuses_is_refused_here
+    PASS [ 50.248 ] test_the_filter_changes_nothing_on_the_whole_corpus
+    PASS [ 0.802 ] test_the_filter_says_no_to_most_nodes
+    PASS [ 0.698 ] test_a_rule_that_wants_one_keyword_says_so_in_one_bit
+    PASS [ 0.757 ] test_a_parse_is_rooted_at_program
+    PASS [ 0.823 ] test_the_root_covers_every_token_but_the_end
+    PASS [ 0.630 ] test_two_statements_are_three_children_of_the_program
+    PASS [ 0.618 ] test_an_empty_query_is_a_program_with_one_empty_statement
+    PASS [ 1.110 ] test_a_child_is_always_built_before_its_parent
+    PASS [ 0.886 ] test_a_nodes_span_covers_its_childrens
+    PASS [ 1.445 ] test_a_replayed_subtree_is_the_one_a_fresh_parse_builds
+    PASS [ 0.944 ] test_parse_rule_asks_about_one_corner_of_the_grammar
+    PASS [ 0.773 ] test_a_quoted_string_is_a_name_only_where_a_table_goes
+    PASS [ 0.586 ] test_a_reserved_word_is_a_name_after_a_dot_and_not_before_one
+    PASS [ 0.702 ] test_a_word_can_be_a_name_only_if_its_class_says_so
+    PASS [ 0.593 ] test_an_operator_the_grammar_writes_out_is_not_a_catalog_lookup
+    PASS [ 0.618 ] test_a_parameter_is_a_marker_and_then_a_name_or_a_number
+    PASS [ 0.656 ] test_an_error_points_at_the_furthest_token_reached
+    PASS [ 0.656 ] test_an_error_draws_a_caret_under_the_token
+    PASS [ 0.610 ] test_a_hint_goes_between_the_message_and_the_caret
+    PASS [ 1.496 ] test_a_misspelled_keyword_is_named
+    PASS [ 0.951 ] test_a_hint_is_left_out_when_it_would_be_a_guess
+    PASS [ 0.554 ] test_running_out_of_input_names_no_token
+    PASS [ 0.934 ] test_an_error_names_the_token_duckdb_names
+    PASS [ 0.863 ] test_nesting_deeper_than_the_guard_is_an_error_and_not_a_crash
+    PASS [ 0.561 ] test_nesting_the_guard_allows_still_parses
+--------
+Summary [ 75.134 ] 27 tests run: 27 passed , 0 failed , 0 skipped 
+
+=== tests/test_sql_pathological.mojo
+
+Running 14 tests for /Users/apple/github/tamnd/fp-merge/tests/test_sql_pathological.mojo 
+    PASS [ 4.239 ] test_unmatched_parentheses_do_not_blow_up
+    PASS [ 2.529 ] test_nested_function_calls_do_not_blow_up
+    PASS [ 1.397 ] test_nested_list_literals_do_not_blow_up
+    PASS [ 1.464 ] test_nested_parentheses_stay_linear
+    PASS [ 7.318 ] test_nested_case_expressions_stay_linear
+    PASS [ 4.454 ] test_an_unterminated_case_chain_fails_quickly
+    PASS [ 35.261 ] test_nested_subqueries_stay_linear
+    PASS [ 21.985 ] test_a_long_in_list_stays_linear
+    PASS [ 7.950 ] test_a_long_operator_chain_stays_linear
+    PASS [ 59.477 ] test_a_wide_select_list_stays_linear
+    PASS [ 7.463 ] test_a_long_qualified_name_stays_linear
+    PASS [ 41.479 ] test_many_statements_stay_linear
+    PASS [ 1.446 ] test_a_run_of_semicolons_stays_linear
+    PASS [ 1.011 ] test_the_cheapest_statement_stays_cheap
+--------
+Summary [ 197.473 ] 14 tests run: 14 passed , 0 failed , 0 skipped 
+
+=== tests/test_sql_token.mojo
+
+Running 66 tests for /Users/apple/github/tamnd/fp-merge/tests/test_sql_token.mojo 
+    PASS [ 0.578 ] test_a_statement_comes_apart_the_way_it_reads
+    PASS [ 0.463 ] test_an_empty_query_is_just_the_end_token
+    PASS [ 0.458 ] test_a_query_of_nothing_but_blanks_is_just_the_end_token
+    PASS [ 0.453 ] test_the_end_token_sits_at_the_end_of_the_text
+    PASS [ 0.450 ] test_case_does_not_matter_to_a_keyword
+    PASS [ 0.587 ] test_a_keyword_token_keeps_the_bytes_the_query_wrote
+    PASS [ 0.565 ] test_a_word_that_is_not_a_keyword_is_an_identifier
+    PASS [ 1.818 ] test_an_unreserved_keyword_is_still_marked_as_a_keyword
+    PASS [ 0.462 ] test_a_word_longer_than_any_keyword_skips_the_lookup
+    PASS [ 0.458 ] test_a_word_can_hold_a_dollar_after_the_first_byte
+    PASS [ 0.450 ] test_a_word_can_be_written_in_utf8
+    PASS [ 0.448 ] test_a_quoted_identifier_keeps_its_case_and_is_never_a_keyword
+    PASS [ 0.449 ] test_a_quoted_identifier_can_hold_a_doubled_quote
+    PASS [ 0.548 ] test_an_empty_quoted_identifier_is_refused
+    PASS [ 0.574 ] test_an_unterminated_quoted_identifier_is_refused
+    PASS [ 0.557 ] test_a_unicode_prefix_is_not_a_prefix
+    PASS [ 1.037 ] test_a_plain_integer
+    PASS [ 0.575 ] test_a_decimal_point_means_decimal_and_not_double
+    PASS [ 0.586 ] test_a_number_can_end_in_its_point
+    PASS [ 0.570 ] test_a_number_can_start_with_its_point
+    PASS [ 0.553 ] test_a_second_point_is_not_part_of_the_number
+    PASS [ 0.550 ] test_an_exponent_makes_it_double
+    PASS [ 0.549 ] test_an_exponent_beats_the_point
+    PASS [ 0.643 ] test_an_e_with_no_digits_after_it_is_given_back
+    PASS [ 0.608 ] test_an_underscore_separates_digits_and_nothing_else
+    PASS [ 0.570 ] test_a_letter_after_a_number_starts_a_new_token
+    PASS [ 0.574 ] test_hex_and_binary_are_not_number_literals
+    PASS [ 0.554 ] test_a_sign_is_an_operator_and_not_part_of_the_number
+    PASS [ 0.610 ] test_a_plain_string_keeps_its_quotes
+    PASS [ 0.703 ] test_a_doubled_quote_stays_inside_the_string
+    PASS [ 0.550 ] test_an_empty_string_is_fine
+    PASS [ 0.563 ] test_an_escape_string_is_marked
+    PASS [ 0.565 ] test_a_backslash_escapes_the_quote_in_an_escape_string
+    PASS [ 0.566 ] test_the_other_three_string_prefixes_are_plain_strings
+    PASS [ 0.629 ] test_a_prefix_only_counts_when_the_quote_is_next_to_it
+    PASS [ 0.661 ] test_a_unicode_string_prefix_is_not_a_prefix
+    PASS [ 0.553 ] test_strings_join_across_a_newline_and_not_across_a_space
+    PASS [ 0.551 ] test_a_line_comment_keeps_the_join_and_a_block_comment_breaks_it
+    PASS [ 0.552 ] test_an_unterminated_string_is_refused
+    PASS [ 0.606 ] test_the_error_points_at_the_quote_that_was_never_closed
+    PASS [ 1.438 ] test_the_error_counts_lines_and_shows_only_the_broken_one
+    PASS [ 0.602 ] test_a_dollar_quoted_string_has_no_escapes
+    PASS [ 0.557 ] test_a_dollar_quote_can_have_an_empty_tag
+    PASS [ 0.548 ] test_a_dollar_quote_tag_can_start_with_an_underscore
+    PASS [ 0.519 ] test_a_partial_tag_inside_a_dollar_quote_does_not_close_it
+    PASS [ 0.508 ] test_a_tag_cannot_start_with_a_digit
+    PASS [ 1.156 ] test_an_unterminated_dollar_quote_is_refused
+    PASS [ 0.951 ] test_a_parameter_marker_comes_out_on_its_own
+    PASS [ 0.732 ] test_a_colon_is_punctuation_and_not_a_parameter
+    PASS [ 0.621 ] test_the_multi_character_operators_come_out_whole
+    PASS [ 2.767 ] test_a_cast_and_a_named_argument_are_operators
+    PASS [ 0.612 ] test_a_run_gives_back_a_trailing_plus_unless_it_earned_it
+    PASS [ 0.575 ] test_a_minus_never_joins_the_run_next_to_it
+    PASS [ 0.647 ] test_a_hash_never_joins_the_run_next_to_it
+    PASS [ 0.619 ] test_an_arrow_survives_the_minus_rule
+    PASS [ 0.552 ] test_punctuation_is_one_byte_at_a_time
+    PASS [ 0.573 ] test_a_dot_between_names_is_punctuation
+    PASS [ 0.564 ] test_a_line_comment_runs_to_the_newline
+    PASS [ 0.547 ] test_a_line_comment_can_end_the_query
+    PASS [ 0.567 ] test_block_comments_nest
+    PASS [ 0.576 ] test_an_unterminated_block_comment_is_refused
+    PASS [ 0.699 ] test_an_unclosed_nested_block_comment_is_refused
+    PASS [ 0.512 ] test_a_form_feed_separates_tokens_and_a_vertical_tab_does_not
+    PASS [ 2.492 ] test_a_division_is_not_a_comment
+    PASS [ 1.605 ] test_every_token_covers_bytes_that_are_really_there
+    PASS [ 0.572 ] test_a_token_never_covers_nothing_except_the_end
+--------
+Summary [ 45.907 ] 66 tests run: 66 passed , 0 failed , 0 skipped 
+
+=== tests/test_sql_transform.mojo
+
+Running 53 tests for /Users/apple/github/tamnd/fp-merge/tests/test_sql_transform.mojo 
+    PASS [ 0.788 ] test_multiplication_binds_tighter_than_addition
+    PASS [ 0.640 ] test_addition_binds_tighter_than_comparison
+    PASS [ 0.572 ] test_subtraction_folds_left
+    PASS [ 0.600 ] test_and_binds_tighter_than_or
+    PASS [ 0.595 ] test_parentheses_change_the_shape_and_the_printed_text
+    PASS [ 0.588 ] test_not_takes_the_whole_comparison
+    PASS [ 0.558 ] test_two_nots_are_not_no_nots
+    PASS [ 0.557 ] test_exponentiation_binds_tighter_than_multiplication
+    PASS [ 0.572 ] test_a_keyword_operator_is_written_back_in_upper_case
+    PASS [ 0.556 ] test_a_bare_name_is_one_part
+    PASS [ 0.571 ] test_a_name_is_folded_down_and_a_quoted_one_is_not
+    PASS [ 0.559 ] test_a_dotted_name_keeps_every_part
+    PASS [ 0.550 ] test_a_string_keeps_its_value_and_not_its_quotes
+    PASS [ 0.545 ] test_a_number_loses_its_digit_separators
+    PASS [ 0.573 ] test_the_three_constants
+    PASS [ 0.637 ] test_a_call_keeps_its_arguments_in_order
+    PASS [ 0.576 ] test_count_star_is_a_flag_and_not_an_argument
+    PASS [ 0.595 ] test_a_distinct_call_says_so
+    PASS [ 11.711 ] test_all_is_the_default_and_is_not_written_back
+    PASS [ 0.958 ] test_a_qualified_call_keeps_its_qualification
+    PASS [ 1.238 ] test_coalesce_becomes_an_ordinary_call
+    PASS [ 0.665 ] test_nullif_becomes_an_ordinary_call
+    PASS [ 0.845 ] test_both_cast_spellings_print_as_the_same_one
+    PASS [ 1.092 ] test_try_cast_stays_a_try_cast
+    PASS [ 1.102 ] test_a_searched_case
+    PASS [ 0.751 ] test_a_simple_case_keeps_its_operand
+    PASS [ 0.641 ] test_between_and_not_between
+    PASS [ 2.494 ] test_in_and_not_in_over_a_list
+    PASS [ 1.351 ] test_like_and_not_like
+    PASS [ 1.166 ] test_the_three_null_tests_become_one_node
+    PASS [ 1.472 ] test_is_distinct_from_stays_one_operator
+    PASS [ 0.887 ] test_collate_keeps_a_name_and_not_a_column
+    PASS [ 2.040 ] test_a_list_constructor_and_the_array_spelling_agree
+    PASS [ 2.823 ] test_a_struct_constructor
+    PASS [ 6.088 ] test_the_parameter_spellings
+    PASS [ 0.707 ] test_a_bare_star
+    PASS [ 0.741 ] test_a_qualified_star
+    PASS [ 0.861 ] test_a_star_with_every_modifier
+    PASS [ 0.847 ] test_except_is_the_other_spelling_of_exclude
+    PASS [ 0.664 ] test_a_prefix_minus_is_not_part_of_the_number
+    PASS [ 1.710 ] test_a_nested_expression_round_trips
+    PASS [ 5.918 ] test_every_shape_here_round_trips
+    PASS [ 0.652 ] test_case_does_not_change_the_tree
+    PASS [ 0.609 ] test_a_subquery_refuses_and_names_the_rule
+    PASS [ 0.755 ] test_a_window_function_refuses_and_names_the_clause
+    PASS [ 0.758 ] test_an_ordered_aggregate_refuses
+    PASS [ 0.643 ] test_is_unknown_refuses_rather_than_becoming_is_null
+    PASS [ 0.612 ] test_an_escaped_string_refuses_rather_than_decoding_half_of_it
+    PASS [ 0.639 ] test_a_subscript_refuses
+    PASS [ 0.616 ] test_a_refusal_says_where_it_was
+    PASS [ 9.430 ] test_a_long_chain_of_tails_is_built_once
+    PASS [ 3.779 ] test_a_call_with_many_arguments_round_trips
+    PASS [ 0.722 ] test_the_table_has_an_entry_for_every_rule_index
+--------
+Summary [ 78.619 ] 53 tests run: 53 passed , 0 failed , 0 skipped 
+
+=== tests/test_strings.mojo
+
+Running 26 tests for /Users/apple/github/tamnd/fp-merge/tests/test_strings.mojo 
+    PASS [ 0.011 ] test_an_empty_column_has_no_elements
+    PASS [ 0.004 ] test_a_short_element_lives_in_its_view
+    PASS [ 0.001 ] test_twelve_bytes_is_still_inline
+    PASS [ 0.001 ] test_thirteen_bytes_goes_to_the_payload
+    PASS [ 0.019 ] test_every_length_from_zero_to_thirty_round_trips
+    PASS [ 0.001 ] test_a_null_is_empty_and_not_valid
+    PASS [ 0.001 ] test_a_null_after_a_long_element_is_still_empty
+    PASS [ 0.001 ] test_the_column_reports_the_string_type
+    PASS [ 0.002 ] test_equals_against_bytes
+    PASS [ 0.001 ] test_equals_is_false_for_a_null
+    PASS [ 0.005 ] test_element_equals_within_a_column
+    PASS [ 0.006 ] test_element_equals_separates_long_strings_by_prefix
+    PASS [ 0.002 ] test_element_equals_separates_long_strings_after_the_prefix
+    PASS [ 0.001 ] test_element_equals_is_false_when_either_is_null
+    PASS [ 0.003 ] test_slice_copies_a_run
+    PASS [ 0.004 ] test_slice_keeps_nulls
+    PASS [ 0.003 ] test_slice_rejects_bad_bounds
+    PASS [ 0.002 ] test_take_gathers_in_order_and_repeats
+    PASS [ 0.001 ] test_take_rejects_an_index_outside_the_column
+    PASS [ 0.002 ] test_filter_keeps_the_set_bits
+    PASS [ 0.001 ] test_filter_carries_nulls_through
+    PASS [ 0.006 ] test_to_list_round_trips
+    PASS [ 0.005 ] test_a_copy_is_independent_of_the_payload
+    PASS [ 0.592 ] test_many_random_elements_round_trip
+    PASS [ 0.014 ] test_append_escaped_collapses_doubled_quotes
+    PASS [ 0.013 ] test_append_escaped_interleaves_with_the_other_appends
+--------
+Summary [ 0.698 ] 26 tests run: 26 passed , 0 failed , 0 skipped 
+
+=== tests/test_strview.mojo
+
+Running 10 tests for /Users/apple/github/tamnd/fp-merge/tests/test_strview.mojo 
+    PASS [ 0.001 ] test_the_view_is_exactly_sixteen_bytes
+    PASS [ 0.001 ] test_default_view_is_the_empty_string
+    PASS [ 0.004 ] test_short_string
+    PASS [ 0.001 ] test_short_string_is_zero_padded
+    PASS [ 0.001 ] test_twelve_bytes_still_fits_inline
+    PASS [ 0.001 ] test_long_string_carries_a_prefix_and_a_location
+    PASS [ 0.001 ] test_prefix_is_the_same_word_for_both_forms
+    PASS [ 0.003 ] test_short_equality
+    PASS [ 0.002 ] test_length_alone_decides_the_form
+    PASS [ 0.001 ] test_prefix_of_a_string_shorter_than_the_prefix
+--------
+Summary [ 0.014 ] 10 tests run: 10 passed , 0 failed , 0 skipped 
+
+=== tests/test_substr.mojo
+
+Running 10 tests for /Users/apple/github/tamnd/fp-merge/tests/test_substr.mojo 
+    PASS [ 0.045 ] test_a_short_cut_matches_the_twin
+    PASS [ 0.015 ] test_a_long_cut_matches_the_twin
+    PASS [ 0.015 ] test_taking_everything_from_an_offset_matches_the_twin
+    PASS [ 0.017 ] test_a_negative_offset_counts_back_from_the_end
+    PASS [ 0.003 ] test_an_offset_past_the_end_is_empty_and_not_an_error
+    PASS [ 0.003 ] test_a_cut_running_off_the_end_stops_at_the_end
+    PASS [ 0.006 ] test_a_null_row_stays_null_on_both_routes
+    PASS [ 0.003 ] test_a_cut_that_crosses_the_inline_boundary_keeps_its_bytes
+    PASS [ 0.002 ] test_the_phone_prefix_tpch_asks_for
+    PASS [ 46.485 ] test_a_column_either_side_of_the_morsel_split_matches_the_twin
+--------
+Summary [ 46.594 ] 10 tests run: 10 passed , 0 failed , 0 skipped 
+
+=== tests/test_temporal_carries.mojo
+stack trace was not collected. Enable stack trace collection with environment variable `MODULAR_DEBUG=stack-trace-on-error`
+Unhandled exception caught during execution: 
+Running 11 tests for /Users/apple/github/tamnd/fp-merge/tests/test_temporal_carries.mojo 
+    PASS [ 0.057 ] test_sorting_a_column_of_instants_gives_back_instants
+    PASS [ 0.016 ] test_gathering_and_filtering_keep_the_type
+    PASS [ 0.006 ] test_filling_a_gap_keeps_the_type
+    PASS [ 0.011 ] test_stacking_two_of_the_same_resolution_keeps_it
+    FAIL [ 0.014 ] test_two_resolutions_are_not_the_same_column
+      concat: every column must have the same dtype; got datetime64[s] and datetime64[ms]
+    PASS [ 1.599 ] test_the_reductions_that_answer_a_time_answer_a_time
+    PASS [ 0.042 ] test_a_spread_of_instants_is_a_length_of_time
+    PASS [ 0.006 ] test_the_standard_error_disagrees_with_itself_and_that_is_copied
+    PASS [ 0.058 ] test_counting_is_still_counting
+    PASS [ 0.023 ] test_a_group_answers_what_the_whole_column_does
+    PASS [ 0.016 ] test_a_date_has_no_scale_to_measure_a_spread_against
+--------
+Summary [ 1.848 ] 11 tests run: 10 passed , 1 failed , 0 skipped 
+Test suite' /Users/apple/github/tamnd/fp-merge/tests/test_temporal_carries.mojo 'failed! 
+
+mojo: error: execution exited with a non-zero result: 1
+=== tests/test_temporal_duration.mojo
+
+Running 18 tests for /Users/apple/github/tamnd/fp-merge/tests/test_temporal_duration.mojo 
+    PASS [ 0.005 ] test_the_finer_unit_wins_whichever_side_it_is_on
+    PASS [ 0.034 ] test_two_instants_subtract_to_an_elapsed_time
+    PASS [ 0.010 ] test_the_difference_of_two_instants_is_taken_at_the_finer_one
+    PASS [ 0.026 ] test_two_instants_cannot_be_added
+    PASS [ 0.010 ] test_an_instant_takes_a_span_and_stays_an_instant
+    PASS [ 0.007 ] test_a_span_minus_an_instant_is_refused
+    PASS [ 0.014 ] test_a_timestamp_constant_carries_its_own_resolution
+    PASS [ 0.010 ] test_a_number_is_not_a_length_of_time
+    PASS [ 0.022 ] test_a_span_has_a_sign_and_an_instant_does_not
+    PASS [ 0.026 ] test_the_reductions_keep_the_type_they_reduced
+    PASS [ 0.007 ] test_the_mean_of_a_span_truncates_toward_zero
+    PASS [ 0.002 ] test_a_total_of_nothing_is_zero_and_an_average_of_nothing_is_missing
+    PASS [ 0.004 ] test_an_instant_has_no_total
+    PASS [ 0.001 ] test_whole_days_round_downward
+    PASS [ 0.006 ] test_seconds_are_counted_with_their_fraction
+    PASS [ 0.005 ] test_neither_reader_will_take_a_point_in_time
+    PASS [ 0.002 ] test_whole_numbers_become_spans_without_losing_a_null
+    PASS [ 0.011 ] test_a_series_reaches_all_of_it_and_keeps_its_labels
+--------
+Summary [ 0.202 ] 18 tests run: 18 passed , 0 failed , 0 skipped 
+
+=== tests/test_temporal_names.mojo
+
+Running 25 tests for /Users/apple/github/tamnd/fp-merge/tests/test_temporal_names.mojo 
+    PASS [ 0.044 ] test_the_day_of_the_week_is_named_as_pandas_names_it
+    PASS [ 0.017 ] test_the_month_is_named_as_pandas_names_it
+    PASS [ 0.003 ] test_a_name_reads_the_same_at_every_resolution
+    PASS [ 0.005 ] test_a_date_column_is_named_too
+    PASS [ 0.002 ] test_a_missing_row_has_no_name
+    PASS [ 0.008 ] test_a_locale_other_than_english_is_refused
+    PASS [ 0.007 ] test_a_column_with_no_calendar_in_it_has_no_names
+    PASS [ 0.018 ] test_the_iso_year_is_not_the_calendar_year
+    PASS [ 0.014 ] test_the_three_iso_fields_are_unsigned_and_the_others_are_not
+    PASS [ 0.004 ] test_a_missing_row_has_no_iso_calendar
+    PASS [ 0.027 ] test_the_iso_frame_has_three_named_columns_and_the_row_labels
+    PASS [ 0.039 ] test_a_format_writes_what_pandas_writes
+    PASS [ 0.016 ] test_the_named_directives_write_the_names
+    PASS [ 0.014 ] test_the_three_week_numbers_disagree_and_all_three_are_right
+    PASS [ 0.018 ] test_the_iso_directives_agree_with_the_iso_fields
+    PASS [ 0.008 ] test_a_year_below_a_thousand_is_padded_to_four_digits
+    PASS [ 0.017 ] test_the_padding_flags_move_the_thirteen_widths_they_can
+    PASS [ 0.009 ] test_the_compound_directives_stand_for_the_others
+    PASS [ 0.010 ] test_the_literals_come_through
+    PASS [ 0.006 ] test_the_sub_second_digits_are_always_six
+    PASS [ 0.004 ] test_a_date_column_formats_its_clock_as_midnight
+    PASS [ 0.002 ] test_a_missing_row_is_not_formatted
+    PASS [ 0.003 ] test_a_directive_that_depends_on_the_machine_is_refused
+    PASS [ 0.014 ] test_a_format_that_cannot_be_parsed_is_refused_before_any_row
+    PASS [ 0.009 ] test_a_series_names_and_formats_and_keeps_its_labels
+--------
+Summary [ 0.318 ] 25 tests run: 25 passed , 0 failed , 0 skipped 
+
+=== tests/test_temporal_round.mojo
+
+Running 27 tests for /Users/apple/github/tamnd/fp-merge/tests/test_temporal_round.mojo 
+    PASS [ 0.025 ] test_flooring_moves_an_instant_back_and_never_forward
+    PASS [ 0.002 ] test_ceiling_leaves_a_row_that_is_already_whole_alone
+    PASS [ 0.002 ] test_rounding_settles_a_tie_on_the_even_hour
+    PASS [ 0.011 ] test_all_four_resolutions_round_the_same_instant_the_same_way
+    PASS [ 0.006 ] test_a_frequency_finer_than_the_column_leaves_it_alone
+    PASS [ 0.007 ] test_a_count_in_front_of_the_alias_multiplies_the_period
+    PASS [ 0.006 ] test_a_frequency_with_a_decimal_point_is_exact
+    PASS [ 0.002 ] test_spaces_at_the_ends_of_a_frequency_are_trimmed
+    PASS [ 0.003 ] test_a_negative_frequency_rounds_the_way_pandas_rounds_it
+    PASS [ 0.007 ] test_a_frequency_that_has_no_fixed_length_is_refused
+    PASS [ 0.007 ] test_the_spellings_pandas_dropped_are_refused_too
+    PASS [ 0.001 ] test_a_null_row_stays_null_and_is_not_rounded_into_a_value
+    PASS [ 0.002 ] test_a_zoned_column_is_refused_rather_than_rounded_in_utc
+    PASS [ 0.004 ] test_a_column_that_is_not_a_timestamp_has_no_frequency_in_it
+    PASS [ 0.006 ] test_a_mode_that_is_not_a_mode_is_refused
+    PASS [ 0.001 ] test_the_period_is_counted_in_the_columns_own_unit
+    PASS [ 0.002 ] test_going_down_in_precision_rounds_down_and_not_towards_zero
+    PASS [ 0.003 ] test_going_up_in_precision_multiplies_and_does_not_recover
+    PASS [ 0.002 ] test_restating_at_the_resolution_it_already_has_is_a_copy
+    PASS [ 0.009 ] test_going_up_out_of_range_is_refused_rather_than_wrapped
+    PASS [ 0.002 ] test_a_null_row_out_of_range_does_not_refuse_the_column
+    PASS [ 0.004 ] test_a_zoned_column_keeps_its_zone_through_a_resolution_change
+    PASS [ 0.001 ] test_a_resolution_that_is_not_one_of_the_four_is_refused
+    PASS [ 0.022 ] test_the_kernel_agrees_with_the_twin_on_all_three_modes
+    PASS [ 0.005 ] test_the_rescale_kernel_agrees_with_its_twin_both_ways
+    PASS [ 0.004 ] test_a_series_rounds_and_keeps_its_name_and_its_labels
+    PASS [ 0.002 ] test_a_series_names_a_resolution_as_a_string
+--------
+Summary [ 0.146 ] 27 tests run: 27 passed , 0 failed , 0 skipped 
+
+=== tests/test_temporal_type.mojo
+
+Running 10 tests for /Users/apple/github/tamnd/fp-merge/tests/test_temporal_type.mojo 
+    PASS [ 0.082 ] test_a_filtered_date_is_still_a_date
+    PASS [ 0.034 ] test_a_gathered_date_is_still_a_date
+    PASS [ 0.024 ] test_two_stacked_dates_are_still_dates
+    PASS [ 0.014 ] test_a_filled_date_is_still_a_date
+    PASS [ 0.014 ] test_a_date_and_an_integer_do_not_stack
+    PASS [ 0.002 ] test_relabelling_needs_the_same_layout
+    PASS [ 0.011 ] test_a_date_survives_a_round_trip_through_a_frame
+    PASS [ 0.002 ] test_a_date_is_written_as_a_date
+    PASS [ 0.002 ] test_a_timestamp_is_written_as_a_timestamp
+    PASS [ 0.001 ] test_a_date_before_the_epoch_is_written_as_a_date
+--------
+Summary [ 0.186 ] 10 tests run: 10 passed , 0 failed , 0 skipped 
+
+=== tests/test_temporal.mojo
+/Users/apple/github/tamnd/fp-merge/tests/test_temporal.mojo:558:8: warning: doc string summary should begin with a capital letter or non-alpha character, but this begins with 'p'
+    """pandas answers `s.dt.year` with the same index and the same name, so a
+       ^
+
+Running 25 tests for /Users/apple/github/tamnd/fp-merge/tests/test_temporal.mojo 
+    PASS [ 0.068 ] test_the_last_second_of_1969_is_not_the_first_of_1970
+    PASS [ 0.007 ] test_the_epoch_itself_is_the_first_of_january
+    PASS [ 0.004 ] test_a_day_deep_before_the_epoch_still_reads_the_right_way_round
+    PASS [ 0.016 ] test_the_leap_rule_has_three_clauses_and_all_three_are_here
+    PASS [ 0.007 ] test_the_twenty_ninth_of_february_is_the_end_of_its_month
+    PASS [ 0.004 ] test_a_quarter_ends_on_four_days_a_year_and_starts_on_four_others
+    PASS [ 0.002 ] test_the_clock_fields_come_out_of_the_remainder_below_the_day
+    PASS [ 0.101 ] test_the_same_instant_reads_the_same_at_all_four_resolutions
+    PASS [ 0.020 ] test_the_sub_second_fields_split_at_the_microsecond
+    PASS [ 0.002 ] test_the_week_starts_on_monday_because_pandas_says_so
+    PASS [ 0.003 ] test_the_day_of_the_year_counts_the_leap_day_when_there_is_one
+    PASS [ 0.002 ] test_a_null_row_stays_null_and_does_not_read_as_the_epoch
+    PASS [ 0.005 ] test_a_field_is_int32_or_bool_and_never_int64
+    PASS [ 0.004 ] test_the_date_of_a_timestamp_is_a_date_column
+    PASS [ 0.007 ] test_normalising_keeps_the_type_and_moves_the_clock_to_midnight
+    PASS [ 0.001 ] test_normalising_a_millisecond_column_answers_milliseconds
+    PASS [ 0.017 ] test_a_date_column_answers_the_calendar_and_no_clock
+    PASS [ 0.010 ] test_a_zoned_column_is_refused_rather_than_answered_in_utc
+    PASS [ 0.007 ] test_a_column_that_is_not_temporal_has_no_calendar_in_it
+    PASS [ 0.001 ] test_a_field_code_that_is_not_a_field_is_refused
+    PASS [ 0.002 ] test_every_field_prints_under_the_name_pandas_gives_it
+    PASS [ 0.073 ] test_the_kernel_agrees_with_the_twin_on_every_field
+    PASS [ 0.003 ] test_the_twin_and_the_kernel_agree_on_a_date_far_from_1970
+    PASS [ 0.003 ] test_a_series_keeps_its_name_and_its_labels_through_a_field
+    PASS [ 0.006 ] test_a_series_looks_a_field_up_by_its_pandas_name
+--------
+Summary [ 0.375 ] 25 tests run: 25 passed , 0 failed , 0 skipped 
+
+=== tests/test_text_agg.mojo
+
+Running 18 tests for /Users/apple/github/tamnd/fp-merge/tests/test_text_agg.mojo 
+    PASS [ 0.037 ] test_count_ignores_the_nulls
+    PASS [ 0.009 ] test_size_counts_the_nulls
+    PASS [ 0.019 ] test_first_and_last_take_the_edges_in_row_order
+    PASS [ 0.010 ] test_first_and_last_skip_the_nulls
+    PASS [ 0.005 ] test_min_and_max_order_bytes
+    PASS [ 0.005 ] test_a_prefix_sorts_before_what_extends_it
+    PASS [ 0.004 ] test_min_reads_past_the_inline_limit
+    PASS [ 0.002 ] test_a_group_with_nothing_in_it_is_null
+    PASS [ 0.008 ] test_a_group_of_only_nulls_is_null_for_all_four
+    PASS [ 0.067 ] test_nunique_counts_distinct_values_in_a_group
+    PASS [ 0.004 ] test_nunique_does_not_leak_across_groups
+    PASS [ 0.004 ] test_nunique_ignores_the_nulls
+    PASS [ 0.008 ] test_an_empty_column_produces_no_groups
+    PASS [ 0.016 ] test_summing_text_names_the_reduction
+    PASS [ 0.007 ] test_the_other_numeric_reductions_are_refused_too
+    PASS [ 0.084 ] test_the_kernel_agrees_with_the_twin
+    PASS [ 0.123 ] test_a_frame_aggregates_a_text_column
+    PASS [ 0.058 ] test_a_frame_aggregates_text_beside_a_number
+--------
+Summary [ 0.470 ] 18 tests run: 18 passed , 0 failed , 0 skipped 
+
+=== tests/test_text_cast.mojo
+
+Running 23 tests for /Users/apple/github/tamnd/fp-merge/tests/test_text_cast.mojo 
+    PASS [ 0.029 ] test_text_reads_as_integers
+    PASS [ 0.007 ] test_text_reads_as_floats
+    PASS [ 0.007 ] test_text_reads_as_bools
+    PASS [ 0.002 ] test_a_null_stays_null_and_is_not_read
+    PASS [ 0.013 ] test_a_word_is_refused_by_name
+    PASS [ 0.002 ] test_a_word_becomes_a_null_when_not_strict
+    PASS [ 0.003 ] test_the_empty_string_is_not_a_number
+    PASS [ 0.002 ] test_a_float_written_where_an_integer_was_asked_for_is_refused
+    PASS [ 0.002 ] test_a_number_too_large_for_the_target_is_refused
+    PASS [ 0.001 ] test_surrounding_space_is_not_stripped
+    PASS [ 0.008 ] test_integers_write_as_text
+    PASS [ 0.005 ] test_bools_write_as_words
+    PASS [ 0.001 ] test_a_null_writes_as_a_null_and_not_as_the_empty_string
+    PASS [ 0.013 ] test_a_float_survives_the_round_trip
+    PASS [ 0.003 ] test_an_integer_survives_the_round_trip
+    PASS [ 0.010 ] test_the_erased_cast_reads_text_as_numbers
+    PASS [ 0.010 ] test_the_erased_cast_writes_numbers_as_text
+    PASS [ 0.007 ] test_casting_text_to_text_copies
+    PASS [ 0.007 ] test_nothing_converts_to_the_null_type
+    PASS [ 0.007 ] test_a_series_casts_both_ways
+    PASS [ 0.003 ] test_a_series_casts_leniently_when_told_to
+    PASS [ 0.030 ] test_a_frame_casts_one_column_and_leaves_the_rest
+    PASS [ 0.014 ] test_a_frame_renders_a_number_column_as_text
+--------
+Summary [ 0.186 ] 23 tests run: 23 passed , 0 failed , 0 skipped 
+
+=== tests/test_text_compare.mojo
+
+Running 20 tests for /Users/apple/github/tamnd/fp-merge/tests/test_text_compare.mojo 
+    PASS [ 0.033 ] test_two_short_columns_compare_for_equality
+    PASS [ 0.002 ] test_equality_reads_past_the_prefix
+    PASS [ 0.002 ] test_equality_is_not_fooled_by_a_prefix
+    PASS [ 0.004 ] test_inequality_is_the_negation
+    PASS [ 0.002 ] test_ordering_puts_the_shorter_prefix_first
+    PASS [ 0.002 ] test_ordering_compares_bytes_unsigned
+    PASS [ 0.002 ] test_ordering_reads_past_the_prefix
+    PASS [ 0.003 ] test_the_four_orderings_agree_on_a_tie
+    PASS [ 0.002 ] test_a_null_on_either_side_makes_the_answer_null
+    PASS [ 0.001 ] test_a_null_is_null_under_inequality_too
+    PASS [ 0.001 ] test_a_short_constant_compares_against_every_row
+    PASS [ 0.005 ] test_a_long_constant_compares_against_every_row
+    PASS [ 0.001 ] test_a_constant_orders_against_a_column
+    PASS [ 0.001 ] test_a_constant_against_a_null_row_is_null
+    PASS [ 0.002 ] test_an_empty_constant_is_not_a_null
+    PASS [ 0.019 ] test_the_erased_path_answers_bool
+    PASS [ 0.014 ] test_a_text_constant_goes_through_the_erased_path
+    PASS [ 0.001 ] test_a_text_constant_on_the_left_is_turned_round
+    PASS [ 0.001 ] test_a_null_text_constant_makes_every_row_null
+    PASS [ 29.972 ] test_the_kernels_agree_with_their_twins_on_random_data
+--------
+Summary [ 30.070 ] 20 tests run: 20 passed , 0 failed , 0 skipped 
+
+=== tests/test_text_group.mojo
+
+Running 48 tests for /Users/apple/github/tamnd/fp-merge/tests/test_text_group.mojo 
+    PASS [ 0.052 ] test_the_ordinals_are_first_seen_order
+    PASS [ 0.002 ] test_keys_that_share_a_prefix_are_different_groups
+    PASS [ 0.002 ] test_keys_that_agree_past_the_inline_limit_are_different_groups
+    PASS [ 0.002 ] test_an_empty_key_is_a_group_and_is_not_a_null
+    PASS [ 0.001 ] test_the_null_group_is_ordinal_zero
+    PASS [ 0.002 ] test_a_column_with_no_nulls_has_no_null_group
+    PASS [ 0.001 ] test_an_empty_column_factorizes_to_nothing
+    PASS [ 0.001 ] test_the_representative_rows_are_the_first_of_each_group
+    PASS [ 0.195 ] test_the_fast_factorize_agrees_with_its_twin_on_random_text
+    PASS [ 0.588 ] test_the_table_grows_without_losing_a_group
+    PASS [ 0.009 ] test_hash_bytes_separates_a_trailing_zero_from_nothing_at_all
+    PASS [ 0.001 ] test_hash_bytes_is_the_same_for_the_same_bytes
+    PASS [ 0.100 ] test_a_frame_groups_by_a_text_key
+    PASS [ 0.011 ] test_a_group_by_on_text_keeps_first_seen_order_when_asked
+    PASS [ 0.042 ] test_a_null_key_is_dropped_or_kept_as_pandas_does
+    PASS [ 0.007 ] test_a_text_key_is_grouped_without_renumbering_its_ordinals
+    PASS [ 0.004 ] test_a_text_key_with_nulls_is_renumbered_after_all
+    PASS [ 0.040 ] test_a_text_key_combines_with_a_number_key
+    PASS [ 0.015 ] test_grouping_with_no_reductions_gives_the_distinct_keys
+    PASS [ 0.055 ] test_an_inner_join_matches_on_text
+    PASS [ 0.029 ] test_an_outer_join_takes_the_key_from_whichever_side_had_the_row
+    PASS [ 0.012 ] test_a_semi_join_on_text_keeps_the_left_rows_that_matched
+    PASS [ 0.005 ] test_joining_text_against_bytes_is_refused
+    PASS [ 0.256 ] test_the_parallel_string_route_agrees_on_a_few_groups
+    PASS [ 0.426 ] test_the_parallel_string_route_agrees_on_many_groups
+    PASS [ 1.368 ] test_the_parallel_string_merge_agrees_across_many_buckets
+    PASS [ 0.424 ] test_the_parallel_string_route_agrees_when_every_row_is_its_own_key
+    PASS [ 0.374 ] test_the_parallel_string_route_agrees_on_an_uneven_slice_count
+    PASS [ 0.231 ] test_the_parallel_string_route_agrees_with_one_worker
+    PASS [ 0.248 ] test_the_parallel_string_route_agrees_with_nulls_scattered
+    PASS [ 0.047 ] test_the_parallel_string_route_agrees_when_every_row_is_null
+    PASS [ 2.732 ] test_the_string_dictionary_route_agrees_on_a_few_groups
+    PASS [ 0.668 ] test_the_string_dictionary_route_agrees_with_one_worker
+    PASS [ 2.811 ] test_the_string_dictionary_route_gives_up_on_a_late_key
+    PASS [ 2.739 ] test_the_string_dictionary_route_gives_up_when_keys_keep_arriving
+    PASS [ 3.864 ] test_the_string_dictionary_route_gives_up_on_too_many_groups
+    PASS [ 1.787 ] test_the_string_dictionary_route_keeps_first_appearance_order
+    PASS [ 8.193 ] test_the_string_route_picks_the_dictionary_when_it_can
+    PASS [ 1.358 ] test_the_partitioned_string_route_agrees_with_the_serial_one
+    PASS [ 5.824 ] test_the_partitioned_string_route_agrees_on_all_distinct_keys
+    PASS [ 1.857 ] test_the_partitioned_string_route_agrees_on_keys_too_long_to_inline
+    PASS [ 7.722 ] test_the_partitioned_string_route_agrees_on_long_keys_all_distinct
+    PASS [ 1.302 ] test_the_partitioned_string_route_agrees_with_nulls_scattered
+    PASS [ 0.331 ] test_the_partitioned_string_route_agrees_when_every_row_is_null
+    PASS [ 0.790 ] test_the_partitioned_string_route_keeps_first_appearance_order
+    PASS [ 1.241 ] test_the_partitioned_string_route_leaves_most_partitions_empty
+    PASS [ 0.137 ] test_the_parallel_string_route_keeps_first_appearance_order_across_slices
+    PASS [ 5.573 ] test_the_merge_agrees_with_itself_either_side_of_the_serial_bound
+--------
+Summary [ 53.478 ] 48 tests run: 48 passed , 0 failed , 0 skipped 
+
+=== tests/test_text_sort.mojo
+
+Running 14 tests for /Users/apple/github/tamnd/fp-merge/tests/test_text_sort.mojo 
+    PASS [ 0.056 ] test_the_radix_half_on_its_own
+    PASS [ 0.009 ] test_elements_agreeing_on_exactly_eight_bytes
+    PASS [ 0.005 ] test_a_prefix_sorts_before_what_extends_it
+    PASS [ 0.014 ] test_ordering_reads_the_payload_when_it_has_to
+    PASS [ 0.007 ] test_an_empty_element_sorts_first
+    PASS [ 0.009 ] test_bytes_are_compared_as_unsigned
+    PASS [ 0.004 ] test_descending_reverses_the_tie_break_too
+    PASS [ 0.011 ] test_nulls_go_last_by_default_and_first_when_asked
+    PASS [ 0.033 ] test_the_tie_break_is_stable
+    PASS [ 0.092 ] test_a_long_tied_run_goes_through_the_merge
+    PASS [ 1.418 ] test_against_a_reference_sort_on_random_text
+    PASS [ 0.030 ] test_a_frame_sorts_on_text_then_number
+    PASS [ 0.002 ] test_argsort_of_one_row_and_of_none
+    PASS [ 0.005 ] test_every_element_identical_is_the_input_order
+--------
+Summary [ 1.695 ] 14 tests run: 14 passed , 0 failed , 0 skipped 
+
+=== tests/test_text.mojo
+
+Running 32 tests for /Users/apple/github/tamnd/fp-merge/tests/test_text.mojo 
+    PASS [ 0.027 ] test_a_series_of_text_reports_itself_as_text
+    PASS [ 0.014 ] test_reading_text_as_bytes_is_refused
+    PASS [ 0.018 ] test_text_prints_its_values_rather_than_its_type
+    PASS [ 0.004 ] test_a_null_prints_as_na_and_not_as_empty
+    PASS [ 0.017 ] test_take_gathers_text_and_a_negative_index_is_a_null
+    PASS [ 2.860 ] test_a_text_take_past_the_split_gathers_only_short_values
+    PASS [ 4.193 ] test_a_text_take_past_the_split_carries_the_payload_across
+    PASS [ 0.016 ] test_take_past_the_end_is_an_error_rather_than_a_null
+    PASS [ 0.015 ] test_filter_keeps_the_long_elements_intact
+    PASS [ 0.007 ] test_a_null_in_the_mask_drops_the_row
+    PASS [ 20.977 ] test_a_text_filter_past_the_split_keeps_the_right_rows
+    PASS [ 17.334 ] test_a_text_filter_past_the_split_carries_nulls_across
+    PASS [ 0.021 ] test_a_substring_is_a_series_and_a_pattern_is_a_mask
+    PASS [ 0.013 ] test_a_substring_on_a_number_column_is_refused
+    PASS [ 0.002 ] test_a_substring_keeps_the_nulls_where_they_were
+    PASS [ 0.016 ] test_a_pattern_filter_is_a_mask_and_then_a_filter
+    PASS [ 0.004 ] test_two_substrings_in_order_are_not_two_substrings
+    PASS [ 0.001 ] test_a_pattern_on_a_number_column_is_refused
+    PASS [ 0.006 ] test_a_null_row_matches_nothing_and_stays_null
+    PASS [ 0.012 ] test_slice_head_and_tail_cut_text
+    PASS [ 0.004 ] test_nulls_survive_a_gather
+    PASS [ 0.007 ] test_drop_nulls_on_text
+    PASS [ 0.004 ] test_fill_null_from_a_single_row
+    PASS [ 0.012 ] test_fill_forward_and_backward_carry_text
+    PASS [ 0.002 ] test_fill_forward_honours_the_limit
+    PASS [ 0.008 ] test_concat_rebases_the_payload_of_the_second_part
+    PASS [ 0.002 ] test_concat_of_text_and_bytes_is_refused
+    PASS [ 0.002 ] test_casting_text_reads_it_rather_than_reading_a_view
+    PASS [ 0.013 ] test_sorting_text_orders_it
+    PASS [ 0.009 ] test_summing_text_says_what_is_missing
+    PASS [ 0.047 ] test_a_frame_holds_text_beside_numbers
+    PASS [ 0.008 ] test_a_frame_of_text_slices_both_columns_together
+--------
+Summary [ 45.675 ] 32 tests run: 32 passed , 0 failed , 0 skipped 
+
+=== tests/test_topn.mojo
+
+Running 11 tests for /Users/apple/github/tamnd/fp-merge/tests/test_topn.mojo 
+    PASS [ 0.308 ] test_the_two_largest_of_every_group_come_back_best_first
+    PASS [ 0.010 ] test_the_smallest_are_the_largest_read_the_other_way
+    PASS [ 0.006 ] test_a_tie_keeps_the_row_that_came_first
+    PASS [ 0.006 ] test_a_null_is_never_a_candidate
+    PASS [ 0.002 ] test_a_group_with_nothing_present_keeps_nothing
+    PASS [ 0.002 ] test_a_nan_is_dropped_the_way_a_null_is
+    PASS [ 0.008 ] test_asking_for_more_rows_than_a_group_has_gives_what_there_is
+    PASS [ 0.042 ] test_the_erased_spelling_agrees_with_the_typed_one
+    PASS [ 0.017 ] test_bad_arguments_are_refused
+    PASS [ 1.762 ] test_past_the_split_no_row_outside_a_group_beats_the_worst_inside
+    PASS [ 0.112 ] test_the_frame_spelling_keeps_the_rows_the_kernel_picked
+--------
+Summary [ 2.275 ] 11 tests run: 11 passed , 0 failed , 0 skipped 
+
+=== tests/test_unary.mojo
+
+Running 20 tests for /Users/apple/github/tamnd/fp-merge/tests/test_unary.mojo 
+    PASS [ 0.036 ] test_negating_a_column_flips_every_sign
+    PASS [ 0.004 ] test_negating_the_most_negative_integer_wraps
+    PASS [ 0.008 ] test_negating_an_unsigned_column_wraps_to_the_complement
+    PASS [ 0.008 ] test_negating_a_zero_float_gives_a_signed_zero
+    PASS [ 0.002 ] test_negating_a_bool_column_is_the_logical_not
+    PASS [ 0.001 ] test_the_absolute_value_flips_only_the_negatives
+    PASS [ 0.001 ] test_the_absolute_value_of_the_most_negative_integer_wraps
+    PASS [ 0.001 ] test_the_absolute_value_of_a_bool_column_is_the_column
+    PASS [ 0.001 ] test_the_absolute_value_of_an_unsigned_column_is_the_column
+    PASS [ 0.002 ] test_inverting_an_integer_column_is_the_bitwise_not
+    PASS [ 0.001 ] test_inverting_an_unsigned_column_is_still_the_bitwise_not
+    PASS [ 0.001 ] test_inverting_a_bool_column_is_the_logical_not
+    PASS [ 0.019 ] test_a_null_stays_null_through_every_operation
+    PASS [ 8.334 ] test_every_row_of_a_long_column_is_reached
+    PASS [ 0.011 ] test_unary_plus_is_the_column_unchanged
+    PASS [ 0.006 ] test_the_erased_entry_point_keeps_the_operand_type
+    PASS [ 0.001 ] test_the_result_type_is_known_without_a_column
+    PASS [ 0.010 ] test_inverting_a_float_column_is_refused
+    PASS [ 0.007 ] test_a_text_column_has_no_unary_arithmetic
+    PASS [ 0.001 ] test_every_operation_prints_as_the_symbol_it_is_written_with
+--------
+Summary [ 8.453 ] 20 tests run: 20 passed , 0 failed , 0 skipped 
+
+=== tests/test_value.mojo
+
+Running 16 tests for /Users/apple/github/tamnd/fp-merge/tests/test_value.mojo 
+    PASS [ 0.001 ] test_int_round_trips
+    PASS [ 0.001 ] test_negative_int_round_trips
+    PASS [ 0.001 ] test_negative_int_reads_as_a_float
+    PASS [ 0.001 ] test_large_unsigned_round_trips
+    PASS [ 0.001 ] test_float32_round_trips_exactly
+    PASS [ 0.001 ] test_float_keeps_full_width
+    PASS [ 0.001 ] test_bool_is_its_own_constructor
+    PASS [ 0.005 ] test_text_round_trips
+    PASS [ 0.012 ] test_text_accessor_refuses_a_number
+    PASS [ 0.001 ] test_null_has_a_type
+    PASS [ 0.001 ] test_null_is_not_the_zero_of_its_type
+    PASS [ 0.001 ] test_null_reads_as_zero
+    PASS [ 0.004 ] test_equality_takes_the_type_into_account
+    PASS [ 0.001 ] test_two_nulls_of_one_type_are_equal
+    PASS [ 0.001 ] test_copy_is_independent
+    PASS [ 0.002 ] test_printing
+--------
+Summary [ 0.025 ] 16 tests run: 16 passed , 0 failed , 0 skipped 
+
+
+1 of 74 test files failed

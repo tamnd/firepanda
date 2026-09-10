@@ -237,6 +237,115 @@ struct TimeZone(Equatable, ImplicitlyCopyable, Movable, Writable):
         """
         return self.size == 0
 
+    def _digit_at(self, i: Int) -> Int:
+        """Reads one byte of the name as a decimal digit.
+
+        Args:
+            i: The position, which the caller keeps under `size`.
+
+        Returns:
+            The digit, or minus one if that byte is not one.
+        """
+        var byte = self.byte_at(i)
+        if byte < UInt8(ord("0")) or byte > UInt8(ord("9")):
+            return -1
+        return Int(byte) - ord("0")
+
+    def _two_digits(self, i: Int) -> Int:
+        """Reads two bytes of the name as a two digit number.
+
+        Args:
+            i: The position of the first of them.
+
+        Returns:
+            The number, or minus one if either byte is not a digit or the name
+            ends before the second one.
+        """
+        if i + 1 >= Int(self.size):
+            return -1
+        var high = self._digit_at(i)
+        var low = self._digit_at(i + 1)
+        if high < 0 or low < 0:
+            return -1
+        return high * 10 + low
+
+    def _starts_with_utc(self) -> Bool:
+        """Reports whether the name opens with the three letters of UTC.
+
+        Returns:
+            True for `UTC` in any case, which is how pandas prints a fixed
+            offset it made itself, as in `UTC+05:30`.
+        """
+        if self.size < 3:
+            return False
+        return (
+            (self.byte_at(0) | 32) == UInt8(ord("u"))
+            and (self.byte_at(1) | 32) == UInt8(ord("t"))
+            and (self.byte_at(2) | 32) == UInt8(ord("c"))
+        )
+
+    def fixed_offset(self) -> Optional[Int64]:
+        """Returns how far ahead of UTC a zone that names its own offset is.
+
+        A zone name is either a rule or a number. `America/New_York` is a rule,
+        and reading a clock against it needs the IANA database, because the
+        answer changes twice a year, changed on different days before 2007, and
+        will change again when somebody legislates. `UTC` and `+05:30` are
+        numbers. They state the whole answer in themselves, every instant in
+        such a column is read against the same offset forever, and no database
+        can tell you anything about them you cannot get from the name.
+
+        That is the line this library draws while it has no database, and the
+        line is a property of the name rather than a list of zones somebody has
+        to keep up to date. The spellings accepted are `UTC`, the Arrow form
+        `+HH:MM` and `-HH:MM` with the colon and the minutes both optional, and
+        the `UTC+HH:MM` form pandas prints when it made the zone itself.
+
+        `Etc/GMT+5` is deliberately not one of them. It is an IANA name, its
+        sign is inverted against every other spelling in this list, and reading
+        it as a number would be five hours wrong in the direction nobody checks.
+
+        Returns:
+            The offset in seconds, or nothing for a naive column or a name that
+            is a rule.
+        """
+        var size = Int(self.size)
+        if size == 0:
+            return None
+
+        var at = 0
+        if self._starts_with_utc():
+            if size == 3:
+                return Int64(0)
+            at = 3
+
+        if at >= size:
+            return None
+        var sign = self.byte_at(at)
+        if sign != UInt8(ord("+")) and sign != UInt8(ord("-")):
+            return None
+        at += 1
+
+        var hours = self._two_digits(at)
+        if hours < 0:
+            return None
+        at += 2
+
+        var minutes = 0
+        if at < size:
+            if self.byte_at(at) == UInt8(ord(":")):
+                at += 1
+            minutes = self._two_digits(at)
+            if minutes < 0:
+                return None
+            at += 2
+
+        if at != size or hours > 23 or minutes > 59:
+            return None
+
+        var total = Int64(hours) * 3600 + Int64(minutes) * 60
+        return -total if sign == UInt8(ord("-")) else total
+
     def __eq__(self, other: Self) -> Bool:
         """Compares two zones.
 
