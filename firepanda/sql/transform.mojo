@@ -148,6 +148,8 @@ from .unsupported import (
     TABLE_MODIFIER,
     TABLE_SAMPLE,
     TYPE_LITERAL,
+    UNPIVOT_GROUPS,
+    UNPIVOT_NULLS,
     WITH_ORDINALITY,
     WITH_USING_KEY,
     not_implemented,
@@ -344,6 +346,9 @@ comptime _PIVOT_VALUES: UInt8 = 71
 comptime _PIVOT_SUBQUERY: UInt8 = 72
 """`PivotColumnSubquery`, a pivot column whose values are a `SELECT`."""
 
+comptime _UNPIVOT: UInt8 = 73
+"""`UnpivotStatement`, the `UNPIVOT t ON a INTO NAME n VALUE v` spelling."""
+
 # A marker is a rule that builds nothing. The rule above it reads it directly,
 # and the byte is here so that rule can pick it out of its siblings with the
 # same array lookup the dispatch uses. The alternative is guessing from a
@@ -367,6 +372,9 @@ comptime _MARK_PIVOT_ON: UInt8 = 215
 comptime _MARK_PIVOT_USING: UInt8 = 216
 comptime _MARK_PIVOT_GROUP: UInt8 = 217
 comptime _MARK_PIVOT_ENUM: UInt8 = 218
+comptime _MARK_TABLE_UNPIVOT: UInt8 = 219
+comptime _MARK_UNPIVOT_NULLS: UInt8 = 220
+comptime _MARK_UNPIVOT_INTO: UInt8 = 221
 
 # Where the parts of a statement sit in the small runs that carry them up. A
 # rule that has more than one thing to hand its parent puts them in a run of
@@ -585,6 +593,7 @@ struct Transform(Movable):
             "PivotListTarget",
             "PivotTargetList",
             "Parens_TargetList",
+            "UnpivotTargetList",
         ]
         for name in descends:
             self._set(grammar, name, _DESCEND)
@@ -744,16 +753,16 @@ struct Transform(Movable):
 
         # `DescribeStatement`, `PivotStatement` and `UnpivotStatement` hang off
         # `SelectStatementType` rather than off `Statement`, because all three
-        # produce rows, so the loop above never reached them. Two of them are
+        # produce rows, so the loop above never reached them. The first one is
         # still the same kind of thing it refuses: a query firepanda will run
         # and does not run yet.
         self._set(grammar, "DescribeStatement", _STATEMENT_LATER)
-        self._set(grammar, "UnpivotStatement", _STATEMENT_LATER)
 
         # The pivot side. `PivotColumnEntry` is three alternatives and each one
         # builds the same node with a different thing after the `IN`, so they
         # get a case each and the entry above them descends.
         self._set(grammar, "PivotStatement", _PIVOT)
+        self._set(grammar, "UnpivotStatement", _UNPIVOT)
         self._set(grammar, "PivotColumnExpression", _PIVOT_BARE)
         self._set(grammar, "PivotValueList", _PIVOT_VALUES)
         self._set(grammar, "PivotColumnSubquery", _PIVOT_SUBQUERY)
@@ -817,6 +826,9 @@ struct Transform(Movable):
         self._set(grammar, "PivotUsing", _MARK_PIVOT_USING)
         self._set(grammar, "PivotGroupByList", _MARK_PIVOT_GROUP)
         self._set(grammar, "PivotEnumTarget", _MARK_PIVOT_ENUM)
+        self._set(grammar, "TableUnpivotClause", _MARK_TABLE_UNPIVOT)
+        self._set(grammar, "IncludeOrExcludeNulls", _MARK_UNPIVOT_NULLS)
+        self._set(grammar, "IntoNameValues", _MARK_UNPIVOT_INTO)
 
         self.expression_rule = grammar.rule("Expression")
         self.statement_rule = grammar.rule("TopLevelStatement")
@@ -1245,6 +1257,9 @@ struct Transform(Movable):
 
         if action == _PIVOT:
             return self._pivot(tree, sql, node, ast, work)
+
+        if action == _UNPIVOT:
+            return self._unpivot(tree, sql, node, ast, work)
 
         if action == _PIVOT_BARE:
             var header = self._only(tree, node)
@@ -2770,6 +2785,9 @@ struct Transform(Movable):
                 for want in self._pivot_clause_parts(tree, clause):
                     wanted.append(want)
                 continue
+            if self._marked(tree, clause, _MARK_TABLE_UNPIVOT):
+                wanted.append(self._unpivot_clause_targets(tree, sql, clause))
+                continue
             var form = self._join_form(tree, sql, kids[i])
             wanted.append(self._join_right(tree, form))
             var on = self._join_on(tree, sql, form)
@@ -2782,6 +2800,9 @@ struct Transform(Movable):
             var clause = self._only(tree, kids[i])
             if self._marked(tree, clause, _MARK_TABLE_PIVOT):
                 built = self._table_pivot(tree, sql, clause, built, ast, work)
+                continue
+            if self._marked(tree, clause, _MARK_TABLE_UNPIVOT):
+                built = self._table_unpivot(tree, sql, clause, built, ast, work)
                 continue
             var form = self._join_form(tree, sql, kids[i])
             var at = tree.nodes[Int(form)].token_start
@@ -2992,6 +3013,148 @@ struct Transform(Movable):
             False,
             at,
         )
+
+    def _unpivot_clause_body(
+        self, tree: Parse, sql: StringSlice, node: UInt32
+    ) raises -> UInt32:
+        """The body inside the parentheses of a `TableUnpivotClause`.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `TableUnpivotClause` node.
+
+        Returns:
+            The `TableUnpivotClauseBody` node.
+
+        Raises:
+            Error: If it says `INCLUDE NULLS`, or it holds more than one `FOR`
+                group, or it is shaped in a way the grammar forbids.
+        """
+        # `TableUnpivotClause <- 'UNPIVOT' IncludeOrExcludeNulls?
+        # Parens(TableUnpivotClauseBody) TableAlias?`.
+        var body = NO_NODE
+        for kid in tree.children(node):
+            if self._marked(tree, kid, _MARK_UNPIVOT_NULLS):
+                # `EXCLUDE NULLS` is the default, so writing it changes
+                # nothing and there is nothing to record. `INCLUDE NULLS` does
+                # change something and there is nowhere to put it.
+                if _word(tree, sql, kid) == "INCLUDE":
+                    raise _unsupported(tree, sql, kid, UNPIVOT_NULLS)
+            elif not self._marked(tree, kid, _MARK_TABLE_ALIAS):
+                body = self._only(tree, kid)
+        if body == NO_NODE:
+            raise _malformed(tree, sql, node, "an UNPIVOT with no body")
+
+        # `TableUnpivotClauseBody <- UnpivotHeader 'FOR' UnpivotValueList+`.
+        if len(tree.children(body)) != 2:
+            raise _unsupported(tree, sql, body, UNPIVOT_GROUPS)
+        return body
+
+    def _unpivot_clause_targets(
+        self, tree: Parse, sql: StringSlice, node: UInt32
+    ) raises -> UInt32:
+        """The columns a `TableUnpivotClause` folds up.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `TableUnpivotClause` node.
+
+        Returns:
+            The `UnpivotTargetList` node, which builds a run of items.
+
+        Raises:
+            Error: If the clause is one this has no case for.
+        """
+        # `UnpivotValueList <- UnpivotHeader 'IN' UnpivotTargetList`.
+        var group = tree.children(self._unpivot_clause_body(tree, sql, node))
+        return tree.children(group[1])[1]
+
+    def _table_unpivot(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        left: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds the `FROM t UNPIVOT (...)` spelling over the reference to its
+        left.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `TableUnpivotClause` node.
+            left: The table reference being unpivoted.
+            ast: Where to put the nodes.
+            work: The walk, for the columns.
+
+        Returns:
+            The table reference node.
+
+        Raises:
+            Error: If the clause is one this has no case for, or a part is not
+                built yet.
+        """
+        var body = self._unpivot_clause_body(tree, sql, node)
+        var kids = tree.children(body)
+        var group = tree.children(kids[1])
+        var names = self._unpivot_header(tree, sql, group[0])
+        if len(names) != 1:
+            # `INTO NAME` takes one column and this spelling can write a list,
+            # so a list of any other length has nowhere to go.
+            raise _unsupported(tree, sql, group[0], UNPIVOT_GROUPS)
+
+        var named = NO_NODE
+        for kid in tree.children(node):
+            if self._marked(tree, kid, _MARK_TABLE_ALIAS):
+                named = kid
+
+        var at = tree.nodes[Int(node)].token_start
+        var unpivot = ast.unpivot(
+            left,
+            ast.items(work.value(group[1])),
+            names[0],
+            self._unpivot_header(tree, sql, kids[0]),
+            at,
+        )
+        return ast.subquery_ref(
+            ast.select(unpivot, token=at),
+            self._alias_name(tree, sql, named),
+            self._alias_columns(tree, sql, named),
+            False,
+            at,
+        )
+
+    def _unpivot_header(
+        self, tree: Parse, sql: StringSlice, node: UInt32
+    ) raises -> List[String]:
+        """Reads the names off an `UnpivotHeader`.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `UnpivotHeader` node.
+
+        Returns:
+            The names, in order. One of them for the bare spelling.
+
+        Raises:
+            Error: If one of them is dotted, which none of these may be.
+        """
+        # `UnpivotHeader <- UnpivotHeaderSingle / UnpivotHeaderList`, and the
+        # second one is a parenthesized list, so the first byte tells them
+        # apart the way it does everywhere else this pair shows up.
+        var inside = self._only(tree, node)
+        var out = List[String]()
+        if _first_byte(tree, sql, inside) != _LEFT_PAREN:
+            out.append(self._plain(tree, sql, self._only(tree, inside)))
+            return out^
+        for name in self._items(tree, self._only(tree, inside)):
+            out.append(self._plain(tree, sql, name))
+        return out^
 
     def _base_table(
         self, tree: Parse, sql: StringSlice, node: UInt32, mut ast: Ast
@@ -3714,10 +3877,28 @@ struct Transform(Movable):
         Raises:
             Error: If one of them is dotted, which a group name cannot be.
         """
-        # `PivotGroupByList <- 'GROUP' 'BY' OptionalParensNameList`, and the
-        # list is written with or without parentheses around it, which the
-        # first byte is enough to tell apart.
-        var inside = self._only(tree, self._only(tree, node))
+        # `PivotGroupByList <- 'GROUP' 'BY' OptionalParensNameList`.
+        return self._optional_parens_names(tree, sql, self._only(tree, node))
+
+    def _optional_parens_names(
+        self, tree: Parse, sql: StringSlice, node: UInt32
+    ) raises -> List[String]:
+        """Reads a name list that may or may not be in parentheses.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `OptionalParensNameList` node.
+
+        Returns:
+            The names, in order.
+
+        Raises:
+            Error: If one of them is dotted, which none of these may be.
+        """
+        # The two spellings mean the same thing, so the first byte is enough to
+        # tell them apart and nothing else has to look at which one was used.
+        var inside = self._only(tree, node)
         var names = self._items(tree, inside)
         if _first_byte(tree, sql, inside) == _LEFT_PAREN:
             names = self._items(tree, self._only(tree, inside))
@@ -3725,6 +3906,60 @@ struct Transform(Movable):
         for name in names:
             out.append(self._plain(tree, sql, name))
         return out^
+
+    def _unpivot(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds an `UNPIVOT` written as a statement.
+
+        `PIVOT_LONGER` is the other spelling of the keyword and means the same
+        thing, so it is read and not kept.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `UnpivotStatement` node.
+            ast: Where to put the nodes.
+            work: The walk, for the table and the `ON` list.
+
+        Returns:
+            The statement node.
+
+        Raises:
+            Error: If a part is not built yet, or a column name is dotted.
+        """
+        # `UnpivotStatement <- UnpivotKeyword TableRef 'ON' TargetList
+        # IntoNameValues?`, so only the last one is optional.
+        var kids = tree.children(node)
+        var source = kids[1]
+        var targets = kids[2]
+        var wanted = List[UInt32]()
+        wanted.append(source)
+        wanted.append(targets)
+        work.warm(wanted)
+
+        var name = String()
+        var values = List[String]()
+        if len(kids) > 3:
+            # `IntoNameValues <- 'INTO' 'NAME' ColIdOrString ValueOrValues
+            # OptionalParensNameList`, and `VALUE` and `VALUES` are the same
+            # word, so the middle one is read past.
+            var into = tree.children(kids[3])
+            name = self._plain(tree, sql, into[0])
+            values = self._optional_parens_names(tree, sql, into[2])
+
+        return ast.unpivot(
+            work.value(source),
+            ast.items(work.value(targets)),
+            name,
+            values,
+            tree.nodes[Int(node)].token_start,
+        )
 
     def _frame(
         self,

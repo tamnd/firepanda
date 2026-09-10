@@ -39,8 +39,8 @@ fixed length run instead, and the entries are named by constant. The query node
 is the only one that does this, because seven clauses do not fit in four fields
 and splitting a `SELECT` across two nodes to make them fit would be worse.
 
-What is not here yet is `UNPIVOT`, and the statements that are not a `SELECT`.
-They arrive with the rest of S2.
+What is not here yet is the statements that are not a `SELECT`. They arrive with
+the rest of S2.
 """
 
 comptime NO_NODE: UInt32 = 0
@@ -620,6 +620,28 @@ column's values are, and at most one of them is set:
 All three being empty is the bare `ON a`, which asks DuckDB to find the values
 by reading the column. `IN ()` is not a thing the grammar can write, so an
 empty run and no run mean the same and there is nothing to tell apart.
+"""
+
+comptime STMT_UNPIVOT: UInt8 = 14
+"""An `UNPIVOT`, in the spelling that is a statement of its own.
+
+`a` is the table reference, `children` is a run of `STMT_ITEM` nodes for the
+columns being folded up, `payload` is the interned name of the column the old
+column names go into, and `b` is a run of interned names for the columns their
+values go into. The last two arrive together or not at all, because `INTO NAME
+n VALUE v` is one clause, so `payload` being 0 and `b` being empty mean the
+same thing and either one answers the question.
+
+The two spellings normalize the way `STMT_PIVOT`'s do and for the same reason.
+`FROM t UNPIVOT (v FOR n IN (a, b))` becomes `FROM (UNPIVOT t ON a, b INTO NAME
+n VALUE v)`, because the statement form is the one that can leave the `INTO`
+out and the other one cannot.
+
+Two things the other form can say are refused rather than recorded. `INCLUDE
+NULLS` has no spelling here at all, and more than one `FOR` group is a shape
+this node has no room for. Both are rows in `unsupported.mojo`. `EXCLUDE NULLS`
+is the default and is read and dropped, the way `EXCLUDE NO OTHERS` is on a
+window frame.
 """
 
 
@@ -1928,6 +1950,37 @@ struct Ast(Movable):
                 a=header,
                 b=statement,
                 children=self.run(values),
+                payload=self.intern(name),
+            )
+        )
+
+    def unpivot(
+        mut self,
+        source: UInt32,
+        on: List[UInt32] = List[UInt32](),
+        name: StringSlice = "",
+        values: List[String] = List[String](),
+        token: UInt32 = 0,
+    ) -> UInt32:
+        """Builds an `UNPIVOT` statement.
+
+        Args:
+            source: The table reference being unpivoted.
+            on: The `STMT_ITEM` nodes of the `ON` list, in order.
+            name: The name column, empty when there is no `INTO`.
+            values: The value columns, in order, empty for the same reason.
+            token: The token it starts at.
+
+        Returns:
+            The statement node index.
+        """
+        return self.add_stmt(
+            Stmt(
+                kind=STMT_UNPIVOT,
+                token=token,
+                a=source,
+                b=self.names(values),
+                children=self.run(on),
                 payload=self.intern(name),
             )
         )

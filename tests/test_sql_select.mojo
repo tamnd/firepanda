@@ -561,18 +561,21 @@ def test_a_long_union_chain_is_built_once() raises:
     assert_equal(_printed(sql, g, rules), sql)
 
 
-def test_a_pivot_after_a_table_is_read_and_an_unpivot_is_not() raises:
-    # What a pivot turns into is tested in `test_sql_pivot.mojo`. The one thing
-    # this file cares about is that the modifier position after a table reaches
-    # it, and that the modifier that is still refused says which one it is.
+def test_a_pivot_or_an_unpivot_after_a_table_is_read() raises:
+    # What the two turn into is tested in `test_sql_pivot.mojo` and
+    # `test_sql_unpivot.mojo`. The one thing this file cares about is that the
+    # modifier position after a table reaches both of them, which is the same
+    # position a join goes in.
     var g = Grammar()
     var rules = Transform(g)
     assert_equal(
         _printed("SELECT a FROM t PIVOT (sum(a) FOR b IN (1))", g, rules),
         "SELECT a FROM (PIVOT t ON b IN (1) USING sum(a))",
     )
-    with assert_raises(contains="UNPIVOT on a table"):
-        _ = _printed("SELECT a FROM t UNPIVOT (v FOR n IN (a, b))", g, rules)
+    assert_equal(
+        _printed("SELECT a FROM t UNPIVOT (v FOR n IN (a, b))", g, rules),
+        "SELECT a FROM (UNPIVOT t ON a, b INTO NAME n VALUE v)",
+    )
 
 
 def test_a_sample_refuses_and_names_itself() raises:
@@ -759,14 +762,12 @@ def test_a_statement_inside_a_with_refuses_under_its_own_name() raises:
 
 def test_a_query_that_is_not_a_select_refuses_by_name() raises:
     # These produce rows, so they hang off the select rule rather than off the
-    # statement rule, and the tier loop never reached them. `PIVOT` was here
-    # too and is read now.
+    # statement rule, and the tier loop never reached them. `PIVOT` and
+    # `UNPIVOT` were here too and are read now, so `DESCRIBE` is what is left.
     var g = Grammar()
     var rules = Transform(g)
     with assert_raises(contains="the DESCRIBE statement yet"):
         _ = _printed("DESCRIBE t", g, rules)
-    with assert_raises(contains="the UNPIVOT statement yet"):
-        _ = _printed("UNPIVOT t ON a", g, rules)
 
 
 def test_a_parenthesised_expression_is_still_just_the_expression() raises:

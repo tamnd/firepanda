@@ -133,7 +133,7 @@ comptime TABLE_SAMPLE: UInt16 = 17
 """`TABLESAMPLE` or `USING SAMPLE` on one table."""
 
 comptime TABLE_MODIFIER: UInt16 = 18
-"""`UNPIVOT` after a table."""
+"""Something after a table that is neither a join nor a pivot."""
 
 comptime TABLE_AT: UInt16 = 19
 """`AT` after a table, which reads it as of a version or a timestamp."""
@@ -195,7 +195,13 @@ comptime POSITIONAL: UInt16 = 37
 comptime DEFAULT_VALUE: UInt16 = 38
 """`DEFAULT` where a value goes."""
 
-comptime NO_CASE: UInt16 = 39
+comptime UNPIVOT_NULLS: UInt16 = 39
+"""`INCLUDE NULLS` on an `UNPIVOT`."""
+
+comptime UNPIVOT_GROUPS: UInt16 = 40
+"""More than one `FOR` group on an `UNPIVOT`."""
+
+comptime NO_CASE: UInt16 = 41
 """A grammar rule the transformer has no case for at all."""
 
 
@@ -374,7 +380,11 @@ def sql_support() -> List[Refusal]:
         Refusal(
             "table-modifier",
             "{} on a table",
-            "PIVOT is read now and UNPIVOT is the rest of this stage.",
+            (
+                "A join, a PIVOT and an UNPIVOT are the three things that go"
+                " here and all three are read, so this is a fourth one the"
+                " grammar grew and the transformer has no case for."
+            ),
             STAGE_ISSUE,
         ),
         Refusal(
@@ -566,6 +576,26 @@ def sql_support() -> List[Refusal]:
                 " library and has no catalog to ask."
             ),
             SQL_ISSUE,
+        ),
+        Refusal(
+            "unpivot-nulls",
+            "INCLUDE NULLS on an UNPIVOT",
+            (
+                "The statement spelling of an UNPIVOT has no way to write it,"
+                " and that is the spelling the node records, so there is"
+                " nowhere to keep it. EXCLUDE NULLS is the default and is"
+                " read."
+            ),
+            STAGE_ISSUE,
+        ),
+        Refusal(
+            "unpivot-groups",
+            "more than one FOR group on an UNPIVOT",
+            (
+                "One UNPIVOT node holds one name column and one set of value"
+                " columns, so a second group has nowhere to go."
+            ),
+            STAGE_ISSUE,
         ),
         Refusal(
             "no-case",

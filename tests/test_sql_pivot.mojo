@@ -14,7 +14,7 @@ one worth reading the note in `STMT_PIVOT` about, because it is the direction
 that can carry every query and the other one is not.
 """
 
-from std.testing import TestSuite, assert_equal, assert_raises, assert_true
+from std.testing import TestSuite, assert_equal
 
 from firepanda.sql import Grammar, Transform
 from firepanda.sql.ast import (
@@ -255,20 +255,6 @@ def test_a_pivot_column_holds_one_kind_of_value_at_a_time() raises:
     assert_equal(ast.text(column.payload), "an_enum")
     assert_equal(column.b, NO_NODE)
     assert_equal(ast.length(column.children), 0)
-
-
-def test_unpivot_still_says_it_is_not_read_yet() raises:
-    # The two arrived one at a time, and the message names which one is which
-    # so a user does not read the refusal as covering both.
-    var g = Grammar()
-    var rules = Transform(g)
-    var ast = Ast()
-    with assert_raises(contains="UNPIVOT"):
-        _ = rules.parse_statement("UNPIVOT t ON a", g, ast)
-    with assert_raises(contains="UNPIVOT"):
-        _ = rules.parse_statement(
-            "SELECT * FROM t UNPIVOT (v FOR n IN (a, b))", g, ast
-        )
 
 
 def main() raises:
