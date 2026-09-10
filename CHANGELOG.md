@@ -8,6 +8,70 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.55] - 2026-09-11
+
+Built against Mojo 1.0.0 (ed45d567).
+
+The SQL front end finishes the stage that turns a parse tree into something with meaning, and the category column becomes a column a caller can actually use rather than one the library can merely hold.
+
+On the SQL side this closes S2 of the DuckDB dialect milestone. Window specifications, `PIVOT` and `UNPIVOT` all read now, which is the whole analytical expression surface, and the two structural pieces underneath it changed as well. The jump table the transformer dispatches through can no longer be built with a hole in it, so a grammar rule nobody wrote a case for is a failure when the table is constructed rather than a fallthrough the first user to write that query discovers. And the corpus differential can say which refusal each of the 39,028 refused statements landed on, which turns the refusal table from a list into a measurement.
+
+On the categorical side a column survives being filtered, taken, stacked and filled, which it did not before: eight kernels were producing a column whose type said category and whose category list was empty, and had been since dictionary columns were added. Comparison works, the Mojo `Series` can reach the same surface the Python `cat` namespace could, and an imported dictionary column can be read at all.
+
+There is also a join that builds on the shorter side rather than the one the caller named second, a parse budget with a number in it that anybody can reproduce, and four error messages that described our internals instead of the user's mistake.
+
+Patch rather than minor, since the milestone this SQL work belongs to is not finished. S2 is.
+
+### Added: the SQL front end reads a window specification
+
+`OVER` was one of four modifiers that could follow a call and refuse, and the `WINDOW` clause was one of the select clauses that refused. Both go to the AST now and print back, which was the last piece of the analytical expression surface still stopping at the transformer, and it is the piece `QUALIFY` was waiting on, since a `QUALIFY` over a call with no window on it is not a query anybody writes.
+
+Two node kinds carry it. The first is whatever follows `OVER`, which is also what `WINDOW w AS (...)` defines, because those are the same thing written in two places. The second is the frame, the `ROWS`, `RANGE` or `GROUPS` clause, whose two bound counts take the fields a node has and leave nowhere for the framing mode, the two bound kinds and the exclusion, so those four are packed four bits each into the field that was left.
+
+`OVER w` prints as `OVER (w)`. The grammar has three spellings for what can follow `OVER` and two of them are nothing but a name, so they share one shape and the printer picks the one that cannot be misread. A frame written without an `EXCLUDE` stays without one rather than growing an explicit `EXCLUDE NO OTHERS`.
+
+The tests are the 25 pairs of frame bounds, the three framings, the four exclusions, a named window, a window built on top of a named one, and every one of them parses, prints, reparses and fails if the two texts differ.
+
+`FILTER`, `WITHIN GROUP` and `EXPORT` still refuse by name after a call, and there is a test that says so.
+
+### Added: the SQL front end reads a PIVOT and an UNPIVOT
+
+Both were refusals under the entry that fires when something follows a table and is neither a join nor a pivot. Both go to the AST now, in both of the spellings DuckDB accepts for each.
+
+Each feature has a statement spelling and a table spelling, and they become one node. `FROM t PIVOT (sum(x) FOR a IN (1, 2))` comes back as `FROM (PIVOT t ON a IN (1, 2) USING sum(x))`, and the same direction for `UNPIVOT`. Normalizing that way round is forced rather than chosen: the standard spelling requires an `IN` on every pivot column and the statement one does not, so `PIVOT t ON a USING sum(x)` cannot be written in the standard form at all, and a printer that picked a spelling per query would be deciding which features each query is allowed to carry.
+
+For `UNPIVOT` neither spelling dominates, so the direction was measured rather than argued. The statement form can leave out `INTO` and the table form cannot. The table form can say `INCLUDE NULLS` and the statement form cannot. Of 194,135 statements in the corpus, 128 mention an unpivot, 3 say `INCLUDE NULLS` and 2 say `EXCLUDE NULLS`. So `INCLUDE NULLS` becomes a refusal that costs three queries, `EXCLUDE NULLS` is read and dropped because it is the default, which is what `EXCLUDE NO OTHERS` already does on a window frame, and everything else normalizes to the statement spelling.
+
+Two new rows in the refusal table and therefore two new rows in the README, one for `INCLUDE NULLS` and one for more than one `FOR` group, which a single node has nowhere to put.
+
+One old row stopped refusing anything. A join, a `PIVOT` and an `UNPIVOT` are the three things the grammar allows after a table and all three are read, so nothing reaches it. It stays as a guard against a fourth one a grammar bump might add, rather than being deleted and renumbering everything after it, and its text says that is what it now is.
+
+### Changed: the SQL transformer will not build a jump table with a hole in it
+
+The transformer dispatches on grammar rule index through a table of one byte per rule, and a rule with no byte meant two different things. Either the case above it reads it directly and nothing ever asks for its value, which is fine and is how a third of the table is meant to work. Or nobody had written its case yet, which is a bug that stays invisible until a user writes the query that reaches it and gets a fallthrough instead of an answer. There was no way to tell the two apart, so there was no way to check the table was complete.
+
+They are two different bytes now. The 481 rules that the case above them reads are listed in one block rather than marked one at a time beside each case, because what matters about that set is that it is complete, and a set is easier to check when it is written out in one place and in one order. The other byte is still zero, so it is still what a rule gets by not being registered, and building the table now walks the grammar from the statement rule, stops descending wherever a statement refuses outright, and raises if a rule it can still reach is holding it.
+
+Building the table is the check, which means every query the engine parses runs it and so does every test in the suite. The statement rule is 995 of 1,187, 697 rules are reachable from it, and 490 of the rest sit behind a refusal with no case, which is where they belong.
+
+Registering rules by name used to be a linear scan over 1,187 names each time. That is the right shape for the handful of callers that ask once and the wrong shape for six hundred in a row, and it took one test file from 39 seconds to 60 before the names went into a map.
+
+### Changed: the SQL corpus differential says which refusal each statement landed on
+
+The harness could say that 39,028 of 69,153 statements refused by name, and nothing else. Which refusals, and how many of each, was not a question it could ask, because a refusal is a raised error with text in it and there was no way back from the text to the table entry that produced it. A table with an entry nobody hits and a table with an entry that eats a third of the corpus look the same from the outside, and the second one is where the next feature should go.
+
+`firepanda.sql.feature_of` is the way back. Entries whose message has a hole in it match on the text either side and the longer match wins, so a short generic message cannot shadow a specific one, and a test walks the whole table and reads every entry back off its own message.
+
+What the corpus says is that the two statement tier refusals account for 33,716 between them, then a long tail from 679 down to 1, that 36 entries fire at all and they sum to exactly the number the round trip line already printed, and that the entry which fires when the transformer has no case at all is zero.
+
+### Changed: the SQL parse budget has a number in it that anybody can reproduce
+
+The parser specification had a measured column reading "380 us when the matcher landed, four to five times faster than that now". That was true when it was written and it was not checkable, because the readings were taken by hand on a quiet machine and the speedups were against a build that no longer exists. There was a second problem hiding in it: the measured column was tokenize and match while the target column included the transform, so the row compared two thirds of the work against a budget for all of it.
+
+There are six rows in the microbenchmark suite now, three per query, on TPC-H q1 and on `SELECT 1`, because the budget is spent in three places and the interesting question is which. Tokenizing is under one per cent of a parse in both, so the tokenizer is done. The matcher is 38 per cent of q1 and 61 per cent of the trivial one, and the transformer is the rest, which the old table could not see. Against the whole of the work q1 is nearly eight times over budget and the trivial query is nearly five times over.
+
+They were taken twice, before and after the window work landed, and nothing moved outside the spread, so adding a feature to the transformer does not cost the queries that do not use it.
+
 ### Fixed: a category column survives being filtered, taken, stacked and filled
 
 `s.dropna()` on a category column raised, and not with a message about categories. It came out of the Arrow writer, several layers away, saying the column was a categorical with no categories behind it.
