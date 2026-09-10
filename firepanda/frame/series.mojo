@@ -41,6 +41,13 @@ from firepanda.frame.index import Index
 from firepanda.kernel.binary import BinaryOp, binary_any, binary_value_any
 from firepanda.kernel.cast import cast_any
 from firepanda.kernel.cumulative import CumulativeOp, cumulative_any
+from firepanda.kernel.dictionary import (
+    dictionary_codes,
+    drop_unused_categories,
+    rename_categories,
+    set_categories,
+    set_ordered,
+)
 from firepanda.kernel.member import is_in_any
 from firepanda.kernel.nulls import (
     coalesce_any,
@@ -708,6 +715,157 @@ struct Series(Copyable, Movable, Sized, Writable):
             self.name,
             AnyArray(text_substring(self.values.strings(), offset, length)),
         )
+
+    def cat_is_category(self) -> Bool:
+        """Answers whether this column holds categories at all.
+
+        Here so that a caller can ask before calling, rather than calling and
+        catching. The seven members below all refuse a column that is not a
+        categorical, and a caller who does not know what they are holding wants
+        a question rather than an exception.
+
+        Returns:
+            True if the column is dictionary encoded.
+        """
+        return self.values.is_dictionary()
+
+    def cat_categories(self) raises -> Self:
+        """Returns the distinct values the codes stand for.
+
+        There are as many rows here as the column has categories, not as it has
+        rows, so the result does not carry this series' labels and gets a range
+        of its own. The name does not come across either, since the categories
+        are not the column.
+
+        Returns:
+            An unnamed text series of the categories, in category order.
+
+        Raises:
+            Error: If the column is not a category column.
+        """
+        return Self("", AnyArray(StringArray(copy=self.values.categories())))
+
+    def cat_codes(self) raises -> Self:
+        """Returns the position each row holds in the categories.
+
+        The labels come across, because a caller reading codes is lining two
+        columns up. The name does not, for the same reason `cat_categories`
+        drops it. Every code is widened to int32 whatever the column stores,
+        which is what `dictionary_codes` is for.
+
+        Returns:
+            An unnamed int32 series, null wherever this one is null.
+
+        Raises:
+            Error: If the column is not a category column.
+        """
+        return self._relabelled("", AnyArray(dictionary_codes(self.values)))
+
+    def cat_ordered(self) raises -> Bool:
+        """Answers whether comparing two of the categories means anything.
+
+        Returns:
+            True if the categories have a meaningful order.
+
+        Raises:
+            Error: If the column is not a category column.
+        """
+        if not self.values.is_dictionary():
+            raise Error(
+                String(
+                    "category: ", self.values.type, " is not a category column"
+                )
+            )
+        return self.values.type.ordered
+
+    def cat_set_ordered(self, ordered: Bool) raises -> Self:
+        """Returns the same column under a type that says whether order counts.
+
+        No row moves and no code changes, so this is a change of type and
+        nothing else. It is a member of its own rather than `cat_set_categories`
+        with the categories the column already has, which would walk every row
+        to arrive at the codes it started with.
+
+        Args:
+            ordered: The flag to carry.
+
+        Returns:
+            A series over the same codes and the same categories.
+
+        Raises:
+            Error: If the column is not a category column.
+        """
+        return self._relabelled(self.name, set_ordered(self.values, ordered))
+
+    def cat_rename_categories(
+        self, var names: StringArray, ordered: Bool = False
+    ) raises -> Self:
+        """Gives the categories new labels, leaving every code where it is.
+
+        The one category operation decided by position rather than by value.
+        Row 4 held category 2 before and holds category 2 after, and what
+        changed is what category 2 is called.
+
+        The count is not checked, because the two pandas methods that reach this
+        disagree about it. `rename_categories` insists on one label per category
+        and checks that where it can name what the caller passed, and
+        `set_categories(rename=True)` deliberately allows a different count.
+
+        Args:
+            names: The new labels, in the order the column holds its categories.
+                Consumed.
+            ordered: Whether the order is to mean anything.
+
+        Returns:
+            A series over the same codes under the new labels.
+
+        Raises:
+            Error: If the column is not a category column, or if the labels
+                repeat.
+        """
+        return self._relabelled(
+            self.name, rename_categories(self.values, names^, ordered)
+        )
+
+    def cat_set_categories(
+        self, var names: StringArray, ordered: Bool = False
+    ) raises -> Self:
+        """Rewrites the column against a new list of categories, by value.
+
+        The door the pandas methods that add, remove and reorder are arithmetic
+        over. Every row keeps the value it had if that value is in the new list
+        and becomes null if it is not, so dropping a category is how a category
+        column loses rows to missing.
+
+        Args:
+            names: The categories to hold, in the order to hold them. Consumed.
+            ordered: Whether that order is to mean anything.
+
+        Returns:
+            A series over the given categories.
+
+        Raises:
+            Error: If the column is not a category column, or if the given
+                categories are not distinct.
+        """
+        return self._relabelled(
+            self.name, set_categories(self.values, names^, ordered)
+        )
+
+    def cat_drop_unused_categories(self) raises -> Self:
+        """Drops the categories nothing in the column uses, keeping the order.
+
+        A member of its own rather than `cat_set_categories` with the used ones,
+        because which categories are used is a question about the codes, and a
+        caller working it out would have to read every code out first.
+
+        Returns:
+            A series over the categories that appear in it.
+
+        Raises:
+            Error: If the column is not a category column.
+        """
+        return self._relabelled(self.name, drop_unused_categories(self.values))
 
     def drop_nulls(self) raises -> Self:
         """Returns the series with the missing rows removed.
