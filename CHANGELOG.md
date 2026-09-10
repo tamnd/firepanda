@@ -8,6 +8,24 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: the differential job that stopped for twenty minutes with nothing left to do
+
+The "Differential vs pandas & DuckDB" job has been failing on every pull request for two days, always at the same step, always at exactly twenty minutes and sixteen seconds, which is the job's own ceiling. It was read as a slow runner because that is what a timeout looks like. It is not one. The step's real work takes ten seconds.
+
+What happens is that `tests/differential/sql_generated.mojo` generates its statements, asks DuckDB about all of them, parses all of them itself, prints its whole report down to the last agreement figure, checks both ceilings, and then aborts on the way out with a glibc `corrupted double-linked list`. There is nothing left for the program to do at that point and no output is lost. The crash handler then holds the dead process open until something kills it, which in CI is the job ceiling twenty minutes later.
+
+It is intermittent and it is not size dependent, which is what made it look like a load problem. On an eight core Linux box a sweep of eight case counts crashed at eight thousand statements and passed at sixteen and at twenty five thousand in the same sweep, and a rerun at the default twenty five thousand crashed once and then passed. Twenty five runs of the real step put the rate at three in twenty five.
+
+Splitting the program in half says which half. Generating eight thousand statements and parsing all of them with no Python in the process at all is clean over twenty runs. Generating the same statements and handing them to DuckDB instead crashes two times in twenty. The matcher, which is the code this test exists to exercise and the code somebody had just changed a lot of, is not involved.
+
+What is involved is `mojo run`, which compiles the program into the process it then runs it in. The same program built with `mojo build` and then run is clean over a hundred and twenty five runs, where the same program under `mojo run` is five crashes in forty five. So all three differential programs are now built first and run second. That is not slower, because `mojo run` compiles too, and it means the job pays for its three compiles once at the start rather than once per step.
+
+The binaries go under `build/differential`, which matters more than it sounds like. A built Mojo binary puts its own directory on Python's `sys.path`, and a stray `grp.py` sitting in `/tmp` on the machine this was narrowed on shadowed the standard library's `grp` and made every run of a binary built into `/tmp` fail for a reason that had nothing to do with any of this. One round of measurements was thrown away to it.
+
+Each comparison step also gets its own ceiling now, five minutes for the two parser comparisons and eight for the frame one, which carries the compiles. The job ceiling only ever said that the job hung. A step ceiling says which comparison did, and a wedge at exit prints nothing on its way out, so without one the log just stops after a report that had already finished.
+
+The abort itself is a real memory safety defect in something and this does not fix it, it stops it from costing twenty minutes a pull request while it is found.
+
 ### Timestamp and Timedelta, measured rather than described
 
 A datetime column has to hand back something when you index into it, take its maximum or read one value out of a grouped result, and until now there was nothing for it to hand back. `firepanda.Timestamp` and `firepanda.Timedelta` are that something, and they are subclasses of `datetime.datetime` and `datetime.timedelta` for the same reason the pandas ones are: a scalar that is not a `datetime` breaks every piece of code holding a `datetime`, and almost all of that code belongs to somebody else. The nanoseconds ride alongside, which is the three digits `datetime` does not have and Arrow does.

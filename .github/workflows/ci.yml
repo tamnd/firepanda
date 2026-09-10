@@ -372,10 +372,16 @@ jobs:
     if: needs.guard.outputs.has_mojo == 'true'
     runs-on: ubuntu-latest
     # This job takes about a minute on a warm cache and about four on a cold one.
-    # It has twice wedged instead of exiting, once for 37 minutes until somebody
-    # cancelled it by hand, so it gets a ceiling. The number is high enough that a
-    # slow runner and a cold cache together stay well under it, and low enough that
-    # a hang costs a coffee rather than an afternoon.
+    # It has wedged instead of exiting more than once, the worst of them for 37
+    # minutes until somebody cancelled it by hand, so it gets a ceiling. The
+    # number is high enough that a slow runner and a cold cache together stay well
+    # under it, and low enough that a hang costs a coffee rather than an afternoon.
+    #
+    # Every step that runs a comparison gets its own ceiling as well, because the
+    # job ceiling only says the job hung and a step ceiling says which comparison
+    # did. A wedge at exit holds the process open with nothing left to print, so
+    # without these the log stops at the last line of a report that finished and
+    # there is nothing to tell it apart from a genuinely slow run.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -383,7 +389,10 @@ jobs:
         with:
           environment: differential
       # Mojo imports pandas in-process, so this needs no bindings and works from M1.
+      # This one builds all three programs before it runs the first, so it carries
+      # the compile time for the two steps below it.
       - run: pixi run differential
+        timeout-minutes: 8
 
       # DuckDB's test corpus is 33 MB and is fetched rather than vendored, so it
       # is cached on the commit the grammar is pinned to. A grammar bump changes
@@ -399,6 +408,7 @@ jobs:
 
       - name: Every statement in DuckDB's corpus, through both parsers
         run: pixi run differential-sql
+        timeout-minutes: 5
 
       # The same comparison over statements the grammar wrote rather than ones
       # people wrote, which is how the rules the corpus has no test for get
@@ -406,6 +416,7 @@ jobs:
       # above. docs/specs/sql/11-conformance.md section 4.
       - name: Statements out of the grammar, through both parsers
         run: pixi run differential-sql-generated
+        timeout-minutes: 5
 
   required:
     name: CI
