@@ -129,6 +129,17 @@ What it is worth depends on run length rather than on cardinality, and the measu
 The walk is split across cores the way the parallel filter is. Which ordinal a row gets depends on how many groups closed before it, which a worker handed the middle of the column does not know, so the boundaries are counted first and a prefix sum over the per worker counts is the ordinal each worker starts at. The comparison a worker makes at the first row of its own stretch reads the row before it, which belongs to the worker before, and reads are what make that safe.
 
 Two things are refused rather than attempted, and both hand back nothing so the caller falls through to the route that gets them right. A column holding a null does not come in at all, because `Sortedness` says nothing about which end a sort put the nulls at. And only a single key column qualifies, because the flag is per column and two columns each sorted on their own say nothing about whether the pairs are in lexicographic order. A descending column does qualify, since equal values are adjacent either way round and the runs come out in the order they appear either way round. Text is refused for now, because it would otherwise match the uint8 arm of the dtype dispatch and group on the first byte of each view.
+### Added: the SQL catalog, which is the set of names a query is allowed to say
+
+The first piece of the binder. A catalog is a session scoped namespace holding a frame or a view under each name, it dies with the process, and there is no storage under it, no schemas and no `ATTACH`, because firepanda has nothing to attach to.
+
+Three of its rules are decisions rather than defaults. It is one namespace and not two, so a frame called `t` and a view called `t` cannot both exist, because a query saying `FROM t` has to mean one of them and picking by kind is a rule nobody could guess. Registering over a name that is taken replaces what was there, which is what a notebook does every time a cell is rerun. And lookup folds while storage does not, so `CREATE TABLE "MyTable"` is reachable as `mytable`, as `"MYTABLE"` and as `MyTable`, and `MyTable` is the spelling that comes back in an error.
+
+That last one is the one worth stating, because it is the only place in the dialect where a quoted identifier is not case sensitive. It was measured against DuckDB rather than read from anywhere, and getting it the other way round would refuse queries DuckDB accepts.
+
+A name that does not resolve gets DuckDB's own text, `Catalog Error: Table with name t does not exist!`, with a `Did you mean` line when a registered name is close. The threshold is ours and not DuckDB's. DuckDB suggests out of a catalog that includes the Postgres compatibility tables, so it can answer a name resembling nothing the user registered with a system table they have never heard of, and we have no such tables, so a guess with nothing behind it would read as a bug. An edit distance below half the shorter name is a typo and above it is a different word.
+
+Frames go in by move and come back by reference. A catalog is the session's working set and a query that copied it to read a schema would be the most expensive thing in the front end. Lookup is a linear scan over a short list, which is what the specification asks for and what wins at the size a REPL actually has.
 
 ### Added: rolling and expanding windows, and the five reductions a window can be carried through
 

@@ -23,6 +23,9 @@ fixed size nodes that hold no grammar rule names, and `printer.mojo` turns one
 back into SQL text. `transform.mojo` is what sits between the parse tree and
 the AST, and it is the only file that knows a grammar rule name.
 
+`catalog.mojo` is the namespace a query's names are resolved against: session
+scoped, no storage, a frame or a view under each name.
+
 `unsupported.mojo` is the line between what the grammar accepts and what
 firepanda runs. Every refusal is an entry in its table rather than a `raise`
 written where the cases ran out, which is what lets `sql_support()` list the
@@ -30,6 +33,7 @@ whole set. See docs/specs/sql/00-README.md.
 """
 
 from .ast import Ast, Expr, Ref, Stmt
+from .catalog import Catalog, View
 from .matcher import Parse, ParseNode, parse, parse_rule, parse_unfiltered
 from .printer import (
     needs_quoting,
