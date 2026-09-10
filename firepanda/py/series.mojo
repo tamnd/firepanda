@@ -144,6 +144,33 @@ struct PySeries(Movable, Writable):
         return PythonObject(Self._held(py_self)[].series[].name)
 
     @staticmethod
+    def relabel(
+        py_self: PythonObject, name: PythonObject
+    ) raises -> PythonObject:
+        """Returns the column under a different name.
+
+        A copy rather than a change in place, which is what pandas does and is
+        also the only thing available here: the series behind a Python wrapper is
+        shared with whoever else is holding it, so renaming in place would rename
+        somebody else's column.
+
+        Empty means no name. A pandas series with no name has `None` there and
+        this side has a `String` with nothing in it, which is the same
+        arrangement `label` reports through and is turned back into `None` in
+        Python.
+
+        Args:
+            py_self: The series.
+            name: The new name, and empty for none.
+
+        Returns:
+            A copy carrying the new name.
+        """
+        var out = Series(copy=Self._held(py_self)[].series[])
+        out.name = words(name, "name")
+        return PythonObject(alloc=Self(ArcPointer(out^)))
+
+    @staticmethod
     def dtype(py_self: PythonObject) raises -> PythonObject:
         """Reports the type, as firepanda spells it.
 

@@ -73,7 +73,8 @@ from firepanda.py.ops import (
     fill,
     unary_op,
 )
-from firepanda.py.reduce import reduction
+from firepanda.kernel.group import AggKind
+from firepanda.py.reduce import grouped_reduction, reduction
 from firepanda.py.series import PySeries
 from firepanda.py.temporal import iso_calendar
 from firepanda.py.transform import transformation, transformed
@@ -430,6 +431,87 @@ struct PyDataFrame(Movable, Writable):
             return PythonObject(alloc=Self(ArcPointer(DataFrame(copy=frame))))
         var out = DataFrame.from_series(parts^)
         out.index = Index(copy=frame.index)
+        return PythonObject(alloc=Self(ArcPointer(out^)))
+
+    @staticmethod
+    def group_agg(
+        py_self: PythonObject,
+        by: PythonObject,
+        kind: PythonObject,
+        param: PythonObject,
+        dropna: PythonObject,
+        sort: PythonObject,
+        as_index: PythonObject,
+    ) raises -> PythonObject:
+        """Groups the rows by some columns and reduces every other column.
+
+        This is `df.groupby(keys).sum()` and its fourteen siblings, and it is one
+        method rather than fifteen for the same reason `reduce` is one method
+        rather than twelve. The reduction crosses as the word pandas spells it,
+        the four that take a number carry it beside the word, and the Python
+        layer holds the vocabulary. A generator that wrote fifteen bindings here
+        would be writing fifteen copies of one call.
+
+        `size` is the one word that does not reduce a column. It counts the rows
+        in each group, so it answers one column called `size` and does not touch
+        the others, which is why it goes to a different method in the core. It is
+        still spelled here rather than given its own binding, because from
+        Python it is `df.groupby(keys).size()` and looks exactly like the other
+        fourteen.
+
+        The three flags are pandas' own and all three mean what they mean there.
+        `as_index` is the one worth knowing about: it puts the key into the row
+        labels rather than leaving it as a column, it is the pandas default, and
+        it needs exactly one key here because two keys are a MultiIndex in pandas
+        and firepanda has none yet. The core raises for that case with the reason
+        in the message rather than quietly handing back one level.
+
+        Args:
+            py_self: The frame.
+            by: The key columns, at least one and no repeats.
+            kind: The reduction, as pandas spells the method on a group.
+            param: The delta degrees of freedom or the quantile, and zero for
+                the reductions that take neither.
+            dropna: Drop the groups whose key is missing, as pandas does.
+            sort: Order the result by the key, as pandas does.
+            as_index: Put the key in the row labels rather than in a column.
+
+        Returns:
+            A new frame with one row per group.
+
+        Raises:
+            Error: Tagged `column`, if a key is missing or named twice, tagged
+                `value` if the name is not one of the fifteen or `as_index` was
+                asked for with more than one key, and tagged `dtype` if a column
+                has a type the reduction cannot read.
+        """
+        var keys = List[String](capacity=Int(len(by)))
+        for name in by:
+            keys.append(String(name))
+        var wanted = grouped_reduction(
+            words(kind, "kind"), number(param, "param")
+        )
+        var drop = flag(dropna, "dropna")
+        var ordered = flag(sort, "sort")
+        var indexed = flag(as_index, "as_index")
+        ref frame = Self._frame(py_self)[].frame[]
+
+        var out: DataFrame
+        try:
+            if wanted == AggKind.SIZE:
+                out = frame.group_count(keys, drop, ordered, indexed)
+            else:
+                out = frame.group_agg(keys, wanted, drop, ordered, indexed)
+        except cause:
+            # The core raises one error type for three different mistakes here
+            # and the tag decides which of the Python exceptions a user sees, so
+            # the text is read rather than guessed at. Getting this wrong is not
+            # a small thing: a missing column arriving as a TypeError is an
+            # exception a pandas program's error handling does not catch.
+            var text = String(cause)
+            if "as_index" in text:
+                raise retagged(VALUE, cause)
+            raise retagged(COLUMN, cause)
         return PythonObject(alloc=Self(ArcPointer(out^)))
 
     @staticmethod

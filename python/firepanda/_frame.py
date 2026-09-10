@@ -21,10 +21,27 @@ from collections.abc import Sequence
 from typing import Any
 
 from . import _firepanda
-from ._pandas import NO_DEFAULT, DataFrameMixin, DatetimeMixin, IndexMixin, Namespace, SeriesMixin
+from ._pandas import (
+    NO_DEFAULT,
+    DataFrameGroupByMixin,
+    DataFrameMixin,
+    DatetimeMixin,
+    IndexMixin,
+    Namespace,
+    SeriesGroupByMixin,
+    SeriesMixin,
+    _grouped,
+)
 from .errors import translate
 
-__all__ = ["DataFrame", "DatetimeProperties", "Index", "Series"]
+__all__ = [
+    "DataFrame",
+    "DataFrameGroupBy",
+    "DatetimeProperties",
+    "Index",
+    "Series",
+    "SeriesGroupBy",
+]
 
 
 class DatetimeProperties(DatetimeMixin):
@@ -342,6 +359,349 @@ class DatetimeProperties(DatetimeMixin):
             raise translate(error) from None
 
 
+class DataFrameGroupBy(DataFrameGroupByMixin):
+    """A frame with a grouping over it, waiting for a reduction.
+
+    Reached from `df.groupby(...)` rather than from an attribute, which is the one way
+    this differs from the accessor above and is why it holds the keys and the flags as
+    well as the frame. Nothing is computed until a reduction is asked for, as in pandas,
+    and nothing about the grouping is kept afterwards: `groups`, `indices` and
+    `get_group` are absent rather than slow, because keeping an index per group whether
+    or not anybody asks is the cost this library exists to not pay.
+    """
+
+    __slots__ = ()
+
+    def sum(
+        self,
+        numeric_only: bool = False,
+        min_count: int = 0,
+        skipna: bool = True,
+        engine: Any = None,
+        engine_kwargs: Any = None,
+    ) -> DataFrame:
+        """The sum of the values in each group. Over every column that is not a key."""
+        try:
+            return self._reduce("sum", 0.0, numeric_only, skipna, min_count, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def mean(
+        self,
+        numeric_only: bool = False,
+        skipna: bool = True,
+        engine: Any = None,
+        engine_kwargs: Any = None,
+    ) -> DataFrame:
+        """The mean of the values in each group. Over every column that is not a key."""
+        try:
+            return self._reduce("mean", 0.0, numeric_only, skipna, None, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def min(
+        self,
+        numeric_only: bool = False,
+        min_count: int = -1,
+        skipna: bool = True,
+        engine: Any = None,
+        engine_kwargs: Any = None,
+    ) -> DataFrame:
+        """The smallest value in each group. Over every column that is not a key."""
+        try:
+            return self._reduce("min", 0.0, numeric_only, skipna, min_count, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def max(
+        self,
+        numeric_only: bool = False,
+        min_count: int = -1,
+        skipna: bool = True,
+        engine: Any = None,
+        engine_kwargs: Any = None,
+    ) -> DataFrame:
+        """The largest value in each group. Over every column that is not a key."""
+        try:
+            return self._reduce("max", 0.0, numeric_only, skipna, min_count, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def count(self) -> DataFrame:
+        """How many values in each group are not missing. Over every column that is not a
+        key.
+        """
+        try:
+            return self._reduce("count")
+        except Exception as error:
+            raise translate(error) from None
+
+    def size(self) -> DataFrame | Series:
+        """How many rows are in each group, missing values included."""
+        try:
+            return self._size()
+        except Exception as error:
+            raise translate(error) from None
+
+    def first(
+        self, numeric_only: bool = False, min_count: int = -1, skipna: bool = True
+    ) -> DataFrame:
+        """The first value in each group, in the frame's own order. Over every column that
+        is not a key.
+        """
+        try:
+            return self._reduce("first", 0.0, numeric_only, skipna, min_count)
+        except Exception as error:
+            raise translate(error) from None
+
+    def last(
+        self, numeric_only: bool = False, min_count: int = -1, skipna: bool = True
+    ) -> DataFrame:
+        """The last value in each group, in the frame's own order. Over every column that
+        is not a key.
+        """
+        try:
+            return self._reduce("last", 0.0, numeric_only, skipna, min_count)
+        except Exception as error:
+            raise translate(error) from None
+
+    def median(self, numeric_only: bool = False, skipna: bool = True) -> DataFrame:
+        """The middle value in each group. Over every column that is not a key."""
+        try:
+            return self._reduce("median", 0.0, numeric_only, skipna)
+        except Exception as error:
+            raise translate(error) from None
+
+    def nunique(self, dropna: bool = True) -> DataFrame:
+        """How many distinct values are in each group. Over every column that is not a key."""
+        try:
+            return self._nunique(dropna)
+        except Exception as error:
+            raise translate(error) from None
+
+    def std(
+        self,
+        ddof: int = 1,
+        engine: Any = None,
+        engine_kwargs: Any = None,
+        numeric_only: bool = False,
+        skipna: bool = True,
+    ) -> DataFrame:
+        """The standard deviation within each group. Over every column that is not a key."""
+        try:
+            return self._spread("std", ddof, numeric_only, skipna, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def var(
+        self,
+        ddof: int = 1,
+        engine: Any = None,
+        engine_kwargs: Any = None,
+        numeric_only: bool = False,
+        skipna: bool = True,
+    ) -> DataFrame:
+        """The variance within each group. Over every column that is not a key."""
+        try:
+            return self._spread("var", ddof, numeric_only, skipna, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def sem(self, ddof: int = 1, numeric_only: bool = False, skipna: bool = True) -> DataFrame:
+        """The standard error of the mean within each group. Over every column that is not
+        a key.
+        """
+        try:
+            return self._reduce("sem", float(ddof), numeric_only, skipna)
+        except Exception as error:
+            raise translate(error) from None
+
+    def skew(self, skipna: bool = True, numeric_only: bool = False, **kwargs: Any) -> DataFrame:
+        """The skewness within each group. Over every column that is not a key."""
+        try:
+            return self._reduce("skew", 0.0, numeric_only, skipna)
+        except Exception as error:
+            raise translate(error) from None
+
+    def quantile(
+        self, q: Any = 0.5, interpolation: str = "linear", numeric_only: bool = False
+    ) -> DataFrame:
+        """The value at one quantile within each group. Over every column that is not a
+        key.
+        """
+        try:
+            return self._quantile(q, interpolation, numeric_only)
+        except Exception as error:
+            raise translate(error) from None
+
+
+class SeriesGroupBy(SeriesGroupByMixin):
+    """One column of a grouped frame, waiting for a reduction.
+
+    Reached from `df.groupby(...)[name]`. The same fifteen reductions over one column
+    instead of all of them, answering a column rather than a frame, which is the whole
+    difference between the two classes.
+    """
+
+    __slots__ = ()
+
+    def sum(
+        self,
+        numeric_only: bool = False,
+        min_count: int = 0,
+        skipna: bool = True,
+        engine: Any = None,
+        engine_kwargs: Any = None,
+    ) -> DataFrame | Series:
+        """The sum of the values in each group. Over the column."""
+        try:
+            return self._reduce("sum", 0.0, numeric_only, skipna, min_count, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def mean(
+        self,
+        numeric_only: bool = False,
+        skipna: bool = True,
+        engine: Any = None,
+        engine_kwargs: Any = None,
+    ) -> DataFrame | Series:
+        """The mean of the values in each group. Over the column."""
+        try:
+            return self._reduce("mean", 0.0, numeric_only, skipna, None, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def min(
+        self,
+        numeric_only: bool = False,
+        min_count: int = -1,
+        skipna: bool = True,
+        engine: Any = None,
+        engine_kwargs: Any = None,
+    ) -> DataFrame | Series:
+        """The smallest value in each group. Over the column."""
+        try:
+            return self._reduce("min", 0.0, numeric_only, skipna, min_count, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def max(
+        self,
+        numeric_only: bool = False,
+        min_count: int = -1,
+        skipna: bool = True,
+        engine: Any = None,
+        engine_kwargs: Any = None,
+    ) -> DataFrame | Series:
+        """The largest value in each group. Over the column."""
+        try:
+            return self._reduce("max", 0.0, numeric_only, skipna, min_count, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def count(self) -> DataFrame | Series:
+        """How many values in each group are not missing. Over the column."""
+        try:
+            return self._reduce("count")
+        except Exception as error:
+            raise translate(error) from None
+
+    def size(self) -> DataFrame | Series:
+        """How many rows are in each group, missing values included."""
+        try:
+            return self._reduce("size")
+        except Exception as error:
+            raise translate(error) from None
+
+    def first(
+        self, numeric_only: bool = False, min_count: int = -1, skipna: bool = True
+    ) -> DataFrame | Series:
+        """The first value in each group, in the frame's own order. Over the column."""
+        try:
+            return self._reduce("first", 0.0, numeric_only, skipna, min_count)
+        except Exception as error:
+            raise translate(error) from None
+
+    def last(
+        self, numeric_only: bool = False, min_count: int = -1, skipna: bool = True
+    ) -> DataFrame | Series:
+        """The last value in each group, in the frame's own order. Over the column."""
+        try:
+            return self._reduce("last", 0.0, numeric_only, skipna, min_count)
+        except Exception as error:
+            raise translate(error) from None
+
+    def median(self, numeric_only: bool = False, skipna: bool = True) -> DataFrame | Series:
+        """The middle value in each group. Over the column."""
+        try:
+            return self._reduce("median", 0.0, numeric_only, skipna)
+        except Exception as error:
+            raise translate(error) from None
+
+    def nunique(self, dropna: bool = True) -> DataFrame | Series:
+        """How many distinct values are in each group. Over the column."""
+        try:
+            return self._nunique(dropna)
+        except Exception as error:
+            raise translate(error) from None
+
+    def std(
+        self,
+        ddof: int = 1,
+        engine: Any = None,
+        engine_kwargs: Any = None,
+        numeric_only: bool = False,
+        skipna: bool = True,
+    ) -> DataFrame | Series:
+        """The standard deviation within each group. Over the column."""
+        try:
+            return self._spread("std", ddof, numeric_only, skipna, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def var(
+        self,
+        ddof: int = 1,
+        engine: Any = None,
+        engine_kwargs: Any = None,
+        numeric_only: bool = False,
+        skipna: bool = True,
+    ) -> DataFrame | Series:
+        """The variance within each group. Over the column."""
+        try:
+            return self._spread("var", ddof, numeric_only, skipna, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def sem(
+        self, ddof: int = 1, numeric_only: bool = False, skipna: bool = True
+    ) -> DataFrame | Series:
+        """The standard error of the mean within each group. Over the column."""
+        try:
+            return self._reduce("sem", float(ddof), numeric_only, skipna)
+        except Exception as error:
+            raise translate(error) from None
+
+    def skew(
+        self, skipna: bool = True, numeric_only: bool = False, **kwargs: Any
+    ) -> DataFrame | Series:
+        """The skewness within each group. Over the column."""
+        try:
+            return self._reduce("skew", 0.0, numeric_only, skipna)
+        except Exception as error:
+            raise translate(error) from None
+
+    def quantile(
+        self, q: Any = 0.5, interpolation: str = "linear", numeric_only: bool = False
+    ) -> DataFrame | Series:
+        """The value at one quantile within each group. Over the column."""
+        try:
+            return self._quantile(q, interpolation, numeric_only)
+        except Exception as error:
+            raise translate(error) from None
+
+
 class DataFrame(DataFrameMixin):
     """A two dimensional labelled data structure with columns of potentially different
     types.
@@ -365,6 +725,23 @@ class DataFrame(DataFrameMixin):
         """The number of rows, so that len(df) works."""
         try:
             return self._inner.length()
+        except Exception as error:
+            raise translate(error) from None
+
+    def groupby(
+        self,
+        by: Any = None,
+        level: Any = None,
+        *,
+        as_index: bool = True,
+        sort: bool = True,
+        group_keys: bool = True,
+        observed: bool = True,
+        dropna: bool = True,
+    ) -> DataFrameGroupBy:
+        """A grouping over the frame, which computes nothing until it is reduced."""
+        try:
+            return _grouped(self, by, level, as_index, sort, group_keys, observed, dropna)
         except Exception as error:
             raise translate(error) from None
 

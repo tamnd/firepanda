@@ -104,11 +104,18 @@ def test_the_extension_exposes_nothing_the_table_does_not_mention(firepanda: Mod
 
 
 def _reaches(firepanda: ModuleType, accessor: str) -> type:
-    """Finds the class an accessor is handed out as, through the attribute that hands it out.
+    """Finds a class that is not named in `__all__`, the way a caller would reach it.
+
+    Preferring the attribute that hands it out, since `s.dt` answering the class
+    is part of what is being checked. The group by classes are not reached that
+    way: `df.groupby(...)` is a call with arguments and `g[name]` is an item, and
+    neither is an attribute that can be read off the class to see what it gives.
+    Those come out of the generated module, which is the one place every class in
+    the table is written.
 
     Args:
         firepanda: The staged package.
-        accessor: The accessor class name, as the table spells it.
+        accessor: The class name, as the table spells it.
 
     Returns:
         The class itself.
@@ -117,7 +124,9 @@ def _reaches(firepanda: ModuleType, accessor: str) -> type:
         for member in exposed.members:
             if member.kind == "accessor" and member.body == accessor:
                 return getattr(getattr(firepanda, exposed.py), member.name)  # type: ignore[no-any-return]
-    raise AssertionError(f"{accessor} is in the table and no attribute hands it out")
+    found = getattr(firepanda._frame, accessor, None)
+    assert isinstance(found, type), f"{accessor} is in the table and is not a class in `_frame`"
+    return found
 
 
 def test_every_member_in_the_table_exists_on_the_python_class(firepanda: ModuleType) -> None:

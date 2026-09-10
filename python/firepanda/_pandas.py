@@ -32,7 +32,7 @@ from . import _firepanda
 from .errors import InvalidArgumentError, translate
 
 if TYPE_CHECKING:
-    from ._frame import DataFrame, Index, Series
+    from ._frame import DataFrame, DataFrameGroupBy, Index, Series, SeriesGroupBy
 
 
 def _refuse(name: str, value: object, why: str) -> None:
@@ -1125,6 +1125,534 @@ class DatetimeMixin:
         from ._frame import _isocalendar
 
         return _isocalendar(self._series._inner)
+
+
+def _grouped(
+    frame: DataFrame,
+    by: Any,
+    level: Any,
+    as_index: bool,
+    sort: bool,
+    group_keys: bool,
+    observed: bool,
+    dropna: bool,
+) -> DataFrameGroupBy:
+    """Builds the group by object `df.groupby(...)` hands back.
+
+    Written rather than generated because it is the one member whose body is not
+    a call on something the class already holds. It builds a different class,
+    and the seven arguments have to be read before there is an object to read
+    them into, so a generated one line delegation has nothing to delegate to.
+
+    Two of the seven are declared and refused. `group_keys` decides whether the
+    key comes back in the result of an `apply`, and there is no `apply` here for
+    it to decide about. `observed` decides whether a categorical key contributes
+    the groups it has no rows for, and pandas made True the default in version
+    3, which is the behaviour here, so it is refused only at False.
+
+    Args:
+        frame: The frame being grouped.
+        by: The key column name or names.
+        level: Declared and refused, since there is no MultiIndex to have one.
+        as_index: Whether the key becomes the row labels.
+        sort: Whether the groups come out in key order.
+        group_keys: Declared and refused.
+        observed: Declared and held at True.
+        dropna: Whether a missing key is a group.
+
+    Returns:
+        A `DataFrameGroupBy`.
+    """
+    from ._frame import DataFrameGroupBy
+
+    _held_at(
+        "group_keys",
+        group_keys,
+        True,
+        "it says whether the key comes back in the result of an apply, and there"
+        " is no apply here for it to say anything about",
+    )
+    _held_at(
+        "observed",
+        observed,
+        True,
+        "it says whether a categorical key contributes the groups it has no rows"
+        " for, and a group with no rows in it is a row this has nothing to put in",
+    )
+    keys = GroupByMixin._keys(frame, by, level)
+    return DataFrameGroupBy(frame, keys, as_index, sort, dropna)
+
+
+def _relabelled(frame: DataFrame, name: str, label: str) -> Series:
+    """Takes one column out of a frame and puts a different name on it.
+
+    A group by reduction comes back as a frame, and turning it into the series
+    pandas answers means taking one column out, at which point the column is
+    called whatever the frame called it. `size` is called `size` there and has no
+    name at all in pandas, and a narrowed group by answers a column called after
+    the one the caller asked for rather than after the last key. Both are one
+    rename and neither is a member a user reaches, so it is a function here
+    rather than a method on the wrapper.
+
+    The column is taken through the extension rather than through `frame[name]`,
+    which reads a name and a list of names and therefore answers either shape.
+    There is one name here and the answer is a column, so going the short way
+    says that rather than leaving it to be narrowed afterwards.
+
+    Args:
+        frame: The frame the reduction produced.
+        name: The column to take out.
+        label: The new name, and empty for none.
+
+    Returns:
+        The column, carrying the new name.
+    """
+    from ._frame import Series
+
+    try:
+        return Series._wrap(frame._inner.column(name).relabel(label))
+    except Exception as error:
+        raise translate(error) from None
+
+
+class GroupByMixin[Answer]:
+    """What `DataFrameGroupBy` and `SeriesGroupBy` share, which is all the state.
+
+    `Answer` is what the reductions hand back. A frame's group by answers a frame
+    and a column's answers a column, and the fifteen reductions are otherwise the
+    same call written twice, so the shared half is written once against the
+    parameter and each subclass says which it is. That is not decoration: without
+    it every reduction on both classes is declared to answer one thing and
+    returns something a type checker only knows as `Any`, which is the one shape
+    of mistake a wrapper this thin exists to make impossible.
+
+    A group by object holds a frame, some key column names and three flags, and
+    it computes nothing until a reduction is asked for. That is pandas' own
+    arrangement and it is the reason the two classes have so little in them: the
+    fifteen reductions are one call each with a different word in it, and the
+    word is the pandas method name, which is the same string the boundary reads.
+
+    The keys are checked here rather than at the first reduction. pandas raises
+    `KeyError` out of `df.groupby("nope")` and not out of the `.sum()` after it,
+    and a program that catches the wrong line is a program whose error handling
+    does not run. Checking early costs one pass over the column names.
+
+    What is deliberately absent is any notion of the groups themselves. pandas
+    can hand back `g.groups`, `g.indices` and `g.get_group(k)`, which are the
+    grouping made visible, and firepanda computes the grouping inside the
+    reduction and throws it away. Keeping it would mean the object holds an
+    index per group whether or not anybody asks, which is the cost pandas pays
+    and is the wrong default for a library whose claim is the other one. Those
+    three names are absent rather than wrong.
+    """
+
+    __slots__ = ("_as_index", "_by", "_dropna", "_frame", "_sort")
+    """The frame, the key names, and the three flags that survive to the call.
+    Slotted for the reason `DataFrameMixin` gives. There is no `_inner`, because
+    a group by object has no extension object of its own: it is a frame and a
+    plan for what to do to it."""
+
+    _frame: DataFrame
+    _by: list[str]
+    _as_index: bool
+    _sort: bool
+    _dropna: bool
+
+    def __init__(self, frame: DataFrame, by: list[str], as_index: bool, sort: bool, dropna: bool):
+        """Holds the frame and the plan. Not a public entry point.
+
+        Args:
+            frame: The frame being grouped.
+            by: The key column names, already read out of whatever pandas shape
+                the caller wrote them in.
+            as_index: Whether the key becomes the row labels.
+            sort: Whether the groups come out in key order.
+            dropna: Whether a missing key is a group.
+        """
+        self._frame = frame
+        self._by = by
+        self._as_index = as_index
+        self._sort = sort
+        self._dropna = dropna
+
+    @staticmethod
+    def _keys(frame: DataFrame, by: Any, level: Any) -> list[str]:
+        """Reads the key columns out of whatever pandas lets a caller write.
+
+        pandas takes a name, a list of names, a column, a list of columns, a
+        function, a dictionary and a level, and turns all seven into the same
+        thing. Two of them are here: a name and a list of names. The rest are
+        refused by shape with the reason, because each one is a different piece
+        of work rather than a longer list.
+
+        Args:
+            frame: The frame, so the names can be checked against it.
+            by: What the caller passed.
+            level: The level, which there is no MultiIndex to have.
+
+        Returns:
+            The key column names.
+
+        Raises:
+            KeyError: If a name is not a column, which is what pandas raises.
+            TypeError: If neither a key nor a level was given.
+            InvalidArgumentError: If the list of keys is empty, which is a
+                `ValueError` and is what pandas raises for it.
+            NotImplementedError: If the shape is one of the five that are not
+                written, or if a level was asked for.
+        """
+        _no_level(level)
+        if by is None:
+            raise TypeError("You have to supply one of 'by' and 'level'")
+        wanted = [by] if isinstance(by, str) else by
+        if not isinstance(wanted, list) or not all(isinstance(name, str) for name in wanted):
+            raise NotImplementedError(
+                "by= has to be a column name or a list of them for now, because"
+                " grouping by a column that is not in the frame, by a function or"
+                " by a mapping all need somewhere to put the key that came from"
+                " outside it"
+            )
+        if len(wanted) == 0:
+            # `InvalidArgumentError` rather than a bare `ValueError`, which is
+            # what pandas raises and what this used to raise, because `translate`
+            # turns an untagged `ValueError` into a `RuntimeError` on the way out
+            # of the generated method. The class here is a `ValueError` too, so a
+            # caller who catches the pandas one still catches this.
+            raise InvalidArgumentError("No group keys passed!")
+        known = frame.columns
+        for name in wanted:
+            if name not in known:
+                raise KeyError(name)
+        return list(wanted)
+
+    def _reduced(self, kind: str, param: float, columns: list[str] | None = None) -> DataFrame:
+        """Runs one reduction over the groups and hands back the frame it makes.
+
+        Both classes come through here and they differ in what they do with the
+        answer, which is the whole of the difference between them.
+
+        Args:
+            kind: The reduction, as pandas spells the method.
+            param: The delta degrees of freedom or the quantile, and zero for
+                the rest.
+            columns: The columns to reduce, or None for every one that is not a
+                key. A `SeriesGroupBy` names one.
+
+        Returns:
+            The frame the core produced, one row per group.
+        """
+        from ._frame import DataFrame
+
+        try:
+            source = self._frame._inner
+            if columns is not None:
+                source = source.select(self._by + columns)
+            return DataFrame._wrap(
+                source.group_agg(self._by, kind, param, self._dropna, self._sort, self._as_index)
+            )
+        except Exception as error:
+            raise translate(error) from None
+
+    def _reduce(
+        self,
+        kind: str,
+        param: float = 0.0,
+        numeric_only: bool = False,
+        skipna: bool = True,
+        min_count: int | None = None,
+        engine: Any = None,
+        engine_kwargs: Any = None,
+    ) -> Answer:
+        """Runs one reduction over the groups, after refusing what is declared.
+
+        Every one of the fifteen comes through here and the five arguments below
+        are the ones pandas puts on their signatures and firepanda does not
+        honour. They are declared rather than left out because the parity test
+        compares the whole parameter list against a running pandas, and they
+        raise rather than being ignored for the reason `_held_at` gives.
+
+        The shaping is what the two classes differ in, so it is one call at the
+        end and is written in each of them.
+
+        Args:
+            kind: The reduction, as pandas spells the method.
+            param: The delta degrees of freedom or the quantile, and zero for
+                the rest.
+            numeric_only: Declared and held at False.
+            skipna: Declared and held at True.
+            min_count: Declared and held at its default, which is zero for `sum`
+                and minus one for the four that pick a value rather than combine
+                them. None for the reductions that do not have it.
+            engine: Declared and refused.
+            engine_kwargs: Declared and refused.
+
+        Returns:
+            The frame or the series pandas answers.
+        """
+        _held_at(
+            "numeric_only",
+            numeric_only,
+            False,
+            "dropping the columns a reduction cannot read is a decision about"
+            " which columns come back, and firepanda reduces the ones it was"
+            " given or says which one it could not",
+        )
+        _held_at(
+            "skipna",
+            skipna,
+            True,
+            "a group's answer is computed from the values that are there, and"
+            " taking one missing value as a reason to answer nothing at all is a"
+            " second pass the kernels do not make",
+        )
+        if min_count is not None:
+            # pandas defaults this to zero for `sum` and to minus one for the
+            # four that pick a value rather than combining them, so the value
+            # that means "nobody asked for anything" depends on the reduction.
+            _held_at(
+                "min_count",
+                min_count,
+                0 if kind == "sum" else -1,
+                "answering nothing for a group that is too small is a check on"
+                " the count after the reduction, and the count is not kept",
+            )
+        _refuse(
+            "engine",
+            engine,
+            "there is one implementation and it is the compiled one, so there is"
+            " nothing here for this to choose between",
+        )
+        _refuse(
+            "engine_kwargs",
+            engine_kwargs,
+            "there is nothing to configure while there is nothing to choose",
+        )
+        return self._shape(kind, param)
+
+    def _spread(
+        self,
+        kind: str,
+        ddof: int,
+        numeric_only: bool,
+        skipna: bool,
+        engine: Any,
+        engine_kwargs: Any,
+    ) -> Answer:
+        """Runs `std` or `var`, which carry a delta degrees of freedom.
+
+        A door of its own only because the generated body has to fit on one
+        line, and `float(ddof)` written there rather than here pushed the two
+        widest of the fifteen past the line limit. The conversion is the whole
+        of what it adds: the kinds store the parameter as a float because it is
+        a number in a formula rather than a length.
+
+        Args:
+            kind: `std` or `var`.
+            ddof: The delta degrees of freedom.
+            numeric_only: Declared and held at False.
+            skipna: Declared and held at True.
+            engine: Declared and refused.
+            engine_kwargs: Declared and refused.
+
+        Returns:
+            The frame or the series pandas answers.
+        """
+        return self._reduce(
+            kind,
+            float(ddof),
+            numeric_only,
+            skipna,
+            None,
+            engine,
+            engine_kwargs,
+        )
+
+    def _nunique(self, dropna: bool) -> Answer:
+        """Counts the distinct values in each group.
+
+        Its own entry point because its `dropna` is not the group by's `dropna`
+        and the two are easy to read as one. The group by's says whether a
+        missing key is a group. This one says whether a missing value counts as
+        one of the distinct values inside a group, and it is held at True, which
+        is pandas' default and the kernel's behaviour.
+
+        Args:
+            dropna: Declared and held at True.
+
+        Returns:
+            The frame or the series pandas answers.
+        """
+        _held_at(
+            "dropna",
+            dropna,
+            True,
+            "counting a missing value as one of the distinct values in a group"
+            " is a second thing for the kernel to carry and nothing asks for it",
+        )
+        return self._shape("nunique", 0.0)
+
+    def _quantile(self, q: Any, interpolation: str, numeric_only: bool) -> Answer:
+        """The value at one quantile within each group.
+
+        `_quantile_wanted` is the same reader the whole column reductions use,
+        so a list of quantiles is refused with the same sentence in both places
+        and the four interpolation rules that are not linear are refused once.
+
+        Args:
+            q: The quantile, between zero and one.
+            interpolation: How to land between two values.
+            numeric_only: Declared and held at False.
+
+        Returns:
+            The frame or the series pandas answers.
+        """
+        return self._reduce(
+            "quantile", _quantile_wanted(q, interpolation), numeric_only=numeric_only
+        )
+
+    def _shape(self, kind: str, param: float) -> Answer:
+        """Runs the reduction and puts the answer in the shape pandas gives.
+
+        Overridden in both subclasses and never called on this one.
+
+        Args:
+            kind: The reduction, as pandas spells the method.
+            param: The delta degrees of freedom or the quantile.
+
+        Returns:
+            The frame or the series pandas answers.
+        """
+        raise NotImplementedError(kind)
+
+
+class DataFrameGroupByMixin(GroupByMixin["DataFrame"]):
+    """The hand written half of `DataFrameGroupBy`.
+
+    A reduction here answers a frame, except `size`, which counts rows rather
+    than reducing a column and therefore answers one number per group. pandas
+    makes that a Series when the key is in the index and a two column frame when
+    it is not, and both of those are here, because the shape is the answer as
+    much as the numbers are.
+    """
+
+    __slots__ = ()
+
+    def __getitem__(self, key: Any) -> DataFrameGroupBy | SeriesGroupBy:
+        """Narrows the group by to one column or to several.
+
+        `df.groupby("k")["v"]` is a `SeriesGroupBy` and `df.groupby("k")[["v"]]`
+        is a `DataFrameGroupBy` over fewer columns, which is the same split
+        `df[...]` makes and is why this is written rather than generated.
+
+        Args:
+            key: A column name, or a list of them.
+
+        Returns:
+            A `SeriesGroupBy` for a name and a `DataFrameGroupBy` for a list.
+
+        Raises:
+            KeyError: If a name is not a column.
+        """
+        from ._frame import DataFrame, DataFrameGroupBy, SeriesGroupBy
+
+        names = [key] if isinstance(key, str) else list(key)
+        for name in names:
+            if name not in self._frame.columns:
+                raise KeyError(name)
+        narrowed = DataFrame._wrap(self._frame._inner.select(self._by + names))
+        if isinstance(key, str):
+            return SeriesGroupBy(narrowed, self._by, self._as_index, self._sort, self._dropna, key)
+        return DataFrameGroupBy(narrowed, self._by, self._as_index, self._sort, self._dropna)
+
+    def _shape(self, kind: str, param: float) -> DataFrame:
+        """One reduction over every column that is not a key.
+
+        Args:
+            kind: The reduction, as pandas spells the method.
+            param: The delta degrees of freedom or the quantile.
+
+        Returns:
+            The frame of one row per group.
+        """
+        return self._reduced(kind, param)
+
+    def _size(self) -> DataFrame | Series:
+        """Counts the rows in each group, which is the one reduction with two shapes.
+
+        A door of its own rather than a branch in `_shape`, because it is the one
+        of the fifteen that does not answer what the other fourteen answer.
+        pandas makes it a series when the key is in the index, since the answer is
+        one column either way, and leaves it a two column frame when the key is
+        not, and the shape is as much the answer as the numbers are.
+
+        Returns:
+            A series of counts, or a frame of the keys and the counts.
+        """
+        out = self._reduced("size", 0.0)
+        if not self._as_index:
+            return out
+        # The name goes because a pandas `size` has none, and the frame's one
+        # column is called `size` here only because a column has to be called
+        # something.
+        return _relabelled(out, out.columns[0], "")
+
+
+class SeriesGroupByMixin(GroupByMixin["DataFrame | Series"]):
+    """The hand written half of `SeriesGroupBy`.
+
+    The same reductions over one column, answering a series rather than a frame.
+    The extra piece of state is the column's name, which the answer carries and
+    the frame underneath does not: after `df.groupby("k")["v"].sum()` the series
+    is called `v`, and by then the frame it came out of has one column called
+    `v` and one called `k` and no way to say which of them the caller asked for.
+    """
+
+    __slots__ = ("_column",)
+    """The column the reductions run over."""
+
+    _column: str
+
+    def __init__(
+        self,
+        frame: DataFrame,
+        by: list[str],
+        as_index: bool,
+        sort: bool,
+        dropna: bool,
+        column: str,
+    ):
+        """Holds the frame, the plan and the column. Not a public entry point.
+
+        Args:
+            frame: The frame, already narrowed to the keys and the column.
+            by: The key column names.
+            as_index: Whether the key becomes the row labels.
+            sort: Whether the groups come out in key order.
+            dropna: Whether a missing key is a group.
+            column: The column the reductions run over.
+        """
+        super().__init__(frame, by, as_index, sort, dropna)
+        self._column = column
+
+    def _shape(self, kind: str, param: float) -> DataFrame | Series:
+        """One reduction over the one column.
+
+        Args:
+            kind: The reduction, as pandas spells the method.
+            param: The delta degrees of freedom or the quantile.
+
+        Returns:
+            A series named after the column, or a frame when the key was asked
+            for as a column rather than as labels.
+        """
+        out = self._reduced(kind, param, [self._column])
+        if not self._as_index:
+            return out
+        # `size` answers a column called `size` rather than one called after the
+        # column it counted, because it did not read that column. Either way
+        # there is exactly one column left once the keys have gone into the
+        # labels, so the answer is the column that is there.
+        return _relabelled(out, out.columns[-1], "" if kind == "size" else self._column)
 
 
 class IndexMixin:

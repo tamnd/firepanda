@@ -785,6 +785,119 @@ def _datetime_members() -> tuple[Member, ...]:
     return tuple(out)
 
 
+GROUPED: tuple[tuple[str, str, str], ...] = (
+    ("sum", "The sum of the values in each group.", "sum"),
+    ("mean", "The mean of the values in each group.", "mean"),
+    ("min", "The smallest value in each group.", "extreme"),
+    ("max", "The largest value in each group.", "extreme"),
+    ("count", "How many values in each group are not missing.", "bare"),
+    ("size", "How many rows are in each group, missing values included.", "bare"),
+    ("first", "The first value in each group, in the frame's own order.", "pick"),
+    ("last", "The last value in each group, in the frame's own order.", "pick"),
+    ("median", "The middle value in each group.", "plain"),
+    ("nunique", "How many distinct values are in each group.", "nunique"),
+    ("std", "The standard deviation within each group.", "spread"),
+    ("var", "The variance within each group.", "spread"),
+    ("sem", "The standard error of the mean within each group.", "sem"),
+    ("skew", "The skewness within each group.", "skew"),
+    ("quantile", "The value at one quantile within each group.", "quantile"),
+)
+"""The fifteen grouped reductions, with the shape of each one's parameter list.
+
+Ten shapes rather than fifteen signatures written out, because pandas gives the
+same list to several of them and the difference between the lists is what the
+parity test compares. Every signature below was measured against a running
+pandas rather than copied out of the documentation, and the shapes exist to make
+a mismatch a one line change instead of a hunt through fifteen strings.
+
+`min` and `max` are `extreme` and `first` and `last` are `pick`, which are the
+same three parameters except that the first pair also takes an engine and the
+second pair does not. That is not a rule with a reason behind it, it is what
+pandas has, and the two shapes are separate because the board measures the
+difference and reported it the first time they were written as one.
+
+`size` and `count` take nothing at all, which is worth naming: they are the two
+that cannot be asked to skip a missing value, since one counts rows and the
+other counts the values that are there, and pandas leaves the arguments off
+rather than declaring them and ignoring them.
+"""
+
+
+def _group_members(py: str) -> tuple[Member, ...]:
+    """Writes the fifteen reduction members for one group by class.
+
+    Same restriction as `_reductions`, which is that nothing here decides what a
+    reduction does. The word crosses the boundary and
+    `firepanda/py/reduce.mojo` reads it, the declared arguments are refused in
+    `_pandas.py`, and every body is one call to a mixin helper.
+
+    The two classes take the same arguments in the same order and differ only in
+    what they answer, which is why this is one function with a return annotation
+    in it rather than two tables. A frame's group by hands back a frame and a
+    column's hands back a column, except for `size` on a frame, which is a
+    column because it produces one number per group rather than one per column.
+
+    Args:
+        py: The class name, `DataFrameGroupBy` or `SeriesGroupBy`.
+
+    Returns:
+        The members, in the order they should be written out.
+    """
+    frame = py == "DataFrameGroupBy"
+    gives = "DataFrame" if frame else "DataFrame | Series"
+    over = "every column that is not a key" if frame else "the column"
+    engines = "engine: Any = None, engine_kwargs: Any = None"
+    signatures = {
+        "sum": f"numeric_only: bool = False, min_count: int = 0, skipna: bool = True, {engines}",
+        "mean": f"numeric_only: bool = False, skipna: bool = True, {engines}",
+        "extreme": (
+            f"numeric_only: bool = False, min_count: int = -1, skipna: bool = True, {engines}"
+        ),
+        "pick": "numeric_only: bool = False, min_count: int = -1, skipna: bool = True",
+        "bare": "",
+        "plain": "numeric_only: bool = False, skipna: bool = True",
+        "nunique": "dropna: bool = True",
+        "spread": f"ddof: int = 1, {engines}, numeric_only: bool = False, skipna: bool = True",
+        "sem": "ddof: int = 1, numeric_only: bool = False, skipna: bool = True",
+        "skew": "skipna: bool = True, numeric_only: bool = False, **kwargs: Any",
+        "quantile": 'q: Any = 0.5, interpolation: str = "linear", numeric_only: bool = False',
+    }
+    bodies = {
+        "sum": 'self._reduce("sum", 0.0, numeric_only, skipna, min_count, engine, engine_kwargs)',
+        "mean": 'self._reduce("mean", 0.0, numeric_only, skipna, None, engine, engine_kwargs)',
+        "bare": 'self._reduce("{name}")',
+        "extreme": (
+            'self._reduce("{name}", 0.0, numeric_only, skipna, min_count, engine,'
+            " engine_kwargs)"
+        ),
+        "pick": 'self._reduce("{name}", 0.0, numeric_only, skipna, min_count)',
+        "plain": 'self._reduce("{name}", 0.0, numeric_only, skipna)',
+        "nunique": "self._nunique(dropna)",
+        "spread": 'self._spread("{name}", ddof, numeric_only, skipna, engine, engine_kwargs)',
+        "sem": 'self._reduce("sem", float(ddof), numeric_only, skipna)',
+        "skew": 'self._reduce("skew", 0.0, numeric_only, skipna)',
+        "quantile": "self._quantile(q, interpolation, numeric_only)",
+    }
+    out: list[Member] = []
+    for name, what, shape in GROUPED:
+        # `size` counts rows rather than reducing a column, so it is one number
+        # per group either way and has its own door on the frame's group by. It
+        # is also the one whose sentence does not name a column, for the same
+        # reason, so it does not get the clause saying which ones it reads.
+        sized = name == "size"
+        out.append(
+            Member(
+                name=name,
+                kind="method",
+                signature=signatures[shape],
+                body="self._size()" if frame and sized else bodies[shape].format(name=name),
+                doc=what if sized else f"{what} Over {over}.",
+                returns="DataFrame | Series" if sized else gives,
+            )
+        )
+    return tuple(out)
+
+
 def _transformations(py: str) -> tuple[Member, ...]:
     """Writes the transformation members for one class.
 
@@ -1030,6 +1143,20 @@ FRAME = Exposed(
             returns="DataFrame",
         ),
         Binding(
+            mojo="PyDataFrame.group_agg",
+            name="group_agg",
+            doc="One reduction applied to every column that is not a key.",
+            params=(
+                ("by", "list[str]"),
+                ("kind", "str"),
+                ("param", "float"),
+                ("dropna", "bool"),
+                ("sort", "bool"),
+                ("as_index", "bool"),
+            ),
+            returns="DataFrame",
+        ),
+        Binding(
             mojo="PyDataFrame.labels",
             name="labels",
             doc="The row labels, as an index.",
@@ -1108,6 +1235,18 @@ FRAME = Exposed(
             body="self._inner.length()",
             doc="The number of rows, so that len(df) works.",
             returns="int",
+        ),
+        Member(
+            name="groupby",
+            kind="method",
+            signature=(
+                "by: Any = None, level: Any = None, *, as_index: bool = True,"
+                " sort: bool = True, group_keys: bool = True, observed: bool = True,"
+                " dropna: bool = True"
+            ),
+            body="_grouped(self, by, level, as_index, sort, group_keys, observed, dropna)",
+            doc="A grouping over the frame, which computes nothing until it is reduced.",
+            returns="DataFrameGroupBy",
         ),
         Member(
             name="__repr__",
@@ -1214,6 +1353,13 @@ SERIES = Exposed(
             name="label",
             doc="The name of the column.",
             returns="str",
+        ),
+        Binding(
+            mojo="PySeries.relabel",
+            name="relabel",
+            doc="A copy of the column under a different name.",
+            params=(("name", "str"),),
+            returns="Series",
         ),
         Binding(
             mojo="PySeries.dtype",
@@ -2042,6 +2188,34 @@ ACCESSORS: tuple[Accessor, ...] = (
         mixin="DatetimeMixin",
         members=_datetime_members(),
     ),
+    Accessor(
+        py="DataFrameGroupBy",
+        owner="DataFrame",
+        doc=(
+            "A frame with a grouping over it, waiting for a reduction.\n\n"
+            "Reached from `df.groupby(...)` rather than from an attribute, which is"
+            " the one way this differs from the accessor above and is why it holds"
+            " the keys and the flags as well as the frame. Nothing is computed until"
+            " a reduction is asked for, as in pandas, and nothing about the grouping"
+            " is kept afterwards: `groups`, `indices` and `get_group` are absent"
+            " rather than slow, because keeping an index per group whether or not"
+            " anybody asks is the cost this library exists to not pay."
+        ),
+        mixin="DataFrameGroupByMixin",
+        members=_group_members("DataFrameGroupBy"),
+    ),
+    Accessor(
+        py="SeriesGroupBy",
+        owner="DataFrameGroupBy",
+        doc=(
+            "One column of a grouped frame, waiting for a reduction.\n\n"
+            "Reached from `df.groupby(...)[name]`. The same fifteen reductions over"
+            " one column instead of all of them, answering a column rather than a"
+            " frame, which is the whole difference between the two classes."
+        ),
+        mixin="SeriesGroupByMixin",
+        members=_group_members("SeriesGroupBy"),
+    ),
 )
 
 BANNER_MOJO = (
@@ -2168,6 +2342,68 @@ def _import(module: str, names: list[str]) -> list[str]:
     if len(one) <= MOJO_COLUMNS:
         return [one]
     return [f"from {module} import ("] + [f"    {name}," for name in names] + [")"]
+
+
+def _import_order(name: str) -> tuple[int, str]:
+    """Sorts imported names the way ruff's import rule wants them sorted.
+
+    Three groups rather than one alphabetical run: a constant in capitals first,
+    then the classes, then anything lowercase, and alphabetical inside each. That
+    is `force-sort-within-sections` order and it is what the check compares
+    against, so writing the names in plain sorted order fails the lint even
+    though the import itself is correct.
+
+    Args:
+        name: The imported name.
+
+    Returns:
+        The key to sort on.
+    """
+    if name.isupper():
+        return (0, name)
+    if name[:1].isupper():
+        return (1, name)
+    return (2, name)
+
+
+def _imported(names: list[str]) -> list[str]:
+    """Writes the one Python import that can outgrow its line.
+
+    The same job `_import` does for Mojo, against the Python line limit and with
+    Python's own bracket style, which is one name per line with a trailing comma.
+    Only `._pandas` needs it, because it is the only import whose contents grow
+    every time a class is added to the table.
+
+    Args:
+        names: The names to import, already in the order ruff wants.
+
+    Returns:
+        The lines of the import.
+    """
+    one = "from ._pandas import " + ", ".join(names)
+    if len(one) <= PYTHON_COLUMNS:
+        return [one]
+    return ["from ._pandas import ("] + [f"    {name}," for name in names] + [")"]
+
+
+def _listed(name: str, items: list[str]) -> list[str]:
+    """Writes a list literal the way `ruff format` would have written it.
+
+    On one line while it fits and one item per line with a trailing comma once it
+    does not, which is the formatter's rule for any collection. `__all__` is the
+    only list here long enough to have crossed the limit.
+
+    Args:
+        name: What the list is being assigned to.
+        items: The items, already written as source.
+
+    Returns:
+        The lines of the assignment.
+    """
+    one = f"{name} = [" + ", ".join(items) + "]"
+    if len(one) <= PYTHON_COLUMNS:
+        return [one]
+    return [f"{name} = ["] + [f"    {item}," for item in items] + ["]"]
 
 
 def registration() -> str:
@@ -2325,18 +2561,24 @@ def wrapper() -> str:
         out.extend(standard)
         out.append("")
     out.append("from . import _firepanda")
-    mixins = sorted({t.mixin for t in TYPES if t.mixin} | {a.mixin for a in ACCESSORS})
+    mixins = {t.mixin for t in TYPES if t.mixin} | {a.mixin for a in ACCESSORS}
     if any(m.kind == "accessor" for m in every):
-        mixins = sorted([*mixins, "Namespace"])
+        mixins.add("Namespace")
     if any("NO_DEFAULT" in (m.signature or "") for m in every):
-        mixins = ["NO_DEFAULT", *mixins]
+        mixins.add("NO_DEFAULT")
+    # `df.groupby(...)` is the one member whose body is a call to a hand written
+    # function rather than to a method on something it already holds, because
+    # what it builds is a different class from the one it is written on and the
+    # arguments have to be read before there is an object to read them into.
+    if any("_grouped(" in m.body for m in every):
+        mixins.add("_grouped")
     if mixins:
-        out.append("from ._pandas import " + ", ".join(mixins))
+        out.extend(_imported(sorted(mixins, key=_import_order)))
     out.append("from .errors import translate")
 
     out.append("")
     named = sorted([t.py for t in TYPES] + [a.py for a in ACCESSORS])
-    out.append("__all__ = [" + ", ".join(f'"{n}"' for n in named) + "]")
+    out.extend(_listed("__all__", [f'"{n}"' for n in named]))
 
     # The accessors come first because a bound type reaches one through a class
     # body assignment, which runs while the class is being built and would find
