@@ -242,13 +242,15 @@ def _quantile_wanted(q: Any, interpolation: str) -> float:
 # somebody who learned numpy first uses whichever of those they learned. Every
 # row was measured against a running pandas 3.0.3 rather than read, which is how
 # the surprises got in: `i` is int32 and not int64, `u` is not a name at all
-# though `i`, `f` and `b` are, `long` is int64 while `longdouble` is float64,
-# and `unicode`, `str_`, `U` and `O` are all the object dtype rather than text.
+# though `i`, `f` and `b` are, `long` is int64 while `longdouble` is not a
+# float64 anywhere but on arm, and `unicode`, `str_`, `U` and `O` are all the
+# object dtype rather than text.
 #
-# Three rows are platform dependent and are written as this machine measured
-# them, which is what pandas would report here too, since both libraries are
-# asking the same C compiler how wide a `long` is: `long` and `uint` are sixty
-# four bits and `longdouble` is a float64.
+# Two rows are platform dependent and are written as they measure on the
+# machines this is built for, which is what pandas would report there too, since
+# both libraries are asking the same C compiler how wide a `long` is: `long` and
+# `uint` are sixty four bits. A third, `longdouble`, is platform dependent in a
+# way that cannot be written down as one row and is refused below instead.
 _DTYPE_NAMES: dict[str, str] = {
     "bool": "bool",
     "bool_": "bool",
@@ -308,9 +310,7 @@ _DTYPE_NAMES: dict[str, str] = {
     "float64": "float64",
     "double": "float64",
     "float": "float64",
-    "longdouble": "float64",
     "d": "float64",
-    "g": "float64",
     "f8": "float64",
     "str": "string",
     "string": "string",
@@ -333,6 +333,19 @@ _NO_BYTES = (
 )
 """Four spellings share this one. The width in the message is not a typo: pandas
 picks it from the widest value the column would render to."""
+
+_NO_LONGDOUBLE = (
+    "longdouble is whatever extended precision float the machine has, which is"
+    " an eighty bit float stored in sixteen bytes on x86 and a plain float64 on"
+    " arm, and firepanda has no float wider than float64 on either. Asking for"
+    " it and getting float64 back would be half the precision on the machines"
+    " where the name means something. The float64 is `double`"
+)
+"""Two spellings share this one, and it is the only name in the table whose
+answer changes with the machine rather than with the argument. Every other
+platform dependent row here, `long` and `uint`, is the same width everywhere
+firepanda is built for, so it can be written down. This one cannot be, and
+mapping it to float64 was correct on arm and a silent narrowing on x86."""
 
 # The types pandas has and firepanda does not, each with the reason it is
 # refused rather than converted. Every one of these raises today by being
@@ -384,6 +397,8 @@ _REFUSED_DTYPES: dict[str, str] = {
     "cdouble": "there is no complex column",
     "csingle": "there is no complex column",
     "clongdouble": "there is no complex column",
+    "longdouble": _NO_LONGDOUBLE,
+    "g": _NO_LONGDOUBLE,
     "period": "there is no period column",
     "interval": "there is no interval column",
     "bytes": _NO_BYTES,
