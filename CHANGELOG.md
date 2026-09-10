@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `DataFrame.add_column`, which adds a column without copying the frame
+
+`with_column` returns a new frame, and it has to, because the frame it was called on is still there afterwards and both of them have to own their columns. What that costs was not obvious until it was measured on a wide one. TPC-H q1 filters six columns of `lineitem` down to five point nine million rows and then adds two computed expressions to them, and written as two `with_column` calls that is two deep copies of the whole thing, around seven hundred megabytes moved in order to write two new columns. The two additions took ninety three milliseconds at sf1 and thirty seven with the copies gone.
+
+`add_column` is the same method with the copy taken out, mutating in place. It is for the common case where a caller built the frame it is adding to and is going to hand the result straight on, which is what building a wide frame for a group by looks like every time. `with_column` now calls it and keeps its own contract exactly, so nothing that used it changes.
+
+A column of the wrong height still raises, and it raises before anything is written, so a frame that refused a column is the frame it was.
+
 ### The elapsed time, and the arithmetic between two temporal columns
 
 Subtracting one datetime column from another now answers a duration column, adding a duration to a datetime answers a datetime, and adding two durations answers a duration. None of the three fitted the machinery that was there, which is why this is a larger change than the four accessor members that come with it.
