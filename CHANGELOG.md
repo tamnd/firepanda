@@ -8,6 +8,26 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the `cat` namespace, so a category column has something on it
+
+A caller could build a category column and then do nothing with it. There was no way to read the categories or the codes, no way to say that the order meant something, and no way to change what the categories were. `Series.cat` now carries all eleven of the names pandas puts there: `categories`, `codes` and `ordered` answer a value, `as_ordered` and `as_unordered` flip the flag, and `add_categories`, `remove_categories`, `remove_unused_categories`, `rename_categories`, `reorder_categories` and `set_categories` hand back a column. Every one of them was compared against a live pandas, including all five of the errors, and `rename_categories` takes a list, a mapping or a callable the way pandas does.
+
+Eleven names are three operations. A rename is decided by position, since no code moves and what changes is what a code is called. Setting the categories is decided by value, and adding, removing, reordering and setting are that one operation with the list worked out differently first. Dropping the unused ones is decided by the codes, which is why it is a door of its own rather than the second one called with the right list: working out which categories are used is a pass over the column, and a caller doing it over the boundary would have to read every code out into Python on a column that is dictionary encoded precisely because it is too big for that.
+
+The count check on a rename is deliberately not in the kernel, because two callers reach that door and disagree about whether a mismatch is a mistake. `rename_categories(["a", "b"])` on three categories is a `ValueError`, and `set_categories(["a", "b"], rename=True)` on the same column nulls the rows that fall off the end, which is what pandas does.
+
+`s.cat` on a column that is not a category is an `AttributeError` raised when the accessor is built rather than when a member is used, so a caller who guards with `hasattr` gets a `False` rather than an exception.
+
+Three differences from pandas are asserted in the tests rather than papered over. The codes are int32 where pandas has int8, for the reasons the previous entry gives. A row whose category is missing has no code at all, where pandas writes -1, because firepanda's codes are an Arrow column with a validity bitmap and pandas' are a numpy array with nowhere to record absence, so `codes >= 0` is a pandas idiom that finds nothing here. And a missing value reads back as `None` rather than as NaN, which is what every other firepanda column already does.
+
+`CategoricalDtype`, `Categorical` and `CategoricalIndex` are still missing, and none of them is blocked on anything now.
+
+### Fixed: an imported category column could not be read at all
+
+`decode_dictionary` asked for int32 codes and raised on anything else. A pandas categorical of fewer than 128 categories has int8 codes, the Arrow importer keeps the width the producer wrote rather than copying a buffer to normalise it, and so every categorical that arrived from pandas over the C data interface was unreadable. `astype("str")` on one failed, and so did anything else that had to see a value. Reading now widens whatever index width is there, all eight of them, so the common case works.
+
+`tolist()` on a category column raised as well, with a message about the column storing positions rather than values. It was dispatching on the physical dtype, which for a dictionary column is the index type, so the request never reached anything that knew what to do with it. It decodes first now and hands back the values, which is what pandas gives and what somebody at a prompt asked for. The codes are still reachable through `Series.cat.codes` for anybody who wanted those.
+
 ### Added: astype("category") builds a category column
 
 Firepanda could read a dictionary encoded column and write one back out, and could not make one. `astype("category")` was refused with a message saying that building the dictionary is a conversion of its own rather than a change of layout, which was accurate and was also the whole reason, so the conversion is now written. It works on a text column, on a series and on a frame, and the result exports over Arrow as a real dictionary encoded column, so a caller can build a categorical in firepanda and hand it to pandas.

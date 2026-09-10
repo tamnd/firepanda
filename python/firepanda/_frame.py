@@ -23,6 +23,7 @@ from typing import Any
 from . import _firepanda
 from ._pandas import (
     NO_DEFAULT,
+    CategoricalMixin,
     DataFrameGroupByMixin,
     DataFrameMixin,
     DatetimeMixin,
@@ -35,6 +36,7 @@ from ._pandas import (
 from .errors import translate
 
 __all__ = [
+    "CategoricalAccessor",
     "DataFrame",
     "DataFrameGroupBy",
     "DatetimeProperties",
@@ -355,6 +357,106 @@ class DatetimeProperties(DatetimeMixin):
         """The ISO 8601 year, week and day of every row, as a frame."""
         try:
             return self._isocalendar()
+        except Exception as error:
+            raise translate(error) from None
+
+
+class CategoricalAccessor(CategoricalMixin):
+    """The `cat` accessor, which is where a category column's categories live.
+
+    Reached from `s.cat`, and only on a column that is a category, which is the one
+    accessor pandas refuses to build at all rather than refusing each member: `s.cat` on
+    a column of numbers is an `AttributeError` there and here. That is the opposite of
+    what `dt` does, and it is not an inconsistency worth fixing, because a caller
+    writing `s.cat` has already decided the column is a categorical and finding out at
+    the accessor is finding out at the right place.
+
+    Eleven names and three doors. A rename is decided by position, setting the
+    categories is decided by value, and dropping the unused ones is decided by the
+    codes. Everything else here is arithmetic over those three.
+    """
+
+    __slots__ = ()
+
+    @property
+    def categories(self) -> Index:
+        """The categories, in the order the column holds them."""
+        try:
+            return self._levels()
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def ordered(self) -> bool:
+        """Whether comparing two of the categories means anything."""
+        try:
+            return self._ordered()
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def codes(self) -> Series:
+        """Which category each row holds, as positions into the categories."""
+        try:
+            return self._codes()
+        except Exception as error:
+            raise translate(error) from None
+
+    def as_ordered(self) -> Series:
+        """The same column, with the category order made to mean something."""
+        try:
+            return self._with_order(True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def as_unordered(self) -> Series:
+        """The same column, with the category order made to mean nothing."""
+        try:
+            return self._with_order(False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def add_categories(self, new_categories: Any) -> Series:
+        """The same values, over more categories than before."""
+        try:
+            return self._added(new_categories)
+        except Exception as error:
+            raise translate(error) from None
+
+    def remove_categories(self, removals: Any) -> Series:
+        """The same values, with the named categories gone and their rows missing."""
+        try:
+            return self._removed(removals)
+        except Exception as error:
+            raise translate(error) from None
+
+    def remove_unused_categories(self) -> Series:
+        """The same values, over only the categories that appear in them."""
+        try:
+            return self._thinned()
+        except Exception as error:
+            raise translate(error) from None
+
+    def rename_categories(self, new_categories: Any) -> Series:
+        """The same values under new labels, matched by position."""
+        try:
+            return self._renamed(new_categories)
+        except Exception as error:
+            raise translate(error) from None
+
+    def reorder_categories(self, new_categories: Any, ordered: Any = None) -> Series:
+        """The same categories in another order."""
+        try:
+            return self._reordered(new_categories, ordered)
+        except Exception as error:
+            raise translate(error) from None
+
+    def set_categories(
+        self, new_categories: Any, ordered: Any = None, rename: bool = False
+    ) -> Series:
+        """A new list of categories, with the values matched against it."""
+        try:
+            return self._set(new_categories, ordered, rename)
         except Exception as error:
             raise translate(error) from None
 
@@ -1817,6 +1919,9 @@ class Series(SeriesMixin):
     """The datetime accessor, which is where the calendar and clock parts of a temporal
     column live.
     """
+
+    cat = Namespace(CategoricalAccessor)
+    """The categorical accessor, which is where the categories of a category column live."""
 
     def __add__(self, other: Any) -> Any:
         """`a + b`, against a series or a constant."""
