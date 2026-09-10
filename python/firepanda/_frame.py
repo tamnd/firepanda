@@ -27,11 +27,16 @@ from ._pandas import (
     DataFrameGroupByMixin,
     DataFrameMixin,
     DatetimeMixin,
+    ExpandingMixin,
     IndexMixin,
     Namespace,
+    RollingMixin,
     SeriesGroupByMixin,
     SeriesMixin,
+    StringMixin,
+    _expanding,
     _grouped,
+    _rolling,
 )
 from .errors import translate
 
@@ -40,9 +45,12 @@ __all__ = [
     "DataFrame",
     "DataFrameGroupBy",
     "DatetimeProperties",
+    "Expanding",
     "Index",
+    "Rolling",
     "Series",
     "SeriesGroupBy",
+    "StringAccessor",
 ]
 
 
@@ -361,6 +369,107 @@ class DatetimeProperties(DatetimeMixin):
             raise translate(error) from None
 
 
+class StringAccessor(StringMixin):
+    """The `str` accessor, which is the largest namespace pandas has.
+
+    Reached from `s.str`, and only on a column of text, which pandas also refuses at the
+    accessor rather than at the method: `s.str` on a column of numbers is an
+    `AttributeError` there and here. The same reasoning the `cat` accessor gives
+    applies, since a caller writing `s.str` has already decided what the column is.
+
+    Twelve of the fifty seven names so far, and the twelve share one idea: a position in
+    a string is a character and not a byte. Every other kernel in this library counts
+    bytes, which is right for a `LIKE` pattern and for a sort order and is not what
+    `s.str.len()` answers.
+    """
+
+    __slots__ = ()
+
+    def len(self) -> Series:
+        """How many characters each row holds."""
+        try:
+            return self._number("len")
+        except Exception as error:
+            raise translate(error) from None
+
+    def slice(self, start: Any = None, stop: Any = None, step: Any = None) -> Series:
+        """A range of characters out of every row, under Python's slice rules."""
+        try:
+            return self._sliced(start, stop, step)
+        except Exception as error:
+            raise translate(error) from None
+
+    def slice_replace(self, start: Any = None, stop: Any = None, repl: Any = None) -> Series:
+        """Every row with a range of characters swapped for a string."""
+        try:
+            return self._replaced_slice(start, stop, repl)
+        except Exception as error:
+            raise translate(error) from None
+
+    def get(self, i: Any) -> Series:
+        """One character out of every row, and nothing where the row is too short."""
+        try:
+            return self._at(i)
+        except Exception as error:
+            raise translate(error) from None
+
+    def find(self, sub: Any, start: Any = 0, end: Any = None) -> Series:
+        """Where a substring first sits in every row, or -1 where it is absent."""
+        try:
+            return self._found("find", sub, start, end)
+        except Exception as error:
+            raise translate(error) from None
+
+    def rfind(self, sub: Any, start: Any = 0, end: Any = None) -> Series:
+        """Where a substring last sits in every row, or -1 where it is absent."""
+        try:
+            return self._found("rfind", sub, start, end)
+        except Exception as error:
+            raise translate(error) from None
+
+    def index(self, sub: Any, start: Any = 0, end: Any = None) -> Series:
+        """The same as find, except that a row without the substring is an error."""
+        try:
+            return self._demanded("find", sub, start, end)
+        except Exception as error:
+            raise translate(error) from None
+
+    def rindex(self, sub: Any, start: Any = 0, end: Any = None) -> Series:
+        """The same as rfind, except that a row without the substring is an error."""
+        try:
+            return self._demanded("rfind", sub, start, end)
+        except Exception as error:
+            raise translate(error) from None
+
+    def startswith(self, pat: Any, na: Any = None) -> Series:
+        """Whether every row begins with a string, or with any of several."""
+        try:
+            return self._begins("startswith", pat, na)
+        except Exception as error:
+            raise translate(error) from None
+
+    def endswith(self, pat: Any, na: Any = None) -> Series:
+        """Whether every row ends with a string, or with any of several."""
+        try:
+            return self._begins("endswith", pat, na)
+        except Exception as error:
+            raise translate(error) from None
+
+    def removeprefix(self, prefix: Any) -> Series:
+        """Every row with a leading string taken off, if it has one."""
+        try:
+            return self._text("removeprefix", prefix)
+        except Exception as error:
+            raise translate(error) from None
+
+    def removesuffix(self, suffix: Any) -> Series:
+        """Every row with a trailing string taken off, if it has one."""
+        try:
+            return self._text("removesuffix", suffix)
+        except Exception as error:
+            raise translate(error) from None
+
+
 class CategoricalAccessor(CategoricalMixin):
     """The `cat` accessor, which is where a category column's categories live.
 
@@ -457,6 +566,123 @@ class CategoricalAccessor(CategoricalMixin):
         """A new list of categories, with the values matched against it."""
         try:
             return self._set(new_categories, ordered, rename)
+        except Exception as error:
+            raise translate(error) from None
+
+
+class Rolling(RollingMixin):
+    """A window of a fixed width over a column, waiting for a reduction.
+
+    Reached from `s.rolling(...)`, and it holds the column and the five numbers that say
+    where each window sits rather than computing anything, which is what pandas does as
+    well. The five are one question, `firepanda/kernel/window.mojo` states it as a pair
+    of row numbers, and this class is where a caller's spelling of that question is
+    checked.
+
+    Five of pandas' twenty six reductions so far, and they are the five a window can be
+    carried through. A total can have the row that left subtracted from it and the row
+    that arrived added to it, and a median cannot, which is the line between what is
+    here and what is not.
+    """
+
+    __slots__ = ()
+
+    def sum(
+        self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
+    ) -> Series:
+        """The total of the values in the window. Over every rolling window."""
+        try:
+            return self._reduce("sum", numeric_only, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def mean(
+        self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
+    ) -> Series:
+        """The mean of the values in the window. Over every rolling window."""
+        try:
+            return self._reduce("mean", numeric_only, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def count(self, numeric_only: bool = False) -> Series:
+        """How many rows of the window hold a value. Over every rolling window."""
+        try:
+            return self._reduce("count", numeric_only)
+        except Exception as error:
+            raise translate(error) from None
+
+    def min(
+        self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
+    ) -> Series:
+        """The smallest value in the window. Over every rolling window."""
+        try:
+            return self._reduce("min", numeric_only, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def max(
+        self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
+    ) -> Series:
+        """The largest value in the window. Over every rolling window."""
+        try:
+            return self._reduce("max", numeric_only, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+
+class Expanding(ExpandingMixin):
+    """A window that starts at the first row and grows, waiting for a reduction.
+
+    Reached from `s.expanding(...)`. The same five reductions as `Rolling` over a window
+    with no near end, which is why the two classes share everything below the
+    constructor: an expanding window is a rolling one whose width is the height of the
+    column. The one thing that is genuinely different is the default for `min_periods`,
+    which is one here and the full width there, and pandas has the same split.
+    """
+
+    __slots__ = ()
+
+    def sum(
+        self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
+    ) -> Series:
+        """The total of the values in the window. Over every expanding window."""
+        try:
+            return self._reduce("sum", numeric_only, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def mean(
+        self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
+    ) -> Series:
+        """The mean of the values in the window. Over every expanding window."""
+        try:
+            return self._reduce("mean", numeric_only, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def count(self, numeric_only: bool = False) -> Series:
+        """How many rows of the window hold a value. Over every expanding window."""
+        try:
+            return self._reduce("count", numeric_only)
+        except Exception as error:
+            raise translate(error) from None
+
+    def min(
+        self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
+    ) -> Series:
+        """The smallest value in the window. Over every expanding window."""
+        try:
+            return self._reduce("min", numeric_only, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def max(
+        self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
+    ) -> Series:
+        """The largest value in the window. Over every expanding window."""
+        try:
+            return self._reduce("max", numeric_only, engine, engine_kwargs)
         except Exception as error:
             raise translate(error) from None
 
@@ -1915,9 +2141,38 @@ class Series(SeriesMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def rolling(
+        self,
+        window: Any,
+        min_periods: int | None = None,
+        center: bool = False,
+        win_type: str | None = None,
+        on: str | None = None,
+        closed: str | None = None,
+        step: int | None = None,
+        method: str = "single",
+    ) -> Rolling:
+        """A window of a fixed width, which computes nothing until it is reduced."""
+        try:
+            return _rolling(self, window, min_periods, center, win_type, on, closed, step, method)
+        except Exception as error:
+            raise translate(error) from None
+
+    def expanding(self, min_periods: int = 1, method: str = "single") -> Expanding:
+        """A window that starts at the first row and grows, reduced the same way."""
+        try:
+            return _expanding(self, min_periods, method)
+        except Exception as error:
+            raise translate(error) from None
+
     dt = Namespace(DatetimeProperties)
     """The datetime accessor, which is where the calendar and clock parts of a temporal
     column live.
+    """
+
+    str = Namespace(StringAccessor)
+    """The string accessor, which is where the methods that read a text column character by
+    character live.
     """
 
     cat = Namespace(CategoricalAccessor)

@@ -40,6 +40,15 @@ from firepanda.frame.display import DisplayOptions, render_column
 from firepanda.frame.index import Index
 from firepanda.kernel.binary import BinaryOp, binary_any, binary_value_any
 from firepanda.kernel.cast import cast_any
+from firepanda.kernel.chars import (
+    text_character_get,
+    text_character_length,
+    text_character_slice,
+    text_find,
+    text_remove_prefix,
+    text_remove_suffix,
+    text_slice_replace,
+)
 from firepanda.kernel.cumulative import CumulativeOp, cumulative_any
 from firepanda.kernel.dictionary import (
     dictionary_codes,
@@ -97,6 +106,14 @@ from firepanda.kernel.temporal import (
     unit_named,
 )
 from firepanda.kernel.unary import UnaryOp, unary_any
+from firepanda.kernel.window import (
+    Shape,
+    WindowEdge,
+    WindowOp,
+    expanding_shape,
+    rolling_shape,
+    window_agg,
+)
 
 
 struct Series(Copyable, Movable, Sized, Writable):
@@ -716,6 +733,215 @@ struct Series(Copyable, Movable, Sized, Writable):
             AnyArray(text_substring(self.values.strings(), offset, length)),
         )
 
+    def chars_is_text(self) -> Bool:
+        """Answers whether this column holds text at all.
+
+        Here for the reason `cat_is_category` is, and pandas has the same pair:
+        `s.str` on a column of numbers is an `AttributeError` rather than a
+        column of nulls, so the caller wants a question they can ask before they
+        reach for the accessor.
+
+        Returns:
+            True if the column is text.
+        """
+        return self.values.type.kind == TypeKind.STRING
+
+    def chars_length(self) raises -> Self:
+        """Returns how many characters each row holds.
+
+        Not how many bytes, which is what `byte_length` and every other kernel
+        in the library measure. The two agree on ASCII and disagree on
+        everything else, and this is the pandas answer.
+
+        Returns:
+            An int64 series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name, AnyArray(text_character_length(self.values.strings()))
+        )
+
+    def chars_slice(
+        self, start: Optional[Int], stop: Optional[Int], step: Int
+    ) raises -> Self:
+        """Returns a range of characters cut out of every row.
+
+        These are Python's slice rules, so a missing bound means the far end in
+        whichever direction the step goes, a negative bound counts back from the
+        end, and a range that runs off a short row is the empty string rather
+        than an error.
+
+        Args:
+            start: The first character, or nothing for the near end.
+            stop: The character to stop before, or nothing for the far end.
+            step: How far to move between characters. Never zero.
+
+        Returns:
+            A text series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text, or the step is zero.
+        """
+        return self._relabelled(
+            self.name,
+            AnyArray(
+                text_character_slice(self.values.strings(), start, stop, step)
+            ),
+        )
+
+    def chars_get(self, at: Int) raises -> Self:
+        """Returns one character out of every row.
+
+        Args:
+            at: Which character, counting back from the end when negative.
+
+        Returns:
+            A text series of the same height, null wherever this one is null and
+            also wherever the row is too short to have that character.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name, AnyArray(text_character_get(self.values.strings(), at))
+        )
+
+    def chars_find(
+        self,
+        sub: StringSlice,
+        start: Optional[Int],
+        stop: Optional[Int],
+        from_end: Bool,
+    ) raises -> Self:
+        """Returns where a substring sits in each row, as a character position.
+
+        Args:
+            sub: The substring to look for.
+            start: The first character the match may start at, or nothing for
+                the beginning.
+            stop: The character to stop searching before, or nothing for the
+                end.
+            from_end: Whether to answer the last match rather than the first.
+
+        Returns:
+            An int64 series holding the character position, or -1 where the
+            substring is not there, and null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name,
+            AnyArray(
+                text_find(
+                    self.values.strings(), sub.as_bytes(), start, stop, from_end
+                )
+            ),
+        )
+
+    def chars_slice_replace(
+        self, start: Optional[Int], stop: Optional[Int], repl: StringSlice
+    ) raises -> Self:
+        """Returns every row with a range of characters swapped for a substring.
+
+        Args:
+            start: The first character replaced, or nothing for the beginning.
+            stop: The character to stop replacing before, or nothing for the
+                end.
+            repl: What to put there.
+
+        Returns:
+            A text series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name,
+            AnyArray(
+                text_slice_replace(
+                    self.values.strings(), start, stop, repl.as_bytes()
+                )
+            ),
+        )
+
+    def chars_remove_prefix(self, prefix: StringSlice) raises -> Self:
+        """Returns every row with a leading substring taken off, if it has one.
+
+        Args:
+            prefix: The substring to remove.
+
+        Returns:
+            A text series of the same height, unchanged wherever the row does
+            not begin with the prefix and null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name,
+            AnyArray(
+                text_remove_prefix(self.values.strings(), prefix.as_bytes())
+            ),
+        )
+
+    def chars_remove_suffix(self, suffix: StringSlice) raises -> Self:
+        """Returns every row with a trailing substring taken off, if it has one.
+
+        Args:
+            suffix: The substring to remove.
+
+        Returns:
+            A text series of the same height, unchanged wherever the row does
+            not end with the suffix and null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name,
+            AnyArray(
+                text_remove_suffix(self.values.strings(), suffix.as_bytes())
+            ),
+        )
+
+    def chars_starts_with(self, prefix: StringSlice) raises -> Self:
+        """Returns whether each row begins with a substring.
+
+        The mask kernel underneath this is the one `LIKE 'prefix%'` uses, and it
+        compares bytes. That is the same answer a character comparison would
+        give, because a prefix that is well formed UTF-8 can only match at a
+        character boundary, so there is nothing to convert.
+
+        Args:
+            prefix: The substring to look for at the front.
+
+        Returns:
+            A bool series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name, AnyArray(self.str_starts_with(prefix))
+        )
+
+    def chars_ends_with(self, suffix: StringSlice) raises -> Self:
+        """Returns whether each row ends with a substring.
+
+        Args:
+            suffix: The substring to look for at the back.
+
+        Returns:
+            A bool series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(self.name, AnyArray(self.str_ends_with(suffix)))
+
     def cat_is_category(self) -> Bool:
         """Answers whether this column holds categories at all.
 
@@ -1140,6 +1366,94 @@ struct Series(Copyable, Movable, Sized, Writable):
             Error: If the column has no order, which here means a string column.
         """
         return self.cumulative(CumulativeOp.MIN)
+
+    def rolling(
+        self,
+        op: WindowOp,
+        window: Int,
+        min_periods: Optional[Int],
+        center: Bool,
+        closed: WindowEdge,
+        step: Optional[Int],
+    ) raises -> Self:
+        """Returns one reduction run over every window of the column.
+
+        A window that is not told how many values it needs needs all of them,
+        so the leading rows of a rolling sum are missing. That is pandas and it
+        is the answer most people are surprised by once.
+
+        Args:
+            op: Which reduction to run.
+            window: How many rows wide the window is.
+            min_periods: How many values a window needs, or nothing for the
+                width.
+            center: Whether the window sits around its row rather than behind
+                it.
+            closed: Which of its two ends the window keeps.
+            step: How many rows apart the answered rows are, or nothing for
+                every row.
+
+        Returns:
+            A float64 series, as tall as this one when the step is one and
+            shorter when it is not.
+
+        Raises:
+            Error: If the column is not a number or a bool, or the parameters
+                do not describe a window.
+        """
+        return self._windowed(
+            op, rolling_shape(window, min_periods, center, closed, step)
+        )
+
+    def expanding(self, op: WindowOp, min_periods: Int) raises -> Self:
+        """Returns one reduction run over every window with no left edge.
+
+        Every window starts at row zero, so the last row of the answer is the
+        whole column reduced and has to equal the plain reduction. Unlike a
+        rolling window this one needs one value rather than all of them by
+        default, which is why an expanding sum has no hole at the top.
+
+        Args:
+            op: Which reduction to run.
+            min_periods: How many values a window needs before it answers.
+
+        Returns:
+            A float64 series of the same height.
+
+        Raises:
+            Error: If the column is not a number or a bool.
+        """
+        return self._windowed(
+            op, expanding_shape(min_periods, len(self.values))
+        )
+
+    def _windowed(self, op: WindowOp, shape: Shape) raises -> Self:
+        """Runs the window kernel and puts the right row labels back on it.
+
+        A step of one answers a row per row, so the labels carry over. A wider
+        step answers a sample of the rows, and the labels it keeps are the
+        labels of the rows it sampled rather than a fresh range, because those
+        are what the rows are still called.
+
+        Args:
+            op: Which reduction to run.
+            shape: Where the windows sit.
+
+        Returns:
+            The reduced series.
+
+        Raises:
+            Error: Whatever the kernel raises.
+        """
+        var values = window_agg(self.values, op, shape)
+        if shape.step == 1:
+            return self._relabelled(self.name, values^)
+        var sampled = List[Int](capacity=len(values))
+        for k in range(len(values)):
+            sampled.append(k * shape.step)
+        var answer = Self(self.name, values^)
+        answer.index = self.index.take(sampled)
+        return answer^
 
     def dt(self, field: TemporalField) raises -> Self:
         """Returns one calendar or clock field of a datetime series.
