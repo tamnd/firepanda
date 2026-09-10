@@ -32,10 +32,35 @@ megabytes to do it. The second builds a dictionary over ten thousand keys, which
 fits in L2, and reads the large side once. That is the difference between the
 join being a factorize with a join stapled to it and the join being a probe.
 
-This route is taken for a single key column of a fixed width dtype. One key
-because two would need the packing that `group_ordinals` does, and fixed width
-because the table compares hashes and a string needs its bytes compared on a hash
-match against the other side's column, which the table has no way to reach.
+This route is taken for a single key column. One key, because two would need the
+packing that `group_ordinals` does. It is taken for a fixed width key whatever
+the two heights are, and for a text key only when the side it would have to build
+is much smaller than the side it would probe, which `STRING_BUILD_SHARE` below
+says more about.
+
+Text used to be excluded from it altogether and that was worth more than it
+looked. The table compares hashes, which is exact for a fixed width key because
+`mix` is a bijection on 64 bits, and is not exact for a string, because sixteen
+bytes of name do not fit in eight bytes of hash. So a string needs its bytes
+compared on a hash match, and the bytes to compare against live in the other
+side's column, which is a thing the table was not handed. `build_strings` and
+`probe_strings` had already put that comparison back for the factorize, where
+both sides of it are the same column; the piece that was missing was telling the
+probe which column the kept views belong to, because a long view carries an
+offset into its own payload and means nothing against anyone else's.
+
+What the exclusion cost is easy to state. Every text key took the concatenating
+route: a copy of both key columns and then a dictionary over every distinct key
+on both sides. Against a dimension table of a hundred thousand rows that is ten
+million strings copied and ten million keys inserted to learn a hundred thousand
+of them, and this route inserts the hundred thousand and reads the rest without
+writing anything. It is 2.28 times on that shape and 1.56 times against a
+dimension of a thousand.
+
+What it does not cover yet is two sides of the same height. There the build is the
+work, this route does it on one thread and the route it replaced does it on every
+core, so it loses and is not taken. Fixing that means a build that spreads rather
+than a better line to draw.
 
 ## Which side is built
 
@@ -83,11 +108,13 @@ every integer key, and a key that is not an integer never reaches the field.
 
 from firepanda.array.any import AnyArray, ColumnRefs, borrow_columns
 from firepanda.array.array import Array
+from firepanda.array.strings import StringArray
+from firepanda.array.strview import StringView
 from firepanda.buffer.buffer import Buffer
 from firepanda.dtype.lists import ALL
 from firepanda.exec.morsel import parallel_morsels
 from firepanda.hash.factorize import CHUNK_ROWS, DIRECT_LIMIT, direct_plan
-from firepanda.hash.function import DEFAULT_SEED, hash_chunk
+from firepanda.hash.function import DEFAULT_SEED, hash_chunk, hash_strings_chunk
 from firepanda.hash.grouping import group_ordinals
 from firepanda.hash.table import HashTable
 from firepanda.kernel.concat import concat_two_any
@@ -100,6 +127,57 @@ Same constant as `pairs.mojo`'s `PARALLEL_LEFT_ROWS` and picked the same way. A
 probe is a handful of nanoseconds a row and a fork and join is tens of
 microseconds, so the split has to have that many rows to pay for itself before it
 is offered.
+"""
+
+comptime STRING_BUILD_SHARE = 8
+"""How much larger the probe side has to be before a text key takes the probe
+route.
+
+A fixed width key takes that route whatever the two heights are, because its
+build is a store per row and costs nothing worth weighing. A text build is a
+hash, a compare and an insert per row and it runs on one thread, where the route
+it is competing against factorizes both sides at once on every core. So the probe
+route is a win when the side it has to build is small and a loss when it is not,
+and this is where the line goes.
+
+Measured on an i9-13900K at ten million probe rows, three sessions a side in ABBA
+order, with the line taken out so that all three shapes go through the probe
+route, against the whole frame route:
+
+| build rows | whole frame | probe route | ratio |
+| --- | --- | --- | --- |
+| a thousand | 41.1 ms | 26.4 ms | 1.56 |
+| a hundred thousand | 66.2 ms | 29.1 ms | 2.28 |
+| ten million | 237.0 ms | 304.8 ms | 0.78 |
+
+The last row is what the probe route does on a shape it is now kept away from, so
+what ships on that shape is the 237.0 and not the 304.8. The two that win are
+separated, every run of one side below every run of the other, and so is the one
+that loses. The four integer rows carried alongside them did not move.
+
+Where the line actually falls is between the second row and the third and the
+numbers do not say exactly where. The serial build reads as a very steady twenty
+eight to thirty nanoseconds a build row across both of the outer rows, and
+fitting the other route between its last two points puts the crossover somewhere
+near a build side a third the size of the probe side. That is an extrapolation
+between two points on a curve that is bending, so the line is put at an eighth
+instead, which is inside the region that was measured to win rather than next to
+the estimate of where winning stops.
+
+A build that spreads is what would remove the line rather than move it, and the
+cheap half of that was tried and is not enough. The build has two phases and only
+one of them has to be serial: hashing a row reads that row and writes eight bytes
+nobody else writes, while inserting reads and writes one shared table. Hashing
+the whole build side at once on every core and then inserting the answers
+serially measured 280 ms against the whole frame route's 226 on the last row
+above, which is 0.80 where the interleaved build measured 0.78. Both are
+separated and both lose. The rung at a hundred thousand did not move at all, six
+runs a side fully interleaved between 28.4 and 29.3 ms.
+
+So the hash was never the serial part that costs anything. The insert is, and
+spreading that means several tables built independently and a probe that knows
+which one to ask, which is a different piece of work rather than a variation on
+this one.
 """
 
 comptime PROBE_MORSEL_ROWS = 1 << 16
@@ -216,27 +294,31 @@ def align_keys[
     if len(left_keys) == 1 and left_rows > 0 and right_rows > 0:
         ref left = left_columns[left_keys[0]][]
         ref right = right_columns[right_keys[0]][]
-        # Before the dispatch, because uint8 is in ALL and a string column would
-        # match it and align on the first byte of each view. `group_ordinals`
-        # guards the same way for the same reason.
+        # The string test comes first and a string never reaches the loop below,
+        # because uint8 is in ALL and a string column would match it and align on
+        # the first byte of each view. `group_ordinals` guards the same way for
+        # the same reason. When the two sides are too close in height for the
+        # string table to be worth building, neither branch returns and this
+        # drops to the concat route at the bottom, which is where a string used
+        # to go in every case.
         if not left.is_string():
             comptime for candidate in ALL:
                 if left.dtype() == candidate:
-                    # Not the zeroing constructor. Between them the build and
-                    # the probe write every slot of this, the build side its
-                    # own stretch and the probe side the rest, so the zeroing
-                    # pass is a pass over both sides that nothing reads. It is
-                    # also the pass that faults these pages in, and the probe
-                    # half of them is filled by every core at once, so leaving
-                    # the memset in hands most of this list to one core before
-                    # thirty two of them write to it.
+                    # Not the zeroing constructor. Between them the build
+                    # and the probe write every slot of this, the build side
+                    # its own stretch and the probe side the rest, so the
+                    # zeroing pass is a pass over both sides that nothing
+                    # reads. It is also the pass that faults these pages in,
+                    # and the probe half of them is filled by every core at
+                    # once, so leaving the memset in hands most of this list
+                    # to one core before thirty two of them write to it.
                     var codes = Array[DType.uint32](
                         overwritten=left_rows + right_rows
                     )
-                    # Views and not copies. A join key column is as large as the
-                    # side it belongs to, and copying both of them before
-                    # looking at either was the same waste a group by used to
-                    # pay on every key.
+                    # Views and not copies. A join key column is as large as
+                    # the side it belongs to, and copying both of them
+                    # before looking at either was the same waste a group by
+                    # used to pay on every key.
                     ref left_view = left.as_typed_view[candidate]()
                     ref right_view = right.as_typed_view[candidate]()
                     var groups = _probe_route[candidate](
@@ -246,6 +328,14 @@ def align_keys[
                         codes,
                     )
                     return KeyAlignment(codes^, groups, absent^, has_nulls)
+        elif min(left_rows, right_rows) * STRING_BUILD_SHARE <= max(
+            left_rows, right_rows
+        ):
+            var codes = Array[DType.uint32](overwritten=left_rows + right_rows)
+            var groups = _probe_route_strings(
+                left.strings(), right.strings(), left_rows, codes
+            )
+            return KeyAlignment(codes^, groups, absent^, has_nulls)
 
     var merged = List[AnyArray](capacity=len(left_keys))
     for k in range(len(left_keys)):
@@ -359,6 +449,248 @@ def _probe_route[
     return _build_and_probe[dt](left, 0, right, left_rows, codes)
 
 
+def _probe_route_strings(
+    left: StringArray,
+    right: StringArray,
+    left_rows: Int,
+    mut codes: Array[DType.uint32],
+) raises -> Int:
+    """Builds a dictionary on the smaller text side and probes the larger.
+
+    Args:
+        left: The left key column.
+        right: The right key column.
+        left_rows: How many rows the left side has, which is where the right
+            side's codes start.
+        codes: Filled with one ordinal per row of both sides.
+
+    Returns:
+        How many ordinals there are, counting the one for a row that matched
+        nothing.
+
+    Raises:
+        Error: If the probe raises.
+    """
+    if len(right) <= len(left):
+        return _build_and_probe_strings(right, left_rows, left, 0, codes)
+    return _build_and_probe_strings(left, 0, right, left_rows, codes)
+
+
+def _build_and_probe_strings(
+    build: StringArray,
+    build_at: Int,
+    probe: StringArray,
+    probe_at: Int,
+    mut codes: Array[DType.uint32],
+) raises -> Int:
+    """Builds the smaller text side's table and asks it about every other row.
+
+    The two halves in one call, for the whole frame caller that has both sides in
+    front of it and wants the ordinals and nothing else. A streaming caller uses
+    `build_side_strings` and `probe_side_strings`, which is the same work with the
+    table kept between the two.
+
+    Args:
+        build: The smaller side's key column.
+        build_at: Where its codes start.
+        probe: The larger side's key column.
+        probe_at: Where its codes start.
+        codes: Filled with one ordinal per row of both sides.
+
+    Returns:
+        The ordinal count, counting the miss ordinal.
+
+    Raises:
+        Error: If the build or the parallel probe raises.
+    """
+    var built = build_side_strings(build, build_at, codes)
+    probe_side_strings(built, build, probe, probe_at, codes)
+    return built.groups()
+
+
+def build_side_strings(
+    build: StringArray, build_at: Int, mut codes: Array[DType.uint32]
+) raises -> BuildSide:
+    """Fills the text key's table and the build side's own codes.
+
+    `_build_hashed` with the key comparison put back, which is the same
+    relationship `build_strings` has to `build`. There is no direct route here
+    because a string has no value to index a table by.
+
+    The build writes into a list of its own and the result is copied across, for
+    the reason `_build_hashed` gives: the build indexes its output by the row it
+    is reading and cannot be told to write somewhere else. The copy is over the
+    smaller side and is sequential.
+
+    Args:
+        build: The smaller side's key column.
+        build_at: Where its codes start.
+        codes: The build side's stretch is filled with its ordinals.
+
+    Returns:
+        The table, ready to probe. Every probe of it has to be handed `build`
+        back, because the views it kept point into that column.
+
+    Raises:
+        Error: If the build raises.
+    """
+    var build_rows = len(build)
+    var build_nulls = build.null_count() > 0
+    var table = HashTable(build_rows, DEFAULT_SEED)
+    var firsts = List[Int]()
+    var reps = List[StringView]()
+    var mine = Array[DType.uint32](build_rows)
+    var hashes = Buffer(CHUNK_ROWS * 8)
+
+    var at = 0
+    while at < build_rows:
+        var count = min(CHUNK_ROWS, build_rows - at)
+        hash_strings_chunk(build, at, count, DEFAULT_SEED, hashes)
+        table.build_strings(
+            hashes,
+            build,
+            build_nulls,
+            at,
+            at,
+            count,
+            build_rows,
+            0,
+            mine,
+            firsts,
+            reps,
+        )
+        at += count
+
+    var out = codes.unsafe_ptr()
+    var got = mine.unsafe_ptr()
+    for i in range(build_rows):
+        out.unsafe_offset(build_at + i).unsafe_write(
+            got.unsafe_offset(i).unsafe_load()
+        )
+
+    var miss = UInt32(len(table))
+    _ = hashes^
+    return BuildSide(
+        DType.bool,
+        False,
+        Buffer(0),
+        0,
+        UInt64(0),
+        table^,
+        miss,
+        True,
+        reps^,
+    )
+
+
+def probe_side_strings(
+    built: BuildSide,
+    source: StringArray,
+    probe: StringArray,
+    probe_at: Int,
+    mut codes: Array[DType.uint32],
+    spread: Bool = True,
+) raises:
+    """Asks a built text side about every row of a probe side.
+
+    `probe_side` for text, and the same promise: it reads the table and writes
+    nothing to it, so every core can do this at once and a streaming join can
+    call it once per chunk with the one built side.
+
+    The one thing it needs that `probe_side` does not is `source`. The views the
+    table kept belong to the column the build read, the probe rows belong to
+    another column, so the comparison is across two columns and it has to be told
+    which one the views came from.
+
+    Args:
+        built: The table the build side filled.
+        source: The column the build read, which the kept views point into.
+        probe: The probe side's key column.
+        probe_at: Where its codes start.
+        codes: The probe side's stretch is filled with its ordinals.
+        spread: Whether this probe may use more than one core. False when the
+            caller is already running on a worker.
+
+    Raises:
+        Error: If the built side is not a text one, or if the parallel probe
+            raises.
+    """
+    if not built.text:
+        raise Error(
+            "join: the table was built from a "
+            + String(built.key)
+            + " key and the probe column is text"
+        )
+    _probe_strings(
+        built.table,
+        source,
+        built.miss,
+        probe,
+        probe_at,
+        built.reps,
+        codes,
+        spread,
+    )
+
+
+def _probe_strings(
+    table: HashTable,
+    source: StringArray,
+    miss: UInt32,
+    probe: StringArray,
+    probe_at: Int,
+    reps: List[StringView],
+    mut codes: Array[DType.uint32],
+    spread: Bool = True,
+) raises:
+    """Reads the string table, a chunk of probe rows at a time.
+
+    Args:
+        table: The table the build side filled.
+        source: The column the build side's kept views point into, which the
+            comparison needs and which is not the column being probed.
+        miss: The ordinal for a row that matches nothing.
+        probe: The probe side's key column.
+        probe_at: Where its codes start.
+        reps: One kept view per ordinal, from the build.
+        codes: The probe side's stretch is filled with its ordinals.
+        spread: Whether this probe may use more than one core. False when the
+            caller is already running on a worker.
+
+    Raises:
+        Error: If the parallel probe raises.
+    """
+    var probe_rows = len(probe)
+    var probe_nulls = probe.null_count() > 0
+
+    def look(start: Int, stop: Int) raises {mut codes, imm}:
+        # One buffer per morsel, for the reason `_probe_hashed` gives.
+        var scratch = Buffer(CHUNK_ROWS * 8)
+        var here = start
+        while here < stop:
+            var count = min(CHUNK_ROWS, stop - here)
+            hash_strings_chunk(probe, here, count, DEFAULT_SEED, scratch)
+            _ = table.probe_strings(
+                scratch,
+                probe,
+                source,
+                probe_nulls,
+                here,
+                count,
+                miss,
+                reps,
+                codes,
+                probe_at,
+            )
+            here += count
+        _ = scratch^
+
+    if spread and probe_rows >= PARALLEL_PROBE_ROWS:
+        parallel_morsels(look, probe_rows, PROBE_MORSEL_ROWS)
+    else:
+        look(0, probe_rows)
+
+
 struct BuildSide(Movable):
     """The build side's keys in a table, ready to be asked about a probe side.
 
@@ -368,17 +700,32 @@ struct BuildSide(Movable):
     so the table has to be a thing that outlives the pass that filled it. That
     is all this is, the state the probe reads, kept.
 
-    Both routes live in one struct rather than two, because a `List` of trait
-    objects is not expressible in Mojo 1.0 and a `Variant` here would be two
-    branches in the probe either way. The unused route costs one empty `Buffer`
-    or one empty `HashTable`, which is a 64-byte block and a few words.
+    There are three routes, not two. A fixed width key gets a table indexed by
+    its own value when the values sit close enough together, and a hash table
+    otherwise. Text gets a hash table with the byte comparison put back, which is
+    the same table with a different probe and one more thing kept.
+
+    All three live in one struct rather than three, because a `List` of trait
+    objects is not expressible in Mojo 1.0 and a `Variant` here would be a branch
+    in the probe either way. An unused route costs one empty `Buffer`, one empty
+    `HashTable` or one empty `List`, which is a 64-byte block and a few words.
     """
 
     var key: DType
-    """The dtype of the key column this was built from.
+    """The dtype of the key column this was built from, or `bool` for text.
 
     A probe with any other dtype would read the same slots meaning something
-    else, so `probe_side` refuses one.
+    else, so `probe_side` refuses one. Text has no dtype to record here and is
+    told apart by `text` instead.
+    """
+
+    var text: Bool
+    """Whether the key was a string column.
+
+    Separate from `key` rather than a dtype value of its own, because a string
+    column's elements are not scalars and nothing else in this struct is
+    parameterized on them. `probe_side` refuses a side with this set and
+    `probe_side_strings` refuses one without it, so the two cannot be crossed.
     """
 
     var direct: Bool
@@ -405,6 +752,15 @@ struct BuildSide(Movable):
     var table: HashTable
     """The hashed route's table, or an empty one."""
 
+    var reps: List[StringView]
+    """The text route's kept view per ordinal, or an empty list.
+
+    A view rather than the bytes, so the build copies nothing. It points into the
+    column the build read, which is why every text probe has to be handed that
+    column back: a long view carries an offset into its own payload and means
+    nothing against anyone else's.
+    """
+
     var miss: UInt32
     """The ordinal a probe row that matched nothing is given.
 
@@ -420,6 +776,8 @@ struct BuildSide(Movable):
         base: UInt64,
         var table: HashTable,
         miss: UInt32,
+        text: Bool = False,
+        var reps: List[StringView] = List[StringView](),
     ):
         """Constructs a built side.
 
@@ -431,6 +789,8 @@ struct BuildSide(Movable):
             base: The bits of the value indexing slot zero.
             table: The hashed route's table, or an empty one.
             miss: The ordinal for a row that matches nothing.
+            text: Whether the key was a string column.
+            reps: The text route's kept view per ordinal, or an empty list.
         """
         self.key = key
         self.direct = direct
@@ -438,7 +798,9 @@ struct BuildSide(Movable):
         self.span = span
         self.base = base
         self.table = table^
+        self.reps = reps^
         self.miss = miss
+        self.text = text
 
     def __init__(out self):
         """Constructs a table with nothing in it.
@@ -455,7 +817,9 @@ struct BuildSide(Movable):
         self.span = 0
         self.base = UInt64(0)
         self.table = HashTable(0, DEFAULT_SEED)
+        self.reps = List[StringView]()
         self.miss = UInt32(0)
+        self.text = False
 
     def groups(self) -> Int:
         """How many ordinals this side hands out, counting the miss one.
@@ -714,10 +1078,10 @@ def probe_side[
         Error: If the probe column's dtype is not the one the table was built
             from, or if the parallel probe raises.
     """
-    if built.key != dt:
+    if built.text or built.key != dt:
         raise Error(
             "join: the table was built from a "
-            + String(built.key)
+            + ("text" if built.text else String(built.key))
             + " key and the probe column is "
             + String(dt)
         )
