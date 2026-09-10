@@ -643,6 +643,72 @@ def refusal(feature: UInt16) -> Refusal:
     return table[Int(feature)]
 
 
+comptime NO_REFUSAL: UInt16 = 65535
+"""What `feature_of` gives back for text that is not a refusal at all."""
+
+comptime _PREFIX = "Not Implemented Error: firepanda does not support "
+"""How the first line of every refusal starts."""
+
+
+def feature_of(message: StringSlice) -> UInt16:
+    """Reads a refusal back and says which entry it came from.
+
+    A raised error is text by the time anything catches it, so a caller that
+    wants to count refusals by feature has to get from the text back to the
+    table. This is the way back. The conformance harness is the caller that
+    needs it: a directory full of one refusal is one missing feature, and the
+    same count spread over ten of them is ten, and telling those apart is the
+    whole reason the table is a table.
+
+    An entry holding a `{}` is matched on the text either side of it, because
+    what went in the middle came from the query and is not known here. Two
+    entries could in principle both fit, so the longer match wins, which is the
+    more specific of the two.
+
+    Args:
+        message: The error, or its first line.
+
+    Returns:
+        The index into `sql_support()`, or `NO_REFUSAL` if the text is not one.
+    """
+    if not message.startswith(_PREFIX):
+        return NO_REFUSAL
+
+    # Only the first line says what the feature was. The rest is the caret
+    # block and the explanation, and both can hold anything.
+    var end = message.find("\n")
+    if end < 0:
+        end = message.byte_length()
+    var line = message[byte = _PREFIX.byte_length() : end]
+    if not line.endswith("."):
+        return NO_REFUSAL
+    line = line[byte = 0 : line.byte_length() - 1]
+
+    var found = NO_REFUSAL
+    var best = -1
+    var table = sql_support()
+    for i in range(len(table)):
+        var text = table[i].message
+        var hole = text.find("{}")
+        if hole < 0:
+            if line == text:
+                return UInt16(i)
+            continue
+        var before = text[byte=0:hole]
+        var after = text[byte = hole + 2 : text.byte_length()]
+        # The two halves have to fit without overlapping, or `{} on a call`
+        # would match `on a call` with nothing where the query text goes.
+        if line.byte_length() < before.byte_length() + after.byte_length():
+            continue
+        if not line.startswith(before) or not line.endswith(after):
+            continue
+        var length = before.byte_length() + after.byte_length()
+        if length > best:
+            best = length
+            found = UInt16(i)
+    return found
+
+
 def issue_link(issue: UInt32) -> String:
     """The URL a refusal points the reader at.
 
