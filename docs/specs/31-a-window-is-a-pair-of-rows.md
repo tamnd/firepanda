@@ -74,11 +74,13 @@ A missing row in the answer is a NaN with no validity bit behind it, which is wh
 
 ## 8. The Python surface, and the four arguments that are declared and refused
 
-`s.rolling(...)` takes nine arguments and this implements six of them. `win_type` asks for a weighted window, which is a different kernel rather than a parameter of this one, and pandas needs scipy for it. `on` says to order the window by another column, which only means anything on a frame. `method` chooses between reducing the columns separately and reducing them together, and a column is one column either way. All three are declared and refused by name, on the rule document 18 section 4 sets: the signature parity check compares the whole parameter list against a running pandas, and a caller who passes one should get a sentence about it rather than a TypeError about an unexpected keyword.
+`rolling(...)` takes nine arguments and this implements six of them. `win_type` asks for a weighted window, which is a different kernel rather than a parameter of this one, and pandas needs scipy for it. `on` says to order the window by another column, and on a frame it also carries that column through into the answer unreduced. `method` chooses between reducing the columns separately and reducing them together, and this library reduces them separately. All three are declared and refused by name, on the rule document 18 section 4 sets: the signature parity check compares the whole parameter list against a running pandas, and a caller who passes one should get a sentence about it rather than a TypeError about an unexpected keyword.
+
+`on` is worth a sentence more than the other two, because on a frame it does something this library could write and still should not. Copying the named column into the answer is easy and ordering the window by it is the point, and ordering by a column means a window given as a duration, which needs a calendar first. A `rolling` that accepted `on` and silently went on counting rows would be the cosmetic half of the argument with the load bearing half missing, which is worse than not having it.
 
 `engine` is the fourth, on the reduction rather than on the constructor. `numba` is refused and `cython` is accepted, because `cython` names the path this library is already on.
 
-`numeric_only` is accepted at both values and changes nothing, which is not the usual treatment. On a column it says to refuse a column that is not a number, and every reduction here already refuses one, so the two values agree everywhere this library has an answer. Refusing True would be inventing a difference rather than reporting one.
+`numeric_only` is one name asking two questions and it gets a different answer on each. On a column it says to refuse a column that is not a number, and every reduction here already refuses one, so the two values agree everywhere this library has an answer and both are accepted. On a frame it says to drop the columns that cannot be reduced rather than refuse them, which is a decision about which columns come back rather than about what a reduction means, so it is held at False and True is refused. That is the same rule the group by path already follows and it is the same sentence there. One method with two rules is worth flagging and it is not an inconsistency: the argument genuinely means two things and pandas spells both of them with one word.
 
 The five arguments that do describe a window are checked in the constructor and not at the reduction, because that is where pandas checks them. `s.rolling(-1)` raises out of the `rolling` call and not out of the `.sum()` after it, and a program that catches the wrong line is a program whose error handling does not run. Each of the five messages is pandas' own sentence, and each is an `InvalidArgumentError`, which is a `ValueError`.
 
@@ -86,18 +88,40 @@ There is one check that is not pandas'. pandas accepts `step=0` when the window 
 
 The kernel checks the same five again on the way in. That is not duplication worth removing: one of the two checks exists to be reached from Python and the other exists because the Mojo API is a public entry point of its own.
 
-## 9. One door, and the width is what picks the window type
+## 9. A window object reports what it was given, not what it resolved to
+
+pandas puts eleven read only properties on a window object and code in the wild reads them, mostly to find out what a window it was handed is going to do before asking it to do it. Six of the eleven are the arguments handed straight back. The other five are `method`, `win_type`, `on`, `ndim` and `exclusions`, and four of those are constant here because they describe a choice this library made once rather than a choice per window.
+
+The six that are arguments are kept exactly as they arrived, and that is a real decision rather than laziness. `df.rolling(2).closed` is None in pandas and not `right`, and `df.rolling(2).min_periods` is None and not two, even though both windows behave as though the default had been written. Resolving them when the object is built would report a decision as though it were an argument, and a caller reading `min_periods` to find out whether one was set would get the wrong answer. So the defaults are applied one line later, on the way to the kernel, where nothing can read them back.
+
+`ndim` is the one property whose answer depends on which of the two owners built the window, and it is the only place outside the reduction where that has to be known.
+
+## 10. The frame form is the columns windowed one at a time
+
+`df.rolling(3).sum()` is `s.rolling(3).sum()` run once per column and the answers put back beside each other. That is not a shortcut, it is what a window is: a pair of row numbers, and every column of a frame has the same rows. There is nothing a frame window can compute that a column window cannot, which is why `method="table"`, the argument that would ask for the columns to be reduced together, is the one that is refused.
+
+So there is one `Rolling` class and one `Expanding` class here where pandas has two of each, and they hold a column or a frame without much caring which. Two places care. The reduction has a different class to hand back. And `numeric_only` asks a question a frame can answer and a column cannot, which section 8 argues.
+
+The one thing that is not per column is the refusal. Every column is checked before any of them is read, so a frame with a text column at the end of it raises instead of computing half an answer and then raising. The wasted work is not the point, since these reductions are cheap and the half answer is thrown away either way. The point is that a caller who gets an error should not have to wonder what was already spent, and the cost of getting this right is a loop that does nothing but check.
+
+The message names the column. pandas says `Cannot aggregate non-numeric type: str`, which over a frame of forty columns sends the reader back to look for the column themselves, and the column name is the one piece of information the error has that the caller does not.
+
+Two smaller things follow from putting columns back together rather than reducing a frame as a frame. A frame of no columns is handed back rather than rebuilt, because rebuilding nothing makes a frame of no rows and that is a different frame. And the row labels are taken off the first answered column rather than off the frame that was read, because a step makes the answer shorter and gives it the labels of the rows it sampled.
+
+## 11. One door, and the width is what picks the window type
 
 There is one bound method under both classes and one function behind it, and an absent width is how an expanding window is spelled. That is the same shape `text.mojo` uses for a slice bound, and it is chosen for the same reason: the alternative is a flag beside the width saying which of them to believe, which is a parameter that exists to say that another parameter does not, and those are the ones that get out of step.
 
 `min_periods` also crosses as an absence, because its default is not one number. Filling it in on the Python side would mean the layer that does not own the rule owns the rule.
 
-The two Python classes are generated from one table entry each and share a `WindowMixin` that holds the column and the five numbers. They differ in their constructors and in nothing else.
+There are two doors rather than one, `PySeries.window_agg` and `PyDataFrame.window_agg`, taking the same six arguments and differing in what they read and what they answer. That is two because the boundary is typed and not because the question is, and the frame one is nine lines that call the column one in a loop.
 
-## 10. The five that are here and the twenty one that are not
+The two Python classes are generated from one table entry each and share a `WindowMixin` that holds the data and the five numbers. They differ in their constructors and in nothing else.
+
+## 12. The five that are here and the twenty one that are not
 
 `sum`, `mean`, `count`, `min` and `max`. They are five rather than some other number because they are the ones a window can be carried through: the answer to a window can be derived from the answer to the window before it and the rows that changed.
 
-`std`, `var`, `sem`, `skew` and `kurt` carry more state than a total and square the error, so a carried variance is a different argument from a carried sum and belongs beside its own tests. `median`, `quantile` and `rank` need the window sorted rather than folded, which is a different data structure again. `apply` needs a Python callable per window. `corr` and `cov` take a second column. `aggregate`, `sum` with a `numeric_only` that means something, and the frame forms are surface rather than kernel. The exponentially weighted window has no edges at all and shares nothing with any of this. A window given as a duration rather than a count needs a datetime index to measure against.
+`std`, `var`, `sem`, `skew` and `kurt` carry more state than a total and square the error, so a carried variance is a different argument from a carried sum and belongs beside its own tests. `median`, `quantile` and `rank` need the window sorted rather than folded, which is a different data structure again. `apply` needs a Python callable per window. `corr` and `cov` take a second column. `aggregate` is surface rather than kernel, and so is a `numeric_only` that drops columns rather than refusing them. The exponentially weighted window has no edges at all and shares nothing with any of this. A window given as a duration rather than a count needs a datetime index to measure against, and a window under a group by needs the row numbers restarted per group.
 
 None of them resolves rather than resolving and refusing, for the reason document 07 gives: an absent name reads as unimplemented on the board and a refusing one reads as a failure, and the second is a worse thing to say about work that has not been done.

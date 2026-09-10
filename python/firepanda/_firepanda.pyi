@@ -40,6 +40,17 @@ class DataFrame:
     def transform(self, kind: str, periods: int) -> DataFrame:
         """Every column put through one named transformation."""
         ...
+    def window_agg(
+        self,
+        kind: str,
+        window: int | None,
+        min_periods: int | None,
+        center: bool,
+        closed: str,
+        step: int | None,
+    ) -> DataFrame:
+        """One reduction over every window of every column."""
+        ...
     def dropna(self, subset: list[str]) -> DataFrame:
         """The rows with no missing value in them."""
         ...

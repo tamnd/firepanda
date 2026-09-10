@@ -1956,7 +1956,7 @@ own error message lists them."""
 class WindowMixin:
     """What `Rolling` and `Expanding` share, which is everything after the width.
 
-    A window object holds a column and five numbers saying where each window
+    A window object holds some data and five numbers saying where each window
     sits, and computes nothing until a reduction is asked for. That is pandas'
     arrangement and it is why these two classes are so nearly empty: the five
     reductions are one call each with a different word in it, and the word is
@@ -1970,28 +1970,35 @@ class WindowMixin:
     removing: one of the two checks exists to be reached from Python and the
     other exists because the Mojo API is a public entry point of its own.
 
+    The data is a column or a frame, and almost nothing here looks at which. A
+    window is a pair of row numbers, every column of a frame has the same rows,
+    so a frame window is the columns windowed one at a time. The two places that
+    do look are the reduction, which has a different class to hand back, and
+    `numeric_only`, which is a different question on each and is argued at
+    `_reduce`.
+
     The two subclasses differ in their constructors only. A rolling window takes
     a width and defaults `min_periods` to it, and an expanding window takes no
     width and defaults `min_periods` to one. Everything below that is the same
     call.
     """
 
-    __slots__ = ("_center", "_closed", "_min_periods", "_series", "_step", "_window")
-    """The column and the five numbers that survive to the reduction. Slotted for
+    __slots__ = ("_center", "_closed", "_data", "_min_periods", "_step", "_window")
+    """The data and the five numbers that survive to the reduction. Slotted for
     the reason `DataFrameMixin` gives. There is no `_inner`, because a window
-    object has no extension object of its own: it is a column and a plan for
+    object has no extension object of its own: it is some data and a plan for
     which rows to read together."""
 
-    _series: Series
+    _data: Series | DataFrame
     _window: int | None
     _min_periods: int | None
     _center: bool
-    _closed: str
+    _closed: str | None
     _step: int | None
 
     def _hold(
         self,
-        data: Series,
+        data: Series | DataFrame,
         window: int | None,
         min_periods: int | None,
         center: bool,
@@ -2000,8 +2007,16 @@ class WindowMixin:
     ) -> None:
         """Checks the five and keeps them. Not a public entry point.
 
+        The five are kept exactly as they arrived, including the two that have a
+        default the caller did not write. `closed` stays None rather than
+        becoming `right` and `min_periods` stays None rather than becoming the
+        width, because a window object in pandas reports back what it was given
+        and not what it resolved to, and `df.rolling(2).closed` is None there.
+        The defaults are applied on the way to the kernel instead, which is one
+        line later and one lie fewer.
+
         Args:
-            data: The column.
+            data: The column or the frame.
             window: How many rows wide, and None for an expanding window.
             min_periods: How many values a window needs, and None for the
                 default of whichever window type this is.
@@ -2043,12 +2058,26 @@ class WindowMixin:
             # row forever, so it is refused where the rest of them are.
             if step < 1:
                 raise InvalidArgumentError("step must be >= 1")
-        self._series = data
+        self._data = data
         self._window = window
         self._min_periods = min_periods
         self._center = center
-        self._closed = closed or "right"
+        self._closed = closed
         self._step = step
+
+    def _over_frame(self) -> bool:
+        """Whether this window is over a frame rather than a column.
+
+        Asked in three places and written once, because the import has to be
+        deferred: `_frame` imports this module to get the mixins it inherits, so
+        this module cannot import `_frame` at the top of the file.
+
+        Returns:
+            True for a frame.
+        """
+        from ._frame import DataFrame
+
+        return isinstance(self._data, DataFrame)
 
     def _reduce(
         self,
@@ -2056,15 +2085,17 @@ class WindowMixin:
         numeric_only: bool = False,
         engine: Any = None,
         engine_kwargs: Any = None,
-    ) -> Series:
+    ) -> Series | DataFrame:
         """Runs one reduction over every window.
 
-        `numeric_only` is accepted at both values and changes nothing, which is
-        not the usual treatment of a declared argument here. On a column it says
-        to refuse a column that is not a number, and every reduction here
-        already refuses one, so the two values agree everywhere this library has
-        an answer. Refusing True would be inventing a difference rather than
-        reporting one.
+        `numeric_only` is one name asking two questions, and it gets a different
+        answer on each. On a column it says to refuse a column that is not a
+        number, and every reduction here already refuses one, so both values
+        agree everywhere this library has an answer and both are accepted. On a
+        frame it says to drop the columns that cannot be reduced rather than
+        refuse them, which is a decision about which columns come back, so it is
+        held at False and True is refused. That is the rule the group by path
+        already follows and the sentence there is the same sentence.
 
         `engine` is the numba path and is refused, since there is no second
         implementation for it to pick. `cython` is the default path spelled out
@@ -2072,20 +2103,30 @@ class WindowMixin:
 
         Args:
             kind: The reduction, as pandas spells the method.
-            numeric_only: Accepted and does nothing, for the reason above.
+            numeric_only: Held at False over a frame, and accepted at both
+                values over a column, for the reason above.
             engine: Declared and refused, except at `cython`.
             engine_kwargs: Declared and refused.
 
         Returns:
-            A column of float64, as tall as the one it read unless a step made
-            it shorter.
+            Whichever of the two was windowed, of float64, as tall as what it
+            read unless a step made it shorter.
 
         Raises:
-            NotImplementedError: If a numba engine was asked for.
+            NotImplementedError: If a numba engine was asked for, or if a frame
+                was asked to drop the columns it cannot reduce.
         """
-        from ._frame import Series
+        from ._frame import DataFrame, Series
 
-        del numeric_only
+        if isinstance(self._data, DataFrame):
+            _held_at(
+                "numeric_only",
+                numeric_only,
+                False,
+                "dropping the columns a window cannot read is a decision about"
+                " which columns come back, and firepanda windows the ones it was"
+                " given or says which one it could not",
+            )
         if engine is not None and engine != "cython":
             raise NotImplementedError(
                 f"engine={engine!r} is not supported yet, because there is one"
@@ -2096,17 +2137,24 @@ class WindowMixin:
             engine_kwargs,
             "it configures the numba engine, and there is no numba engine here for it to configure",
         )
+        # The one default `_hold` did not apply is applied here. `right` is
+        # pandas' word for a window that keeps the row it is answering and not
+        # the one that fell off the far end. The absent `min_periods` is left
+        # absent and crosses that way, because its default is the width on one of
+        # these two classes and one on the other, and the side that knows which
+        # is the kernel.
+        plan = (
+            kind,
+            self._window,
+            self._min_periods,
+            self._center,
+            self._closed or "right",
+            self._step,
+        )
         try:
-            return Series._wrap(
-                self._series._inner.window_agg(
-                    kind,
-                    self._window,
-                    self._min_periods,
-                    self._center,
-                    self._closed,
-                    self._step,
-                )
-            )
+            if isinstance(self._data, DataFrame):
+                return DataFrame._wrap(self._data._inner.window_agg(*plan))
+            return Series._wrap(self._data._inner.window_agg(*plan))
         except Exception as error:
             raise translate(error) from None
 
@@ -2119,17 +2167,17 @@ class RollingMixin(WindowMixin):
 
     def __init__(
         self,
-        data: Series,
+        data: Series | DataFrame,
         window: int,
         min_periods: int | None,
         center: bool,
         closed: str | None,
         step: int | None,
     ) -> None:
-        """Holds the column and the window. Not a public entry point.
+        """Holds the data and the window. Not a public entry point.
 
         Args:
-            data: The column.
+            data: The column or the frame.
             window: How many rows wide.
             min_periods: How many values a window needs, and None for the width.
             center: Whether the window sits around its row.
@@ -2146,24 +2194,24 @@ class ExpandingMixin(WindowMixin):
     __slots__ = ()
     """All the state is `WindowMixin`'s."""
 
-    def __init__(self, data: Series, min_periods: int) -> None:
-        """Holds the column and how long it waits. Not a public entry point.
+    def __init__(self, data: Series | DataFrame, min_periods: int) -> None:
+        """Holds the data and how long it waits. Not a public entry point.
 
-        The width is None rather than the height of the column, and that is the
-        one place the absence is written down on the Python side: the column can
+        The width is None rather than the height of the data, and that is the
+        one place the absence is written down on the Python side: the data can
         grow between here and the reduction in pandas and the width is resolved
-        against whatever the column is when the reduction runs, so filling it in
-        now would be answering a question that has not been asked yet.
+        against whatever it is when the reduction runs, so filling it in now
+        would be answering a question that has not been asked yet.
 
         Args:
-            data: The column.
+            data: The column or the frame.
             min_periods: How many values a window needs before it answers.
         """
         self._hold(data, None, min_periods, False, None, None)
 
 
 def _rolling(
-    data: Series,
+    data: Series | DataFrame,
     window: Any,
     min_periods: int | None,
     center: bool,
@@ -2173,21 +2221,27 @@ def _rolling(
     step: int | None,
     method: str,
 ) -> Rolling:
-    """Builds the window object `s.rolling(...)` hands back.
+    """Builds the window object `s.rolling(...)` and `df.rolling(...)` hand back.
 
     Written rather than generated for the reason `_grouped` gives, which is that
     it builds a different class and the arguments have to be read before there
-    is an object to read them into.
+    is an object to read them into. One function for both owners, because the
+    nine arguments mean the same thing on each and the class that comes out is
+    the same class.
 
     Three of the nine are declared and refused. `win_type` asks for a weighted
     window, which is a different kernel and not a parameter of this one, and
     pandas needs scipy for it. `on` says to take the window's ordering from
-    another column, which only means anything on a frame. `method` chooses
-    between reducing each column separately and reducing them together, and
-    there is one column here either way.
+    another column, and on a frame it also carries that column through into the
+    answer unreduced. The carrying is the easy half and the ordering is the
+    whole point, and ordering by a column means a window given as a duration,
+    which needs a calendar first. Writing the half that copies a column would be
+    a `rolling("2D", on="t")` that silently counted rows. `method` chooses
+    between reducing each column separately and reducing them together, and this
+    library reduces them separately.
 
     Args:
-        data: The column.
+        data: The column or the frame.
         window: How many rows wide.
         min_periods: How many values a window needs.
         center: Whether the window sits around its row.
@@ -2211,22 +2265,26 @@ def _rolling(
     _refuse(
         "on",
         on,
-        "it says to order the window by another column, and there is one column here to order by",
+        "it says to order the window by another column, and a window measured in"
+        " rows is already ordered by rows, so it would only mean something once a"
+        " window can be given as a duration",
     )
     _held_at(
         "method",
         method,
         "single",
-        "it says whether the columns are reduced together, and a column is one column either way",
+        "it says whether the columns are reduced together, and here they are"
+        " reduced one at a time, which is what a window over a pair of row"
+        " numbers can do without holding the whole frame at once",
     )
     return Rolling(data, window, min_periods, center, closed, step)
 
 
-def _expanding(data: Series, min_periods: int, method: str) -> Expanding:
-    """Builds the window object `s.expanding(...)` hands back.
+def _expanding(data: Series | DataFrame, min_periods: int, method: str) -> Expanding:
+    """Builds the window object `s.expanding(...)` and `df.expanding(...)` hand back.
 
     Args:
-        data: The column.
+        data: The column or the frame.
         min_periods: How many values a window needs before it answers.
         method: Declared and held at `single`, for the reason `_rolling` gives.
 
@@ -2239,7 +2297,9 @@ def _expanding(data: Series, min_periods: int, method: str) -> Expanding:
         "method",
         method,
         "single",
-        "it says whether the columns are reduced together, and a column is one column either way",
+        "it says whether the columns are reduced together, and here they are"
+        " reduced one at a time, which is what a window over a pair of row"
+        " numbers can do without holding the whole frame at once",
     )
     return Expanding(data, min_periods)
 
