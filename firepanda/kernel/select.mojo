@@ -11,7 +11,10 @@ What the vector unit will not do, the other cores will. A gather's output row
 depends on its own index and on nothing else in the output, so `take_rows` splits
 by output row, on boundaries rounded to a multiple of sixty four because the
 validity bitmap is the one thing in there that is not per row. `filter_rows` has
-no such shape: where a row lands depends on how many rows before it survived.
+no such shape, because where a row lands depends on how many rows before it
+survived, so it counts first: one parallel pass over the mask gives every morsel
+the number of rows it keeps, a prefix sum turns those into the output positions
+the morsels start at, and the second pass is then as independent as a gather's.
 
 `take_rows` treats a negative index as a null. That is not a convenience, it is
 how a left join reports that the row on the right did not exist, and it is why
@@ -69,12 +72,37 @@ which is four orders of magnitude more than the atomic that hands it out.
 """
 
 comptime PARALLEL_FILTER_ROWS = 1 << 16
-"""Below this many input rows a variable width filter stays on one thread.
+"""Below this many input rows a filter stays on one thread.
 
 Higher than it would be for a gather, because a filter reads its input in order
 and a gather does not, so a filtered row is a few nanoseconds rather than a cache
 miss. The same number as the take threshold in the end, which is a coincidence of
 two different arguments landing in the same place rather than a shared constant.
+
+Both routes use it, the fixed width one and the variable width one, and they pay
+different things for the split. The variable width route has to size its payload
+before it can write it, the fixed width one has to count its kept rows before it
+knows where each morsel starts, and both of those are a pass over the mask that
+the serial version does not make. They come out close enough that a second
+threshold would be a number with nothing behind it.
+"""
+
+comptime FILTER_MORSEL_ROWS = 1 << 16
+"""Input rows a worker counts, and then compacts, at a time.
+
+Unlike the take's morsel this one does not have to be a multiple of sixty four,
+because a filter's output positions do not line up with its input positions and
+no rounding of the input would make them. It is the same size anyway, which on
+`lineitem` at sf1 is ninety two morsels for thirty two cores, enough that a
+morsel whose mask happens to be all true does not hold up the end.
+"""
+
+comptime FILTER_PACK_WORDS = 1 << 10
+"""Validity words a worker packs at a time, when the filtered column has nulls.
+
+A word is sixty four output rows, so this is the same sixty five thousand rows
+as the morsel above, and the packing pass is over the output rather than the
+input.
 """
 
 comptime TAKE_LOOKAHEAD = 8
@@ -496,7 +524,7 @@ def _take_core[
 
 def filter_rows[
     dt: DType
-](col: Array[dt], mask: Array[DType.bool]) -> Array[dt]:
+](col: Array[dt], mask: Array[DType.bool]) raises -> Array[dt]:
     """Keeps the rows where the mask is true.
 
     Two passes. The first counts the kept rows so the output can be allocated
@@ -507,6 +535,10 @@ def filter_rows[
     The second pass comes in two versions and the split is on whether the column
     being filtered has any nulls. It usually does not, and that case is worth a
     lot: with no validity to carry across, the copy loop has no branch left in it.
+
+    Above `PARALLEL_FILTER_ROWS` both passes run on every core. Counting is what
+    makes that possible, since it is the count that tells a worker starting in
+    the middle of the mask where its output begins; see `_filter_spread`.
 
     Args:
         col: The column to filter.
@@ -730,10 +762,13 @@ def _filter_core[
     validity: Bitmap,
     has_null: Bool,
     mask: Array[DType.bool],
-) -> Array[dt]:
+) raises -> Array[dt]:
     """The compaction loop, over a pointer and a bitmap rather than a column."""
     var n = len(mask)
     var mask_values = mask.unsafe_ptr()
+
+    if n >= PARALLEL_FILTER_ROWS:
+        return _filter_spread(source, validity, has_null, mask)
 
     var kept = 0
     for i in range(n):
@@ -795,6 +830,142 @@ def _filter_core[
 
     if at & 63 != 0:
         built.unsafe_set_word(at >> 6, word)
+
+    out.data.validity = built^
+    return out^
+
+
+def _filter_spread[
+    dt: DType, //, origin: ImmOrigin
+](
+    source: Pointer[Scalar[dt], origin],
+    validity: Bitmap,
+    has_null: Bool,
+    mask: Array[DType.bool],
+) raises -> Array[dt]:
+    """The compaction loop on every core.
+
+    The serial version is two passes, one to count and one to copy, and the
+    reason it stayed serial for so long is that the copy looks unsplittable:
+    where a row lands depends on how many rows before it survived, so a worker
+    starting in the middle of the mask does not know where to write. Counting
+    first answers exactly that question. The first pass gives every morsel the
+    number of rows it keeps, a prefix sum over those turns into the output
+    position each morsel begins at, and the copy is then as independent as a
+    gather's, each worker writing a run of output nobody else touches.
+
+    That leaves the mask read twice rather than once, which is why this waits
+    for `PARALLEL_FILTER_ROWS`. A mask is a byte a row against eight for a
+    double and sixteen for a text view, so the extra pass is a small fraction of
+    what the copy moves, and it buys the whole rest of the machine.
+
+    The copy loop is the serial one unchanged, including the trick of writing
+    every row and advancing the cursor by the mask bit rather than branching on
+    it, and including the bound: a worker stops when it has written the number
+    of rows it counted, which is what keeps its last speculative write inside
+    its own run and out of the next worker's first slot.
+
+    Nulls in the filtered column are the one thing that does not fall out for
+    free, because sixty four output rows share a validity word and two morsels
+    can land in the same one. Rather than synchronize on it, the copy records a
+    byte a kept row and a third pass packs those bytes into words, which is
+    independent again because a word is sixty four consecutive output rows. The
+    byte buffer is the size of the answer, not the size of the input.
+
+    Args:
+        source: The values to filter.
+        validity: The values' validity.
+        has_null: Whether `validity` has anything in it worth reading.
+        mask: The mask. A null in it drops the row.
+
+    Parameters:
+        dt: The dtype.
+        origin: Where `source` is borrowed from.
+
+    Returns:
+        A column holding the kept rows, in their original order.
+
+    Raises:
+        Error: If a worker fails, or if the output cannot be allocated.
+    """
+    var n = len(mask)
+    var mask_values = mask.unsafe_ptr()
+    var dense = mask.data.validity.all_valid()
+    var morsels = (n + FILTER_MORSEL_ROWS - 1) // FILTER_MORSEL_ROWS
+    var offsets = List[Int](length=morsels + 1, fill=0)
+
+    def count(w: Int) raises {mut offsets, imm}:
+        var begin = w * FILTER_MORSEL_ROWS
+        var stop = begin + FILTER_MORSEL_ROWS
+        if stop > n:
+            stop = n
+        var seen = 0
+        if dense:
+            for i in range(begin, stop):
+                seen += Int(Bool(mask_values.unsafe_offset(i).unsafe_load()))
+        else:
+            for i in range(begin, stop):
+                var truthy = Bool(mask_values.unsafe_offset(i).unsafe_load())
+                seen += Int(truthy and mask.data.validity.get(i))
+        offsets[w + 1] = seen
+
+    parallel_for(count, morsels)
+
+    for m in range(morsels):
+        offsets[m + 1] += offsets[m]
+    var kept = offsets[morsels]
+
+    var out = Array[dt](overwritten=kept)
+    var flags = Buffer(overwritten=kept if has_null else 0)
+
+    def compact(w: Int) raises {mut out, mut flags, imm}:
+        var target = out.unsafe_ptr()
+        var marks = flags.bitcast[DType.uint8]()
+        var limit = offsets[w + 1]
+        var written = offsets[w]
+        var i = w * FILTER_MORSEL_ROWS
+        while written < limit:
+            target.unsafe_offset(written).unsafe_write(
+                source.unsafe_offset(i).unsafe_load()
+            )
+            if has_null:
+                marks.unsafe_offset(written).unsafe_write(
+                    UInt8(1) if validity.get(i) else UInt8(0)
+                )
+            var truthy = Bool(mask_values.unsafe_offset(i).unsafe_load())
+            if dense:
+                written += Int(truthy)
+            else:
+                written += Int(truthy and mask.data.validity.get(i))
+            i += 1
+
+    parallel_for(compact, morsels)
+
+    if not has_null:
+        return out^
+
+    var built = Bitmap(kept, all_valid=False)
+    var words = built.word_count()
+
+    def pack(w: Int) raises {mut built, imm}:
+        var marks = flags.bitcast[DType.uint8]()
+        var first = w * FILTER_PACK_WORDS
+        var last = first + FILTER_PACK_WORDS
+        if last > words:
+            last = words
+        for word in range(first, last):
+            var base = word << 6
+            var stop = base + 64
+            if stop > kept:
+                stop = kept
+            var bits = UInt64(0)
+            for i in range(base, stop):
+                if marks.unsafe_offset(i).unsafe_load() != 0:
+                    bits |= UInt64(1) << UInt64(i - base)
+            built.unsafe_set_word(word, bits)
+
+    if words > 0:
+        parallel_for(pack, (words + FILTER_PACK_WORDS - 1) // FILTER_PACK_WORDS)
 
     out.data.validity = built^
     return out^
