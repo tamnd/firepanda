@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: dictionary encoded Arrow columns can be read
+
+A `pandas.Categorical`, a low cardinality string column out of Parquet, and anything else that arrives dictionary encoded now loads as a category column. Until now all of it was refused at the door with a message about an unsupported format string, which was a confusing thing to be told about a column type firepanda has had since the CSV reader learned about categories.
+
+The reason it was hard is that the C Data Interface does not give a dictionary its own format string. The field keeps the format of its index, and the value type hangs off a separate member of the schema, while the categories hang off the matching member of the array, one set per batch rather than one per column. So the value type has to be read before a stream releases its schema and remembered, and the categories have to be collected batch by batch. The codes themselves go down exactly the path any other int32 column takes, with no special case in the copying.
+
+Two shapes are refused and both say why. A stream whose batches carry different categories cannot be read as it stands, because the code 0 in one batch is then a different word from the code 0 in the next, and unifying them would mean silently rewriting every code in every batch that came before on every read of every file. The message names the column and names the fix, which in pyarrow is `table.unify_dictionaries()`. Categories that are not text are refused too, since firepanda holds them in a string column, and that message names the dictionary's format rather than the field's, because the field's format is an index type and a reader who went to look at it would find nothing wrong with it. Both arrive as `NotImplementedError`, because Arrow allows what the producer did and the gap is firepanda's.
+
+Writing one back out is not part of this. A frame with a category column in it still cannot be exported, and there is no `.cat` namespace or `codes` accessor on the Python series yet, so from Python what a caller can currently do with an imported categorical is see that it arrived. Doing the import first is what makes the rest of that list reachable at all.
+
 ### Fixed: a misspelled argument was being told to wait for a feature it already had
 
 There are two ways to pass an argument a value the call will not answer, and firepanda was giving both of them the same answer. `s.quantile(0.5, interpolation="lower")` names one of the twelve rules pandas has and firepanda has not written, and `NotImplementedError` is right for it: the thing asked for is real and is scheduled. `s.quantile(0.5, interpolation="lowr")` is a typo four characters from a working line, and it was getting the same reply, which sent somebody off to read a changelog about a feature that already exists under the spelling they meant. It now says what pandas says, which is `'lowr' is not a valid method. Use one of:` followed by the thirteen names, because the list is the fix and the class is the one an existing `except ValueError` is already written against.
