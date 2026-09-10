@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: astype("category") builds a category column
+
+Firepanda could read a dictionary encoded column and write one back out, and could not make one. `astype("category")` was refused with a message saying that building the dictionary is a conversion of its own rather than a change of layout, which was accurate and was also the whole reason, so the conversion is now written. It works on a text column, on a series and on a frame, and the result exports over Arrow as a real dictionary encoded column, so a caller can build a categorical in firepanda and hand it to pandas.
+
+It is a kernel of its own rather than an arm of the cast, because every other cast reads a value and writes the same value in another layout while this one cannot: what code a row gets depends on every row before it. The categories come out sorted rather than in first appearance order, which costs a sort over the distinct values and buys the order a caller can actually see, since it is what `.cat.categories` prints, what a groupby produces its groups in, and what an ordered comparison means. A null does not become a category, it becomes a null code beside categories that do not mention it, and an empty string does become one, because a value somebody wrote nothing into is not a value nobody wrote.
+
+Casting off a category is the half that was easier to get wrong. A dictionary column's physical dtype is its index type, so `astype("int64")` on one would have found the int64 arm of the number path and handed back the codes, which are integers and look like an answer. Both entry points now decode first, whatever the target is. A category cast to a category is a copy rather than a decode and a re-encode, which keeps the categories nobody used and keeps the order they were in, both of which pandas keeps.
+
+A column that is not text still cannot be encoded, and says so as a `NotImplementedError`, because firepanda holds categories in a string column and rendering the numbers as text would produce a column whose values round trip and whose category dtype does not. There is still no `.cat` namespace, no `codes` or `categories` on the Python series, and no way to ask for an ordering, since a type name cannot carry one in pandas either. That is the next piece and it is reachable now.
+
 ### Fixed: astype no longer halves the precision of a longdouble on x86
 
 `longdouble` and its character code `g` are refused by name now, where before they resolved to float64. That mapping was measured on an arm Mac, where numpy's `longdouble` really is a float64, and it is wrong on x86 Linux, where it is an eighty bit float that numpy prints as float128. Anyone asking for the widest float the machine has and getting float64 back is getting half of what they asked for, without being told.
