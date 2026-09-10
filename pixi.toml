@@ -167,6 +167,14 @@ vendor-grammar = "bash tools/vendor_grammar.sh"
 gen-grammar = "python tools/gen_grammar.py"
 check-grammar = "python tools/gen_grammar.py --check"
 
+# The README's list of what the SQL front end refuses, written out of
+# `sql_support()` rather than kept beside it. `--check` is the same run with the
+# file compared rather than written. There is no CI step for it, because
+# tests/test_sql_unsupported.mojo checks the same thing and the test suite
+# already runs.
+sql-support = "mojo run -I . tools/sql_support.mojo"
+check-sql-support = "mojo run -I . tools/sql_support.mojo --check"
+
 # A grep is not a sanitizer. It is what exists.
 check-shared-state = """
 ! grep -rn --include=*.mojo -E '\\bAtomic\\b|^var [a-z_]+ *=' firepanda \
