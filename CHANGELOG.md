@@ -31,6 +31,17 @@ It was found by AddressSanitizer rather than by a failing assertion, as a use af
 The second thing is smaller. A pooled buffer can still be sharing with a column that outlived it, which is safe because the pool zeroes on the way out and zeroing un-shares first, so it hands back a private allocation and loses the recycling rather than writing over somebody's bytes.
 
 Closes #406.
+### Added: the plan layer starts with the expression tree and the three analyses over it
+
+The engine has nine physical operators and a pipeline driver, and nothing in the repository calls it except one test. The reason is that there is nothing between the eager API and the operators to decide anything, so `df.filter(...).select(...)` runs the filter, materializes it, runs the select, materializes that, and by the time anything downstream is reached the fact that a filter happened is gone. `firepanda/plan/` is where that decision layer goes, and this is its first file.
+
+`Expressions` is an arena and an expression is an index into it. The nine kinds are column reference, literal, unary, binary, cast, call, aggregate, conditional and window, which is the list in `docs/specs/planner/01-what-a-plan-is.md`, and the builders are the only way to make one so that every operand is checked against the arena as it goes in. Indices are handed out in creation order, so a child is always at a lower index than its parent and a pass that wants to visit every node after its children can walk the list backwards instead of traversing.
+
+The three analyses land with the arena rather than with the first pass that wants one, because every pass in the pipeline spec is written in terms of them. `elementwise` asks whether the value at a row depends only on that row, which is what a fusion pass checks before it folds two operators into one loop. `input_independent` asks whether the expression reads the input at all, which is what stops q1 evaluating the same date subtraction six million times. `tables` asks which inputs an expression reads, as a bitmask, which is what predicate pushdown and predicate transfer are both written on.
+
+Two of the answers are not the obvious ones and both are tested. A sum of a constant is not input independent, because `sum(1)` is the row count and folding it to one at plan time would be wrong. And the table set of an unbound column raises rather than coming back empty, because empty is a real answer that an input independent expression has, and handing it back for a column whose table is simply not known yet would tell pushdown that a predicate is safe to move past the only node able to evaluate it.
+
+Nothing calls any of this yet. The logical nodes, binding, the passes and the lowering into the existing `exec` nodes follow, and the eager API does not change when they do.
 ### A group by on a sorted column stops building a hash table
 
 A group by builds a hash table because equal keys are scattered through the column and it has no other way to find them. When the column is already in order they are not scattered, every group is one run of adjacent rows, and walking the column and closing a group each time the value changes gives exactly the same ordinals for one comparison a row. `firepanda/hash/sorted.mojo` is that walk, and `DataFrame._grouping` is the one place that now decides between it and the ordinary route, for every group by, `drop_duplicates` and broadcast in the frame layer.
