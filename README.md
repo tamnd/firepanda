@@ -143,7 +143,7 @@ See https://github.com/tamnd/firepanda/issues/13
 | `field-access` | a field access | A dotted name is a name to firepanda, and telling a struct field from a column needs a binder that knows what the columns are. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `subscript` | a slice or a subscript | firepanda reads a list element and a substring with a function rather than with brackets. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `postfix-operator` | a postfix operator | The two firepanda reads after an operand are a cast and a dotted name, and this is neither. | [#13](https://github.com/tamnd/firepanda/issues/13) |
-| `call-modifier` | {} on a call | Window specifications and aggregate filters are the rest of this stage and are not in the AST yet. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `call-modifier` | {} on a call | A window specification is read now. The aggregate filter and the two that change what a call reads are the rest of this stage and are not in the AST yet. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `call-argument` | {} inside a call | An ordered aggregate and a null treatment both change what the call means, so firepanda refuses them rather than dropping them. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `array-subquery` | ARRAY over a subquery | It collects a whole column into one list value, which firepanda has no node for. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `dotted-name` | a dotted name here | Only a plain name fits in this position. | [#13](https://github.com/tamnd/firepanda/issues/13) |
