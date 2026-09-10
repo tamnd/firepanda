@@ -133,7 +133,7 @@ comptime TABLE_SAMPLE: UInt16 = 17
 """`TABLESAMPLE` or `USING SAMPLE` on one table."""
 
 comptime TABLE_MODIFIER: UInt16 = 18
-"""`PIVOT` or `UNPIVOT` after a table."""
+"""Something after a table that is neither a join nor a pivot."""
 
 comptime TABLE_AT: UInt16 = 19
 """`AT` after a table, which reads it as of a version or a timestamp."""
@@ -195,7 +195,13 @@ comptime POSITIONAL: UInt16 = 37
 comptime DEFAULT_VALUE: UInt16 = 38
 """`DEFAULT` where a value goes."""
 
-comptime NO_CASE: UInt16 = 39
+comptime UNPIVOT_NULLS: UInt16 = 39
+"""`INCLUDE NULLS` on an `UNPIVOT`."""
+
+comptime UNPIVOT_GROUPS: UInt16 = 40
+"""More than one `FOR` group on an `UNPIVOT`."""
+
+comptime NO_CASE: UInt16 = 41
 """A grammar rule the transformer has no case for at all."""
 
 
@@ -374,7 +380,11 @@ def sql_support() -> List[Refusal]:
         Refusal(
             "table-modifier",
             "{} on a table",
-            "PIVOT and UNPIVOT are the rest of this stage.",
+            (
+                "A join, a PIVOT and an UNPIVOT are the three things that go"
+                " here and all three are read, so this is a fourth one the"
+                " grammar grew and the transformer has no case for."
+            ),
             STAGE_ISSUE,
         ),
         Refusal(
@@ -568,6 +578,26 @@ def sql_support() -> List[Refusal]:
             SQL_ISSUE,
         ),
         Refusal(
+            "unpivot-nulls",
+            "INCLUDE NULLS on an UNPIVOT",
+            (
+                "The statement spelling of an UNPIVOT has no way to write it,"
+                " and that is the spelling the node records, so there is"
+                " nowhere to keep it. EXCLUDE NULLS is the default and is"
+                " read."
+            ),
+            STAGE_ISSUE,
+        ),
+        Refusal(
+            "unpivot-groups",
+            "more than one FOR group on an UNPIVOT",
+            (
+                "One UNPIVOT node holds one name column and one set of value"
+                " columns, so a second group has nowhere to go."
+            ),
+            STAGE_ISSUE,
+        ),
+        Refusal(
             "no-case",
             "grammar rule {}",
             (
@@ -611,6 +641,72 @@ def refusal(feature: UInt16) -> Refusal:
     if Int(feature) >= len(table):
         return UNKNOWN
     return table[Int(feature)]
+
+
+comptime NO_REFUSAL: UInt16 = 65535
+"""What `feature_of` gives back for text that is not a refusal at all."""
+
+comptime _PREFIX = "Not Implemented Error: firepanda does not support "
+"""How the first line of every refusal starts."""
+
+
+def feature_of(message: StringSlice) -> UInt16:
+    """Reads a refusal back and says which entry it came from.
+
+    A raised error is text by the time anything catches it, so a caller that
+    wants to count refusals by feature has to get from the text back to the
+    table. This is the way back. The conformance harness is the caller that
+    needs it: a directory full of one refusal is one missing feature, and the
+    same count spread over ten of them is ten, and telling those apart is the
+    whole reason the table is a table.
+
+    An entry holding a `{}` is matched on the text either side of it, because
+    what went in the middle came from the query and is not known here. Two
+    entries could in principle both fit, so the longer match wins, which is the
+    more specific of the two.
+
+    Args:
+        message: The error, or its first line.
+
+    Returns:
+        The index into `sql_support()`, or `NO_REFUSAL` if the text is not one.
+    """
+    if not message.startswith(_PREFIX):
+        return NO_REFUSAL
+
+    # Only the first line says what the feature was. The rest is the caret
+    # block and the explanation, and both can hold anything.
+    var end = message.find("\n")
+    if end < 0:
+        end = message.byte_length()
+    var line = message[byte = _PREFIX.byte_length() : end]
+    if not line.endswith("."):
+        return NO_REFUSAL
+    line = line[byte = 0 : line.byte_length() - 1]
+
+    var found = NO_REFUSAL
+    var best = -1
+    var table = sql_support()
+    for i in range(len(table)):
+        var text = table[i].message
+        var hole = text.find("{}")
+        if hole < 0:
+            if line == text:
+                return UInt16(i)
+            continue
+        var before = text[byte=0:hole]
+        var after = text[byte = hole + 2 : text.byte_length()]
+        # The two halves have to fit without overlapping, or `{} on a call`
+        # would match `on a call` with nothing where the query text goes.
+        if line.byte_length() < before.byte_length() + after.byte_length():
+            continue
+        if not line.startswith(before) or not line.endswith(after):
+            continue
+        var length = before.byte_length() + after.byte_length()
+        if length > best:
+            best = length
+            found = UInt16(i)
+    return found
 
 
 def support_table() -> String:

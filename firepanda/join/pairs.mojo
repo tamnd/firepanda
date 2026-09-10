@@ -44,6 +44,18 @@ implemented that way: swap, run a left join, swap the result back. That makes a
 right join come out in right row order, which is what pandas does and what
 somebody asking for a right join instead of a left one is asking for.
 
+An inner join exchanges them too, but for a different reason and with the order
+put back. The scan is of the right side and the walk is of the left, so a call
+written with the dimension table first buckets the whole fact table in order to
+walk fifteen hundred rows, and the same join written the other way round does
+almost no work at all. Nothing about the data says which side is which, only how
+the caller spelled the call, and an inner join is symmetric in the rows it
+produces. So when the left is enough shorter, the sides are exchanged, and the
+pairing that comes back in right row order is counting sorted into left row
+order before it is returned. `BUILD_SIDE_MARGIN` is how much shorter, and
+`_by_left_row` is the sort. This is the first of the planner decisions to move
+out of the caller's hands and it does not need a plan to make.
+
 Buckets are the general answer and most joins do not need the general answer. A
 join onto a primary key, which is most of them, has one right row per code, and
 then the counts, the prefix sum, the cursor walk and the bucket array itself are
@@ -122,6 +134,22 @@ The walk is a handful of nanoseconds a row and a fork and join is tens of
 microseconds, so the split has to be paying for itself over at least that many
 rows before it is offered. Same shape of constant as `factorize`'s
 `PARALLEL_ROWS` and picked the same way, from where the two costs cross.
+"""
+
+comptime BUILD_SIDE_MARGIN = 4
+"""How much shorter the left has to be before an inner join exchanges the sides.
+
+Building on the shorter side is the right answer on cost and the wrong answer on
+order, so the exchange is not free: the pairing comes back in right row order
+and has to be sorted back. The sort is a counting sort over the output, so the
+saving has to cover one extra pass over the result before the exchange is worth
+making, and that is what the margin is for rather than any property of the join.
+
+Four rather than two because the count that matters is the output height and not
+the left height, and a join that fans out pays the sort on every row it produces
+while it only saves on the rows it scanned. Four is where the two crossed on a
+dimension against fact join at sf1, and the crossover is shallow either side of
+it. See `_by_left_row` for what the sort costs.
 """
 
 comptime LEFT_MORSEL_ROWS = 1 << 15
@@ -407,6 +435,31 @@ def join_indices[
             JoinKind.LEFT,
         ).swapped()
 
+    if (
+        kind == JoinKind.INNER
+        and left_rows * BUILD_SIDE_MARGIN <= right_rows
+        and left_rows != 0
+    ):
+        # The build is a scan of the right side and the probe is a walk of the
+        # left, so calling the dimension table `left` and the fact table `right`
+        # buckets six million rows in order to walk fifteen hundred. Which side
+        # is which is a fact about how the caller wrote the call and not about
+        # the data, and an inner join is the one kind where exchanging them
+        # changes nothing about which rows come out. So exchange them, and put
+        # the order back afterwards.
+        return _by_left_row(
+            join_indices(
+                right_columns,
+                right_keys,
+                right_rows,
+                left_columns,
+                left_keys,
+                left_rows,
+                JoinKind.INNER,
+            ).swapped(),
+            left_rows,
+        )
+
     var aligned = align_keys(
         left_columns,
         left_keys,
@@ -446,6 +499,56 @@ def join_indices[
                 paired.left_at.append(-1)
                 paired.right_at.append(r)
     return paired^
+
+
+def _by_left_row(var paired: JoinIndices, left_rows: Int) -> JoinIndices:
+    """Puts a pairing that came back in right row order into left row order.
+
+    A counting sort rather than a comparison sort, because the key is a left row
+    number and left row numbers are exactly the integers below `left_rows`, so
+    there is nothing to compare. One pass to count, one prefix sum over the left
+    height, one pass to scatter.
+
+    The sort is stable and that is not a detail. The pairing arrives in right row
+    order, so the entries for one left row arrive with their right rows already
+    increasing, and a stable sort by left row leaves them that way. That is the
+    order a join without the exchange produces, which is what makes the exchange
+    invisible to a caller.
+
+    Only reachable for an inner join, where every entry names a real row on both
+    sides. A kind that can emit a negative left row would need a bucket for it
+    and would have to decide where those rows go, and none of them come through
+    here.
+
+    Args:
+        paired: The pairing, in right row order.
+        left_rows: The left frame's height, which bounds the key.
+
+    Returns:
+        The same pairs in left row order, and in right row order within a left
+        row.
+    """
+    var pairs = len(paired)
+    if pairs == 0:
+        return paired^
+
+    # Offset by one so that the prefix sum below lands each row's run start in
+    # its own slot rather than the next one's.
+    var starts = List[Int](length=left_rows + 1, fill=0)
+    for i in range(pairs):
+        starts[paired.left_at[i] + 1] += 1
+    for row in range(left_rows):
+        starts[row + 1] += starts[row]
+
+    var left = List[Int](length=pairs, fill=0)
+    var right = List[Int](length=pairs, fill=0)
+    for i in range(pairs):
+        var row = paired.left_at[i]
+        var at = starts[row]
+        starts[row] = at + 1
+        left[at] = row
+        right[at] = paired.right_at[i]
+    return JoinIndices(left^, right^)
 
 
 def bucket_side(

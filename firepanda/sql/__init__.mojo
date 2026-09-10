@@ -42,4 +42,4 @@ from .printer import (
 from .table import Grammar, GrammarNode, memoized_rules, overridden_rules
 from .token import Token, tokenize, token_text
 from .transform import Transform
-from .unsupported import Refusal, refusal, sql_support
+from .unsupported import NO_REFUSAL, Refusal, feature_of, refusal, sql_support
