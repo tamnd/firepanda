@@ -470,12 +470,44 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         makes `df.with_column(df.column("a").cast(...))` leave the frame looking
         the way it did.
 
+        The frame is copied, because the one this is called on is still there
+        afterwards and both of them have to own their columns. A caller that is
+        finished with the original and only wants to add something to it wants
+        `add_column`, which is this without the copy; see the note there for
+        what the copy costs when the frame is large.
+
         Args:
             column: The column. Must match the frame's height unless the frame
                 has no columns yet.
 
         Returns:
             A frame carrying it.
+
+        Raises:
+            If the length does not match the frame's height.
+        """
+        var out = Self(copy=self)
+        out.add_column(column^)
+        return out^
+
+    def add_column(mut self, var column: Series) raises:
+        """Adds or replaces a column in place.
+
+        `with_column` with the copy taken out, for a caller that built the frame
+        it is calling this on and is going to hand the result straight on. That
+        is most of what building a wide frame looks like: TPC-H q1 filters six
+        columns of `lineitem` and then adds two expressions to them, and written
+        as two `with_column` calls that is two deep copies of five point nine
+        million rows of six columns, about seven hundred megabytes moved to
+        write two new columns. Adding them in place is ninety three milliseconds
+        down to thirty seven at sf1.
+
+        Replacing is by name and keeps the column's position, the same as
+        `with_column`.
+
+        Args:
+            column: The column. Must match the frame's height unless the frame
+                has no columns yet.
 
         Raises:
             If the length does not match the frame's height.
@@ -491,19 +523,17 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                 + " rows"
             )
 
-        var out = Self(copy=self)
         var field = Field(column.name, column.logical())
-        var replacing = out.schema.has(column.name)
-        var at = out.schema.index_of(column.name) if replacing else 0
+        var replacing = self.schema.has(column.name)
+        var at = self.schema.index_of(column.name) if replacing else 0
         if replacing:
-            out.schema.fields[at] = field^
-            out.columns[at] = ChunkedArray(column^.into_values())
-            return out^
+            self.schema.fields[at] = field^
+            self.columns[at] = ChunkedArray(column^.into_values())
+            return
 
-        out.schema.append(field^)
-        out.columns.append(ChunkedArray(column^.into_values()))
-        out.rows = len(out.columns[0])
-        return out^
+        self.schema.append(field^)
+        self.columns.append(ChunkedArray(column^.into_values()))
+        self.rows = len(self.columns[0])
 
     def cast(self, name: String, to: DType, strict: Bool = True) raises -> Self:
         """Returns a frame with one column converted to another dtype.
@@ -992,6 +1022,212 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                 AggSpec(self.schema[i].name, kind, self.schema[i].name)
             )
         return self.agg(specs^)
+
+    def drop_duplicates(self) raises -> Self:
+        """Returns the frame with the repeated rows removed.
+
+        Every column is part of the comparison, which is `drop_duplicates()`
+        with no subset.
+
+        Returns:
+            A frame holding the first appearance of each distinct row, in the
+            order those appearances happened.
+
+        Raises:
+            If a dtype involved has no physical layout.
+        """
+        var every = List[String](capacity=len(self.schema.fields))
+        for f in range(len(self.schema.fields)):
+            every.append(self.schema.fields[f].name)
+        return self.drop_duplicates(every)
+
+    def drop_duplicates(self, subset: List[String]) raises -> Self:
+        """Returns the frame with rows that repeat a subset of columns removed.
+
+        Two differences from `group_by` with no reductions, and both of them are
+        the reason this is its own method rather than a call to that one. It
+        gives back every column and not just the keys, taking each group's first
+        row whole; and it keeps the rows whose key holds a null, because a null
+        is a value for the purpose of deciding whether a row is a repeat. That
+        second one is pandas' rule and Polars', and it is the opposite of
+        `group_by`'s `dropna` default, which is also pandas' rule for a group by.
+
+        The rows come back in the order they appear in the input. That is what
+        pandas means by keeping the first of each duplicate, and today it costs
+        nothing at all: every factorize route hands its ordinals out in first
+        appearance order, so `Grouping.rows_at` is already ascending and is
+        taken as it stands. That is a fact about the routes rather than
+        something `Grouping` promises, so it is checked, at one comparison per
+        group, and `_first_rows` walks the rows when the check says no. Sorting
+        the representatives instead would be the wrong trade, because a route
+        that ever stopped being ordered would be one of the packed ones, and
+        those are the routes where the groups can approach the rows in number.
+
+        Args:
+            subset: The columns that decide whether two rows are the same. At
+                least one, no repeats.
+
+        Returns:
+            A frame holding the first appearance of each distinct row.
+
+        Raises:
+            If a name is missing or repeated, or if a dtype involved has no
+            physical layout.
+        """
+        var at = List[Int](capacity=len(subset))
+        for i in range(len(subset)):
+            var idx = self.schema.index_of(subset[i])
+            for j in range(len(at)):
+                if at[j] == idx:
+                    raise Error(
+                        "drop_duplicates: column "
+                        + subset[i]
+                        + " was given twice"
+                    )
+            at.append(idx)
+        if len(at) == 0:
+            raise Error(
+                "drop_duplicates: at least one column is required, and a frame"
+                " with no columns has no rows to tell apart"
+            )
+
+        var grouping = group_ordinals(self.column_refs(), at, self.rows)
+
+        var ascending = True
+        for g in range(1, len(grouping.rows_at)):
+            if grouping.rows_at[g] <= grouping.rows_at[g - 1]:
+                ascending = False
+                break
+
+        var keep = grouping.rows_at.copy() if ascending else _first_rows(
+            grouping.codes, grouping.groups, self.rows
+        )
+
+        # `take` rather than a gather written out here, so that a frame whose
+        # columns are in chunks works and so that the row labels follow the rows
+        # they belong to, which is what pandas keeps across a `drop_duplicates`.
+        return self.take(keep)
+
+    def group_broadcast(
+        self, by: List[String], specs: List[AggSpec]
+    ) raises -> Self:
+        """Reduces each group and writes the answer back onto every row of it.
+
+        This is a window aggregate with no frame and no ordering, which SQL
+        spells `sum(x) over (partition by k)`, pandas spells
+        `df.groupby(k)[x].transform("sum")` and Polars spells `.over(k)`. The
+        result is as tall as the input, not as tall as the group count, and
+        every row of a group holds that group's value.
+
+        What it is for is the shape where a predicate is on the aggregate but
+        the rows wanted back are the original ones. TPC-H asks that twice, in
+        q17 against a group's average and in q18 against a group's sum, and
+        without this the only way to write it is to group, filter the groups,
+        and join the surviving keys back onto the input, which is a build and a
+        probe over a question that is a gather.
+
+        The gather is what this is. The reduction runs once per group exactly as
+        `group_by` runs it, and then each row reads its own group's answer
+        through the ordinal it already has. Nothing is sorted, nothing is
+        hashed twice, and no key column is materialized.
+
+        Null keys are not dropped. A group by drops them by default because its
+        result is one row per key and a null key is not a key; here the result
+        is one row per input row and dropping would mean deciding that some
+        input rows have no answer. They get their group's answer like any other
+        row, and a caller that wants pandas' behaviour can mask on the key.
+
+        Args:
+            by: The key columns. At least one, no repeats.
+            specs: What to compute. At least one, no two producing the same
+                name.
+
+        Returns:
+            A frame of the input's height and labels, one column per spec.
+
+        Raises:
+            If a name is missing or repeated, if two outputs would collide, if
+            no specs were given, or if a dtype involved has no physical layout.
+        """
+        if len(specs) == 0:
+            raise Error(
+                "group broadcast: at least one aggregate is required, because"
+                " the result is one column per aggregate and no aggregates is"
+                " an empty frame as tall as the input"
+            )
+
+        var at = List[Int](capacity=len(by))
+        for i in range(len(by)):
+            var idx = self.schema.index_of(by[i])
+            for j in range(len(at)):
+                if at[j] == idx:
+                    raise Error(
+                        "group broadcast: key column "
+                        + by[i]
+                        + " was given twice"
+                    )
+            at.append(idx)
+
+        var names = List[String](capacity=len(specs))
+        for s in range(len(specs)):
+            var name = specs[s].output_name()
+            for f in range(len(names)):
+                if names[f] == name:
+                    raise Error(
+                        "group broadcast: two output columns would both be"
+                        " called "
+                        + name
+                    )
+            names.append(name)
+
+        var grouping = group_ordinals(self.column_refs(), at, self.rows)
+
+        var single_at = List[Int]()
+        var single_kinds = List[AggKind]()
+        for s in range(len(specs)):
+            if specs[s].kind.reads_two_columns():
+                continue
+            single_at.append(self.schema.index_of(specs[s].column))
+            single_kinds.append(specs[s].kind)
+
+        var reduced = aggregate_group_many(
+            self.column_refs(),
+            single_at,
+            single_kinds,
+            grouping.codes,
+            grouping.groups,
+        )
+
+        # One list of positions for every column, because they all read the
+        # same ordinal per row. Widening the ordinals into it costs a pass that
+        # a gather taking the codes directly would not, and that gather is the
+        # follow up here; what it buys today is `take_any`, which already
+        # spreads over the cores, already carries validity and already knows
+        # what to do with a text column.
+        var spread = _broadcast_positions(grouping.codes, self.rows)
+
+        var fields = List[Field](capacity=len(specs))
+        var columns = List[AnyArray](capacity=len(specs))
+        for s in range(len(specs)):
+            var produced: AnyArray
+            if specs[s].kind.reads_two_columns():
+                produced = aggregate_group_pair_any(
+                    self.columns[self.schema.index_of(specs[s].column)].only(),
+                    self.columns[self.schema.index_of(specs[s].other)].only(),
+                    specs[s].kind,
+                    grouping.codes,
+                    grouping.groups,
+                )
+            else:
+                produced = reduced.pop(0)
+            fields.append(Field(names[s], produced.type))
+            columns.append(take_any(produced, spread))
+
+        var out = Self(Schema(fields^), columns^)
+        # The rows are the input's rows, so they keep the input's labels. That
+        # is what makes `df.with_column(df.group_broadcast(...)[0])` line up.
+        out.index = Index(copy=self.index)
+        return out^
 
     def group_by(
         self,
@@ -3954,6 +4190,69 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                 " null",
             )
         return out^
+
+
+def _first_rows(
+    codes: Array[DType.uint32], groups: Int, rows: Int
+) raises -> List[Int]:
+    """Returns the first row each ordinal appears on, in that order.
+
+    This is what `drop_duplicates` falls back to when a grouping hands back
+    representative rows that are not ascending. No route does today, so nothing
+    in the library reaches it, and it is written out here and tested on its own
+    rather than left as a branch inside the method that nobody has ever run.
+
+    Args:
+        codes: One group ordinal per row.
+        groups: How many distinct ordinals there are.
+        rows: How many rows to read, which is the frame's height.
+
+    Returns:
+        One row per group, ascending, the row that introduced that group.
+
+    Raises:
+        Error: If an ordinal is not below `groups`.
+    """
+    var out = List[Int](capacity=groups)
+    var seen = Bitmap(groups, all_valid=False)
+    var src = codes.unsafe_ptr()
+    for i in range(rows):
+        var g = Int(src.unsafe_offset(i).unsafe_load())
+        if g < 0 or g >= groups:
+            raise Error(
+                "drop_duplicates: row "
+                + String(i)
+                + " has group ordinal "
+                + String(g)
+                + " out of "
+                + String(groups)
+            )
+        if not seen.get(g):
+            seen.set(g, True)
+            out.append(i)
+    return out^
+
+
+def _broadcast_positions(
+    codes: Array[DType.uint32], rows: Int
+) raises -> List[Int]:
+    """Widens group ordinals into the positions a gather wants.
+
+    Args:
+        codes: One group ordinal per row.
+        rows: How many rows to read.
+
+    Returns:
+        The same ordinals as `Int`, one per row.
+
+    Raises:
+        Error: Never, but the list build is inside a raising context.
+    """
+    var out = List[Int](capacity=rows)
+    var src = codes.unsafe_ptr()
+    for i in range(rows):
+        out.append(Int(src.unsafe_offset(i).unsafe_load()))
+    return out^
 
 
 def _has_name(fields: List[Field], name: String) -> Bool:

@@ -93,8 +93,8 @@ A second note, internal rather than user facing: Mojo 1.0 removed negative index
 ### Expressions, evaluation and options
 
 - [ ] `col` — pandas 3.0's `pd.col()` expression builder, and firepanda's native spelling (M4)
-- [ ] `eval` (M11)
-- [ ] `query` on `DataFrame` (M11)
+- [ ] `eval` (M4b)
+- [ ] `query` on `DataFrame` (M4b)
 - [ ] `set_option`, `get_option`, `reset_option`, `describe_option`, `option_context` (M1)
 - [ ] `show_versions` (M1)
 - [ ] `testing.assert_frame_equal`, `assert_series_equal`, `assert_index_equal` (M1)
@@ -116,8 +116,9 @@ A second note, internal rather than user facing: Mojo 1.0 removed negative index
 - [ ] `head`, `tail`, `sample`, `nlargest`, `nsmallest` (M1)
 - [ ] `filter` with `items`, `like`, `regex` (M6)
 - [ ] `take`, `xs`, `get`, `pop`, `insert` (M6)
-- [ ] `where`, `mask`, `query` (M6, `query` M11)
-- [ ] `isin`, `between` on Series (M1)
+- [ ] `where`, `mask`, `query` (M6, `query` M4b)
+- [x] `isin` on Series (M1)
+- [ ] `between` on Series (M1)
 - [ ] `first`, `last` (M7)
 
 ### Reshaping and sorting
@@ -129,7 +130,7 @@ A second note, internal rather than user facing: Mojo 1.0 removed negative index
 - [ ] `stack`, `unstack`, `melt`, `pivot`, `pivot_table`, `explode`, `squeeze` (M6)
 - [ ] `transpose` — see `T` above
 - [ ] `droplevel`, `swaplevel`, `reorder_levels` (M6, compound index only)
-- [ ] `assign`, `eval` (M6, `eval` M11)
+- [ ] `assign`, `eval` (M6, `eval` M4b)
 
 ### Combining
 
@@ -157,7 +158,8 @@ A second note, internal rather than user facing: Mojo 1.0 removed negative index
 - [ ] `describe` with `include` and `exclude` (M6)
 - [ ] `value_counts`, `nunique`, `idxmax`, `idxmin` (M6)
 - [ ] `any`, `all` (M1)
-- [ ] `duplicated`, `drop_duplicates` (M6)
+- [x] `drop_duplicates` (M6) — with and without a subset, keeping the first of each repeat and keeping null keys
+- [ ] `duplicated` (M6)
 - [ ] `apply`, `map`, `pipe`, `agg`, `transform` (M6, and see document 04 section 7 on Python callables)
 - [ ] `applymap` — `adapted`, `map` in pandas 3.0
 - [ ] `groupby` (M1 for the basic aggregations, M6 for the rest)
@@ -259,7 +261,8 @@ pandas 3.0 covers nested data thinly and Polars covers it well. We follow Polars
 - [ ] `sum`, `mean`, `min`, `max`, `count`, `size`, `first`, `last`, `nth` (M1)
 - [ ] `std`, `var`, `sem`, `median`, `quantile`, `nunique`, `prod` (M1)
 - [ ] `agg` with a string, a list, a dict, named aggregation kwargs (M1 basic, M6 complete)
-- [ ] `transform` (M6)
+- [x] `transform` with a built in aggregate, which is `group_broadcast` (M6)
+- [ ] `transform` with a Python callable (M6, and see document 04 section 7)
 - [ ] `apply` (M6, and see document 04 section 7)
 - [ ] `filter` (M6)
 - [ ] `cumsum`, `cumcount`, `cumprod`, `cummax`, `cummin`, `rank`, `shift`, `diff`, `pct_change` (M6)
@@ -282,7 +285,8 @@ pandas 3.0 covers nested data thinly and Polars covers it well. We follow Polars
 - [ ] All of `sum`, `mean`, `median`, `min`, `max`, `std`, `var`, `count`, `quantile`, `skew`, `kurt`, `sem`, `corr`, `cov`, `rank` on each of the three (M6)
 - [ ] `rolling.apply` with a callable (M6)
 - [ ] `win_type` weighted windows: triang, gaussian, boxcar, and the rest (M6)
-- [ ] `over` — the Polars spelling of a window function, since pandas has no direct equivalent short of `groupby.transform` (M6)
+- [x] `over` with an aggregate and no ordering, which is the Polars spelling of `group_broadcast` (M6)
+- [ ] `over` with an ordering or a window frame (M6)
 
 ## 10. Time series
 
@@ -326,7 +330,7 @@ Not a pandas feature, and more important than most of them.
 - [ ] DuckDB: registering a firepanda frame as a scannable table (M3)
 - [ ] `to_numpy` zero copy for primitive dtypes with no nulls (M3)
 - [ ] Arrow IPC file and stream (M2)
-- [ ] ADBC driver (M11)
+- [ ] ADBC driver (M4b)
 
 This section is the escape hatch that makes every gap elsewhere survivable. Anything firepanda has not implemented yet can be handed to pandas, Polars or DuckDB without a copy, which converts incompleteness from a blocker into an inconvenience. It is also why document 08 puts M2 before the lazy engine.
 

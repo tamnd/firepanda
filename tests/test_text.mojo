@@ -234,6 +234,217 @@ def test_a_null_in_the_mask_drops_the_row() raises:
     assert_equal(kept.text(0), "a")
 
 
+def wide_text(rows: Int, every_null: Int) raises -> Series:
+    """Builds a text column long enough for `filter` to split it across cores.
+
+    A third of the elements are past the inline boundary, so a worker has payload
+    of its own to place and the offsets it writes have to account for what the
+    workers before it placed. The rest are short, which is the arm that touches no
+    payload at all.
+
+    Args:
+        rows: How many elements.
+        every_null: Make every nth element null. Zero for no nulls at all,
+            which is the arm that skips the validity pass.
+
+    Returns:
+        The column.
+
+    Raises:
+        If the builder cannot grow.
+    """
+    var builder = StringBuilder(capacity=rows)
+    for i in range(rows):
+        if every_null > 0 and i % every_null == 0:
+            builder.append_null()
+        elif i % 3 == 0:
+            builder.append(long_text(String("p", i)).as_bytes())
+        else:
+            builder.append(String("s", i).as_bytes())
+    return Series("s", builder^.finish())
+
+
+def every_third(rows: Int) raises -> Array[DType.bool]:
+    """Builds a mask that keeps two rows in three, with one null in the mask.
+
+    Args:
+        rows: How many rows.
+
+    Returns:
+        The mask.
+
+    Raises:
+        If the mask cannot be allocated.
+    """
+    var mask = Array[DType.bool](rows)
+    var bits = mask.unsafe_ptr()
+    for i in range(rows):
+        bits.unsafe_offset(i).unsafe_write(i % 3 != 2)
+    mask.data.validity.set(rows - 2, False)
+    return mask^
+
+
+def first_wrong(
+    got: Series, source: Series, mask: Array[DType.bool]
+) raises -> Int:
+    """Returns the first source row the filter got wrong, or -1.
+
+    An assertion per row would format a message for each of a hundred thousand
+    of them, and these tests have to be that tall to reach the length where the
+    split turns on, so the check is written to cost less than what it checks.
+
+    Args:
+        got: The filtered column.
+        source: What it was filtered from.
+        mask: The mask that was used.
+
+    Returns:
+        The source position of the first disagreement, or -1.
+
+    Raises:
+        If reading an element fails.
+    """
+    var at = 0
+    for i in range(len(source)):
+        if not mask.data.validity.get(i):
+            continue
+        if not Bool(mask[i]):
+            continue
+        if at >= len(got):
+            return i
+        if got.is_valid(at) != source.is_valid(i):
+            return i
+        if source.is_valid(i) and got.text(at) != source.text(i):
+            return i
+        at += 1
+    return -1 if at == len(got) else 0
+
+
+def test_a_text_filter_past_the_split_keeps_the_right_rows() raises:
+    # Below `PARALLEL_FILTER_ROWS` the filter walks the column on one thread and
+    # above it every worker writes its own stretch of the output, so the row and
+    # payload bases the counting pass hands out are what decide whether the
+    # answer is right. None of that is reachable from the four row columns the
+    # tests above use. The height is one past a multiple of sixty four so the
+    # last worker's range ends part way through a validity word.
+    var rows = 131_073
+    var source = wide_text(rows, 0)
+    var mask = every_third(rows)
+    var kept = source.filter(mask)
+    assert_equal(len(kept), 87_381)
+    assert_equal(first_wrong(kept, source, mask), -1, "a kept row is wrong")
+
+
+def test_a_text_filter_past_the_split_carries_nulls_across() raises:
+    # A filtered row is not the row it came from, so a worker's first output row
+    # can land in the middle of a validity word its neighbour also writes. That
+    # is why the bits go down in a pass of their own, and this is the arm that
+    # runs it.
+    var rows = 131_073
+    var source = wide_text(rows, 7)
+    var mask = every_third(rows)
+    var kept = source.filter(mask)
+    assert_true(kept.null_count() > 0, "the nulls were dropped")
+    assert_equal(first_wrong(kept, source, mask), -1, "a kept row is wrong")
+
+
+def test_a_substring_is_a_series_and_a_pattern_is_a_mask() raises:
+    # `str_slice` gives a series back rather than a mask, because the answer is
+    # text and text is what the next operation wants. That is the opposite of
+    # the four pattern methods below it and it is not an inconsistency: those
+    # answer a question and this one produces a column.
+    var s = Series(
+        "phone", strings_from_list(["23-768-687-3665", "13-750-942-6364"])
+    )
+    var code = s.str_slice(0, 2)
+    assert_equal(code.text(0), "23")
+    assert_equal(code.text(1), "13")
+    assert_equal(code.name, "phone")
+    assert_equal(len(code), 2)
+
+    # To the end by default, and a negative offset counts back from it.
+    assert_equal(s.str_slice(3).text(0), "768-687-3665")
+    assert_equal(s.str_slice(-4).text(0), "3665")
+
+
+def test_a_substring_on_a_number_column_is_refused() raises:
+    var s = Series("n", Array[DType.int64](3))
+    with assert_raises(contains="not a string column"):
+        _ = s.str_slice(0, 2)
+
+
+def test_a_substring_keeps_the_nulls_where_they_were() raises:
+    var builder = StringBuilder(capacity=3)
+    builder.append("abcdefghijklmnop".as_bytes())
+    builder.append_null()
+    builder.append("qrst".as_bytes())
+    var s = Series("t", builder^.finish())
+
+    var cut = s.str_slice(1, 3)
+    assert_true(cut.is_valid(0))
+    assert_false(cut.is_valid(1))
+    assert_true(cut.is_valid(2))
+    assert_equal(cut.text(0), "bcd")
+    assert_equal(cut.text(2), "rst")
+
+
+def test_a_pattern_filter_is_a_mask_and_then_a_filter() raises:
+    # The four `str_` methods hand back a mask rather than a series, the way
+    # `is_null` does, because a mask is what `filter` takes and turning it into
+    # a series first would only mean turning it back.
+    var s = Series(
+        "part",
+        strings_from_list(
+            ["SMALL BRASS BOX", "LARGE PLATED TIN", "SMALL BRUSHED BRASS"]
+        ),
+    )
+    var kept = s.filter(s.str_contains("BRASS"))
+    assert_equal(len(kept), 2)
+    assert_equal(kept.text(0), "SMALL BRASS BOX")
+    assert_equal(kept.text(1), "SMALL BRUSHED BRASS")
+
+    var front = s.filter(s.str_starts_with("SMALL"))
+    assert_equal(len(front), 2)
+
+    var back = s.filter(s.str_ends_with("BRASS"))
+    assert_equal(len(back), 1)
+    assert_equal(back.text(0), "SMALL BRUSHED BRASS")
+
+    var both = s.filter(s.str_contains_in_order("SMALL", "BRASS"))
+    assert_equal(len(both), 2)
+
+
+def test_two_substrings_in_order_are_not_two_substrings() raises:
+    # `LIKE '%BRASS%SMALL%'` is false of a row that holds both the other way
+    # round, which is the whole reason the pair is one call rather than two.
+    var s = Series("part", strings_from_list(["SMALL BRASS BOX"]))
+    assert_true(s.str_contains("BRASS")[0])
+    assert_true(s.str_contains("SMALL")[0])
+    assert_false(s.str_contains_in_order("BRASS", "SMALL")[0])
+    assert_true(s.str_contains_in_order("SMALL", "BRASS")[0])
+
+
+def test_a_pattern_on_a_number_column_is_refused() raises:
+    var s = Series("n", Array[DType.int64](3))
+    with assert_raises(contains="not a string column"):
+        _ = s.str_contains("7")
+
+
+def test_a_null_row_matches_nothing_and_stays_null() raises:
+    var builder = StringBuilder(capacity=3)
+    builder.append("brass".as_bytes())
+    builder.append_null()
+    builder.append("tin".as_bytes())
+    var s = Series("part", builder^.finish())
+    var mask = s.str_contains("brass")
+    assert_true(mask[0])
+    assert_false(mask.is_valid(1))
+    assert_false(mask[2])
+    # And a null row is dropped by the filter rather than kept, which is what a
+    # null in a mask means everywhere else in the library.
+    assert_equal(len(s.filter(s.str_contains("s"))), 1)
+
+
 def test_slice_head_and_tail_cut_text() raises:
     var s = Series("s", strings_from_list(["a", long_text("bb"), "c", "d"]))
     assert_equal(s.slice(1, 3).text(0), long_text("bb"))
