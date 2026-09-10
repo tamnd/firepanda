@@ -30,6 +30,11 @@ scoped, no storage, a frame or a view under each name.
 bindings a query level offers, the chain of levels a subquery sits inside, and
 the record of what a correlated one reached out for.
 
+`types.mojo` is DuckDB's type set rather than firepanda's, because the two do
+not line up: DuckDB has `DECIMAL(p, s)` and `HUGEINT`, and the engine's
+`LogicalType` has neither, so a front end that reused it would answer
+`1.1 + 2.2` with a binary float where DuckDB gives exactly `3.3`.
+
 `unsupported.mojo` is the line between what the grammar accepts and what
 firepanda runs. Every refusal is an entry in its table rather than a `raise`
 written where the cases ran out, which is what lets `sql_support()` list the
@@ -51,4 +56,5 @@ from .printer import (
 from .table import Grammar, GrammarNode, memoized_rules, overridden_rules
 from .token import Token, tokenize, token_text
 from .transform import Transform
+from .types import SqlType, decimal, parse_type, type_for, type_name
 from .unsupported import NO_REFUSAL, Refusal, feature_of, refusal, sql_support
