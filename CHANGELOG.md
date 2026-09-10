@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A join on two columns stops being a group by over both tables
+
+`align_keys` had two routes and the fast one was reserved for a single key column. One key builds a dictionary on the shorter side and asks it one question per row of the taller one, which is what a join actually wants. Two keys did something else entirely: concatenate each key column with its opposite number, hand the whole set to `group_ordinals`, and factorize a tuple over the sum of the two heights. On a fact table of ten million rows joined to a dimension of eight thousand, that is a copy of twenty million values and a dictionary built over every distinct pair on both sides, to learn eight thousand of them.
+
+The reason it was written that way is that two keys need packing and the packing lived in `group_ordinals`. It still does. What is new is that a join can use it, because the packing was never the part that had to be a group by. `group_ordinals` already turns a tuple of integers into a single number when the parts are close enough together: subtract each key's minimum, lay the keys out in positional notation, and the packed value identifies the tuple exactly with no factorize anywhere. The only thing a join adds is that both sides have to pack the same way, so each key's range is taken over both tables rather than over one. That is `_pair_plan`, and once it answers, a compound key join is a single key join on a uint32 column and inherits the dictionary on the shorter side, the direct table when the packed range is narrow, and the parallel probe.
+
+The route is declined for a key that is not an integer, for a tuple whose parts are different dtypes, for a null in a key, and for parts spread too far apart to share a uint32. Those all fall through to the route that was there before and are unchanged. Deciding costs one range scan per key per side, and `direct_plan` returns the moment a column passes the ceiling it was given, so a tuple that cannot pack is usually declined within a few thousand rows rather than after a pass over all of them.
+
+`_tuple_pack` is now `tuple_pack` and that is the whole of the refactor. A group by makes its plan from one frame and packs that frame, a join makes one plan that covers two and packs each of them with it, and the loop in the middle did not have to change to serve both.
+
+On an i9-13900K, three sessions a side in ABBAAB order, `join/two_keys` goes from 5.61 ms to 4.42 and `join/two_keys_equal_sides` from 15.63 ms to 7.09, every run of one side below every run of the other. TPC-H sf1 on the same machine moves the two queries that join `lineitem` to `partsupp` on part and supplier together and nothing else: q9 from 0.139 s to 0.119 and q20 from 0.084 to 0.070, two sessions a side, with the other twenty interleaved.
+
+Three benchmark rows come with it. `join/two_keys` was already there and is the packed shape. `join/two_keys_far_apart` is the same join with the second key shifted forty bits so the pair cannot pack, which is the same answer over the same shape on the old route, so the gap between the two rows is what this is worth and it is also the row that says the deciding scans are cheap when they decide no. `join/two_keys_equal_sides` gives the packed pair a build side as tall as the probe side, which is the shape where filling the table is the work rather than the probe.
+
 ### Fixed: the differential job that stopped for twenty minutes with nothing left to do
 
 The "Differential vs pandas & DuckDB" job has been failing on every pull request for two days, always at the same step, always at exactly twenty minutes and sixteen seconds, which is the job's own ceiling. It was read as a slow runner because that is what a timeout looks like. It is not one. The step's real work takes ten seconds.
