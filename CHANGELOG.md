@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: the interpreter CI reached for stopped working
+
+`uv run` takes the newest interpreter it can find, the newest one is now a free threaded build of 3.14, and importing the extension into it segfaults inside `PyInit__firepanda` before a single test runs. Every platform failed at once, on pull requests that touched no Python at all, which is the signature of the environment moving rather than the code. The extension tests now name the version they run on.
+
+This is a stopgap and the comment on the step says so. An extension that does not declare whether it is safe without the GIL is supposed to make the interpreter turn the GIL back on and carry on, not crash in its init function, so something is wrong rather than merely unsupported. #400 has the reproduction and what has to be found out to close it.
+
 ### Added: astype, and about sixty ways to spell a type
 
 `Series.astype` and `DataFrame.astype`, with the pandas signature, and `dtype=` honoured in both constructors instead of refused. The frame form takes one type name for every column or a dict naming some of them, which is what pandas takes.
