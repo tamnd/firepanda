@@ -117,6 +117,7 @@ from .ast import (
     STMT_SELECT,
     STMT_SET_OPERATION,
     STMT_TABLE,
+    STMT_UNPIVOT,
     STMT_VALUES,
     STMT_WINDOW,
 )
@@ -934,6 +935,10 @@ def _write_stmt(
         _write_pivot(ast, node, grammar, out)
         return
 
+    if kind == STMT_UNPIVOT:
+        _write_unpivot(ast, node, grammar, out)
+        return
+
     raise Error(String("the printer has no case for statement kind ", kind))
 
 
@@ -1015,6 +1020,49 @@ def _write_pivot_on(
             out += ", "
         _write_item(ast, ast.at(item.children, i), grammar, out)
     out += ")"
+
+
+def _write_unpivot(
+    ast: Ast, node: UInt32, grammar: Grammar, mut out: String
+) raises:
+    """Appends an `UNPIVOT` statement.
+
+    `VALUE` and `VALUES` are the same word to the grammar, so the count picks
+    which one to write and a query that wrote the other one gets this one back.
+
+    Args:
+        ast: The AST.
+        node: The `STMT_UNPIVOT` index.
+        grammar: A loaded grammar.
+        out: The buffer.
+
+    Raises:
+        Error: If it has no table or no `ON` list, or a part could not be
+            printed.
+    """
+    ref item = ast.stmts[Int(node)]
+    if item.a == NO_NODE:
+        raise Error("an UNPIVOT with no table under it")
+    out += "UNPIVOT "
+    _write_ref(ast, item.a, grammar, out)
+
+    var columns = ast.length(item.children)
+    if columns == 0:
+        raise Error("an UNPIVOT with no columns to fold up")
+    for i in range(columns):
+        out += ", " if i > 0 else " ON "
+        _write_item(ast, ast.at(item.children, i), grammar, out)
+
+    if item.payload == NO_NODE:
+        return
+    out += " INTO NAME "
+    out += quote_name(ast.text(item.payload), grammar)
+    var values = ast.length(item.b)
+    out += " VALUES " if values > 1 else " VALUE "
+    for i in range(values):
+        if i > 0:
+            out += ", "
+        out += quote_name(ast.text(ast.at(item.b, i)), grammar)
 
 
 def _write_nested(
