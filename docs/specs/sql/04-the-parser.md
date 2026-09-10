@@ -18,19 +18,19 @@ Our targets, which document 01's latency axis depends on:
 | | firepanda target | measured |
 | --- | --- | --- |
 | tokenize, TPC-H q1 | | 3.2 us |
-| tokenize and match, TPC-H q1 | | 181 us |
-| tokenize, match and transform, TPC-H q1 | under 60 us | 449 us |
-| tokenize, `SELECT 1` | | 101 ns |
-| tokenize and match, `SELECT 1` | | 9.4 us |
-| tokenize, match and transform, `SELECT 1` | under 3 us | 13.9 us |
+| tokenize and match, TPC-H q1 | | 176 us |
+| tokenize, match and transform, TPC-H q1 | under 60 us | 460 us |
+| tokenize, `SELECT 1` | | 105 ns |
+| tokenize and match, `SELECT 1` | | 9.1 us |
+| tokenize, match and transform, `SELECT 1` | under 3 us | 14.8 us |
 | allocations for a small statement | one arena block, no per node malloc | met |
 | memoization table | reused across statements, not reallocated | not allocated at all unless a memoized rule finishes |
 
 The allocation line is the one that matters. A REPL loop over small statements spends its time in the allocator, not the matcher, and this is the axis where a library beats a database.
 
-Those are the `sql/` rows of `benchmarks/main.mojo`, ten repetitions, the median, on Apple M4, Mojo 1.0.0 (ed45d567), firepanda 0.6.53, with the grammar and the jump table built once outside the timed section because that is what a process does. Interquartile range was under five per cent on every row. The machine had other work on it, so these read high rather than low, and they are here because a number anybody can reproduce with `pixi run bench -- --filter=sql/` is worth more than a better one nobody can.
+Those are the `sql/` rows of `benchmarks/main.mojo`, ten repetitions, the median, on Apple M4, Mojo 1.0.0 (ed45d567), firepanda 0.6.54, with the grammar and the jump table built once outside the timed section because that is what a process does. Interquartile range was under five per cent on every row. The machine had other work on it, so these read high rather than low, and they are here because a number anybody can reproduce with `pixi run bench -- --filter=sql/` is worth more than a better one nobody can.
 
-The split is the useful part. Tokenizing is under one per cent of a parse either way, so the tokenizer is done. The matcher is 40 per cent of q1 and 68 per cent of `SELECT 1`, and the transformer is the rest. The last time this table was written its measured column had no transformer in it, because there was no transformer, so it was comparing two thirds of the work against a budget for all of it. Against the whole of it, q1 is seven and a half times over and `SELECT 1` is four and a half times over, and the work to close that is on both sides rather than only in the matcher.
+The split is the useful part. Tokenizing is under one per cent of a parse either way, so the tokenizer is done. The matcher is 38 per cent of q1 and 61 per cent of `SELECT 1`, and the transformer is the rest. The last time this table was written its measured column had no transformer in it, because there was no transformer, so it was comparing two thirds of the work against a budget for all of it. Against the whole of it, q1 is nearly eight times over and `SELECT 1` is nearly five times over, and the work to close that is on both sides rather than only in the matcher.
 
 Two changes have already been made to the matcher and both are still worth what they were: the first token filter in section 4, worth about three times on its own, and memoizing successes as well as failures in section 5, worth about one and a half times on top of it. Both were measured back to back in one binary against the matcher as it was before them, so they are speedups against a build that no longer exists and the absolute readings that went with them are not comparable to the table above.
 
