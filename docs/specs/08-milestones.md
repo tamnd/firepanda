@@ -76,6 +76,22 @@ Done when every existing test passes with the engine on, when group by queries a
 
 Deliberately not in it: a buffer manager, a lazy frame, an optimizer, window functions, and anything distributed or GPU.
 
+## M2c, The planner
+
+Added in September 2026 after hand planning the TPC-H suite in the benchmark driver, which took the twenty two queries at sf1 from 6.671 seconds to about 1.4 with one kernel changed. That is a factor of four point eight from projection pushdown, predicate pushdown, join reordering and operator selection, all written out by a person query by query, and none of it transfers to a query a user writes. The full argument and the design are in [`planner/`](planner/00-README.md).
+
+There is a second reason it is now. M2b's chunked engine already exists: `firepanda/exec/` has nine physical operators and a pipeline driver, and the only thing in the repository that calls it is a test file. The plan layer is what makes it reachable.
+
+It takes the plan, the binder and the optimizer passes out of M4 and does them first, because the plan is the thing the passes rewrite and building the lazy user surface against an API that does not exist yet means building it twice. M4 keeps `LazyFrame`, `scan_parquet`, `collect`, `profile` and the error model.
+
+Build the logical IR, nine node kinds and nine expression kinds, with binding that resolves a name to a position and a type once. Build the three analyses, elementwise, input independent and table set, that every pass is written in terms of. Build the passes: expression simplification, type coercion, projection pushdown, predicate pushdown with transitive predicates, common subplan and subexpression elimination, projection merging, slice pushdown, top n recognition and empty pruning. Lower into the existing `exec` node union with `Materialize` as the fallback for anything not yet lowerable, which is what keeps this milestone and M2b independent of each other.
+
+Then predicate transfer, from the 2024 and 2025 papers: a blocked Bloom filter over the 64 bit hashes the join already computes, an IN list below about sixty four distinct keys, minimum and maximum always, a transfer graph rooted by LargestRoot, and a forward and a backward pass. Then the runtime half: join filters built as a side effect of the build side, and the physical operator choice made from the measured input rather than hardcoded. Join ordering last, greedy from exact row counts, because the papers say predicate transfer makes the order matter much less.
+
+Done when a plain translation of all twenty two TPC-H queries, written against the frame API with no hand planning, is within a few per cent of the hand planned driver. Done when the ratio between the fastest and slowest execution of a query over randomly permuted join orders is under 2 on the join heavy queries. Done when `explain()` prints something a person can read for every query in the benchmark suite. Done when the full test suite passes unchanged and a differential test agrees with the optimizer on and off.
+
+Deliberately not in it: a cardinality estimator, DPhyp, the lazy user surface, and anything that closes the gap on q1 and q6, which have no joins and whose gap is memory traffic and therefore M2b.
+
 ## M3, The Python front door
 
 Everything in document 07.

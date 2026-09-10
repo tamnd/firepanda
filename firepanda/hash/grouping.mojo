@@ -284,9 +284,7 @@ def group_ordinals[
                     if kind == dt:
                         var plan = _tuple_plan[dt](columns, at, rows)
                         if plan.space > 0:
-                            var packed = _tuple_pack[dt](
-                                columns, at, rows, plan
-                            )
+                            var packed = tuple_pack[dt](columns, at, rows, plan)
                             return _packed_grouping(packed, plan.space)
 
     var first = factorize_any(columns[at[0]][])
@@ -642,12 +640,17 @@ def _tuple_plan[
     return TuplePlan[dt](bases^, steps^, space)
 
 
-def _tuple_pack[
+def tuple_pack[
     dt: DType, o: ImmOrigin
 ](
     columns: ColumnRefs[o], at: List[Int], rows: Int, plan: TuplePlan[dt]
 ) raises -> Array[DType.uint32]:
     """Packs every key tuple into one integer in a single pass over the columns.
+
+    Public because a join packs too. A group by makes its plan from one frame
+    and packs that frame; a join makes one plan that covers both sides and packs
+    each of them with it, which is the same loop over different columns. The
+    plan is what the two sides have to agree on, not the packing.
 
     Args:
         columns: The frame's columns, borrowed.

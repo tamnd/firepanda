@@ -941,6 +941,70 @@ def test_filter_carries_the_nulls_of_the_values_across() raises:
     assert_equal(kept[2], 40)
 
 
+def test_a_filter_past_the_split_keeps_the_right_rows() raises:
+    # Above `PARALLEL_FILTER_ROWS` the compaction is counted first and then run
+    # on every core, each worker writing a run of output the prefix sum gave it.
+    # What that gets wrong if the bound is wrong is the first slot of the next
+    # worker's run, because the copy loop writes a row before it knows whether
+    # to keep it. A mask that goes false at the end of a morsel is what makes
+    # that speculative write land on a boundary, so every sixty fourth row is
+    # dropped and the length is not a multiple of the morsel.
+    var col = build[DType.int64](200_003, 0)
+    var mask = Array[DType.bool](200_003)
+    for i in range(200_003):
+        mask[i] = i % 64 != 63
+
+    var kept = filter_rows(col, mask)
+    var kept_twin = filter_scalar(col, mask)
+    assert_equal(len(kept), len(kept_twin), "kept row count")
+    for i in range(len(kept)):
+        assert_equal(kept[i], kept_twin[i], "a kept row is wrong")
+
+
+def test_a_filter_past_the_split_carries_the_nulls_across() raises:
+    # The null carrying route is the one that cannot write its validity straight
+    # out, because sixty four output rows share a word and two workers can land
+    # in the same one. It records a byte a kept row instead and packs them in a
+    # third pass, so this checks the packed bits against the serial twin rather
+    # than only the values. The mask is null in places too, which is a third way
+    # for a row to be dropped and has to agree with the twin as well.
+    var col = build[DType.int64](200_003, 3)
+    var mask = Array[DType.bool](200_003)
+    for i in range(200_003):
+        mask[i] = i % 7 != 0
+    for i in range(0, 200_003, 1_000):
+        mask.set_null(i)
+
+    var kept = filter_rows(col, mask)
+    var kept_twin = filter_scalar(col, mask)
+    assert_equal(len(kept), len(kept_twin), "kept row count")
+    for i in range(len(kept)):
+        assert_equal(kept.is_valid(i), kept_twin.is_valid(i), "validity")
+        assert_equal(kept[i], kept_twin[i], "a kept row is wrong")
+
+
+def test_a_filter_past_the_split_that_keeps_nothing() raises:
+    # An all false mask leaves every worker with an empty run, which is the case
+    # where the copy loop has to not run at all rather than run once.
+    var col = build[DType.int64](200_003, 5)
+    var mask = Array[DType.bool](200_003)
+
+    assert_equal(len(filter_rows(col, mask)), 0, "nothing survives")
+
+
+def test_a_filter_past_the_split_that_keeps_everything() raises:
+    var col = build[DType.int64](200_003, 5)
+    var mask = Array[DType.bool](200_003)
+    for i in range(200_003):
+        mask[i] = True
+
+    var kept = filter_rows(col, mask)
+    assert_equal(len(kept), 200_003, "everything survives")
+    for i in range(len(kept)):
+        assert_equal(kept.is_valid(i), col.is_valid(i), "validity")
+        assert_equal(kept[i], col[i], "a kept row is wrong")
+
+
 def test_slice_copies_values_and_validity() raises:
     var col = build[DType.int64](200, 5)
     var piece = col.slice(64, 130)

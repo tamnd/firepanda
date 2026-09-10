@@ -36,4 +36,5 @@ from .dtype import (
 )
 from .frame import DataFrame, Series, concat, concat_series, dt_isocalendar
 from .join import JoinIndices, JoinKind, join_indices
+from .sql.unsupported import Refusal, sql_support
 from .version import VERSION, version

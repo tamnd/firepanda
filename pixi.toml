@@ -111,7 +111,30 @@ fuzz-join = "mojo run -I . tests/fuzz/join.mojo"
 # the single-threaded result. docs/specs/09-quality-bar.md section 3.
 stress = "mojo run -I . tests/stress/main.mojo"
 
-differential = { cmd = "mojo run -I . tests/differential/main.mojo", default-environment = "differential" }
+# All three differential programs are built first and then run, rather than run
+# through `mojo run`. `mojo run` compiles into the process it then runs the
+# program in, and the two do not always take each other's teardown well: the
+# generated statement comparison aborted at exit with a glibc "corrupted
+# double-linked list" three times in twenty five, every time after the
+# comparison had finished and its whole report had printed, and the crash
+# handler then held the dead process open until the job's ceiling killed it. The
+# same program built and then run is clean over a hundred and twenty five runs.
+# Building is not slower either, because `mojo run` compiles too, and this way
+# the whole job pays for its compiles once at the start.
+#
+# `inputs` and `outputs` are what keep the three steps below from compiling
+# everything three times over. Each of them depends on this task, and without a
+# cache key pixi would honour that literally.
+differential-build = { cmd = "mkdir -p build/differential && mojo build -I . tests/differential/main.mojo -o build/differential/frames && mojo build -I . tests/differential/sql.mojo -o build/differential/sql && mojo build -I . tests/differential/sql_generated.mojo -o build/differential/generated", default-environment = "differential", inputs = [
+  "firepanda/**",
+  "tests/differential/*.mojo",
+], outputs = [
+  "build/differential/frames",
+  "build/differential/sql",
+  "build/differential/generated",
+] }
+
+differential = { cmd = "./build/differential/frames", default-environment = "differential", depends-on = ["differential-build"] }
 
 # DuckDB's own test corpus, which is the oracle for the compatibility claim.
 # `corpus` fetches test/sql at the commit the grammar is pinned to and flattens
@@ -119,13 +142,13 @@ differential = { cmd = "mojo run -I . tests/differential/main.mojo", default-env
 # repository is not a trade worth making for something only the harness reads.
 # See docs/specs/sql/13-open-questions.md question 10.
 corpus = { cmd = "bash tools/fetch_corpus.sh && python tools/corpus.py" }
-differential-sql = { cmd = "mojo run -I . tests/differential/sql.mojo", default-environment = "differential", depends-on = ["corpus"] }
+differential-sql = { cmd = "./build/differential/sql", default-environment = "differential", depends-on = ["corpus", "differential-build"] }
 
 # The same comparison against statements nobody wrote. The grammar writes them,
 # which reaches the rules DuckDB's corpus happens to have no test for, and it
 # needs no corpus so it is cheap to run anywhere.
 # See docs/specs/sql/11-conformance.md section 4.
-differential-sql-generated = { cmd = "mojo run -I . tests/differential/sql_generated.mojo", default-environment = "differential" }
+differential-sql-generated = { cmd = "./build/differential/generated", default-environment = "differential", depends-on = ["differential-build"] }
 
 bench = "mojo run -I . benchmarks/main.mojo"
 bench-compare = "python tools/bench_compare.py"

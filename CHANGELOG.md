@@ -22,6 +22,70 @@ Three parameter names were wrong and are now right. `Timestamp.fromisoformat` ta
 
 On the conformance board this opens the whole `Timedelta` namespace, which was reporting thirty two runs behind one message saying the namespace could not be built, because the board builds it by evaluating `Timedelta("1D")`. That closes #391.
 
+### Added: the planner specification, and a milestone for it
+
+`docs/specs/planner/`, eleven documents, on what decides the shape of a query rather than on how the query runs. `engine/` next door is morsels, pipelines and spilling, and it says almost nothing about who chose the join order or which physical group by to use. This is that half.
+
+It exists now because we just measured what it is worth by hand, twenty two times. The TPC-H driver in the benchmark repository started at 6.671 seconds for the twenty two queries at sf1 and is at about 1.4. One kernel changed in that time. Everything else was projection pushdown, predicate pushdown, join reordering and operator selection, written out by a person query by query, and none of it transfers to a query a user writes.
+
+The documents are the IR and binding, the pass pipeline with each pass carrying what it bought us on TPC-H, join ordering and why we are not starting there, predicate transfer, cardinality and cost, runtime filters, operator selection, the build order, the refactoring, and the milestone checklist.
+
+The strategy document is `04-predicate-transfer.md`. The classical answer to fast joins is to find the right order, finding the right order needs cardinality estimates, and the estimates are wrong by orders of magnitude on anything past three relations. The 2024 Predicate Transfer paper and the 2025 Robust Predicate Transfer paper say you can sidestep most of that by filtering every table with what every other table implies about it before joining anything, after which the join order stops mattering very much. Their DuckDB integration measures the worst to best ratio over random join orders dropping to 1.6 on an acyclic query, and 1.5 times end to end as a geometric mean, across all of TPC-H, JOB and TPC-DS. That is a much better fit for a young engine than a cost model is.
+
+The uncomfortable part is `07-operator-selection.md`, which lists choices we already have both implementations of and do not make. `group_broadcast` beats group by plus a semi join by a factor of eight on q17 at two hundred thousand groups, and loses to it by a factor of three on q18 at one and a half million. The join buckets the right side because the parameter is called right, whatever the two heights are. A join on more than one key column concatenates every key column across both sides and factorizes the tuple over the sum of the two heights, where a join on one integer key builds a dictionary on the smaller side and probes the larger. None of that needs a plan layer and it is the first stage of the milestone.
+
+`08-milestones.md` gains M2c, which takes the plan, the binder and the optimizer passes out of M4 and does them first, because the plan is the thing the passes rewrite and building the lazy user surface against an API that does not exist yet means building it twice. M4 keeps `LazyFrame`, `collect`, `profile` and the error model.
+
+There is a second reason it is now rather than later. M2b's chunked engine already exists: `firepanda/exec/` has nine physical operators and a pipeline driver, and the only thing in the repository that calls it is a test file. The plan layer is what makes it reachable.
+
+No code changes.
+
+### Changed: a filter runs on every core
+
+`filter_rows` and `filter_any` were the last two kernels of their size still running on one thread. The reason was structural rather than an oversight. A gather knows where every output row goes before it starts, so it splits by output row and the workers never meet; a filter does not, because where a row lands depends on how many rows before it survived, and a worker handed the middle of the mask has no idea where to write.
+
+Counting answers exactly that. The serial version already made two passes, one to count the kept rows so the output could be allocated once at the right size and one to copy, and the count is per morsel for free. A prefix sum over the per morsel counts is the output position each morsel begins at, and with that the copy is as independent as a gather's, every worker writing a run of output that nobody else touches.
+
+The copy loop is the serial one unchanged, including the trick of writing every row and advancing the cursor by the mask bit rather than branching on it, since the mask is data and the branch predictor cannot learn it. The bound matters more now than it did: a worker stops when it has written the number of rows it counted, and that is what keeps the last speculative write inside its own run instead of in the next worker's first slot.
+
+Nulls in the filtered column were the one part that did not fall out for free, because sixty four output rows share a validity word and two morsels can land in the same one. Rather than synchronize, the copy records a byte per kept row and a third pass packs those into words, which is independent again because a word is sixty four consecutive output rows, and the byte buffer is the size of the answer rather than the size of the input.
+
+Measured on TPC-H q6 at sf1 on a 13900K, which filters two columns of `lineitem` down to a hundred and fourteen thousand rows out of six million: seventeen milliseconds to five and a half. At the other end of the selectivity range, one double column of six million rows kept almost whole is six milliseconds, which is about sixteen gigabytes a second of traffic in and out.
+
+Below `PARALLEL_FILTER_ROWS`, sixty five thousand rows, it stays on one thread and nothing about it changes. That is the threshold the variable width filter already used, and the two routes now share it: they pay for the split differently, one sizing its payload ahead of writing it and the other counting its kept rows, but the two costs come out close enough that a second constant would be a number with nothing behind it.
+
+### A join on two columns stops being a group by over both tables
+
+`align_keys` had two routes and the fast one was reserved for a single key column. One key builds a dictionary on the shorter side and asks it one question per row of the taller one, which is what a join actually wants. Two keys did something else entirely: concatenate each key column with its opposite number, hand the whole set to `group_ordinals`, and factorize a tuple over the sum of the two heights. On a fact table of ten million rows joined to a dimension of eight thousand, that is a copy of twenty million values and a dictionary built over every distinct pair on both sides, to learn eight thousand of them.
+
+The reason it was written that way is that two keys need packing and the packing lived in `group_ordinals`. It still does. What is new is that a join can use it, because the packing was never the part that had to be a group by. `group_ordinals` already turns a tuple of integers into a single number when the parts are close enough together: subtract each key's minimum, lay the keys out in positional notation, and the packed value identifies the tuple exactly with no factorize anywhere. The only thing a join adds is that both sides have to pack the same way, so each key's range is taken over both tables rather than over one. That is `_pair_plan`, and once it answers, a compound key join is a single key join on a uint32 column and inherits the dictionary on the shorter side, the direct table when the packed range is narrow, and the parallel probe.
+
+The route is declined for a key that is not an integer, for a tuple whose parts are different dtypes, for a null in a key, and for parts spread too far apart to share a uint32. Those all fall through to the route that was there before and are unchanged. Deciding costs one range scan per key per side, and `direct_plan` returns the moment a column passes the ceiling it was given, so a tuple that cannot pack is usually declined within a few thousand rows rather than after a pass over all of them.
+
+`_tuple_pack` is now `tuple_pack` and that is the whole of the refactor. A group by makes its plan from one frame and packs that frame, a join makes one plan that covers two and packs each of them with it, and the loop in the middle did not have to change to serve both.
+
+On an i9-13900K, three sessions a side in ABBAAB order, `join/two_keys` goes from 5.61 ms to 4.42 and `join/two_keys_equal_sides` from 15.63 ms to 7.09, every run of one side below every run of the other. TPC-H sf1 on the same machine moves the two queries that join `lineitem` to `partsupp` on part and supplier together and nothing else: q9 from 0.139 s to 0.119 and q20 from 0.084 to 0.070, two sessions a side, with the other twenty interleaved.
+
+Three benchmark rows come with it. `join/two_keys` was already there and is the packed shape. `join/two_keys_far_apart` is the same join with the second key shifted forty bits so the pair cannot pack, which is the same answer over the same shape on the old route, so the gap between the two rows is what this is worth and it is also the row that says the deciding scans are cheap when they decide no. `join/two_keys_equal_sides` gives the packed pair a build side as tall as the probe side, which is the shape where filling the table is the work rather than the probe.
+
+### Fixed: the differential job that stopped for twenty minutes with nothing left to do
+
+The "Differential vs pandas & DuckDB" job has been failing on every pull request for two days, always at the same step, always at exactly twenty minutes and sixteen seconds, which is the job's own ceiling. It was read as a slow runner because that is what a timeout looks like. It is not one. The step's real work takes ten seconds.
+
+What happens is that `tests/differential/sql_generated.mojo` generates its statements, asks DuckDB about all of them, parses all of them itself, prints its whole report down to the last agreement figure, checks both ceilings, and then aborts on the way out with a glibc `corrupted double-linked list`. There is nothing left for the program to do at that point and no output is lost. The crash handler then holds the dead process open until something kills it, which in CI is the job ceiling twenty minutes later.
+
+It is intermittent and it is not size dependent, which is what made it look like a load problem. On an eight core Linux box a sweep of eight case counts crashed at eight thousand statements and passed at sixteen and at twenty five thousand in the same sweep, and a rerun at the default twenty five thousand crashed once and then passed. Twenty five runs of the real step put the rate at three in twenty five.
+
+Splitting the program in half says which half. Generating eight thousand statements and parsing all of them with no Python in the process at all is clean over twenty runs. Generating the same statements and handing them to DuckDB instead crashes two times in twenty. The matcher, which is the code this test exists to exercise and the code somebody had just changed a lot of, is not involved.
+
+What is involved is `mojo run`, which compiles the program into the process it then runs it in. The same program built with `mojo build` and then run is clean over a hundred and twenty five runs, where the same program under `mojo run` is five crashes in forty five. So all three differential programs are now built first and run second. That is not slower, because `mojo run` compiles too, and it means the job pays for its three compiles once at the start rather than once per step.
+
+The binaries go under `build/differential`, which matters more than it sounds like. A built Mojo binary puts its own directory on Python's `sys.path`, and a stray `grp.py` sitting in `/tmp` on the machine this was narrowed on shadowed the standard library's `grp` and made every run of a binary built into `/tmp` fail for a reason that had nothing to do with any of this. One round of measurements was thrown away to it.
+
+Each comparison step also gets its own ceiling now, five minutes for the two parser comparisons and eight for the frame one, which carries the compiles. The job ceiling only ever said that the job hung. A step ceiling says which comparison did, and a wedge at exit prints nothing on its way out, so without one the log just stops after a report that had already finished.
+
+The abort itself is a real memory safety defect in something and this does not fix it, it stops it from costing twenty minutes a pull request while it is found.
+
 ### Timestamp and Timedelta, measured rather than described
 
 A datetime column has to hand back something when you index into it, take its maximum or read one value out of a grouped result, and until now there was nothing for it to hand back. `firepanda.Timestamp` and `firepanda.Timedelta` are that something, and they are subclasses of `datetime.datetime` and `datetime.timedelta` for the same reason the pandas ones are: a scalar that is not a `datetime` breaks every piece of code holding a `datetime`, and almost all of that code belongs to somebody else. The nanoseconds ride alongside, which is the three digits `datetime` does not have and Arrow does.
@@ -189,6 +253,21 @@ One defect was fixed on the way. `all_null` took a logical type, matched it agai
 Nothing downstream had to be told about any of this, because the harder half was already built. A NaN in a float column already counts as missing in `firepanda/kernel/nulls.mojo` and is already stepped over by the reductions in `firepanda/kernel/agg.mojo`, so after the widening `null_count` still reports the gap, `dropna` still drops it, `sum` still skips it, and arithmetic propagates it exactly as pandas does for the same reason pandas does. On the conformance board this moves 494 passing runs to 580 and 94 failures to 8, and the eight that are left are four small bugs that were invisible underneath eighty seven copies of one message.
 
 The one thing this breaks is the answer `firepanda.read_csv` gives for a numeric column with a missing value, which used to be an integer column with a null and is now a float column with a NaN. A caller who wants the Arrow answer should read the file into pyarrow and use `firepanda.from_arrow`.
+
+### Every refusal is now an entry in one table
+
+SQL is where the grammar accepts everything DuckDB accepts and the engine runs rather less than that, so there is a line somewhere and `firepanda/sql/unsupported.mojo` is where it is written down. Twenty six entries, each one a name, the sentence the user reads, what firepanda is instead, and the issue to go and read. `firepanda.sql_support()` returns the whole list.
+
+The reason for a table rather than a message written at the point the cases ran out is that a scattered raise cannot be counted. Nobody can ask what firepanda does not do without reading the source, the README compatibility table has to be maintained by hand against a set nobody can see, and the conformance harness cannot tell a corpus file that failed for a refusal from one that failed for a crash. Those last two are very different failures and a harness that cannot separate them reports the wrong number.
+
+The message has four parts and the table is what makes the third one survive. It names the feature, quotes the line with a caret under it, says what firepanda is instead, and links the issue. The third is the part that gets dropped when a message is written in a hurry, and it is the one that stops the user filing the bug.
+
+    Not Implemented Error: firepanda does not support a slice or a subscript.
+    LINE 1: SELECT a[1] FROM t
+                    ^
+    firepanda reads a list element and a substring with a function rather than with brackets. See https://github.com/tamnd/firepanda/issues/13
+
+The caret is the tokenizer's, which already drew one for a syntax error, so a refusal and a syntax error now point at a position the same way rather than each having their own idea of what a line number counts from. An entry may hold one hole for the text from the query, so `ORDER BY` and `FILTER` on a call are one entry that keeps both names rather than two entries or one that has lost them.
 
 ### The zones that need no database
 

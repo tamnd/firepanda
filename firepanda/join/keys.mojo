@@ -32,11 +32,35 @@ megabytes to do it. The second builds a dictionary over ten thousand keys, which
 fits in L2, and reads the large side once. That is the difference between the
 join being a factorize with a join stapled to it and the join being a probe.
 
-This route is taken for a single key column. One key, because two would need the
-packing that `group_ordinals` does. It is taken for a fixed width key whatever
-the two heights are, and for a text key only when the side it would have to build
-is much smaller than the side it would probe, which `STRING_BUILD_SHARE` below
-says more about.
+This route is taken for a single key column, and for a compound key whose parts
+are integers close enough together to pack into one. It is taken for a fixed
+width key whatever the two heights are, and for a text key only when the side it
+would have to build is much smaller than the side it would probe, which
+`STRING_BUILD_SHARE` below says more about.
+
+The packing is `group_ordinals`' own, and the only thing a join adds to it is
+that the two sides have to pack the same way, so each key's range is taken over
+both sides rather than over one frame. `_pair_plan` is that, and once it answers
+a compound key join is a single key join on the packed column. What is left on
+the concatenating route is a key that is not an integer, a mix of dtypes, a null
+in a key, and a tuple whose parts are spread too far apart to share a uint32.
+
+Measured on an i9-13900K, three sessions a side in ABBAAB order, medians:
+
+| row | packed | concatenating | ratio |
+| --- | --- | --- | --- |
+| `join/two_keys` | 4.42 ms | 5.61 ms | 1.27 |
+| `join/two_keys_equal_sides` | 7.09 ms | 15.63 ms | 2.21 |
+| `join/two_keys_far_apart` | 12.50 ms | 12.51 ms | 1.00 |
+
+Every run of one side is below every run of the other on the first two rows. The
+third is the same join with a key shifted out of reach so that it cannot pack,
+which is what says the scans that decide cost nothing when they decide no.
+
+TPC-H sf1 on the same machine, two sessions a side in ABBA order, moves the two
+queries that join `lineitem` to `partsupp` on part and supplier together and
+nothing else: q9 from 0.139 s to 0.119 and q20 from 0.084 to 0.070. The other
+twenty are interleaved.
 
 Text used to be excluded from it altogether and that was worth more than it
 looked. The table compares hashes, which is exact for a fixed width key because
@@ -115,7 +139,7 @@ from firepanda.dtype.lists import ALL
 from firepanda.exec.morsel import parallel_morsels
 from firepanda.hash.factorize import CHUNK_ROWS, DIRECT_LIMIT, direct_plan
 from firepanda.hash.function import DEFAULT_SEED, hash_chunk, hash_strings_chunk
-from firepanda.hash.grouping import group_ordinals
+from firepanda.hash.grouping import TuplePlan, group_ordinals, tuple_pack
 from firepanda.hash.table import HashTable
 from firepanda.kernel.concat import concat_two_any
 
@@ -337,6 +361,52 @@ def align_keys[
             )
             return KeyAlignment(codes^, groups, absent^, has_nulls)
 
+    # More than one key, and the tuple packs into a single integer that both
+    # sides agree on. That turns a compound key join into the single key join
+    # above, dictionary on the smaller side and all, rather than into a group by
+    # over both sides stacked. See `_pair_plan` for when it applies.
+    if (
+        len(left_keys) > 1
+        and left_rows > 0
+        and right_rows > 0
+        and not has_nulls
+    ):
+        var uniform = not left_columns[left_keys[0]][].is_string()
+        for k in range(1, len(left_keys)):
+            if (
+                left_columns[left_keys[k]][].is_string()
+                or left_columns[left_keys[k]][].dtype()
+                != left_columns[left_keys[0]][].dtype()
+            ):
+                uniform = False
+        if uniform:
+            var kind = left_columns[left_keys[0]][].dtype()
+            comptime for candidate in ALL:
+                comptime if candidate.is_integral():
+                    if kind == candidate:
+                        var plan = _pair_plan[candidate](
+                            left_columns,
+                            left_keys,
+                            right_columns,
+                            right_keys,
+                        )
+                        if plan.space > 0:
+                            var packed_left = tuple_pack[candidate](
+                                left_columns, left_keys, left_rows, plan
+                            )
+                            var packed_right = tuple_pack[candidate](
+                                right_columns, right_keys, right_rows, plan
+                            )
+                            var codes = Array[DType.uint32](
+                                overwritten=left_rows + right_rows
+                            )
+                            var groups = _probe_route[DType.uint32](
+                                packed_left, packed_right, left_rows, codes
+                            )
+                            return KeyAlignment(
+                                codes^, groups, absent^, has_nulls
+                            )
+
     var merged = List[AnyArray](capacity=len(left_keys))
     for k in range(len(left_keys)):
         merged.append(
@@ -415,6 +485,99 @@ def _null_keys[
                 break
         out.append(missing)
     return out^
+
+
+def _pair_plan[
+    dt: DType, l: ImmOrigin, r: ImmOrigin
+](
+    left_columns: ColumnRefs[l],
+    left_keys: List[Int],
+    right_columns: ColumnRefs[r],
+    right_keys: List[Int],
+) raises -> TuplePlan[dt]:
+    """Finds one packing both sides of a compound key join can use.
+
+    A group by packs a key tuple by subtracting each key's minimum and laying
+    the keys out in positional notation, and `_tuple_plan` works that out from
+    the one frame it is grouping. A join has two frames and they have to pack
+    the same way or the codes mean different things on the two sides, so each
+    key's range here is the range over both sides together: the lower of the two
+    minima and the higher of the two maxima. A value only one side has widens
+    the range and then matches nothing, which is correct and costs a few slots.
+
+    The packed value is a uint32 because that is what the probe route takes, so
+    the product of the ranges has to stay inside one. Nothing here asks it to be
+    small enough for a direct table on top of that. The build below is free to
+    hash instead, and a compound key wide enough to need to is still better off
+    packed than factorized over both sides stacked.
+
+    Each key is given what the tuple has left rather than the whole ceiling, and
+    `direct_plan` returns as soon as a column passes what it was given, so a key
+    that puts the tuple out of reach is declined within a few thousand rows.
+    Only the first key can cost a full scan of both sides for nothing.
+
+    Args:
+        left_columns: The left frame's columns.
+        left_keys: Which of them are keys, in key order.
+        right_columns: The right frame's columns.
+        right_keys: Which of them are keys, in the matching order.
+
+    Parameters:
+        dt: The dtype every key on both sides shares.
+        l: The origin the left columns are borrowed from.
+        r: The origin the right columns are borrowed from.
+
+    Returns:
+        The plan, whose space is -1 when the packed route does not apply.
+
+    Raises:
+        Error: If a column cannot be viewed at `dt`.
+    """
+    var bases = List[Scalar[dt]]()
+    var spans = List[Int]()
+    var space = 1
+    for k in range(len(left_keys)):
+        # What the tuple has left. Integer division, so this only ever narrows.
+        var room = Int(UInt32.MAX) // space
+        ref one = left_columns[left_keys[k]][].as_typed_view[dt]()
+        var here = direct_plan[dt](one, room)
+        if here.span < 1:
+            return TuplePlan[dt](List[Scalar[dt]](), List[Int](), -1)
+        ref two = right_columns[right_keys[k]][].as_typed_view[dt]()
+        var there = direct_plan[dt](two, room)
+        if there.span < 1:
+            return TuplePlan[dt](List[Scalar[dt]](), List[Int](), -1)
+
+        # In int64 rather than the key's own dtype, which is what the packing
+        # loop does too. An unsigned key past the signed range wraps, but both
+        # ends wrap by the same amount and only their difference is read, so the
+        # span is exact and the base casts back to the value it came from.
+        var low = here.base.cast[DType.int64]()
+        var other = there.base.cast[DType.int64]()
+        if other < low:
+            low = other
+        var high = here.base.cast[DType.int64]() + Int64(here.span)
+        var beyond = other + Int64(there.span)
+        if beyond > high:
+            high = beyond
+
+        # Both sides fit their own ceiling and the pair still need not, because
+        # two narrow ranges far apart make a wide one.
+        var span = Int(high - low)
+        if span < 1 or span > room:
+            return TuplePlan[dt](List[Scalar[dt]](), List[Int](), -1)
+        bases.append(low.cast[dt]())
+        spans.append(span)
+        space *= span
+
+    var steps = List[Int]()
+    for _ in range(len(left_keys)):
+        steps.append(0)
+    var step = 1
+    for k in range(len(left_keys) - 1, -1, -1):
+        steps[k] = step
+        step *= spans[k]
+    return TuplePlan[dt](bases^, steps^, space)
 
 
 def _probe_route[
