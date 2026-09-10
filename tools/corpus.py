@@ -16,9 +16,11 @@ statement, in a format the Mojo harness can walk without a parser of its own:
     <byte length>\\t<path>:<line>\\n
     <the SQL>\\n
 
-As a module `verdicts` hands the Mojo harness DuckDB's answer for every one of
-those statements in a single string, one character each. That is one crossing of
-the CPython boundary rather than seventy thousand of them.
+As a module `verdicts` and `verdicts_of` hand the Mojo harness DuckDB's answer
+for every one of those statements in a single string, one character each. That
+is one crossing of the CPython boundary rather than seventy thousand of them.
+Both of them run DuckDB in a child process, which is deliberate and is explained
+on `verdicts`.
 
 See docs/specs/sql/11-conformance.md.
 """
@@ -222,6 +224,9 @@ def verdicts_for(sqls) -> str:
     One connection for the whole batch, because opening one costs more than
     parsing a statement does.
 
+    Call this from a plain Python process. `verdicts` and `verdicts_of` are what
+    an embedded interpreter should call, and they run this in a child.
+
     Args:
         sqls: An iterable of statements.
 
@@ -245,24 +250,92 @@ def verdicts_for(sqls) -> str:
     return "".join(out)
 
 
+def verdicts_of(sqls) -> str:
+    """Asks DuckDB about a batch of statements the caller already has.
+
+    Same child process as `verdicts` and for the same reason. The statements go
+    over a temporary file in the format `write` uses rather than over a pipe,
+    because SQL has newlines in it and a length prefix is the one framing that
+    does not need escaping.
+
+    Args:
+        sqls: An iterable of statements.
+
+    Returns:
+        One character per statement, in order.
+
+    Raises:
+        RuntimeError: If the child could not answer.
+    """
+    import tempfile
+
+    handle = tempfile.NamedTemporaryFile(
+        "w", suffix=".txt", encoding="utf-8", delete=False
+    )
+    try:
+        with handle:
+            for sql in sqls:
+                handle.write(f"{len(sql.encode('utf-8'))}\tbatch\n{sql}\n")
+        return verdicts(handle.name)
+    finally:
+        os.unlink(handle.name)
+
+
 def verdicts(path: str) -> str:
     """Asks DuckDB about every statement in a file and reports what it said.
+
+    The asking happens in a child process. The caller is a Mojo binary with
+    CPython embedded in it, and `import duckdb` in that interpreter loads an
+    extension module that registers process exit handlers. Those handlers run
+    after the embedded interpreter has been torn down, the connection they go
+    looking for is gone, and the process dies in a destructor with `corrupted
+    double-linked list` on Linux and a heap trace on macOS. The report has
+    already been printed by then, so what is lost is the exit status, and on CI
+    the job hangs until the runner kills it. See
+    https://github.com/tamnd/firepanda/issues/359.
+
+    A child process does the same work, prints the answer, and exits before
+    anything of ours has started shutting down. It costs one fork and one pipe
+    for the whole corpus.
 
     Args:
         path: The statements file written by `write`.
 
     Returns:
         One character per statement, in the order they were written.
+
+    Raises:
+        RuntimeError: If the child could not answer.
     """
-    return verdicts_for(sql for _, sql in read(path))
+    import subprocess
+
+    child = subprocess.run(
+        [sys.executable, os.path.abspath(__file__), "verdicts", path],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if child.returncode != 0:
+        raise RuntimeError(
+            f"asking DuckDB about {path} exited {child.returncode}:"
+            f" {child.stderr.strip()}"
+        )
+    return child.stdout.strip()
 
 
 def main() -> int:
     """Writes the statements file for a fetched corpus.
 
+    With `verdicts <path>` it instead prints DuckDB's answer for every statement
+    in a file, which is what `verdicts` above runs in a child.
+
     Returns:
         A process exit status.
     """
+    if len(sys.argv) > 2 and sys.argv[1] == "verdicts":
+        sys.stdout.write(verdicts_for(sql for _, sql in read(sys.argv[2])))
+        return 0
+
     root = cache()
     tests = os.path.join(root, "test", "sql")
     if not os.path.isdir(tests):
