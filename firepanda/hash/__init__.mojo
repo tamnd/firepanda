@@ -74,4 +74,5 @@ from .scalar import (
     factorize_linear,
     factorize_strings_linear,
 )
+from .sorted import sorted_ordinals
 from .table import HashTable

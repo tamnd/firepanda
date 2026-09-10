@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### A group by on a sorted column stops building a hash table
+
+A group by builds a hash table because equal keys are scattered through the column and it has no other way to find them. When the column is already in order they are not scattered, every group is one run of adjacent rows, and walking the column and closing a group each time the value changes gives exactly the same ordinals for one comparison a row. `firepanda/hash/sorted.mojo` is that walk, and `DataFrame._grouping` is the one place that now decides between it and the ordinary route, for every group by, `drop_duplicates` and broadcast in the frame layer.
+
+Nothing about the choice is a guess. `ChunkedArray.order` already carried the sortedness flag, `sort_values` already set it on the key it had just sorted, and `prove_sorted` already existed for a caller willing to pay one scan to find out. What was missing was a reader. A column whose flag is unset takes the ordinary route and is right, slower, which it was before.
+
+What it is worth depends on run length rather than on cardinality, and the measurement is worth quoting because the asymptotic argument gets it wrong. On a million rows on a 13900K, walked against hashed over the same sorted column: a thousand groups is 639 microseconds against 569, a hundred thousand groups is 639 against 623, and a million groups with every row its own is 14.199 milliseconds against 987 microseconds. That last one is 14.4 times. A sorted column is the best case a hash table ever gets, because consecutive equal keys probe the same slot and the table stays in cache, so when the runs are long both routes sit against memory bandwidth and there is nothing to take away. The walk wins when the runs are short, which is when the table has to insert on nearly every row and being in order stops helping it. A sorted key of nearly distinct values is what `drop_duplicates` on a sorted column is.
+
+The walk is split across cores the way the parallel filter is. Which ordinal a row gets depends on how many groups closed before it, which a worker handed the middle of the column does not know, so the boundaries are counted first and a prefix sum over the per worker counts is the ordinal each worker starts at. The comparison a worker makes at the first row of its own stretch reads the row before it, which belongs to the worker before, and reads are what make that safe.
+
+Two things are refused rather than attempted, and both hand back nothing so the caller falls through to the route that gets them right. A column holding a null does not come in at all, because `Sortedness` says nothing about which end a sort put the nulls at. And only a single key column qualifies, because the flag is per column and two columns each sorted on their own say nothing about whether the pairs are in lexicographic order. A descending column does qualify, since equal values are adjacent either way round and the runs come out in the order they appear either way round. Text is refused for now, because it would otherwise match the uint8 arm of the dtype dispatch and group on the first byte of each view.
+
 ### Added: astype, and about sixty ways to spell a type
 
 `Series.astype` and `DataFrame.astype`, with the pandas signature, and `dtype=` honoured in both constructors instead of refused. The frame form takes one type name for every column or a dict naming some of them, which is what pandas takes.

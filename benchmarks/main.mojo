@@ -90,6 +90,7 @@ from firepanda.hash import (
     hash_into,
     mix,
     radix_partition,
+    sorted_ordinals,
 )
 from firepanda.io.arrow_c import (
     ArrayPtr,
@@ -3231,6 +3232,19 @@ def bench_group(mut harness: Harness) raises:
     var few = Array[DType.uint32](rows)
     var many = Array[DType.uint32](rows)
     var key = Array[DType.int64](rows)
+    # The same thousand groups as `key`, but with the rows in key order rather
+    # than shuffled, which is the column a `sort_values` leaves behind and the
+    # only shape the walk in `hash/sorted.mojo` will take.
+    var run_key = Array[DType.int64](rows)
+    # The same again at a hundred thousand groups, which is past `DIRECT_LIMIT`
+    # and so is the cardinality where the ordinary route has to build a real
+    # table rather than index one. This is the column the walk is for.
+    var run_wide = Array[DType.int64](rows)
+    # Sorted and every row its own group, with the values spread far enough
+    # apart that no direct table could hold them. This is the one shape where
+    # being in order buys the hash table nothing, because no two rows in a row
+    # land in the same slot, and so it is the ceiling on what the walk is worth.
+    var run_far = Array[DType.int64](rows)
     var spread = Array[DType.int64](rows)
     var spread_values = Array[DType.int64](rows)
     var spread_second = Array[DType.int64](rows)
@@ -3246,7 +3260,16 @@ def bench_group(mut harness: Harness) raises:
     var nearly = rows * 2 // 3
     if nearly < 1:
         nearly = 1
+    var run = rows // GROUPS
+    if run < 1:
+        run = 1
+    var run_long = rows // wide
+    if run_long < 1:
+        run_long = 1
     for i in range(rows):
+        run_key[i] = Int64(i // run)
+        run_wide[i] = Int64(i // run_long)
+        run_far[i] = Int64(i) * 1031
         var draw = rng.next_u64()
         values[i] = Int64(draw % 1000)
         sparse[i] = Int64(draw % 1000)
@@ -3518,6 +3541,102 @@ def bench_group(mut harness: Harness) raises:
 
     harness.record(
         "group/ordinals_one_key_wide", "rows", rows, ordinals_one_wide
+    )
+
+    # The pair that says what the sorted route is worth. Both group the same
+    # thousand groups over the same rows; the only difference is that the second
+    # one knows the rows are in key order and walks them instead of building a
+    # table. Read them against each other rather than against anything else in
+    # this section, because the ratio is the whole measurement and the two rows
+    # differ in nothing but the route.
+    var run_columns = List[Series]()
+    run_columns.append(Series("key", run_key^))
+    var run_df = DataFrame.from_series(run_columns^)
+
+    def ordinals_sorted_hashed() raises {imm run_df, imm one_key}:
+        keep(run_df.rows)
+        var out = group_ordinals(run_df.column_refs(), one_key, run_df.rows)
+        keep(out.groups)
+
+    harness.record(
+        "group/ordinals_sorted_hashed", "rows", rows, ordinals_sorted_hashed
+    )
+
+    def ordinals_sorted_walked() raises {imm run_df}:
+        keep(run_df.rows)
+        var out = sorted_ordinals(run_df.columns[0].only())
+        keep(out.value().groups)
+
+    harness.record(
+        "group/ordinals_sorted_walked", "rows", rows, ordinals_sorted_walked
+    )
+
+    # The same pair a hundred times higher in cardinality. The two rows above
+    # are a key small enough to index a table directly, where the ordinary route
+    # already does one pass and a lookup and there is nothing for the walk to
+    # take away. These two are past that limit, so the ordinary route is a real
+    # hash table and the walk is still one comparison a row.
+    var run_wide_columns = List[Series]()
+    run_wide_columns.append(Series("key", run_wide^))
+    var run_wide_df = DataFrame.from_series(run_wide_columns^)
+
+    def ordinals_sorted_wide_hashed() raises {imm run_wide_df, imm one_key}:
+        keep(run_wide_df.rows)
+        var out = group_ordinals(
+            run_wide_df.column_refs(), one_key, run_wide_df.rows
+        )
+        keep(out.groups)
+
+    harness.record(
+        "group/ordinals_sorted_wide_hashed",
+        "rows",
+        rows,
+        ordinals_sorted_wide_hashed,
+    )
+
+    def ordinals_sorted_wide_walked() raises {imm run_wide_df}:
+        keep(run_wide_df.rows)
+        var out = sorted_ordinals(run_wide_df.columns[0].only())
+        keep(out.value().groups)
+
+    harness.record(
+        "group/ordinals_sorted_wide_walked",
+        "rows",
+        rows,
+        ordinals_sorted_wide_walked,
+    )
+
+    # The ceiling. Sorted, every row its own group, values too far apart for a
+    # direct table, so the ordinary route inserts a million distinct keys and
+    # gets nothing back from the rows being in order.
+    var run_far_columns = List[Series]()
+    run_far_columns.append(Series("key", run_far^))
+    var run_far_df = DataFrame.from_series(run_far_columns^)
+
+    def ordinals_sorted_far_hashed() raises {imm run_far_df, imm one_key}:
+        keep(run_far_df.rows)
+        var out = group_ordinals(
+            run_far_df.column_refs(), one_key, run_far_df.rows
+        )
+        keep(out.groups)
+
+    harness.record(
+        "group/ordinals_sorted_far_hashed",
+        "rows",
+        rows,
+        ordinals_sorted_far_hashed,
+    )
+
+    def ordinals_sorted_far_walked() raises {imm run_far_df}:
+        keep(run_far_df.rows)
+        var out = sorted_ordinals(run_far_df.columns[0].only())
+        keep(out.value().groups)
+
+    harness.record(
+        "group/ordinals_sorted_far_walked",
+        "rows",
+        rows,
+        ordinals_sorted_far_walked,
     )
 
     def ordinals_two() raises {imm df, imm two_keys}:
