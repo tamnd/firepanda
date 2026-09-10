@@ -847,6 +847,53 @@ def test_a_take_past_the_split_from_a_column_with_no_nulls() raises:
     assert_equal(first_wrong(taken, col, picks), -1, "a gathered row is wrong")
 
 
+def test_a_take_by_consecutive_indices_is_the_slice_it_looks_like() raises:
+    # The run fast path replaces the whole gather loop with a memcpy and a run
+    # of all ones validity words, so it needs the same length as the two tests
+    # above: past the split, so several morsels take it independently, and one
+    # past a multiple of sixty four, so the last morsel has to mask its tail
+    # word rather than store a full one. The run starts away from zero because
+    # the memcpy's source offset and the validity's output offset are different
+    # numbers and a run beginning at zero would not tell them apart.
+    var col = build[DType.int64](70_000, 0)
+    var picks = List[Int](capacity=65_601)
+    for i in range(65_601):
+        picks.append(100 + i)
+
+    var taken = take_rows(col, picks)
+    assert_equal(len(taken), len(picks))
+    assert_equal(first_wrong(taken, col, picks), -1, "a gathered row is wrong")
+
+
+def test_a_take_by_almost_consecutive_indices_falls_back() raises:
+    # One index out of place has to put the whole morsel back on the general
+    # loop, and the one that matters is the last row of a morsel, because that
+    # is the one a check that stopped early would miss. `TAKE_MORSEL_ROWS` is
+    # sixty five thousand five hundred and thirty six.
+    var col = build[DType.int64](70_000, 0)
+    var picks = List[Int](capacity=65_601)
+    for i in range(65_601):
+        picks.append(100 + i)
+    picks[65_535] = 3
+    picks[65_600] = -1
+
+    var taken = take_rows(col, picks)
+    assert_equal(first_wrong(taken, col, picks), -1, "a gathered row is wrong")
+
+
+def test_a_take_by_consecutive_indices_still_carries_nulls() raises:
+    # A source with nulls is the case the fast path is not allowed to take, so
+    # the run of indices here has to come back with the source's nulls in the
+    # right places rather than a bitmap of all ones.
+    var col = build[DType.int64](70_000, 7)
+    var picks = List[Int](capacity=65_601)
+    for i in range(65_601):
+        picks.append(100 + i)
+
+    var taken = take_rows(col, picks)
+    assert_equal(first_wrong(taken, col, picks), -1, "a gathered row is wrong")
+
+
 def test_take_turns_a_negative_index_into_a_null() raises:
     var col = from_list[DType.int64]([10, 20, 30])
     var taken = take_rows(col, [2, -1, 0])

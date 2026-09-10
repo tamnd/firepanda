@@ -298,6 +298,44 @@ struct AnyArray(Copyable, Movable, Sized):
         """
         return self.data.length
 
+    def retyped(var self, type: LogicalType) raises -> Self:
+        """Returns the column carrying another logical type over the same bytes.
+
+        This exists for the kernels that move rows around without changing what
+        a value means. A filter over a date column builds its output through
+        `Array[DType.int32]`, because that is the layout a date is stored in, and
+        erasing that array gives back a column that says it is an int32. The
+        bytes are right and the type is wrong, and the wrongness is quiet: the
+        frame's schema still says date, and the first thing that compares the two
+        raises somewhere unrelated. So the kernel puts the input's type back on
+        the output, and this is how.
+
+        The physical layout has to be the one already there. Relabelling an
+        int32 buffer as a float32 one would not convert anything, it would read
+        the same bits as a different number, and that is `cast_any`'s job.
+
+        Args:
+            type: The type to carry. Its physical dtype must be the one this
+                column already has.
+
+        Returns:
+            The same column, relabelled.
+
+        Raises:
+            If the physical layouts differ.
+        """
+        if type.physical != self.type.physical:
+            raise Error(
+                "retyped: "
+                + String(type)
+                + " is laid out as "
+                + String(type.physical)
+                + " and this column is laid out as "
+                + String(self.type.physical)
+            )
+        self.type = type
+        return self^
+
     def dtype(self) -> DType:
         """Returns the physical dtype.
 
