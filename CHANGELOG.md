@@ -20,6 +20,16 @@ Two of the answers are not the obvious ones and both are tested. A sum of a cons
 
 Nothing calls any of this yet. The logical nodes, binding, the passes and the lowering into the existing `exec` nodes follow, and the eager API does not change when they do.
 
+### Added: a category column can be compared
+
+`s == "bolt"` on a category column raised, and so did `s < "bolt"`, and so did comparing two category columns to each other. The message was the promotion refusal, which says that what two categoricals combine to depends on their categories and the categories are held by the column rather than by the type. That is true, and a comparison does not need a promotion at all: it needs the codes. `s == "bolt"` is one lookup in the categories and then an integer comparison of every code against one number, which is cheaper than the text comparison the decoded column would do and does not allocate the decoded column.
+
+Six rules come out of pandas and all six were measured rather than designed. Equality works whether the categories are ordered or not. An ordering comparison needs them ordered and says `Unordered Categoricals can only compare equality or not` when they are not. A scalar that is not one of the categories is all false under equality, because a value that is not a category is not equal to any row, and a `TypeError` under an ordering, because there is no position to compare against. Two categoricals have to hold the same categories in the same order, since a code is a position and two lists in different orders give the same code to different values. A categorical against a plain text column compares by value under equality and is refused under an ordering. And the ordering follows the category order rather than the word order, so a column of sizes whose categories are small, medium, large answers `medium < large` as true where the same three words as text answer false, which is the whole point of `ordered=True`.
+
+The messages are the pandas messages word for word, except for the type named when an ordering meets a plain column, where pandas names an internal array class firepanda has no equivalent of. Nulls follow the rest of the library rather than pandas: a comparison against a value that is not there is missing rather than false, which is what a firepanda text or number column already answers.
+
+`min` and `max` on an ordered categorical, sorting by category order, and `between` all follow from the same codes and are not here yet. Document 28 records the reasoning.
+
 ### Changed: an inner join builds on the shorter side rather than the one named right
 
 A join scans one side into a table and walks the other against it, and which side gets scanned was decided by which argument the caller passed second. So `customers.join(orders)` bucketed one and a half million rows in order to walk a hundred and fifty thousand, and the same join written the other way round did a tenth of the work for the same answer. Nothing about the data says which side is which. An inner join now exchanges them when the left is at least four times shorter, and puts the row order back with a counting sort over the result.
