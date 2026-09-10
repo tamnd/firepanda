@@ -20,6 +20,10 @@ On the categorical side a column survives being filtered, taken, stacked and fil
 
 Two pandas surfaces arrived while this was being cut and are in it. `rolling` and `expanding` carry five reductions across a window, and the `str` accessor has twelve names on it that count in characters rather than bytes, which is the difference that makes a position mean the same thing it means in pandas.
 
+The query planner started while this was being cut too, and its first three files are here. `firepanda/plan/` has the expression tree with the three analyses every pass is written in terms of, the nine logical node kinds with a printed form, and the binding pass that turns a name into a position and gives every expression the type the kernel will really answer. Nothing calls any of it yet and no behaviour changes because of it, which is deliberate: the lowering into the existing chunked engine is what connects the two and it is the next piece.
+
+One thing does get faster on its own. A group by on a column already flagged as sorted stops building a hash table and walks the runs instead, which is 14.4 times on a sorted key of nearly distinct values and never a loss.
+
 There is also a join that builds on the shorter side rather than the one the caller named second, a parse budget with a number in it that anybody can reproduce, and four error messages that described our internals instead of the user's mistake.
 
 Patch rather than minor, since the milestone this SQL work belongs to is not finished. S2 is.
@@ -73,6 +77,7 @@ The parser specification had a measured column reading "380 us when the matcher 
 There are six rows in the microbenchmark suite now, three per query, on TPC-H q1 and on `SELECT 1`, because the budget is spent in three places and the interesting question is which. Tokenizing is under one per cent of a parse in both, so the tokenizer is done. The matcher is 38 per cent of q1 and 61 per cent of the trivial one, and the transformer is the rest, which the old table could not see. Against the whole of the work q1 is nearly eight times over budget and the trivial query is nearly five times over.
 
 They were taken twice, before and after the window work landed, and nothing moved outside the spread, so adding a feature to the transformer does not cost the queries that do not use it.
+
 ### Added: binding a plan, so names become positions and every expression has a type
 
 A plan comes out of the builders holding names. `col("l_discount")` is a string, and finding out which column that is means asking a schema. `firepanda/plan/bind.mojo` is the pass that asks, once, and writes the answer onto the tree: a position, a relation, and the logical type the expression produces.
@@ -112,6 +117,7 @@ The three analyses land with the arena rather than with the first pass that want
 Two of the answers are not the obvious ones and both are tested. A sum of a constant is not input independent, because `sum(1)` is the row count and folding it to one at plan time would be wrong. And the table set of an unbound column raises rather than coming back empty, because empty is a real answer that an input independent expression has, and handing it back for a column whose table is simply not known yet would tell pushdown that a predicate is safe to move past the only node able to evaluate it.
 
 Nothing calls any of this yet. The logical nodes, binding, the passes and the lowering into the existing `exec` nodes follow, and the eager API does not change when they do.
+
 ### A group by on a sorted column stops building a hash table
 
 A group by builds a hash table because equal keys are scattered through the column and it has no other way to find them. When the column is already in order they are not scattered, every group is one run of adjacent rows, and walking the column and closing a group each time the value changes gives exactly the same ordinals for one comparison a row. `firepanda/hash/sorted.mojo` is that walk, and `DataFrame._grouping` is the one place that now decides between it and the ordinary route, for every group by, `drop_duplicates` and broadcast in the frame layer.
@@ -123,6 +129,7 @@ What it is worth depends on run length rather than on cardinality, and the measu
 The walk is split across cores the way the parallel filter is. Which ordinal a row gets depends on how many groups closed before it, which a worker handed the middle of the column does not know, so the boundaries are counted first and a prefix sum over the per worker counts is the ordinal each worker starts at. The comparison a worker makes at the first row of its own stretch reads the row before it, which belongs to the worker before, and reads are what make that safe.
 
 Two things are refused rather than attempted, and both hand back nothing so the caller falls through to the route that gets them right. A column holding a null does not come in at all, because `Sortedness` says nothing about which end a sort put the nulls at. And only a single key column qualifies, because the flag is per column and two columns each sorted on their own say nothing about whether the pairs are in lexicographic order. A descending column does qualify, since equal values are adjacent either way round and the runs come out in the order they appear either way round. Text is refused for now, because it would otherwise match the uint8 arm of the dtype dispatch and group on the first byte of each view.
+
 ### Added: rolling and expanding windows, and the five reductions a window can be carried through
 
 pandas has three window types and puts twenty six reductions on the first two, and the conformance board had every one of them at zero. `s.rolling(...)` and `s.expanding(...)` are here now, with `sum`, `mean`, `count`, `min` and `max` on each and with all five of the parameters that decide where a window sits.
@@ -738,6 +745,7 @@ A constant carries a resolution the same way a column does, through the new `Val
 `Series.dt_days` floors rather than truncating, so minus one microsecond is minus one day, which is the rule that keeps the days and the remainder adding back up and is the thing a positive only test corpus cannot catch. `Series.dt_total_seconds` answers float64 at every resolution, including on a column of whole seconds, and is lossy past 2 to the 53 because pandas' is. `Series.to_timedelta` on an integer column is a relabelling and not a conversion: the integers are already the counts, so nothing is computed and no null turns into a zero length span on the way through. A column that already carries a resolution comes back unchanged.
 
 Eighteen tests in `tests/test_temporal_duration.mojo`, every expected value read off pandas 3.0.3 rather than worked out, covering both signs of the mean truncation and both signs of the day rounding. The fuzzer checks the two readers and the three reductions against one row at a time twins one case in eight, with the day twin using an explicitly floored division rather than the language operator so that agreement is evidence about the answer and not about the operator, and with the duration columns drawn by random bit width and separately drawn sign so a run sees spans of a few units beside spans of a few centuries. Four hundred thousand cases at seed 20260907 found nothing. The arithmetic between two temporal columns is deliberately not fuzzed, because it is a rescale in front of the add and subtract loops the fuzzer already runs over every dtype.
+
 ### From a parse tree to something worth binding against
 
 `firepanda/sql/transform.mojo`, the piece between the matcher and the arenas, and the only file in the engine that knows a grammar rule name. A grammar bump therefore breaks this file or nothing.
@@ -1120,6 +1128,7 @@ Read honestly that says three things. Against polars, which is the like for like
 Starts with and ends with do not search at all. Both know where to look, so both are a length test and one run of bytes compared at a fixed offset, which is what `text/starts_with` and `text/ends_with` are in the benchmark suite to confirm: if they are ever close to `text/contains_hit` then the skipping has stopped working.
 
 There is no general pattern compiler and this is not a step towards one before it is needed. A matcher with a wildcard alphabet is a different piece of work, it would be slower on all four of these, and none of the queries ask for it.
+
 ### DuckDB's grammar is in the tree, and a table is generated from it
 
 DuckDB replaced its Bison parser with a hand written PEG parser and shipped the grammar as data. Forty `.gram` files, five keyword lists, 61,190 bytes, MIT licensed, and executed by the reference implementation itself rather than being a description of it. That is the artifact the whole SQL milestone rests on, and it is now vendored at `firepanda/sql/grammar/` with a `VENDOR` file recording the upstream commit and a SHA-256 for each of the 47 files.
@@ -2147,6 +2156,7 @@ The second gate took the measurement to find. Spreading the work costs a task pe
 On that machine, at a million rows, over a line of a computed column then a filter then a projection: `exec/pipeline_line_16k` 5.59 ms to 1.94 and `exec/pipeline_line` 5.26 to 1.66, both with every new run below every old one across three alternating blocks. `exec/pipeline_project`, `exec/pipeline_project_128k`, `exec/pipeline_cast` and `exec/pipeline_cast_128k` all take the sequential route now and all four land inside the noise, between minus 0.2 and plus 1.8 percent. `exec/pipeline_line_one_chunk` and `exec/pipeline_limited` are the controls and did not move.
 
 Handing tasks out one per chunk is not the last word. A shared counter that gives each worker several chunks would pay for the tasks once per core rather than once per chunk, and would let the projection and the cast back onto the parallel route. That is a later change and it needs the batch to stay bounded.
+
 ### A NaN is missing when you ask whether a row is missing
 
 The other side of the same question. pandas on the numpy backend has no separate presence bitmap for a float column, so NaN is the only missing it has there, and `Series([1.0, nan]).count()` is 1. firepanda followed Arrow, where a NaN is an ordinary float that happens to compare false against itself, so it answered 2. `isna` said False on a NaN, `notna` said True, `dropna` kept the row, and `hasnans` said a column with a NaN in it had none.
