@@ -32,6 +32,18 @@ Two of the answers are not the obvious ones and both are tested. A sum of a cons
 
 Nothing calls any of this yet. The logical nodes, binding, the passes and the lowering into the existing `exec` nodes follow, and the eager API does not change when they do.
 
+### Added: the Mojo `Series` can reach a category column too
+
+The `cat` namespace went in on the Python side and called the kernels directly, past the Mojo `Series` rather than through it. That left the two front doors disagreeing about what the library can do. A caller writing Python could read a category column's codes; a caller writing Mojo could not, and had to import `firepanda.kernel.dictionary` and hold an `AnyArray`, which is the layer the frame package exists to cover.
+
+`Series` now has `cat_is_category`, `cat_categories`, `cat_codes`, `cat_ordered`, `cat_set_ordered`, `cat_rename_categories`, `cat_set_categories` and `cat_drop_unused_categories`. They are named for the kernel operation rather than for the pandas spelling, the way the 30 `dt_*` and 5 `str_*` members already are, because the pandas spelling is what the Python layer is for. The two reads hand back a series: the categories come back unnamed and with a range of their own, since there are as many of them as the column has distinct values rather than rows, and the codes come back unnamed and carrying the row labels, since a caller reading codes is lining two columns up.
+
+The Python accessor now calls those members instead of the kernels, so there is one implementation rather than two. It lost its own copy of the rule that a rewritten column keeps its row labels, which is the part that would have drifted.
+
+What did not move is the list arithmetic. `add_categories`, `remove_categories` and `reorder_categories` are still worked out in Python, because each of them has an opinion about what a caller can get wrong and the opinions are pandas' rather than the kernel's. So those three names exist on one door and not on the other, and a Mojo caller who wants them builds the list and calls `cat_set_categories`.
+
+This was found by the conformance driver rather than by review. That driver runs the data cases through the Mojo API, so it had no way to ask for any of this and reported all 64 runs across the 36 `categorical/*` case ids as absent, on a section the library largely implements. It could have reached into the kernels the way the Python layer did and answered most of them, and did not, because a pass produced that way is a pass nobody holding a `Series` can get.
+
 ### Added: a category column can be compared
 
 `s == "bolt"` on a category column raised, and so did `s < "bolt"`, and so did comparing two category columns to each other. The message was the promotion refusal, which says that what two categoricals combine to depends on their categories and the categories are held by the column rather than by the type. That is true, and a comparison does not need a promotion at all: it needs the codes. `s == "bolt"` is one lookup in the categories and then an integer comparison of every code against one number, which is cheaper than the text comparison the decoded column would do and does not allocate the decoded column.
