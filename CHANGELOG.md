@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: astype no longer halves the precision of a longdouble on x86
+
+`longdouble` and its character code `g` are refused by name now, where before they resolved to float64. That mapping was measured on an arm Mac, where numpy's `longdouble` really is a float64, and it is wrong on x86 Linux, where it is an eighty bit float that numpy prints as float128. Anyone asking for the widest float the machine has and getting float64 back is getting half of what they asked for, without being told.
+
+It is the only name in the table whose answer changes with the machine rather than with the argument, so unlike `long` and `uint` it cannot be written down as a row. firepanda has no float wider than float64 on any platform, which puts it with `complex` and `void` and the rest of the types the refusal table exists for, and the message says so and points at `double` for the float64 the caller may have wanted anyway.
+
+Found by CI on Linux, on a test that passed on macOS for exactly this reason.
+
 ### Fixed: the interpreter CI reached for stopped working
 
 `uv run` takes the newest interpreter it can find, the newest one is now a free threaded build of 3.14, and importing the extension into it segfaults inside `PyInit__firepanda` before a single test runs. Every platform failed at once, on pull requests that touched no Python at all, which is the signature of the environment moving rather than the code. The extension tests now name the version they run on.
@@ -18,7 +26,7 @@ This is a stopgap and the comment on the step says so. An extension that does no
 
 `Series.astype` and `DataFrame.astype`, with the pandas signature, and `dtype=` honoured in both constructors instead of refused. The frame form takes one type name for every column or a dict naming some of them, which is what pandas takes.
 
-The cast itself was already written and tested in Mojo and simply had no door into Python. Almost all of the new code is the other half of the method, which is working out what type the caller asked for. pandas resolves a dtype through numpy and numpy has spent thirty years collecting names, so `int64` is also `int`, `int_`, `intp`, `long`, `longlong`, `l`, `q`, `p` and `i8`, and a program written by somebody who learned numpy first uses whichever of those they learned. Every row of the table was measured against a running pandas 3.0.3 rather than remembered, which is how the surprises got in: `i` is int32 and not int64, `u` is not a name at all though `i`, `f` and `b` are, `long` is int64 while `longdouble` is float64, and `unicode`, `str_`, `U` and `O` are all the object dtype rather than text. The test walks the whole table and asks a live pandas what each name means, so a row added without being measured fails.
+The cast itself was already written and tested in Mojo and simply had no door into Python. Almost all of the new code is the other half of the method, which is working out what type the caller asked for. pandas resolves a dtype through numpy and numpy has spent thirty years collecting names, so `int64` is also `int`, `int_`, `intp`, `long`, `longlong`, `l`, `q`, `p` and `i8`, and a program written by somebody who learned numpy first uses whichever of those they learned. Every row of the table was measured against a running pandas 3.0.3 rather than remembered, which is how the surprises got in: `i` is int32 and not int64, `u` is not a name at all though `i`, `f` and `b` are, `long` is int64 while `longdouble` is not a float64 anywhere but on arm, and `unicode`, `str_`, `U` and `O` are all the object dtype rather than text. The test walks the whole table and asks a live pandas what each name means, so a row added without being measured fails.
 
 A type pandas has and firepanda does not is refused by name with the reason, rather than being absent and failing on the lookup. Four of those refusals are for types firepanda does have. A cast to `datetime64[ns]`, `timedelta64[ns]` or `date32[day]` falls through to the physical layout underneath and would hand back the integers the instants, spans and days are stored as, and a cast to `binary` hands back text. All four are worth fixing in the kernel and none of them is worth shipping as a silent wrong answer in the meantime.
 
@@ -217,6 +225,18 @@ Three doors rather than one, though, and the rule for which is which is the shap
 pandas defaults three parameters to a private sentinel, `lib.no_default`, and firepanda now has its own `NO_DEFAULT` to put in the same three places. `shift(fill_value=)`, `dropna(how=)` and `dropna(thresh=)` are the three. It is not the pandas object, because importing a private name out of pandas to spell a default would make pandas a hard dependency of a library that does not otherwise need it, and it is not `None`, because `None` is a value a caller can pass to `fill_value` and it has to be distinguishable from not passing anything.
 
 Every argument pandas declares and this does not implement raises rather than being ignored, the same way the reductions do. `axis=1` on a frame transformation, `skipna=False` on a scan, `numeric_only`, `limit_area`, `shift(freq=)`, a list of periods with a `suffix`, a `fill_value` on a shift, `dropna(how="all")`, a `thresh`, `inplace` and `ignore_index` each refuse by name with the reason in the message, and there is a test per refusal.
+
+### Parse, print, reparse, over the whole corpus
+
+`pixi run differential-sql` now puts every statement firepanda parses through the transformer and the printer twice and checks that the two printings agree. That is 69,153 statements, of which 15,915 come back the same text twice, 2,735 refuse by name, and 50,502 are statements the transformer is not aimed at yet and fail in the matcher rather than in a transformer case. Nothing is broken and nothing is unstable, and both of those numbers have a ceiling of zero so they stay that way.
+
+The four outcomes are separated on purpose. A refusal starts with `Not Implemented Error:` and is the expected answer for anything outside the surface firepanda covers, so it is counted rather than failed. A statement the query rule does not match at all is a `CREATE TABLE` or an `ATTACH` and is the size of the work that is left rather than a defect. Anything else out of the transformer is a bug, and text that prints back to something different is a printer that lost something. Running them together in one number would have hidden the two that matter behind the fifty thousand that do not.
+
+The printer no longer calls itself once per child. `x + x + x` folds to the left, so the eight kilobyte expression in DuckDB's `overflow/expression_tree_depth.test` is a tree two thousand deep, and a recursive printer runs out of stack on it and takes the process down with it. The walk is now a loop over an explicit stack with a phase counter saying which part of a node is being written, which is the same shape the transformer's walk already had. Depth costs heap and the two thousand term chain prints in one pass. That closes #368.
+
+Two quoting bugs came out of the corpus and both were the printer writing a name bare that cannot stand bare. `SELECT "inner" FROM t` came back as a syntax error at the `FROM`, and `ORDER BY s COLLATE "is"` came back as one at the `s`. The rule was quoting reserved keywords only, and DuckDB has five keyword classes rather than two. A column name keyword such as `coalesce` may stand anywhere and stays bare, a function name or type name keyword such as `inner` or `left` may only stand where a function is being called, and a reserved keyword may stand nowhere. So the same word is quoted as a column and bare as a call, which is what the grammar says and what the round trip now checks on seventy thousand statements.
+
+One statement is left that firepanda prints correctly and cannot read back, and it is the two thousand term chain. The printer parenthesizes every operand, so the text opens with two thousand parentheses and the matcher's own depth guard stops at about twenty two. It has a ceiling of its own and a bucket of its own, because nothing was lost: the AST is right and the text is right, and the only thing that cannot read it is our matcher. It goes when the matcher becomes an explicit stack machine.
 
 ### The corpus differential stops taking the process down with it
 
