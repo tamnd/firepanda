@@ -8,6 +8,10 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### The corpus differential stops taking the process down with it
+
+`pixi run differential-sql` printed its whole report and then died in a destructor, with `corrupted double-linked list` on Linux and a heap trace on macOS, and CI hung afterwards until the runner cancelled the job twenty minutes later. The run had passed. What was lost was the exit status. The harness is a Mojo binary with CPython embedded in it, and importing DuckDB into that interpreter registers process exit handlers that run after the interpreter has been finalized and free a connection that is no longer there. The asking now happens in a child process, which costs one fork and one pipe for seventy thousand statements, and the parent never loads DuckDB at all. That closes #359.
+
 ### The twelve reductions a pandas program can finally call
 
 `s.sum()`, `s.mean()`, `s.min()`, `s.max()`, `s.median()`, `s.skew()`, `s.std()`, `s.var()`, `s.sem()`, `s.quantile()`, `s.nunique()` and the same list on a frame, plus `df.count()`, now work from Python. They worked in Mojo the whole time. The core has had seventeen reductions behind `AggKind` since the aggregation work landed, and the Python extension exposed none of them, which meant the second most written expression in pandas after `df["a"]` was not available to a pandas program. This is the binding catching up with the library rather than the library learning anything.
