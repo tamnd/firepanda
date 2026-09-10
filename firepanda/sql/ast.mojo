@@ -644,7 +644,6 @@ is the default and is read and dropped, the way `EXCLUDE NO OTHERS` is on a
 window frame.
 """
 
-
 comptime CLAUSE_SLOTS: Int = 7
 """How many entries a query node's clause run always has."""
 
