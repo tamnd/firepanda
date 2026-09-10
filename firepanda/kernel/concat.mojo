@@ -156,8 +156,13 @@ def concat_refs_any(
         # The `is_string` half is not redundant. A string column's physical
         # dtype is uint8, so a string column and a column of bytes agree on
         # `dtype()` and are not the same column at all.
+        # The logical type and not just the layout, because a date and an
+        # int32 are stored the same way and stacking them would produce a
+        # column that is one of the two and says so, having quietly decided
+        # which. `cast_any` is how a caller means to mix them.
         if (
-            parts[p][].dtype() != dt
+            parts[p][].type != parts[0][].type
+            or parts[p][].dtype() != dt
             or parts[p][].is_string() != parts[0][].is_string()
         ):
             raise Error(
@@ -165,24 +170,6 @@ def concat_refs_any(
                 + String(parts[0][].type)
                 + " and "
                 + String(parts[p][].type)
-            )
-        # A column of times is an integer count of units underneath, so two of
-        # them at different resolutions agree on `dtype()` and are not the same
-        # column at all. Stacking a second column onto a millisecond one without
-        # noticing would put every value of one of them out by a factor of a
-        # thousand, silently, which is the worst answer available. pandas
-        # reconciles the two at the finer unit here; firepanda refuses for now
-        # and says so, because a wrong answer costs more than a missing one.
-        if (
-            parts[0][].type.is_temporal() or parts[p][].type.is_temporal()
-        ) and parts[p][].type != parts[0][].type:
-            raise Error(
-                "concat: "
-                + String(parts[0][].type)
-                + " and "
-                + String(parts[p][].type)
-                + " are counts of different things and stacking them would put"
-                " one of the two out by the ratio between their units"
             )
         total += len(parts[p][])
 
@@ -203,7 +190,7 @@ def concat_refs_any(
         else:
             for p in range(len(parts)):
                 out.paste(parts[p][].strings())
-        return AnyArray(out^.finish())
+        return AnyArray(out^.finish()).retyped(parts[0][].type)
 
     var fixed = List[_Part](capacity=len(parts))
     var at = 0
@@ -213,8 +200,9 @@ def concat_refs_any(
 
     comptime for candidate in ALL:
         if dt == candidate:
-            var stacked = _stack_fixed[candidate](fixed, total)
-            return AnyArray(stacked^.into_data(), parts[0][].type)
+            return AnyArray(_stack_fixed[candidate](fixed, total)).retyped(
+                parts[0][].type
+            )
     raise Error("concat: unsupported dtype " + String(dt))
 
 
@@ -235,12 +223,12 @@ def concat_two_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
     Raises:
         If the dtypes differ or have no physical layout.
     """
-    if a.dtype() != b.dtype():
+    if a.type != b.type or a.dtype() != b.dtype():
         raise Error(
             "concat: every column must have the same dtype; got "
-            + String(a.dtype())
+            + String(a.type)
             + " and "
-            + String(b.dtype())
+            + String(b.type)
         )
     if a.is_string() != b.is_string():
         raise Error(
@@ -249,18 +237,6 @@ def concat_two_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
             + " and "
             + String(b.type)
         )
-    # As in `concat_refs_any`: two resolutions share a physical dtype and are
-    # not the same column, and a join stacking one onto the other would be out
-    # by the ratio between the units with nothing to show for it.
-    if (a.type.is_temporal() or b.type.is_temporal()) and a.type != b.type:
-        raise Error(
-            "concat: "
-            + String(a.type)
-            + " and "
-            + String(b.type)
-            + " are counts of different things and stacking them would put one"
-            " of the two out by the ratio between their units"
-        )
     if a.is_string():
         var out = _StringStack(
             len(a) + len(b),
@@ -268,7 +244,7 @@ def concat_two_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
         )
         out.paste(a.strings())
         out.paste(b.strings())
-        return AnyArray(out^.finish())
+        return AnyArray(out^.finish()).retyped(a.type)
 
     var fixed = List[_Part](capacity=2)
     fixed.append(_part_of(a.data, 0))
@@ -276,8 +252,9 @@ def concat_two_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
 
     comptime for candidate in ALL:
         if a.dtype() == candidate:
-            var stacked = _stack_fixed[candidate](fixed, len(a) + len(b))
-            return AnyArray(stacked^.into_data(), a.type)
+            return AnyArray(
+                _stack_fixed[candidate](fixed, len(a) + len(b))
+            ).retyped(a.type)
     raise Error("concat: unsupported dtype " + String(a.dtype()))
 
 
