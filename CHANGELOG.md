@@ -18,6 +18,8 @@ On the SQL side this closes S2 of the DuckDB dialect milestone. Window specifica
 
 On the categorical side a column survives being filtered, taken, stacked and filled, which it did not before: eight kernels were producing a column whose type said category and whose category list was empty, and had been since dictionary columns were added. Comparison works, the Mojo `Series` can reach the same surface the Python `cat` namespace could, and an imported dictionary column can be read at all.
 
+Two pandas surfaces arrived while this was being cut and are in it. `rolling` and `expanding` carry five reductions across a window, and the `str` accessor has twelve names on it that count in characters rather than bytes, which is the difference that makes a position mean the same thing it means in pandas.
+
 There is also a join that builds on the shorter side rather than the one the caller named second, a parse budget with a number in it that anybody can reproduce, and four error messages that described our internals instead of the user's mistake.
 
 Patch rather than minor, since the milestone this SQL work belongs to is not finished. S2 is.
