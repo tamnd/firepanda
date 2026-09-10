@@ -52,15 +52,29 @@ so the variable width case is answered before the dispatch is reached, by the
 kernels in `text.mojo`. Arithmetic on text is still an error, and it is the same
 error it was: there is no common type between a string and a number, and adding
 two strings is a concatenation, which is a function rather than an operator here.
+
+Comparison on a category column is answered before the dispatch too, and for a
+stronger reason than text. `promote` refuses every mixture involving a dictionary
+type, because what two categoricals combine to depends on their categories and
+the categories are held by the column rather than by the type. That refusal is
+right and a comparison does not need it: comparing codes to a code answers the
+question without promoting anything, and it is cheaper than the text comparison
+the decoded column would do. The six rules pandas has for it are in
+`_dictionary_erased` and `_dictionary_const_erased`.
 """
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
+from firepanda.array.strings import StringArray
 from firepanda.array.value import Value
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
 from firepanda.dtype.logical import LogicalType, TypeKind, promote
 from firepanda.dtype.temporal import TimeUnit, TimeZone, finer_unit
+from firepanda.kernel.dictionary import (
+    decode_dictionary,
+    dictionary_codes,
+)
 
 from .arith import (
     OP_ADD,
@@ -727,6 +741,13 @@ def binary_any(a: AnyArray, b: AnyArray, op: BinaryOp) raises -> AnyArray:
             + " rows and the right has "
             + String(len(b))
         )
+    # Ahead of `binary_type`, because that reaches `promote` and `promote`
+    # refuses every mixture involving a dictionary type. Arithmetic falls
+    # through on purpose and collects that refusal, which is the right answer
+    # for it.
+    if (a.is_dictionary() or b.is_dictionary()) and op.is_comparison():
+        return _dictionary_erased(a, b, op)
+
     # Checked first and for its own sake. Everything below assumes the pair has
     # a common type and that the operation is defined on it.
     var answer = binary_type(op, a.type, b.type)
@@ -796,6 +817,252 @@ def _compare_text_erased(
     if op == BinaryOp.GT:
         return AnyArray(compare_text[CMP_GT](x, y))
     return AnyArray(compare_text[CMP_GE](x, y))
+
+
+comptime _UNORDERED = "Unordered Categoricals can only compare equality or not"
+"""What pandas says when an ordering comparison meets a categorical that has no
+meaning to its order. Reproduced word for word, because a program that catches
+the `TypeError` and matches on its text is a program that exists."""
+
+
+def _same_categories(a: StringArray, b: StringArray) -> Bool:
+    """Reports whether two category lists are the same list in the same order.
+
+    Order counts. A code is a position, so two columns whose categories hold the
+    same labels in a different order give the same code to different values, and
+    comparing the codes would answer confidently and wrongly.
+
+    Args:
+        a: The left column's categories.
+        b: The right column's categories.
+
+    Returns:
+        True if the two lists match label for label.
+    """
+    if len(a) != len(b):
+        return False
+    for k in range(len(a)):
+        if a.is_valid(k) != b.is_valid(k):
+            return False
+        if a.is_valid(k) and a[k] != b[k]:
+            return False
+    return True
+
+
+def _scalar_kind(type: LogicalType) -> String:
+    """The Python type name pandas puts in an invalid comparison message.
+
+    pandas names the type of the object the caller passed rather than the dtype
+    it was read at, so a `5` is an `int` and not an int64. Only the four kinds a
+    Python literal can arrive as need a name here.
+
+    Args:
+        type: The dtype the scalar was read as.
+
+    Returns:
+        The name.
+    """
+    if type.is_variable_width():
+        return "str"
+    if type.kind == TypeKind.BOOL:
+        return "bool"
+    if type.is_float():
+        return "float"
+    return "int"
+
+
+def _dunder(op: BinaryOp) -> String:
+    """The dunder pandas names a comparison by inside an error message.
+
+    Args:
+        op: The comparison.
+
+    Returns:
+        The dunder, with the underscores on it.
+    """
+    if op == BinaryOp.EQ:
+        return "__eq__"
+    if op == BinaryOp.NE:
+        return "__ne__"
+    if op == BinaryOp.LT:
+        return "__lt__"
+    if op == BinaryOp.LE:
+        return "__le__"
+    if op == BinaryOp.GT:
+        return "__gt__"
+    return "__ge__"
+
+
+def _dictionary_erased(
+    a: AnyArray, b: AnyArray, op: BinaryOp
+) raises -> AnyArray:
+    """Compares a category column with another column.
+
+    Three shapes and three answers. Two categoricals that hold the same
+    categories in the same order compare as their codes do, which is an integer
+    comparison over columns that already exist and is cheaper than comparing the
+    text they decode to. Two that disagree about their categories are refused,
+    because a code means nothing outside the list it indexes and there is no
+    reading of `<` that spans two different lists. A categorical against an
+    ordinary column compares by value under equality, which means decoding, and
+    is refused under an ordering, which is pandas' rule and not one invented
+    here.
+
+    An ordering comparison needs both sides ordered. That is what `ordered=True`
+    is for and it is the one thing a caller sets it to get.
+
+    The decoding arm only has somewhere to go when the other column holds text,
+    since a categorical holds text and a number column has no reading of `==`
+    against it that is not already false. That is refused rather than answered
+    all false, because a caller comparing a category column against a number has
+    made a mistake rather than asked a question with a boring answer.
+
+    Args:
+        a: The left column.
+        b: The right column, of the same length.
+        op: The comparison.
+
+    Returns:
+        A bool column, null wherever either input is null.
+
+    Raises:
+        Error: If the two sides disagree about their categories, if an ordering
+            comparison meets an unordered categorical, if an ordering comparison
+            meets a column that is not a categorical at all, or if the other
+            column is neither a categorical nor text.
+    """
+    var equality = op == BinaryOp.EQ or op == BinaryOp.NE
+    if a.is_dictionary() and b.is_dictionary():
+        if not _same_categories(a.categories(), b.categories()):
+            raise Error(
+                "Categoricals can only be compared if 'categories' are the"
+                " same."
+            )
+        if not equality and not (a.type.ordered and b.type.ordered):
+            raise Error(_UNORDERED)
+        return _binary_erased(
+            AnyArray(dictionary_codes(a)),
+            AnyArray(dictionary_codes(b)),
+            op,
+            DType.int32,
+        )
+
+    if not equality:
+        raise Error(
+            String(
+                "Cannot compare a Categorical for op ",
+                _dunder(op),
+                " with type ",
+                (b if a.is_dictionary() else a).type,
+                (
+                    ". If you want to compare values, decode the categorical"
+                    " first with astype(str)."
+                ),
+            )
+        )
+
+    var other = (b.type if a.is_dictionary() else a.type).copy()
+    if not other.is_variable_width():
+        raise Error(
+            String(
+                "no common type for category and ",
+                other,
+                (
+                    ", because a categorical holds text and comparing it to a"
+                    " number is a comparison between two kinds of thing"
+                ),
+            )
+        )
+
+    # `_compare_text_erased` rather than `binary_any`, which is what
+    # `binary_any` would reach anyway with two text columns and a comparison.
+    # Going back through the front door would make this function and that one
+    # mutually recursive, and the compiler pays for that: the same call written
+    # as recursion took the binary tests from a two second build to one that had
+    # not finished in ten minutes.
+    var left = AnyArray(
+        decode_dictionary(a)
+    ) if a.is_dictionary() else AnyArray(copy=a)
+    var right = AnyArray(
+        decode_dictionary(b)
+    ) if b.is_dictionary() else AnyArray(copy=b)
+    return _compare_text_erased(left, right, op)
+
+
+def _dictionary_const_erased(
+    a: AnyArray, b: Value, op: BinaryOp, value_on_left: Bool
+) raises -> AnyArray:
+    """Compares a category column with one constant.
+
+    The whole operation is a lookup and an integer comparison. The constant is
+    found in the categories once, which gives a code, and then the column's
+    codes are compared against that one number. Nothing is decoded and nothing
+    is promoted.
+
+    The asymmetry between equality and ordering is where the constant is not one
+    of the categories. Equality can still answer, because a value that is not a
+    category is not equal to any row, and pandas answers all false. An ordering
+    cannot, because there is no position to compare against, and pandas raises.
+    The all false answer is written as a comparison against minus one rather
+    than as a loop of its own, since no code is ever negative and the ordinary
+    constant loop already carries the nulls across.
+
+    Args:
+        a: The category column.
+        b: The constant.
+        op: The comparison.
+        value_on_left: True for `"b" < s` rather than `s < "b"`.
+
+    Returns:
+        A bool column, null wherever the column is null and null everywhere if
+        the constant is null.
+
+    Raises:
+        Error: If an ordering comparison meets an unordered categorical, or one
+            whose categories do not include the constant.
+    """
+    if b.is_null():
+        return all_null(LogicalType.BOOL, len(a))
+
+    var applied = op.mirrored() if value_on_left else op
+    var equality = applied == BinaryOp.EQ or applied == BinaryOp.NE
+
+    var at = -1
+    if b.type.is_variable_width():
+        ref categories = a.categories()
+        var text = b.as_string()
+        for k in range(len(categories)):
+            if categories.is_valid(k) and categories[k] == text:
+                at = k
+                break
+
+    if at < 0:
+        if not equality:
+            if not a.type.ordered:
+                raise Error(_UNORDERED)
+            raise Error(
+                String(
+                    "Invalid comparison between dtype=category and ",
+                    _scalar_kind(b.type),
+                )
+            )
+        return _binary_const_erased(
+            AnyArray(dictionary_codes(a)),
+            Value(Int32(-1)),
+            applied,
+            DType.int32,
+            False,
+        )
+
+    if not equality and not a.type.ordered:
+        raise Error(_UNORDERED)
+    return _binary_const_erased(
+        AnyArray(dictionary_codes(a)),
+        Value(Int32(at)),
+        applied,
+        DType.int32,
+        False,
+    )
 
 
 def _temporal_erased(
@@ -934,6 +1201,12 @@ def binary_value_any(
         that common type, or if the constant is an integer the column's dtype
         cannot hold and the operation is arithmetic.
     """
+    # The same arm `binary_any` has, and ahead of `resolve_constant` for the
+    # same reason: a category column has no width to give a weak scalar and no
+    # common type with anything, and a comparison needs neither.
+    if a.is_dictionary() and op.is_comparison():
+        return _dictionary_const_erased(a, b, op, value_on_left)
+
     # A Python scalar arrives without a width and takes the column's, so this
     # runs before anything reads the constant's type.
     var scalar = resolve_constant(a.type, b, op)
