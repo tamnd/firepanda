@@ -794,5 +794,28 @@ def test_the_table_has_an_entry_for_the_statement_rule() raises:
     assert_true(rules.parens_rule >= 0)
 
 
+def test_the_table_is_total_over_everything_it_can_reach() raises:
+    # Building the table is the check. `Transform.__init__` walks the grammar
+    # from `Statement` and refuses to hand back a table with a reachable rule
+    # that has no case, so every test in every file is already running it and
+    # this line is what says so out loud.
+    var g = Grammar()
+    var rules = Transform(g)
+
+    # Which leaves one thing worth asserting from out here: that the check is
+    # not passing because everything got a case. Rules with none are still
+    # there in their hundreds, all of them under a statement that refuses
+    # before anything below it is read, and that is the shape to keep.
+    var without = 0
+    for i in range(len(g.names)):
+        if rules.actions[i] == 0:
+            without += 1
+    assert_true(without > 0, "every rule in the grammar has a case, somehow")
+    assert_true(
+        without < len(g.names) // 2,
+        String(without, " of ", len(g.names), " rules have no case"),
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
