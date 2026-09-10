@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the `str` accessor, and the twelve names where a position is a character
+
+pandas puts fifty seven names on `s.str` and the conformance board had every one of them at zero, which made `strings` the largest section in the suite sitting at nothing. Twelve of them are here, and they are twelve rather than some other number because they share one idea: `len`, `slice`, `slice_replace`, `get`, `find`, `rfind`, `index`, `rindex`, `startswith`, `endswith`, `removeprefix` and `removesuffix` each either take a position in a string or answer one, and a position in a string is a character.
+
+Every string kernel written before this one counts bytes, and every one of them is right to. A SQL `substring` is defined on bytes here because that is what the planner needs, a `LIKE` pattern matches byte sequences because a valid UTF-8 encoding is a substring of another exactly when the string is, a sort over UTF-8 bytes is code point order, and a hash does not care. `s.str.len()` is the first question in the library that cannot be answered that way: `héllo` is five characters in six bytes and `日本語です` is five characters in fifteen. So `firepanda/kernel/chars.mojo` is new, and it is the one file in the library that counts characters.
+
+It builds its output one row at a time rather than sizing it in parallel the way `substr.mojo` does, because that trick rests on the output length of an element being derivable from its input length, and how many bytes `[1:4]` takes out of a row depends on which characters are in it. The two that do not build strings do not pay for that. `len` is a parallel pass over morsels that tests the top two bits of each byte, and `find` uses the SIMD byte search that already existed and then converts the byte offset it gets back into a character position, which is a linear pass over the prefix of a row that already matched and is nothing at all on the rows where the search failed.
+
+A slice bound crosses the boundary as an absence rather than as a number, since Python's rules resolve it against the length of the string and every row has a different one. `s.str.slice(None, None, -1)` reverses each row and `s.str.slice(0, 0, -1)` empties them, so `None` there is a value and not a caller who left an argument out. `maybe_whole` in `args.mojo` is the reader for that and is the only one that answers an optional. `get` takes its index in the same position and is a separate kernel from a slice of one character, because a slice past the end of a short row is the empty string and a `get` past the end is missing, which is pandas rather than Python.
+
+Three bound methods carry all twelve, on the rule document 07 sets and the temporal accessor follows: the shape of the answer picks the door, and there are three shapes here, a mask, a number and text. `index` and `rindex` are not in the extension at all, since they are `find` and `rfind` that raise where those answer -1, and where the exception is thrown is a pandas question rather than a kernel one. They cost a full pass over an answer that is then thrown away, which is what pandas pays for the same reason.
+
+The accessor refuses a column that is not text when it is built rather than when it is used, with an `AttributeError` so that `hasattr(s, "str")` answers False instead of raising, which is what pandas does and what `cat` here already did. The forty five names that are not spelled do not resolve, rather than resolving and refusing, because an absent name reads as unimplemented on the board and a refusing one reads as a failure.
+
+Document 30 is the argument, including what the remaining forty five are waiting on and why case conversion needs a decision before it needs a kernel.
+
 ### Fixed: a category column survives being filtered, taken, stacked and filled
 
 `s.dropna()` on a category column raised, and not with a message about categories. It came out of the Arrow writer, several layers away, saying the column was a categorical with no categories behind it.

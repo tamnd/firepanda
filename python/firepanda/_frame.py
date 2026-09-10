@@ -31,6 +31,7 @@ from ._pandas import (
     Namespace,
     SeriesGroupByMixin,
     SeriesMixin,
+    StringMixin,
     _grouped,
 )
 from .errors import translate
@@ -43,6 +44,7 @@ __all__ = [
     "Index",
     "Series",
     "SeriesGroupBy",
+    "StringAccessor",
 ]
 
 
@@ -357,6 +359,107 @@ class DatetimeProperties(DatetimeMixin):
         """The ISO 8601 year, week and day of every row, as a frame."""
         try:
             return self._isocalendar()
+        except Exception as error:
+            raise translate(error) from None
+
+
+class StringAccessor(StringMixin):
+    """The `str` accessor, which is the largest namespace pandas has.
+
+    Reached from `s.str`, and only on a column of text, which pandas also refuses at the
+    accessor rather than at the method: `s.str` on a column of numbers is an
+    `AttributeError` there and here. The same reasoning the `cat` accessor gives
+    applies, since a caller writing `s.str` has already decided what the column is.
+
+    Twelve of the fifty seven names so far, and the twelve share one idea: a position in
+    a string is a character and not a byte. Every other kernel in this library counts
+    bytes, which is right for a `LIKE` pattern and for a sort order and is not what
+    `s.str.len()` answers.
+    """
+
+    __slots__ = ()
+
+    def len(self) -> Series:
+        """How many characters each row holds."""
+        try:
+            return self._number("len")
+        except Exception as error:
+            raise translate(error) from None
+
+    def slice(self, start: Any = None, stop: Any = None, step: Any = None) -> Series:
+        """A range of characters out of every row, under Python's slice rules."""
+        try:
+            return self._sliced(start, stop, step)
+        except Exception as error:
+            raise translate(error) from None
+
+    def slice_replace(self, start: Any = None, stop: Any = None, repl: Any = None) -> Series:
+        """Every row with a range of characters swapped for a string."""
+        try:
+            return self._replaced_slice(start, stop, repl)
+        except Exception as error:
+            raise translate(error) from None
+
+    def get(self, i: Any) -> Series:
+        """One character out of every row, and nothing where the row is too short."""
+        try:
+            return self._at(i)
+        except Exception as error:
+            raise translate(error) from None
+
+    def find(self, sub: Any, start: Any = 0, end: Any = None) -> Series:
+        """Where a substring first sits in every row, or -1 where it is absent."""
+        try:
+            return self._found("find", sub, start, end)
+        except Exception as error:
+            raise translate(error) from None
+
+    def rfind(self, sub: Any, start: Any = 0, end: Any = None) -> Series:
+        """Where a substring last sits in every row, or -1 where it is absent."""
+        try:
+            return self._found("rfind", sub, start, end)
+        except Exception as error:
+            raise translate(error) from None
+
+    def index(self, sub: Any, start: Any = 0, end: Any = None) -> Series:
+        """The same as find, except that a row without the substring is an error."""
+        try:
+            return self._demanded("find", sub, start, end)
+        except Exception as error:
+            raise translate(error) from None
+
+    def rindex(self, sub: Any, start: Any = 0, end: Any = None) -> Series:
+        """The same as rfind, except that a row without the substring is an error."""
+        try:
+            return self._demanded("rfind", sub, start, end)
+        except Exception as error:
+            raise translate(error) from None
+
+    def startswith(self, pat: Any, na: Any = None) -> Series:
+        """Whether every row begins with a string, or with any of several."""
+        try:
+            return self._begins("startswith", pat, na)
+        except Exception as error:
+            raise translate(error) from None
+
+    def endswith(self, pat: Any, na: Any = None) -> Series:
+        """Whether every row ends with a string, or with any of several."""
+        try:
+            return self._begins("endswith", pat, na)
+        except Exception as error:
+            raise translate(error) from None
+
+    def removeprefix(self, prefix: Any) -> Series:
+        """Every row with a leading string taken off, if it has one."""
+        try:
+            return self._text("removeprefix", prefix)
+        except Exception as error:
+            raise translate(error) from None
+
+    def removesuffix(self, suffix: Any) -> Series:
+        """Every row with a trailing string taken off, if it has one."""
+        try:
+            return self._text("removesuffix", suffix)
         except Exception as error:
             raise translate(error) from None
 
@@ -1918,6 +2021,11 @@ class Series(SeriesMixin):
     dt = Namespace(DatetimeProperties)
     """The datetime accessor, which is where the calendar and clock parts of a temporal
     column live.
+    """
+
+    str = Namespace(StringAccessor)
+    """The string accessor, which is where the methods that read a text column character by
+    character live.
     """
 
     cat = Namespace(CategoricalAccessor)

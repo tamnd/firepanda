@@ -1940,6 +1940,172 @@ def _relabelled(frame: DataFrame, name: str, label: str) -> Series:
         raise translate(error) from None
 
 
+class StringMixin:
+    """The hand written half of `StringAccessor`.
+
+    Three doors under it, picked by the shape of the answer rather than by the
+    shape of the arguments, which is the rule `firepanda/py/text.mojo` states and
+    argues for. Everything here turns what pandas lets a caller write into the
+    word and the four values a door takes.
+
+    Two things are decided here rather than in the kernel, and both are decided
+    here because they are about the pandas surface. `index` and `rindex` are
+    `find` and `rfind` that raise when the substring is missing from any row, and
+    the exception is a `ValueError` whose text pandas copied from Python's
+    `str.index`. And `startswith` accepts a tuple of prefixes, which is Python's
+    signature rather than anything a column kernel should know about, so it is a
+    fold of the one prefix answer over the tuple.
+    """
+
+    __slots__ = ("_series",)
+    """The series the accessor was reached from, held for the reason
+    `DatetimeMixin` gives."""
+
+    _series: Series
+
+    def __init__(self, data: Series) -> None:
+        """Holds the series, and refuses one that is not text.
+
+        The second accessor that checks the column when it is built rather than
+        when it is used, and pandas checks this one the same way and with this
+        text. A caller who wrote `s.str` on a column of numbers asked for an
+        attribute the object does not have, so `hasattr` should answer False
+        rather than raise.
+
+        pandas ends the message with a name for what the column holds instead,
+        and the name it uses is the one `infer_dtype` gives rather than the
+        dtype: a column of int64 is `integer` there. The sentence is pandas' and
+        the last word is ours, because inventing a second vocabulary for types
+        so that one message can read like pandas would be the wrong trade.
+        """
+        if not data._inner.string_is_text():
+            raise AttributeError(f"Can only use .str accessor with string values, not {data.dtype}")
+        self._series = data
+
+    def _text(
+        self,
+        kind: str,
+        arg: str = "",
+        start: int | None = None,
+        stop: int | None = None,
+        step: int = 1,
+    ) -> Series:
+        """Runs a method that answers text."""
+        from ._frame import Series
+
+        try:
+            return Series._wrap(self._series._inner.string_text(kind, arg, start, stop, step))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _flag(self, kind: str, arg: str) -> Series:
+        """Runs a method that answers a mask."""
+        from ._frame import Series
+
+        try:
+            return Series._wrap(self._series._inner.string_flag(kind, arg))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _number(
+        self,
+        kind: str,
+        arg: str = "",
+        start: int | None = None,
+        stop: int | None = None,
+    ) -> Series:
+        """Runs a method that answers a number."""
+        from ._frame import Series
+
+        try:
+            return Series._wrap(self._series._inner.string_number(kind, arg, start, stop))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _sliced(self, start: Any, stop: Any, step: Any) -> Series:
+        """A range of characters out of every row.
+
+        `step=None` means one, which is Python's rule and not a default this
+        library chose, and it is the only one of the three that can be filled in
+        without knowing how long the row is.
+        """
+        return self._text("slice", "", start, stop, 1 if step is None else step)
+
+    def _replaced_slice(self, start: Any, stop: Any, repl: Any) -> Series:
+        """Every row with a range of characters swapped for a string.
+
+        pandas lets `repl` be left out and means the empty string by it, which
+        makes `slice_replace(1, 3)` a deletion rather than an error.
+        """
+        return self._text("slice_replace", "" if repl is None else repl, start, stop)
+
+    def _at(self, i: Any) -> Series:
+        """One character out of every row, by position."""
+        return self._text("get", "", i)
+
+    def _found(self, kind: str, sub: Any, start: Any, end: Any) -> Series:
+        """Where a substring sits in every row, or -1 where it is not there."""
+        return self._number(kind, sub, start, end)
+
+    def _demanded(self, kind: str, sub: Any, start: Any, end: Any) -> Series:
+        """The same, but a row that does not contain the substring is an error.
+
+        pandas checks every row and raises once, which means the answer is
+        computed in full before it is thrown away. That is what it costs to give
+        the caller the exception they asked for, and doing it any other way would
+        mean stopping at the first missing row and reporting a position for the
+        rows before it, which is not an answer anybody can use.
+
+        The class raised is ours rather than a plain `ValueError`, because the
+        generated method around this one runs every error through `translate`
+        and an untagged `ValueError` is exactly what `translate` turns into a
+        `RuntimeError`. `InvalidArgumentError` is a `ValueError` as well, so a
+        caller catching what pandas raises still catches it.
+        """
+        found = self._found(kind, sub, start, end)
+        for value in found.tolist():
+            if isinstance(value, int) and value < 0:
+                raise InvalidArgumentError("substring not found")
+        return found
+
+    def _begins(self, kind: str, pat: Any, na: Any) -> Series:
+        """Whether every row starts or ends with a string, or with any of several.
+
+        A tuple is Python's signature for these two and it is the only place in
+        the accessor where one argument stands for several questions. An empty
+        tuple is False on every row that is not missing, which is what Python's
+        `startswith(())` says.
+
+        The fold over the tuple and the filling of `na` both happen over plain
+        lists here, because `Series` has neither `|` nor `fillna` yet. Both are
+        one column operation each once it does, and moving them down is worth
+        doing the day it exists rather than writing two kernels nothing else
+        would call.
+        """
+        if not isinstance(pat, tuple):
+            answer = self._flag(kind, pat)
+            if na is None:
+                return answer
+            return self._as_mask([na if one is None else one for one in answer.tolist()])
+        rows = self._series._inner.length()
+        held: list[Any] = [False] * rows
+        for one in pat:
+            for at, value in enumerate(self._flag(kind, one).tolist()):
+                if value is None:
+                    held[at] = None
+                elif value:
+                    held[at] = True
+        if na is not None:
+            held = [na if one is None else one for one in held]
+        return self._as_mask(held)
+
+    def _as_mask(self, values: list[Any]) -> Series:
+        """Builds a boolean column out of a plain list, carrying the name across."""
+        from ._frame import Series
+
+        return Series(values, name=self._series.name)
+
+
 class GroupByMixin[Answer]:
     """What `DataFrameGroupBy` and `SeriesGroupBy` share, which is all the state.
 
