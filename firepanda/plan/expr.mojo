@@ -295,7 +295,7 @@ struct Expressions(Movable, Sized):
         self.nodes.append(node^)
         return at
 
-    def _check(self, at: Int) raises:
+    def check(self, at: Int) raises:
         """Refuses an index that is not in the arena.
 
         Args:
@@ -384,7 +384,7 @@ struct Expressions(Movable, Sized):
         Raises:
             If the operand is not in the arena.
         """
-        self._check(over)
+        self.check(over)
         return self._add(
             Expr(
                 ExprKind.UNARY,
@@ -415,8 +415,8 @@ struct Expressions(Movable, Sized):
         Raises:
             If either operand is not in the arena.
         """
-        self._check(left)
-        self._check(right)
+        self.check(left)
+        self.check(right)
         return self._add(
             Expr(
                 ExprKind.BINARY,
@@ -447,7 +447,7 @@ struct Expressions(Movable, Sized):
         Raises:
             If the operand is not in the arena.
         """
-        self._check(over)
+        self.check(over)
         var at = self._add(
             Expr(
                 ExprKind.CAST,
@@ -485,7 +485,7 @@ struct Expressions(Movable, Sized):
             If any argument is not in the arena.
         """
         for i in range(len(args)):
-            self._check(args[i])
+            self.check(args[i])
         return self._add(
             Expr(
                 ExprKind.CALL,
@@ -515,7 +515,7 @@ struct Expressions(Movable, Sized):
         Raises:
             If the operand is not in the arena.
         """
-        self._check(over)
+        self.check(over)
         return self._add(
             Expr(
                 ExprKind.AGGREGATE,
@@ -549,9 +549,9 @@ struct Expressions(Movable, Sized):
         Raises:
             If any of the three is not in the arena.
         """
-        self._check(when)
-        self._check(then)
-        self._check(otherwise)
+        self.check(when)
+        self.check(then)
+        self.check(otherwise)
         return self._add(
             Expr(
                 ExprKind.CONDITIONAL,
@@ -591,13 +591,13 @@ struct Expressions(Movable, Sized):
         Raises:
             If any of them is not in the arena.
         """
-        self._check(over)
+        self.check(over)
         var children: List[Int] = [over]
         for i in range(len(partition)):
-            self._check(partition[i])
+            self.check(partition[i])
             children.append(partition[i])
         for i in range(len(order)):
-            self._check(order[i])
+            self.check(order[i])
             children.append(order[i])
         return self._add(
             Expr(
@@ -635,7 +635,7 @@ struct Expressions(Movable, Sized):
         Raises:
             If the expression is not in the arena.
         """
-        self._check(root)
+        self.check(root)
         ref node = self.nodes[root]
         if node.kind == ExprKind.AGGREGATE or node.kind == ExprKind.WINDOW:
             return False
@@ -668,7 +668,7 @@ struct Expressions(Movable, Sized):
         Raises:
             If the expression is not in the arena.
         """
-        self._check(root)
+        self.check(root)
         ref node = self.nodes[root]
         if node.kind == ExprKind.COLUMN:
             return False
@@ -707,7 +707,7 @@ struct Expressions(Movable, Sized):
             binding has not reached, or one bound to a table too far out to fit
             in the mask.
         """
-        self._check(root)
+        self.check(root)
         ref node = self.nodes[root]
         if node.kind == ExprKind.COLUMN:
             if node.table == UNBOUND:
