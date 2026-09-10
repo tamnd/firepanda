@@ -4330,6 +4330,18 @@ def bench_join(mut harness: Harness) raises:
     inner on the same inputs. Outer has to track which right rows were hit, which
     is a bitmap write per matched row.
 
+    What does a compound key cost. Three rows, and they are a set rather than
+    three samples. `join/two_keys` is a pair of integers close enough together
+    that the tuple packs into one uint32, which turns the join into the single
+    key join above with a packing pass in front of it.
+    `join/two_keys_far_apart` is the same join with the second key shifted forty
+    bits, which is the same result over the same shape and cannot pack, so it
+    takes the concatenating route; the gap between the two is what packing the
+    pair is worth and it is also what says the scans that decide are cheap when
+    they decide no. `join/two_keys_equal_sides` is the packed pair with a build
+    side as tall as the probe side, which is to the compound rows what
+    `join/inner_equal_sides` is to the single key ones.
+
     What does multiplicity cost. `join/many_to_many` is two small frames with
     sixty four keys each, so every key produces a block of output rows and the
     result is far taller than either input. That is the case where a join stops
@@ -4544,6 +4556,82 @@ def bench_join(mut harness: Harness) raises:
         keep(out.rows)
 
     harness.record("join/two_keys", "rows", rows, two_key)
+
+    # The same two keys with the second one spread over forty bits, which puts
+    # the pair past a uint32 and sends it to the concatenating route. Every other
+    # thing about the two rows is the same, so the gap between them is the whole
+    # of what packing the pair is worth, and this row is also what says the two
+    # scans that decide it are cheap when the answer is no.
+    var far_rng = Rng(0x105E5)
+    var far_fact_key = Array[DType.int64](rows)
+    var far_fact_other = Array[DType.int64](rows)
+    for i in range(rows):
+        var draw = far_rng.next_u64()
+        far_fact_key[i] = Int64(draw % UInt64(dim_rows))
+        far_fact_other[i] = Int64((draw >> 20) % 8) << 40
+    var far_fact_series = List[Series]()
+    far_fact_series.append(Series("key", far_fact_key^))
+    far_fact_series.append(Series("other", far_fact_other^))
+    var far_fact = DataFrame.from_series(far_fact_series^)
+
+    var far_key = Array[DType.int64](pair_rows)
+    var far_other = Array[DType.int64](pair_rows)
+    var far_label = Array[DType.int64](pair_rows)
+    for i in range(pair_rows):
+        far_key[i] = Int64(i // 8)
+        far_other[i] = Int64(i % 8) << 40
+        far_label[i] = Int64(i)
+    var far_series = List[Series]()
+    far_series.append(Series("key", far_key^))
+    far_series.append(Series("other", far_other^))
+    far_series.append(Series("label", far_label^))
+    var far_dim = DataFrame.from_series(far_series^)
+
+    def two_key_far() raises {imm far_fact, imm far_dim, imm two}:
+        keep(far_fact.rows)
+        var out = far_fact.join(far_dim, two)
+        keep(out.rows)
+
+    harness.record("join/two_keys_far_apart", "rows", rows, two_key_far)
+
+    # Two keys with a build side as tall as the probe side, which is what
+    # `join/inner_equal_sides` is to the single key rows. The pair still packs,
+    # so this is the shape where the packed route has a real table to fill rather
+    # than one that sits in cache, and it is the one a compound key join on two
+    # fact tables would hit.
+    var tall_key = Array[DType.int64](rows)
+    var tall_other = Array[DType.int64](rows)
+    var tall_label = Array[DType.int64](rows)
+    for i in range(rows):
+        tall_key[i] = Int64(i // 8)
+        tall_other[i] = Int64(i % 8)
+        tall_label[i] = Int64(i)
+    var tall_series = List[Series]()
+    tall_series.append(Series("key", tall_key^))
+    tall_series.append(Series("other", tall_other^))
+    tall_series.append(Series("label", tall_label^))
+    var tall_dim = DataFrame.from_series(tall_series^)
+
+    var tall_fact_key = Array[DType.int64](rows)
+    var tall_fact_other = Array[DType.int64](rows)
+    var tall_fact_value = Array[DType.int64](rows)
+    for i in range(rows):
+        var draw = rng.next_u64()
+        tall_fact_key[i] = Int64(draw % UInt64(rows // 8 if rows >= 8 else 1))
+        tall_fact_other[i] = Int64((draw >> 20) % 8)
+        tall_fact_value[i] = Int64(draw % 1000)
+    var tall_fact_series = List[Series]()
+    tall_fact_series.append(Series("key", tall_fact_key^))
+    tall_fact_series.append(Series("other", tall_fact_other^))
+    tall_fact_series.append(Series("value", tall_fact_value^))
+    var tall_fact = DataFrame.from_series(tall_fact_series^)
+
+    def two_key_equal() raises {imm tall_fact, imm tall_dim, imm two}:
+        keep(tall_fact.rows)
+        var out = tall_fact.join(tall_dim, two)
+        keep(out.rows)
+
+    harness.record("join/two_keys_equal_sides", "rows", rows, two_key_equal)
 
     # Deliberately small. Sixty four keys over four thousand rows a side is
     # sixty four rows per key per side, which is four thousand output rows per

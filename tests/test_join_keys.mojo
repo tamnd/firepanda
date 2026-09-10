@@ -16,9 +16,15 @@ Which route runs is not observable from the outside, which is the point of havin
 several, so the tests that care drive them by shape instead. A narrow integer key
 takes the direct table, a key spread over the whole int64 range takes the hash
 table, a string key takes a table of its own when the side that would be built is
-much smaller than the side that would be probed, and two key columns or anything
-else takes the concat and factorize fallback. Each of those shapes appears here
-at least once, and the assertions are the same ones in every case.
+much smaller than the side that would be probed, two integer key columns close
+enough together pack into one and take the same route a single key does, and
+anything else takes the concat and factorize fallback. Each of those shapes
+appears here at least once, and the assertions are the same ones in every case.
+
+The compound key tests come in pairs for that reason. One drives the packed
+route and the next puts the same question to a tuple that cannot pack, by
+spreading a key over forty bits, by putting a null in one, or by giving the two
+keys different dtypes. Both have to answer the same way.
 
 The string table is the one with a trap in it. Every other route settles a row by
 comparing hashes, which is exact for a fixed width key. A string is not, so the
@@ -56,6 +62,11 @@ from firepanda.join.keys import KeyAlignment, align_keys, build_side, probe_side
 
 def ints(values: List[Scalar[DType.int64]]) -> Array[DType.int64]:
     """Builds an int64 column."""
+    return from_list(values)
+
+
+def small(values: List[Scalar[DType.int32]]) -> Array[DType.int32]:
+    """Builds an int32 column, for a key tuple of two dtypes."""
     return from_list(values)
 
 
@@ -298,6 +309,129 @@ def test_two_key_columns_align_on_the_tuple() raises:
     # (1, 9) is on the left only, and it agrees with neither of the above.
     assert_not_equal(got.codes[0], got.codes[1], "first key alone is not it")
     assert_not_equal(got.codes[0], got.codes[2], "second key alone is not it")
+
+
+def test_a_compound_key_takes_the_range_of_both_sides() raises:
+    # Key values only the right side has. A plan made from the left alone would
+    # pack the right's 3 as a distance below zero, and the tuple it landed on
+    # would be some other tuple's.
+    var got = align_owned(
+        paired(AnyArray(ints([5, 5, 4])), AnyArray(ints([0, 1, 0]))),
+        two(0, 1),
+        3,
+        paired(AnyArray(ints([5, 3])), AnyArray(ints([1, 0]))),
+        two(0, 1),
+        2,
+    )
+    assert_equal(got.codes[1], got.codes[3], "(5, 1) on both sides")
+    assert_true(not matched(got, 3, 2, 0), "(5, 0) is on the left only")
+    assert_true(not matched(got, 3, 2, 2), "(4, 0) is on the left only")
+    assert_not_equal(got.codes[0], got.codes[4], "(5, 0) against (3, 0)")
+    assert_not_equal(got.codes[2], got.codes[4], "(4, 0) against (3, 0)")
+
+
+def test_a_compound_key_agrees_whichever_side_is_smaller() raises:
+    # The packed route builds on the shorter side, so the two calls below take
+    # different halves of the same branch. What has to hold is that they agree
+    # about which rows pair, which is all the ordinals ever promise.
+    var one_way = align_owned(
+        paired(AnyArray(ints([5, 5, 4])), AnyArray(ints([0, 1, 0]))),
+        two(0, 1),
+        3,
+        paired(AnyArray(ints([5, 3])), AnyArray(ints([1, 0]))),
+        two(0, 1),
+        2,
+    )
+    var other_way = align_owned(
+        paired(AnyArray(ints([5, 3])), AnyArray(ints([1, 0]))),
+        two(0, 1),
+        2,
+        paired(AnyArray(ints([5, 5, 4])), AnyArray(ints([0, 1, 0]))),
+        two(0, 1),
+        3,
+    )
+    assert_equal(one_way.codes[1], one_way.codes[3], "(5, 1) one way")
+    assert_equal(other_way.codes[0], other_way.codes[3], "(5, 1) the other")
+    assert_true(not matched(other_way, 2, 3, 1), "(3, 0) matches nothing")
+
+
+def test_a_compound_key_too_wide_to_pack_still_aligns() raises:
+    # A first key spread over forty bits puts the tuple past a uint32, so this
+    # drops to the concatenating route. The answer is the same either way.
+    var wide = Int64(1) << 40
+    var got = align_owned(
+        paired(AnyArray(ints([1, wide])), AnyArray(ints([0, 1]))),
+        two(0, 1),
+        2,
+        paired(AnyArray(ints([wide])), AnyArray(ints([1]))),
+        two(0, 1),
+        1,
+    )
+    assert_equal(got.codes[1], got.codes[2], "the shared tuple")
+    assert_true(not matched(got, 2, 1, 0), "(1, 0) matches nothing")
+
+
+def test_a_compound_key_with_a_null_still_aligns() raises:
+    # A null has no value to pack, so this drops to the concatenating route as
+    # well, and the null row has to come back flagged and matching nothing.
+    var left_second = ints([9, 8, 9])
+    left_second.set_null(0)
+    var got = align_owned(
+        paired(AnyArray(ints([1, 1, 2])), AnyArray(left_second^)),
+        two(0, 1),
+        3,
+        paired(AnyArray(ints([1, 2])), AnyArray(ints([8, 9]))),
+        two(0, 1),
+        2,
+    )
+    assert_true(got.has_nulls, "has_nulls")
+    assert_true(got.absent[0], "the null row")
+    assert_equal(got.codes[1], got.codes[3], "(1, 8) still pairs")
+    assert_equal(got.codes[2], got.codes[4], "(2, 9) still pairs")
+
+
+def test_a_compound_key_of_two_dtypes_still_aligns() raises:
+    # The packed route reads every key at one dtype, so a tuple of two takes the
+    # concatenating route. Both sides still have to match key for key.
+    var got = align_owned(
+        paired(AnyArray(ints([1, 1, 2])), AnyArray(small([9, 8, 9]))),
+        two(0, 1),
+        3,
+        paired(AnyArray(ints([1, 2])), AnyArray(small([8, 9]))),
+        two(0, 1),
+        2,
+    )
+    assert_equal(got.codes[1], got.codes[3], "(1, 8)")
+    assert_equal(got.codes[2], got.codes[4], "(2, 9)")
+    assert_true(not matched(got, 3, 2, 0), "(1, 9) matches nothing")
+
+
+def test_a_compound_key_past_the_split_aligns_what_one_thread_would() raises:
+    # Past `PARALLEL_PROBE_ROWS` the probe is dealt out to every core, and the
+    # packing passes are in morsels above that too. Both sides of the split have
+    # to write the same ordinals, so this checks the shape rather than a number:
+    # every left row whose second key is even pairs, and no other one does.
+    comptime rows = (1 << 17) + 1000
+    var first = List[Scalar[DType.int64]](capacity=rows)
+    var second = List[Scalar[DType.int64]](capacity=rows)
+    for i in range(rows):
+        first.append(Int64(i % 97))
+        second.append(Int64(i % 2))
+    var got = align_owned(
+        paired(AnyArray(ints(first)), AnyArray(ints(second))),
+        two(0, 1),
+        rows,
+        paired(AnyArray(ints([3, 40])), AnyArray(ints([0, 0]))),
+        two(0, 1),
+        2,
+    )
+    var wrong = -1
+    for i in range(rows):
+        var pairs = (i % 97 == 3 or i % 97 == 40) and i % 2 == 0
+        if matched(got, rows, 2, i) != pairs:
+            wrong = i
+            break
+    assert_equal(wrong, -1, "the first left row that disagreed")
 
 
 def test_a_string_key_aligns() raises:
