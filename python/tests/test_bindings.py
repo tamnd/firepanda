@@ -94,19 +94,52 @@ def test_the_extension_exposes_nothing_the_table_does_not_mention(firepanda: Mod
         assert found_methods - tabled_methods == set()
 
 
-def test_every_member_in_the_table_exists_on_the_python_class(firepanda: ModuleType) -> None:
-    """The Python half of the table resolves too, with the right kinds."""
+def _reaches(firepanda: ModuleType, accessor: str) -> type:
+    """Finds the class an accessor is handed out as, through the attribute that hands it out.
+
+    Args:
+        firepanda: The staged package.
+        accessor: The accessor class name, as the table spells it.
+
+    Returns:
+        The class itself.
+    """
     for exposed in bindings.TYPES:
-        cls = getattr(firepanda, exposed.py)
+        for member in exposed.members:
+            if member.kind == "accessor" and member.body == accessor:
+                return getattr(getattr(firepanda, exposed.py), member.name)  # type: ignore[no-any-return]
+    raise AssertionError(f"{accessor} is in the table and no attribute hands it out")
+
+
+def test_every_member_in_the_table_exists_on_the_python_class(firepanda: ModuleType) -> None:
+    """The Python half of the table resolves too, with the right kinds.
+
+    The accessors are walked with the types because a member is a member wherever
+    it is written. The one class an accessor is reached through is `Series`, so
+    the accessor classes themselves are found through that attribute rather than
+    by name off the package, which is where pandas keeps them too.
+    """
+    for exposed in [*bindings.TYPES, *bindings.ACCESSORS]:
+        holder = exposed.py
+        cls = (
+            getattr(firepanda, holder)
+            if holder in firepanda.__all__
+            else _reaches(firepanda, holder)
+        )
         for member in exposed.members:
             attribute = inspect.getattr_static(cls, member.name, None)
             assert attribute is not None, (
-                f"{exposed.py}.{member.name} is in the table and not on the class"
+                f"{holder}.{member.name} is in the table and not on the class"
             )
             if member.kind == "property":
                 assert isinstance(attribute, property), (
-                    f"{exposed.py}.{member.name} is a property in the table and"
+                    f"{holder}.{member.name} is a property in the table and"
                     f" a {type(attribute).__name__} on the class"
+                )
+            elif member.kind == "accessor":
+                assert isinstance(attribute.__get__(None), type), (
+                    f"{holder}.{member.name} is an accessor in the table and"
+                    f" does not answer a class when it is read off the class"
                 )
             else:
                 assert callable(attribute)

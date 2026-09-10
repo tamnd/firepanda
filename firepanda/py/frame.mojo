@@ -75,6 +75,7 @@ from firepanda.py.ops import (
 )
 from firepanda.py.reduce import reduction
 from firepanda.py.series import PySeries
+from firepanda.py.temporal import iso_calendar
 from firepanda.py.transform import transformation, transformed
 
 
@@ -1104,6 +1105,39 @@ def open_arrow(source: PythonObject) raises -> PythonObject:
         )
     except cause:
         raise retagged(_import_kind(cause), cause)
+
+
+def isocalendar(column: PythonObject) raises -> PythonObject:
+    """Reads the three ISO 8601 week date fields of a column, as a frame.
+
+    A free function rather than a method, and the reason is the import graph
+    rather than taste. It reads a series and answers a frame, `series.mojo`
+    cannot import `frame.mojo` because `frame.mojo` already imports it, and the
+    only other place it could live is a method on the frame that takes a column,
+    which reads backwards. So it is what it is: a function of a series that
+    gives a frame, belonging to neither type.
+
+    It is the third door of the `dt` accessor and the only member of it that
+    answers a frame, which is what makes it a door rather than a name in the
+    table. `firepanda/py/temporal.mojo` is that argument.
+
+    Args:
+        column: The series to read.
+
+    Returns:
+        A new frame of three columns, `year`, `week` and `day`.
+
+    Raises:
+        Error: Tagged `dtype`, if the column is not a date or a naive timestamp.
+    """
+    try:
+        return PythonObject(
+            alloc=PyDataFrame(
+                ArcPointer(iso_calendar(PySeries._held(column)[].series[]))
+            )
+        )
+    except cause:
+        raise retagged(DTYPE, cause)
 
 
 def raise_for_test(kind: PythonObject) raises -> PythonObject:

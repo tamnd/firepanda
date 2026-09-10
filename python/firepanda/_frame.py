@@ -21,10 +21,325 @@ from collections.abc import Sequence
 from typing import Any
 
 from . import _firepanda
-from ._pandas import NO_DEFAULT, DataFrameMixin, IndexMixin, SeriesMixin
+from ._pandas import NO_DEFAULT, DataFrameMixin, DatetimeMixin, IndexMixin, Namespace, SeriesMixin
 from .errors import translate
 
-__all__ = ["DataFrame", "Index", "Series"]
+__all__ = ["DataFrame", "DatetimeProperties", "Index", "Series"]
+
+
+class DatetimeProperties(DatetimeMixin):
+    """The `dt` accessor, which is one class where pandas has two.
+
+    pandas splits `DatetimeProperties` from `TimedeltaProperties` and puts a different
+    set of names on each. This is one class carrying both sets, because the core has one
+    `Series.dt(name)` door for both and the column's own type is what decides whether a
+    name means anything, so splitting here would mean reading the dtype on every `.dt`
+    just to pick which object to hand back. The visible difference is which error a
+    caller sees: asking a timestamp column for `days` is a dtype error here and an
+    AttributeError in pandas.
+    """
+
+    __slots__ = ()
+
+    @property
+    def year(self) -> Series:
+        """The calendar year of every row."""
+        try:
+            return self._part("year", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def month(self) -> Series:
+        """The month of every row, 1 for January."""
+        try:
+            return self._part("month", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def day(self) -> Series:
+        """The day of the month of every row."""
+        try:
+            return self._part("day", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def hour(self) -> Series:
+        """The hour on a twenty four hour clock."""
+        try:
+            return self._part("hour", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def minute(self) -> Series:
+        """The minute of the hour."""
+        try:
+            return self._part("minute", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def second(self) -> Series:
+        """The second of the minute."""
+        try:
+            return self._part("second", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def microsecond(self) -> Series:
+        """The microseconds past the second."""
+        try:
+            return self._part("microsecond", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def nanosecond(self) -> Series:
+        """The nanoseconds past the microsecond."""
+        try:
+            return self._part("nanosecond", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def dayofweek(self) -> Series:
+        """The day of the week, 0 for Monday."""
+        try:
+            return self._part("dayofweek", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def day_of_week(self) -> Series:
+        """The day of the week, 0 for Monday. The same as dayofweek."""
+        try:
+            return self._part("dayofweek", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def weekday(self) -> Series:
+        """The day of the week, 0 for Monday. The same as dayofweek."""
+        try:
+            return self._part("dayofweek", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def dayofyear(self) -> Series:
+        """The day of the year, 1 for the first of January."""
+        try:
+            return self._part("dayofyear", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def day_of_year(self) -> Series:
+        """The day of the year. The same as dayofyear."""
+        try:
+            return self._part("dayofyear", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def quarter(self) -> Series:
+        """The quarter of the year, 1 to 4."""
+        try:
+            return self._part("quarter", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def days_in_month(self) -> Series:
+        """How many days the row's month has."""
+        try:
+            return self._part("days_in_month", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def daysinmonth(self) -> Series:
+        """How many days the row's month has. The same as days_in_month."""
+        try:
+            return self._part("days_in_month", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def is_leap_year(self) -> Series:
+        """Whether the row's year has a twenty ninth of February."""
+        try:
+            return self._part("is_leap_year", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def is_month_start(self) -> Series:
+        """Whether the row is the first day of its month."""
+        try:
+            return self._part("is_month_start", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def is_month_end(self) -> Series:
+        """Whether the row is the last day of its month."""
+        try:
+            return self._part("is_month_end", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def is_quarter_start(self) -> Series:
+        """Whether the row is the first day of its quarter."""
+        try:
+            return self._part("is_quarter_start", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def is_quarter_end(self) -> Series:
+        """Whether the row is the last day of its quarter."""
+        try:
+            return self._part("is_quarter_end", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def is_year_start(self) -> Series:
+        """Whether the row is the first day of its year."""
+        try:
+            return self._part("is_year_start", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def is_year_end(self) -> Series:
+        """Whether the row is the last day of its year."""
+        try:
+            return self._part("is_year_end", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def date(self) -> Series:
+        """The date part, with the clock dropped."""
+        try:
+            return self._part("date", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def days(self) -> Series:
+        """The whole days in each span, floored, for a duration column."""
+        try:
+            return self._part("days", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def tz(self) -> str | None:
+        """The clock the column is read against, or None when it carries no zone."""
+        try:
+            return self._zone()
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def unit(self) -> str:
+        """The resolution the column is stored in, one of s, ms, us and ns."""
+        try:
+            return self._resolution()
+        except Exception as error:
+            raise translate(error) from None
+
+    def normalize(self) -> Series:
+        """Every clock moved back to midnight, keeping the timestamp type."""
+        try:
+            return self._part("normalize", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    def total_seconds(self) -> Series:
+        """Each span as a number of seconds, for a duration column."""
+        try:
+            return self._part("total_seconds", "")
+        except Exception as error:
+            raise translate(error) from None
+
+    def floor(self, freq: Any, ambiguous: Any = "raise", nonexistent: Any = "raise") -> Series:
+        """Every clock moved down to the given frequency."""
+        try:
+            return self._rounded("floor", freq, ambiguous, nonexistent)
+        except Exception as error:
+            raise translate(error) from None
+
+    def ceil(self, freq: Any, ambiguous: Any = "raise", nonexistent: Any = "raise") -> Series:
+        """Every clock moved up to the given frequency."""
+        try:
+            return self._rounded("ceil", freq, ambiguous, nonexistent)
+        except Exception as error:
+            raise translate(error) from None
+
+    def round(self, freq: Any, ambiguous: Any = "raise", nonexistent: Any = "raise") -> Series:
+        """Every clock moved to the nearest the given frequency."""
+        try:
+            return self._rounded("round", freq, ambiguous, nonexistent)
+        except Exception as error:
+            raise translate(error) from None
+
+    def as_unit(self, unit: str, round_ok: bool = True) -> Series:
+        """The column stored in another resolution."""
+        try:
+            return self._as_unit(unit, round_ok)
+        except Exception as error:
+            raise translate(error) from None
+
+    def day_name(self, locale: Any = None) -> Series:
+        """The name of the day of the week of every row."""
+        try:
+            return self._named("day_name", locale)
+        except Exception as error:
+            raise translate(error) from None
+
+    def month_name(self, locale: Any = None) -> Series:
+        """The name of the month of every row."""
+        try:
+            return self._named("month_name", locale)
+        except Exception as error:
+            raise translate(error) from None
+
+    def strftime(self, date_format: str) -> Series:
+        """Every row written out as text, in the given format."""
+        try:
+            return self._part("strftime", date_format)
+        except Exception as error:
+            raise translate(error) from None
+
+    def tz_convert(self, tz: Any) -> Series:
+        """The same instants read against another clock."""
+        try:
+            return self._tz_convert(tz)
+        except Exception as error:
+            raise translate(error) from None
+
+    def tz_localize(self, tz: Any, ambiguous: Any = "raise", nonexistent: Any = "raise") -> Series:
+        """The same readings put on a clock, or taken off one when tz is None."""
+        try:
+            return self._tz_localize(tz, ambiguous, nonexistent)
+        except Exception as error:
+            raise translate(error) from None
+
+    def isocalendar(self) -> DataFrame:
+        """The ISO 8601 year, week and day of every row, as a frame."""
+        try:
+            return self._isocalendar()
+        except Exception as error:
+            raise translate(error) from None
 
 
 class DataFrame(DataFrameMixin):
@@ -1107,6 +1422,11 @@ class Series(SeriesMixin):
         except Exception as error:
             raise translate(error) from None
 
+    dt = Namespace(DatetimeProperties)
+    """The datetime accessor, which is where the calendar and clock parts of a temporal
+    column live.
+    """
+
     def __add__(self, other: Any) -> Any:
         """`a + b`, against a series or a constant."""
         try:
@@ -1694,6 +2014,14 @@ def from_arrow(source: object) -> DataFrame:
     """Builds a frame from a pyarrow, Polars or pandas frame."""
     try:
         return DataFrame._wrap(_firepanda.from_arrow(source))
+    except Exception as error:
+        raise translate(error) from None
+
+
+def _isocalendar(column: object) -> DataFrame:
+    """The ISO 8601 year, week and day of a temporal column, as a frame."""
+    try:
+        return DataFrame._wrap(_firepanda._isocalendar(column))
     except Exception as error:
         raise translate(error) from None
 

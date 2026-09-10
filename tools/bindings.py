@@ -58,25 +58,36 @@ REPO = Path(__file__).resolve().parents[1]
 def _docstring(text: str, indent: str) -> list[str]:
     """Wraps a docstring so the generated file stays under the line limit.
 
+    A blank line in the text is a paragraph break and survives the wrapping. Most
+    docstrings in the table are one sentence and never reach it, but a class that
+    has to explain a decision needs a summary line and then the explanation, which
+    is also what the docstring linter expects.
+
     Args:
-        text: The docstring, as one long line.
+        text: The docstring, with a blank line between paragraphs and each
+            paragraph on one long line.
         indent: The indent to put in front of every line.
 
     Returns:
         The lines to emit.
     """
     width = 88 - len(indent)
-    if len(text) <= width:
+    if len(text) <= width and "\n" not in text:
         return [f'{indent}"""{text}"""']
-    words, lines, current = text.split(), [], ""
-    for word in words:
-        if current and len(current) + 1 + len(word) > width:
-            lines.append(current)
-            current = word
-        else:
-            current = f"{current} {word}" if current else word
-    lines.append(current)
-    return [f'{indent}"""{lines[0]}'] + [indent + line for line in lines[1:]] + [f'{indent}"""']
+    lines: list[str] = []
+    for at, paragraph in enumerate(text.split("\n\n")):
+        if at:
+            lines.append("")
+        current = ""
+        for word in paragraph.split():
+            if current and len(current) + 1 + len(word) > width:
+                lines.append(current)
+                current = word
+            else:
+                current = f"{current} {word}" if current else word
+        lines.append(current)
+    body = [indent + line if line else "" for line in lines[1:]]
+    return [f'{indent}"""{lines[0]}', *body, f'{indent}"""']
 
 
 def _guarded(statement: str, indent: str) -> list[str]:
@@ -573,6 +584,207 @@ CUMULATIVE: tuple[tuple[str, str], ...] = (
 """The four scans, which differ only in the operator they fold with."""
 
 
+DT_PARTS: tuple[tuple[str, str, str], ...] = (
+    ("year", "year", "The calendar year of every row."),
+    ("month", "month", "The month of every row, 1 for January."),
+    ("day", "day", "The day of the month of every row."),
+    ("hour", "hour", "The hour on a twenty four hour clock."),
+    ("minute", "minute", "The minute of the hour."),
+    ("second", "second", "The second of the minute."),
+    ("microsecond", "microsecond", "The microseconds past the second."),
+    ("nanosecond", "nanosecond", "The nanoseconds past the microsecond."),
+    ("dayofweek", "dayofweek", "The day of the week, 0 for Monday."),
+    ("day_of_week", "dayofweek", "The day of the week, 0 for Monday. The same as dayofweek."),
+    ("weekday", "dayofweek", "The day of the week, 0 for Monday. The same as dayofweek."),
+    ("dayofyear", "dayofyear", "The day of the year, 1 for the first of January."),
+    ("day_of_year", "dayofyear", "The day of the year. The same as dayofyear."),
+    ("quarter", "quarter", "The quarter of the year, 1 to 4."),
+    ("days_in_month", "days_in_month", "How many days the row's month has."),
+    (
+        "daysinmonth",
+        "days_in_month",
+        "How many days the row's month has. The same as days_in_month.",
+    ),
+    ("is_leap_year", "is_leap_year", "Whether the row's year has a twenty ninth of February."),
+    ("is_month_start", "is_month_start", "Whether the row is the first day of its month."),
+    ("is_month_end", "is_month_end", "Whether the row is the last day of its month."),
+    ("is_quarter_start", "is_quarter_start", "Whether the row is the first day of its quarter."),
+    ("is_quarter_end", "is_quarter_end", "Whether the row is the last day of its quarter."),
+    ("is_year_start", "is_year_start", "Whether the row is the first day of its year."),
+    ("is_year_end", "is_year_end", "Whether the row is the last day of its year."),
+    ("date", "date", "The date part, with the clock dropped."),
+    ("days", "days", "The whole days in each span, floored, for a duration column."),
+)
+"""The parts of `dt` that take nothing and answer a column, as pandas names them
+and as the boundary does.
+
+The two spellings are not always the same word and that is the whole reason for a
+second column. pandas has `dayofweek` and `day_of_week` and `weekday` for one
+field and `days_in_month` and `daysinmonth` for another, and the core has one
+name for each because a kernel does not need three. Putting the aliases here
+rather than in the Mojo keeps the pandas surface in the one file that is about
+the pandas surface.
+
+`normalize` is not in here even though it takes nothing, because it is a method
+in pandas and everything in this table is a property, and `total_seconds` is not
+in here for the same reason."""
+
+
+def _datetime_members() -> tuple[Member, ...]:
+    """Writes the members of the `dt` accessor.
+
+    Nothing here decides what a part means. The word crosses the boundary,
+    `firepanda/py/temporal.mojo` reads it, and every body is one call to a mixin
+    helper, which is the same restriction `_reductions` and `_transformations`
+    work under and for the same reason.
+
+    The order is the parts first, then the two that answer a word, then the
+    methods, which is roughly how the pandas documentation lists them and is the
+    order somebody comparing the two would read them in.
+
+    Returns:
+        The members, in the order they should be written out.
+    """
+    out: list[Member] = []
+    for name, crosses, what in DT_PARTS:
+        out.append(
+            Member(
+                name=name,
+                kind="property",
+                body=f'self._part("{crosses}", "")',
+                doc=what,
+                returns="Series",
+            )
+        )
+
+    out.append(
+        Member(
+            name="tz",
+            kind="property",
+            body="self._zone()",
+            doc="The clock the column is read against, or None when it carries no zone.",
+            returns="str | None",
+        )
+    )
+    out.append(
+        Member(
+            name="unit",
+            kind="property",
+            body="self._resolution()",
+            doc="The resolution the column is stored in, one of s, ms, us and ns.",
+            returns="str",
+        )
+    )
+
+    # Two names that take nothing and are still methods rather than properties,
+    # which is why they are not in the table above. pandas spells both with an
+    # empty parameter list, checked against a running one.
+    out.append(
+        Member(
+            name="normalize",
+            kind="method",
+            signature="",
+            body='self._part("normalize", "")',
+            doc="Every clock moved back to midnight, keeping the timestamp type.",
+            returns="Series",
+        )
+    )
+    out.append(
+        Member(
+            name="total_seconds",
+            kind="method",
+            signature="",
+            body='self._part("total_seconds", "")',
+            doc="Each span as a number of seconds, for a duration column.",
+            returns="Series",
+        )
+    )
+
+    for name, what in (
+        ("floor", "down to"),
+        ("ceil", "up to"),
+        ("round", "to the nearest"),
+    ):
+        out.append(
+            Member(
+                name=name,
+                kind="method",
+                signature='freq: Any, ambiguous: Any = "raise", nonexistent: Any = "raise"',
+                body=f'self._rounded("{name}", freq, ambiguous, nonexistent)',
+                doc=f"Every clock moved {what} the given frequency.",
+                returns="Series",
+            )
+        )
+
+    out.append(
+        Member(
+            name="as_unit",
+            kind="method",
+            signature="unit: str, round_ok: bool = True",
+            body="self._as_unit(unit, round_ok)",
+            doc="The column stored in another resolution.",
+            returns="Series",
+        )
+    )
+
+    for name, what in (
+        ("day_name", "The name of the day of the week of every row."),
+        ("month_name", "The name of the month of every row."),
+    ):
+        out.append(
+            Member(
+                name=name,
+                kind="method",
+                signature="locale: Any = None",
+                body=f'self._named("{name}", locale)',
+                doc=what,
+                returns="Series",
+            )
+        )
+
+    out.append(
+        Member(
+            name="strftime",
+            kind="method",
+            signature="date_format: str",
+            body='self._part("strftime", date_format)',
+            doc="Every row written out as text, in the given format.",
+            returns="Series",
+        )
+    )
+    out.append(
+        Member(
+            name="tz_convert",
+            kind="method",
+            signature="tz: Any",
+            body="self._tz_convert(tz)",
+            doc="The same instants read against another clock.",
+            returns="Series",
+        )
+    )
+    out.append(
+        Member(
+            name="tz_localize",
+            kind="method",
+            signature='tz: Any, ambiguous: Any = "raise", nonexistent: Any = "raise"',
+            body="self._tz_localize(tz, ambiguous, nonexistent)",
+            doc="The same readings put on a clock, or taken off one when tz is None.",
+            returns="Series",
+        )
+    )
+    out.append(
+        Member(
+            name="isocalendar",
+            kind="method",
+            signature="",
+            body="self._isocalendar()",
+            doc="The ISO 8601 year, week and day of every row, as a frame.",
+            returns="DataFrame",
+        )
+    )
+    return tuple(out)
+
+
 def _transformations(py: str) -> tuple[Member, ...]:
     """Writes the transformation members for one class.
 
@@ -1063,6 +1275,20 @@ SERIES = Exposed(
             returns="bool",
         ),
         Binding(
+            mojo="PySeries.temporal_part",
+            name="temporal_part",
+            doc="One part of a temporal column, as a column.",
+            params=(("kind", "str"), ("arg", "str")),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.temporal_word",
+            name="temporal_word",
+            doc="The clock or the resolution of a temporal column, as a string.",
+            params=(("kind", "str"),),
+            returns="str",
+        ),
+        Binding(
             mojo="PySeries.binary_series",
             name="binary_series",
             doc="An operation between two series, matching rows by label.",
@@ -1223,6 +1449,16 @@ SERIES = Exposed(
         ),
         *_reductions("Series"),
         *_transformations("Series"),
+        Member(
+            name="dt",
+            kind="accessor",
+            body="DatetimeProperties",
+            doc=(
+                "The datetime accessor, which is where the calendar and clock parts of a"
+                " temporal column live."
+            ),
+            returns="DatetimeProperties",
+        ),
         *_operators("Series"),
     ),
 )
@@ -1716,6 +1952,17 @@ FUNCTIONS = (
         params=(("source", "object"),),
         returns="DataFrame",
     ),
+    # Not a user entry point either, and here for the reason the free function
+    # in `firepanda/py/frame.mojo` gives: it reads a series and answers a frame,
+    # so it belongs to neither bound type and the import graph will not let it
+    # sit on the series. `DatetimeProperties.isocalendar` is what calls it.
+    Binding(
+        mojo="isocalendar",
+        name="_isocalendar",
+        doc="The ISO 8601 year, week and day of a temporal column, as a frame.",
+        params=(("column", "object"),),
+        returns="DataFrame",
+    ),
     # Not a user entry point. Every row of the error table in
     # `python/firepanda/errors.py` has to be exercised from Python, and five
     # bound methods cannot reach most of them, so the Mojo side offers a way to
@@ -1730,6 +1977,60 @@ FUNCTIONS = (
 )
 
 TYPES: tuple[Exposed, ...] = (FRAME, SERIES, INDEX)
+
+
+@dataclass(frozen=True)
+class Accessor:
+    """One pandas namespace, which is a Python class with no extension type under it.
+
+    `s.dt.year` is two attribute lookups and pandas answers the first one with an
+    object that holds the series and does nothing else. There is no Mojo struct
+    for that object and there should not be, because it holds a Python wrapper
+    rather than a column and everything it does is one call on the series it was
+    made from. So it is generated like the bound classes and emitted beside them,
+    and it is a separate dataclass rather than an `Exposed` with the Mojo fields
+    left empty, because a type with no extension behind it is a different thing
+    and saying so in the schema is cheaper than a comment asking people to ignore
+    four fields.
+    """
+
+    py: str
+    """The class name, which is the pandas one."""
+
+    owner: str
+    """The class the accessor is reached from."""
+
+    doc: str
+    """The Python class docstring."""
+
+    mixin: str
+    """The hand written base class in `python/firepanda/_pandas.py`. Not optional
+    the way it is on `Exposed`, because an accessor has no `_inner` of its own and
+    something has to hold the series, so there is always logic to inherit."""
+
+    members: tuple[Member, ...]
+    """The members on the Python side."""
+
+
+ACCESSORS: tuple[Accessor, ...] = (
+    Accessor(
+        py="DatetimeProperties",
+        owner="Series",
+        doc=(
+            "The `dt` accessor, which is one class where pandas has two.\n\n"
+            "pandas splits `DatetimeProperties` from `TimedeltaProperties` and puts a"
+            " different set of names on each. This is one class carrying both sets,"
+            " because the core has one `Series.dt(name)` door for both and the column's"
+            " own type is what decides whether a name means anything, so splitting here"
+            " would mean reading the dtype on every `.dt` just to pick which object to"
+            " hand back. The visible difference is which error a caller sees: asking a"
+            " timestamp column for `days` is a dtype error here and an AttributeError in"
+            " pandas."
+        ),
+        mixin="DatetimeMixin",
+        members=_datetime_members(),
+    ),
+)
 
 BANNER_MOJO = (
     "# Generated by tools/bindings.py. Do not edit.\n"
@@ -1946,6 +2247,41 @@ def stubs() -> str:
     return "\n".join(out) + "\n"
 
 
+def _members(members: tuple[Member, ...]) -> list[str]:
+    """Writes the members of one Python class.
+
+    Shared by the bound types and the accessors, which are different in what
+    holds them up and identical in what a member looks like once it is written.
+
+    Args:
+        members: The members, in the order they should appear.
+
+    Returns:
+        The lines, each already indented for a class body.
+    """
+    out: list[str] = []
+    for m in members:
+        out.append("")
+        # An accessor is a class attribute rather than anything callable, so it is
+        # written and then documented, which is how a bare attribute carries a
+        # docstring. It is not a property because a property read off the class
+        # answers itself, and pandas answers the accessor class there.
+        if m.kind == "accessor":
+            out.append(f"    {m.name} = Namespace({m.body})")
+            out.extend(_docstring(m.doc, "    "))
+            continue
+        if m.kind == "property":
+            out.append("    @property")
+            out.append(f"    def {m.name}(self) -> {m.returns}:")
+        else:
+            params = ["self"] + (m.signature.split(", ") if m.signature else [])
+            out.extend(_python_def("    ", m.name, params, m.returns))
+        out.extend(_docstring(m.doc, "        "))
+        body = f"{m.wraps}._wrap({m.body})" if m.wraps else m.body
+        out.extend(_guarded(f"return {body}", "        "))
+    return out
+
+
 def wrapper() -> str:
     """Writes the Python classes a user actually holds.
 
@@ -1968,23 +2304,39 @@ def wrapper() -> str:
     # Only emitted when something in the table actually asks for it, since an
     # import nothing uses is a lint failure rather than a harmless extra line.
     standard = []
-    if any("Sequence[" in (m.signature or "") for t in TYPES for m in t.members):
+    every = [m for t in TYPES for m in t.members] + [m for a in ACCESSORS for m in a.members]
+    if any("Sequence[" in (m.signature or "") for m in every):
         standard.append("from collections.abc import Sequence")
-    if any("Any" in (m.signature or "") or m.returns == "Any" for t in TYPES for m in t.members):
+    if any("Any" in (m.signature or "") or m.returns == "Any" for m in every):
         standard.append("from typing import Any")
     if standard:
         out.extend(standard)
         out.append("")
     out.append("from . import _firepanda")
-    mixins = sorted({t.mixin for t in TYPES if t.mixin})
-    if any("NO_DEFAULT" in (m.signature or "") for t in TYPES for m in t.members):
+    mixins = sorted({t.mixin for t in TYPES if t.mixin} | {a.mixin for a in ACCESSORS})
+    if any(m.kind == "accessor" for m in every):
+        mixins = sorted([*mixins, "Namespace"])
+    if any("NO_DEFAULT" in (m.signature or "") for m in every):
         mixins = ["NO_DEFAULT", *mixins]
     if mixins:
         out.append("from ._pandas import " + ", ".join(mixins))
     out.append("from .errors import translate")
 
     out.append("")
-    out.append("__all__ = [" + ", ".join(f'"{n}"' for n in sorted(t.py for t in TYPES)) + "]")
+    named = sorted([t.py for t in TYPES] + [a.py for a in ACCESSORS])
+    out.append("__all__ = [" + ", ".join(f'"{n}"' for n in named) + "]")
+
+    # The accessors come first because a bound type reaches one through a class
+    # body assignment, which runs while the class is being built and would find
+    # nothing if the accessor class were still further down the file.
+    for a in ACCESSORS:
+        out.append("")
+        out.append("")
+        out.append(f"class {a.py}({a.mixin}):")
+        out.extend(_docstring(a.doc, "    "))
+        out.append("")
+        out.append("    __slots__ = ()")
+        out.extend(_members(a.members))
 
     for t in TYPES:
         out.append("")
@@ -1993,7 +2345,7 @@ def wrapper() -> str:
         out.append(f"class {t.py}{base}:")
         out.extend(_docstring(t.doc, "    "))
         out.append("")
-        out.append('    __slots__ = ()' if t.mixin else '    __slots__ = ("_inner",)')
+        out.append("    __slots__ = ()" if t.mixin else '    __slots__ = ("_inner",)')
         out.append("")
         out.append("    @classmethod")
         out.append(f"    def _wrap(cls, inner: _firepanda.{t.name}) -> {t.py}:")
@@ -2012,17 +2364,7 @@ def wrapper() -> str:
             out.append('        """Wraps an extension object. Not a public entry point."""')
             out.append("        self._inner = inner")
 
-        for m in t.members:
-            out.append("")
-            if m.kind == "property":
-                out.append("    @property")
-                out.append(f"    def {m.name}(self) -> {m.returns}:")
-            else:
-                params = ["self"] + (m.signature.split(", ") if m.signature else [])
-                out.extend(_python_def("    ", m.name, params, m.returns))
-            out.extend(_docstring(m.doc, "        "))
-            body = f"{m.wraps}._wrap({m.body})" if m.wraps else m.body
-            out.extend(_guarded(f"return {body}", "        "))
+        out.extend(_members(t.members))
 
     for fn in FUNCTIONS:
         params = fn.py_params or fn.params
