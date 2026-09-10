@@ -196,6 +196,9 @@ def register(mut module: PythonModuleBuilder) raises:
         "string_text",
         docstring="One str accessor method that answers text, as a column.",
     )
+    _ = series.def_method[PySeries.window_agg](
+        "window_agg", docstring="One reduction over every window of the column."
+    )
     _ = series.def_method[PySeries.string_flag](
         "string_flag",
         docstring="One str accessor method that answers a mask, as a column.",

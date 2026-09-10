@@ -1043,6 +1043,68 @@ rather than declaring them and ignoring them.
 """
 
 
+WINDOWED: tuple[tuple[str, str], ...] = (
+    ("sum", "The total of the values in the window."),
+    ("mean", "The mean of the values in the window."),
+    ("count", "How many rows of the window hold a value."),
+    ("min", "The smallest value in the window."),
+    ("max", "The largest value in the window."),
+)
+"""The five reductions a window can be folded through, and what each answers.
+
+Five rather than pandas' twenty six, and the five are the ones that can be
+carried from one window to the next rather than recomputed. `firepanda/kernel/
+window.mojo` says which of the other twenty one need a different data structure
+and why each of them is its own piece of work.
+"""
+
+
+def _window_members(py: str) -> tuple[Member, ...]:
+    """Writes the five reduction members for one window class.
+
+    Same restriction as `_group_members`, which is that nothing here decides
+    what a reduction does. The word crosses the boundary and
+    `firepanda/py/window.mojo` reads it, and every body is one call to a mixin
+    helper that already holds where the window sits.
+
+    The two classes take the same arguments and answer the same thing, and the
+    only difference between them is which parameters their constructor accepted,
+    so this is one function rather than two tables.
+
+    Args:
+        py: The class name, `Rolling` or `Expanding`, used in the sentences.
+
+    Returns:
+        The members, in the order they should be written out.
+    """
+    engines = "engine: Any = None, engine_kwargs: Any = None"
+    over = "rolling" if py == "Rolling" else "expanding"
+    out: list[Member] = []
+    for name, what in WINDOWED:
+        # `count` is the one pandas gives no engine arguments, because it never
+        # had a numba path to choose, and copying that is free here.
+        counting = name == "count"
+        out.append(
+            Member(
+                name=name,
+                kind="method",
+                signature=(
+                    "numeric_only: bool = False"
+                    if counting
+                    else f"numeric_only: bool = False, {engines}"
+                ),
+                body=(
+                    f'self._reduce("{name}", numeric_only)'
+                    if counting
+                    else f'self._reduce("{name}", numeric_only, engine, engine_kwargs)'
+                ),
+                doc=f"{what} Over every {over} window.",
+                returns="Series",
+            )
+        )
+    return tuple(out)
+
+
 def _group_members(py: str) -> tuple[Member, ...]:
     """Writes the fifteen reduction members for one group by class.
 
@@ -1732,6 +1794,20 @@ SERIES = Exposed(
             returns="Series",
         ),
         Binding(
+            mojo="PySeries.window_agg",
+            name="window_agg",
+            doc="One reduction over every window of the column.",
+            params=(
+                ("kind", "str"),
+                ("window", "int | None"),
+                ("min_periods", "int | None"),
+                ("center", "bool"),
+                ("closed", "str"),
+                ("step", "int | None"),
+            ),
+            returns="Series",
+        ),
+        Binding(
             mojo="PySeries.string_flag",
             name="string_flag",
             doc="One str accessor method that answers a mask, as a column.",
@@ -1944,6 +2020,26 @@ SERIES = Exposed(
         ),
         *_reductions("Series"),
         *_transformations("Series"),
+        Member(
+            name="rolling",
+            kind="method",
+            signature=(
+                "window: Any, min_periods: int | None = None, center: bool = False,"
+                " win_type: str | None = None, on: str | None = None,"
+                ' closed: str | None = None, step: int | None = None, method: str = "single"'
+            ),
+            body="_rolling(self, window, min_periods, center, win_type, on, closed, step, method)",
+            doc="A window of a fixed width, which computes nothing until it is reduced.",
+            returns="Rolling",
+        ),
+        Member(
+            name="expanding",
+            kind="method",
+            signature='min_periods: int = 1, method: str = "single"',
+            body="_expanding(self, min_periods, method)",
+            doc="A window that starts at the first row and grows, reduced the same way.",
+            returns="Expanding",
+        ),
         Member(
             name="dt",
             kind="accessor",
@@ -2585,6 +2681,44 @@ ACCESSORS: tuple[Accessor, ...] = (
         members=_categorical_members(),
     ),
     Accessor(
+        py="Rolling",
+        owner="Series",
+        doc=(
+            "A window of a fixed width over a column, waiting for a"
+            " reduction.\n\n"
+            "Reached from `s.rolling(...)`, and it holds the column and the five"
+            " numbers that say where each window sits rather than computing"
+            " anything, which is what pandas does as well. The five are one"
+            " question, `firepanda/kernel/window.mojo` states it as a pair of row"
+            " numbers, and this class is where a caller's spelling of that"
+            " question is checked.\n\n"
+            "Five of pandas' twenty six reductions so far, and they are the five"
+            " a window can be carried through. A total can have the row that"
+            " left subtracted from it and the row that arrived added to it, and"
+            " a median cannot, which is the line between what is here and what"
+            " is not."
+        ),
+        mixin="RollingMixin",
+        members=_window_members("Rolling"),
+    ),
+    Accessor(
+        py="Expanding",
+        owner="Series",
+        doc=(
+            "A window that starts at the first row and grows, waiting for a"
+            " reduction.\n\n"
+            "Reached from `s.expanding(...)`. The same five reductions as"
+            " `Rolling` over a window with no near end, which is why the two"
+            " classes share everything below the constructor: an expanding"
+            " window is a rolling one whose width is the height of the column."
+            " The one thing that is genuinely different is the default for"
+            " `min_periods`, which is one here and the full width there, and"
+            " pandas has the same split."
+        ),
+        mixin="ExpandingMixin",
+        members=_window_members("Expanding"),
+    ),
+    Accessor(
         py="DataFrameGroupBy",
         owner="DataFrame",
         doc=(
@@ -2968,6 +3102,11 @@ def wrapper() -> str:
     # arguments have to be read before there is an object to read them into.
     if any("_grouped(" in m.body for m in every):
         mixins.add("_grouped")
+    # `s.rolling(...)` and `s.expanding(...)` are the same case as `groupby`
+    # above, for the same reason, so they are hand written functions too.
+    for builder in ("_rolling", "_expanding"):
+        if any(f"{builder}(" in m.body for m in every):
+            mixins.add(builder)
     if mixins:
         out.extend(_imported(sorted(mixins, key=_import_order)))
     out.append("from .errors import translate")
