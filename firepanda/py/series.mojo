@@ -46,6 +46,7 @@ from firepanda.py.temporal import part as temporal_part
 from firepanda.py.temporal import word as temporal_word
 from firepanda.py.temporal import word_part
 from firepanda.py.transform import transformation, transformed
+from firepanda.py.window import window as window_agg
 from firepanda.py.values import python_list, python_value
 
 
@@ -749,6 +750,57 @@ struct PySeries(Movable, Writable):
                         maybe_whole(start, "start"),
                         maybe_whole(stop, "stop"),
                         whole(step, "step"),
+                    )
+                )
+            )
+        )
+
+    @staticmethod
+    def window_agg(
+        py_self: PythonObject,
+        kind: PythonObject,
+        width: PythonObject,
+        min_periods: PythonObject,
+        center: PythonObject,
+        closed: PythonObject,
+        step: PythonObject,
+    ) raises -> PythonObject:
+        """Runs one reduction over every window of the column.
+
+        The one door behind both `Rolling` and `Expanding`, which differ only in
+        where the near end of the window sits. A width of `None` is what says an
+        expanding window was asked for, and `firepanda/py/window.mojo` argues
+        why that is a width and not a flag.
+
+        Args:
+            py_self: The series.
+            kind: The reduction, as pandas spells the method.
+            width: How many rows wide, or `None` for an expanding window.
+            min_periods: How many values a window needs, or `None` for the
+                default of whichever window type this is.
+            center: Whether the window sits around its row.
+            closed: Which of the two ends the window keeps.
+            step: How many rows apart the answered rows are, or `None`.
+
+        Returns:
+            A new series of float64.
+
+        Raises:
+            Error: Tagged `dtype` if the column holds nothing a window can
+                reduce, and tagged `value` if the parameters do not describe a
+                window.
+        """
+        return PythonObject(
+            alloc=Self(
+                ArcPointer(
+                    window_agg(
+                        Self._held(py_self)[].series[],
+                        words(kind, "kind"),
+                        maybe_whole(width, "window"),
+                        maybe_whole(min_periods, "min_periods"),
+                        flag(center, "center"),
+                        words(closed, "closed"),
+                        maybe_whole(step, "step"),
                     )
                 )
             )

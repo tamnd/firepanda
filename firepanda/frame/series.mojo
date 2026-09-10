@@ -106,6 +106,14 @@ from firepanda.kernel.temporal import (
     unit_named,
 )
 from firepanda.kernel.unary import UnaryOp, unary_any
+from firepanda.kernel.window import (
+    Shape,
+    WindowEdge,
+    WindowOp,
+    expanding_shape,
+    rolling_shape,
+    window_agg,
+)
 
 
 struct Series(Copyable, Movable, Sized, Writable):
@@ -1358,6 +1366,94 @@ struct Series(Copyable, Movable, Sized, Writable):
             Error: If the column has no order, which here means a string column.
         """
         return self.cumulative(CumulativeOp.MIN)
+
+    def rolling(
+        self,
+        op: WindowOp,
+        window: Int,
+        min_periods: Optional[Int],
+        center: Bool,
+        closed: WindowEdge,
+        step: Optional[Int],
+    ) raises -> Self:
+        """Returns one reduction run over every window of the column.
+
+        A window that is not told how many values it needs needs all of them,
+        so the leading rows of a rolling sum are missing. That is pandas and it
+        is the answer most people are surprised by once.
+
+        Args:
+            op: Which reduction to run.
+            window: How many rows wide the window is.
+            min_periods: How many values a window needs, or nothing for the
+                width.
+            center: Whether the window sits around its row rather than behind
+                it.
+            closed: Which of its two ends the window keeps.
+            step: How many rows apart the answered rows are, or nothing for
+                every row.
+
+        Returns:
+            A float64 series, as tall as this one when the step is one and
+            shorter when it is not.
+
+        Raises:
+            Error: If the column is not a number or a bool, or the parameters
+                do not describe a window.
+        """
+        return self._windowed(
+            op, rolling_shape(window, min_periods, center, closed, step)
+        )
+
+    def expanding(self, op: WindowOp, min_periods: Int) raises -> Self:
+        """Returns one reduction run over every window with no left edge.
+
+        Every window starts at row zero, so the last row of the answer is the
+        whole column reduced and has to equal the plain reduction. Unlike a
+        rolling window this one needs one value rather than all of them by
+        default, which is why an expanding sum has no hole at the top.
+
+        Args:
+            op: Which reduction to run.
+            min_periods: How many values a window needs before it answers.
+
+        Returns:
+            A float64 series of the same height.
+
+        Raises:
+            Error: If the column is not a number or a bool.
+        """
+        return self._windowed(
+            op, expanding_shape(min_periods, len(self.values))
+        )
+
+    def _windowed(self, op: WindowOp, shape: Shape) raises -> Self:
+        """Runs the window kernel and puts the right row labels back on it.
+
+        A step of one answers a row per row, so the labels carry over. A wider
+        step answers a sample of the rows, and the labels it keeps are the
+        labels of the rows it sampled rather than a fresh range, because those
+        are what the rows are still called.
+
+        Args:
+            op: Which reduction to run.
+            shape: Where the windows sit.
+
+        Returns:
+            The reduced series.
+
+        Raises:
+            Error: Whatever the kernel raises.
+        """
+        var values = window_agg(self.values, op, shape)
+        if shape.step == 1:
+            return self._relabelled(self.name, values^)
+        var sampled = List[Int](capacity=len(values))
+        for k in range(len(values)):
+            sampled.append(k * shape.step)
+        var answer = Self(self.name, values^)
+        answer.index = self.index.take(sampled)
+        return answer^
 
     def dt(self, field: TemporalField) raises -> Self:
         """Returns one calendar or clock field of a datetime series.
