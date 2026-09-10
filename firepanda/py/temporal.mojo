@@ -40,10 +40,17 @@ and this is where it is a different operation from naming a zone, which it is,
 since one reinterprets the readings and the other keeps them.
 """
 
+from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.temporal import TimeUnit
 from firepanda.frame import DataFrame
 from firepanda.frame.index import Index
 from firepanda.frame.series import Series
-from firepanda.kernel.temporal import TemporalField, field_named, temporal_field
+from firepanda.kernel.temporal import (
+    TemporalField,
+    field_named,
+    frequency_period,
+    temporal_field,
+)
 from firepanda.py.errors import VALUE, tagged
 
 
@@ -156,6 +163,39 @@ def word_part(name: String) raises -> String:
     return name
 
 
+def frequency(spelling: String) raises -> String:
+    """Checks that a word is a frequency something can be rounded to.
+
+    Separate from the rounding itself for the reason `temporal` above is separate
+    from `part`: the caller checks the argument before it opens the handler that
+    turns a kernel complaint into a dtype error, so a frequency nobody can round
+    to comes back as the value error pandas raises rather than as a complaint
+    about the column's type, which is not what went wrong.
+
+    It asks the kernel rather than keeping its own list, because the vocabulary
+    is seven aliases with a count and a sign in front and two copies of that is
+    two chances to accept `1.5h` in one place and refuse it in the other. The
+    nanosecond type it asks against is a stand in and nothing about the answer
+    depends on it: the type decides what unit the period comes back in, and the
+    period is thrown away here.
+
+    Args:
+        spelling: The frequency, as pandas spells it.
+
+    Returns:
+        The same word.
+
+    Raises:
+        Error: Tagged `value` if it is not a fixed frequency, keeping whatever
+            the kernel said about why.
+    """
+    try:
+        _ = frequency_period(spelling, LogicalType.timestamp(TimeUnit.NANO))
+    except e:
+        raise tagged(VALUE, String(e))
+    return spelling
+
+
 def part(column: Series, kind: String, arg: String) raises -> Series:
     """Reads one part of a temporal column, and hands back a column.
 
@@ -173,6 +213,8 @@ def part(column: Series, kind: String, arg: String) raises -> Series:
             whatever the kernel raises for a column whose type has no such part.
     """
     _ = column_part(kind)
+    if kind == "floor" or kind == "ceil" or kind == "round":
+        _ = frequency(arg)
     if kind == "date":
         return column.dt_date()
     if kind == "normalize":
