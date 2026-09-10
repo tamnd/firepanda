@@ -8,6 +8,24 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: rolling and expanding windows, and the five reductions a window can be carried through
+
+pandas has three window types and puts twenty six reductions on the first two, and the conformance board had every one of them at zero. `s.rolling(...)` and `s.expanding(...)` are here now, with `sum`, `mean`, `count`, `min` and `max` on each and with all five of the parameters that decide where a window sits.
+
+Five reductions rather than some other five because they are the ones a window can be carried through: the answer to a window can be derived from the answer to the window before it and the rows that changed. That is the whole reason anybody uses these rather than a loop, and it is what separates them from `median` and `quantile`, which need the window sorted, and from `std` and `var`, which carry more state than a total. Those are their own pieces of work and document 31 says which.
+
+The five parameters are one question and not five. `window`, `center` and `closed` decide the first row and the row after the last of the window that row `i` reduces, `min_periods` decides whether that window is allowed to answer, and `step` decides which `i` are asked at all. `Shape.edges` in the new `firepanda/kernel/window.mojo` is that arithmetic and is the only place in the library that knows any of it, which is what makes an expanding window a rolling one whose width is the height of the column rather than a second implementation that agrees today.
+
+Two answers here are deliberately not pandas'. pandas carries one running total, so an infinity entering a window makes it infinite and subtracting the infinity when the row leaves gives a NaN rather than giving the total back, and every window after that reads NaN until the window empties: `pd.Series([1, 2, inf, 3, 4, 5, 6]).rolling(3).sum()` is missing on the two windows that hold the infinity and on the two after it. Its rolling maximum cannot return an infinity either, because it seeds the running extreme with negative infinity and reads a result equal to that seed as an empty window. This counts the two infinities beside the total instead, so a window holding one sign sums to it, a window holding both sums to a NaN, and both survive the infinity leaving the window again.
+
+The finite total is compensated, and the compensation is kept beside the total and added back at the end rather than being folded into the next row on the way in. That is the difference between working and not: folding it in rounds the incoming row before adding it, so `[1e16, 1, 1, 1, 1]` under a two wide window answers one rather than two once the large value has left.
+
+`count` gates on how many rows the window covers rather than on how many of them hold a value, which is pandas' rule and follows from it computing the count as a rolling sum over the presence indicator. On `[1, nan, 3, nan, 5, 6]` a three wide count answers `[nan, nan, 2, 1, 2, 2]` while the sum over the same windows is missing everywhere.
+
+Four declared arguments are refused by name. `win_type` asks for a weighted window, `on` says to order by another column, `method` says whether the columns are reduced together, and `engine` asks for numba. The five that do describe a window are checked in the constructor with pandas' own sentences, because that is where pandas raises them, with one addition: `step=0` is refused there rather than becoming a `ZeroDivisionError` out of the reduction the way it does in pandas.
+
+Document 31 is the argument, including why subtracting a row is not adding one backwards and what the remaining twenty one reductions are waiting on.
+
 ### Added: the `str` accessor, and the twelve names where a position is a character
 
 pandas puts fifty seven names on `s.str` and the conformance board had every one of them at zero, which made `strings` the largest section in the suite sitting at nothing. Twelve of them are here, and they are twelve rather than some other number because they share one idea: `len`, `slice`, `slice_replace`, `get`, `find`, `rfind`, `index`, `rindex`, `startswith`, `endswith`, `removeprefix` and `removesuffix` each either take a position in a string or answer one, and a position in a string is a character.

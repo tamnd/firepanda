@@ -27,12 +27,16 @@ from ._pandas import (
     DataFrameGroupByMixin,
     DataFrameMixin,
     DatetimeMixin,
+    ExpandingMixin,
     IndexMixin,
     Namespace,
+    RollingMixin,
     SeriesGroupByMixin,
     SeriesMixin,
     StringMixin,
+    _expanding,
     _grouped,
+    _rolling,
 )
 from .errors import translate
 
@@ -41,7 +45,9 @@ __all__ = [
     "DataFrame",
     "DataFrameGroupBy",
     "DatetimeProperties",
+    "Expanding",
     "Index",
+    "Rolling",
     "Series",
     "SeriesGroupBy",
     "StringAccessor",
@@ -560,6 +566,123 @@ class CategoricalAccessor(CategoricalMixin):
         """A new list of categories, with the values matched against it."""
         try:
             return self._set(new_categories, ordered, rename)
+        except Exception as error:
+            raise translate(error) from None
+
+
+class Rolling(RollingMixin):
+    """A window of a fixed width over a column, waiting for a reduction.
+
+    Reached from `s.rolling(...)`, and it holds the column and the five numbers that say
+    where each window sits rather than computing anything, which is what pandas does as
+    well. The five are one question, `firepanda/kernel/window.mojo` states it as a pair
+    of row numbers, and this class is where a caller's spelling of that question is
+    checked.
+
+    Five of pandas' twenty six reductions so far, and they are the five a window can be
+    carried through. A total can have the row that left subtracted from it and the row
+    that arrived added to it, and a median cannot, which is the line between what is
+    here and what is not.
+    """
+
+    __slots__ = ()
+
+    def sum(
+        self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
+    ) -> Series:
+        """The total of the values in the window. Over every rolling window."""
+        try:
+            return self._reduce("sum", numeric_only, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def mean(
+        self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
+    ) -> Series:
+        """The mean of the values in the window. Over every rolling window."""
+        try:
+            return self._reduce("mean", numeric_only, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def count(self, numeric_only: bool = False) -> Series:
+        """How many rows of the window hold a value. Over every rolling window."""
+        try:
+            return self._reduce("count", numeric_only)
+        except Exception as error:
+            raise translate(error) from None
+
+    def min(
+        self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
+    ) -> Series:
+        """The smallest value in the window. Over every rolling window."""
+        try:
+            return self._reduce("min", numeric_only, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def max(
+        self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
+    ) -> Series:
+        """The largest value in the window. Over every rolling window."""
+        try:
+            return self._reduce("max", numeric_only, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+
+class Expanding(ExpandingMixin):
+    """A window that starts at the first row and grows, waiting for a reduction.
+
+    Reached from `s.expanding(...)`. The same five reductions as `Rolling` over a window
+    with no near end, which is why the two classes share everything below the
+    constructor: an expanding window is a rolling one whose width is the height of the
+    column. The one thing that is genuinely different is the default for `min_periods`,
+    which is one here and the full width there, and pandas has the same split.
+    """
+
+    __slots__ = ()
+
+    def sum(
+        self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
+    ) -> Series:
+        """The total of the values in the window. Over every expanding window."""
+        try:
+            return self._reduce("sum", numeric_only, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def mean(
+        self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
+    ) -> Series:
+        """The mean of the values in the window. Over every expanding window."""
+        try:
+            return self._reduce("mean", numeric_only, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def count(self, numeric_only: bool = False) -> Series:
+        """How many rows of the window hold a value. Over every expanding window."""
+        try:
+            return self._reduce("count", numeric_only)
+        except Exception as error:
+            raise translate(error) from None
+
+    def min(
+        self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
+    ) -> Series:
+        """The smallest value in the window. Over every expanding window."""
+        try:
+            return self._reduce("min", numeric_only, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def max(
+        self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
+    ) -> Series:
+        """The largest value in the window. Over every expanding window."""
+        try:
+            return self._reduce("max", numeric_only, engine, engine_kwargs)
         except Exception as error:
             raise translate(error) from None
 
@@ -2015,6 +2138,30 @@ class Series(SeriesMixin):
         """Whether the values never go up. A missing value makes this False."""
         try:
             return self._inner.monotonic(False)
+        except Exception as error:
+            raise translate(error) from None
+
+    def rolling(
+        self,
+        window: Any,
+        min_periods: int | None = None,
+        center: bool = False,
+        win_type: str | None = None,
+        on: str | None = None,
+        closed: str | None = None,
+        step: int | None = None,
+        method: str = "single",
+    ) -> Rolling:
+        """A window of a fixed width, which computes nothing until it is reduced."""
+        try:
+            return _rolling(self, window, min_periods, center, win_type, on, closed, step, method)
+        except Exception as error:
+            raise translate(error) from None
+
+    def expanding(self, min_periods: int = 1, method: str = "single") -> Expanding:
+        """A window that starts at the first row and grows, reduced the same way."""
+        try:
+            return _expanding(self, min_periods, method)
         except Exception as error:
             raise translate(error) from None
 
