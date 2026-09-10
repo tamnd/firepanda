@@ -59,6 +59,7 @@ from firepanda.exec import parallel_morsels
 # question and gets the same answer, rather than a second one that rounds
 # differently from the reader.
 from firepanda.io.parse import parse_bool, parse_float, parse_int
+from firepanda.kernel.dictionary import decode_dictionary, encode_dictionary
 from firepanda.kernel.nulls import missing_count_any
 
 
@@ -342,6 +343,13 @@ def cast_any(col: AnyArray, to: DType, strict: Bool = True) raises -> AnyArray:
         If either dtype is not one firepanda has a physical layout for, or the
         column is text holding a value that is not a number.
     """
+    # A dictionary column must not fall through either, and for a worse reason
+    # than the string one below: its physical dtype is the index type, so the
+    # number path would find a matching source arm and quietly convert the codes.
+    # A caller asking for int64 wants the values, and the codes are integers that
+    # look like an answer.
+    if col.is_dictionary():
+        return cast_any(AnyArray(decode_dictionary(col)), to, strict)
     # A string column must not fall through to the number path: its physical
     # dtype is uint8, so `_cast_erased` would find the uint8 source arm and
     # convert the first byte of every 16 byte view.
@@ -382,6 +390,15 @@ def cast_any(
         Error: If the type has no conversion from this column's type, or the
             column is text holding a value that is not a number.
     """
+    if to.kind == TypeKind.DICTIONARY:
+        return _cast_to_dictionary(col, to)
+    # A dictionary source is decoded first and then cast as text. That is one
+    # more pass over the column than a clever version would take, which would
+    # cast the categories and then reindex, and it is the version that gives the
+    # right answer with no case analysis: whatever the target is, the values are
+    # what the codes stand for and not the codes.
+    if col.is_dictionary():
+        return cast_any(AnyArray(decode_dictionary(col)), to, strict)
     if to.kind == TypeKind.STRING or to.kind == TypeKind.BINARY:
         if col.is_string():
             return AnyArray(StringArray(copy=col.strings()))
@@ -393,6 +410,49 @@ def cast_any(
     if to.kind == TypeKind.NULL:
         raise Error("cast: nothing converts to the null type")
     return cast_any(col, to.physical, strict)
+
+
+def _cast_to_dictionary(col: AnyArray, to: LogicalType) raises -> AnyArray:
+    """Encodes a column as a dictionary, which is what `astype("category")` is.
+
+    A column that is already a dictionary is copied rather than decoded and
+    encoded again. That is not only the faster answer, it is the different one:
+    a re-encode would drop the categories nobody used and would resort the rest,
+    and pandas keeps both across an `astype("category")` on a categorical.
+
+    Args:
+        col: The column to encode.
+        to: The dictionary type asked for, which supplies the ordered flag.
+
+    Returns:
+        A dictionary column over int32 codes.
+
+    Raises:
+        Error: If the column is not text, since firepanda holds categories in a
+            string array and has nowhere to put categories of another type.
+    """
+    if col.is_dictionary():
+        var same = col.copy()
+        same.type = LogicalType.dictionary(same.type.physical, to.ordered)
+        return same^
+    if col.is_string():
+        return encode_dictionary(col.strings(), to.ordered)
+    # Rendering the numbers as text first would produce a column that is a
+    # category column in every way except the one that matters, which is what
+    # `.cat.categories` says it holds. Pandas would report int64 there and this
+    # would report text, so the values would round trip and the dtype would not,
+    # and a caller would find out about it somewhere else.
+    raise Error(
+        String(
+            "cast: a column of ",
+            col.type,
+            (
+                " cannot be encoded as a category, and categories of a type"
+                " other than text are not supported, because firepanda holds"
+                " them as a string column"
+            ),
+        )
+    )
 
 
 def _cast_erased[dst: DType](col: AnyArray) raises -> Array[dst]:

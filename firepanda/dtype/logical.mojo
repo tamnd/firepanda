@@ -498,10 +498,17 @@ def named_type(name: String) raises -> LogicalType:
     It reads the spellings that are a single word and nothing else. The
     parameterised ones are left out because each carries something this
     signature has no room for: a timestamp carries a unit and a zone, a
-    duration a unit, a dictionary an index width and an ordering, and a list
-    an element type that does not live on the type at all. Those columns are
-    built by the code that knows those things and are converted by calls that
-    name them, so a name is never the way one is asked for.
+    duration a unit, and a list an element type that does not live on the type
+    at all. Those columns are built by the code that knows those things and are
+    converted by calls that name them, so a name is never the way one is asked
+    for.
+
+    `category` is here anyway, and it carries two things this signature has no
+    room for. It gets them from the encoder rather than from the caller: int32
+    codes, which is what `encode_dictionary` builds, and unordered, which is
+    what pandas gives for a bare `astype("category")`. A caller who wants an
+    ordering is asking for something a type name cannot say in pandas either,
+    and says it with a `CategoricalDtype` instead.
 
     Nothing here is case insensitive and nothing is abbreviated, because the
     aliases a user writes are pandas vocabulary rather than firepanda's and
@@ -526,6 +533,8 @@ def named_type(name: String) raises -> LogicalType:
         return LogicalType.BINARY
     if name == "date32[day]":
         return LogicalType.DATE32
+    if name == "category":
+        return LogicalType.dictionary(DType.int32, False)
     comptime for dt in ALL:
         if name == String(dt):
             return logical_for(dt)

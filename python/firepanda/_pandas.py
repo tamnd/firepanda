@@ -408,6 +408,13 @@ _DTYPE_NAMES: dict[str, str] = {
     "f8": "float64",
     "str": "string",
     "string": "string",
+    # The only name here that is not a layout. It builds the categories as well
+    # as the codes, which is a pass over the column rather than a conversion of
+    # one, and it is spelled as a name anyway because that is how pandas asks
+    # for it. What comes back is unordered over int32 codes, and a caller who
+    # wants an ordering or a fixed set of categories asks with a
+    # `CategoricalDtype` rather than with a word.
+    "category": "category",
 }
 
 _NO_OBJECT = (
@@ -462,11 +469,6 @@ _REFUSED_DTYPES: dict[str, str] = {
     "str_": _NO_OBJECT,
     "O": _NO_OBJECT,
     "U": _NO_OBJECT,
-    "category": (
-        "building the dictionary is a conversion of its own rather than a"
-        " change of layout, and the cast underneath would hand back the index"
-        " width as a plain integer column"
-    ),
     "datetime64": (
         "the cast underneath converts layouts and these are int64 underneath,"
         " so the answer would be a column of counts rather than of instants."

@@ -8,6 +8,40 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: a projection stopped copying the columns it keeps
+
+`select` clones every column it keeps, and until now a clone was a memcpy of the whole thing. The TPC-H queries project `lineitem` before they join it, which is how anybody would write them, so on the four slowest queries that copy ran over the largest table in the query and computed nothing.
+
+It was measured in place rather than reasoned about. Inserting a second redundant projection of the same columns right after the existing one and taking the difference gives what the existing one costs, and on sf1 on a 13900K it came to 15.8 ms on q5, 16.6 on q8 and 30.3 on q9, against a total suite gap to polars of 85 ms. q6 and q10 project no lineitem columns and moved by -0.4 and +0.9 ms, which is the control.
+
+Building the benchmark engine both ways from the same tree and running them back to back on sf1 says it is worth more than that. Wall clock in milliseconds, deep copy against sharing, median of five runs and the middle of three repeats: q5 69.1 to 56.0, q8 54.2 to 33.0, q9 104.1 to 68.4, q1 71.8 to 49.2, q6 25.3 to 10.2, q7 31.5 to 27.5, q10 80.4 to 77.0 and q3 35.2 to 35.1. That is 106 ms across the eight, against the 63 ms the projection probe predicted for the three it was aimed at.
+
+The extra is on paths the probe could not see. q6 was one of the two controls, on the grounds that it projects no lineitem columns, and it still moved by 15 ms, and q1 has no join in it at all and moved by 23. Both of them read the whole of lineitem and neither of them was projecting, so the copies they stopped paying for are somewhere else. That is worth knowing and it is not worth chasing here. Peak resident memory did not move, staying between 4.21 and 4.27 GB on every query in both builds, which says the copy was short lived enough never to be alive at the high water mark.
+
+So a buffer is now behind a refcount and a copy of one shares the allocation. The copy becomes real the first time somebody asks for a pointer they could write through. That is the whole of it, and the interesting part is how it is enforced. The accessors come in pairs: `unsafe_ptr` and `bitcast` take a borrowed receiver and hand back pointers the compiler will not let anyone write through, and `unsafe_mut_ptr` and `mut_bitcast` take a mutable one, un-share first, and hand back pointers that can be written. A reader therefore cannot accidentally pay for a copy and a writer cannot accidentally skip one, because writing through a reader's pointer does not compile.
+
+Splitting them turned every write site in the library into a build error, which is the point: the compiler produced the list and will produce it again for any call site written later. There were about four hundred and twenty of them across thirty five files, two thirds in the sort and select kernels, and every one is the same edit.
+
+The comment that used to justify the deep copy said copies are rare because kernels move buffers rather than copying them. The kernels do. The frame layer does not, and projection is the second thing a query does. The reasoning was sound and the premise was wrong.
+
+Two things are worth writing down, and the first of them cost a day. The refcount is atomic and the un-sharing is not, so a shared buffer has to be made private before several workers write it. The first draft of this entry said the case does not arise, on the grounds that every parallel kernel allocates its output before it starts. Most of them do. Two of them make their output by copying an input and then editing it, and there every worker reaches the un-share at the same moment, every one sees a count above one and every one allocates. One wins the assignment and the rest leak, and the buffer they all copied from has its count taken down once per worker for the single copy that exists. It is a torn refcount rather than torn data, so nothing looks wrong at the time and no query comes back with a different answer. It surfaces much later as a free of memory somebody is still reading.
+
+It was found by AddressSanitizer rather than by a failing assertion, as a use after free in an `ArcPointer` control block, and narrowed by holding twenty spare copies of a bitmap and watching the count fall by one on every call into the float branch of the group count. `Buffer.make_private` is how a caller says so now, on the thread that made the copy and before the workers start, after which each worker finds a count of one and takes the early return. A scan of the library for a buffer or bitmap made by copying and later captured mutably by a closure in the same function turns up exactly two places: `_drop_nans` clearing the bits of the rows holding a NaN, and the constant divisor path in floordiv clearing the bits of the rows dividing by zero. Both call it, and the buffer docstring now states the rule rather than the wrong reassurance.
+
+The second thing is smaller. A pooled buffer can still be sharing with a column that outlived it, which is safe because the pool zeroes on the way out and zeroing un-shares first, so it hands back a private allocation and loses the recycling rather than writing over somebody's bytes.
+
+Closes #406.
+
+### Added: astype("category") builds a category column
+
+Firepanda could read a dictionary encoded column and write one back out, and could not make one. `astype("category")` was refused with a message saying that building the dictionary is a conversion of its own rather than a change of layout, which was accurate and was also the whole reason, so the conversion is now written. It works on a text column, on a series and on a frame, and the result exports over Arrow as a real dictionary encoded column, so a caller can build a categorical in firepanda and hand it to pandas.
+
+It is a kernel of its own rather than an arm of the cast, because every other cast reads a value and writes the same value in another layout while this one cannot: what code a row gets depends on every row before it. The categories come out sorted rather than in first appearance order, which costs a sort over the distinct values and buys the order a caller can actually see, since it is what `.cat.categories` prints, what a groupby produces its groups in, and what an ordered comparison means. A null does not become a category, it becomes a null code beside categories that do not mention it, and an empty string does become one, because a value somebody wrote nothing into is not a value nobody wrote.
+
+Casting off a category is the half that was easier to get wrong. A dictionary column's physical dtype is its index type, so `astype("int64")` on one would have found the int64 arm of the number path and handed back the codes, which are integers and look like an answer. Both entry points now decode first, whatever the target is. A category cast to a category is a copy rather than a decode and a re-encode, which keeps the categories nobody used and keeps the order they were in, both of which pandas keeps.
+
+A column that is not text still cannot be encoded, and says so as a `NotImplementedError`, because firepanda holds categories in a string column and rendering the numbers as text would produce a column whose values round trip and whose category dtype does not. There is still no `.cat` namespace, no `codes` or `categories` on the Python series, and no way to ask for an ordering, since a type name cannot carry one in pandas either. That is the next piece and it is reachable now.
+
 ### Fixed: astype no longer halves the precision of a longdouble on x86
 
 `longdouble` and its character code `g` are refused by name now, where before they resolved to float64. That mapping was measured on an arm Mac, where numpy's `longdouble` really is a float64, and it is wrong on x86 Linux, where it is an eighty bit float that numpy prints as float128. Anyone asking for the widest float the machine has and getting float64 back is getting half of what they asked for, without being told.
@@ -82,29 +116,15 @@ The check sits in `firepanda/py/cast.mojo` and not in the kernel, because it is 
 
 `errors="ignore"` covers the new refusal the same as the old ones, because it covers every `ValueError` and this is one.
 
-### Changed: a projection stopped copying the columns it keeps
+### The README says what SQL will not do, and the table says it
 
-`select` clones every column it keeps, and until now a clone was a memcpy of the whole thing. The TPC-H queries project `lineitem` before they join it, which is how anybody would write them, so on the four slowest queries that copy ran over the largest table in the query and computed nothing.
+The README had nothing about SQL in it at all, which is a strange thing for a repository whose current milestone is a SQL dialect. It has a section now: what exists, which is the parser and the AST and the printer and no execution yet, what the refusal looks like when a query is on the far side of the line, and then the whole line, all forty one entries of it, in a table.
 
-It was measured in place rather than reasoned about. Inserting a second redundant projection of the same columns right after the existing one and taking the difference gives what the existing one costs, and on sf1 on a 13900K it came to 15.8 ms on q5, 16.6 on q8 and 30.3 on q9, against a total suite gap to polars of 85 ms. q6 and q10 project no lineitem columns and moved by -0.4 and +0.9 ms, which is the control.
+The table is generated by `pixi run sql-support` out of `sql_support()` and lives between two markers in the file. That is the part worth having. A hand written list of what a library does not do is right on the day it is written and wrong the week after, every time, because nobody remembers the README when they are adding an entry to a table in another directory. `tests/test_sql_unsupported.mojo` reads the README and fails when the two disagree, so the way you find out is a test rather than a reader.
 
-Building the benchmark engine both ways from the same tree and running them back to back on sf1 says it is worth more than that. Wall clock in milliseconds, deep copy against sharing, median of five runs and the middle of three repeats: q5 69.1 to 56.0, q8 54.2 to 33.0, q9 104.1 to 68.4, q1 71.8 to 49.2, q6 25.3 to 10.2, q7 31.5 to 27.5, q10 80.4 to 77.0 and q3 35.2 to 35.1. That is 106 ms across the eight, against the 63 ms the projection probe predicted for the three it was aimed at.
+`pixi run check-sql-support` is the same run with the file compared rather than written, for anyone who wants it outside the suite. There is no new CI step, since the test suite already runs.
 
-The extra is on paths the probe could not see. q6 was one of the two controls, on the grounds that it projects no lineitem columns, and it still moved by 15 ms, and q1 has no join in it at all and moved by 23. Both of them read the whole of lineitem and neither of them was projecting, so the copies they stopped paying for are somewhere else. That is worth knowing and it is not worth chasing here. Peak resident memory did not move, staying between 4.21 and 4.27 GB on every query in both builds, which says the copy was short lived enough never to be alive at the high water mark.
-
-So a buffer is now behind a refcount and a copy of one shares the allocation. The copy becomes real the first time somebody asks for a pointer they could write through. That is the whole of it, and the interesting part is how it is enforced. The accessors come in pairs: `unsafe_ptr` and `bitcast` take a borrowed receiver and hand back pointers the compiler will not let anyone write through, and `unsafe_mut_ptr` and `mut_bitcast` take a mutable one, un-share first, and hand back pointers that can be written. A reader therefore cannot accidentally pay for a copy and a writer cannot accidentally skip one, because writing through a reader's pointer does not compile.
-
-Splitting them turned every write site in the library into a build error, which is the point: the compiler produced the list and will produce it again for any call site written later. There were about four hundred and twenty of them across thirty five files, two thirds in the sort and select kernels, and every one is the same edit.
-
-The comment that used to justify the deep copy said copies are rare because kernels move buffers rather than copying them. The kernels do. The frame layer does not, and projection is the second thing a query does. The reasoning was sound and the premise was wrong.
-
-Two things are worth writing down, and the first of them cost a day. The refcount is atomic and the un-sharing is not, so a shared buffer has to be made private before several workers write it. The first draft of this entry said the case does not arise, on the grounds that every parallel kernel allocates its output before it starts. Most of them do. Two of them make their output by copying an input and then editing it, and there every worker reaches the un-share at the same moment, every one sees a count above one and every one allocates. One wins the assignment and the rest leak, and the buffer they all copied from has its count taken down once per worker for the single copy that exists. It is a torn refcount rather than torn data, so nothing looks wrong at the time and no query comes back with a different answer. It surfaces much later as a free of memory somebody is still reading.
-
-It was found by AddressSanitizer rather than by a failing assertion, as a use after free in an `ArcPointer` control block, and narrowed by holding twenty spare copies of a bitmap and watching the count fall by one on every call into the float branch of the group count. `Buffer.make_private` is how a caller says so now, on the thread that made the copy and before the workers start, after which each worker finds a count of one and takes the early return. A scan of the library for a buffer or bitmap made by copying and later captured mutably by a closure in the same function turns up exactly two places: `_drop_nans` clearing the bits of the rows holding a NaN, and the constant divisor path in floordiv clearing the bits of the rows dividing by zero. Both call it, and the buffer docstring now states the rule rather than the wrong reassurance.
-
-The second thing is smaller. A pooled buffer can still be sharing with a column that outlived it, which is safe because the pool zeroes on the way out and zeroing un-shares first, so it hands back a private allocation and loses the recycling rather than writing over somebody's bytes.
-
-Closes #406.
+That is exit criterion 4 on #307.
 
 ### Added: astype, and about sixty ways to spell a type
 
