@@ -580,11 +580,16 @@ def test_a_sample_refuses_and_names_itself() raises:
         _ = _printed("SELECT a FROM t WHERE x USING SAMPLE 10%", g, rules)
 
 
-def test_a_window_clause_refuses_and_names_itself() raises:
+def test_a_window_clause_names_a_window_for_the_query_to_use() raises:
+    # What can go inside the parentheses is tested in `test_sql_window.mojo`.
+    # The one thing this file cares about is that the clause comes out in the
+    # place `SimpleSelect` wants it, so the printed text parses again.
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="does not support"):
-        _ = _printed("SELECT a FROM t WINDOW w AS ()", g, rules)
+    assert_equal(
+        _printed("SELECT a FROM t WINDOW w AS ()", g, rules),
+        "SELECT a FROM t WINDOW w AS ()",
+    )
 
 
 def test_the_colon_alias_on_a_select_item_is_the_same_as_as() raises:

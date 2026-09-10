@@ -25,6 +25,7 @@ from firepanda.sql.ast import (
     Expr,
     Ref,
     Stmt,
+    CLAUSE_SLOTS,
     GROUP_ALL,
     GROUP_CUBE,
     GROUP_EMPTY,
@@ -159,7 +160,7 @@ def test_a_query_always_has_a_full_clause_run() raises:
     # when every clause in it is empty.
     var ast = Ast()
     var node = ast.query()
-    assert_equal(ast.length(ast.stmts[Int(node)].children), 6)
+    assert_equal(ast.length(ast.stmts[Int(node)].children), CLAUSE_SLOTS)
 
 
 def test_reading_a_slot_of_a_missing_run_gives_the_null_node() raises:

@@ -99,6 +99,7 @@ from __future__ import annotations
 
 import datetime as _datetime
 import re
+import time as _time
 import warnings
 from typing import Any, NamedTuple
 
@@ -938,7 +939,7 @@ class Timestamp(_datetime.datetime):
     @property
     def week(self) -> int:
         """The ISO week number."""
-        return self.isocalendar()[1]
+        return int(self.isocalendar()[1])
 
     weekofyear = week
 
@@ -1371,6 +1372,119 @@ class Timestamp(_datetime.datetime):
             The text.
         """
         return super().strftime(format)
+
+    # The thirteen below are here for the same reason `strftime` is. Each one
+    # does exactly what `datetime` does and adds nothing, but the inherited C
+    # level callable has no signature `inspect` can read, and pandas spells
+    # every one of these out. A caller reading the two libraries by reflection
+    # has to see the same thing, so these are spelled out as well.
+
+    def ctime(self) -> str:
+        """The moment in the C library's fixed width format.
+
+        Returns:
+            The text, as `datetime.ctime` writes it.
+        """
+        return super().ctime()
+
+    def date(self) -> _datetime.date:
+        """The calendar day, with the time of day dropped.
+
+        Returns:
+            The day as a plain `datetime.date`.
+        """
+        return super().date()
+
+    def dst(self) -> _datetime.timedelta | None:
+        """How far the zone is shifted for daylight saving at this moment.
+
+        Returns:
+            The shift, or None when there is no zone.
+        """
+        return super().dst()
+
+    def isocalendar(self) -> Any:
+        """The ISO year, week and weekday this moment falls in.
+
+        The return is loose because the type `datetime` returns here is not a
+        name the standard library exports, so there is nothing to write down.
+
+        Returns:
+            The three numbers, as `datetime.isocalendar` returns them.
+        """
+        return super().isocalendar()
+
+    def isoweekday(self) -> int:
+        """The day of the week counting Monday as 1.
+
+        Returns:
+            A number from 1 to 7.
+        """
+        return super().isoweekday()
+
+    def time(self) -> _datetime.time:
+        """The time of day, with the calendar day and the zone dropped.
+
+        Returns:
+            The time as a plain `datetime.time`.
+        """
+        return super().time()
+
+    def timetuple(self) -> _time.struct_time:
+        """The moment as the tuple the `time` module works in.
+
+        Returns:
+            A `time.struct_time` in local terms.
+        """
+        return super().timetuple()
+
+    def timetz(self) -> _datetime.time:
+        """The time of day with the zone kept and the calendar day dropped.
+
+        Returns:
+            The time as a plain `datetime.time`, zone attached.
+        """
+        return super().timetz()
+
+    def toordinal(self) -> int:
+        """The day counted from the first day of year 1.
+
+        Returns:
+            The ordinal of the calendar day.
+        """
+        return super().toordinal()
+
+    def tzname(self) -> str | None:
+        """What the zone calls itself at this moment.
+
+        Returns:
+            The name, or None when there is no zone.
+        """
+        return super().tzname()
+
+    def utcoffset(self) -> _datetime.timedelta | None:
+        """How far the zone is from UTC at this moment.
+
+        Returns:
+            The offset, or None when there is no zone.
+        """
+        return super().utcoffset()
+
+    def utctimetuple(self) -> _time.struct_time:
+        """The moment as the tuple the `time` module works in, in UTC.
+
+        Returns:
+            A `time.struct_time` in UTC terms.
+        """
+        return super().utctimetuple()
+
+    def weekday(self) -> int:
+        """The day of the week counting Monday as 0.
+
+        Returns:
+            A number from 0 to 6.
+        """
+        return super().weekday()
 
     @classmethod
     def fromtimestamp(cls, ts: float, tz: Any = None) -> Timestamp:
