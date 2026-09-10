@@ -34,7 +34,15 @@ from . import _firepanda
 from .errors import ColumnNotFoundError, DTypeError, InvalidArgumentError, translate
 
 if TYPE_CHECKING:
-    from ._frame import DataFrame, DataFrameGroupBy, Index, Series, SeriesGroupBy
+    from ._frame import (
+        DataFrame,
+        DataFrameGroupBy,
+        Expanding,
+        Index,
+        Rolling,
+        Series,
+        SeriesGroupBy,
+    )
 
 
 def _refuse(name: str, value: object, why: str) -> None:
@@ -1938,6 +1946,528 @@ def _relabelled(frame: DataFrame, name: str, label: str) -> Series:
         return Series._wrap(frame._inner.column(name).relabel(label))
     except Exception as error:
         raise translate(error) from None
+
+
+_CLOSED = ("right", "left", "both", "neither")
+"""The four words pandas takes for which ends a window keeps, in the order its
+own error message lists them."""
+
+
+class WindowMixin:
+    """What `Rolling` and `Expanding` share, which is everything after the width.
+
+    A window object holds some data and five numbers saying where each window
+    sits, and computes nothing until a reduction is asked for. That is pandas'
+    arrangement and it is why these two classes are so nearly empty: the five
+    reductions are one call each with a different word in it, and the word is
+    the pandas method name, which is the same string the boundary reads.
+
+    The five numbers are checked in the constructor and not at the reduction,
+    because pandas checks them there. `s.rolling(-1)` raises out of the
+    `rolling` call and not out of the `.sum()` after it, and a program that
+    catches the wrong line is a program whose error handling does not run. The
+    kernel checks them again on the way in, which is not duplication worth
+    removing: one of the two checks exists to be reached from Python and the
+    other exists because the Mojo API is a public entry point of its own.
+
+    The data is a column or a frame, and almost nothing here looks at which. A
+    window is a pair of row numbers, every column of a frame has the same rows,
+    so a frame window is the columns windowed one at a time. The two places that
+    do look are the reduction, which has a different class to hand back, and
+    `numeric_only`, which is a different question on each and is argued at
+    `_reduce`.
+
+    The two subclasses differ in their constructors only. A rolling window takes
+    a width and defaults `min_periods` to it, and an expanding window takes no
+    width and defaults `min_periods` to one. Everything below that is the same
+    call.
+    """
+
+    __slots__ = ("_center", "_closed", "_data", "_min_periods", "_step", "_window")
+    """The data and the five numbers that survive to the reduction. Slotted for
+    the reason `DataFrameMixin` gives. There is no `_inner`, because a window
+    object has no extension object of its own: it is some data and a plan for
+    which rows to read together."""
+
+    _data: Series | DataFrame
+    _window: int | None
+    _min_periods: int | None
+    _center: bool
+    _closed: str | None
+    _step: int | None
+
+    def _hold(
+        self,
+        data: Series | DataFrame,
+        window: int | None,
+        min_periods: int | None,
+        center: bool,
+        closed: str | None,
+        step: int | None,
+    ) -> None:
+        """Checks the five and keeps them. Not a public entry point.
+
+        The five are kept exactly as they arrived, including the two that have a
+        default the caller did not write. `closed` stays None rather than
+        becoming `right` and `min_periods` stays None rather than becoming the
+        width, because a window object in pandas reports back what it was given
+        and not what it resolved to, and `df.rolling(2).closed` is None there.
+        The defaults are applied on the way to the kernel instead, which is one
+        line later and one lie fewer.
+
+        Args:
+            data: The column or the frame.
+            window: How many rows wide, and None for an expanding window.
+            min_periods: How many values a window needs, and None for the
+                default of whichever window type this is.
+            center: Whether the window sits around its row.
+            closed: Which ends the window keeps, and None for `right`.
+            step: How many rows apart the answered rows are, and None for every
+                row.
+
+        Raises:
+            InvalidArgumentError: If the five do not describe a window, with the
+                sentence pandas raises for each. A `ValueError`, which is what
+                pandas raises and what a caller's except clause is looking for.
+        """
+        if center is not True and center is not False:
+            raise InvalidArgumentError("center must be a boolean")
+        if window is not None and (not isinstance(window, int) or isinstance(window, bool)):
+            # pandas says the same thing for a float, for a string and for an
+            # offset, because all three reach it as a window it cannot count
+            # rows with. A window given as a duration needs a datetime index to
+            # measure against and that is its own piece of work.
+            raise InvalidArgumentError("window must be an integer 0 or greater")
+        if window is not None and window < 0:
+            raise InvalidArgumentError("window must be an integer 0 or greater")
+        if min_periods is not None:
+            if not isinstance(min_periods, int) or isinstance(min_periods, bool):
+                raise InvalidArgumentError("min_periods must be an integer")
+            if min_periods < 0:
+                raise InvalidArgumentError("min_periods must be >= 0")
+            if window is not None and min_periods > window:
+                raise InvalidArgumentError(f"min_periods {min_periods} must be <= window {window}")
+        if closed is not None and closed not in _CLOSED:
+            raise InvalidArgumentError("closed must be 'right', 'left', 'both' or 'neither'")
+        if step is not None:
+            if not isinstance(step, int) or isinstance(step, bool):
+                raise InvalidArgumentError("step must be an integer")
+            # pandas accepts a step of zero here and divides by it later, which
+            # is a ZeroDivisionError out of the reduction rather than a sentence
+            # about the argument that caused it. A step of zero asks for the same
+            # row forever, so it is refused where the rest of them are.
+            if step < 1:
+                raise InvalidArgumentError("step must be >= 1")
+        self._data = data
+        self._window = window
+        self._min_periods = min_periods
+        self._center = center
+        self._closed = closed
+        self._step = step
+
+    def _over_frame(self) -> bool:
+        """Whether this window is over a frame rather than a column.
+
+        Asked in three places and written once, because the import has to be
+        deferred: `_frame` imports this module to get the mixins it inherits, so
+        this module cannot import `_frame` at the top of the file.
+
+        Returns:
+            True for a frame.
+        """
+        from ._frame import DataFrame
+
+        return isinstance(self._data, DataFrame)
+
+    def _reduce(
+        self,
+        kind: str,
+        numeric_only: bool = False,
+        engine: Any = None,
+        engine_kwargs: Any = None,
+    ) -> Series | DataFrame:
+        """Runs one reduction over every window.
+
+        `numeric_only` is one name asking two questions, and it gets a different
+        answer on each. On a column it says to refuse a column that is not a
+        number, and every reduction here already refuses one, so both values
+        agree everywhere this library has an answer and both are accepted. On a
+        frame it says to drop the columns that cannot be reduced rather than
+        refuse them, which is a decision about which columns come back, so it is
+        held at False and True is refused. That is the rule the group by path
+        already follows and the sentence there is the same sentence.
+
+        `engine` is the numba path and is refused, since there is no second
+        implementation for it to pick. `cython` is the default path spelled out
+        and is accepted.
+
+        Args:
+            kind: The reduction, as pandas spells the method.
+            numeric_only: Held at False over a frame, and accepted at both
+                values over a column, for the reason above.
+            engine: Declared and refused, except at `cython`.
+            engine_kwargs: Declared and refused.
+
+        Returns:
+            Whichever of the two was windowed, of float64, as tall as what it
+            read unless a step made it shorter.
+
+        Raises:
+            NotImplementedError: If a numba engine was asked for, or if a frame
+                was asked to drop the columns it cannot reduce.
+        """
+        from ._frame import DataFrame, Series
+
+        if isinstance(self._data, DataFrame):
+            _held_at(
+                "numeric_only",
+                numeric_only,
+                False,
+                "dropping the columns a window cannot read is a decision about"
+                " which columns come back, and firepanda windows the ones it was"
+                " given or says which one it could not",
+            )
+        if engine is not None and engine != "cython":
+            raise NotImplementedError(
+                f"engine={engine!r} is not supported yet, because there is one"
+                " implementation here and it is the one cython names"
+            )
+        _refuse(
+            "engine_kwargs",
+            engine_kwargs,
+            "it configures the numba engine, and there is no numba engine here for it to configure",
+        )
+        # The one default `_hold` did not apply is applied here. `right` is
+        # pandas' word for a window that keeps the row it is answering and not
+        # the one that fell off the far end. The absent `min_periods` is left
+        # absent and crosses that way, because its default is the width on one of
+        # these two classes and one on the other, and the side that knows which
+        # is the kernel.
+        plan = (
+            kind,
+            self._window,
+            self._min_periods,
+            self._center,
+            self._closed or "right",
+            self._step,
+        )
+        try:
+            if isinstance(self._data, DataFrame):
+                return DataFrame._wrap(self._data._inner.window_agg(*plan))
+            return Series._wrap(self._data._inner.window_agg(*plan))
+        except Exception as error:
+            raise translate(error) from None
+
+
+class RollingMixin(WindowMixin):
+    """The hand written half of `Rolling`, which is its constructor."""
+
+    __slots__ = ()
+    """All the state is `WindowMixin`'s."""
+
+    def __init__(
+        self,
+        data: Series | DataFrame,
+        window: int,
+        min_periods: int | None,
+        center: bool,
+        closed: str | None,
+        step: int | None,
+    ) -> None:
+        """Holds the data and the window. Not a public entry point.
+
+        Args:
+            data: The column or the frame.
+            window: How many rows wide.
+            min_periods: How many values a window needs, and None for the width.
+            center: Whether the window sits around its row.
+            closed: Which ends the window keeps, and None for `right`.
+            step: How many rows apart the answered rows are, and None for every
+                row.
+        """
+        self._hold(data, window, min_periods, center, closed, step)
+
+
+class ExpandingMixin(WindowMixin):
+    """The hand written half of `Expanding`, which is its constructor."""
+
+    __slots__ = ()
+    """All the state is `WindowMixin`'s."""
+
+    def __init__(self, data: Series | DataFrame, min_periods: int) -> None:
+        """Holds the data and how long it waits. Not a public entry point.
+
+        The width is None rather than the height of the data, and that is the
+        one place the absence is written down on the Python side: the data can
+        grow between here and the reduction in pandas and the width is resolved
+        against whatever it is when the reduction runs, so filling it in now
+        would be answering a question that has not been asked yet.
+
+        Args:
+            data: The column or the frame.
+            min_periods: How many values a window needs before it answers.
+        """
+        self._hold(data, None, min_periods, False, None, None)
+
+
+def _rolling(
+    data: Series | DataFrame,
+    window: Any,
+    min_periods: int | None,
+    center: bool,
+    win_type: str | None,
+    on: str | None,
+    closed: str | None,
+    step: int | None,
+    method: str,
+) -> Rolling:
+    """Builds the window object `s.rolling(...)` and `df.rolling(...)` hand back.
+
+    Written rather than generated for the reason `_grouped` gives, which is that
+    it builds a different class and the arguments have to be read before there
+    is an object to read them into. One function for both owners, because the
+    nine arguments mean the same thing on each and the class that comes out is
+    the same class.
+
+    Three of the nine are declared and refused. `win_type` asks for a weighted
+    window, which is a different kernel and not a parameter of this one, and
+    pandas needs scipy for it. `on` says to take the window's ordering from
+    another column, and on a frame it also carries that column through into the
+    answer unreduced. The carrying is the easy half and the ordering is the
+    whole point, and ordering by a column means a window given as a duration,
+    which needs a calendar first. Writing the half that copies a column would be
+    a `rolling("2D", on="t")` that silently counted rows. `method` chooses
+    between reducing each column separately and reducing them together, and this
+    library reduces them separately.
+
+    Args:
+        data: The column or the frame.
+        window: How many rows wide.
+        min_periods: How many values a window needs.
+        center: Whether the window sits around its row.
+        win_type: Declared and refused.
+        on: Declared and refused.
+        closed: Which ends the window keeps.
+        step: How many rows apart the answered rows are.
+        method: Declared and held at `single`.
+
+    Returns:
+        A `Rolling`.
+    """
+    from ._frame import Rolling
+
+    _refuse(
+        "win_type",
+        win_type,
+        "it asks for a weighted window, which is a different kernel from an"
+        " unweighted one rather than a parameter of this one",
+    )
+    _refuse(
+        "on",
+        on,
+        "it says to order the window by another column, and a window measured in"
+        " rows is already ordered by rows, so it would only mean something once a"
+        " window can be given as a duration",
+    )
+    _held_at(
+        "method",
+        method,
+        "single",
+        "it says whether the columns are reduced together, and here they are"
+        " reduced one at a time, which is what a window over a pair of row"
+        " numbers can do without holding the whole frame at once",
+    )
+    return Rolling(data, window, min_periods, center, closed, step)
+
+
+def _expanding(data: Series | DataFrame, min_periods: int, method: str) -> Expanding:
+    """Builds the window object `s.expanding(...)` and `df.expanding(...)` hand back.
+
+    Args:
+        data: The column or the frame.
+        min_periods: How many values a window needs before it answers.
+        method: Declared and held at `single`, for the reason `_rolling` gives.
+
+    Returns:
+        An `Expanding`.
+    """
+    from ._frame import Expanding
+
+    _held_at(
+        "method",
+        method,
+        "single",
+        "it says whether the columns are reduced together, and here they are"
+        " reduced one at a time, which is what a window over a pair of row"
+        " numbers can do without holding the whole frame at once",
+    )
+    return Expanding(data, min_periods)
+
+
+class StringMixin:
+    """The hand written half of `StringAccessor`.
+
+    Three doors under it, picked by the shape of the answer rather than by the
+    shape of the arguments, which is the rule `firepanda/py/text.mojo` states and
+    argues for. Everything here turns what pandas lets a caller write into the
+    word and the four values a door takes.
+
+    Two things are decided here rather than in the kernel, and both are decided
+    here because they are about the pandas surface. `index` and `rindex` are
+    `find` and `rfind` that raise when the substring is missing from any row, and
+    the exception is a `ValueError` whose text pandas copied from Python's
+    `str.index`. And `startswith` accepts a tuple of prefixes, which is Python's
+    signature rather than anything a column kernel should know about, so it is a
+    fold of the one prefix answer over the tuple.
+    """
+
+    __slots__ = ("_series",)
+    """The series the accessor was reached from, held for the reason
+    `DatetimeMixin` gives."""
+
+    _series: Series
+
+    def __init__(self, data: Series) -> None:
+        """Holds the series, and refuses one that is not text.
+
+        The second accessor that checks the column when it is built rather than
+        when it is used, and pandas checks this one the same way and with this
+        text. A caller who wrote `s.str` on a column of numbers asked for an
+        attribute the object does not have, so `hasattr` should answer False
+        rather than raise.
+
+        pandas ends the message with a name for what the column holds instead,
+        and the name it uses is the one `infer_dtype` gives rather than the
+        dtype: a column of int64 is `integer` there. The sentence is pandas' and
+        the last word is ours, because inventing a second vocabulary for types
+        so that one message can read like pandas would be the wrong trade.
+        """
+        if not data._inner.string_is_text():
+            raise AttributeError(f"Can only use .str accessor with string values, not {data.dtype}")
+        self._series = data
+
+    def _text(
+        self,
+        kind: str,
+        arg: str = "",
+        start: int | None = None,
+        stop: int | None = None,
+        step: int = 1,
+    ) -> Series:
+        """Runs a method that answers text."""
+        from ._frame import Series
+
+        try:
+            return Series._wrap(self._series._inner.string_text(kind, arg, start, stop, step))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _flag(self, kind: str, arg: str) -> Series:
+        """Runs a method that answers a mask."""
+        from ._frame import Series
+
+        try:
+            return Series._wrap(self._series._inner.string_flag(kind, arg))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _number(
+        self,
+        kind: str,
+        arg: str = "",
+        start: int | None = None,
+        stop: int | None = None,
+    ) -> Series:
+        """Runs a method that answers a number."""
+        from ._frame import Series
+
+        try:
+            return Series._wrap(self._series._inner.string_number(kind, arg, start, stop))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _sliced(self, start: Any, stop: Any, step: Any) -> Series:
+        """A range of characters out of every row.
+
+        `step=None` means one, which is Python's rule and not a default this
+        library chose, and it is the only one of the three that can be filled in
+        without knowing how long the row is.
+        """
+        return self._text("slice", "", start, stop, 1 if step is None else step)
+
+    def _replaced_slice(self, start: Any, stop: Any, repl: Any) -> Series:
+        """Every row with a range of characters swapped for a string.
+
+        pandas lets `repl` be left out and means the empty string by it, which
+        makes `slice_replace(1, 3)` a deletion rather than an error.
+        """
+        return self._text("slice_replace", "" if repl is None else repl, start, stop)
+
+    def _at(self, i: Any) -> Series:
+        """One character out of every row, by position."""
+        return self._text("get", "", i)
+
+    def _found(self, kind: str, sub: Any, start: Any, end: Any) -> Series:
+        """Where a substring sits in every row, or -1 where it is not there."""
+        return self._number(kind, sub, start, end)
+
+    def _demanded(self, kind: str, sub: Any, start: Any, end: Any) -> Series:
+        """The same, but a row that does not contain the substring is an error.
+
+        pandas checks every row and raises once, which means the answer is
+        computed in full before it is thrown away. That is what it costs to give
+        the caller the exception they asked for, and doing it any other way would
+        mean stopping at the first missing row and reporting a position for the
+        rows before it, which is not an answer anybody can use.
+
+        The class raised is ours rather than a plain `ValueError`, because the
+        generated method around this one runs every error through `translate`
+        and an untagged `ValueError` is exactly what `translate` turns into a
+        `RuntimeError`. `InvalidArgumentError` is a `ValueError` as well, so a
+        caller catching what pandas raises still catches it.
+        """
+        found = self._found(kind, sub, start, end)
+        for value in found.tolist():
+            if isinstance(value, int) and value < 0:
+                raise InvalidArgumentError("substring not found")
+        return found
+
+    def _begins(self, kind: str, pat: Any, na: Any) -> Series:
+        """Whether every row starts or ends with a string, or with any of several.
+
+        A tuple is Python's signature for these two and it is the only place in
+        the accessor where one argument stands for several questions. An empty
+        tuple is False on every row that is not missing, which is what Python's
+        `startswith(())` says.
+
+        The fold over the tuple and the filling of `na` both happen over plain
+        lists here, because `Series` has neither `|` nor `fillna` yet. Both are
+        one column operation each once it does, and moving them down is worth
+        doing the day it exists rather than writing two kernels nothing else
+        would call.
+        """
+        if not isinstance(pat, tuple):
+            answer = self._flag(kind, pat)
+            if na is None:
+                return answer
+            return self._as_mask([na if one is None else one for one in answer.tolist()])
+        rows = self._series._inner.length()
+        held: list[Any] = [False] * rows
+        for one in pat:
+            for at, value in enumerate(self._flag(kind, one).tolist()):
+                if value is None:
+                    held[at] = None
+                elif value:
+                    held[at] = True
+        if na is not None:
+            held = [na if one is None else one for one in held]
+        return self._as_mask(held)
+
+    def _as_mask(self, values: list[Any]) -> Series:
+        """Builds a boolean column out of a plain list, carrying the name across."""
+        from ._frame import Series
+
+        return Series(values, name=self._series.name)
 
 
 class GroupByMixin[Answer]:
