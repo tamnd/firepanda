@@ -785,6 +785,122 @@ def _datetime_members() -> tuple[Member, ...]:
     return tuple(out)
 
 
+def _string_members() -> tuple[Member, ...]:
+    """Writes the members of the `str` accessor.
+
+    Twelve of pandas' fifty seven, and they are the twelve whose only idea is
+    that a position in a string is a character rather than a byte. The rest of
+    the accessor is case conversion, the predicates, splitting and the regex
+    methods, and each of those groups has an idea of its own that is worth
+    landing on its own.
+
+    `index` and `rindex` are here without being in the extension, because they
+    are `find` and `rfind` that raise rather than answering -1, and where that
+    exception is thrown is a pandas question rather than a kernel one.
+
+    Returns:
+        The members, in the order they should be written out.
+    """
+    return (
+        Member(
+            name="len",
+            kind="method",
+            signature="",
+            body='self._number("len")',
+            doc="How many characters each row holds.",
+            returns="Series",
+        ),
+        Member(
+            name="slice",
+            kind="method",
+            signature="start: Any = None, stop: Any = None, step: Any = None",
+            body="self._sliced(start, stop, step)",
+            doc="A range of characters out of every row, under Python's slice rules.",
+            returns="Series",
+        ),
+        Member(
+            name="slice_replace",
+            kind="method",
+            signature="start: Any = None, stop: Any = None, repl: Any = None",
+            body="self._replaced_slice(start, stop, repl)",
+            doc="Every row with a range of characters swapped for a string.",
+            returns="Series",
+        ),
+        Member(
+            name="get",
+            kind="method",
+            signature="i: Any",
+            body="self._at(i)",
+            doc="One character out of every row, and nothing where the row is too short.",
+            returns="Series",
+        ),
+        Member(
+            name="find",
+            kind="method",
+            signature="sub: Any, start: Any = 0, end: Any = None",
+            body='self._found("find", sub, start, end)',
+            doc="Where a substring first sits in every row, or -1 where it is absent.",
+            returns="Series",
+        ),
+        Member(
+            name="rfind",
+            kind="method",
+            signature="sub: Any, start: Any = 0, end: Any = None",
+            body='self._found("rfind", sub, start, end)',
+            doc="Where a substring last sits in every row, or -1 where it is absent.",
+            returns="Series",
+        ),
+        Member(
+            name="index",
+            kind="method",
+            signature="sub: Any, start: Any = 0, end: Any = None",
+            body='self._demanded("find", sub, start, end)',
+            doc="The same as find, except that a row without the substring is an error.",
+            returns="Series",
+        ),
+        Member(
+            name="rindex",
+            kind="method",
+            signature="sub: Any, start: Any = 0, end: Any = None",
+            body='self._demanded("rfind", sub, start, end)',
+            doc="The same as rfind, except that a row without the substring is an error.",
+            returns="Series",
+        ),
+        Member(
+            name="startswith",
+            kind="method",
+            signature="pat: Any, na: Any = None",
+            body='self._begins("startswith", pat, na)',
+            doc="Whether every row begins with a string, or with any of several.",
+            returns="Series",
+        ),
+        Member(
+            name="endswith",
+            kind="method",
+            signature="pat: Any, na: Any = None",
+            body='self._begins("endswith", pat, na)',
+            doc="Whether every row ends with a string, or with any of several.",
+            returns="Series",
+        ),
+        Member(
+            name="removeprefix",
+            kind="method",
+            signature="prefix: Any",
+            body='self._text("removeprefix", prefix)',
+            doc="Every row with a leading string taken off, if it has one.",
+            returns="Series",
+        ),
+        Member(
+            name="removesuffix",
+            kind="method",
+            signature="suffix: Any",
+            body='self._text("removesuffix", suffix)',
+            doc="Every row with a trailing string taken off, if it has one.",
+            returns="Series",
+        ),
+    )
+
+
 def _categorical_members() -> tuple[Member, ...]:
     """Writes the members of the `cat` accessor.
 
@@ -1603,6 +1719,45 @@ SERIES = Exposed(
             returns="bool",
         ),
         Binding(
+            mojo="PySeries.string_text",
+            name="string_text",
+            doc="One str accessor method that answers text, as a column.",
+            params=(
+                ("kind", "str"),
+                ("arg", "str"),
+                ("start", "int | None"),
+                ("stop", "int | None"),
+                ("step", "int"),
+            ),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.string_flag",
+            name="string_flag",
+            doc="One str accessor method that answers a mask, as a column.",
+            params=(("kind", "str"), ("arg", "str")),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.string_number",
+            name="string_number",
+            doc="One str accessor method that answers a number, as a column.",
+            params=(
+                ("kind", "str"),
+                ("arg", "str"),
+                ("start", "int | None"),
+                ("stop", "int | None"),
+            ),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.string_is_text",
+            name="string_is_text",
+            doc="Whether the column holds text at all.",
+            params=(),
+            returns="bool",
+        ),
+        Binding(
             mojo="PySeries.temporal_part",
             name="temporal_part",
             doc="One part of a temporal column, as a column.",
@@ -1798,6 +1953,16 @@ SERIES = Exposed(
                 " temporal column live."
             ),
             returns="DatetimeProperties",
+        ),
+        Member(
+            name="str",
+            kind="accessor",
+            body="StringAccessor",
+            doc=(
+                "The string accessor, which is where the methods that read a text"
+                " column character by character live."
+            ),
+            returns="StringAccessor",
         ),
         Member(
             name="cat",
@@ -2379,6 +2544,24 @@ ACCESSORS: tuple[Accessor, ...] = (
         ),
         mixin="DatetimeMixin",
         members=_datetime_members(),
+    ),
+    Accessor(
+        py="StringAccessor",
+        owner="Series",
+        doc=(
+            "The `str` accessor, which is the largest namespace pandas has.\n\n"
+            "Reached from `s.str`, and only on a column of text, which pandas also"
+            " refuses at the accessor rather than at the method: `s.str` on a column"
+            " of numbers is an `AttributeError` there and here. The same reasoning"
+            " the `cat` accessor gives applies, since a caller writing `s.str` has"
+            " already decided what the column is.\n\n"
+            "Twelve of the fifty seven names so far, and the twelve share one idea:"
+            " a position in a string is a character and not a byte. Every other"
+            " kernel in this library counts bytes, which is right for a `LIKE`"
+            " pattern and for a sort order and is not what `s.str.len()` answers."
+        ),
+        mixin="StringMixin",
+        members=_string_members(),
     ),
     Accessor(
         py="CategoricalAccessor",

@@ -51,6 +51,30 @@ def whole(value: PythonObject, name: String) raises -> Int:
         )
 
 
+def maybe_whole(value: PythonObject, name: String) raises -> Optional[Int]:
+    """Reads a Python integer that is allowed to be absent.
+
+    `None` is a position in a slice and not a missing argument, which is why
+    this exists rather than a default. `s.str.slice(None, None, -1)` reverses
+    every row and `s.str.slice(0, 0, -1)` empties them, so an absent bound has
+    to survive the crossing as an absence and cannot be turned into a number on
+    either side of it.
+
+    Args:
+        value: What Python passed.
+        name: The parameter name, for the message.
+
+    Returns:
+        The integer, or nothing if Python passed `None`.
+
+    Raises:
+        Error: Tagged `dtype`, if the value is neither an integer nor `None`.
+    """
+    if value is Python.none():
+        return None
+    return whole(value, name)
+
+
 def flag(value: PythonObject, name: String) raises -> Bool:
     """Reads a Python boolean.
 
