@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a category column can be written back out
+
+The other half of the dictionary encoded import. A frame with a category column in it can now be handed to pyarrow, pandas or anything else that speaks the Arrow protocol, and comes back the same. Until now it could be read in and not written out, which is worse than not reading it: a caller who read a Parquet file got a frame that failed at the far end of whatever they were doing, over a column they did not choose to have.
+
+The part that catches people is that a dictionary field carries the format of its index rather than of its values. `format_for` on a dictionary over int8 codes answers `c`, which is int8, and says nothing about the categories being text, because the field describes the buffer it actually has and the rest hangs off a second schema on the field's `dictionary` member. The ordered flag goes on the field's flags next to the nullable bit, and it is one bit and is the difference between `a < b` answering and refusing.
+
+Both hung structures are allocations, and both release callbacks now free them, finding them through the member rather than through a box. Getting that wrong is the kind of bug nothing fails over: no wrong answer, no traceback, one schema and one array left behind on every export of every category column, on a path a program reading Parquet in a loop takes once per file.
+
+The categories are the one thing this exporter copies, and the reason is that a borrow would need a keep alive naming whatever owns the column, which the two array exporters disagree about. A set of categories is as long as the cardinality rather than as long as the column, so a column of ten million rows over four categories copies four strings.
+
+The test worth naming is the round trip of a category nobody used. A column whose categories are `low`, `high` and `unused`, whose rows never say `unused`, comes back with three categories and not two. An implementation that round tripped through the values instead of through the codes would pass every assertion about rows and drop it silently, and the difference would surface later in a `value_counts` a long way from anything that mentions Arrow.
+
+Spec 25 has the reasoning. This is still not a `cat` namespace: working with a categorical from Python is separate work and is what the board asks for next.
+
 ### Added: dictionary encoded Arrow columns can be read
 
 A `pandas.Categorical`, a low cardinality string column out of Parquet, and anything else that arrives dictionary encoded now loads as a category column. Until now all of it was refused at the door with a message about an unsupported format string, which was a confusing thing to be told about a column type firepanda has had since the CSV reader learned about categories.

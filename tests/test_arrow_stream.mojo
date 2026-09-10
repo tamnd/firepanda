@@ -49,7 +49,12 @@ from firepanda.io.arrow_c import (
     stream_next,
     stream_schema,
 )
-from firepanda.io.arrow_export import export_frame_array, export_frame_schema
+from firepanda.io.arrow_export import (
+    export_array,
+    export_frame_array,
+    export_frame_schema,
+    export_schema,
+)
 from firepanda.io.arrow_stream import (
     dictionary_plan,
     export_frame_stream,
@@ -147,45 +152,47 @@ def _codes(var values: List[Int32]) raises -> DataFrame:
     return DataFrame.from_series(series^)
 
 
-def _words(var values: List[String]) raises -> DataFrame:
-    """A one column frame of text, which is what a set of categories is."""
-    var series = List[Series](capacity=1)
-    series.append(Series("categories", AnyArray(strings_from_list(values))))
-    return DataFrame.from_series(series^)
-
-
 def _encode(
     mut schema: ArrowSchema,
     mut array: ArrowArray,
-    mut values_schema: ArrowSchema,
-    mut values_array: ArrowArray,
+    var words: List[String],
     ordered: Bool = False,
 ) raises:
     """Turns an exported int32 column into a dictionary encoded one.
 
-    firepanda's own exporter cannot write a dictionary column yet, so a producer
-    that hands one over has to be built here. It is built by splicing rather than
-    by hand because splicing is what the C interface says a dictionary is: the
-    field keeps the index type as its own format and points at a separate schema
-    and a separate array for the values. Two exported frames laid against each
-    other are exactly that shape.
+    firepanda's own frame exporter will not write a dictionary column for you,
+    so a producer that hands one over has to be built here. It is built by
+    hanging rather than by hand because hanging is what the C interface says a
+    dictionary is: the field keeps the index type as its own format and points
+    at a separate schema and a separate array for the values.
 
-    Nothing is copied and nothing is owned, so both exported frames have to
-    outlive the import.
+    The two hung structures get their own allocations and are handed to the
+    field, which means the release callback on the field owns them and frees
+    them, exactly as it does for a dictionary column firepanda exported itself.
+    Anything else would be building a producer that does not conform, and the
+    interface is explicit that a release callback releases the dictionary too.
 
     Args:
         schema: The struct schema of the codes frame.
         array: The struct array of the codes frame.
-        values_schema: The struct schema of the categories frame.
-        values_array: The struct array of the categories frame.
+        words: The categories.
         ordered: Whether to set the ordered flag on the field.
     """
     var field = schema.children.value().unsafe_offset(0)[]
     var column = array.children.value().unsafe_offset(0)[]
-    var value_field = values_schema.children.value().unsafe_offset(0)[]
-    var value_column = values_array.children.value().unsafe_offset(0)[]
-    field[].dictionary = value_field.unsafe_bitcast[NoneType]()
-    column[].dictionary = value_column.unsafe_bitcast[NoneType]()
+
+    var value_schema = external_call[
+        "malloc", Pointer[ArrowSchema, MutUntrackedOrigin]
+    ](size_of[ArrowSchema]())
+    value_schema.unsafe_write(export_schema(LogicalType.STRING))
+    field[].dictionary = value_schema.unsafe_bitcast[NoneType]()
+
+    var value_array = external_call[
+        "malloc", Pointer[ArrowArray, MutUntrackedOrigin]
+    ](size_of[ArrowArray]())
+    value_array.unsafe_write(export_array(AnyArray(strings_from_list(words))))
+    column[].dictionary = value_array.unsafe_bitcast[NoneType]()
+
     if ordered:
         field[].flags = field[].flags | ARROW_FLAG_DICTIONARY_ORDERED
 
@@ -194,14 +201,9 @@ def test_a_dictionary_column_arrives_with_its_categories() raises:
     # The codes are copied by the same path as any other integer column and the
     # categories are attached at the end, which is what the layout was built for.
     var codes = ArcPointer(_codes([Int32(1), Int32(0), Int32(-1), Int32(1)]))
-    var words = ArcPointer(
-        _words(["rivet", "a category longer than twelve bytes"])
-    )
     var schema = _schema_of(codes)
     var array = _array_of(codes)
-    var values_schema = _schema_of(words)
-    var values_array = _array_of(words)
-    _encode(schema, array, values_schema, values_array)
+    _encode(schema, array, ["rivet", "a category longer than twelve bytes"])
 
     var frame = import_frame(schema, array)
     assert_equal(len(frame), 4)
@@ -215,38 +217,26 @@ def test_a_dictionary_column_arrives_with_its_categories() raises:
     assert_false(column.is_valid(2))
     assert_equal(String(column.type), "category")
 
-    release_array(values_array)
-    release_schema(values_schema)
-
 
 def test_the_ordered_flag_crosses_with_the_categories() raises:
     # Which is the only thing that tells `a < b` from a refusal, so a flag that
     # does not cross makes every ordered categorical unordered on arrival.
     var codes = ArcPointer(_codes([Int32(0), Int32(1)]))
-    var words = ArcPointer(_words(["low", "high"]))
     var schema = _schema_of(codes)
     var array = _array_of(codes)
-    var values_schema = _schema_of(words)
-    var values_array = _array_of(words)
-    _encode(schema, array, values_schema, values_array, ordered=True)
+    _encode(schema, array, ["low", "high"], ordered=True)
 
     var frame = import_frame(schema, array)
     assert_true(frame.column("value").values.type.ordered)
-
-    release_array(values_array)
-    release_schema(values_schema)
 
 
 def test_a_plan_reads_the_value_type_the_field_does_not_carry() raises:
     # The field's own format is the index type, so the value type is only in the
     # dictionary schema, and a stream releases that before it hands out a batch.
     var codes = ArcPointer(_codes([Int32(0)]))
-    var words = ArcPointer(_words(["one"]))
     var schema = _schema_of(codes)
     var array = _array_of(codes)
-    var values_schema = _schema_of(words)
-    var values_array = _array_of(words)
-    _encode(schema, array, values_schema, values_array)
+    _encode(schema, array, ["one"])
 
     var plan = dictionary_plan(schema)
     assert_equal(len(plan), 1)
@@ -260,8 +250,6 @@ def test_a_plan_reads_the_value_type_the_field_does_not_carry() raises:
 
     release_array(array)
     release_schema(schema)
-    release_array(values_array)
-    release_schema(values_schema)
 
 
 def test_a_frame_with_no_dictionary_column_plans_nothing() raises:

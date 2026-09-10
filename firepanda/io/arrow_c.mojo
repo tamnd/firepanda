@@ -507,6 +507,14 @@ def format_for(type: LogicalType) raises -> String:
         return String("tdD")
     if type.kind == TypeKind.DURATION:
         return String("tD", type.unit.code_letter())
+    if type.kind == TypeKind.DICTIONARY:
+        # The index type and not the value type, which catches people and is
+        # what the interface says. A dictionary field has no format of its own:
+        # it carries the format of its codes and hangs the value type off
+        # `schema.dictionary`, so the caller writing this into a field has a
+        # second schema to build and this function cannot build it, because the
+        # categories are on the column and a `LogicalType` never holds them.
+        return format_for(LogicalType(TypeKind.INT, type.physical))
     if type == LogicalType.NULL:
         return "n"
     if type == LogicalType.BOOL:
