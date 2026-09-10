@@ -20,11 +20,13 @@ The rule: broadcast when the group count is small relative to the row count, gro
 
 `firepanda/join/pairs.mojo` builds from the right side because the parameter is called right. It should build from the smaller side, because the hash table is what has to be resident. Compare the two lengths, build from the smaller, flip the output pair order to compensate. DuckDB has this as a distinct optimizer pass from join ordering.
 
-**Dense integer keys.**
+**Keys that do not take the dictionary route.**
 
-DuckDB's perfect hash join detects a dense integer key at runtime, after the minimum and maximum are known, and skips hashing entirely: the key minus the minimum is the slot. We have half of this already, since PR #75 detects a unique build side and builds a direct code to row table, but it still hashes to get the code first.
+DuckDB's perfect hash join detects a dense integer key at runtime, after the minimum and maximum are known, and skips hashing entirely: the key minus the minimum is the slot. We have that for one case and not for the others, and the shape of what is missing is worth writing down because it is not the shape the name suggests.
 
-This matters more than it sounds. On db-benchmark j4 the profile is `frame_join` 635 milliseconds, of which `join_indices` is 590, of which `group_ordinals` is 395. That 395 exists because we factorize the key into codes as a separate whole column pass before joining. Detecting a dense integer key and indexing directly removes most of it, for the case that is most joins in practice, because most join keys are identifiers.
+`align_keys` in `firepanda/join/keys.mojo` puts both sides' keys into one ordinal space and it has three routes. A single non text key builds a dictionary on the smaller side and probes the larger with it, and `build_side` takes a table indexed by the value itself when the key is an integer whose span is near the build side's own height, which is the perfect hash join and it is already there. A single text key takes the same shape, but only when the two sides differ in height by at least a factor of eight, which is `STRING_BUILD_SHARE`. Everything else, which is every join on more than one key column and every text join on two sides of similar height, concatenates each key column across both sides and factorizes the tuple over the sum of the two heights through `group_ordinals`.
+
+That last route is the gap and it is a large one. It is a whole column pass over left plus right where the dictionary route is a pass over the smaller side and a lookup per row of the larger, and it copies every key column of both sides to build the concatenation it factorizes. A compound key is not an exotic case, it is what a join on a natural key looks like, and it is the shape most of the TPC-H joins would have if they were not all written on a single surrogate key.
 
 **Sorted input.**
 

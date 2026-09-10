@@ -24,7 +24,8 @@ M3 keeps the lazy user surface, `LazyFrame`, `scan_parquet`, `collect`, `explain
 - [ ] A sortedness flag on a column, set by sort and by readers that know, cleared by everything that reorders
 - [ ] A cached distinct count on a column, written by `factorize` which already computes it
 - [ ] A cached minimum and maximum, and an all valid flag, written by the kernels that already know
-- [ ] Dense integer key detection at the join, indexing directly rather than hashing to a code first
+- [ ] A join on more than one key column building a dictionary on the smaller side and probing the larger, rather than concatenating both sides and factorizing the tuple
+- [ ] A join on one text key taking the dictionary route when the two sides are close in height, rather than only when they differ by a factor of eight
 - [ ] Sorted group by, chosen when the key carries the sortedness flag
 
 ### The IR

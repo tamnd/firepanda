@@ -66,7 +66,7 @@ The only pass that is a search rather than a rewrite. Document 03.
 
 Once the order is fixed, each hash join still chooses which side to build the table from. DuckDB has this as a separate pass from join ordering, `BUILD_SIDE_PROBE_SIDE`, and the two can be disabled independently.
 
-The rule is to build from the smaller side, because the hash table is the thing that has to be resident. `firepanda/join/pairs.mojo` builds from the right side because the parameter is named right. That does nothing on db-benchmark j4 and j5, which join ten million rows to ten million, and it is a large win the first time a user writes the tables in the unhelpful order. It is also about twenty lines: compare the lengths, build from the smaller, flip the output pair order to compensate.
+The rule is to build from the smaller side, because the hash table is the thing that has to be resident. `firepanda/join/pairs.mojo` builds from the right side because the parameter is named right. That does nothing on the db-benchmark joins, which all put the larger table on the left and so happen to want the right side bucketed anyway, and it is a large win the first time a user writes the tables in the other order. It is also about twenty lines: compare the lengths, build from the smaller, flip the output pair order to compensate.
 
 ## What order, and why fixed
 

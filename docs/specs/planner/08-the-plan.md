@@ -22,11 +22,11 @@ These should ship as ordinary pull requests before anything else here starts.
 
 **Column metadata.** A distinct count, a sortedness flag, a minimum and maximum, and an all valid flag, cached on a column when a kernel computes one anyway and invalidated on write. `factorize` produces a group count as a side effect and throws it away; the compare kernels know whether a mask came out all true. Everything in document 07 depends on this and none of it is new computation.
 
-**Dense integer key detection at the join.** When the build side key is an integer whose range is dense enough, index directly instead of hashing. We already detect a unique build side and build a direct table; this removes the factorize pass in front of it. On db-benchmark j4 that pass is 395 milliseconds inside a 635 millisecond query.
+**The join routes that skip the dictionary.** A join on one integer key already builds a dictionary on the smaller side and takes a table indexed by the value itself when the range is narrow. A join on more than one key column does neither, and neither does a join on one text key when the two sides are within a factor of eight in height: both concatenate every key column across both sides and factorize the tuple over the sum of the two heights. Give those cases the build on the smaller side and probe the larger shape the single integer key case has.
 
 **Sortedness flag, then sorted group by.** A group by whose key is known sorted needs no hash table. `sort_values` sets the flag, readers that know set it, and everything that reorders rows clears it.
 
-Expected: j4 and j5 substantially, and a class of user query where the tables were written in the wrong order.
+Expected: a class of user query where the tables were written in the unhelpful order, and every join on a compound key, which is currently paying a whole column factorize over both sides that the single key case does not.
 
 ## Stage one: the plan layer
 
@@ -84,7 +84,7 @@ The 2x goal against all three rivals is not reachable from plan work alone, beca
 
 ## What we should take from this document
 
-Stage zero now, because none of it needs a plan and one item of it is 395 milliseconds on a benchmark we already run.
+Stage zero now, because none of it needs a plan and every item of it is a decision the code currently makes from a parameter name or from nothing.
 
 Stage one is the milestone. It is what makes the engine we already wrote reachable.
 
