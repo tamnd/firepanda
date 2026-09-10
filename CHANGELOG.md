@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### From a parse tree to something worth binding against
+
+`firepanda/sql/transform.mojo`, the piece between the matcher and the arenas, and the only file in the engine that knows a grammar rule name. A grammar bump therefore breaks this file or nothing.
+
+Dispatch is a jump table. The table is one byte per grammar rule and is built once, when the grammar is loaded, so nothing compares a rule name while a query is being transformed. A rule with no entry does not fall through to a default: it refuses and names itself, which is what keeps a coverage gap visible rather than turning it into a wrong answer.
+
+Precedence is flattened here. DuckDB's grammar spells sixteen levels as a chain of `X <- Y Tail*` rules, so `1 + 2 * 3` arrives as a tower of single child pass throughs twenty one deep for a bare literal. Every level folds through the same routine, left to right, which is the associativity the chain shape asks for. Getting that wrong is a wrong answer no syntax test would catch, which is why the printer landed first and why the test for it is a round trip rather than a comparison against an expected tree.
+
+Nothing is resolved. `a.b` becomes a two part name and not a column, and `count(x)` becomes a call with a name and not an overload. Every decision that needs to know what exists belongs to the binder.
+
+The walk is a loop over an explicit stack rather than a recursion. A form that needs the value of a child asks for it and either gets it or is run again once the child has been built, so depth costs heap and not stack, and a form with more than one operand asks for all of them at once so that it is only ever built once. Two things fall out of that. The matcher's own depth limit is now the only thing that refuses a deeply nested query, so when that limit goes this file will not be the next wall. And the transformer builds under Mojo 1.0 at all, which a recursive one does not: with this much control flow around the recursion cycle the compiler hangs outright, and #369 records the bisection.
+
+What it covers is the expression grammar: the sixteen precedence levels, `NOT`, the `IS` family, `BETWEEN`, `IN` over a list, the `LIKE` family, prefix operators, casts in both spellings, dotted names, calls with `DISTINCT`, `CASE` in both forms, list and struct constructors, the four parameter spellings, and a star with `EXCLUDE`, `REPLACE` and `RENAME`. What it refuses, by name and with a link, is anything holding a statement, window functions, ordered aggregates, `IS UNKNOWN`, slices and subscripts, and escaped string literals. The statement and table reference arenas are next, and the three expression kinds that hold a statement inside them arrive with those.
+
 ### Filtering a text column is twenty two times faster
 
 `filter` over a column of six million single character labels took ninety milliseconds. The same filter over a column of doubles beside it took eight. The gap was not the strings, it was the route: the variable width path went through `StringBuilder`, which appends a view to one growing list and a null flag to another and then copies both into the finished column, so a filter that should have been one pass over the mask was three passes and two reallocating lists.
