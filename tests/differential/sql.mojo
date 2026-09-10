@@ -36,7 +36,16 @@ Usage:
 from std.python import Python, PythonObject
 from std.sys import argv
 
-from firepanda.sql import Ast, Grammar, Transform, print_stmt
+from firepanda.sql import (
+    Ast,
+    Grammar,
+    NO_REFUSAL,
+    Refusal,
+    Transform,
+    feature_of,
+    print_stmt,
+    sql_support,
+)
 from firepanda.sql.matcher import parse
 
 comptime ACCEPTED = Byte(ord("1"))
@@ -241,6 +250,44 @@ def directory_of(origin: StringSlice) -> String:
     return String(origin[byte=0:slash])
 
 
+def breakdown(table: List[Refusal], counts: List[Int], unnamed: Int) -> None:
+    """Prints which refusals the corpus landed on, commonest first.
+
+    One number for every refusal is the number that says what to build next. A
+    thousand statements on one entry is one feature and a thousand spread over
+    twenty is twenty, and the totals above cannot tell those apart.
+
+    `no-case` is the row to watch. Every other entry is a decision somebody
+    wrote down, and that one is the transformer running out of cases, so it is
+    the count that says how far the jump table is from covering the grammar.
+
+    Args:
+        table: The refusal table, in its own order.
+        counts: How many statements landed on each entry, parallel to it.
+        unnamed: Refusals whose text matched no entry, which should be zero.
+    """
+    print()
+    print("refusals by feature:")
+
+    # Selection sort over a few dozen entries, because the alternative is
+    # sorting a list of pairs and there is no pair type here worth adding.
+    var shown = List[Bool](length=len(table), fill=False)
+    for _ in range(len(table)):
+        var best = -1
+        for i in range(len(table)):
+            if shown[i] or counts[i] == 0:
+                continue
+            if best < 0 or counts[i] > counts[best]:
+                best = i
+        if best < 0:
+            break
+        shown[best] = True
+        print("   ", counts[best], table[best].feature)
+
+    if unnamed > 0:
+        print("   ", unnamed, "matched no entry, which is a bug in the table")
+
+
 def report(kind: StringSlice, cases: List[Statement], of: Int) -> None:
     """Prints one side of the disagreement list.
 
@@ -310,7 +357,9 @@ comptime TOO_DEEP: UInt8 = 5
 """It printed to text the matcher's depth guard will not read back."""
 
 
-def round_trip(sql: StringSlice, grammar: Grammar, rules: Transform) -> UInt8:
+def round_trip(
+    sql: StringSlice, grammar: Grammar, rules: Transform, mut feature: UInt16
+) -> UInt8:
     """Puts one statement through the transformer and the printer twice.
 
     Once is not enough. The printer parenthesizes every operand, so a
@@ -325,11 +374,14 @@ def round_trip(sql: StringSlice, grammar: Grammar, rules: Transform) -> UInt8:
         sql: The statement, which the parser has already accepted.
         grammar: A loaded grammar.
         rules: A loaded transformer.
+        feature: Set to the table entry a refusal came from, and to
+            `NO_REFUSAL` for every other outcome.
 
     Returns:
         One of `STABLE`, `REFUSED_BY_TABLE`, `NOT_A_QUERY`, `BROKEN`,
         `UNSTABLE` or `TOO_DEEP`.
     """
+    feature = NO_REFUSAL
     var once: String
     try:
         var ast = Ast()
@@ -338,6 +390,7 @@ def round_trip(sql: StringSlice, grammar: Grammar, rules: Transform) -> UInt8:
     except error:
         var message = String(error)
         if message.startswith(REFUSAL):
+            feature = feature_of(message)
             return REFUSED_BY_TABLE
         if message.startswith(SYNTAX):
             return NOT_A_QUERY
@@ -388,6 +441,9 @@ def main() raises:
     var broken = List[Statement]()
     var unstable = List[Statement]()
     var too_deep = List[Statement]()
+    var table = sql_support()
+    var by_feature = List[Int](length=len(table), fill=0)
+    var unnamed = 0
 
     for i in range(len(statements)):
         var answer = answers[i]
@@ -399,7 +455,12 @@ def main() raises:
             ours = False
 
         if ours:
-            var outcome = round_trip(statement.sql, grammar, rules)
+            var feature = NO_REFUSAL
+            var outcome = round_trip(statement.sql, grammar, rules, feature)
+            if feature != NO_REFUSAL:
+                by_feature[Int(feature)] += 1
+            elif outcome == REFUSED_BY_TABLE:
+                unnamed += 1
             if outcome == STABLE:
                 transformed += 1
             elif outcome == REFUSED_BY_TABLE:
@@ -461,6 +522,7 @@ def main() raises:
         "too deep to read back, of",
         round_tripped,
     )
+    breakdown(table, by_feature, unnamed)
     report(
         "the transformer failed on these without refusing:",
         broken,
