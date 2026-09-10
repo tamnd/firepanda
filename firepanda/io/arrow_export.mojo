@@ -86,10 +86,12 @@ from std.ffi import c_char, external_call
 from std.sys import size_of
 
 from firepanda.array.any import AnyArray
+from firepanda.array.strings import StringArray
 from firepanda.bitmap.bitmap import Bitmap
-from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.logical import LogicalType, TypeKind
 
 from .arrow_c import (
+    ARROW_FLAG_DICTIONARY_ORDERED,
     ARROW_FLAG_NULLABLE,
     STRUCT_FORMAT,
     ArrayPtr,
@@ -237,10 +239,71 @@ def pack_bools(column: AnyArray) -> Bitmap:
     return out^
 
 
+def _hang_schema(mut field: ArrowSchema, var values: ArrowSchema):
+    """Puts a value schema on a field's `dictionary` member, and owns it.
+
+    The member is a pointer, so the schema it names has to outlive this call and
+    has to be freeable later. It gets its own allocation rather than a slot in
+    the box, because the release callback finds it through the member itself and
+    so needs nothing from the box at all. That keeps every box in this file the
+    shape it already was.
+
+    Args:
+        field: The field to hang it on.
+        values: The value schema, consumed.
+    """
+    var slot = external_call[
+        "malloc", Pointer[ArrowSchema, MutUntrackedOrigin]
+    ](size_of[ArrowSchema]())
+    slot.unsafe_write(values^)
+    field.dictionary = slot.unsafe_bitcast[NoneType]()
+
+
+def _hang_array(mut column: ArrowArray, var values: ArrowArray):
+    """Puts a categories array on a column's `dictionary` member, and owns it.
+
+    Args:
+        column: The column to hang it on.
+        values: The categories, consumed.
+    """
+    var slot = external_call["malloc", Pointer[ArrowArray, MutUntrackedOrigin]](
+        size_of[ArrowArray]()
+    )
+    slot.unsafe_write(values^)
+    column.dictionary = slot.unsafe_bitcast[NoneType]()
+
+
+def _drop_schema_dictionary(schema: SchemaPtr):
+    """Releases and frees a hung value schema, if there is one.
+
+    Called from the release callback. A structure that was handed out has to be
+    released before its memory goes, and the allocation is this file's, so both
+    halves happen here. Without it every export of a category column leaks one
+    schema, which is the kind of leak nothing fails over and everything grows on.
+    """
+    if not schema[].dictionary:
+        return
+    var slot = schema[].dictionary.value().unsafe_bitcast[ArrowSchema]()
+    release_schema(slot[])
+    external_call["free", NoneType](slot)
+    schema[].dictionary = None
+
+
+def _drop_array_dictionary(array: ArrayPtr):
+    """Releases and frees a hung categories array, if there is one."""
+    if not array[].dictionary:
+        return
+    var slot = array[].dictionary.value().unsafe_bitcast[ArrowArray]()
+    release_array(slot[])
+    external_call["free", NoneType](slot)
+    array[].dictionary = None
+
+
 def _release_exported_schema(schema: SchemaPtr) abi("C") -> None:
     """Frees an exported schema. Installed as `ArrowSchema.release`."""
     if not schema[].release:
         return
+    _drop_schema_dictionary(schema)
     if schema[].private_data:
         var box = schema[].private_data.value().unsafe_bitcast[_SchemaBox]()
         box.unsafe_deinit_pointee()
@@ -255,6 +318,7 @@ def _release_exported_array(array: ArrayPtr) abi("C") -> None:
     """Frees an exported array. Installed as `ArrowArray.release`."""
     if not array[].release:
         return
+    _drop_array_dictionary(array)
     if array[].private_data:
         var box = array[].private_data.value().unsafe_bitcast[_ArrayBox]()
         box.unsafe_deinit_pointee()
@@ -312,6 +376,19 @@ def export_schema(
     schema.flags = ARROW_FLAG_NULLABLE
     schema.private_data = box.unsafe_bitcast[NoneType]()
     schema.release = schema_release_callback(_release_exported_schema)
+    if type.kind == TypeKind.DICTIONARY:
+        # `format_for` has already written the index format on the field, which
+        # is what a dictionary field carries. The value type goes on a schema of
+        # its own, and it is always text because that is what firepanda holds
+        # categories in. The ordered flag is one bit and is the difference
+        # between `a < b` answering and refusing, so it crosses here.
+        if type.ordered:
+            schema.flags = schema.flags | ARROW_FLAG_DICTIONARY_ORDERED
+        try:
+            _hang_schema(schema, export_schema(LogicalType.STRING))
+        except error:
+            release_schema(schema)
+            raise error
     return schema^
 
 
@@ -402,6 +479,36 @@ def _fill_buffers(
     return 2
 
 
+def _hang_categories(mut array: ArrowArray, column: AnyArray) raises:
+    """Exports a dictionary column's categories and hangs them on the array.
+
+    The categories are copied rather than borrowed, which is the one copy this
+    file makes that is not a bool column's bit packing. It is bought rather than
+    conceded: a borrow would need a keep alive naming whatever owns the column,
+    and the two array exporters disagree about what that is, one holding the
+    column itself and one holding a share of a frame. A set of categories is as
+    long as the cardinality rather than as long as the column, so the copy is the
+    small side of the data by the whole point of the encoding.
+
+    Args:
+        array: The exported codes, to hang the categories on.
+        column: The column they came from.
+
+    Raises:
+        Error: If the categories cannot be exported, in which case the codes are
+            released first, since the caller is not getting them.
+    """
+    if column.type.kind != TypeKind.DICTIONARY:
+        return
+    try:
+        _hang_array(
+            array, export_array(AnyArray(StringArray(copy=column.categories())))
+        )
+    except error:
+        release_array(array)
+        raise error
+
+
 def export_array(var column: AnyArray) raises -> ArrowArray:
     """Hands a firepanda column to a C consumer without copying its values.
 
@@ -461,6 +568,7 @@ def export_array(var column: AnyArray) raises -> ArrowArray:
     )
     array.private_data = box.unsafe_bitcast[NoneType]()
     array.release = array_release_callback(_release_exported_array)
+    _hang_categories(array, box[].column)
     return array^
 
 
@@ -520,6 +628,7 @@ def _release_borrowed_array[
     """
     if not array[].release:
         return
+    _drop_array_dictionary(array)
     if array[].private_data:
         var box = (
             array[].private_data.value().unsafe_bitcast[_BorrowedArrayBox[K]]()
@@ -586,6 +695,7 @@ def export_array_borrowed[
     )
     array.private_data = box.unsafe_bitcast[NoneType]()
     array.release = array_release_callback(_release_borrowed_array[K])
+    _hang_categories(array, column[])
     return array^
 
 
