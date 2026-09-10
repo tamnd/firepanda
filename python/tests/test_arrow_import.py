@@ -383,3 +383,59 @@ def test_categories_that_are_not_text_are_refused_by_name(firepanda: ModuleType)
     with pytest.raises(NotImplementedError) as caught:
         firepanda.from_arrow(table)
     assert "grade" in str(caught.value)
+
+
+@needs["pyarrow"]
+def test_a_category_column_goes_back_out_the_way_it_came_in(firepanda: ModuleType) -> None:
+    """The round trip, which is what makes the values above checkable at all.
+
+    Until the export existed, a frame could hold a column it could not hand to
+    anybody, so a caller who read a Parquet file got something that failed at the
+    far end of whatever they were doing rather than at the near end, over a column
+    they did not choose to have.
+    """
+    import pyarrow as pa
+
+    table = pa.table({"grade": pa.array(["a", "b", "a", None]).dictionary_encode()})
+    back = pa.table(firepanda.from_arrow(table))
+    assert back.column("grade").to_pylist() == ["a", "b", "a", None]
+    assert pa.types.is_dictionary(back.schema.field("grade").type)
+
+
+@needs["pandas"]
+@needs["pyarrow"]
+def test_an_ordered_categorical_round_trips_as_an_ordered_one(firepanda: ModuleType) -> None:
+    """Through firepanda and back into a pandas categorical, flag and all.
+
+    The flag is one bit and it decides whether `low < high` is an answer or an
+    error, so a round trip that dropped it would hand back something that looks
+    right in every printed form and behaves differently.
+    """
+    import pandas as pd
+    import pyarrow as pa
+
+    theirs = pd.Series(
+        pd.Categorical(["low", "high", "low"], categories=["low", "high"], ordered=True)
+    )
+    returned = pa.table(firepanda.from_arrow(pa.table({"g": theirs}))).to_pandas()["g"]
+    assert returned.dtype == theirs.dtype
+    assert list(returned) == list(theirs)
+    assert returned.cat.ordered
+
+
+@needs["pandas"]
+@needs["pyarrow"]
+def test_a_category_nobody_used_survives_the_round_trip(firepanda: ModuleType) -> None:
+    """Which is the thing a trip through the values rather than the codes loses.
+
+    A column whose categories are `low`, `high` and `unused` and whose rows never
+    say `unused` comes back with three categories and not two. Losing it would be
+    invisible in every row and would change what `value_counts` and a groupby over
+    the column are supposed to produce.
+    """
+    import pandas as pd
+    import pyarrow as pa
+
+    theirs = pd.Series(pd.Categorical(["low", "high"], categories=["low", "high", "unused"]))
+    returned = pa.table(firepanda.from_arrow(pa.table({"g": theirs}))).to_pandas()["g"]
+    assert list(returned.cat.categories) == ["low", "high", "unused"]
