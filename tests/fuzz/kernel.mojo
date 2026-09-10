@@ -75,6 +75,13 @@ from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.temporal import TimeUnit
 from firepanda.kernel.arith import OP_ADD, OP_MUL, OP_SUB
 from firepanda.kernel.compare import CMP_GE, CMP_LT
+from firepanda.kernel.cumulative import (
+    OP_CUMMAX,
+    OP_CUMMIN,
+    OP_CUMPROD,
+    OP_CUMSUM,
+    cumulative,
+)
 from firepanda.kernel.nulls import fill_backward, fill_forward
 from firepanda.kernel.reduce import reduce_any
 from firepanda.kernel.scalar import (
@@ -85,6 +92,7 @@ from firepanda.kernel.scalar import (
     cast_scalar,
     compare_const_scalar,
     count_scalar,
+    cumulative_scalar,
     divide_const_scalar,
     divide_scalar,
     equal_scalar,
@@ -465,6 +473,59 @@ def nan_fills[dt: DType](a: Array[dt], step: Int, seed: UInt64) raises:
         )
 
 
+def running_folds[dt: DType](col: Array[dt], step: Int, seed: UInt64) raises:
+    """Runs all four scans over one column and checks each against its twin.
+
+    All four rather than one, because the identity and the fold change together
+    and a run that only checked the total would not notice a running minimum
+    that had been seeded from the wrong end of the dtype.
+
+    The column goes in at its own width, which is what `cumulative` is for. The
+    entry point that answers pandas widens an int8 column to int64 before it
+    scans, so fuzzing through that one would leave the narrow dtypes untested
+    and would test int64 six times.
+
+    Args:
+        col: The column.
+        step: The case number.
+        seed: The seed.
+
+    Parameters:
+        dt: The dtype.
+
+    Raises:
+        If any of the four disagrees with its twin.
+    """
+    same_column(
+        cumulative[code=OP_CUMSUM](col),
+        cumulative_scalar[code=OP_CUMSUM](col),
+        step,
+        seed,
+        "cumsum",
+    )
+    same_column(
+        cumulative[code=OP_CUMPROD](col),
+        cumulative_scalar[code=OP_CUMPROD](col),
+        step,
+        seed,
+        "cumprod",
+    )
+    same_column(
+        cumulative[code=OP_CUMMAX](col),
+        cumulative_scalar[code=OP_CUMMAX](col),
+        step,
+        seed,
+        "cummax",
+    )
+    same_column(
+        cumulative[code=OP_CUMMIN](col),
+        cumulative_scalar[code=OP_CUMMIN](col),
+        step,
+        seed,
+        "cummin",
+    )
+
+
 def fail(step: Int, seed: UInt64, what: String, detail: String) raises:
     """Raises the standard failure message.
 
@@ -753,6 +814,15 @@ def run_one[dt: DType](mut rng: Rng, step: Int, seed: UInt64) raises:
 
     comptime if dt.is_floating_point():
         nan_reductions[dt](rng, step, seed)
+
+    # The running folds. On a float dtype they go round twice, because the
+    # column the generator draws has nulls in it and never a NaN, and the two
+    # spellings of missing take different routes through the scan: a null is a
+    # cleared bit the block reads out of the validity word, and a NaN is a
+    # compare on the value. Both have to end up skipped. See #170.
+    running_folds(a, step, seed)
+    comptime if dt.is_floating_point():
+        running_folds(nan_column[dt](rng, length, step % 4), step, seed)
 
     same_column(add(a, b), add_scalar(a, b), step, seed, "add")
     same_column(subtract(a, b), subtract_scalar(a, b), step, seed, "subtract")
