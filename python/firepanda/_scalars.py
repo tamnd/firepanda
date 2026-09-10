@@ -99,6 +99,7 @@ from __future__ import annotations
 
 import datetime as _datetime
 import re
+import warnings
 from typing import Any, NamedTuple
 
 from .errors import (
@@ -188,6 +189,73 @@ _ABBREVIATIONS: dict[str, int] = {
     "nanosecond": 1,
     "nanoseconds": 1,
 }
+
+# What a unit written inside a string means, as in `Timedelta("1h30min")`. This
+# is a third table rather than a reuse of the one above, because the two
+# vocabularies are not the same and measuring is the only way to find that out.
+# `Timedelta(1, unit="W")` is a week and `Timedelta("1 week")` is refused, while
+# `Timedelta("1hr")` is an hour and `Timedelta(1, unit="hr")` is refused. The
+# keys here are lower case and the lookup lowers what it is given, because this
+# form is case insensitive where `unit=` is not.
+_TEXT_UNITS: dict[str, int] = {
+    "w": 604_800_000_000_000,
+    "d": 86_400_000_000_000,
+    "day": 86_400_000_000_000,
+    "days": 86_400_000_000_000,
+    "h": 3_600_000_000_000,
+    "hr": 3_600_000_000_000,
+    "hour": 3_600_000_000_000,
+    "hours": 3_600_000_000_000,
+    "m": 60_000_000_000,
+    "min": 60_000_000_000,
+    "minute": 60_000_000_000,
+    "minutes": 60_000_000_000,
+    "s": 1_000_000_000,
+    "sec": 1_000_000_000,
+    "second": 1_000_000_000,
+    "seconds": 1_000_000_000,
+    "ms": 1_000_000,
+    "milli": 1_000_000,
+    "millis": 1_000_000,
+    "millisecond": 1_000_000,
+    "milliseconds": 1_000_000,
+    "us": 1_000,
+    "micro": 1_000,
+    "micros": 1_000,
+    "microsecond": 1_000,
+    "microseconds": 1_000,
+    "ns": 1,
+    "nano": 1,
+    "nanos": 1,
+    "nanosecond": 1,
+    "nanoseconds": 1,
+}
+
+# The eight spellings that still work and warn, mapped to what to write instead.
+# Deprecation is part of the contract: a program running under
+# `-W error::DeprecationWarning` has to break in the same place in both
+# libraries, so a compatibility layer that quietly stops warning has changed the
+# behaviour of every strict test suite that imports it. The class here is
+# `DeprecationWarning` rather than pandas' `Pandas4Warning`, for the reason
+# document 31 gives: firepanda has no version four to point at, and the pandas
+# class is a subclass of this one so a filter written against the base catches
+# both.
+_DEPRECATED_TEXT_UNITS: dict[str, str] = {
+    "w": "W",
+    "d": "D",
+    "H": "h",
+    "S": "s",
+    "MIN": "min",
+    "MS": "ms",
+    "US": "us",
+    "NS": "ns",
+}
+
+# A month and a year are refused rather than averaged, because neither has a
+# fixed length and picking one would silently answer a question nobody asked.
+# `m` is minutes and `M` is the ambiguous one, which is why this is checked on
+# the spelling as written rather than on the lowered form.
+_AMBIGUOUS_TEXT_UNITS: frozenset[str] = frozenset({"M", "Y", "y"})
 
 # Which of the four Arrow units a whole number counted in a given unit lands on.
 # A count of weeks, days, hours or minutes is a whole number of seconds, so it
@@ -1228,6 +1296,26 @@ class Timestamp(_datetime.datetime):
         cut = base.find(".") + 7
         return base[:cut] + f"{self.nanosecond:03d}" + base[cut:]
 
+    def strftime(self, format: str) -> str:
+        """The moment rendered through a C style format string.
+
+        This is what `datetime.strftime` does and nothing else, and it is written
+        out rather than inherited for one reason: the inherited one is a C level
+        callable whose signature `inspect.signature` cannot read, and pandas spells
+        its own out. A caller reading either library with `inspect` has to see the
+        same parameter, so this one is spelled out too.
+
+        The nanoseconds are not in the answer, because `%f` is microseconds and
+        there is no directive below it. pandas drops them here as well.
+
+        Args:
+            format: The format string.
+
+        Returns:
+            The text.
+        """
+        return super().strftime(format)
+
     @classmethod
     def fromtimestamp(cls, ts: float, tz: Any = None) -> Timestamp:
         """The moment a Unix timestamp names, in local time unless a zone is given.
@@ -1314,16 +1402,20 @@ class Timestamp(_datetime.datetime):
         return cls(_datetime.datetime.combine(date, time))
 
     @classmethod
-    def fromisoformat(cls, date_string: str, /) -> Timestamp:
+    def fromisoformat(cls, object: str, /) -> Timestamp:
         """The moment an ISO 8601 string names.
 
+        The parameter is named `object` because that is what pandas names it, and
+        the conformance board compares parameter names. It is positional only in
+        both libraries, so no caller can be holding the name either way.
+
         Args:
-            date_string: The text.
+            object: The text.
 
         Returns:
             The moment.
         """
-        return cls(date_string)
+        return cls(object)
 
     @classmethod
     def strptime(cls, date_string: Any, format: Any) -> Timestamp:
@@ -1493,13 +1585,17 @@ class Timedelta(_datetime.timedelta):
     _nanos: int
     _unit: str
 
-    def __new__(cls, value: Any = _KEEP, unit: Any = None, **fields: Any) -> Timedelta:
+    def __new__(cls, value: Any = _KEEP, unit: Any = None, **kwargs: Any) -> Timedelta:
         """Builds an elapsed time out of whatever names one.
+
+        The keyword collector is named `kwargs` because that is what pandas names
+        it and the conformance board compares parameter names. `fields` reads
+        better and is what the helper below still calls it.
 
         Args:
             value: Text, a whole number, or a `timedelta`.
             unit: What a whole number counts.
-            **fields: `days`, `hours` and the rest, when no value is given.
+            **kwargs: `days`, `hours` and the rest, when no value is given.
 
         Returns:
             The elapsed time.
@@ -1509,7 +1605,7 @@ class Timedelta(_datetime.timedelta):
             ValueError: If the text or the unit does not parse.
         """
         if value is _KEEP:
-            return cls._from_nanos(*cls._from_fields(fields))
+            return cls._from_nanos(*cls._from_fields(kwargs))
         # The named fields are dropped rather than refused when a value is given
         # too, because that is what pandas does with them: `Timedelta(1, "s",
         # days=1)` is one second there and the day goes nowhere. Refusing would
@@ -1583,28 +1679,31 @@ class Timedelta(_datetime.timedelta):
 
     @staticmethod
     def _parse(text: str) -> tuple[int, str]:
-        """Reads the `1 days 02:03:04.000005006` shape pandas prints.
+        """Reads either of the two shapes pandas accepts in a string.
+
+        There are two, and only the first of them is the shape a span prints as.
+        `1 days 02:03:04.000005006` is the printed form and it round trips. The
+        other is a run of counts with their units written next to them, as in
+        `1h30min` or `1 day, 2:03:04`, and it is the shape people actually type.
+        Both are here because a library whose constructor only accepts what its
+        own repr produces is a library nobody can call by hand, and because the
+        conformance board builds its whole `Timedelta` namespace by evaluating
+        `Timedelta("1D")` and cannot ask a single question about a class it
+        could not construct.
 
         Returns:
-            The nanoseconds and the unit, which is nanoseconds when the text
-            spelled out more than six fractional digits and microseconds
-            otherwise. It is the digits that decide and not the value, so
-            `Timedelta("3 days 00:00:00.000000000")` is nanoseconds even though
-            every one of those digits is a zero.
+            The nanoseconds and the unit.
 
         Raises:
             ValueError: If it does not parse.
         """
         found = re.match(
-            r"^\s*([+-]?)\s*(?:(\d+)\s*days?\s*)?"
+            r"^\s*([+-]?)\s*(?:(\d+)\s*days?\s*,?\s*)?"
             r"(?:\+?\s*(\d+):(\d{1,2})(?::(\d{1,2})(?:[.,](\d+))?)?)?\s*$",
             text,
         )
         if found is None or (found.group(2) is None and found.group(3) is None):
-            raise InvalidArgumentError(
-                f"Could not parse {text!r} as a Timedelta. The shape it takes is"
-                " the one it prints, `1 days 02:03:04.000005006`"
-            )
+            return Timedelta._parse_counts(text)
         sign, days, hours, minutes, seconds, fraction = found.groups()
         clock = int(hours or 0) * 3_600_000_000_000
         clock += int(minutes or 0) * 60_000_000_000
@@ -1621,6 +1720,97 @@ class Timedelta(_datetime.timedelta):
         if days is None:
             return (-clock if sign == "-" else clock), unit
         return (-whole + clock if sign == "-" else whole + clock), unit
+
+    @staticmethod
+    def _parse_counts(text: str) -> tuple[int, str]:
+        """Reads the `1h30min` shape, which is counts with their units attached.
+
+        Returns:
+            The nanoseconds and the unit. The unit is nanoseconds when any count
+            was written in them, when any count spelled more than six fractional
+            digits, or when the total is not a whole number of microseconds, and
+            microseconds otherwise. All three of those were measured rather than
+            reasoned about: `Timedelta("0ns")` is quoted in nanoseconds even
+            though it is zero, `Timedelta("1.000000000s")` is quoted in them
+            because of the digits it wrote and not the value they came to, and
+            `Timedelta("1.5us")` is quoted in them because fifteen hundred
+            nanoseconds is not a whole count of microseconds.
+
+        Raises:
+            ValueError: If it does not parse, if a unit is not one of the
+                thirty three, or if it is a month or a year, which have no fixed
+                length and are refused rather than averaged.
+        """
+        body = text.strip()
+        negative = body.startswith("-")
+        if body[:1] in {"+", "-"}:
+            body = body[1:].lstrip()
+        if "+" in body or "-" in body:
+            # pandas is strict about this and it is right to be. `1D-2h` reads
+            # as a day less two hours to a person and as two spans to a parser,
+            # and guessing which one was meant is worse than asking.
+            raise InvalidArgumentError("only leading negative signs are allowed")
+        count = r"(?:\d+(?:\.\d*)?|\.\d+)"
+        if not body or re.fullmatch(rf"(?:{count}\s*[A-Za-z]+[\s,]*)+", body) is None:
+            if re.match(r"^[A-Za-z]", body):
+                raise InvalidArgumentError("unit abbreviation w/o a number")
+            raise InvalidArgumentError(
+                f"Could not parse {text!r} as a Timedelta. The two shapes it"
+                " takes are the one it prints, `1 days 02:03:04.000005006`, and"
+                " a run of counts with their units, `1h30min`"
+            )
+        total = 0
+        nanoseconds = False
+        for number, spelled in re.findall(rf"({count})\s*([A-Za-z]+)", body):
+            if spelled in _AMBIGUOUS_TEXT_UNITS:
+                raise InvalidArgumentError(
+                    "Units 'M', 'Y' and 'y' do not represent unambiguous"
+                    " timedelta values and are not supported."
+                )
+            scale = _TEXT_UNITS.get(spelled.lower())
+            if scale is None:
+                raise InvalidArgumentError(f"invalid unit abbreviation: {spelled}")
+            if spelled in _DEPRECATED_TEXT_UNITS:
+                instead = _DEPRECATED_TEXT_UNITS[spelled]
+                warnings.warn(
+                    f"'{spelled}' is deprecated and will be removed in a future"
+                    f" version. Please use '{instead}' instead of '{spelled}'.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+            # Every other unit in this table is matched without regard to case
+            # and this one is not, which is a wart rather than a rule. `0nano`
+            # and `0NANO` are both quoted in nanoseconds and `0NS` and `0Ns` are
+            # quoted in microseconds, because the deprecated spelling is
+            # rewritten on the way in and the rewrite is what the resolution is
+            # read off. It is copied because a program that reads `.unit` gets
+            # the same answer from both libraries or it gets a surprise.
+            nanoseconds = nanoseconds or spelled == "ns" or spelled.lower().startswith("nano")
+            whole, _, digits = number.partition(".")
+            total += int(whole or 0) * scale
+            if digits:
+                # The whole part and the fractional part are scaled separately,
+                # which is what pandas does and is not tidiness. Multiplying the
+                # whole thing as one float loses the low digits of a large count
+                # long before it loses anything a caller would forgive.
+                #
+                # The fraction is rounded to as many decimals as the unit has
+                # nanoseconds in it, up to nine, and then truncated. That is two
+                # rules rather than one and both were measured: `1.0009us` is a
+                # thousand and one nanoseconds because the fraction rounds up to
+                # a whole nanosecond first, while `1.5ns` is one nanosecond
+                # because a nanosecond has no decimals to round to and the
+                # truncation is all that is left. Neither is what a reader would
+                # guess and the second one is not even self consistent with the
+                # first, so it is copied rather than tidied.
+                places = min(9, len(str(scale)) - 1)
+                fraction = float(f"0.{digits}")
+                total += int(round(fraction, places) * scale) if places else int(fraction * scale)
+                nanoseconds = nanoseconds or len(digits) > 6
+        # The sign goes on at the end, so that a negative count truncates
+        # towards zero the same way a positive one does.
+        nanoseconds = nanoseconds or total % 1_000 != 0
+        return (-total if negative else total), ("ns" if nanoseconds else "us")
 
     @classmethod
     def _from_nanos(cls, nanos: int, unit: str) -> Timedelta:
