@@ -90,6 +90,68 @@ spellings round trip through the printed form and both are here because getting
 one right does not get the other right.
 """
 
+TEXT_SPANS = [
+    "1D",
+    "1 D",
+    "1 day",
+    "1 days",
+    "2W",
+    "1h",
+    "1 hr",
+    "30min",
+    "30m",
+    "1 sec",
+    "5ms",
+    "7us",
+    "3ns",
+    "1 nanos",
+    "1h30min",
+    "1 h 30 min",
+    "1D2h",
+    "2W3D4h5min6s7ms8us9ns",
+    "-1D",
+    "+1D",
+    "- 1D",
+    " 1 D ",
+    "1 day, 2:03:04",
+    "1 day, 2:03:04.5",
+    "2:03:04",
+    "0D",
+    "0ns",
+    "0NS",
+    "1000ns",
+    "1000NS",
+    "1.5D",
+    "1.5s",
+    "1.5us",
+    "1.25us",
+    "1.0us",
+    "1.0009us",
+    "1.5ns",
+    "2.5ns",
+    "-2.5ns",
+    "0.0000001s",
+    "0.000001s",
+    "1.000000000s",
+    "0.5ms",
+    "1D 500ns",
+    "1 day 2 day",
+]
+"""The count and unit form, one entry per thing that decides an answer.
+
+The first group is one spelling of each unit. The second is what happens when
+several of them are written together, with and without spaces. The third is the
+signs, which pandas only allows in the leading position. The fourth is the forms
+that overlap with the printed shape, since a parser that tries the printed shape
+first has to hand the rest over rather than refuse them.
+
+The rest are fractions, which is where every surprise in this form lives.
+`1.0009us` rounds its fraction up to a whole nanosecond and `1.5ns` truncates
+its own, `1.000000000s` is quoted in nanoseconds because of the digits it wrote
+rather than the value they came to, and `0NS` is quoted in microseconds where
+`0ns` is quoted in nanoseconds, which is a wart in the deprecated spelling.
+"""
+
 FREQUENCIES = ["D", "h", "min", "s", "ms", "us", "ns", "2h", "15min", "-2h", "3D"]
 """The fixed frequencies with and without a count, and one with a sign."""
 
@@ -684,6 +746,55 @@ def test_every_public_name_pandas_puts_on_the_two_classes_is_here(firepanda: Mod
 
 
 @needs_pandas
+def test_every_callable_takes_the_parameters_pandas_takes(firepanda: ModuleType) -> None:
+    """The second half of the surface, which is the second question the board asks.
+
+    Names and kinds and not defaults, because the repr of a pandas sentinel is not
+    portable and comparing defaults would produce a wall of differences that are
+    all about sentinel identity. A wrong default shows up where a user would
+    notice it, which is in an answer.
+
+    A callable pandas itself cannot introspect is skipped, since both sides
+    failing to report a signature is not evidence of anything. That is why the
+    two constructors are compared separately below: pandas can read those.
+
+    The members are read off a built moment and a built span rather than off the
+    two classes, which is what the board does and is not a detail. A method read
+    off a class carries its `self` and a method read off an instance does not,
+    and the inherited C level ones disagree about that parameter's kind between
+    the two libraries in a way no caller can see.
+    """
+    import inspect
+
+    import pandas as pd
+
+    def parameters(obj: Any) -> list[str] | None:
+        try:
+            return [f"{p.name}:{p.kind.name}" for p in inspect.signature(obj).parameters.values()]
+        except (TypeError, ValueError):
+            return None
+
+    differences = []
+    pairs: list[tuple[str, Any, Any]] = [
+        ("Timestamp", firepanda.Timestamp("2026-01-01"), pd.Timestamp("2026-01-01")),
+        ("Timedelta", firepanda.Timedelta("1D"), pd.Timedelta("1D")),
+    ]
+    for label, mine, theirs in pairs:
+        for name in sorted(n for n in dir(theirs) if not n.startswith("_")):
+            want = parameters(getattr(theirs, name))
+            if want is None:
+                continue
+            got = parameters(getattr(mine, name))
+            if got != want:
+                differences.append(f"{label}.{name}: {got}, pandas takes {want}")
+        want = parameters(type(theirs))
+        got = parameters(type(mine))
+        if got != want:
+            differences.append(f"{label}(): {got}, pandas takes {want}")
+    assert differences == [], "\n".join(differences)
+
+
+@needs_pandas
 @pytest.mark.parametrize("spelled", SPANS)
 @pytest.mark.parametrize(
     "name",
@@ -906,6 +1017,72 @@ def test_building_a_span_from_a_value_agrees_with_pandas(firepanda: ModuleType, 
     import pandas as pd
 
     agree(lambda: firepanda.Timedelta(value), lambda: pd.Timedelta(value), f"Timedelta({value!r})")
+
+
+@needs_pandas
+@pytest.mark.parametrize("text", TEXT_SPANS)
+def test_a_span_written_as_counts_and_units_agrees_with_pandas(
+    firepanda: ModuleType, text: str
+) -> None:
+    """The shape people type, as against the shape a span prints as.
+
+    Both the nanosecond count and the unit are compared, because the unit is
+    where this form is least obvious: three separate rules decide it and all
+    three were measured rather than reasoned about. A whole sweep of eight
+    hundred and eighty five spellings ran against pandas while this was written
+    and the list below is the part of it worth keeping, one entry per thing that
+    can go wrong rather than one per spelling.
+    """
+    import pandas as pd
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        agree(
+            lambda: (firepanda.Timedelta(text).value, firepanda.Timedelta(text).unit),
+            lambda: (pd.Timedelta(text).value, pd.Timedelta(text).unit),
+            f"Timedelta({text!r})",
+        )
+
+
+@needs_pandas
+@pytest.mark.parametrize("spelled", ["w", "d", "H", "S", "MIN", "MS", "US", "NS"])
+def test_the_deprecated_unit_spellings_warn_the_way_pandas_warns(
+    firepanda: ModuleType, spelled: str
+) -> None:
+    """A program under `-W error::DeprecationWarning` has to break in both libraries.
+
+    The class is `DeprecationWarning` here and `Pandas4Warning` there, which is
+    a subclass of it, so a filter written against the base catches both and a
+    filter written against the pandas name catches only pandas. That is the
+    smaller of the two possible mistakes and document 31 made it first.
+    """
+    import pandas as pd
+
+    with pytest.warns(DeprecationWarning, match=f"'{spelled}' is deprecated"):
+        firepanda.Timedelta("1" + spelled)
+    with pytest.warns(DeprecationWarning, match=f"'{spelled}' is deprecated"):
+        pd.Timedelta("1" + spelled)
+
+
+@needs_pandas
+@pytest.mark.parametrize(
+    "text", ["1 M", "1 Y", "1 y", "1 zz", "hello", "--1D", "1D-2h", "1e3s", "1_000s", "1 T", "1 L"]
+)
+def test_a_span_that_names_no_length_is_refused_the_way_pandas_refuses_it(
+    firepanda: ModuleType, text: str
+) -> None:
+    """A month has no fixed length and `1D-2h` has two readings, so neither is guessed.
+
+    `T` and `L` are in here because they used to be minutes and milliseconds and
+    are not any more, so a program carrying them has to find out rather than get
+    a number.
+    """
+    import pandas as pd
+
+    with pytest.raises(ValueError):
+        firepanda.Timedelta(text)
+    with pytest.raises(ValueError):
+        pd.Timedelta(text)
 
 
 @needs_pandas
