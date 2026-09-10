@@ -8,6 +8,92 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: astype no longer halves the precision of a longdouble on x86
+
+`longdouble` and its character code `g` are refused by name now, where before they resolved to float64. That mapping was measured on an arm Mac, where numpy's `longdouble` really is a float64, and it is wrong on x86 Linux, where it is an eighty bit float that numpy prints as float128. Anyone asking for the widest float the machine has and getting float64 back is getting half of what they asked for, without being told.
+
+It is the only name in the table whose answer changes with the machine rather than with the argument, so unlike `long` and `uint` it cannot be written down as a row. firepanda has no float wider than float64 on any platform, which puts it with `complex` and `void` and the rest of the types the refusal table exists for, and the message says so and points at `double` for the float64 the caller may have wanted anyway.
+
+Found by CI on Linux, on a test that passed on macOS for exactly this reason.
+
+### Fixed: the interpreter CI reached for stopped working
+
+`uv run` takes the newest interpreter it can find, the newest one is now a free threaded build of 3.14, and importing the extension into it segfaults inside `PyInit__firepanda` before a single test runs. Every platform failed at once, on pull requests that touched no Python at all, which is the signature of the environment moving rather than the code. The extension tests now name the version they run on.
+
+This is a stopgap and the comment on the step says so. An extension that does not declare whether it is safe without the GIL is supposed to make the interpreter turn the GIL back on and carry on, not crash in its init function, so something is wrong rather than merely unsupported. #400 has the reproduction and what has to be found out to close it.
+
+### Added: a category column can be written back out
+
+The other half of the dictionary encoded import. A frame with a category column in it can now be handed to pyarrow, pandas or anything else that speaks the Arrow protocol, and comes back the same. Until now it could be read in and not written out, which is worse than not reading it: a caller who read a Parquet file got a frame that failed at the far end of whatever they were doing, over a column they did not choose to have.
+
+The part that catches people is that a dictionary field carries the format of its index rather than of its values. `format_for` on a dictionary over int8 codes answers `c`, which is int8, and says nothing about the categories being text, because the field describes the buffer it actually has and the rest hangs off a second schema on the field's `dictionary` member. The ordered flag goes on the field's flags next to the nullable bit, and it is one bit and is the difference between `a < b` answering and refusing.
+
+Both hung structures are allocations, and both release callbacks now free them, finding them through the member rather than through a box. Getting that wrong is the kind of bug nothing fails over: no wrong answer, no traceback, one schema and one array left behind on every export of every category column, on a path a program reading Parquet in a loop takes once per file.
+
+The categories are the one thing this exporter copies, and the reason is that a borrow would need a keep alive naming whatever owns the column, which the two array exporters disagree about. A set of categories is as long as the cardinality rather than as long as the column, so a column of ten million rows over four categories copies four strings.
+
+The test worth naming is the round trip of a category nobody used. A column whose categories are `low`, `high` and `unused`, whose rows never say `unused`, comes back with three categories and not two. An implementation that round tripped through the values instead of through the codes would pass every assertion about rows and drop it silently, and the difference would surface later in a `value_counts` a long way from anything that mentions Arrow.
+
+Spec 25 has the reasoning. This is still not a `cat` namespace: working with a categorical from Python is separate work and is what the board asks for next.
+
+### Added: dictionary encoded Arrow columns can be read
+
+A `pandas.Categorical`, a low cardinality string column out of Parquet, and anything else that arrives dictionary encoded now loads as a category column. Until now all of it was refused at the door with a message about an unsupported format string, which was a confusing thing to be told about a column type firepanda has had since the CSV reader learned about categories.
+
+The reason it was hard is that the C Data Interface does not give a dictionary its own format string. The field keeps the format of its index, and the value type hangs off a separate member of the schema, while the categories hang off the matching member of the array, one set per batch rather than one per column. So the value type has to be read before a stream releases its schema and remembered, and the categories have to be collected batch by batch. The codes themselves go down exactly the path any other int32 column takes, with no special case in the copying.
+
+Two shapes are refused and both say why. A stream whose batches carry different categories cannot be read as it stands, because the code 0 in one batch is then a different word from the code 0 in the next, and unifying them would mean silently rewriting every code in every batch that came before on every read of every file. The message names the column and names the fix, which in pyarrow is `table.unify_dictionaries()`. Categories that are not text are refused too, since firepanda holds them in a string column, and that message names the dictionary's format rather than the field's, because the field's format is an index type and a reader who went to look at it would find nothing wrong with it. Both arrive as `NotImplementedError`, because Arrow allows what the producer did and the gap is firepanda's.
+
+Writing one back out is not part of this. A frame with a category column in it still cannot be exported, and there is no `.cat` namespace or `codes` accessor on the Python series yet, so from Python what a caller can currently do with an imported categorical is see that it arrived. Doing the import first is what makes the rest of that list reachable at all.
+
+### Fixed: a misspelled argument was being told to wait for a feature it already had
+
+There are two ways to pass an argument a value the call will not answer, and firepanda was giving both of them the same answer. `s.quantile(0.5, interpolation="lower")` names one of the twelve rules pandas has and firepanda has not written, and `NotImplementedError` is right for it: the thing asked for is real and is scheduled. `s.quantile(0.5, interpolation="lowr")` is a typo four characters from a working line, and it was getting the same reply, which sent somebody off to read a changelog about a feature that already exists under the spelling they meant. It now says what pandas says, which is `'lowr' is not a valid method. Use one of:` followed by the thirteen names, because the list is the fix and the class is the one an existing `except ValueError` is already written against.
+
+The same split now applies to `DataFrame.quantile(method=)`, which has a two word vocabulary, and to `nonexistent=` on `tz_localize`, `floor`, `ceil` and `round` on both the column and the scalar. The rule is written down as spec 23: ask whether pandas takes the value, not whether firepanda answers it, and check for the typo first, since a typo is also not the default and would otherwise be caught on its way past by the branch that reports a gap.
+
+`ambiguous=` is deliberately not given the same check on a column, and is given it on a scalar. That is not an inconsistency, it is what pandas does. `s.dt.tz_localize("UTC", ambiguous=3)` comes back with an answer in it and is never validated, while `Timestamp.tz_localize("UTC", ambiguous=3)` is refused, and the scalar refuses `infer` as well because a single moment has no neighbours to infer a direction from. Adding a check the column version does not have would be firepanda refusing input pandas accepts, and a wrong refusal stops a program where a wrong message only wastes an afternoon.
+
+### Fixed: rounding a column with no zone refused an argument pandas never reads
+
+`floor`, `ceil` and `round` take `ambiguous` and `nonexistent`, and pandas reads them only when the value already carries a zone. Hand a naive column or a naive `Timestamp` either of them and pandas rounds and ignores the argument, because there is no daylight saving without a zone and so nothing for a policy to decide. firepanda was refusing, which meant a naive column that rounds fine in pandas stopped. Both now pass a naive value straight through. `tz_localize` is not like this and still reads both every time, including when it is handed `None` and including when the moment is already zoned, which is also measured rather than assumed.
+
+### Fixed: four messages that described our internals instead of the user's mistake
+
+A message is a product surface. Somebody who hits one of these has stopped reading their own code and has started pasting a sentence into a search box, and a sentence that is accurate about firepanda's insides and shares no words with the pandas documentation sends them nowhere. These four had the right exception class and the wrong words, which is the failure mode that looks like nothing is wrong.
+
+`dt.tz_convert` on a column with no zone said `tz_convert has nothing to convert this column from`. It now says `Cannot convert tz-naive timestamps, use tz_localize to localize`, which is pandas' own sentence, followed by ours saying which column and what to reach for. `dt.tz_localize` on a column that already carries one said `this column is already on UTC` and now leads with `Already tz-aware, use tz_convert to convert`. A frequency nobody can round to said `'not a frequency' is not a fixed frequency` and now says `Invalid frequency: not a frequency`, still followed by the list of the seven that work. The frequency message also names the whole string the caller wrote rather than the letters after the count, so `2xyz` reports `2xyz` and not `xyz`.
+
+An operation between two dtypes with nothing between them said `no common type for int64 and string`, which is a true statement about the promotion table and is not a statement about anything the user wrote. It now leads with `operation 'add' not supported for dtype 'int64' with dtype 'string'` and keeps the promotion complaint after the colon, because the second half is often the more useful of the two and both fit in one string. Whether the failure is that one is decided by asking `promote` rather than by reading the message text, and `promote` is asked instead of `binary_type` on purpose: `bool - bool` promotes perfectly well and is refused further along by numpy's own sentence naming `bitwise_xor` as the operator that works, which is a better message than this one and would have been buried by it. The sentence is only added when each side is a single dtype, since two frames are lined up by name and there is no pair to name here without doing the alignment a second time.
+
+The constant form is deliberately left alone. pandas answers `s + "x"` with a numpy `UFuncTypeError` saying `ufunc 'add' did not contain a loop with signature matching types`, which is an implementation detail leaking through rather than a message pandas wrote, and there is nothing there worth copying.
+
+All four were found by the conformance suite the day it started routing L4 to the Python module, which is [firepanda-compat #82](https://github.com/tamnd/firepanda-compat/pull/82), and they had been invisible until then.
+
+### Fixed: the three ways a cast fails, all three of them wrong
+
+A conversion that cannot be made now fails the way pandas fails it, in the class it raises, in the sentence it says and in whether it fails at all.
+
+Text that will not read as a number was raising a `TypeError`. It is a `ValueError` in pandas and it is a `ValueError` here now, which matters more than it sounds: `except ValueError` around a cast is ordinary code and a `TypeError` walks straight past it. The message is the pandas one word for word, so `invalid literal for int() with base 10: 'x'` for an integer target and `could not convert string to float: 'x'` for a float one, with the row number added on the end. pandas says which value would not read and not where it was, and on a column of any size that is the first thing a person then has to go and find out.
+
+A float column holding a NaN, an infinity or a missing value converted to an integer was not failing at all, which was the worse of the two bugs. The first and the last handed back a null sitting in an integer column and the infinity handed back the largest int64 there is. Nothing raised, so a caller ended up holding a column pandas could not have made, having asked for one pandas would have refused. All three are now refused, with the class pandas gives that refusal, `IntCastingNaNError`, which is in `firepanda.errors` under the name it has in `pandas.errors`. It is a `ValueError` too, so a broad catch still fires.
+
+The check sits in `firepanda/py/cast.mojo` and not in the kernel, because it is a pandas rule and not an Arrow one. An Arrow integer column holding a null is perfectly legal and firepanda keeps making them. That leaves one door pandas does not have: `firepanda.Series([1, None, 3])` is an int64 column with a null where the pandas one is float64 with a NaN, so a caller here can ask to convert an integer column that already holds a missing value. It is refused too, since the column pandas would have had is the one pandas refuses.
+
+`errors="ignore"` covers the new refusal the same as the old ones, because it covers every `ValueError` and this is one.
+
+### Added: astype, and about sixty ways to spell a type
+
+`Series.astype` and `DataFrame.astype`, with the pandas signature, and `dtype=` honoured in both constructors instead of refused. The frame form takes one type name for every column or a dict naming some of them, which is what pandas takes.
+
+The cast itself was already written and tested in Mojo and simply had no door into Python. Almost all of the new code is the other half of the method, which is working out what type the caller asked for. pandas resolves a dtype through numpy and numpy has spent thirty years collecting names, so `int64` is also `int`, `int_`, `intp`, `long`, `longlong`, `l`, `q`, `p` and `i8`, and a program written by somebody who learned numpy first uses whichever of those they learned. Every row of the table was measured against a running pandas 3.0.3 rather than remembered, which is how the surprises got in: `i` is int32 and not int64, `u` is not a name at all though `i`, `f` and `b` are, `long` is int64 while `longdouble` is not a float64 anywhere but on arm, and `unicode`, `str_`, `U` and `O` are all the object dtype rather than text. The test walks the whole table and asks a live pandas what each name means, so a row added without being measured fails.
+
+A type pandas has and firepanda does not is refused by name with the reason, rather than being absent and failing on the lookup. Four of those refusals are for types firepanda does have. A cast to `datetime64[ns]`, `timedelta64[ns]` or `date32[day]` falls through to the physical layout underneath and would hand back the integers the instants, spans and days are stored as, and a cast to `binary` hands back text. All four are worth fixing in the kernel and none of them is worth shipping as a silent wrong answer in the meantime.
+
+`copy=` warns and does nothing, which is what pandas 3 does with it. `errors="ignore"` hands the column back unchanged, and it is read in the Python layer rather than passed to the kernel, because the kernel's flag asks a different question: it turns a value that will not convert into a missing one, and pandas never asks for that.
+
+One deliberate divergence, written down as a test. `astype("bool")` on a column of text is truthiness in pandas, so `"x"`, `"0"` and `"false"` are all True and only the empty string is False, and nothing is parsed and no input is ever rejected. firepanda parses, and a value that is not a boolean is an error.
+
 ### Fixed: the type check that failed over a dependency we do not have
 
 `_numpy` imports numpy inside a `try` so that the three names handing back a numpy scalar can say what is missing rather than raise `ImportError` at anyone. mypy runs with no numpy installed, which is the whole point of the guard, and reported the guarded import as a missing library stub. That took the Format job down on every branch and there was nothing on any of those branches to fix. numpy is now declared to mypy as a module it will not find, which is true and is going to stay true, since firepanda has no dependencies.
@@ -215,6 +301,40 @@ Three doors rather than one, though, and the rule for which is which is the shap
 pandas defaults three parameters to a private sentinel, `lib.no_default`, and firepanda now has its own `NO_DEFAULT` to put in the same three places. `shift(fill_value=)`, `dropna(how=)` and `dropna(thresh=)` are the three. It is not the pandas object, because importing a private name out of pandas to spell a default would make pandas a hard dependency of a library that does not otherwise need it, and it is not `None`, because `None` is a value a caller can pass to `fill_value` and it has to be distinguishable from not passing anything.
 
 Every argument pandas declares and this does not implement raises rather than being ignored, the same way the reductions do. `axis=1` on a frame transformation, `skipna=False` on a scan, `numeric_only`, `limit_area`, `shift(freq=)`, a list of periods with a `suffix`, a `fill_value` on a shift, `dropna(how="all")`, a `thresh`, `inplace` and `ignore_index` each refuse by name with the reason in the message, and there is a test per refusal.
+
+### No refusal says a rule number any more
+
+`SELECT INTERVAL '1 day'` used to come back with `firepanda does not support grammar rule 472`, which is a fact about firepanda's build of the grammar and means nothing to the person who wrote the query. It now says it does not support an INTERVAL literal, and that a duration is its own type with its own arithmetic and arrives with the date and time work. Across DuckDB's corpus that was 3,385 statements blaming a number and it is now none of them.
+
+Thirteen entries went into the refusal table and no code went with them, which is the point of the table being a table. A row value written as `(a, b)` or `ROW(a, b)`, an `INTERVAL`, a typed literal such as `DATE '2020-01-01'`, a lambda, a list comprehension, an argument passed by name, `COLUMNS`, a `MAP` literal, `GROUPING`, a column written as `#1`, and `DEFAULT` where a value goes each name themselves and say what to write instead where there is something to write instead.
+
+The functions SQL spells with keywords inside the parentheses share one entry between them. `EXTRACT`, `SUBSTRING`, `TRIM`, `POSITION`, `OVERLAY`, `TRY` and `UNPACK` all get a rule of their own from the grammar because none of them is a plain name and arguments, and the message fills in whichever one was written, so `SELECT TRIM(BOTH ' ' FROM a)` says firepanda does not support TRIM yet.
+
+Three statements that produce rows were never reached by the tier tables, because `DESCRIBE`, `PIVOT` and `UNPIVOT` hang off the select rule rather than off the statement rule. All three now say they are coming, which is what they are. And `WITH x AS (INSERT INTO t VALUES (1))` used to blame the rule for the parentheses around a statement in a `WITH`, which is a rule nobody writes and nobody can look up. It now walks in and lets the statement inside say its own name.
+
+### Every statement says what firepanda does with it
+
+A statement firepanda does not run now refuses by name instead of coming back as a syntax error. `ATTACH 'x.db'` says firepanda does not support the ATTACH statement, points at the word, and says to read the data with SELECT and do the rest in Mojo. `CREATE TABLE t (a INT)` says firepanda does not support the CREATE statement yet, which is a different sentence on purpose: a reader who is told `not yet` waits for a release and a reader who is told `not this` writes the query another way. Telling somebody their perfectly good SQL has a syntax error in it tells them neither.
+
+The split is the one in `docs/specs/sql/05-ast-and-binder.md` section 4. Ten statements are tier two and say `yet`, from `CREATE` and `INSERT` through `PRAGMA`, because each is a frame operation with a SQL spelling. Twenty five are tier three and do not, because each wants a catalog, a transaction, a file that outlives the process, or an extension, and firepanda is a dataframe library rather than a database. `UPDATE` and `DELETE` are in the second group rather than the first, which is a judgement rather than a fact: both are expressible over an immutable frame as a rewrite, neither is what a dataframe user reaches for, and half of them would be worse than none of them.
+
+A trailing semicolon is part of a statement now. `SELECT 1;` was a syntax error at the semicolon, which is the shape of query anybody pastes out of a file or a shell, and the transformer starts at the whole statement rule rather than at the query rule so it now reads the same as `SELECT 1`. A file of nothing but whitespace, or a bare `;`, is a syntax error at end of input.
+
+Over DuckDB's corpus that moves 40,063 statements out of `syntax error` and into a sentence that names what they asked for. 69,153 statements go through the round trip, 28,871 come back as the same text twice, 40,171 refuse by name, and 108 are text the grammar itself will not take, which is the corpus testing that bad SQL is rejected and firepanda agreeing. Nothing is broken and nothing is unstable.
+
+`GROUPING SETS ((a, ))` also stopped being a special case. The trailing comma made the grammar hand back a row where `GROUPING SETS (a)` hands back an expression, and the two mean the same set of one column, so the row now builds as the column and the two spellings print the same.
+
+### Parse, print, reparse, over the whole corpus
+
+`pixi run differential-sql` now puts every statement firepanda parses through the transformer and the printer twice and checks that the two printings agree. That is 69,153 statements, and the counts are in the section above. Nothing is broken and nothing is unstable, and both of those numbers have a ceiling of zero so they stay that way.
+
+The four outcomes are separated on purpose. A refusal starts with `Not Implemented Error:` and is the expected answer for anything outside the surface firepanda covers, so it is counted rather than failed. Text the grammar will not take at all is not a defect either. Anything else out of the transformer is a bug, and text that prints back to something different is a printer that lost something. Running them together in one number would have hidden the two that matter behind the rest.
+
+The printer no longer calls itself once per child. `x + x + x` folds to the left, so the eight kilobyte expression in DuckDB's `overflow/expression_tree_depth.test` is a tree two thousand deep, and a recursive printer runs out of stack on it and takes the process down with it. The walk is now a loop over an explicit stack with a phase counter saying which part of a node is being written, which is the same shape the transformer's walk already had. Depth costs heap and the two thousand term chain prints in one pass. That closes #368.
+
+Two quoting bugs came out of the corpus and both were the printer writing a name bare that cannot stand bare. `SELECT "inner" FROM t` came back as a syntax error at the `FROM`, and `ORDER BY s COLLATE "is"` came back as one at the `s`. The rule was quoting reserved keywords only, and DuckDB has five keyword classes rather than two. A column name keyword such as `coalesce` may stand anywhere and stays bare, a function name or type name keyword such as `inner` or `left` may only stand where a function is being called, and a reserved keyword may stand nowhere. So the same word is quoted as a column and bare as a call, which is what the grammar says and what the round trip now checks on seventy thousand statements.
+
+Three statements are left that firepanda prints correctly and cannot read back. One is the two thousand term chain and the other two are wide generated CTEs. The printer parenthesizes every operand, so the text of the chain opens with two thousand parentheses and the matcher's own depth guard stops at about twenty two. They have a ceiling of their own and a bucket of their own, because nothing was lost: the AST is right and the text is right, and the only thing that cannot read it is our matcher. They go when the matcher becomes an explicit stack machine.
 
 ### The corpus differential stops taking the process down with it
 

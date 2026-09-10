@@ -475,9 +475,6 @@ def test_a_long_chain_of_tails_is_built_once() raises:
     # with a long run of tails costs one pass and not one per tail. If that
     # ever regresses this test still passes and gets slow, so it also counts
     # the arena, which a fold that ran twice would leave garbage in.
-    #
-    # It stops short of the printer, which is still recursive and runs out of
-    # stack at this depth. See #368.
     var g = Grammar()
     var rules = Transform(g)
     var sql = String("1")
@@ -489,6 +486,27 @@ def test_a_long_chain_of_tails_is_built_once() raises:
     # index 0 so that 0 can mean no node.
     assert_equal(len(ast.exprs), 1002)
     assert_equal(Int(node), 1001)
+
+
+def test_a_chain_two_thousand_deep_prints() raises:
+    # The corpus has this shape in overflow/expression_tree_depth.test, at
+    # eight kilobytes of `x + x`. A left fold makes it a tree two thousand
+    # deep, and a printer that calls itself once per child does not come back
+    # from that: it overruns the stack and takes the process with it, so there
+    # is nothing to catch and nothing to report. See #368.
+    var g = Grammar()
+    var rules = Transform(g)
+    var sql = String("1")
+    for _ in range(2000):
+        sql += " + 1"
+    var ast = Ast()
+    var node = rules.parse_expression(sql, g, ast)
+    var text = print_expr(ast, node, g)
+    # One pair of parentheses per operator, both of them outside everything the
+    # operator already wrote, so the text opens with two thousand of them.
+    assert_equal(text.byte_length(), 2000 * 2 + 2001 + 2000 * 3)
+    assert_true(text.startswith("((("))
+    assert_true(text.endswith("+ 1)"))
 
 
 def test_a_call_with_many_arguments_round_trips() raises:

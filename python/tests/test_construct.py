@@ -204,11 +204,14 @@ def test_the_declared_pandas_parameters_are_refused_by_name(firepanda: ModuleTyp
     parameters rather than one. A parameter that is silently ignored would be
     worse than one that is missing, so each of them raises with its own name in
     the message.
+
+    `dtype` used to be on this list and is not any more, because it is honoured
+    now. `test_astype.py` has what it does instead.
     """
-    for keyword in ("index", "columns", "dtype", "copy"):
+    for keyword in ("index", "columns", "copy"):
         with pytest.raises(NotImplementedError, match=keyword):
             firepanda.DataFrame({"a": [1]}, **{keyword: object()})
-    for keyword in ("index", "dtype", "copy"):
+    for keyword in ("index", "copy"):
         with pytest.raises(NotImplementedError, match=keyword):
             firepanda.Series([1], **{keyword: object()})
 

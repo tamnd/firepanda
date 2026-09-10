@@ -26,10 +26,12 @@ exactly the shape the generator cannot write and exactly the shape `_refuse` and
 
 from __future__ import annotations
 
+import datetime
+import warnings
 from typing import TYPE_CHECKING, Any
 
 from . import _firepanda
-from .errors import InvalidArgumentError, translate
+from .errors import ColumnNotFoundError, DTypeError, InvalidArgumentError, translate
 
 if TYPE_CHECKING:
     from ._frame import DataFrame, DataFrameGroupBy, Index, Series, SeriesGroupBy
@@ -172,6 +174,93 @@ def _held_at(name: str, value: Any, default: Any, why: str) -> None:
         raise NotImplementedError(f"{name}={value!r} is not supported yet, because {why}")
 
 
+# The thirteen interpolations pandas takes, in the order numpy lists them, since
+# pandas hands the name straight to `numpy.quantile` and the message it raises
+# prints numpy's own dictionary. firepanda has written `linear`. The other twelve
+# are a schedule and are refused as one, which is why this list is longer than
+# anything firepanda answers: it is what pandas accepts, and a name that is not
+# on it is a typo rather than a gap.
+_INTERPOLATIONS = (
+    "inverted_cdf",
+    "averaged_inverted_cdf",
+    "closest_observation",
+    "interpolated_inverted_cdf",
+    "hazen",
+    "weibull",
+    "linear",
+    "median_unbiased",
+    "normal_unbiased",
+    "lower",
+    "higher",
+    "midpoint",
+    "nearest",
+)
+
+# The four spellings of `nonexistent`, and the sentence pandas refuses a fifth
+# with. pandas takes a timedelta here as well, which is not a string and would
+# fail this check, so the call sites let one through to `_held_at` and it comes
+# back a NotImplementedError. That is the right class for it: a timedelta is a
+# value pandas accepts and firepanda has not written, which is the schedule and
+# not the typo.
+#
+# `ambiguous` has no list like this and is deliberately not given one. pandas
+# does not check the argument's vocabulary on a column at all: it carries
+# whatever arrived down to the point where a wall clock hour turns out to be two
+# instants, and `.dt.tz_localize('UTC', ambiguous=3)` comes back with an answer
+# in it. Adding a check here would be firepanda refusing input pandas accepts,
+# which is the direction of difference this library does not get to have. The
+# scalar in `_scalars.py` does check it, because `Timestamp.tz_localize` does,
+# and the two files differ there because pandas differs there.
+_NONEXISTENT = ("raise", "NaT", "shift_forward", "shift_backward")
+_NONEXISTENT_REFUSAL = (
+    "The nonexistent argument must be one of 'raise', 'NaT', 'shift_forward',"
+    " 'shift_backward' or a timedelta object"
+)
+
+
+def _spelled(value: Any, allowed: tuple[str, ...], message: str) -> None:
+    """Refuses a value that is not in the argument's vocabulary at all.
+
+    This is the question `_held_at` is not asking, and running the two together
+    is what put the wrong class on three refusals.
+
+    An argument like `interpolation` has a fixed vocabulary and two ways to be
+    wrong. `interpolation="lower"` is a value pandas accepts and firepanda has
+    not implemented, which is `NotImplementedError` and is a schedule. And
+    `interpolation="not a method"` is a value pandas does not accept either,
+    which is a typo, and pandas answers it with a `ValueError` naming the words
+    that would have worked. Answering both with `NotImplementedError` tells
+    somebody who misspelled `midpoint` that firepanda has not got round to their
+    spelling yet, which is not true and sends them to the changelog instead of to
+    their own line.
+
+    So this is asked first and `_held_at` second. The message is built by the
+    caller rather than assembled here, because each of these is pandas' own
+    sentence and pandas words every one of them differently: `Invalid method: x.
+    Method must be in {'table', 'single'}.` for one, `'x' is not a valid method.
+    Use one of:` for another. Document 22 is why the wording follows pandas and
+    where it deliberately does not.
+
+    Not every argument with a fixed vocabulary gets one of these, and the test
+    is whether pandas checks. `ambiguous` reads like the same shape and is not:
+    pandas carries whatever arrived down to the point where an hour turns out to
+    be two instants and complains about the hour rather than about the argument.
+    A check here would refuse input pandas accepts, which is the one direction of
+    difference this library does not get to have.
+
+    Args:
+        value: What was passed.
+        allowed: The values pandas accepts, which is not the same list as the
+            values firepanda implements and is usually longer.
+        message: The refusal, worded the way pandas words it.
+
+    Raises:
+        InvalidArgumentError: If the value is not one of them.
+    """
+    if value not in allowed:
+        raise InvalidArgumentError(message)
+
+
 def _reducing_axis(axis: Any, owner: str) -> None:
     """Refuses a reduction along the second axis.
 
@@ -213,16 +302,22 @@ def _quantile_wanted(q: Any, interpolation: str) -> float:
         The quantile as a float.
 
     Raises:
-        InvalidArgumentError: If it is not a number between zero and one.
-        NotImplementedError: If it is a list, or if the interpolation is one of
-            the four that are not linear.
+        InvalidArgumentError: If it is not a number between zero and one, or if
+            the interpolation is not one of the thirteen pandas takes.
+        NotImplementedError: If it is a list, or if the interpolation is one
+            pandas takes and firepanda has not written.
     """
+    _spelled(
+        interpolation,
+        _INTERPOLATIONS,
+        f"{interpolation!r} is not a valid method. Use one of: " + ", ".join(_INTERPOLATIONS),
+    )
     _held_at(
         "interpolation",
         interpolation,
         "linear",
         "the reduction lands between two values by weighting them and the other"
-        " four rules pick one of them instead",
+        " twelve rules pick one of them or reweight the whole sample instead",
     )
     if isinstance(q, bool) or not isinstance(q, (int, float)):
         raise NotImplementedError(
@@ -232,6 +327,279 @@ def _quantile_wanted(q: Any, interpolation: str) -> float:
     if not 0.0 <= float(q) <= 1.0:
         raise InvalidArgumentError(f"percentiles should all be in the interval [0, 1]. Try {q!r}")
     return float(q)
+
+
+# Every spelling of a type firepanda has, and the one name firepanda prints for
+# it. The table is long because pandas resolves a dtype through numpy and numpy
+# has spent thirty years collecting names, so `int64` is also `int`, `int_`,
+# `intp`, `long`, `longlong`, `l`, `q`, `p` and `i8`, and a program written by
+# somebody who learned numpy first uses whichever of those they learned. Every
+# row was measured against a running pandas 3.0.3 rather than read, which is how
+# the surprises got in: `i` is int32 and not int64, `u` is not a name at all
+# though `i`, `f` and `b` are, `long` is int64 while `longdouble` is not a
+# float64 anywhere but on arm, and `unicode`, `str_`, `U` and `O` are all the
+# object dtype rather than text.
+#
+# Two rows are platform dependent and are written as they measure on the
+# machines this is built for, which is what pandas would report there too, since
+# both libraries are asking the same C compiler how wide a `long` is: `long` and
+# `uint` are sixty four bits. A third, `longdouble`, is platform dependent in a
+# way that cannot be written down as one row and is refused below instead.
+_DTYPE_NAMES: dict[str, str] = {
+    "bool": "bool",
+    "bool_": "bool",
+    "?": "bool",
+    "b1": "bool",
+    "int8": "int8",
+    "byte": "int8",
+    "b": "int8",
+    "i1": "int8",
+    "int16": "int16",
+    "short": "int16",
+    "h": "int16",
+    "i2": "int16",
+    "int32": "int32",
+    "intc": "int32",
+    "i": "int32",
+    "i4": "int32",
+    "int64": "int64",
+    "int": "int64",
+    "int_": "int64",
+    "intp": "int64",
+    "long": "int64",
+    "longlong": "int64",
+    "l": "int64",
+    "q": "int64",
+    "p": "int64",
+    "i8": "int64",
+    "uint8": "uint8",
+    "ubyte": "uint8",
+    "B": "uint8",
+    "u1": "uint8",
+    "uint16": "uint16",
+    "ushort": "uint16",
+    "H": "uint16",
+    "u2": "uint16",
+    "uint32": "uint32",
+    "uintc": "uint32",
+    "I": "uint32",
+    "u4": "uint32",
+    "uint64": "uint64",
+    "uint": "uint64",
+    "uintp": "uint64",
+    "ulong": "uint64",
+    "ulonglong": "uint64",
+    "L": "uint64",
+    "Q": "uint64",
+    "P": "uint64",
+    "u8": "uint64",
+    "float16": "float16",
+    "half": "float16",
+    "e": "float16",
+    "f2": "float16",
+    "float32": "float32",
+    "single": "float32",
+    "f": "float32",
+    "f4": "float32",
+    "float64": "float64",
+    "double": "float64",
+    "float": "float64",
+    "d": "float64",
+    "f8": "float64",
+    "str": "string",
+    "string": "string",
+}
+
+_NO_OBJECT = (
+    "Arrow has no type that holds anything at all, so there is no column for an"
+    " object dtype to be. `unicode`, `str_`, `U` and `O` are all spellings of it,"
+    " which is a numpy wart rather than a firepanda one: the type that holds text"
+    " is `str`"
+)
+"""Six spellings share this, so it is written once. The last sentence is there
+because a caller who wrote `U` and got told there is no object column has been
+answered accurately and not usefully, since what they wanted was text."""
+
+_NO_BYTES = (
+    "the fixed width byte string pads every value out to the longest one, so"
+    " `bytes` is really `|S21` on a column of small integers, and firepanda's"
+    " binary column is variable width"
+)
+"""Four spellings share this one. The width in the message is not a typo: pandas
+picks it from the widest value the column would render to."""
+
+_NO_LONGDOUBLE = (
+    "longdouble is whatever extended precision float the machine has, which is"
+    " an eighty bit float stored in sixteen bytes on x86 and a plain float64 on"
+    " arm, and firepanda has no float wider than float64 on either. Asking for"
+    " it and getting float64 back would be half the precision on the machines"
+    " where the name means something. The float64 is `double`"
+)
+"""Two spellings share this one, and it is the only name in the table whose
+answer changes with the machine rather than with the argument. Every other
+platform dependent row here, `long` and `uint`, is the same width everywhere
+firepanda is built for, so it can be written down. This one cannot be, and
+mapping it to float64 was correct on arm and a silent narrowing on x86."""
+
+# The types pandas has and firepanda does not, each with the reason it is
+# refused rather than converted. Every one of these raises today by being
+# absent, and raises tomorrow by being declared and refused, which is the
+# difference between a caller finding out and a caller getting a number.
+#
+# The four temporal and binary rows are the ones worth reading twice, because
+# each of them names a type firepanda has and is refused anyway.
+# `datetime64[ns]`, `timedelta64[ns]` and `date32[day]` are refused because the
+# cast underneath falls through to the physical layout and hands back the
+# integers the instants, spans and days are stored as. A column of instants that
+# came back as a column of nanosecond counts is the kind of wrong answer that
+# looks right in a repl. `binary` is refused because the cast to it hands back
+# text. All four are worth fixing in the kernel and none of them is worth
+# shipping as a silent wrong answer in the meantime.
+_REFUSED_DTYPES: dict[str, str] = {
+    "object": _NO_OBJECT,
+    "object_": _NO_OBJECT,
+    "unicode": _NO_OBJECT,
+    "str_": _NO_OBJECT,
+    "O": _NO_OBJECT,
+    "U": _NO_OBJECT,
+    "category": (
+        "building the dictionary is a conversion of its own rather than a"
+        " change of layout, and the cast underneath would hand back the index"
+        " width as a plain integer column"
+    ),
+    "datetime64": (
+        "the cast underneath converts layouts and these are int64 underneath,"
+        " so the answer would be a column of counts rather than of instants."
+        " Reading a column as instants is to_datetime and changing the unit of"
+        " one that already is, is dt.as_unit"
+    ),
+    "timedelta64": (
+        "the cast underneath converts layouts and these are int64 underneath,"
+        " so the answer would be a column of counts rather than of spans"
+    ),
+    "date32[day]": (
+        "the same reason the two above are refused, one type narrower: a date is"
+        " an int32 day number underneath and the cast would hand back the day"
+        " numbers"
+    ),
+    "binary": (
+        "the cast to it hands back a column of text rather than a column of"
+        " bytes, and nothing in the pandas facing layer can build a binary column"
+        " to convert from, so the name has nothing to do here yet"
+    ),
+    "complex": "there is no complex column",
+    "cdouble": "there is no complex column",
+    "csingle": "there is no complex column",
+    "clongdouble": "there is no complex column",
+    "longdouble": _NO_LONGDOUBLE,
+    "g": _NO_LONGDOUBLE,
+    "period": "there is no period column",
+    "interval": "there is no interval column",
+    "bytes": _NO_BYTES,
+    "bytes_": _NO_BYTES,
+    "S": _NO_BYTES,
+    "void": "there is no void column",
+    "V": "there is no void column",
+}
+
+_NULLABLE_DTYPES: frozenset[str] = frozenset(
+    ["boolean"]
+    + [f"{kind}{bits}" for kind in ("Int", "UInt") for bits in (8, 16, 32, 64)]
+    + [f"Float{bits}" for bits in (32, 64)]
+)
+"""The extension types pandas spells with a capital letter, which are a second
+missing value model rather than a second set of widths. They are listed rather
+than matched on the capital, because `Int64` and `int64` differing only in a
+letter is the kind of thing a reader has to be able to see the whole of."""
+
+_NO_NULLABLE = (
+    "the nullable extension types are a second way of spelling a missing value"
+    " and firepanda has one way, which is the Arrow one. The lower case name is"
+    " the same width and already holds missing values"
+)
+
+# What a python type means as a dtype, measured the same way. These are not
+# strings and cannot be looked up in the table above, and pandas takes them, so
+# `s.astype(float)` and `s.astype(int)` both work here too. `complex` and
+# `bytes` are in the refused table by their own names, and `object` is refused
+# under its own name as well, so all three arrive at the same message whether
+# the caller wrote the word or the type.
+_DTYPE_TYPES: dict[type, str] = {
+    bool: "bool",
+    int: "int64",
+    float: "float64",
+    str: "str",
+    complex: "complex",
+    bytes: "bytes",
+    object: "object",
+}
+
+
+def _named_dtype(dtype: Any) -> str:
+    """Resolves whatever a caller wrote into the one name firepanda prints.
+
+    Four shapes arrive here and pandas takes all four: a string, a python type,
+    a numpy dtype object, and a numpy scalar type. The last two are read by
+    duck typing rather than by importing numpy, since firepanda does not depend
+    on numpy and a compatibility layer that imported it in order to read a name
+    off it would have acquired the dependency for one attribute.
+
+    Args:
+        dtype: What the caller passed.
+
+    Returns:
+        The canonical name, which is what `dtype` prints and what the extension
+        reads.
+
+    Raises:
+        NotImplementedError: If the name is a type pandas has and firepanda
+            does not.
+        DTypeError: If it is not a type name at all. pandas raises a `TypeError`
+            here rather than a `ValueError`, which reads oddly for a bad string
+            and is what a caller catching pandas already catches.
+    """
+    if isinstance(dtype, type):
+        named = _DTYPE_TYPES.get(dtype)
+        # A numpy scalar type is a type whose name is already in the table,
+        # which is what makes `s.astype(numpy.int8)` work without numpy being
+        # importable here.
+        name = named if named is not None else getattr(dtype, "__name__", "")
+    elif isinstance(dtype, str):
+        name = dtype
+    else:
+        # A numpy dtype object carries its spelling on `.name`, and so does a
+        # pandas extension dtype. Anything else is rendered and will fail the
+        # lookup below with what the caller wrote in the message.
+        carried = getattr(dtype, "name", None)
+        name = carried if isinstance(carried, str) else str(dtype)
+    # Arrow is little endian everywhere, so the three byte order marks that mean
+    # native, little or not applicable are dropped and the one that means big is
+    # refused. A program that wrote `>i8` meant it.
+    #
+    # The mark only comes off when what is left is a name, which matters because
+    # an object that is not a dtype at all was rendered above and `str(object())`
+    # begins with a `<`. Stripping that unconditionally would put the angle
+    # bracket in the message on one side and not the other.
+    if name[:1] in {"<", "=", "|"} and name[1:] in _DTYPE_NAMES:
+        name = name[1:]
+    if name[:1] == ">":
+        raise NotImplementedError(f"{name!r} is big endian and every Arrow buffer is little endian")
+    known = _DTYPE_NAMES.get(name)
+    if known is not None:
+        return known
+    if name in _NULLABLE_DTYPES:
+        raise NotImplementedError(f"dtype {name!r} is not supported, because {_NO_NULLABLE}")
+    # Not an exact match, because four of these carry something after the name:
+    # a unit in `datetime64[ns]`, a frequency in `period[D]`, a width in
+    # `complex128` and a length in `S21`. What may follow is spelled out rather
+    # than left to `startswith` alone, since `S` is a key and a bare prefix test
+    # would answer that every name beginning with an S is a byte string.
+    for key, why in _REFUSED_DTYPES.items():
+        rest = name[len(key) :] if name.startswith(key) else None
+        if rest is None or not (rest == "" or rest[:1] == "[" or rest.isdigit()):
+            continue
+        raise NotImplementedError(f"dtype {name!r} is not supported, because {why}")
+    raise DTypeError(f"data type {name!r} not understood")
 
 
 class _NoDefault:
@@ -258,6 +626,48 @@ class _NoDefault:
 
 NO_DEFAULT = _NoDefault()
 """The one instance, compared by identity the way the pandas one is."""
+
+
+def _cast_keywords(copy: Any, errors: Any) -> bool:
+    """Reads the two keywords `astype` carries besides the type itself.
+
+    `copy` is deprecated in pandas 3 and does nothing there, because copy on
+    write already decides when a copy happens. It does nothing here either, for
+    a different reason: an answer is always a new column over new buffers. So it
+    warns and is ignored, which is what pandas does, rather than being refused,
+    because refusing it would break code that passes it and gets no complaint
+    from pandas.
+
+    `errors` is the one that changes behaviour. It says what a value that will
+    not convert means, and it is read here rather than sent to the kernel,
+    because the kernel's flag is a different question: it asks whether a bad
+    value becomes missing, and pandas never asks for that.
+
+    Args:
+        copy: What the caller passed, or `NO_DEFAULT`.
+        errors: Either `"raise"` or `"ignore"`.
+
+    Returns:
+        True if a value that will not convert should raise.
+
+    Raises:
+        InvalidArgumentError: If `errors` is neither of the two words.
+    """
+    if copy is not NO_DEFAULT:
+        warnings.warn(
+            "The copy keyword is deprecated and will be removed in a future"
+            " version. Copy-on-Write is active in pandas since 3.0 which utilizes"
+            " a lazy copy mechanism that defers copies until necessary. Use .copy()"
+            " to make an eager copy if necessary.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+    if errors not in ("raise", "ignore"):
+        raise InvalidArgumentError(
+            "Expected value of kwarg 'errors' to be one of ['raise', 'ignore']."
+            f" Supplied value is '{errors}'"
+        )
+    return bool(errors == "raise")
 
 
 def _limit_wanted(limit: Any) -> int:
@@ -338,20 +748,32 @@ class DataFrameMixin:
     ) -> None:
         """Builds a frame from a mapping of column name to values.
 
-        The signature is the pandas one in full and only the first parameter is
-        implemented. The other four are refused by name, which is a stronger
+        The signature is the pandas one in full and two of the five parameters
+        are implemented. The other three are refused by name, which is a stronger
         statement than leaving them out: the signature parity test compares five
         parameters against pandas instead of one, and a caller who passes one of
         them is told what is missing rather than that the keyword is unexpected.
+
+        `dtype=` is inference followed by a cast, which is what it is in pandas
+        too. Building the frame first and converting it after is one pass more
+        than reading the values into the asked for type directly would be, and it
+        is the reading that decides what a value means, so the two agree on every
+        answer and differ only in how much work they do.
         """
         _refuse("index", index, "putting labels on a frame as it is built is not written")
         _refuse("columns", columns, "selecting and reordering on the way in is not written")
-        _refuse("dtype", dtype, "casting on the way in needs the cast machinery")
         _refuse("copy", copy, "there is exactly one behaviour and it always copies")
         try:
             self._inner = _firepanda.DataFrame(data)
         except Exception as error:
             raise translate(error) from None
+        if dtype is not None:
+            names = self._inner.names()
+            wanted = [_named_dtype(dtype)] * len(names)
+            try:
+                self._inner = self._inner.cast(names, wanted, True)
+            except Exception as error:
+                raise translate(error) from None
 
     def __getitem__(self, key: Any) -> DataFrame | Series:
         """One column as a series, or several as a frame.
@@ -496,6 +918,11 @@ class DataFrameMixin:
         self, q: Any, axis: Any, numeric_only: bool, interpolation: str, method: str
     ) -> Series:
         """Runs the quantile down every column."""
+        _spelled(
+            method,
+            ("single", "table"),
+            f"Invalid method: {method}. Method must be in {{'table', 'single'}}.",
+        )
         _held_at(
             "method",
             method,
@@ -662,6 +1089,38 @@ class DataFrameMixin:
         except Exception as error:
             raise translate(error) from None
 
+    def _astype(self, dtype: Any, copy: Any, errors: Any) -> DataFrame:
+        """Converts some or all of the columns and hands back a new frame.
+
+        Two shapes arrive. One type converts every column, and a dict naming
+        some of them converts those and leaves the rest alone. The dict is the
+        interesting one, because a key that is not a column is a mistake worth
+        catching before anything converts, so the keys are all checked first and
+        the frame is either converted whole or not touched.
+        """
+        from ._frame import DataFrame
+
+        strictly = _cast_keywords(copy, errors)
+        if isinstance(dtype, dict):
+            present = set(self._inner.names())
+            for one in dtype:
+                if one not in present:
+                    raise ColumnNotFoundError(
+                        "Only a column name can be used for the key in a dtype"
+                        f" mappings argument. '{one}' not found in columns."
+                    )
+            names = [str(one) for one in dtype]
+            dtypes = [_named_dtype(one) for one in dtype.values()]
+        else:
+            names = self._inner.names()
+            dtypes = [_named_dtype(dtype)] * len(names)
+        try:
+            return DataFrame._wrap(self._inner.cast(names, dtypes, True))
+        except Exception as error:
+            if strictly:
+                raise translate(error) from None
+            return DataFrame._wrap(self._inner)
+
 
 class SeriesMixin:
     """The hand written half of `Series`."""
@@ -692,15 +1151,23 @@ class SeriesMixin:
         entirely and is slow for the columns it does not lose. It has to be
         unwrapped here because what a user holds is the generated wrapper and
         the extension can only recognise its own type.
+
+        `dtype=` is inference followed by a cast, for the reason the frame
+        constructor gives.
         """
         _refuse("index", index, "putting labels on a series as it is built is not written")
-        _refuse("dtype", dtype, "casting on the way in needs the cast machinery")
         _refuse("copy", copy, "there is exactly one behaviour and it always copies")
         source = data._inner if isinstance(data, SeriesMixin) else data
         try:
             self._inner = _firepanda.Series(source, "" if name is None else str(name))
         except Exception as error:
             raise translate(error) from None
+        if dtype is not None:
+            wanted = _named_dtype(dtype)
+            try:
+                self._inner = self._inner.cast(wanted, True)
+            except Exception as error:
+                raise translate(error) from None
 
     def _operator(self, other: Any, op: str, flip: bool, strict: bool) -> Any:
         """Runs one of the twenty operators, on whichever of three operands it got.
@@ -918,6 +1385,24 @@ class SeriesMixin:
         )
         return self._transform(kind, 0, axis, False, False)
 
+    def _astype(self, dtype: Any, copy: Any, errors: Any) -> Series:
+        """Converts the column and hands back a new one.
+
+        The name is resolved outside the `try`, because `errors="ignore"` means
+        a value that will not convert, not a type that does not exist. pandas
+        raises on the name whichever way `errors` is set, and so does this.
+        """
+        from ._frame import Series
+
+        strictly = _cast_keywords(copy, errors)
+        wanted = _named_dtype(dtype)
+        try:
+            return Series._wrap(self._inner.cast(wanted, True))
+        except Exception as error:
+            if strictly:
+                raise translate(error) from None
+            return Series._wrap(self._inner)
+
 
 class Namespace:
     """One accessor, reached through an attribute the way pandas reaches one.
@@ -1027,22 +1512,35 @@ class DatetimeMixin:
             raise translate(error) from None
 
     def _rounded(self, kind: str, freq: Any, ambiguous: Any, nonexistent: Any) -> Series:
-        """Moves every clock to a frequency, one of three ways."""
-        _held_at(
-            "ambiguous",
-            ambiguous,
-            "raise",
-            "picking which of the two readings a repeated wall clock hour means"
-            " needs the zone's transition table, which is the same work"
-            " tz_localize over a fold needs",
-        )
-        _held_at(
-            "nonexistent",
-            nonexistent,
-            "raise",
-            "shifting a wall clock time that a spring forward skipped needs the"
-            " zone's transition table",
-        )
+        """Moves every clock to a frequency, one of three ways.
+
+        The two zone policies are read here only when the column already carries
+        a zone, which is measured rather than reasoned about: pandas hands a naive
+        column back rounded with a misspelled `nonexistent` in its arguments
+        unread, because there is no daylight saving to have a policy about.
+        Refusing that would be firepanda turning away input pandas takes, which is
+        the direction of difference this library does not get to have. The zone is
+        asked for only when one of the two is not the default, since asking is a
+        boundary crossing and the default changes no answer either way.
+        """
+        if (ambiguous != "raise" or nonexistent != "raise") and self._zone() is not None:
+            _held_at(
+                "ambiguous",
+                ambiguous,
+                "raise",
+                "picking which of the two readings a repeated wall clock hour means"
+                " needs the zone's transition table, which is the same work"
+                " tz_localize over a fold needs",
+            )
+            if not isinstance(nonexistent, datetime.timedelta):
+                _spelled(nonexistent, _NONEXISTENT, _NONEXISTENT_REFUSAL)
+            _held_at(
+                "nonexistent",
+                nonexistent,
+                "raise",
+                "shifting a wall clock time that a spring forward skipped needs the"
+                " zone's transition table",
+            )
         if not isinstance(freq, str):
             raise NotImplementedError(
                 "freq has to be a string for now, because an offset object carries"
@@ -1099,6 +1597,8 @@ class DatetimeMixin:
             "a wall clock hour that a fall back repeats is two instants and"
             " choosing between them needs the zone's transition table",
         )
+        if not isinstance(nonexistent, datetime.timedelta):
+            _spelled(nonexistent, _NONEXISTENT, _NONEXISTENT_REFUSAL)
         _held_at(
             "nonexistent",
             nonexistent,

@@ -23,7 +23,7 @@ from std.python.bindings import check_arguments_arity
 
 from firepanda.array.any import AnyArray
 from firepanda.array.strings import strings_from_list
-from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.logical import LogicalType, named_type
 from firepanda.frame import DataFrame
 from firepanda.frame.concat import concat_series
 from firepanda.frame.index import Index
@@ -44,6 +44,11 @@ from firepanda.io.arrow_stream import (
 from firepanda.io.read import read_csv
 from firepanda.py.args import flag, number, whole, words
 from firepanda.py.build import empty_column, frame_from
+from firepanda.py.cast import (
+    NOT_FINITE,
+    checks_finite,
+    refuse_if_not_finite,
+)
 from firepanda.py.convert import (
     array_capsule,
     schema_capsule,
@@ -57,6 +62,7 @@ from firepanda.py.errors import (
     COLUMN,
     DTYPE,
     IO,
+    NONFINITE,
     OVERFLOW,
     POSITION,
     UNSUPPORTED,
@@ -66,9 +72,9 @@ from firepanda.py.errors import (
 )
 from firepanda.py.index import PyIndex
 from firepanda.py.ops import (
+    binary_failure,
     binary_op,
     constant,
-    binary_tag,
     constant_tag,
     fill,
     unary_op,
@@ -434,6 +440,84 @@ struct PyDataFrame(Movable, Writable):
         return PythonObject(alloc=Self(ArcPointer(out^)))
 
     @staticmethod
+    def cast(
+        py_self: PythonObject,
+        names: PythonObject,
+        dtypes: PythonObject,
+        strict: PythonObject,
+    ) raises -> PythonObject:
+        """Converts some columns to other types and hands back a new frame.
+
+        Two lists rather than a mapping, because a mapping would have to be read
+        out of a Python dict in an order the caller did not choose and the order
+        matters here: a column named twice would be converted twice and the
+        second answer would win silently. Paired lists keep the order the caller
+        wrote and let the Python side be the one that decides what a repeat
+        means.
+
+        A name not in the frame is the caller's mistake and is reported as one,
+        because pandas reports it too and a frame that quietly ignored it would
+        hand back the column unconverted with nothing said.
+
+        Args:
+            py_self: The frame.
+            names: The columns to convert.
+            dtypes: The type for each of them, in the same order.
+            strict: Whether a text value that is not a number raises rather
+                than becoming a null.
+
+        Returns:
+            A new frame with those columns converted and the rest untouched.
+
+        Raises:
+            Error: Tagged `value` if the two lists are different lengths, a name
+                is not one this layer prints or a text value is not a number,
+                tagged `column` if a column is not in the frame, tagged
+                `nonfinite` if an integer column was asked for and there is a
+                missing value, a NaN or an infinity in the way, and tagged
+                `dtype` if the conversion is not one firepanda has.
+        """
+        if len(names) != len(dtypes):
+            raise tagged(
+                VALUE,
+                String(
+                    "cast was given ",
+                    len(names),
+                    " columns and ",
+                    len(dtypes),
+                    " types, which have to come in pairs",
+                ),
+            )
+        var strictly = flag(strict, "strict")
+        var out = DataFrame(copy=Self._frame(py_self)[].frame[])
+        for i in range(len(names)):
+            var name = String(names[i])
+            var wanted: LogicalType
+            try:
+                wanted = named_type(String(dtypes[i]))
+            except cause:
+                raise retagged(VALUE, cause)
+            if not out.schema.has(name):
+                raise tagged(COLUMN, String("no column named ", name))
+            var text = out.schema[
+                out.schema.index_of(name)
+            ].dtype.is_variable_width()
+            # `column` copies the column and flattens it, so it is only asked
+            # for when the answer can matter, which the predicate decides.
+            if checks_finite(wanted):
+                refuse_if_not_finite(out.column(name).values, wanted)
+            try:
+                out = out.cast(name, wanted, strictly)
+            except cause:
+                # The source decides the tag, for the reason `PySeries.cast`
+                # gives: out of text the only failure left is a value that will
+                # not read, which is a value error in pandas.
+                if text:
+                    raise retagged(VALUE, cause)
+                raise retagged(DTYPE, cause)
+        return PythonObject(alloc=Self(ArcPointer(out^)))
+
+    @staticmethod
     def group_agg(
         py_self: PythonObject,
         by: PythonObject,
@@ -619,7 +703,8 @@ struct PyDataFrame(Movable, Writable):
                 operation is not defined on a pair of columns it reached.
         """
         var right = Self._other(other, "other")
-        var which = binary_op(words(op, "op"))
+        var spelling = words(op, "op")
+        var which = binary_op(spelling)
         var filled = fill(fill_value)
         var flipped = flag(flip, "flip")
         try:
@@ -633,12 +718,11 @@ struct PyDataFrame(Movable, Writable):
                 )
             )
         except cause:
-            raise retagged(
-                binary_tag(
-                    which,
-                    Self._dtypes_of(Self._frame(py_self)[].frame[]),
-                    Self._dtypes_of(right[]),
-                ),
+            raise binary_failure(
+                spelling,
+                which,
+                Self._dtypes_of(Self._frame(py_self)[].frame[]),
+                Self._dtypes_of(right[]),
                 cause,
             )
 
@@ -678,7 +762,8 @@ struct PyDataFrame(Movable, Writable):
                 operation is not defined on a pair it reached.
         """
         var right = PySeries._other(other, "other")
-        var which = binary_op(words(op, "op"))
+        var spelling = words(op, "op")
+        var which = binary_op(spelling)
         var along = whole(axis, "axis")
         var flipped = flag(flip, "flip")
         try:
@@ -694,12 +779,11 @@ struct PyDataFrame(Movable, Writable):
         except cause:
             var theirs = List[LogicalType](capacity=1)
             theirs.append(right[].logical())
-            raise retagged(
-                binary_tag(
-                    which,
-                    Self._dtypes_of(Self._frame(py_self)[].frame[]),
-                    theirs,
-                ),
+            raise binary_failure(
+                spelling,
+                which,
+                Self._dtypes_of(Self._frame(py_self)[].frame[]),
+                theirs,
                 cause,
             )
 
@@ -1249,6 +1333,8 @@ def raise_for_test(kind: PythonObject) raises -> PythonObject:
         raise tagged(DTYPE, "cannot add int64 and float64")
     if which == "value":
         raise tagged(VALUE, "n must not be negative")
+    if which == "nonfinite":
+        raise tagged(NONFINITE, NOT_FINITE)
     if which == "overflow":
         raise tagged(OVERFLOW, "Python integer 128 out of bounds for int8")
     if which == "position":

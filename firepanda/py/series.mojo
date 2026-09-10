@@ -16,20 +16,21 @@ from std.memory import ArcPointer, Pointer
 from std.python import Python, PythonObject
 from std.python.bindings import check_arguments_arity
 
-from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.logical import LogicalType, named_type
 from firepanda.frame.index import Index
 from firepanda.frame.series import Series
 from firepanda.kernel.reduce import reduce_any
 from firepanda.py.args import flag, number, whole, words
 from firepanda.py.build import column_from, empty_column
+from firepanda.py.cast import refuse_if_not_finite
 from firepanda.io.arrow_export import export_array_borrowed, export_schema
 from firepanda.py.convert import array_capsule, schema_capsule
 from firepanda.py.index import PyIndex
 from firepanda.py.errors import DTYPE, UNSUPPORTED, VALUE, retagged, tagged
 from firepanda.py.ops import (
+    binary_failure,
     binary_op,
     constant,
-    binary_tag,
     constant_tag,
     fill,
     unary_op,
@@ -356,6 +357,58 @@ struct PySeries(Movable, Writable):
             raise retagged(DTYPE, e)
 
     @staticmethod
+    def cast(
+        py_self: PythonObject, dtype: PythonObject, strict: PythonObject
+    ) raises -> PythonObject:
+        """Converts the column to another type and hands back a new one.
+
+        The name that arrives here is already canonical, because the Python
+        layer resolves what pandas accepts, which is aliases and python types
+        and numpy dtypes, down to one of the spellings `dtype` prints. So this
+        reads a name and nothing else, and a name it does not know is a bug on
+        the other side rather than a caller's mistake.
+
+        Args:
+            py_self: The series.
+            dtype: The target type, spelled the way `dtype` prints it.
+            strict: Whether a text value that is not a number raises rather
+                than becoming a null.
+
+        Returns:
+            A new series of that type.
+
+        Raises:
+            Error: Tagged `value` if the name is not one this layer prints or a
+                text value is not a number, tagged `nonfinite` if an integer
+                column was asked for and there is a missing value, a NaN or an
+                infinity in the way, and tagged `dtype` if the conversion is not
+                one firepanda has.
+        """
+        var wanted: LogicalType
+        try:
+            wanted = named_type(words(dtype, "dtype"))
+        except cause:
+            raise retagged(VALUE, cause)
+        ref held = Self._held(py_self)[].series[]
+        refuse_if_not_finite(held.values, wanted)
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(held.cast(wanted, flag(strict, "strict")))
+                )
+            )
+        except cause:
+            # The only way a conversion out of text fails is a value that will
+            # not read, the target having already been checked by `named_type`
+            # above. That is the caller's value being wrong rather than their
+            # type being wrong, and pandas raises `ValueError` for it, so the
+            # source decides the tag. Asking the column is better than reading
+            # the message, which would be a second place the two could drift.
+            if held.values.is_string():
+                raise retagged(VALUE, cause)
+            raise retagged(DTYPE, cause)
+
+    @staticmethod
     def monotonic(
         py_self: PythonObject, increasing: PythonObject
     ) raises -> PythonObject:
@@ -580,7 +633,8 @@ struct PySeries(Movable, Writable):
                 operation is not defined on the two dtypes.
         """
         var right = Self._other(other, "other")
-        var which = binary_op(words(op, "op"))
+        var spelling = words(op, "op")
+        var which = binary_op(spelling)
         var filled = fill(fill_value)
         var flipped = flag(flip, "flip")
         try:
@@ -598,7 +652,7 @@ struct PySeries(Movable, Writable):
             mine.append(Self._held(py_self)[].series[].logical())
             var theirs = List[LogicalType](capacity=1)
             theirs.append(right[].logical())
-            raise retagged(binary_tag(which, mine, theirs), cause)
+            raise binary_failure(spelling, which, mine, theirs, cause)
 
     @staticmethod
     def binary_value(

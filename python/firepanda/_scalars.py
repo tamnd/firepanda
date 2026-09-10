@@ -354,6 +354,74 @@ def _kind(value: Any) -> str:
     return type(value).__name__
 
 
+# The vocabularies pandas takes for the two daylight saving policies, and the
+# sentences it refuses a fifth word with. `nonexistent` also takes a timedelta,
+# meaning shift by that much, which is why the list alone is not the whole test.
+# `ambiguous` does not take `infer` here even though the column version does: a
+# single moment has no neighbours to infer a direction from, so the scalar has
+# one word fewer than the column.
+_AMBIGUOUS_REFUSAL = "'ambiguous' parameter must be one of: True, False, 'NaT', 'raise' (default)"
+_NONEXISTENT = ("raise", "NaT", "shift_forward", "shift_backward")
+_NONEXISTENT_REFUSAL = (
+    "The nonexistent argument must be one of 'raise', 'NaT', 'shift_forward',"
+    " 'shift_backward' or a timedelta object"
+)
+
+
+def _zone_policies(ambiguous: Any, nonexistent: Any, live: bool) -> None:
+    """Refuses the two daylight saving policies, telling a typo from a gap.
+
+    Both of them need the zone's transition table, which is firepanda#349, so
+    nothing but the default is answered here either way. Which class the refusal
+    carries still matters, because the two ways of being wrong send a reader to
+    two different places. A value pandas takes and firepanda has not written is a
+    schedule, and it comes back `NotImplementedError` pointing at the issue. A
+    value pandas does not take either is a typo, and pandas answers that with a
+    `ValueError` naming the words that would have worked, so this does too.
+    Telling somebody who misspelled `shift_forward` that firepanda has not got
+    round to their spelling sends them to the changelog instead of to their own
+    line.
+
+    `live` is whether pandas looks at these arguments at all on this call, and it
+    is measured rather than reasoned about. `tz_localize` always looks, even when
+    it is handed None and even when the moment already carries a zone, so it
+    passes True. The rounding family only looks when the moment is already zoned,
+    and hands a naive one straight back with a misspelling in its arguments
+    unread, so it passes whether there is a zone. Checking anyway would be
+    firepanda refusing input pandas accepts, which is the direction of difference
+    this library does not get to have.
+
+    The scalar checks `ambiguous` and the column version in `_pandas.py`
+    deliberately does not, because that is what the two of them do. pandas
+    validates the word on `Timestamp` and does not validate it on `.dt` at all,
+    where three and a misspelling both come back with an answer.
+
+    Args:
+        ambiguous: The fold policy.
+        nonexistent: The gap policy.
+        live: Whether pandas reads these arguments on this call.
+
+    Raises:
+        InvalidArgumentError: If either is not in its vocabulary.
+        UnsupportedError: If either is anything but `raise`.
+    """
+    if not live:
+        return
+    # `in` would take 1 for True, and pandas does not, so the two booleans are
+    # matched by identity and the strings by value.
+    if ambiguous is not True and ambiguous is not False and ambiguous not in ("NaT", "raise"):
+        raise InvalidArgumentError(_AMBIGUOUS_REFUSAL)
+    if not isinstance(nonexistent, _datetime.timedelta) and nonexistent not in _NONEXISTENT:
+        raise InvalidArgumentError(_NONEXISTENT_REFUSAL)
+    for name, given in (("ambiguous", ambiguous), ("nonexistent", nonexistent)):
+        if given != "raise":
+            raise UnsupportedError(
+                f"{name}= is not supported yet, because choosing a side of a"
+                " daylight saving change needs the zone transition table,"
+                " which is firepanda#349"
+            )
+
+
 def _period(freq: Any) -> int:
     """Turns a pandas frequency string into a length in nanoseconds.
 
@@ -1051,13 +1119,7 @@ class Timestamp(_datetime.datetime):
                 since both of them need the zone database the kernel does not
                 have.
         """
-        for name, given in (("ambiguous", ambiguous), ("nonexistent", nonexistent)):
-            if given != "raise":
-                raise UnsupportedError(
-                    f"{name}= is not supported yet, because choosing a side of a"
-                    " daylight saving change needs the zone transition table,"
-                    " which is firepanda#349"
-                )
+        _zone_policies(ambiguous, nonexistent, self.tzinfo is not None)
         period = _period(freq)
         offset = self.utcoffset()
         shift = 0 if offset is None else int(offset.total_seconds() * 1_000_000_000)
@@ -1135,13 +1197,7 @@ class Timestamp(_datetime.datetime):
             TypeError: If it already has a zone.
             NotImplementedError: If either policy is asked for.
         """
-        for name, given in (("ambiguous", ambiguous), ("nonexistent", nonexistent)):
-            if given != "raise":
-                raise UnsupportedError(
-                    f"{name}= is not supported yet, because choosing a side of a"
-                    " daylight saving change needs the zone transition table,"
-                    " which is firepanda#349"
-                )
+        _zone_policies(ambiguous, nonexistent, True)
         if tz is None:
             # Stripping a zone off something that has none is a no operation and
             # not a mistake. pandas hands the moment straight back, which is the

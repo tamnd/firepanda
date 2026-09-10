@@ -20,7 +20,13 @@ reaches.
 from std.ffi import c_char, external_call
 from std.sys import size_of
 from std.memory import ArcPointer, Pointer
-from std.testing import TestSuite, assert_equal, assert_raises, assert_true
+from std.testing import (
+    TestSuite,
+    assert_equal,
+    assert_false,
+    assert_raises,
+    assert_true,
+)
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
@@ -28,6 +34,7 @@ from firepanda.array.strings import strings_from_list
 from firepanda.dtype.logical import LogicalType
 from firepanda.frame import DataFrame, Series
 from firepanda.io.arrow_c import (
+    ARROW_FLAG_DICTIONARY_ORDERED,
     ArrayPtr,
     ArrowArray,
     ArrowArrayStream,
@@ -42,8 +49,14 @@ from firepanda.io.arrow_c import (
     stream_next,
     stream_schema,
 )
-from firepanda.io.arrow_export import export_frame_array, export_frame_schema
+from firepanda.io.arrow_export import (
+    export_array,
+    export_frame_array,
+    export_frame_schema,
+    export_schema,
+)
 from firepanda.io.arrow_stream import (
+    dictionary_plan,
     export_frame_stream,
     frame_layout,
     import_frame,
@@ -123,6 +136,131 @@ def _array_of(frame: ArcPointer[DataFrame]) raises -> ArrowArray:
             ]()
         )
     return export_frame_array(columns, len(frame[]), frame)
+
+
+def _codes(var values: List[Int32]) raises -> DataFrame:
+    """A one column frame of int32 codes, which is what a dictionary index is.
+    """
+    var column = Array[DType.int32](len(values))
+    for i in range(len(values)):
+        if values[i] < 0:
+            column.set_null(i)
+        else:
+            column.set_valid(i, values[i])
+    var series = List[Series](capacity=1)
+    series.append(Series("value", AnyArray(column^)))
+    return DataFrame.from_series(series^)
+
+
+def _encode(
+    mut schema: ArrowSchema,
+    mut array: ArrowArray,
+    var words: List[String],
+    ordered: Bool = False,
+) raises:
+    """Turns an exported int32 column into a dictionary encoded one.
+
+    firepanda's own frame exporter will not write a dictionary column for you,
+    so a producer that hands one over has to be built here. It is built by
+    hanging rather than by hand because hanging is what the C interface says a
+    dictionary is: the field keeps the index type as its own format and points
+    at a separate schema and a separate array for the values.
+
+    The two hung structures get their own allocations and are handed to the
+    field, which means the release callback on the field owns them and frees
+    them, exactly as it does for a dictionary column firepanda exported itself.
+    Anything else would be building a producer that does not conform, and the
+    interface is explicit that a release callback releases the dictionary too.
+
+    Args:
+        schema: The struct schema of the codes frame.
+        array: The struct array of the codes frame.
+        words: The categories.
+        ordered: Whether to set the ordered flag on the field.
+    """
+    var field = schema.children.value().unsafe_offset(0)[]
+    var column = array.children.value().unsafe_offset(0)[]
+
+    var value_schema = external_call[
+        "malloc", Pointer[ArrowSchema, MutUntrackedOrigin]
+    ](size_of[ArrowSchema]())
+    value_schema.unsafe_write(export_schema(LogicalType.STRING))
+    field[].dictionary = value_schema.unsafe_bitcast[NoneType]()
+
+    var value_array = external_call[
+        "malloc", Pointer[ArrowArray, MutUntrackedOrigin]
+    ](size_of[ArrowArray]())
+    value_array.unsafe_write(export_array(AnyArray(strings_from_list(words))))
+    column[].dictionary = value_array.unsafe_bitcast[NoneType]()
+
+    if ordered:
+        field[].flags = field[].flags | ARROW_FLAG_DICTIONARY_ORDERED
+
+
+def test_a_dictionary_column_arrives_with_its_categories() raises:
+    # The codes are copied by the same path as any other integer column and the
+    # categories are attached at the end, which is what the layout was built for.
+    var codes = ArcPointer(_codes([Int32(1), Int32(0), Int32(-1), Int32(1)]))
+    var schema = _schema_of(codes)
+    var array = _array_of(codes)
+    _encode(schema, array, ["rivet", "a category longer than twelve bytes"])
+
+    var frame = import_frame(schema, array)
+    assert_equal(len(frame), 4)
+    ref column = frame.column("value").values
+    assert_true(column.is_dictionary())
+    assert_equal(len(column.categories()), 2)
+    assert_equal(column.categories()[0], "rivet")
+    assert_equal(column.categories()[1], "a category longer than twelve bytes")
+    assert_equal(column.codes[DType.int32]()[0], Int32(1))
+    assert_equal(column.codes[DType.int32]()[1], Int32(0))
+    assert_false(column.is_valid(2))
+    assert_equal(String(column.type), "category")
+
+
+def test_the_ordered_flag_crosses_with_the_categories() raises:
+    # Which is the only thing that tells `a < b` from a refusal, so a flag that
+    # does not cross makes every ordered categorical unordered on arrival.
+    var codes = ArcPointer(_codes([Int32(0), Int32(1)]))
+    var schema = _schema_of(codes)
+    var array = _array_of(codes)
+    _encode(schema, array, ["low", "high"], ordered=True)
+
+    var frame = import_frame(schema, array)
+    assert_true(frame.column("value").values.type.ordered)
+
+
+def test_a_plan_reads_the_value_type_the_field_does_not_carry() raises:
+    # The field's own format is the index type, so the value type is only in the
+    # dictionary schema, and a stream releases that before it hands out a batch.
+    var codes = ArcPointer(_codes([Int32(0)]))
+    var schema = _schema_of(codes)
+    var array = _array_of(codes)
+    _encode(schema, array, ["one"])
+
+    var plan = dictionary_plan(schema)
+    assert_equal(len(plan), 1)
+    assert_equal(plan[0].column, 0)
+    # `vu` and not `u` because firepanda's exporter writes string views, and
+    # the point of the assertion is that the value type is read from the
+    # dictionary schema rather than from the field, which carries `i`.
+    assert_equal(plan[0].values, "vu")
+    assert_true(not plan[0].ordered)
+    assert_equal(frame_layout(schema).formats[0], "i")
+
+    release_array(array)
+    release_schema(schema)
+
+
+def test_a_frame_with_no_dictionary_column_plans_nothing() raises:
+    # Almost every frame, and the reason the plan is a list rather than a slot
+    # per column.
+    var source = _held()
+    var schema = _schema_of(source)
+    var array = _array_of(source)
+    assert_equal(len(dictionary_plan(schema)), 0)
+    release_array(array)
+    release_schema(schema)
 
 
 def test_a_frame_round_trips_through_one_struct_array() raises:

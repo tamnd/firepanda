@@ -83,6 +83,10 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = dataframe.def_method[PyDataFrame.dropna](
         "dropna", docstring="The rows with no missing value in them."
     )
+    _ = dataframe.def_method[PyDataFrame.cast](
+        "cast",
+        docstring="Some columns converted to other types, as a new frame.",
+    )
     _ = dataframe.def_method[PyDataFrame.group_agg](
         "group_agg",
         docstring="One reduction applied to every column that is not a key.",
@@ -157,6 +161,9 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = series.def_method[PySeries.transform](
         "transform",
         docstring="The column put through one named transformation.",
+    )
+    _ = series.def_method[PySeries.cast](
+        "cast", docstring="The column converted to another type."
     )
     _ = series.def_method[PySeries.monotonic](
         "monotonic",

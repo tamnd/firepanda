@@ -100,26 +100,40 @@ from .unsupported import (
     ARRAY_SUBQUERY,
     CALL_ARGUMENT,
     CALL_MODIFIER,
+    COLUMNS,
     CUSTOM_OPERATOR,
+    DEFAULT_VALUE,
     DOTTED_NAME,
     ESCAPE_STRING,
     FIELD_ACCESS,
+    GROUPING,
+    INTERVAL,
     IN_BARE_VALUE,
     IS_UNKNOWN,
     JOIN_FORM,
+    LAMBDA,
     LIKE_ESCAPE,
+    LIST_COMPREHENSION,
+    MAP_LITERAL,
     METHOD_CALL,
+    NAMED_ARGUMENT,
     NOT_SUBQUERY,
     NO_CASE,
     OPERATOR,
+    POSITIONAL,
     POSTFIX_OPERATOR,
     QUOTED_NAME,
+    ROW_VALUE,
     SELECT_CLAUSE,
     SELECT_SAMPLE,
+    SPECIAL_CALL,
+    STATEMENT_LATER,
+    STATEMENT_NEVER,
     SUBSCRIPT,
     TABLE_AT,
     TABLE_MODIFIER,
     TABLE_SAMPLE,
+    TYPE_LITERAL,
     WITH_ORDINALITY,
     WITH_USING_KEY,
     not_implemented,
@@ -253,6 +267,38 @@ comptime _CTE: UInt8 = 55
 comptime _VALUES: UInt8 = 56
 comptime _VALUES_ROW: UInt8 = 57
 comptime _TABLE_STATEMENT: UInt8 = 58
+
+comptime _STATEMENT_LATER: UInt8 = 59
+"""A statement firepanda will run and does not run yet, refused by name."""
+
+comptime _STATEMENT_NEVER: UInt8 = 60
+"""A statement firepanda will not run, refused by name.
+
+The two are separate actions rather than one because a user who reads `not yet`
+waits and a user who reads `not this` writes their query another way, and
+telling them apart is the whole reason `Statement` is what the transformer is
+aimed at. A statement that fell out of the matcher instead would say `syntax
+error` about text that is perfectly good SQL.
+"""
+
+comptime _TOP_LEVEL: UInt8 = 61
+"""One statement and the semicolons after it, if there are any.
+
+This is where a statement starts, rather than `Statement` itself, because a
+query copied out of a file or a shell ends in a semicolon and a reader who is
+told that is a syntax error will not believe it. The rule also matches nothing
+at all, which is how a file of nothing but whitespace parses, so this is the one
+place the transformer has to look at a missing child instead of trusting the
+grammar to have provided one.
+"""
+
+comptime _REFUSE: UInt8 = 62
+"""A rule that refuses by name, with the name in `refusals`.
+
+There are a lot of these and there will be more, and a feature whose whole
+implementation is one sentence of English does not need an action byte and a
+dispatch arm of its own. It needs a row in a table.
+"""
 
 # A marker is a rule that builds nothing. The rule above it reads it directly,
 # and the byte is here so that rule can pick it out of its siblings with the
@@ -394,6 +440,15 @@ struct Transform(Movable):
     var actions: List[UInt8]
     """One action per rule index. `_NO_CASE` means the rule refuses."""
 
+    var refusals: List[UInt16]
+    """The refusal a `_REFUSE` rule raises, by rule index, 0 for the rest.
+
+    A second table rather than a second action byte per feature. A rule that
+    does nothing but refuse carries no code, only a table entry, and there are
+    enough of them that giving each one an action byte and a dispatch arm would
+    be a hundred lines saying the same thing a hundred times.
+    """
+
     var expression_rule: Int
     """The index of `Expression`, so a caller can parse one directly."""
 
@@ -415,6 +470,7 @@ struct Transform(Movable):
                 means a bump renamed something and this file has to follow.
         """
         self.actions = List[UInt8](length=len(grammar.names), fill=_NO_CASE)
+        self.refusals = List[UInt16](length=len(grammar.names), fill=0)
         self.expression_rule = -1
         self.statement_rule = -1
         self.parens_rule = -1
@@ -547,6 +603,115 @@ struct Transform(Movable):
         self._set(grammar, "ValuesExpressions", _VALUES_ROW)
         self._set(grammar, "TableStatement", _TABLE_STATEMENT)
 
+        # `Statement` is thirty seven alternatives and one of them is the one
+        # firepanda runs. It descends into whichever matched, and every other
+        # one carries a refusal, so a `CREATE INDEX` gets a sentence naming it
+        # rather than a syntax error about text that is perfectly good SQL.
+        # docs/specs/sql/05-ast-and-binder.md section 4, tiers two and three.
+        self._set(grammar, "Statement", _DESCEND)
+        self._set(grammar, "TopLevelStatement", _TOP_LEVEL)
+
+        # Tier two. Each of these is a frame operation with SQL spelling, so it
+        # says `not yet` and points at the milestone.
+        var later: List[StaticString] = [
+            "CreateStatement",
+            "InsertStatement",
+            "CopyStatement",
+            "ExplainStatement",
+            "PrepareStatement",
+            "ExecuteStatement",
+            "DeallocateStatement",
+            "SetStatement",
+            "ResetStatement",
+            "PragmaStatement",
+        ]
+        for name in later:
+            self._set(grammar, name, _STATEMENT_LATER)
+
+        # Tier three. Each of these wants a catalog, a transaction, a file on
+        # disk that outlives the process, or an extension, and firepanda has
+        # none of those. `UPDATE` and `DELETE` are here rather than above on
+        # purpose: they are expressible over an immutable frame as a rewrite,
+        # they are not what a dataframe user reaches for, and half of them is
+        # worse than none of them.
+        var never: List[StaticString] = [
+            "AlterStatement",
+            "AnalyzeStatement",
+            "AttachStatement",
+            "CallStatement",
+            "CheckpointStatement",
+            "CommentStatement",
+            "ConnectStatement",
+            "DeleteStatement",
+            "DetachStatement",
+            "DisconnectStatement",
+            "DropStatement",
+            "ExportStatement",
+            "ExpressionStatement",
+            "ExtensionRepositoryStatement",
+            "ExternalResourceStatement",
+            "ImportStatement",
+            "InstallStatement",
+            "LoadStatement",
+            "MergeIntoStatement",
+            "TransactionStatement",
+            "TruncateStatement",
+            "UpdateExtensionsStatement",
+            "UpdateStatement",
+            "UseStatement",
+            "VacuumStatement",
+        ]
+        for name in never:
+            self._set(grammar, name, _STATEMENT_NEVER)
+
+        # `DescribeStatement`, `PivotStatement` and `UnpivotStatement` hang off
+        # `SelectStatementType` rather than off `Statement`, because all three
+        # produce rows, so the loop above never reached them. They are the same
+        # kind of thing it refuses: a query firepanda will run and does not run
+        # yet.
+        self._set(grammar, "DescribeStatement", _STATEMENT_LATER)
+        self._set(grammar, "PivotStatement", _STATEMENT_LATER)
+        self._set(grammar, "UnpivotStatement", _STATEMENT_LATER)
+
+        # `CTEDMLBody <- Parens(Statement)` is `WITH x AS (INSERT ...)`. Walking
+        # into it costs nothing and the statement inside says its own name, so
+        # the user reads `the INSERT statement yet` rather than the name of the
+        # wrapper, which is a rule they did not write and cannot look up. Two
+        # rules because the parentheses are a rule of their own.
+        self._set(grammar, "CTEDMLBody", _DESCEND)
+        self._set(grammar, "Parens_Statement", _DESCEND)
+
+        # Features with no form in the arena yet. Each of these is one sentence
+        # of English in `unsupported.mojo` and no code at all, which is what the
+        # refusal table is for.
+        self._refuse(grammar, "ParenthesisExpression", ROW_VALUE)
+        self._refuse(grammar, "RowExpression", ROW_VALUE)
+        self._refuse(grammar, "IntervalLiteral", INTERVAL)
+        self._refuse(grammar, "TypeLiteral", TYPE_LITERAL)
+        self._refuse(grammar, "LambdaExpression", LAMBDA)
+        self._refuse(grammar, "ListComprehensionExpression", LIST_COMPREHENSION)
+        self._refuse(grammar, "NamedFunctionArgument", NAMED_ARGUMENT)
+        self._refuse(grammar, "ColumnsExpression", COLUMNS)
+        self._refuse(grammar, "MapExpression", MAP_LITERAL)
+        self._refuse(grammar, "GroupingExpression", GROUPING)
+        self._refuse(grammar, "PositionalExpression", POSITIONAL)
+        self._refuse(grammar, "DefaultExpression", DEFAULT_VALUE)
+        self._refuse(grammar, "TableFunctionAliasColon", ALIAS_COLON)
+
+        # The functions SQL spells with keywords inside the parentheses. The
+        # message fills in whichever one it was, so they share an entry.
+        var special: List[StaticString] = [
+            "ExtractExpression",
+            "SubstringExpression",
+            "TrimExpression",
+            "PositionExpression",
+            "OverlayExpression",
+            "TryExpression",
+            "UnpackExpression",
+        ]
+        for name in special:
+            self._refuse(grammar, name, SPECIAL_CALL)
+
         # The markers, which build nothing and are only ever recognized.
         self._set(grammar, "TableAlias", _MARK_TABLE_ALIAS)
         self._set(grammar, "TableAliasColon", _MARK_ALIAS_COLON)
@@ -564,7 +729,7 @@ struct Transform(Movable):
         self._set(grammar, "JoinWithoutOnClause", _MARK_JOIN_PLAIN)
 
         self.expression_rule = grammar.rule("Expression")
-        self.statement_rule = grammar.rule("SelectStatement")
+        self.statement_rule = grammar.rule("TopLevelStatement")
         self.parens_rule = grammar.rule("ParenthesisExpression")
 
     def _set(
@@ -595,6 +760,22 @@ struct Transform(Movable):
             )
         self.actions[index] = action
 
+    def _refuse(
+        mut self, grammar: Grammar, name: StaticString, feature: UInt16
+    ) raises:
+        """Points one rule at one refusal.
+
+        Args:
+            grammar: A loaded grammar.
+            name: The rule name, spelled the way the grammar spells it.
+            feature: A key into the refusal table in `unsupported.mojo`.
+
+        Raises:
+            Error: If there is no such rule.
+        """
+        self._set(grammar, name, _REFUSE)
+        self.refusals[grammar.rule(name)] = feature
+
     def parse_expression(
         self, sql: StringSlice, grammar: Grammar, mut ast: Ast
     ) raises -> UInt32:
@@ -618,10 +799,10 @@ struct Transform(Movable):
     def parse_statement(
         self, sql: StringSlice, grammar: Grammar, mut ast: Ast
     ) raises -> UInt32:
-        """Parses one `SELECT` and transforms it.
+        """Parses one statement and transforms it.
 
         Args:
-            sql: The statement text, with no trailing semicolon.
+            sql: The statement text, with or without a trailing semicolon.
             grammar: The grammar it was parsed against.
             ast: Where to put the nodes.
 
@@ -629,8 +810,9 @@ struct Transform(Movable):
             The root statement node.
 
         Raises:
-            Error: If the text is not a `SELECT`, or holds something this does
-                not transform yet.
+            Error: If the text is not one statement, or is a statement
+                firepanda does not run, or holds something this does not
+                transform yet.
         """
         var tree = parse_rule(sql, grammar, self.statement_rule)
         return self.walk(tree, sql, tree.root, ast)
@@ -719,6 +901,12 @@ struct Transform(Movable):
 
         if action == _DESCEND:
             return work.value(self._only(tree, node))
+
+        if action == _TOP_LEVEL:
+            var only = tree.nodes[Int(node)].first_child
+            if only == NO_NODE:
+                raise Error("Parser Error: syntax error at end of input")
+            return work.value(only)
 
         if action == _FOLD:
             return self._fold(tree, sql, node, ast, work)
@@ -935,6 +1123,24 @@ struct Transform(Movable):
         if action == _TABLE_STATEMENT:
             return ast.table_statement(
                 self._name_parts(tree, sql, self._only(tree, node)), at
+            )
+
+        if action == _STATEMENT_LATER:
+            raise _unsupported(
+                tree, sql, node, STATEMENT_LATER, _word(tree, sql, node)
+            )
+
+        if action == _STATEMENT_NEVER:
+            raise _unsupported(
+                tree, sql, node, STATEMENT_NEVER, _word(tree, sql, node)
+            )
+
+        if action == _REFUSE:
+            # The first word goes along whether the message has a slot for it or
+            # not, because `filled` drops it when there is no `{}` and most of
+            # these messages name the feature themselves.
+            raise _unsupported(
+                tree, sql, node, self.refusals[rule], _word(tree, sql, node)
             )
 
         raise _no_case(tree, sql, node)
@@ -2789,6 +2995,16 @@ struct Transform(Movable):
 
         # `ParenthesisExpression <- Parens(List(Expression)?)`.
         var items = self._items(tree, self._only(tree, tuple))
+        # `GROUPING SETS ((a, ))` is a set of one column, and so is
+        # `GROUPING SETS (a)`, so the one entry row builds as the entry. Leaving
+        # the row there would print as `(a)`, which reads back as the plain
+        # entry it already was and makes the print of a print differ from the
+        # print. The empty row is not this: `()` is the grand total and has to
+        # stay a row.
+        if len(items) == 1:
+            return ast.group(
+                GROUP_EXPRESSION, work.value(items[0]), List[UInt32](), at
+            )
         work.warm(items)
         var nested = List[UInt32]()
         for item in items:
