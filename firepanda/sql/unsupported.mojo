@@ -298,8 +298,9 @@ def sql_support() -> List[Refusal]:
             "call-modifier",
             "{} on a call",
             (
-                "Window specifications and aggregate filters are the rest of"
-                " this stage and are not in the AST yet."
+                "A window specification is read now. The aggregate filter and"
+                " the two that change what a call reads are the rest of this"
+                " stage and are not in the AST yet."
             ),
             STAGE_ISSUE,
         ),
