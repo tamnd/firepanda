@@ -63,6 +63,7 @@ from .ast import (
     GROUP_EXPRESSION,
     GROUP_ROLLUP,
     GROUP_SETS,
+    GROUP_TUPLE,
     LIMIT_ALL,
     LIMIT_PERCENT,
     LITERAL_BOOLEAN,
@@ -815,6 +816,8 @@ def _write_group(
         out += "CUBE ("
     elif item.b == GROUP_ROLLUP:
         out += "ROLLUP ("
+    elif item.b == GROUP_TUPLE:
+        out += "("
     else:
         raise Error(String("the printer has no case for grouping ", item.b))
     for i in range(ast.length(item.children)):
