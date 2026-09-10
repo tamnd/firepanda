@@ -599,40 +599,30 @@ def coalesce_any(a: AnyArray, b: AnyArray) raises -> AnyArray:
             + " rows and fallback has "
             + String(len(b))
         )
-    if a.is_string() != b.is_string():
+    if a.type != b.type or a.is_string() != b.is_string():
         raise Error(
             "coalesce: both columns must have the same dtype; got "
             + String(a.type)
             + " and "
             + String(b.type)
         )
-    # As in `concat_refs_any`: two resolutions share a physical dtype and are
-    # not the same column, so filling a second column's gaps from a millisecond
-    # one would put every filled row out by a factor of a thousand and leave the
-    # rest alone, which is worse than either being wrong throughout or refusing.
-    if (a.type.is_temporal() or b.type.is_temporal()) and a.type != b.type:
-        raise Error(
-            "coalesce: "
-            + String(a.type)
-            + " and "
-            + String(b.type)
-            + " are counts of different things, so a row filled from the second"
-            " would be out by the ratio between their units"
-        )
     if a.is_string():
-        return AnyArray(_coalesce_strings(a.strings(), b.strings()))
+        return AnyArray(_coalesce_strings(a.strings(), b.strings())).retyped(
+            a.type
+        )
 
     comptime for candidate in ALL:
         if a.dtype() == candidate:
-            var picked = _coalesce_core(
-                a.unsafe_ptr[candidate](),
-                a.data.validity,
-                len(a),
-                b.unsafe_ptr[candidate](),
-                b.data.validity,
-                len(b),
-            )
-            return AnyArray(picked^.into_data(), a.type)
+            return AnyArray(
+                _coalesce_core(
+                    a.unsafe_ptr[candidate](),
+                    a.data.validity,
+                    len(a),
+                    b.unsafe_ptr[candidate](),
+                    b.data.validity,
+                    len(b),
+                )
+            ).retyped(a.type)
     raise Error("coalesce: unsupported dtype " + String(a.dtype()))
 
 
@@ -789,17 +779,20 @@ def fill_forward_any(col: AnyArray, limit: Int = 0) raises -> AnyArray:
         If the dtype has no physical layout.
     """
     if col.is_string():
-        return AnyArray(_fill_strings[forward=True](col.strings(), limit))
+        return AnyArray(
+            _fill_strings[forward=True](col.strings(), limit)
+        ).retyped(col.type)
 
     comptime for candidate in ALL:
         if col.dtype() == candidate:
-            var filled = _fill_core[forward=True](
-                col.unsafe_ptr[candidate](),
-                col.data.validity,
-                len(col),
-                limit,
-            )
-            return AnyArray(filled^.into_data(), col.type)
+            return AnyArray(
+                _fill_core[forward=True](
+                    col.unsafe_ptr[candidate](),
+                    col.data.validity,
+                    len(col),
+                    limit,
+                )
+            ).retyped(col.type)
     raise Error("fill_forward: unsupported dtype " + String(col.dtype()))
 
 
@@ -817,17 +810,20 @@ def fill_backward_any(col: AnyArray, limit: Int = 0) raises -> AnyArray:
         If the dtype has no physical layout.
     """
     if col.is_string():
-        return AnyArray(_fill_strings[forward=False](col.strings(), limit))
+        return AnyArray(
+            _fill_strings[forward=False](col.strings(), limit)
+        ).retyped(col.type)
 
     comptime for candidate in ALL:
         if col.dtype() == candidate:
-            var filled = _fill_core[forward=False](
-                col.unsafe_ptr[candidate](),
-                col.data.validity,
-                len(col),
-                limit,
-            )
-            return AnyArray(filled^.into_data(), col.type)
+            return AnyArray(
+                _fill_core[forward=False](
+                    col.unsafe_ptr[candidate](),
+                    col.data.validity,
+                    len(col),
+                    limit,
+                )
+            ).retyped(col.type)
     raise Error("fill_backward: unsupported dtype " + String(col.dtype()))
 
 

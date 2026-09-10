@@ -852,6 +852,118 @@ def lookup_frame() raises -> DataFrame:
     return DataFrame(Schema(fields^), columns^)
 
 
+def key_words() raises -> AnyArray:
+    """The six left keys, as text, for the joins on a text key.
+
+    Three of them are past twelve bytes and three are not, which is the split
+    that matters here and not anywhere else in this file. A view of twelve bytes
+    or fewer holds its bytes inside itself and a longer one holds an offset into
+    a payload, so a comparison against a long key has to reach into the column
+    the table was built from and a comparison against a short one never does.
+    Only the long ones would notice a probe reading its own payload instead.
+
+    The keys are laid out so that the answer is the same set the integer joins in
+    this file give, which is rows 2, 4 and 6. Two of those match on a long key
+    and one on a short one, and of the three that match nothing, one is long.
+    """
+    return AnyArray(
+        strings_from_list(
+            [
+                "k1",
+                "a-key-well-past-twelve-2",
+                "k3",
+                "a-key-well-past-twelve-4",
+                "a-key-well-past-twelve-5",
+                "k6",
+            ]
+        )
+    )
+
+
+def key_fields() raises -> List[Field]:
+    """The schema the text keyed frames share."""
+    var fields = List[Field]()
+    fields.append(Field("n", LogicalType.INT64))
+    fields.append(Field("key", LogicalType.STRING))
+    return fields^
+
+
+def word_key_frame() raises -> DataFrame:
+    """The six rows in one chunk, keyed on text."""
+    var columns = List[AnyArray]()
+    columns.append(numbers([1, 2, 3, 4, 5, 6]))
+    columns.append(key_words())
+    return DataFrame(Schema(key_fields()), columns^)
+
+
+def cut_word_key_frame() raises -> DataFrame:
+    """The same six rows in chunks of two, three and one.
+
+    The cuts fall where they fall in `cut_frame`, so the chunk that holds the
+    long key that matches nothing is not the chunk that holds the short key that
+    does.
+    """
+    var whole = key_words()
+    var n = ChunkedArray(LogicalType.INT64)
+    n.append(numbers([1, 2]))
+    n.append(numbers([3, 4, 5]))
+    n.append(numbers([6]))
+    var key = ChunkedArray(LogicalType.STRING)
+    key.append(AnyArray(whole.strings().slice(0, 2)))
+    key.append(AnyArray(whole.strings().slice(2, 5)))
+    key.append(AnyArray(whole.strings().slice(5, 6)))
+    var columns = List[ChunkedArray]()
+    columns.append(n^)
+    columns.append(key^)
+    return DataFrame(Schema(key_fields()), columns^)
+
+
+def word_lookup_frame() raises -> DataFrame:
+    """Four rows to join against, keyed on text.
+
+    `lookup_frame` with the keys written out. The fourth is a long key that
+    matches nothing on the other side, which is the row an outer join would have
+    to notice and this node does not.
+    """
+    var columns = List[AnyArray]()
+    columns.append(
+        AnyArray(
+            strings_from_list(
+                [
+                    "a-key-well-past-twelve-2",
+                    "a-key-well-past-twelve-4",
+                    "k6",
+                    "a-key-well-past-twelve-8",
+                ]
+            )
+        )
+    )
+    columns.append(numbers([20, 40, 60, 80]))
+    var fields = List[Field]()
+    fields.append(Field("key", LogicalType.STRING))
+    fields.append(Field("tag", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def byte_lookup_frame() raises -> DataFrame:
+    """A lookup frame whose `key` is a column of bytes rather than of text.
+
+    A string column's physical dtype is uint8, so this is the frame that agrees
+    with a text keyed one on everything a dtype comparison can see and means
+    something completely different.
+    """
+    var col = Array[DType.uint8](4)
+    for i in range(4):
+        col.set_valid(i, UInt8(i + 1))
+    var columns = List[AnyArray]()
+    columns.append(AnyArray(col^))
+    columns.append(numbers([20, 40, 60, 80]))
+    var fields = List[Field]()
+    fields.append(Field("key", LogicalType.UINT8))
+    fields.append(Field("tag", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
 def joined_rows(var pipeline: Pipeline) raises -> List[Int64]:
     """Runs a pipeline and reads its `n` column back, sorted.
 
@@ -1057,18 +1169,66 @@ def test_a_right_join_in_a_pipeline_is_refused() raises:
         pipeline.add(Node(Join(lookup_frame(), "n", "n", JoinKind.RIGHT)))
 
 
-def test_a_join_on_a_text_key_is_refused() raises:
-    """A text key needs the ordinal space that comes from concatenating both
-    sides, and having both sides is what a stream does not have."""
-    var pipeline = Pipeline(word_frame())
-    with assert_raises(contains="fixed width key"):
-        pipeline.add(Node(Join(word_frame(), "status", "status")))
+def test_a_join_on_a_text_key_gives_what_the_frame_join_gives() raises:
+    """The refusal this replaces said a text key needs both sides concatenated.
+
+    It does not. It needs a table that compares the bytes when two hashes agree,
+    and once it has one it is built from one side and read from the other like
+    any other key.
+    """
+    var whole = word_key_frame().join_on(
+        word_lookup_frame(), ["key"], ["key"], JoinKind.INNER
+    )
+    var pipeline = Pipeline(cut_word_key_frame())
+    pipeline.add(Node(Join(word_lookup_frame(), "key", "key", JoinKind.INNER)))
+    assert_equal(
+        String(pipeline.schema), String(whole.schema), "the same output schema"
+    )
+    var values = joined_rows(pipeline^)
+    assert_equal(len(values), len(whole), "the same number of rows")
+    assert_equal(values[0], Int64(2), "matched on a long key")
+    assert_equal(values[1], Int64(4), "matched on a long key")
+    assert_equal(values[2], Int64(6), "matched on a key held inline")
+
+
+def test_a_text_join_over_chunks_agrees_with_one_over_one_chunk() raises:
+    """The same claim the integer joins make, on the key that could not make it.
+
+    Worth its own test rather than being folded into the one above, because the
+    thing that would break it is per chunk: the probe compares a probe row's
+    bytes against a view that points into a column it is not reading, and a chunk
+    that read its own payload would answer differently from the whole frame
+    without answering nonsense.
+    """
+    var one = Pipeline(word_key_frame())
+    one.add(Node(Join(word_lookup_frame(), "key", "key", JoinKind.INNER)))
+    var many = Pipeline(cut_word_key_frame())
+    many.add(Node(Join(word_lookup_frame(), "key", "key", JoinKind.INNER)))
+    assert_equal(
+        String(joined_rows(one^)), String(joined_rows(many^)), "the same rows"
+    )
+
+
+def test_a_left_join_on_a_text_key_keeps_a_row_that_matched_nothing() raises:
+    var pipeline = Pipeline(cut_word_key_frame())
+    pipeline.add(Node(Join(word_lookup_frame(), "key", "key", JoinKind.LEFT)))
+    var values = joined_rows(pipeline^)
+    assert_equal(len(values), 6, "every left row, matched or not")
 
 
 def test_a_join_on_keys_of_different_dtypes_is_refused() raises:
     var pipeline = Pipeline(cut_frame())
-    with assert_raises(contains="fixed width key"):
+    with assert_raises(contains="the same dtype on each side"):
         pipeline.add(Node(Join(lookup_frame(), "keep", "n")))
+
+
+def test_a_join_of_a_text_key_against_a_byte_key_is_refused() raises:
+    """The one pair of keys whose physical dtypes agree and whose meanings do
+    not. A string column is laid out as bytes, so without the string test beside
+    the dtype test this would build a table over the first byte of each view."""
+    var pipeline = Pipeline(cut_word_key_frame())
+    with assert_raises(contains="the same dtype on each side"):
+        pipeline.add(Node(Join(byte_lookup_frame(), "key", "key")))
 
 
 def test_a_join_asked_for_a_column_the_result_has_not_got_is_refused() raises:
