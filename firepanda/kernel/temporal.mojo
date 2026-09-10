@@ -2333,3 +2333,122 @@ def temporal_strftime(a: AnyArray, fmt: StringSlice) raises -> StringArray:
     return _formatted_column[DType.int64](
         stamps, steps, fmt, per_day, per_second
     )
+
+
+def _padded(value: Int64, width: Int) -> String:
+    """Writes a non negative number with at least a given number of digits.
+
+    Args:
+        value: The number.
+        width: The least number of digits.
+
+    Returns:
+        The digits, left padded with zeros.
+    """
+    var text = String(value)
+    var out = String()
+    for _ in range(width - text.byte_length()):
+        out += "0"
+    return out + text
+
+
+def temporal_text(type: LogicalType, raw: Int64) raises -> String:
+    """Renders one instant the way a file and a printed table should carry it.
+
+    A date is stored as a day count and a timestamp as a tick count, so anything
+    that renders a column by reading its physical layout writes the count. The
+    bytes are right and the reader gets an integer where the schema promised a
+    date, which is the same wrongness `AnyArray.retyped` was written for, one
+    layer further out: the type is known and thrown away at the last step.
+
+    The spelling is ISO 8601, which is what pandas prints, what Polars prints
+    and what every CSV reader including this library's own parses back to the
+    type it started as.
+
+    Args:
+        type: The column's logical type, which must be a date or a naive
+            timestamp.
+        raw: The stored value.
+
+    Returns:
+        `YYYY-MM-DD` for a date and `YYYY-MM-DD HH:MM:SS` for a timestamp, with
+        a fractional part only when the value has one.
+
+    Raises:
+        Error: If the type is not one whose values are instants, or if it is a
+            timestamp carrying a time zone, since rendering that from the stored
+            instant would print UTC under the name of a local hour.
+    """
+    var per_day = _units_per_day(type)
+    var per_second = _units_per_second(type)
+
+    # Floor division, so a tick before the epoch belongs to the day it falls in
+    # rather than to the one after it.
+    var days = raw // per_day
+    var civil = civil_from_days[1](days)
+
+    var year = civil.year[0]
+    var out = String()
+    if year < 0:
+        out += "-"
+        year = -year
+    out += _padded(year, 4)
+    out += "-" + _padded(civil.month[0], 2)
+    out += "-" + _padded(civil.day[0], 2)
+    if per_second == 0:
+        return out^
+
+    var within = raw - days * per_day
+    var seconds = within // per_second
+    out += " " + _padded(seconds // 3600, 2)
+    out += ":" + _padded((seconds // 60) % 60, 2)
+    out += ":" + _padded(seconds % 60, 2)
+
+    var fraction = within - seconds * per_second
+    if fraction == 0:
+        return out^
+    var digits = 0
+    var scale = per_second
+    while scale > 1:
+        scale //= 10
+        digits += 1
+    return out + "." + _padded(fraction, digits)
+
+
+def instant_text(col: AnyArray, i: Int) -> Optional[String]:
+    """Renders one row of a column when that column holds instants.
+
+    This is what a renderer calls before it dispatches on the physical layout,
+    and it answers nothing for every column that is not a date or a naive
+    timestamp, which is the signal to carry on down the usual path. A timestamp
+    carrying a time zone answers nothing too: the stored instants are UTC and
+    printing an hour off them would be a wrong number under the right name, so
+    the count is the more honest thing to show until there is a zone database
+    to convert with.
+
+    Args:
+        col: The column.
+        i: The row, which the caller has already found to be present.
+
+    Returns:
+        The text, or nothing when this column is not one this renders.
+    """
+    if col.type.kind == TypeKind.DATE:
+        try:
+            return temporal_text(
+                col.type,
+                Int64(
+                    col.unsafe_ptr[DType.int32]().unsafe_offset(i).unsafe_load()
+                ),
+            )
+        except:
+            return None
+    if col.type.kind == TypeKind.TIMESTAMP and col.type.zone.is_naive():
+        try:
+            return temporal_text(
+                col.type,
+                col.unsafe_ptr[DType.int64]().unsafe_offset(i).unsafe_load(),
+            )
+        except:
+            return None
+    return None

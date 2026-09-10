@@ -19,7 +19,7 @@ from std.ffi import external_call
 from std.math import copysign, floor, isnan, nan, sqrt
 
 from firepanda.array.array import Array
-from firepanda.array.strings import StringArray
+from firepanda.array.strings import StringArray, StringBuilder
 
 from .accum import accumulator
 from .arith import OP_ADD, OP_MUL, OP_SUB
@@ -2031,3 +2031,336 @@ def total_seconds_scalar(
             continue
         out.set_valid(i, Float64(a[i]) / rate)
     return out^
+
+
+def _string_find_scalar(hay: String, needle: String, from_: Int) -> Int:
+    """Finds a substring by comparing characters one at a time.
+
+    Deliberately the worst search anybody would write. It tries every position
+    and compares every byte at each one, with no skip and no first byte filter,
+    which is exactly what makes it a check on a kernel whose whole content is the
+    skipping.
+
+    Args:
+        hay: The string being searched.
+        needle: The string being looked for.
+        from_: The first position that may be returned.
+
+    Returns:
+        The offset of the match, or -1.
+    """
+    var n = hay.byte_length()
+    var m = needle.byte_length()
+    if m == 0:
+        return from_ if from_ <= n else -1
+    for at in range(from_, n - m + 1):
+        var same = True
+        for k in range(m):
+            if hay[byte=at + k] != needle[byte=k]:
+                same = False
+                break
+        if same:
+            return at
+    return -1
+
+
+def text_contains_scalar(a: StringArray, needle: String) -> Array[DType.bool]:
+    """Whether each element contains a substring, one element at a time.
+
+    Args:
+        a: The column.
+        needle: The substring.
+
+    Returns:
+        A bool column, null where the column is null.
+    """
+    var out = Array[DType.bool](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        out.set_valid(i, _string_find_scalar(a[i], needle, 0) >= 0)
+    return out^
+
+
+def text_contains_in_order_scalar(
+    a: StringArray, first: String, second: String
+) -> Array[DType.bool]:
+    """Whether each element contains two substrings in order, one at a time.
+
+    Args:
+        a: The column.
+        first: The substring that must come first.
+        second: The substring that must follow it.
+
+    Returns:
+        A bool column, null where the column is null.
+    """
+    var out = Array[DType.bool](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        var text = a[i]
+        var at = _string_find_scalar(text, first, 0)
+        var found = False
+        if at >= 0:
+            found = (
+                _string_find_scalar(text, second, at + first.byte_length()) >= 0
+            )
+        out.set_valid(i, found)
+    return out^
+
+
+def text_starts_with_scalar(
+    a: StringArray, prefix: String
+) -> Array[DType.bool]:
+    """Whether each element begins with a substring, one element at a time.
+
+    Args:
+        a: The column.
+        prefix: The substring.
+
+    Returns:
+        A bool column, null where the column is null.
+    """
+    var out = Array[DType.bool](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        out.set_valid(i, _string_find_scalar(a[i], prefix, 0) == 0)
+    return out^
+
+
+def text_ends_with_scalar(a: StringArray, suffix: String) -> Array[DType.bool]:
+    """Whether each element ends with a substring, one element at a time.
+
+    Args:
+        a: The column.
+        suffix: The substring.
+
+    Returns:
+        A bool column, null where the column is null.
+    """
+    var out = Array[DType.bool](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        var text = a[i]
+        var room = text.byte_length() - suffix.byte_length()
+        if room < 0:
+            out.set_valid(i, False)
+            continue
+        out.set_valid(i, _string_find_scalar(text, suffix, room) == room)
+    return out^
+
+
+def text_substring_scalar(
+    a: StringArray, offset: Int, length: Int
+) raises -> StringArray:
+    """Cuts a byte range out of every element, one byte at a time.
+
+    Args:
+        a: The column.
+        offset: Where each substring starts. Negative counts back from the end.
+        length: How many bytes to take. Negative means to the end.
+
+    Returns:
+        A text column, null where the column is null.
+
+    Raises:
+        Error: Never, but building a column can.
+    """
+    var builder = StringBuilder(capacity=len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            builder.append_null()
+            continue
+        var text = a[i]
+        var n = text.byte_length()
+        var at = offset
+        if at < 0:
+            at = n + at
+            if at < 0:
+                at = 0
+        elif at > n:
+            at = n
+        var room = n - at
+        var count = room if length < 0 else min(length, room)
+        var piece = String()
+        for k in range(at, at + count):
+            piece += text[byte=k]
+        builder.append(piece.as_bytes())
+    return builder^.finish()
+
+
+def is_in_scalar[
+    dt: DType
+](a: Array[dt], values: Array[dt]) raises -> Array[DType.bool]:
+    """Says whether each row's value is in a set, by asking every member.
+
+    No table, no register, no threshold. This is the definition of `IN` written
+    out, which is the only thing that can tell the two routes in `member.mojo`
+    apart from each other when they disagree.
+
+    Args:
+        a: The column.
+        values: The set. Nulls in it are ignored.
+
+    Parameters:
+        dt: The dtype of both.
+
+    Returns:
+        A bool column, null wherever the column is null.
+
+    Raises:
+        Error: Never.
+    """
+    var out = Array[DType.bool](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        var hit = False
+        for j in range(len(values)):
+            if values.is_valid(j) and a[i] == values[j]:
+                hit = True
+        out.set_valid(i, hit)
+    return out^
+
+
+def text_is_in_scalar(
+    a: StringArray, values: StringArray
+) raises -> Array[DType.bool]:
+    """Says whether each row's text is in a set, by asking every member.
+
+    Args:
+        a: The column.
+        values: The set. Nulls in it are ignored.
+
+    Returns:
+        A bool column, null wherever the column is null.
+
+    Raises:
+        Error: Never.
+    """
+    var out = Array[DType.bool](len(a))
+    for i in range(len(a)):
+        if not a.is_valid(i):
+            out.set_null(i)
+            continue
+        var hit = False
+        for j in range(len(values)):
+            if values.is_valid(j) and a[i] == values[j]:
+                hit = True
+        out.set_valid(i, hit)
+    return out^
+
+
+def pick_scalar[
+    dt: DType
+](cond: Array[DType.bool], a: Array[dt], b: Array[dt]) -> Array[dt]:
+    """Chooses between two columns a row at a time, one row at a time.
+
+    Written out the way the rule reads, which is the only thing that can say
+    whether the select in `pick.mojo` and the words it builds its validity out
+    of agree with each other.
+
+    Args:
+        cond: The condition. A null in it takes the false side.
+        a: The true side.
+        b: The false side.
+
+    Parameters:
+        dt: The dtype of both sides.
+
+    Returns:
+        A column of that dtype.
+    """
+    var out = Array[dt](len(cond))
+    for i in range(len(cond)):
+        var yes = cond.is_valid(i) and cond[i]
+        ref side = a if yes else b
+        if side.is_valid(i):
+            out.set_valid(i, side[i])
+        else:
+            out.set_null(i)
+    return out^
+
+
+def pick_const_scalar[
+    dt: DType
+](cond: Array[DType.bool], a: Array[dt], b: Scalar[dt]) -> Array[dt]:
+    """Chooses between a column and a constant, one row at a time.
+
+    Args:
+        cond: The condition.
+        a: The true side.
+        b: The false side.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column of that dtype.
+    """
+    var out = Array[dt](len(cond))
+    for i in range(len(cond)):
+        if not (cond.is_valid(i) and cond[i]):
+            out.set_valid(i, b)
+        elif a.is_valid(i):
+            out.set_valid(i, a[i])
+        else:
+            out.set_null(i)
+    return out^
+
+
+def pick_constants_scalar[
+    dt: DType
+](cond: Array[DType.bool], a: Scalar[dt], b: Scalar[dt]) -> Array[dt]:
+    """Chooses between two constants, one row at a time.
+
+    Args:
+        cond: The condition.
+        a: The value where it holds.
+        b: The value where it does not.
+
+    Parameters:
+        dt: The dtype.
+
+    Returns:
+        A column of that dtype, with no nulls.
+    """
+    var out = Array[dt](len(cond))
+    for i in range(len(cond)):
+        out.set_valid(i, a if cond.is_valid(i) and cond[i] else b)
+    return out^
+
+
+def text_pick_scalar(
+    cond: Array[DType.bool], a: StringArray, b: StringArray
+) raises -> StringArray:
+    """Chooses between two text columns, one row at a time.
+
+    Args:
+        cond: The condition.
+        a: The true side.
+        b: The false side.
+
+    Returns:
+        A text column.
+
+    Raises:
+        Error: Never.
+    """
+    var builder = StringBuilder(capacity=len(cond))
+    for i in range(len(cond)):
+        var yes = cond.is_valid(i) and cond[i]
+        ref side = a if yes else b
+        if side.is_valid(i):
+            builder.append(side.unsafe_bytes(i))
+        else:
+            builder.append_null()
+    return builder^.finish()

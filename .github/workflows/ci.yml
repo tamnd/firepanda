@@ -57,7 +57,7 @@ jobs:
       # The specification is the deliverable right now, so it is the thing under test.
       - name: No duration estimates in the spec
         run: |
-          if grep -rnEi '[0-9]+ ?(week|month)s?|person.week' docs/specs/*.md; then
+          if grep -rnEi '[0-9]+ ?(week|month)s?|person.week' docs/specs; then
             echo "::error::docs/specs must not carry duration estimates; milestones are ordered, not scheduled."
             exit 1
           fi
@@ -65,8 +65,9 @@ jobs:
       - name: Milestone tags resolve
         run: |
           # Every M<n> referenced in the parity checklist must be a heading in 08-milestones.md.
-          grep -oE '^## M[0-9]+' docs/specs/08-milestones.md | awk '{print $2}' | sort -u > /tmp/defined
-          grep -ohE '\(M[0-9]+\)' docs/specs/06-pandas-parity.md | tr -d '()' | sort -u > /tmp/used
+          # The optional letter suffix is for milestones inserted between two others, like M4b.
+          grep -oE '^## M[0-9]+[a-z]?' docs/specs/08-milestones.md | awk '{print $2}' | sort -u > /tmp/defined
+          grep -ohE '\(M[0-9]+[a-z]?\)' docs/specs/06-pandas-parity.md | tr -d '()' | sort -u > /tmp/used
           missing=$(comm -13 /tmp/defined /tmp/used)
           if [ -n "$missing" ]; then
             echo "::error::milestones referenced in 06-pandas-parity.md but not defined in 08-milestones.md: $missing"
@@ -101,6 +102,14 @@ jobs:
           while read -r n; do
             compgen -G "docs/specs/${n}-*.md" > /dev/null || { echo "::error::reference to document $n but no such file"; rc=1; }
           done < <(grep -ohE 'document [0-9]{2}' docs/specs/*.md | awk '{print $2}' | sort -u)
+          # A subdirectory numbers its own documents, so a reference inside it
+          # resolves against that directory rather than against the top level.
+          for dir in docs/specs/*/; do
+            compgen -G "${dir}*.md" > /dev/null || continue
+            while read -r n; do
+              compgen -G "${dir}${n}-*.md" > /dev/null || { echo "::error::reference in ${dir} to document $n but no such file"; rc=1; }
+            done < <(grep -ohE 'document [0-9]{2}' "${dir}"*.md | awk '{print $2}' | sort -u)
+          done
           exit $rc
 
       # A link check that talks to the internet is a flaky check, and this one
@@ -328,11 +337,46 @@ jobs:
             --threshold 0.25 --reference 'hash/dict_*' --advisory \
             --markdown "$GITHUB_STEP_SUMMARY"
 
+  grammar:
+    name: Vendored grammar
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-pixi
+
+      # The vendored grammar is DuckDB's, byte for byte, and the moment a local
+      # edit exists "compatible by construction" becomes "compatible except for
+      # the edits" and nobody will remember what they were. VENDOR carries a
+      # SHA-256 per file so an edit is caught here rather than argued about
+      # later. docs/specs/sql/03-the-grammar.md section 3.
+      - name: Vendored grammar is unmodified
+        working-directory: firepanda/sql/grammar
+        run: |
+          grep -E '^[0-9a-f]{64}  ' VENDOR > /tmp/grammar.sha256
+          count=$(wc -l < /tmp/grammar.sha256)
+          if [ "$count" -lt 40 ]; then
+            echo "::error::VENDOR lists only $count files, which cannot be right"
+            exit 1
+          fi
+          sha256sum --check --strict /tmp/grammar.sha256
+
+      # The generated tables are checked in so that a contributor with no Python
+      # and no network can build firepanda. That means they can go stale, and
+      # this is the step that says so.
+      - name: Generated grammar tables are current
+        run: pixi run check-grammar
+
   differential:
     name: Differential vs pandas & DuckDB
     needs: guard
     if: needs.guard.outputs.has_mojo == 'true'
     runs-on: ubuntu-latest
+    # This job takes about a minute on a warm cache and about four on a cold one.
+    # It has twice wedged instead of exiting, once for 37 minutes until somebody
+    # cancelled it by hand, so it gets a ceiling. The number is high enough that a
+    # slow runner and a cold cache together stay well under it, and low enough that
+    # a hang costs a coffee rather than an afternoon.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-pixi
@@ -341,10 +385,32 @@ jobs:
       # Mojo imports pandas in-process, so this needs no bindings and works from M1.
       - run: pixi run differential
 
+      # DuckDB's test corpus is 33 MB and is fetched rather than vendored, so it
+      # is cached on the commit the grammar is pinned to. A grammar bump changes
+      # the key and the next run fetches the corpus that belongs to it.
+      - name: Read the pinned grammar commit
+        id: grammar
+        run: echo "sha=$(awk '/^commit:/ {print $2}' firepanda/sql/grammar/VENDOR)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: .cache/duckdb-corpus
+          key: duckdb-corpus-${{ steps.grammar.outputs.sha }}
+
+      - name: Every statement in DuckDB's corpus, through both parsers
+        run: pixi run differential-sql
+
+      # The same comparison over statements the grammar wrote rather than ones
+      # people wrote, which is how the rules the corpus has no test for get
+      # covered at all. It needs no corpus, so it does not depend on the cache
+      # above. docs/specs/sql/11-conformance.md section 4.
+      - name: Statements out of the grammar, through both parsers
+        run: pixi run differential-sql-generated
+
   required:
     name: CI
     if: always()
-    needs: [spec, format, build, bench, differential]
+    needs: [spec, format, build, bench, grammar, differential]
     runs-on: ubuntu-latest
     steps:
       - name: Collect results

@@ -3,7 +3,7 @@
 # install rather than against this file; see docs/specs/01-research-2026.md.
 [workspace]
 name = "firepanda"
-version = "0.6.51"
+version = "0.6.53"
 description = "A dataframe library for Mojo with the pandas API"
 authors = ["tamnd <tamnd87@gmail.com>"]
 license = "Apache-2.0"
@@ -113,12 +113,36 @@ stress = "mojo run -I . tests/stress/main.mojo"
 
 differential = { cmd = "mojo run -I . tests/differential/main.mojo", default-environment = "differential" }
 
+# DuckDB's own test corpus, which is the oracle for the compatibility claim.
+# `corpus` fetches test/sql at the commit the grammar is pinned to and flattens
+# it into one statements file. It is not checked in, because 33 MB against a 5 MB
+# repository is not a trade worth making for something only the harness reads.
+# See docs/specs/sql/13-open-questions.md question 10.
+corpus = { cmd = "bash tools/fetch_corpus.sh && python tools/corpus.py" }
+differential-sql = { cmd = "mojo run -I . tests/differential/sql.mojo", default-environment = "differential", depends-on = ["corpus"] }
+
+# The same comparison against statements nobody wrote. The grammar writes them,
+# which reaches the rules DuckDB's corpus happens to have no test for, and it
+# needs no corpus so it is cheap to run anywhere.
+# See docs/specs/sql/11-conformance.md section 4.
+differential-sql-generated = { cmd = "mojo run -I . tests/differential/sql_generated.mojo", default-environment = "differential" }
+
 bench = "mojo run -I . benchmarks/main.mojo"
 bench-compare = "python tools/bench_compare.py"
 
 # Under monomorphization these are the numbers most likely to blow up, so they are
 # graphed from M0 rather than thresholded from M8. docs/specs/03-dtype-dispatch.md.
 compile-budget = "python tools/compile_budget.py"
+
+# DuckDB's PEG grammar, vendored verbatim, and the tables generated from it.
+# `vendor-grammar` takes a tag or a branch and rewrites firepanda/sql/grammar/.
+# `gen-grammar` turns that into firepanda/sql/generated/, which is checked in so
+# that a contributor with no Python and no network can still build firepanda.
+# `check-grammar` is the same run with the output compared rather than written,
+# which is what stops somebody hand editing a table. docs/specs/sql/03-the-grammar.md.
+vendor-grammar = "bash tools/vendor_grammar.sh"
+gen-grammar = "python tools/gen_grammar.py"
+check-grammar = "python tools/gen_grammar.py --check"
 
 # A grep is not a sanitizer. It is what exists.
 check-shared-state = """
