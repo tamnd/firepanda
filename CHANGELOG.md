@@ -286,12 +286,6 @@ pandas defaults three parameters to a private sentinel, `lib.no_default`, and fi
 
 Every argument pandas declares and this does not implement raises rather than being ignored, the same way the reductions do. `axis=1` on a frame transformation, `skipna=False` on a scan, `numeric_only`, `limit_area`, `shift(freq=)`, a list of periods with a `suffix`, a `fill_value` on a shift, `dropna(how="all")`, a `thresh`, `inplace` and `ignore_index` each refuse by name with the reason in the message, and there is a test per refusal.
 
-### Parse, print, reparse, over the whole corpus
-
-`pixi run differential-sql` now puts every statement firepanda parses through the transformer and the printer twice and checks that the two printings agree. That is 69,153 statements, of which 15,915 come back the same text twice, 2,735 refuse by name, and 50,502 are statements the transformer is not aimed at yet and fail in the matcher rather than in a transformer case. Nothing is broken and nothing is unstable, and both of those numbers have a ceiling of zero so they stay that way.
-
-The four outcomes are separated on purpose. A refusal starts with `Not Implemented Error:` and is the expected answer for anything outside the surface firepanda covers, so it is counted rather than failed. A statement the query rule does not match at all is a `CREATE TABLE` or an `ATTACH` and is the size of the work that is left rather than a defect. Anything else out of the transformer is a bug, and text that prints back to something different is a printer that lost something. Running them together in one number would have hidden the two that matter behind the fifty thousand that do not.
-
 ### No refusal says a rule number any more
 
 `SELECT INTERVAL '1 day'` used to come back with `firepanda does not support grammar rule 472`, which is a fact about firepanda's build of the grammar and means nothing to the person who wrote the query. It now says it does not support an INTERVAL literal, and that a duration is its own type with its own arithmetic and arrives with the date and time work. Across DuckDB's corpus that was 3,385 statements blaming a number and it is now none of them.
@@ -323,8 +317,6 @@ The four outcomes are separated on purpose. A refusal starts with `Not Implement
 The printer no longer calls itself once per child. `x + x + x` folds to the left, so the eight kilobyte expression in DuckDB's `overflow/expression_tree_depth.test` is a tree two thousand deep, and a recursive printer runs out of stack on it and takes the process down with it. The walk is now a loop over an explicit stack with a phase counter saying which part of a node is being written, which is the same shape the transformer's walk already had. Depth costs heap and the two thousand term chain prints in one pass. That closes #368.
 
 Two quoting bugs came out of the corpus and both were the printer writing a name bare that cannot stand bare. `SELECT "inner" FROM t` came back as a syntax error at the `FROM`, and `ORDER BY s COLLATE "is"` came back as one at the `s`. The rule was quoting reserved keywords only, and DuckDB has five keyword classes rather than two. A column name keyword such as `coalesce` may stand anywhere and stays bare, a function name or type name keyword such as `inner` or `left` may only stand where a function is being called, and a reserved keyword may stand nowhere. So the same word is quoted as a column and bare as a call, which is what the grammar says and what the round trip now checks on seventy thousand statements.
-
-One statement is left that firepanda prints correctly and cannot read back, and it is the two thousand term chain. The printer parenthesizes every operand, so the text opens with two thousand parentheses and the matcher's own depth guard stops at about twenty two. It has a ceiling of its own and a bucket of its own, because nothing was lost: the AST is right and the text is right, and the only thing that cannot read it is our matcher. It goes when the matcher becomes an explicit stack machine.
 
 Three statements are left that firepanda prints correctly and cannot read back. One is the two thousand term chain and the other two are wide generated CTEs. The printer parenthesizes every operand, so the text of the chain opens with two thousand parentheses and the matcher's own depth guard stops at about twenty two. They have a ceiling of their own and a bucket of their own, because nothing was lost: the AST is right and the text is right, and the only thing that cannot read it is our matcher. They go when the matcher becomes an explicit stack machine.
 
@@ -479,7 +471,6 @@ A constant carries a resolution the same way a column does, through the new `Val
 `Series.dt_days` floors rather than truncating, so minus one microsecond is minus one day, which is the rule that keeps the days and the remainder adding back up and is the thing a positive only test corpus cannot catch. `Series.dt_total_seconds` answers float64 at every resolution, including on a column of whole seconds, and is lossy past 2 to the 53 because pandas' is. `Series.to_timedelta` on an integer column is a relabelling and not a conversion: the integers are already the counts, so nothing is computed and no null turns into a zero length span on the way through. A column that already carries a resolution comes back unchanged.
 
 Eighteen tests in `tests/test_temporal_duration.mojo`, every expected value read off pandas 3.0.3 rather than worked out, covering both signs of the mean truncation and both signs of the day rounding. The fuzzer checks the two readers and the three reductions against one row at a time twins one case in eight, with the day twin using an explicitly floored division rather than the language operator so that agreement is evidence about the answer and not about the operator, and with the duration columns drawn by random bit width and separately drawn sign so a run sees spans of a few units beside spans of a few centuries. Four hundred thousand cases at seed 20260907 found nothing. The arithmetic between two temporal columns is deliberately not fuzzed, because it is a rescale in front of the add and subtract loops the fuzzer already runs over every dtype.
-
 ### From a parse tree to something worth binding against
 
 `firepanda/sql/transform.mojo`, the piece between the matcher and the arenas, and the only file in the engine that knows a grammar rule name. A grammar bump therefore breaks this file or nothing.
@@ -862,7 +853,6 @@ Read honestly that says three things. Against polars, which is the like for like
 Starts with and ends with do not search at all. Both know where to look, so both are a length test and one run of bytes compared at a fixed offset, which is what `text/starts_with` and `text/ends_with` are in the benchmark suite to confirm: if they are ever close to `text/contains_hit` then the skipping has stopped working.
 
 There is no general pattern compiler and this is not a step towards one before it is needed. A matcher with a wildcard alphabet is a different piece of work, it would be slower on all four of these, and none of the queries ask for it.
-
 ### DuckDB's grammar is in the tree, and a table is generated from it
 
 DuckDB replaced its Bison parser with a hand written PEG parser and shipped the grammar as data. Forty `.gram` files, five keyword lists, 61,190 bytes, MIT licensed, and executed by the reference implementation itself rather than being a description of it. That is the artifact the whole SQL milestone rests on, and it is now vendored at `firepanda/sql/grammar/` with a `VENDOR` file recording the upstream commit and a SHA-256 for each of the 47 files.
@@ -1047,6 +1037,7 @@ Two Arrow types and a join that had been running on one core.
 The join is the one worth reading. An outer join was the only kind that would not spread across cores, because it has to remember which built side rows paired and it remembered them in a bitmap, whose set is a read modify write of a word that eight rows share. That was a real constraint on the bitmap and not on the remembering, and marking a byte per key code instead takes it away. Reading the byte before writing it is worth as much again, because a store is what takes a cache line off the other cores and a load is not. Together they are just under three times on `join/outer`.
 
 The types are dictionary and duration columns, which the Arrow reader and writer now handle in every unit and every index width. A dictionary is how Arrow spells a categorical, so this is the type a text column with few distinct values arrives as from Polars and pyarrow, and reading it was previously an error that stopped the whole file.
+
 
 ### An outer join runs on every core, three times faster
 
@@ -1889,7 +1880,6 @@ The second gate took the measurement to find. Spreading the work costs a task pe
 On that machine, at a million rows, over a line of a computed column then a filter then a projection: `exec/pipeline_line_16k` 5.59 ms to 1.94 and `exec/pipeline_line` 5.26 to 1.66, both with every new run below every old one across three alternating blocks. `exec/pipeline_project`, `exec/pipeline_project_128k`, `exec/pipeline_cast` and `exec/pipeline_cast_128k` all take the sequential route now and all four land inside the noise, between minus 0.2 and plus 1.8 percent. `exec/pipeline_line_one_chunk` and `exec/pipeline_limited` are the controls and did not move.
 
 Handing tasks out one per chunk is not the last word. A shared counter that gives each worker several chunks would pay for the tasks once per core rather than once per chunk, and would let the projection and the cast back onto the parallel route. That is a later change and it needs the batch to stay bounded.
-
 ### A NaN is missing when you ask whether a row is missing
 
 The other side of the same question. pandas on the numpy backend has no separate presence bitmap for a float column, so NaN is the only missing it has there, and `Series([1.0, nan]).count()` is 1. firepanda followed Arrow, where a NaN is an ordinary float that happens to compare false against itself, so it answered 2. `isna` said False on a NaN, `notna` said True, `dropna` kept the row, and `hasnans` said a column with a NaN in it had none.
