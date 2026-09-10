@@ -24,7 +24,11 @@ from std.time import perf_counter_ns
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
-from firepanda.array.strings import StringArray, StringBuilder
+from firepanda.array.strings import (
+    StringArray,
+    StringBuilder,
+    strings_from_list,
+)
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.hash.factorize import (
     _factorize_strings_parallel,
@@ -41,7 +45,25 @@ from firepanda.kernel.compare import (
     CMP_NE,
 )
 from firepanda.kernel.group import AggKind, aggregate_group_any
+from firepanda.kernel.member import TEXT_LINEAR_MAX, text_is_in
+from firepanda.kernel.pattern import (
+    text_contains,
+    text_contains_in_order,
+    text_ends_with,
+    text_starts_with,
+)
+from firepanda.kernel.pick import text_pick
+from firepanda.kernel.scalar import (
+    text_contains_in_order_scalar,
+    text_contains_scalar,
+    text_ends_with_scalar,
+    text_is_in_scalar,
+    text_pick_scalar,
+    text_starts_with_scalar,
+    text_substring_scalar,
+)
 from firepanda.kernel.sort import argsort_any
+from firepanda.kernel.substr import TO_END, text_substring
 from firepanda.kernel.text import compare_text, compare_text_const
 from firepanda.testing.rng import Rng
 
@@ -416,6 +438,407 @@ def reference_compare(pick: Int, a: String, b: String) -> Bool:
     return a >= b
 
 
+def random_run(mut rng: Rng, values: List[String]) -> String:
+    """Draws a needle, usually one that is somewhere in the column.
+
+    Half the needles are a run of bytes lifted out of an element and half are
+    drawn the way an element is. A needle drawn freely almost never occurs, and
+    a search that answered no to everything would pass a run made only of those.
+
+    Args:
+        rng: The generator.
+        values: The reference elements.
+
+    Returns:
+        The needle, which may be empty.
+    """
+    if len(values) == 0 or rng.next_bool():
+        return random_text(rng)
+    var text = values[rng.next_below(len(values))]
+    var length = text.byte_length()
+    if length == 0:
+        return String("")
+    var start = rng.next_below(length)
+    var count = rng.next_below(length - start) + 1
+    var out = String("")
+    for k in range(count):
+        out += text[byte=start + k]
+    return out
+
+
+def agree(
+    got: Array[DType.bool],
+    want: Array[DType.bool],
+    step: Int,
+    seed: UInt64,
+    what: String,
+) raises:
+    """Asserts a pattern kernel and its twin gave the same column.
+
+    Args:
+        got: The kernel's answer.
+        want: The twin's answer.
+        step: The case number, for the failure message.
+        seed: The seed, for the failure message.
+        what: Which kernel and which needle, for the failure message.
+
+    Raises:
+        If they differ anywhere, in validity or in value.
+    """
+    if len(got) != len(want):
+        raise Error(
+            String(
+                "case ",
+                step,
+                " seed ",
+                seed,
+                ": ",
+                what,
+                " gave ",
+                len(got),
+                " rows against ",
+                len(want),
+            )
+        )
+    for i in range(len(got)):
+        if got.is_valid(i) != want.is_valid(i):
+            raise Error(
+                String(
+                    "case ",
+                    step,
+                    " seed ",
+                    seed,
+                    ": ",
+                    what,
+                    " row ",
+                    i,
+                    " validity ",
+                    got.is_valid(i),
+                    " against ",
+                    want.is_valid(i),
+                )
+            )
+        if got.is_valid(i) and got[i] != want[i]:
+            raise Error(
+                String(
+                    "case ",
+                    step,
+                    " seed ",
+                    seed,
+                    ": ",
+                    what,
+                    " row ",
+                    i,
+                    " is ",
+                    got[i],
+                    " against ",
+                    want[i],
+                )
+            )
+
+
+def check_text_pattern(
+    column: StringArray,
+    values: List[String],
+    mut rng: Rng,
+    step: Int,
+    seed: UInt64,
+) raises:
+    """Runs one of the four pattern kernels against its twin.
+
+    The twin tries every position and compares every byte. The kernel tests
+    sixteen positions at once and skips almost all of them, and which sixteen
+    depends on where in the row it is and how long the row is, so the lengths
+    this file already draws are exactly what is wanted: a row shorter than one
+    block takes the byte path, a longer one takes the block path, and the block
+    that runs off the end overlaps the one before it.
+
+    Args:
+        column: The column under test.
+        values: The reference elements, used only to draw needles that occur.
+        rng: The generator.
+        step: The case number, for the failure message.
+        seed: The seed, for the failure message.
+
+    Raises:
+        If a kernel and its twin disagree anywhere.
+    """
+    var needle = random_run(rng, values)
+    var pick = rng.next_below(4)
+    if pick == 0:
+        agree(
+            text_contains(column, needle.as_bytes()),
+            text_contains_scalar(column, needle),
+            step,
+            seed,
+            "contains " + needle,
+        )
+    elif pick == 1:
+        agree(
+            text_starts_with(column, needle.as_bytes()),
+            text_starts_with_scalar(column, needle),
+            step,
+            seed,
+            "starts_with " + needle,
+        )
+    elif pick == 2:
+        agree(
+            text_ends_with(column, needle.as_bytes()),
+            text_ends_with_scalar(column, needle),
+            step,
+            seed,
+            "ends_with " + needle,
+        )
+    else:
+        var second = random_run(rng, values)
+        agree(
+            text_contains_in_order(
+                column, needle.as_bytes(), second.as_bytes()
+            ),
+            text_contains_in_order_scalar(column, needle, second),
+            step,
+            seed,
+            "in_order " + needle + " " + second,
+        )
+
+
+def check_text_substring(
+    column: StringArray,
+    mut rng: Rng,
+    step: Int,
+    seed: UInt64,
+) raises:
+    """Cuts a random byte range out of the column and checks it against the twin.
+
+    The offset is drawn either side of zero and the length either side of
+    twelve, because those are the two numbers the kernel branches on: a
+    negative offset counts back from the end of a row whose length it does not
+    know until it reads it, and a length of at most twelve is the route that
+    writes into the view and never allocates a payload. Both are drawn wider
+    than any row this file builds, so ranges that fall entirely off the end
+    turn up often.
+
+    Args:
+        column: The column under test.
+        rng: The generator.
+        step: The case number, for the failure message.
+        seed: The seed, for the failure message.
+
+    Raises:
+        If the kernel and the twin disagree anywhere.
+    """
+    var offset = Int(rng.next_below(80)) - 40
+    var length = Int(rng.next_below(40)) - 2
+    if length < 0:
+        length = TO_END
+    var what = String("substring ", offset, " ", length)
+    var got = text_substring(column, offset, length)
+    var want = text_substring_scalar(column, offset, length)
+    if len(got) != len(want):
+        raise Error(
+            String(
+                "case ",
+                step,
+                " seed ",
+                seed,
+                ": ",
+                what,
+                " gave ",
+                len(got),
+                " rows against ",
+                len(want),
+            )
+        )
+    for i in range(len(got)):
+        if got.is_valid(i) != want.is_valid(i):
+            raise Error(
+                String(
+                    "case ",
+                    step,
+                    " seed ",
+                    seed,
+                    ": ",
+                    what,
+                    " row ",
+                    i,
+                    " validity ",
+                    got.is_valid(i),
+                    " against ",
+                    want.is_valid(i),
+                )
+            )
+        if got.is_valid(i) and got[i] != want[i]:
+            raise Error(
+                String(
+                    "case ",
+                    step,
+                    " seed ",
+                    seed,
+                    ": ",
+                    what,
+                    " row ",
+                    i,
+                    " gave ",
+                    got[i],
+                    " against ",
+                    want[i],
+                )
+            )
+
+
+def check_text_is_in(
+    column: StringArray,
+    values: List[String],
+    mut rng: Rng,
+    step: Int,
+    seed: UInt64,
+) raises:
+    """Looks the column up in a random set and checks it against the twin.
+
+    The set is drawn either side of the threshold the kernel switches routes at,
+    so both the comparison against every member and the table are walked, and it
+    is drawn mostly out of the column's own elements, because a set of freely
+    drawn strings almost never hits anything and a kernel answering no to
+    everything would pass it.
+
+    Args:
+        column: The column under test.
+        values: The reference elements.
+        rng: The generator.
+        step: The case number, for the failure message.
+        seed: The seed, for the failure message.
+
+    Raises:
+        If the kernel and the twin disagree anywhere.
+    """
+    var count = Int(rng.next_below(6 * TEXT_LINEAR_MAX + 5))
+    var members = List[String]()
+    for _ in range(count):
+        if len(values) > 0 and rng.next_bool():
+            members.append(values[rng.next_below(len(values))])
+        else:
+            members.append(random_run(rng, values))
+    var set = strings_from_list(members)
+    var what = String("is_in over ", count)
+    var got = text_is_in(column, set)
+    var want = text_is_in_scalar(column, set)
+    for i in range(len(got)):
+        if got.is_valid(i) != want.is_valid(i):
+            raise Error(
+                String(
+                    "case ",
+                    step,
+                    " seed ",
+                    seed,
+                    ": ",
+                    what,
+                    " row ",
+                    i,
+                    " validity ",
+                    got.is_valid(i),
+                    " against ",
+                    want.is_valid(i),
+                )
+            )
+        if got.is_valid(i) and got[i] != want[i]:
+            raise Error(
+                String(
+                    "case ",
+                    step,
+                    " seed ",
+                    seed,
+                    ": ",
+                    what,
+                    " row ",
+                    i,
+                    " gave ",
+                    got[i],
+                    " against ",
+                    want[i],
+                )
+            )
+
+
+def check_text_pick(
+    column: StringArray,
+    values: List[String],
+    mut rng: Rng,
+    step: Int,
+    seed: UInt64,
+) raises:
+    """Chooses between the column and a shuffle of itself, against the twin.
+
+    The condition is drawn with nulls in it on purpose, because the rule that a
+    null takes the false side is the one thing about this kernel that is not
+    obvious, and a condition with no nulls in it never exercises the rule.
+
+    The second column is a gather from the first, so the two sides agree on
+    their bytes often enough that a kernel taking the wrong side would still
+    produce something plausible, which is what makes the comparison worth
+    running.
+
+    Args:
+        column: The column under test.
+        values: The reference elements.
+        rng: The generator.
+        step: The case number, for the failure message.
+        seed: The seed, for the failure message.
+
+    Raises:
+        If the kernel and the twin disagree anywhere.
+    """
+    var n = len(column)
+    var builder = StringBuilder(capacity=n)
+    for _ in range(n):
+        if len(values) > 0 and rng.next_bool():
+            builder.append(values[rng.next_below(len(values))].as_bytes())
+        else:
+            builder.append_null()
+    var other = builder^.finish()
+
+    var cond = Array[DType.bool](n)
+    for i in range(n):
+        var draw = rng.next_below(3)
+        if draw == 2:
+            cond.set_null(i)
+        else:
+            cond.set_valid(i, draw == 1)
+
+    var got = text_pick(cond, column, other)
+    var want = text_pick_scalar(cond, column, other)
+    for i in range(len(got)):
+        if got.is_valid(i) != want.is_valid(i):
+            raise Error(
+                String(
+                    "case ",
+                    step,
+                    " seed ",
+                    seed,
+                    ": pick row ",
+                    i,
+                    " validity ",
+                    got.is_valid(i),
+                    " against ",
+                    want.is_valid(i),
+                )
+            )
+        if got.is_valid(i) and got[i] != want[i]:
+            raise Error(
+                String(
+                    "case ",
+                    step,
+                    " seed ",
+                    seed,
+                    ": pick row ",
+                    i,
+                    " gave ",
+                    got[i],
+                    " against ",
+                    want[i],
+                )
+            )
+
+
 def check_text_compare(
     column: StringArray,
     values: List[String],
@@ -744,8 +1167,20 @@ def main() raises:
                             )
                         )
 
-        elif op < 90 and len(values) > 0:
+        elif op < 85 and len(values) > 0:
             check_text_compare(column, values, present, rng, step, options.seed)
+
+        elif op < 88 and len(values) > 0:
+            check_text_pattern(column, values, rng, step, options.seed)
+
+        elif op < 90:
+            check_text_substring(column, rng, step, options.seed)
+
+        elif op < 91:
+            check_text_is_in(column, values, rng, step, options.seed)
+
+        elif op < 92:
+            check_text_pick(column, values, rng, step, options.seed)
 
         elif op < 95 and len(values) > 0:
             # The permutation is compared position by position rather than the

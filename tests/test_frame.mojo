@@ -419,6 +419,44 @@ def test_with_column_on_an_empty_frame_sets_the_height() raises:
     assert_equal(grown.width(), 1, "width")
 
 
+def test_add_column_appends_without_copying_the_frame() raises:
+    var df = sample_frame()
+    var extra = df.column("key").rename("key_again")
+    df.add_column(extra^)
+    assert_equal(df.width(), 4, "column added")
+    assert_equal(df.names()[3], "key_again", "appended at the end")
+    assert_equal(len(df), 6, "rows unchanged")
+
+
+def test_add_column_replaces_in_place_by_name() raises:
+    var df = sample_frame()
+    df.add_column(df.column("key").cast(DType.float64))
+    assert_equal(df.width(), 3, "no column added")
+    assert_equal(df.names()[0], "key", "position kept")
+    assert_true(df[0].dtype() == DType.float64, "column dtype updated")
+    assert_true(
+        df.schema[0].dtype == LogicalType.FLOAT64, "schema updated with it"
+    )
+
+
+def test_add_column_rejects_the_wrong_height() raises:
+    var df = sample_frame()
+    var raised = False
+    try:
+        df.add_column(int_series("short", [Int64(1)]))
+    except:
+        raised = True
+    assert_true(raised, "a column of the wrong height should raise")
+    assert_equal(df.width(), 3, "the frame is left as it was")
+
+
+def test_add_column_on_an_empty_frame_sets_the_height() raises:
+    var df = DataFrame()
+    df.add_column(int_series("a", [Int64(1), Int64(2)]))
+    assert_equal(len(df), 2, "height comes from the first column")
+    assert_equal(df.width(), 1, "width")
+
+
 def test_cast_converts_one_column() raises:
     var df = sample_frame()
     var narrowed = df.cast("key", DType.int8)

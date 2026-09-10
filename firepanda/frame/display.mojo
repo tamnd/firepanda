@@ -40,6 +40,7 @@ what lets `frame.mojo` and `series.mojo` both call it without a cycle.
 from firepanda.array.any import AnyArray, ColumnRefs
 from firepanda.dtype.lists import ALL
 from firepanda.dtype.schema import Schema
+from firepanda.kernel.temporal import instant_text
 
 comptime DEFAULT_MAX_ROWS = 10
 """Rows printed before the middle is elided. Half from each end."""
@@ -202,6 +203,12 @@ def render_value(col: AnyArray, i: Int, options: DisplayOptions) -> String:
             return String("<", col.type, ">")
     if col.type.is_variable_width():
         return String("<", col.type, ">")
+    # Before the layout dispatch, because a date is laid out as an int32 and a
+    # timestamp as an int64, and falling through would print the day count
+    # instead of the day.
+    var instant = instant_text(col, i)
+    if instant:
+        return instant.take()
     comptime for candidate in ALL:
         if col.dtype() == candidate:
             var value = (
