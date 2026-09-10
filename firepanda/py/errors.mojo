@@ -96,6 +96,14 @@ def retagged(kind: String, cause: Error) -> Error:
     The message is kept exactly, because the core writes better messages than
     anything a binding could invent about a call it only knows the shape of.
 
+    An error that arrives already tagged is handed back untouched, which is what
+    the name says and was not what it did. A binding that checks its arguments
+    itself and then calls the core inside a `try` produces exactly that: the
+    check raises a `value` and the handler around the call wraps it in a `dtype`,
+    so a bad frequency came out as a `TypeError` and the Python side read the
+    outer tag. The inner tag is the more specific one, since it was applied by
+    the code that knew what was wrong, so it wins.
+
     Args:
         kind: One of the prefixes above.
         cause: The error to classify.
@@ -103,4 +111,7 @@ def retagged(kind: String, cause: Error) -> Error:
     Returns:
         The error to raise.
     """
-    return Error(kind + String(cause))
+    var message = String(cause)
+    if message.startswith("firepanda:"):
+        return Error(message)
+    return Error(kind + message)

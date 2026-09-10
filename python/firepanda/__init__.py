@@ -37,11 +37,14 @@ from __future__ import annotations
 from . import _firepanda, api, errors
 from ._frame import DataFrame, Index, Series, from_arrow, read_csv
 from ._pandas import to_datetime
+from ._scalars import Timedelta, Timestamp
 
 __all__ = [
     "DataFrame",
     "Index",
     "Series",
+    "Timedelta",
+    "Timestamp",
     "__version__",
     "api",
     "errors",
