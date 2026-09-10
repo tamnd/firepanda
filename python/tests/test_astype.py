@@ -181,6 +181,8 @@ def test_a_name_nothing_answers_to_is_a_type_error(firepanda: ModuleType) -> Non
         ("S21", "fixed width byte string"),
         ("bytes", "fixed width byte string"),
         ("void", "no void column"),
+        ("longdouble", "extended precision"),
+        ("g", "extended precision"),
         (">i8", "big endian"),
     ],
 )
