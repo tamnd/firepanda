@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a misspelled argument was being told to wait for a feature it already had
+
+There are two ways to pass an argument a value the call will not answer, and firepanda was giving both of them the same answer. `s.quantile(0.5, interpolation="lower")` names one of the twelve rules pandas has and firepanda has not written, and `NotImplementedError` is right for it: the thing asked for is real and is scheduled. `s.quantile(0.5, interpolation="lowr")` is a typo four characters from a working line, and it was getting the same reply, which sent somebody off to read a changelog about a feature that already exists under the spelling they meant. It now says what pandas says, which is `'lowr' is not a valid method. Use one of:` followed by the thirteen names, because the list is the fix and the class is the one an existing `except ValueError` is already written against.
+
+The same split now applies to `DataFrame.quantile(method=)`, which has a two word vocabulary, and to `nonexistent=` on `tz_localize`, `floor`, `ceil` and `round` on both the column and the scalar. The rule is written down as spec 23: ask whether pandas takes the value, not whether firepanda answers it, and check for the typo first, since a typo is also not the default and would otherwise be caught on its way past by the branch that reports a gap.
+
+`ambiguous=` is deliberately not given the same check on a column, and is given it on a scalar. That is not an inconsistency, it is what pandas does. `s.dt.tz_localize("UTC", ambiguous=3)` comes back with an answer in it and is never validated, while `Timestamp.tz_localize("UTC", ambiguous=3)` is refused, and the scalar refuses `infer` as well because a single moment has no neighbours to infer a direction from. Adding a check the column version does not have would be firepanda refusing input pandas accepts, and a wrong refusal stops a program where a wrong message only wastes an afternoon.
+
+### Fixed: rounding a column with no zone refused an argument pandas never reads
+
+`floor`, `ceil` and `round` take `ambiguous` and `nonexistent`, and pandas reads them only when the value already carries a zone. Hand a naive column or a naive `Timestamp` either of them and pandas rounds and ignores the argument, because there is no daylight saving without a zone and so nothing for a policy to decide. firepanda was refusing, which meant a naive column that rounds fine in pandas stopped. Both now pass a naive value straight through. `tz_localize` is not like this and still reads both every time, including when it is handed `None` and including when the moment is already zoned, which is also measured rather than assumed.
+
 ### Fixed: four messages that described our internals instead of the user's mistake
 
 A message is a product surface. Somebody who hits one of these has stopped reading their own code and has started pasting a sentence into a search box, and a sentence that is accurate about firepanda's insides and shares no words with the pandas documentation sends them nowhere. These four had the right exception class and the wrong words, which is the failure mode that looks like nothing is wrong.
