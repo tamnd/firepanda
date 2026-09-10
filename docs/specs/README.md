@@ -14,7 +14,7 @@ says what was already decided and why.
 | [05-kernels.md](05-kernels.md) | Kernel shape, the hash table, strings, the GPU path |
 | [06-pandas-parity.md](06-pandas-parity.md) | The full pandas 3.0 conformance checklist, milestone-tagged |
 | [07-python-bindings.md](07-python-bindings.md) | `PythonModuleBuilder`, Arrow PyCapsule, wheels, and the ABI problem |
-| [08-milestones.md](08-milestones.md) | M0 through M11, exit criteria, and four points to stop and reassess |
+| [08-milestones.md](08-milestones.md) | M0 through M11 including M4b for SQL, exit criteria, and four points to stop and reassess |
 | [09-quality-bar.md](09-quality-bar.md) | Testing, and living without a race detector |
 | [10-benchmarks.md](10-benchmarks.md) | What gets measured and against whom |
 | [11-package-layout.md](11-package-layout.md) | The tree, and why Mojo 1.0's import rules decide it |
@@ -29,6 +29,7 @@ says what was already decided and why.
 | [20-editing-an-index.md](20-editing-an-index.md) | The five operations that change an index's labels, the three that turn a label into a slice bound, and what an unsorted index costs |
 | [21-the-index-you-can-hold.md](21-the-index-you-can-hold.md) | The third bound type, why `df.index` returns an index rather than a list, and the divergences the Python facing index has |
 | [engine/](engine/00-README.md) | How DuckDB and Polars execute a query, and what firepanda is going to do about it |
+| [sql/](sql/00-README.md) | DuckDB's dialect, the vendored grammar, the shared logical plan, and how compatibility gets measured |
 
 ## How to read this
 
@@ -51,5 +52,6 @@ Sizing them in weeks invites a reader to add the numbers up and treat the total 
 delivery date, and at this stage that number would be fiction.
 
 **Conventions.** Documents refer to each other as "document NN section N", and CI
-checks that those references resolve. Milestone tags `(M0)` through `(M11)` in the
-parity checklist refer to headings in document 08, and CI checks that too.
+checks that those references resolve. Milestone tags `(M0)` through `(M11)`, plus
+`(M4b)`, in the parity checklist refer to headings in document 08, and CI checks that
+too.

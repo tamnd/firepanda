@@ -13,11 +13,20 @@ which is pinned to `groups - 1`, because the caller sizes its bucket tables to
 it.
 
 Which route runs is not observable from the outside, which is the point of having
-three, so the tests that care drive them by shape instead. A narrow integer key
+several, so the tests that care drive them by shape instead. A narrow integer key
 takes the direct table, a key spread over the whole int64 range takes the hash
-table, and two key columns or a string key take the concat and factorize
-fallback. Each of those shapes appears here at least once, and the assertions are
-the same ones in every case.
+table, a string key takes a table of its own when the side that would be built is
+much smaller than the side that would be probed, and two key columns or anything
+else takes the concat and factorize fallback. Each of those shapes appears here
+at least once, and the assertions are the same ones in every case.
+
+The string table is the one with a trap in it. Every other route settles a row by
+comparing hashes, which is exact for a fixed width key. A string is not, so the
+bytes have to be compared as well, and the bytes the table kept belong to the side
+it was built from while the row being asked belongs to the other one. A string of
+twelve bytes or fewer carries its own, so a test that wants to reach that seam has
+to use longer keys than that and keys that share a prefix, which the tests below
+say when they are doing it.
 
 The last few tests are about the seam rather than the answer. `build_side` and
 `probe_side` are `align_keys`' second route split in half so a streaming join can
@@ -298,6 +307,190 @@ def test_a_string_key_aligns() raises:
     assert_equal(got.codes[0], got.codes[2], "both reds")
     assert_equal(got.codes[1], got.codes[3], "green across the sides")
     assert_not_equal(got.codes[0], got.codes[1], "red against green")
+
+
+def align_text(left: List[String], right: List[String]) raises -> KeyAlignment:
+    """Aligns two single column string frames."""
+    var rows = len(left)
+    var other = len(right)
+    return align_owned(
+        columns(AnyArray(text(left))),
+        one(0),
+        rows,
+        columns(AnyArray(text(right))),
+        one(0),
+        other,
+    )
+
+
+def long_keys(count: Int, of: Int) raises -> List[String]:
+    """Builds string keys that are too long to be held inline and share a prefix.
+
+    Both of those matter to the string route and neither is true of the short
+    keys the tests above use. A string of twelve bytes or fewer lives inside its
+    own view and is compared without anyone reading a payload, and a string whose
+    first four bytes differ from another's is settled by the prefix check without
+    the rest being read. The keys here are eighteen bytes and differ only in the
+    last one, so every comparison between two of them goes all the way to the
+    bytes in the column.
+
+    Args:
+        count: How many keys to produce.
+        of: How many distinct keys to draw from, cycled through in order.
+
+    Returns:
+        The keys.
+
+    Raises:
+        If a key cannot be built.
+    """
+    var out = List[String](capacity=count)
+    for i in range(count):
+        out.append(String("shared-prefix-key-", i % of))
+    return out^
+
+
+def long_key_column(count: Int, of: Int) raises -> StringArray:
+    """`long_keys` written straight into a column.
+
+    The same keys, without the list of that many separate strings in between.
+    One of these columns is long enough that the difference is most of the test.
+
+    Args:
+        count: How many rows to produce.
+        of: How many distinct keys to draw from, cycled through in order.
+
+    Returns:
+        The column.
+
+    Raises:
+        If a key cannot be built.
+    """
+    var seen = long_keys(of, of)
+    var out = StringBuilder(capacity=count)
+    for i in range(count):
+        out.append(seen[i % of].as_bytes())
+    return out^.finish()
+
+
+def test_a_string_key_against_a_much_smaller_side_aligns() raises:
+    # Eight left rows for every right row, which is the shape that takes the
+    # string table rather than the concat route. The keys are long and share a
+    # prefix, so settling one means comparing a probe row's bytes against a view
+    # the table kept of a row of the other column.
+    var left = long_keys(24, 6)
+    var right = List[String]()
+    right.append(String("shared-prefix-key-1"))
+    right.append(String("shared-prefix-key-4"))
+    right.append(String("shared-prefix-key-1"))
+    var got = align_text(left, right)
+
+    assert_equal(got.groups, 3, "two keys and the miss")
+    for i in range(24):
+        var key = i % 6
+        if key == 1:
+            assert_equal(got.codes[i], got.codes[24], String("key 1 at ", i))
+            assert_equal(got.codes[i], got.codes[26], String("repeat at ", i))
+        elif key == 4:
+            assert_equal(got.codes[i], got.codes[25], String("key 4 at ", i))
+        else:
+            assert_equal(
+                Int(got.codes[i]), got.groups - 1, String("miss at ", i)
+            )
+
+
+def test_a_string_key_aligns_the_same_way_on_either_route() raises:
+    # The same twenty four rows asked about the same three keys twice. The first
+    # call has the sides far enough apart to take the string table and the second
+    # pads the right side out until it declines and the concat route runs. Codes
+    # are not comparable across two alignments, since each numbers its own
+    # groups, so what is compared is which rows agree with which.
+    var left = long_keys(24, 6)
+    var small = List[String]()
+    small.append(String("shared-prefix-key-1"))
+    small.append(String("shared-prefix-key-4"))
+    small.append(String("shared-prefix-key-1"))
+    var probed = align_text(left, small)
+
+    var padded = small.copy()
+    for i in range(20):
+        padded.append(String("padding-that-matches-nothing-", i))
+    var concat = align_text(left, padded)
+
+    var bad = -1
+    for i in range(24):
+        for j in range(3):
+            var by_table = probed.codes[i] == probed.codes[24 + j]
+            var by_concat = concat.codes[i] == concat.codes[24 + j]
+            if by_table != by_concat:
+                bad = i * 3 + j
+                break
+    assert_equal(bad, -1, String("left ", bad // 3, " right ", bad % 3))
+
+
+def test_a_null_string_key_matches_nothing_on_the_string_table() raises:
+    # A null on each side, on the shape that takes the string table. Neither one
+    # may pair with anything, including the other one.
+    var left = StringBuilder(capacity=24)
+    for i in range(24):
+        if i == 5:
+            left.append_null()
+        else:
+            left.append(String("shared-prefix-key-", i % 6).as_bytes())
+    var right = StringBuilder(capacity=3)
+    right.append(String("shared-prefix-key-1").as_bytes())
+    right.append_null()
+    right.append(String("shared-prefix-key-4").as_bytes())
+
+    var got = align_owned(
+        columns(AnyArray(left^.finish())),
+        one(0),
+        24,
+        columns(AnyArray(right^.finish())),
+        one(0),
+        3,
+    )
+    assert_true(got.has_nulls, "has_nulls")
+    assert_true(got.absent[5], "the null left row")
+    assert_true(got.absent[25], "the null right row")
+    assert_true(not matched(got, 24, 3, 5), "the null left row pairs with none")
+    assert_equal(got.codes[1], got.codes[24], "key 1 still pairs")
+    assert_equal(got.codes[4], got.codes[26], "key 4 still pairs")
+
+
+def test_a_string_probe_past_the_split_aligns_what_one_thread_would() raises:
+    # Over `PARALLEL_PROBE_ROWS`, so the string probe hands itself out in
+    # morsels, and far enough over the build side that it is the route taken.
+    # Every fourth key is on the right and the answer is checked row by row
+    # against what the key alone says it should be.
+    comptime rows = (1 << 17) + 5
+    var right = StringBuilder(capacity=64)
+    for i in range(64):
+        right.append(String("shared-prefix-key-", i * 4).as_bytes())
+
+    var got = align_owned(
+        columns(AnyArray(long_key_column(rows, 256))),
+        one(0),
+        rows,
+        columns(AnyArray(right^.finish())),
+        one(0),
+        64,
+    )
+    var bad = -1
+    for i in range(rows):
+        var want_miss = (i % 256) % 4 != 0
+        var is_miss = Int(got.codes[i]) == got.groups - 1
+        if want_miss != is_miss:
+            bad = i
+            break
+    assert_equal(bad, -1, String("row ", bad))
+
+    var wrong = -1
+    for r in range(64):
+        if got.codes[rows + r] != got.codes[r * 4]:
+            wrong = r
+            break
+    assert_equal(wrong, -1, String("right row ", wrong))
 
 
 def test_a_float_key_aligns() raises:

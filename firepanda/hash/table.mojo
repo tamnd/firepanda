@@ -568,12 +568,14 @@ struct HashTable(Movable, Sized):
         self,
         hashes: Buffer,
         col: StringArray,
+        source: StringArray,
         has_null: Bool,
         base: Int,
         count: Int,
         miss: UInt32,
         reps: List[StringView],
         mut codes: Array[DType.uint32],
+        out_at: Int = 0,
     ) -> Int:
         """Looks a chunk of a string column's keys up without inserting any.
 
@@ -588,11 +590,21 @@ struct HashTable(Movable, Sized):
         how a column whose keys are all known in advance is factorized in a
         single pass with no per worker table and no merge behind it.
 
+        The `reps` views belong to whichever column the table was built from,
+        which for a factorize is this one and for a join is the other side. That
+        is why `source` is an argument rather than being assumed to be `col`: a
+        long view carries an offset into its own column's payload and means
+        nothing against anyone else's. When the two are the same column the
+        comparison does exactly what it did before, and a column whose keys fit
+        in twelve bytes never reads either payload.
+
         Args:
             hashes: Hashes for this chunk, indexed from zero, from
                 `hash_strings_chunk`. Hashed with this table's seed, or nothing
                 matches.
             col: The column, needed for the comparison. Indexed by absolute row.
+            source: The column the `reps` views came from, which is `col` for a
+                factorize and the built side for a join.
             has_null: Whether the probe column has any nulls at all.
             base: The absolute row index this chunk starts at.
             count: How many rows are in this chunk.
@@ -600,7 +612,13 @@ struct HashTable(Movable, Sized):
                 and for a null row.
             reps: The view that was kept for each ordinal when it was handed
                 out, which is what `build_strings` appends to as it goes.
-            codes: Where the per-row ordinals go, indexed by absolute row.
+            codes: Where the per-row ordinals go, indexed by absolute row plus
+                `out_at`.
+            out_at: Added to the row index to get where in `codes` it goes, for
+                the reason `probe` gives: a join writes both sides into one
+                ordinal list and the side that is not first starts partway along
+                it. The row index still indexes the column, so the two cannot be
+                the same number.
 
         Returns:
             How many rows of this chunk held a key the table does not have. A
@@ -608,7 +626,7 @@ struct HashTable(Movable, Sized):
             missing.
         """
         var hash = hashes.bitcast[DType.uint64]()
-        var out = codes.unsafe_ptr()
+        var out = codes.unsafe_ptr().unsafe_offset(out_at)
         var slots = self._slots.bitcast[DType.uint64]()
         var mask = self._mask
         var absent = 0
@@ -637,7 +655,9 @@ struct HashTable(Movable, Sized):
                     absent += 1
                     break
                 if slots.unsafe_offset(slot).unsafe_load() == wanted:
-                    if col.element_equals_view(i, reps[Int(ordinal) - 1]):
+                    if col.element_equals_foreign(
+                        i, reps[Int(ordinal) - 1], source
+                    ):
                         out.unsafe_offset(i).unsafe_write(
                             UInt32(Int(ordinal) - 1)
                         )

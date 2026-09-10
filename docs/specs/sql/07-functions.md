@@ -1,0 +1,117 @@
+# Functions
+
+The part of the work that is large rather than hard, and therefore the part most likely to be underestimated in a plan and then to consume a year. This document counts it, tiers it, and says what the ones outside the tier do.
+
+## 1. The size of the catalog
+
+Measured from `duckdb_functions()` on DuckDB 1.5.5:
+
+| kind | overloads | distinct names |
+| --- | --- | --- |
+| scalar | 1,465 | 617 |
+| aggregate | 1,177 | 88 |
+| macro | 131 | 118 |
+| table | 129 | 89 |
+| pragma | 45 | 45 |
+| table macro | 4 | 4 |
+| total | 2,951 | 948 distinct overall |
+
+The shape of that table is the useful part. There are 617 scalar names against 88 aggregate names, but the aggregates have almost as many overloads, at 1,177 across 88 names, which is thirteen per name, because every aggregate is instantiated for every numeric type and most also exist in `_if`, `_distinct`, ordered and windowed forms. Aggregates are few, deep and expensive per name. Scalars are many, shallow and cheap per name.
+
+That asymmetry sets the strategy: write aggregates by hand and generate scalars.
+
+By area, counting distinct names: list and array 115, datetime 34, JSON 29, string 20 by prefix and far more by meaning, struct 12, map 11, regexp 8, spatial 8, and everything else 711.
+
+## 2. The registry
+
+```
+struct FunctionOverload:
+    var name: UInt32              # interned
+    var kind: FunctionKind        # scalar, aggregate, window capable, table
+    var params: List[TypeId]      # or a variadic marker
+    var varargs: TypeId
+    var return_type: ReturnTypeRule   # fixed, or a function of the arguments
+    var impl: UInt32              # index into the kernel table
+```
+
+Interned names, a flat table, and a lookup that groups overloads by name. The return type is a rule and not a type, because DuckDB's return types are computed. `sum(INTEGER)` is HUGEINT, decimal arithmetic derives precision and scale per document 06, and `list_value(...)` returns a list of the resolved element type. A table of fixed return types is wrong for a large fraction of the catalog and the wrongness is silent.
+
+Registration is at build time via `comptime`, so the table is static data with no startup cost and no dictionary construction, which matters because document 01's latency budget is measured from a cold `sql()` call and a registry built at import time is a fixed tax on every process.
+
+## 3. Overload resolution
+
+DuckDB's rule, matched exactly because the corpus depends on it:
+
+1. Collect all overloads with the name. An unknown name is an error, with edit distance suggestions over the catalog.
+2. For each, check arity, honouring variadics and defaults.
+3. Score each candidate. An exact type match is free, an implicit cast costs by distance in the type lattice, and an impossible cast disqualifies. Untyped `NULL` and untyped string literals match anything at a small cost, which is why `1 = '1'` works per document 06.
+4. Lowest total cost wins. A tie is an error listing the candidates.
+
+The cast cost lattice is the whole of it and it is where a subtle divergence lives forever. Widening within a family is cheap, crossing families is expensive, and narrowing is usually forbidden. Getting one edge weight wrong picks a different overload for some argument combination and produces a different type, then a different answer. Document 11's differential harness therefore includes a resolution fuzzer that calls each implemented name with every combination of a small set of typed arguments and compares the resolved return type against DuckDB's.
+
+## 4. The tiers
+
+**Tier 1, required for TPC-H and for the conformance target.** This is the 1.0 commitment.
+
+Arithmetic and comparison over every numeric type including decimal and hugeint, with the overflow behaviour from document 06. `CASE`, `COALESCE`, `NULLIF`, `IFNULL`, `IS DISTINCT FROM`. Casts between every pair in the supported type set, plus `TRY_CAST`. The string set the corpus and the benchmarks actually use: `substring`, `length`, `upper`, `lower`, `trim`, `ltrim`, `rtrim`, `concat`, `||`, `replace`, `strpos` and `position`, `like`, `ilike` and `similar to`, `left`, `right`, `lpad`, `rpad`, `split_part`, `starts_with`, `contains`, `repeat`, `reverse`, `md5`, `regexp_matches`, `regexp_replace` and `regexp_extract`. Date and time: `extract` and its shorthands, `date_part`, `date_trunc`, `date_diff`, `strftime`, `strptime`, `age`, interval arithmetic, `current_date` and `now`. Numeric: `abs`, `round`, `ceil`, `floor`, `sign`, `sqrt`, `pow`, `exp`, `ln`, `log`, the trig set, `greatest`, `least`, `mod`. Aggregates: `count`, `sum`, `avg`, `min`, `max`, `stddev` and `var` in both forms, `median`, `quantile` and `approx_quantile`, `string_agg`, `list` and `array_agg`, `bool_and` and `bool_or`, `first`, `last` and `any_value`, `count(DISTINCT)`, `arg_min` and `arg_max`. Windows: `row_number`, `rank`, `dense_rank`, `percent_rank`, `cume_dist`, `ntile`, `lag`, `lead`, `first_value`, `last_value`, `nth_value`, plus every tier 1 aggregate used as a window function.
+
+Roughly 150 names. That is the honest 1.0 scope and it covers TPC-H completely, db-benchmark completely, and the large majority of what the `test/sql` analytical directories exercise.
+
+**Tier 2, the list, struct and map surface.** 138 names by the count above. These are what makes DuckDB pleasant and they are what a pandas user reaches for when a column holds a list. Post 1.0, except that the constructors `list_value`, `struct_pack`, `[...]` and `{...}` and the accessors are pulled forward into tier 1 because the grammar makes them syntax rather than functions.
+
+**Tier 3, refused by name.** JSON, spatial, `bit_*`, encryption, the `duckdb_*` introspection functions beyond `duckdb_functions()` and `duckdb_settings()`, full text search, and the long tail of the 711 other names. Each refusal names the function and points at the tracking issue, per document 05, and `firepanda.sql_support()` enumerates them.
+
+## 5. Implementation, and why generation is the answer
+
+Every scalar function is a kernel over Arrow arrays with a validity bitmap, and ninety per cent of them are the same three shapes:
+
+- unary elementwise over `T` producing `U`, with null in giving null out
+- binary elementwise over `(T, T)` producing `U`, with broadcast for constants
+- n-ary with a custom loop
+
+Mojo's `comptime` monomorphizes these across the dtype set from one source, which is exactly how `firepanda/kernel/` already works, so a scalar function is a few lines plus a registry entry. The registry table itself is generated from a declaration list, which is what keeps 150 names from being 150 hand written registration blocks.
+
+Three things must not be generated, because generating them produces something wrong.
+
+**Anything with derived return types.** Decimal arithmetic and `sum`'s promotion to HUGEINT are rules, written once and shared.
+
+**Anything with a null rule that does not propagate.** `concat` ignores nulls, `coalesce` short circuits, `count` counts non nulls, and `||` propagates. Each is stated explicitly at its registration site and tested, because the default is null propagating and a silently defaulted function is a wrong answer.
+
+**Aggregates.** They are stateful and their protocol is the performance critical one.
+
+## 6. The aggregate protocol
+
+Four operations, which is DuckDB's design and the only one that supports both the hash aggregate and the window path:
+
+```
+init(state)                          # zero a state
+update(states, sel, input_vector)    # vectorized, many states at once
+combine(target, source)              # merge partials, for parallelism and spilling
+finalize(states) -> result_vector    # produce values
+```
+
+`update` taking a selection vector and a whole input vector at once is what makes the hash aggregate fast: one call per chunk per aggregate, not one call per row. `combine` is what makes it parallel across morsels and what makes it spillable, and an aggregate without a `combine` forces a single threaded, unbounded memory path. So `combine` is mandatory at registration, and the ones that genuinely cannot have it, such as `string_agg` with `ORDER BY`, declare themselves ordered and get the fallback path explicitly, matching DuckDB's own `ordered_aggregate_threshold` of 262,144.
+
+State must be fixed size and trivially relocatable wherever possible, because that is what lets the hash table store states inline and lets document 09 spill a partition by writing bytes. `sum`, `count`, `avg`, `min` and `max` on fixed width types, and the moment based statistics, all qualify. `list`, `string_agg`, `quantile` and the distinct variants do not, and each carries a note about what its memory does as cardinality grows, which is the question document 09 actually asks.
+
+## 7. Window functions
+
+Windows share the aggregate protocol and add a frame. The three implementation strategies, chosen per function:
+
+**Naive per row** for small frames or non decomposable aggregates.
+
+**Segment tree** over the partition for decomposable aggregates with arbitrary frames. This is DuckDB's approach, it is `O(n log n)`, and it is the only thing that makes `RANGE BETWEEN` frames tractable.
+
+**Streaming** for the running total case, `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`, which is by far the most common and is `O(n)` with one state.
+
+The ranking functions `row_number`, `rank`, `dense_rank` and `ntile`, and the navigation functions `lag`, `lead`, `first_value` and `nth_value`, are not aggregates and get direct implementations over the sorted partition.
+
+`EXCLUDE CURRENT ROW`, `GROUP` and `TIES`, and `GROUPS` framing, are part of the grammar and part of `test/sql/window`, so they are part of 1.0 rather than deferred. The frame boundary computation is shared and the exclusion is a modification to it, not a separate path.
+
+## 8. Table functions
+
+Nine names at 1.0: `read_csv`, `read_csv_auto`, `read_parquet`, `read_json`, `read_json_auto`, `glob`, `range`, `generate_series` and `unnest`. All but the last three touch the filesystem and all of them are gated by `enable_external_access` per document 02.
+
+They bind to firepanda's existing readers. `read_parquet` today goes through `firepanda/io/duckdb.mojo`, which is an honest dependency for reading a file format and not the wrapper that document 00 rejected. The query is still planned and executed by firepanda, and the dependency is on a decoder rather than on an engine.
+
+`unnest` is different from the rest and deserves its own note. It is a table function in the grammar but a plan node in practice, because `SELECT unnest(l) FROM t` expands rows, and document 08 gives it a dedicated operator rather than pretending it is a scalar.
