@@ -665,6 +665,29 @@ def error_at(src: Span[UInt8, _], offset: Int, message: StringSlice) -> Error:
     Returns:
         The error, ready to raise.
     """
+    return Error(
+        String("Parser Error: ", message, "\n\n", caret_at(src, offset))
+    )
+
+
+def caret_at(src: Span[UInt8, _], offset: Int) -> String:
+    """Renders the line an offset falls on with a caret under it.
+
+        LINE 1: SELECT 'abc
+                       ^
+
+    Two things quote a position in a query and both want the same two lines, so
+    they share this rather than each having their own idea of what a line
+    number counts from. The tokenizer and the matcher wrap it in a parser error
+    and the transformer wraps it in a refusal.
+
+    Args:
+        src: The query text.
+        offset: The byte to point at.
+
+    Returns:
+        The two lines, with no trailing newline.
+    """
     var bytes = src
     var line_start = 0
     var line = 1
@@ -681,11 +704,7 @@ def error_at(src: Span[UInt8, _], offset: Int, message: StringSlice) -> Error:
     var caret = String()
     for _ in range(prefix.byte_length() + offset - line_start):
         caret += " "
-    return Error(
-        String(
-            "Parser Error: ", message, "\n\n", prefix, text, "\n", caret, "^"
-        )
-    )
+    return String(prefix, text, "\n", caret, "^")
 
 
 def _is_blank(c: UInt8) -> Bool:
