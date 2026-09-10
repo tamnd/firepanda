@@ -48,6 +48,7 @@ from firepanda.kernel.nulls import (
     is_not_null_any,
     is_null_any,
     missing_count_any,
+    widen_for_missing,
 )
 from firepanda.kernel.pattern import (
     text_contains,
@@ -57,6 +58,7 @@ from firepanda.kernel.pattern import (
 )
 from firepanda.kernel.pick import pick_any
 from firepanda.kernel.select import filter_any, take_any
+from firepanda.kernel.shift import shift_any
 from firepanda.kernel.sort import argsort_any, is_sorted_any
 from firepanda.kernel.substr import TO_END, text_substring
 from firepanda.kernel.temporal import (
@@ -742,6 +744,133 @@ struct Series(Copyable, Movable, Sized, Writable):
         """
         return self._relabelled(
             self.name, fill_backward_any(self.values, limit)
+        )
+
+    def shift(self, periods: Int = 1) raises -> Self:
+        """Returns the series with its rows moved along, leaving the gap missing.
+
+        The third of the order-dependent methods, and the one that makes the
+        other two worth having, since a lag is what most people want a
+        remembered row order for in the first place.
+
+        The type can change, and that is pandas rather than a slip. Moving the
+        rows of a complete integer column makes room that has nothing in it, and
+        pandas on the numpy backend has no integer that means absent, so it
+        widens the whole column to float64 and writes a NaN in the gap. That is
+        the same rule the read path applies to a file, applied here for the same
+        reason, and it is why `shift(0)` and a shift with a fill value stay
+        integer columns: neither of them makes a gap. See `widen_for_missing`
+        and #171.
+
+        Args:
+            periods: How far to move. Positive moves rows towards the end of the
+                series and negative moves them towards the start.
+
+        Returns:
+            A series of the same height and labels, widened if the shift made a
+            gap in a column of whole numbers.
+
+        Raises:
+            Error: If the dtype has no physical layout.
+        """
+        return self._relabelled(
+            self.name, widen_for_missing(shift_any(self.values, periods))
+        )
+
+    def shift(self, periods: Int, fill_value: Value) raises -> Self:
+        """Returns the series with its rows moved along and the gap filled.
+
+        Nothing goes missing here, so nothing widens, and an integer column
+        shifted with an integer fill is still an integer column. That is the
+        difference between this and the overload above and it is the whole
+        reason pandas has the argument.
+
+        Args:
+            periods: How far to move.
+            fill_value: What to put in the gap. It is read as the column's own
+                type, so filling an int64 column with a whole number keeps it
+                int64.
+
+        Returns:
+            A series of the same height, labels and type.
+
+        Raises:
+            Error: If the dtype has no physical layout, or the fill value cannot
+                be read as the column's type.
+        """
+        return self._relabelled(
+            self.name,
+            widen_for_missing(shift_any(self.values, periods, fill_value)),
+        )
+
+    def diff(self, periods: Int = 1) raises -> Self:
+        """Returns the change from the row `periods` back to each row.
+
+        Spelled as a subtraction against a shift of itself rather than as a loop
+        with a carry, because that is what it is, and because writing it this way
+        means the type rules come out right without being restated. A difference
+        between two timestamps is a length of time here for the same reason it is
+        anywhere else in the library, which is that the subtraction says so.
+
+        The rows the shift could not reach have no difference at all, so the
+        first `periods` rows are missing, and the same widening the shift
+        explains applies to the answer.
+
+        Args:
+            periods: How far back to compare against. Negative compares against
+                a row ahead, which puts the missing rows at the end.
+
+        Returns:
+            A series of the same height and labels.
+
+        Raises:
+            Error: If the dtype has no physical layout, or the column's type
+                cannot be subtracted from itself.
+        """
+        return self._relabelled(
+            self.name,
+            widen_for_missing(
+                binary_any(
+                    self.values,
+                    shift_any(self.values, periods),
+                    BinaryOp.SUB,
+                )
+            ),
+        )
+
+    def pct_change(self, periods: Int = 1) raises -> Self:
+        """Returns the change from the row `periods` back as a fraction of it.
+
+        pandas divides by the earlier value rather than by the later one, so a
+        column going from two to three reports a half and not a third, and the
+        answer is a ratio rather than a percentage despite the name.
+
+        It divides first and subtracts one afterwards, rather than subtracting
+        first and dividing the difference. On ordinary numbers the two are the
+        same number. On the edges they are not, and the case that caught it was a
+        row of minus zero after a row of minus infinity, where dividing first
+        gives minus one and subtracting first gives infinity over minus infinity,
+        which is NaN. pandas divides first, so this does.
+
+        Args:
+            periods: How far back to compare against.
+
+        Returns:
+            A float series of the same height and labels.
+
+        Raises:
+            Error: If the dtype has no physical layout, or the column cannot be
+                divided by itself.
+        """
+        var before = widen_for_missing(shift_any(self.values, periods))
+        var ratio = binary_any(self.values, before, BinaryOp.DIV)
+        return self._relabelled(
+            self.name,
+            widen_for_missing(
+                binary_value_any(
+                    ratio, Value(Float64(1)).weakened(), BinaryOp.SUB
+                )
+            ),
         )
 
     def dt(self, field: TemporalField) raises -> Self:

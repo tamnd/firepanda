@@ -117,8 +117,11 @@ from .nulls import (
     is_null,
     is_null_any,
     missing_count_any,
+    nan_over_nulls,
     present_bitmap,
     present_bitmap_any,
+    widen_for_missing,
+    widens_for_missing,
 )
 from .pattern import (
     find_bytes,
@@ -143,6 +146,7 @@ from .select import (
     take_range,
     take_rows,
 )
+from .shift import shift_any
 from .sort import (
     argsort,
     argsort_any,

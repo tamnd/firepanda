@@ -974,6 +974,11 @@ def all_null(type: LogicalType, rows: Int) raises -> AnyArray:
     install a bitmap. Running the repair pass over it would be a write of the
     zeros that are already there.
 
+    The type comes back out as well as in. A block of missing timestamps is a
+    block of missing timestamps and not a block of missing integers that happen
+    to be the same width, and the difference shows up the moment somebody tries
+    to stack the block onto a real column.
+
     Args:
         type: The column's type.
         rows: How many rows.
@@ -988,7 +993,7 @@ def all_null(type: LogicalType, rows: Int) raises -> AnyArray:
         if type.physical == target:
             var out = Array[target](rows)
             out.data.validity = Bitmap(rows, all_valid=False)
-            return AnyArray(out^)
+            return AnyArray(out^.into_data(), type)
     raise Error("binary: unsupported dtype")
 
 
