@@ -123,10 +123,10 @@ from firepanda.kernel import (
     argsort_multi,
     arith_const,
     cast_to,
+    coalesce,
     compare_const,
     compare_text,
     compare_text_const,
-    coalesce,
     concat_any,
     concat_arrays,
     concat_two_any,
@@ -146,16 +146,26 @@ from firepanda.kernel import (
     group_sum,
     group_top_rows,
     group_var,
+    is_in,
+    is_null,
     less,
     mean_of,
-    is_null,
     min_of,
     missing_count_any,
     multiply,
+    pick,
+    pick_const,
+    pick_constants,
     sum_of,
     take_any,
     take_range,
     take_rows,
+    text_contains,
+    text_contains_in_order,
+    text_ends_with,
+    text_is_in,
+    text_starts_with,
+    text_substring,
 )
 from firepanda.kernel.arith import OP_ADD
 from firepanda.kernel.compare import CMP_EQ, CMP_LT
@@ -1111,6 +1121,40 @@ def bench_kernel(mut harness: Harness) raises:
 
     harness.record("kernel/filter_range", "rows", rows, filter_range_bench)
 
+    # The conditional column, in the three shapes a query writes it in. Read them
+    # in order: `kernel/pick_constants` is a select and a store with no input to
+    # load, `kernel/pick_const` adds one stream of loads, `kernel/pick` adds two.
+    # Nothing in those three touches a validity bitmap, and the gap between the
+    # last one and `kernel/pick_nulls` is what building the output's validity
+    # costs, which is a pass packing sixty four condition bytes into a word at a
+    # time. If that gap ever stops being visible, the fast path has stopped being
+    # a fast path and is building the bitmap unconditionally.
+    def pick_columns() raises {imm mask, imm dense, imm other}:
+        var out = pick(mask, dense, other)
+        keep(out)
+
+    harness.record("kernel/pick", "rows", rows, pick_columns)
+
+    def pick_one_const() raises {imm mask, imm dense}:
+        var out = pick_const(mask, dense, Scalar[BENCH_DTYPE](0))
+        keep(out)
+
+    harness.record("kernel/pick_const", "rows", rows, pick_one_const)
+
+    def pick_two_consts() raises {imm mask}:
+        var out = pick_constants(
+            mask, Scalar[BENCH_DTYPE](1), Scalar[BENCH_DTYPE](0)
+        )
+        keep(out)
+
+    harness.record("kernel/pick_constants", "rows", rows, pick_two_consts)
+
+    def pick_with_nulls() raises {imm mask, imm sparse, imm other}:
+        var out = pick(mask, sparse, other)
+        keep(out)
+
+    harness.record("kernel/pick_nulls", "rows", rows, pick_with_nulls)
+
 
 def bench_sort(mut harness: Harness) raises:
     """Measures the radix sort, on the shapes that change how many passes it does.
@@ -1342,6 +1386,64 @@ def bench_frame(mut harness: Harness) raises:
         keep(out.rows)
 
     harness.record("frame/sort_two_keys", "rows", rows, frame_sort_two)
+
+    # Read these three against `group/ordinals_one_key`, which is the pass they
+    # all start with. What is left over is the gather of three columns, and the
+    # three rows differ only in how many rows that gather moves: a thousand
+    # groups, then roughly a million, then the whole frame back because the
+    # score column makes nearly every row its own. The last one is the shape a
+    # `select distinct` over a wide row has and it is the one where the gather,
+    # rather than the grouping, is the whole cost.
+    def frame_distinct_one() raises {imm df}:
+        keep(df.rows)
+        var out = df.drop_duplicates(["key"])
+        keep(out.rows)
+
+    harness.record("frame/distinct_one_key", "rows", rows, frame_distinct_one)
+
+    def frame_distinct_wide() raises {imm df}:
+        keep(df.rows)
+        var out = df.drop_duplicates(["score"])
+        keep(out.rows)
+
+    harness.record("frame/distinct_wide_key", "rows", rows, frame_distinct_wide)
+
+    def frame_distinct_all() raises {imm df}:
+        keep(df.rows)
+        var out = df.drop_duplicates()
+        keep(out.rows)
+
+    harness.record("frame/distinct_all", "rows", rows, frame_distinct_all)
+
+    # A window aggregate with no frame and no ordering, which is a group by and
+    # then a gather. Read the pair against `group/sum`, which is the reduction
+    # on its own: what is left over is the gather that writes each group's
+    # answer onto its rows. The two differ in how wide that gather reaches. The
+    # key has a thousand values, so its answers stay in cache and every row
+    # reads one of them; the score has a million, so the answer column is as
+    # large as the input and the gather is a random read over all of it.
+    var one_sum = List[AggSpec]()
+    one_sum.append(AggSpec("score", AggKind.SUM))
+    var one_count = List[AggSpec]()
+    one_count.append(AggSpec("key", AggKind.COUNT))
+
+    def frame_broadcast_narrow() raises {imm df, imm one_sum}:
+        keep(df.rows)
+        var out = df.group_broadcast(["key"], one_sum)
+        keep(out.rows)
+
+    harness.record(
+        "frame/group_broadcast", "rows", rows, frame_broadcast_narrow
+    )
+
+    def frame_broadcast_wide() raises {imm df, imm one_count}:
+        keep(df.rows)
+        var out = df.group_broadcast(["score"], one_count)
+        keep(out.rows)
+
+    harness.record(
+        "frame/group_broadcast_wide", "rows", rows, frame_broadcast_wide
+    )
 
     def frame_by_name() raises {imm df}:
         keep(df.rows)
@@ -2220,6 +2322,51 @@ def _string_column(
     return builder^.finish()
 
 
+def _string_set(count: Int, width: Int, present: Int) raises -> StringArray:
+    """Builds a set of members for the set lookup benchmarks.
+
+    The first `present` members are the first `present` elements of
+    `_string_column(count, width, False)`, so they are the only ones that match
+    anything. The rest share their length and their first four bytes with that
+    column and differ at one byte near the end, so rejecting one costs a whole
+    comparison rather than being settled by the prefix.
+
+    Two sets built this way with the same `present` and different `count` match
+    exactly the same rows, which is what makes a row measuring one set size
+    against another a measurement of the set size and not of the selectivity.
+
+    Args:
+        count: How many members.
+        width: How many bytes in each.
+        present: How many of them the column holds.
+
+    Returns:
+        The set.
+
+    Raises:
+        If the builder raises.
+    """
+    var pool = List[UInt8](capacity=count * width)
+    for i in range(count):
+        for j in range(width):
+            if i < present and j == width - 1:
+                pool.append(UInt8(97 + i % 26))
+            elif i >= present and j == width - 2:
+                pool.append(UInt8(48 + i % 10))
+            else:
+                pool.append(UInt8(97 + j % 26))
+
+    var builder = StringBuilder(capacity=count)
+    var base = pool.unsafe_ptr()
+    for i in range(count):
+        builder.append(
+            Span[UInt8, origin_of(pool)](
+                unsafe_ptr=base.unsafe_offset(i * width), length=width
+            )
+        )
+    return builder^.finish()
+
+
 def bench_strings(mut harness: Harness) raises:
     """Times the variable width string column on both sides of the inline limit.
 
@@ -2583,6 +2730,169 @@ def bench_text(mut harness: Harness) raises:
         "text/equal_constant_short", "rows", rows, equal_constant_short
     )
 
+    # The pattern rows. What decides the cost of a contains is where the answer
+    # is and how much of the row the search has to look at before it gets there,
+    # so there are three: a needle that is present a quarter of the way into a
+    # thirty two byte row, one that is absent from the same row and so cannot be
+    # settled before the last byte, and the present one again on an eight byte
+    # row, which fits inside a single block and never enters the skipping loop
+    # at all. The prefix and suffix rows are the control. Both answer in one
+    # comparison at a known offset and should be several times cheaper than any
+    # of the three, and if they are not then the search is not skipping.
+    #
+    # `flat` holds the alphabet repeating, so `ghijk` sits at byte six of every
+    # row and `ghijx` sits nowhere, and the two differ only in whether the last
+    # byte of the candidate matches. That is the check the first and last byte
+    # filter exists to make, so the gap between these two rows is the closest
+    # thing the suite has to a direct reading of it.
+    var found_here = String("ghijk")
+    var found_nowhere = String("ghijx")
+
+    def contains_hit() raises {imm flat, imm found_here}:
+        var out = text_contains(flat, found_here.as_bytes())
+        keep(out)
+
+    harness.record("text/contains_hit", "rows", rows, contains_hit)
+
+    def contains_miss() raises {imm flat, imm found_nowhere}:
+        var out = text_contains(flat, found_nowhere.as_bytes())
+        keep(out)
+
+    harness.record("text/contains_miss", "rows", rows, contains_miss)
+
+    def contains_short() raises {imm short_left, imm found_here}:
+        var out = text_contains(short_left, found_here.as_bytes())
+        keep(out)
+
+    harness.record("text/contains_short", "rows", rows, contains_short)
+
+    var pair_first = String("cde")
+
+    def contains_pair() raises {imm flat, imm pair_first, imm found_here}:
+        var out = text_contains_in_order(
+            flat, pair_first.as_bytes(), found_here.as_bytes()
+        )
+        keep(out)
+
+    harness.record("text/contains_pair", "rows", rows, contains_pair)
+
+    var front = String("abcd")
+
+    def starts_with() raises {imm flat, imm front}:
+        var out = text_starts_with(flat, front.as_bytes())
+        keep(out)
+
+    harness.record("text/starts_with", "rows", rows, starts_with)
+
+    var back = String("abcd")
+
+    def ends_with() raises {imm flat, imm back}:
+        var out = text_ends_with(flat, back.as_bytes())
+        keep(out)
+
+    harness.record("text/ends_with", "rows", rows, ends_with)
+
+    # The two routes through the substring kernel, on the same thirty two byte
+    # column. Two bytes fits inside a view, so that one skips the sizing pass
+    # entirely and writes nothing but the views buffer. Twenty does not, so that
+    # one reads the views once to size every morsel's share of the payload, sums
+    # the shares, and then copies bytes. The gap between the two rows is what a
+    # payload costs, and it is the number to watch when the same two pass shape
+    # is put under `filter` and `take`.
+    def substring_inline() raises {imm flat}:
+        var out = text_substring(flat, 0, 2)
+        keep(out)
+
+    harness.record("text/substring_inline", "rows", rows, substring_inline)
+
+    def substring_payload() raises {imm flat}:
+        var out = text_substring(flat, 4, 20)
+        keep(out)
+
+    harness.record("text/substring_payload", "rows", rows, substring_payload)
+
+    # The set lookup, swept across the threshold between its two routes. Sets at
+    # or under the threshold are compared against one member at a time with
+    # nothing built. Larger ones go through a hash and a probe of a table. Every
+    # set here holds the same single member the column actually contains and pads
+    # the rest with members it cannot, so every row matches the same rows and what
+    # separates them is only the size of the set. That is what makes the sweep
+    # readable: the linear route climbs with the set size and the table route is
+    # flat, and where the climbing line crosses the flat one is where the
+    # threshold belongs.
+    #
+    # One and two are the linear route and the rest are the table, so what to
+    # watch is that two is still under three and that three, four and sixty four
+    # are all about the same. Four is here because it is the size of q19's set,
+    # and it is the row that would have caught the first threshold this had: it
+    # was eight, which sent a set of four down the linear route and cost it sixty
+    # percent.
+    var set_1 = _string_set(1, 32, 1)
+    var set_2 = _string_set(2, 32, 1)
+    var set_3 = _string_set(3, 32, 1)
+    var set_4 = _string_set(4, 32, 1)
+    var set_64 = _string_set(64, 32, 1)
+
+    def is_in_1() raises {imm flat, imm set_1}:
+        var out = text_is_in(flat, set_1)
+        keep(out)
+
+    harness.record("text/is_in_1", "rows", rows, is_in_1)
+
+    def is_in_2() raises {imm flat, imm set_2}:
+        var out = text_is_in(flat, set_2)
+        keep(out)
+
+    harness.record("text/is_in_2", "rows", rows, is_in_2)
+
+    def is_in_3() raises {imm flat, imm set_3}:
+        var out = text_is_in(flat, set_3)
+        keep(out)
+
+    harness.record("text/is_in_3", "rows", rows, is_in_3)
+
+    def is_in_4() raises {imm flat, imm set_4}:
+        var out = text_is_in(flat, set_4)
+        keep(out)
+
+    harness.record("text/is_in_4", "rows", rows, is_in_4)
+
+    def is_in_64() raises {imm flat, imm set_64}:
+        var out = text_is_in(flat, set_64)
+        keep(out)
+
+    harness.record("text/is_in_64", "rows", rows, is_in_64)
+
+    # The same crossover on an eight byte column, which is the width TPC-H
+    # actually looks things up at: two byte country codes in q22 and container
+    # names in q19. An element this short is compared inside its view and hashed
+    # in one go, so both routes get cheaper and they do not have to cross in the
+    # same place. They do not: the crossover here is between one and two rather
+    # than between two and three, so a threshold picked on wide strings alone
+    # would have been picked on the wrong data.
+    var short_flat = _string_column(rows, 8, False)
+    var short_1 = _string_set(1, 8, 1)
+    var short_2 = _string_set(2, 8, 1)
+    var short_4 = _string_set(4, 8, 1)
+
+    def is_in_short_1() raises {imm short_flat, imm short_1}:
+        var out = text_is_in(short_flat, short_1)
+        keep(out)
+
+    harness.record("text/is_in_short_1", "rows", rows, is_in_short_1)
+
+    def is_in_short_2() raises {imm short_flat, imm short_2}:
+        var out = text_is_in(short_flat, short_2)
+        keep(out)
+
+    harness.record("text/is_in_short_2", "rows", rows, is_in_short_2)
+
+    def is_in_short_4() raises {imm short_flat, imm short_4}:
+        var out = text_is_in(short_flat, short_4)
+        keep(out)
+
+    harness.record("text/is_in_short_4", "rows", rows, is_in_short_4)
+
     var plain = Array[BENCH_DTYPE](rows)
     for i in range(rows):
         plain[i] = Scalar[BENCH_DTYPE](i)
@@ -2593,6 +2903,44 @@ def bench_text(mut harness: Harness) raises:
         keep(out)
 
     harness.record("text/equal_number", "rows", rows, equal_number)
+
+    # The same sweep on numbers, where a comparison is one SIMD equal against a
+    # block that is already loaded rather than a walk over bytes, and so holds its
+    # own against a table far longer. Every set is a run of multiples of seven,
+    # all of which the column holds, so the selectivity is the same negligible
+    # thing in every row and the only difference is again the size of the set.
+    #
+    # Four and thirty two are the linear route and sixty four is the table. Thirty
+    # two is the threshold itself and is the row to watch: it should stay under
+    # sixty four, and the day it does not the threshold has drifted past its
+    # crossover.
+    def multiples(count: Int) -> Array[BENCH_DTYPE]:
+        var out = Array[BENCH_DTYPE](count)
+        for i in range(count):
+            out.set_valid(i, Scalar[BENCH_DTYPE](i * 7))
+        return out^
+
+    var numbers_4 = multiples(4)
+    var numbers_32 = multiples(32)
+    var numbers_64 = multiples(64)
+
+    def is_in_number_4() raises {imm plain, imm numbers_4}:
+        var out = is_in(plain, numbers_4)
+        keep(out)
+
+    harness.record("text/is_in_number_4", "rows", rows, is_in_number_4)
+
+    def is_in_number_32() raises {imm plain, imm numbers_32}:
+        var out = is_in(plain, numbers_32)
+        keep(out)
+
+    harness.record("text/is_in_number_32", "rows", rows, is_in_number_32)
+
+    def is_in_number_64() raises {imm plain, imm numbers_64}:
+        var out = is_in(plain, numbers_64)
+        keep(out)
+
+    harness.record("text/is_in_number_64", "rows", rows, is_in_number_64)
 
     # The three rows to read together are the sort rows, and what separates them
     # is how much of the answer the eight byte key can give. `sort_distinct` is
@@ -3963,14 +4311,19 @@ def bench_join(mut harness: Harness) raises:
     has and it was the only common join shape with no row here, which meant the
     one phase of a join that is still serial had nothing measuring it.
 
-    What does the key type cost. Every row above joins on an integer, and an
-    integer key whose values span the row count takes the direct route in the
-    factorizer, which is an array index and a store per row. All five
-    db-benchmark join queries join on text, where every key is hashed, compared
-    against whatever else landed in its slot and stored in a map.
-    `join/inner_equal_sides_text` is `join/inner_equal_sides` with both key
-    columns turned into text and nothing else changed, so the gap between the two
-    is what the key type costs on top of the pairing they share.
+    What does the key type cost. Every integer row above has a text twin:
+    `join/inner_1000_text`, `join/inner_100k_text` and
+    `join/inner_equal_sides_text` are the same joins with both key columns
+    written as `id` and a number, which is the form db-benchmark's character
+    columns use. Each pair differs in the key type and in nothing else, so the
+    gap within a pair is what text costs.
+
+    The three text rows are a ladder rather than three samples of one thing. The
+    probe is the same read on all three; what changes is how much of the run is
+    building the dictionary, from almost none at a thousand keys to almost all of
+    it at one key per row. That is the axis a route decision has to be made on.
+    db-benchmark's one join on a character key is its fourth query, on id5
+    against the medium table, and it sits at the second rung.
 
     What do the other kinds cost relative to inner. Semi and anti stop at the
     first match and gather nothing from the right, so they should be cheaper than
@@ -4101,24 +4454,12 @@ def bench_join(mut harness: Harness) raises:
 
     harness.record("join/inner_equal_sides", "rows", rows, inner_equal)
 
-    # The same shape again with the key as text, which is what db-benchmark j4
-    # and j5 join on and what no row here had. The keys are `id` and a number,
-    # the same values the row above uses and the same values db-benchmark writes
-    # into id3, so the two rows differ in the key type and in nothing else.
+    # The same shape again with the key as text, which no row here had. The keys
+    # are `id` and a number, the same values the row above uses written the way
+    # db-benchmark writes its character columns, so the two rows differ in the
+    # key type and in nothing else.
     var text_dim = _text_dimension(rows, "label")
-    var text_key = List[String](capacity=rows)
-    var text_value = Array[DType.int64](rows)
-    for i in range(rows):
-        var draw = rng.next_u64()
-        text_key.append(String("id", draw % UInt64(rows if rows > 0 else 1)))
-        text_value[i] = Int64(draw % 1000)
-    var text_series = List[Series]()
-    text_series.append(Series("key", strings_from_list(text_key)))
-    text_series.append(Series("value", text_value^))
-    var text_fact = DataFrame.from_series(text_series^)
-    # Ten million small strings held twice is most of a gigabyte, and the column
-    # has its own copy by now, so the list goes before the timing starts.
-    _ = text_key^
+    var text_fact = _text_fact(rows, rows, rng)
 
     def inner_equal_text() raises {imm text_fact, imm text_dim, imm one}:
         keep(text_fact.rows)
@@ -4128,6 +4469,36 @@ def bench_join(mut harness: Harness) raises:
     harness.record(
         "join/inner_equal_sides_text", "rows", rows, inner_equal_text
     )
+
+    # The two rungs below the one above, so the text side has the same ladder
+    # the integer side has: a thousand distinct keys, a hundred thousand, and one
+    # per row. What separates them is not the probe, which is the same read on
+    # all three, but how much of the work is building the dictionary and how much
+    # of that build can be spread. db-benchmark's character join is a build side
+    # a thousandth of the probe side, which is the middle rung.
+    var small_text_dim = _text_dimension(dim_rows, "label")
+    var small_text_fact = _text_fact(rows, dim_rows, rng)
+
+    def inner_small_text() raises {
+        imm small_text_fact, imm small_text_dim, imm one
+    }:
+        keep(small_text_fact.rows)
+        var out = small_text_fact.join(small_text_dim, one)
+        keep(out.rows)
+
+    harness.record("join/inner_1000_text", "rows", rows, inner_small_text)
+
+    var wide_text_dim = _text_dimension(wide_rows, "label")
+    var wide_text_fact = _text_fact(rows, wide_rows, rng)
+
+    def inner_wide_text() raises {
+        imm wide_text_fact, imm wide_text_dim, imm one
+    }:
+        keep(wide_text_fact.rows)
+        var out = wide_text_fact.join(wide_text_dim, one)
+        keep(out.rows)
+
+    harness.record("join/inner_100k_text", "rows", rows, inner_wide_text)
 
     def semi_partial() raises {imm fact, imm partial, imm one}:
         keep(fact.rows)
@@ -4242,8 +4613,8 @@ def _text_dimension(rows: Int, label: String) raises -> DataFrame:
     """Builds a dimension table keyed by text, with one row per key.
 
     `_dimension` above with the key column written as `id` and the number rather
-    than as the number, which is the form db-benchmark uses for id1, id2 and id3
-    and therefore the form all five of its join queries pair on.
+    than as the number, which is the form db-benchmark uses for its character
+    columns and the form its one join on a character key pairs on.
 
     Args:
         rows: The height, which is also the number of distinct keys.
@@ -4263,6 +4634,37 @@ def _text_dimension(rows: Int, label: String) raises -> DataFrame:
     var series = List[Series]()
     series.append(Series("key", strings_from_list(key)))
     series.append(Series(label, payload^))
+    return DataFrame.from_series(series^)
+
+
+def _text_fact(rows: Int, keys: Int, mut rng: Rng) raises -> DataFrame:
+    """Builds a fact table keyed by text, drawing from a fixed number of keys.
+
+    Args:
+        rows: The height.
+        keys: How many distinct keys to draw from, matching the dimension table
+            this will be joined against.
+        rng: The generator, so that two calls do not produce the same draws.
+
+    Returns:
+        A two column frame keyed by `key`.
+
+    Raises:
+        If the frame cannot be built.
+    """
+    var span = UInt64(keys if keys > 0 else 1)
+    var key = List[String](capacity=rows)
+    var value = Array[DType.int64](rows)
+    for i in range(rows):
+        var draw = rng.next_u64()
+        key.append(String("id", draw % span))
+        value[i] = Int64(draw % 1000)
+    var series = List[Series]()
+    series.append(Series("key", strings_from_list(key)))
+    series.append(Series("value", value^))
+    # The column has its own copy of every element by now and the list is the
+    # larger of the two, so it goes before the caller starts timing anything.
+    _ = key^
     return DataFrame.from_series(series^)
 
 

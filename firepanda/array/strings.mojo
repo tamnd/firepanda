@@ -291,7 +291,8 @@ struct StringArray(Copyable, Movable, Sized):
 
         The view has to have come from this same column. A long one carries a
         payload offset, and an offset into another column's payload is not
-        wrong in a way that can be detected here.
+        wrong in a way that can be detected here. A caller holding a view of a
+        different column wants `element_equals_foreign` next door.
 
         Args:
             i: The element index.
@@ -313,6 +314,48 @@ struct StringArray(Copyable, Movable, Sized):
                 unsafe_ptr=self.payload.unsafe_ptr()
                 .unsafe_offset(other.offset())
                 .unsafe_origin_cast[origin_of(self)](),
+                length=len(other),
+            ),
+        )
+
+    def element_equals_foreign(
+        self, i: Int, other: StringView, source: StringArray
+    ) -> Bool:
+        """Compares one element against a view of an element of another column.
+
+        `element_equals_view` with the assumption that the two came from the
+        same place taken out. A join has exactly that shape: the table holds one
+        view per key of the side it was built from, and every probe row it
+        settles belongs to the other side. The two columns have separate payload
+        buffers, so a long view's offset means nothing against this column's,
+        and the difference between the two methods is which buffer that offset
+        is added to.
+
+        A short element never reaches the payload at all, so on any column whose
+        keys fit in twelve bytes this is exactly `element_equals_view` and costs
+        the same. `source` is only read for the long case.
+
+        Args:
+            i: The element index in this column.
+            other: A view of an element of `source`.
+            source: The column `other` came from.
+
+        Returns:
+            True if the element is present and byte-identical to the view's.
+        """
+        if not self.is_valid(i):
+            return False
+        var mine = self.view(i)
+        if len(mine) != len(other) or mine.prefix() != other.prefix():
+            return False
+        if mine.is_inline():
+            return views_equal_short(mine, other)
+        return _bytes_equal(
+            self.unsafe_bytes(i),
+            Span[UInt8, origin_of(source)](
+                unsafe_ptr=source.payload.unsafe_ptr()
+                .unsafe_offset(other.offset())
+                .unsafe_origin_cast[origin_of(source)](),
                 length=len(other),
             ),
         )
