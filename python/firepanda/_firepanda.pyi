@@ -151,6 +151,17 @@ class Series:
     ) -> Series:
         """One str accessor method that answers text, as a column."""
         ...
+    def window_agg(
+        self,
+        kind: str,
+        window: int | None,
+        min_periods: int | None,
+        center: bool,
+        closed: str,
+        step: int | None,
+    ) -> Series:
+        """One reduction over every window of the column."""
+        ...
     def string_flag(self, kind: str, arg: str) -> Series:
         """One str accessor method that answers a mask, as a column."""
         ...

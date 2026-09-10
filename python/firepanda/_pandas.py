@@ -34,7 +34,15 @@ from . import _firepanda
 from .errors import ColumnNotFoundError, DTypeError, InvalidArgumentError, translate
 
 if TYPE_CHECKING:
-    from ._frame import DataFrame, DataFrameGroupBy, Index, Series, SeriesGroupBy
+    from ._frame import (
+        DataFrame,
+        DataFrameGroupBy,
+        Expanding,
+        Index,
+        Rolling,
+        Series,
+        SeriesGroupBy,
+    )
 
 
 def _refuse(name: str, value: object, why: str) -> None:
@@ -1938,6 +1946,302 @@ def _relabelled(frame: DataFrame, name: str, label: str) -> Series:
         return Series._wrap(frame._inner.column(name).relabel(label))
     except Exception as error:
         raise translate(error) from None
+
+
+_CLOSED = ("right", "left", "both", "neither")
+"""The four words pandas takes for which ends a window keeps, in the order its
+own error message lists them."""
+
+
+class WindowMixin:
+    """What `Rolling` and `Expanding` share, which is everything after the width.
+
+    A window object holds a column and five numbers saying where each window
+    sits, and computes nothing until a reduction is asked for. That is pandas'
+    arrangement and it is why these two classes are so nearly empty: the five
+    reductions are one call each with a different word in it, and the word is
+    the pandas method name, which is the same string the boundary reads.
+
+    The five numbers are checked in the constructor and not at the reduction,
+    because pandas checks them there. `s.rolling(-1)` raises out of the
+    `rolling` call and not out of the `.sum()` after it, and a program that
+    catches the wrong line is a program whose error handling does not run. The
+    kernel checks them again on the way in, which is not duplication worth
+    removing: one of the two checks exists to be reached from Python and the
+    other exists because the Mojo API is a public entry point of its own.
+
+    The two subclasses differ in their constructors only. A rolling window takes
+    a width and defaults `min_periods` to it, and an expanding window takes no
+    width and defaults `min_periods` to one. Everything below that is the same
+    call.
+    """
+
+    __slots__ = ("_center", "_closed", "_min_periods", "_series", "_step", "_window")
+    """The column and the five numbers that survive to the reduction. Slotted for
+    the reason `DataFrameMixin` gives. There is no `_inner`, because a window
+    object has no extension object of its own: it is a column and a plan for
+    which rows to read together."""
+
+    _series: Series
+    _window: int | None
+    _min_periods: int | None
+    _center: bool
+    _closed: str
+    _step: int | None
+
+    def _hold(
+        self,
+        data: Series,
+        window: int | None,
+        min_periods: int | None,
+        center: bool,
+        closed: str | None,
+        step: int | None,
+    ) -> None:
+        """Checks the five and keeps them. Not a public entry point.
+
+        Args:
+            data: The column.
+            window: How many rows wide, and None for an expanding window.
+            min_periods: How many values a window needs, and None for the
+                default of whichever window type this is.
+            center: Whether the window sits around its row.
+            closed: Which ends the window keeps, and None for `right`.
+            step: How many rows apart the answered rows are, and None for every
+                row.
+
+        Raises:
+            InvalidArgumentError: If the five do not describe a window, with the
+                sentence pandas raises for each. A `ValueError`, which is what
+                pandas raises and what a caller's except clause is looking for.
+        """
+        if center is not True and center is not False:
+            raise InvalidArgumentError("center must be a boolean")
+        if window is not None and (not isinstance(window, int) or isinstance(window, bool)):
+            # pandas says the same thing for a float, for a string and for an
+            # offset, because all three reach it as a window it cannot count
+            # rows with. A window given as a duration needs a datetime index to
+            # measure against and that is its own piece of work.
+            raise InvalidArgumentError("window must be an integer 0 or greater")
+        if window is not None and window < 0:
+            raise InvalidArgumentError("window must be an integer 0 or greater")
+        if min_periods is not None:
+            if not isinstance(min_periods, int) or isinstance(min_periods, bool):
+                raise InvalidArgumentError("min_periods must be an integer")
+            if min_periods < 0:
+                raise InvalidArgumentError("min_periods must be >= 0")
+            if window is not None and min_periods > window:
+                raise InvalidArgumentError(f"min_periods {min_periods} must be <= window {window}")
+        if closed is not None and closed not in _CLOSED:
+            raise InvalidArgumentError("closed must be 'right', 'left', 'both' or 'neither'")
+        if step is not None:
+            if not isinstance(step, int) or isinstance(step, bool):
+                raise InvalidArgumentError("step must be an integer")
+            # pandas accepts a step of zero here and divides by it later, which
+            # is a ZeroDivisionError out of the reduction rather than a sentence
+            # about the argument that caused it. A step of zero asks for the same
+            # row forever, so it is refused where the rest of them are.
+            if step < 1:
+                raise InvalidArgumentError("step must be >= 1")
+        self._series = data
+        self._window = window
+        self._min_periods = min_periods
+        self._center = center
+        self._closed = closed or "right"
+        self._step = step
+
+    def _reduce(
+        self,
+        kind: str,
+        numeric_only: bool = False,
+        engine: Any = None,
+        engine_kwargs: Any = None,
+    ) -> Series:
+        """Runs one reduction over every window.
+
+        `numeric_only` is accepted at both values and changes nothing, which is
+        not the usual treatment of a declared argument here. On a column it says
+        to refuse a column that is not a number, and every reduction here
+        already refuses one, so the two values agree everywhere this library has
+        an answer. Refusing True would be inventing a difference rather than
+        reporting one.
+
+        `engine` is the numba path and is refused, since there is no second
+        implementation for it to pick. `cython` is the default path spelled out
+        and is accepted.
+
+        Args:
+            kind: The reduction, as pandas spells the method.
+            numeric_only: Accepted and does nothing, for the reason above.
+            engine: Declared and refused, except at `cython`.
+            engine_kwargs: Declared and refused.
+
+        Returns:
+            A column of float64, as tall as the one it read unless a step made
+            it shorter.
+
+        Raises:
+            NotImplementedError: If a numba engine was asked for.
+        """
+        from ._frame import Series
+
+        del numeric_only
+        if engine is not None and engine != "cython":
+            raise NotImplementedError(
+                f"engine={engine!r} is not supported yet, because there is one"
+                " implementation here and it is the one cython names"
+            )
+        _refuse(
+            "engine_kwargs",
+            engine_kwargs,
+            "it configures the numba engine, and there is no numba engine here for it to configure",
+        )
+        try:
+            return Series._wrap(
+                self._series._inner.window_agg(
+                    kind,
+                    self._window,
+                    self._min_periods,
+                    self._center,
+                    self._closed,
+                    self._step,
+                )
+            )
+        except Exception as error:
+            raise translate(error) from None
+
+
+class RollingMixin(WindowMixin):
+    """The hand written half of `Rolling`, which is its constructor."""
+
+    __slots__ = ()
+    """All the state is `WindowMixin`'s."""
+
+    def __init__(
+        self,
+        data: Series,
+        window: int,
+        min_periods: int | None,
+        center: bool,
+        closed: str | None,
+        step: int | None,
+    ) -> None:
+        """Holds the column and the window. Not a public entry point.
+
+        Args:
+            data: The column.
+            window: How many rows wide.
+            min_periods: How many values a window needs, and None for the width.
+            center: Whether the window sits around its row.
+            closed: Which ends the window keeps, and None for `right`.
+            step: How many rows apart the answered rows are, and None for every
+                row.
+        """
+        self._hold(data, window, min_periods, center, closed, step)
+
+
+class ExpandingMixin(WindowMixin):
+    """The hand written half of `Expanding`, which is its constructor."""
+
+    __slots__ = ()
+    """All the state is `WindowMixin`'s."""
+
+    def __init__(self, data: Series, min_periods: int) -> None:
+        """Holds the column and how long it waits. Not a public entry point.
+
+        The width is None rather than the height of the column, and that is the
+        one place the absence is written down on the Python side: the column can
+        grow between here and the reduction in pandas and the width is resolved
+        against whatever the column is when the reduction runs, so filling it in
+        now would be answering a question that has not been asked yet.
+
+        Args:
+            data: The column.
+            min_periods: How many values a window needs before it answers.
+        """
+        self._hold(data, None, min_periods, False, None, None)
+
+
+def _rolling(
+    data: Series,
+    window: Any,
+    min_periods: int | None,
+    center: bool,
+    win_type: str | None,
+    on: str | None,
+    closed: str | None,
+    step: int | None,
+    method: str,
+) -> Rolling:
+    """Builds the window object `s.rolling(...)` hands back.
+
+    Written rather than generated for the reason `_grouped` gives, which is that
+    it builds a different class and the arguments have to be read before there
+    is an object to read them into.
+
+    Three of the nine are declared and refused. `win_type` asks for a weighted
+    window, which is a different kernel and not a parameter of this one, and
+    pandas needs scipy for it. `on` says to take the window's ordering from
+    another column, which only means anything on a frame. `method` chooses
+    between reducing each column separately and reducing them together, and
+    there is one column here either way.
+
+    Args:
+        data: The column.
+        window: How many rows wide.
+        min_periods: How many values a window needs.
+        center: Whether the window sits around its row.
+        win_type: Declared and refused.
+        on: Declared and refused.
+        closed: Which ends the window keeps.
+        step: How many rows apart the answered rows are.
+        method: Declared and held at `single`.
+
+    Returns:
+        A `Rolling`.
+    """
+    from ._frame import Rolling
+
+    _refuse(
+        "win_type",
+        win_type,
+        "it asks for a weighted window, which is a different kernel from an"
+        " unweighted one rather than a parameter of this one",
+    )
+    _refuse(
+        "on",
+        on,
+        "it says to order the window by another column, and there is one column here to order by",
+    )
+    _held_at(
+        "method",
+        method,
+        "single",
+        "it says whether the columns are reduced together, and a column is one column either way",
+    )
+    return Rolling(data, window, min_periods, center, closed, step)
+
+
+def _expanding(data: Series, min_periods: int, method: str) -> Expanding:
+    """Builds the window object `s.expanding(...)` hands back.
+
+    Args:
+        data: The column.
+        min_periods: How many values a window needs before it answers.
+        method: Declared and held at `single`, for the reason `_rolling` gives.
+
+    Returns:
+        An `Expanding`.
+    """
+    from ._frame import Expanding
+
+    _held_at(
+        "method",
+        method,
+        "single",
+        "it says whether the columns are reduced together, and a column is one column either way",
+    )
+    return Expanding(data, min_periods)
 
 
 class StringMixin:
