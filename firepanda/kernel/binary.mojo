@@ -74,6 +74,7 @@ from firepanda.dtype.temporal import TimeUnit, TimeZone, finer_unit
 from firepanda.kernel.dictionary import (
     decode_dictionary,
     dictionary_codes,
+    same_categories,
 )
 
 from .arith import (
@@ -825,30 +826,6 @@ meaning to its order. Reproduced word for word, because a program that catches
 the `TypeError` and matches on its text is a program that exists."""
 
 
-def _same_categories(a: StringArray, b: StringArray) -> Bool:
-    """Reports whether two category lists are the same list in the same order.
-
-    Order counts. A code is a position, so two columns whose categories hold the
-    same labels in a different order give the same code to different values, and
-    comparing the codes would answer confidently and wrongly.
-
-    Args:
-        a: The left column's categories.
-        b: The right column's categories.
-
-    Returns:
-        True if the two lists match label for label.
-    """
-    if len(a) != len(b):
-        return False
-    for k in range(len(a)):
-        if a.is_valid(k) != b.is_valid(k):
-            return False
-        if a.is_valid(k) and a[k] != b[k]:
-            return False
-    return True
-
-
 def _scalar_kind(type: LogicalType) -> String:
     """The Python type name pandas puts in an invalid comparison message.
 
@@ -933,7 +910,7 @@ def _dictionary_erased(
     """
     var equality = op == BinaryOp.EQ or op == BinaryOp.NE
     if a.is_dictionary() and b.is_dictionary():
-        if not _same_categories(a.categories(), b.categories()):
+        if not same_categories(a.categories(), b.categories()):
             raise Error(
                 "Categoricals can only be compared if 'categories' are the"
                 " same."

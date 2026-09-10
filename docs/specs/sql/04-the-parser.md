@@ -15,18 +15,26 @@ Those numbers include DuckDB's JSON serialization of the parse tree, so the true
 
 Our targets, which document 01's latency axis depends on:
 
-| | firepanda target | measured, tokenize and match |
+| | firepanda target | measured |
 | --- | --- | --- |
-| tokenize, match and transform, TPC-H q1 | under 60 us | 380 us when the matcher landed, four to five times faster than that now |
-| tokenize, match and transform, `SELECT 1` | under 3 us | 20 us when the matcher landed, about four times faster than that now |
+| tokenize, TPC-H q1 | | 3.2 us |
+| tokenize and match, TPC-H q1 | | 176 us |
+| tokenize, match and transform, TPC-H q1 | under 60 us | 460 us |
+| tokenize, `SELECT 1` | | 105 ns |
+| tokenize and match, `SELECT 1` | | 9.1 us |
+| tokenize, match and transform, `SELECT 1` | under 3 us | 14.8 us |
 | allocations for a small statement | one arena block, no per node malloc | met |
 | memoization table | reused across statements, not reallocated | not allocated at all unless a memoized rule finishes |
 
 The allocation line is the one that matters. A REPL loop over small statements spends its time in the allocator, not the matcher, and this is the axis where a library beats a database.
 
-The 380 and the 20 are an optimized build on the same M4, measured while the machine was quiet. The speedups are measured back to back in one binary against the matcher as it was then, so they hold whatever the machine is doing, which is why they are stated as speedups: the machine has not been quiet since and a clean absolute reading is still owed. The two changes that bought them are the first token filter in section 4, worth about three times on its own, and memoizing successes as well as failures in section 5, worth about one and a half times on top of it. None of these have a transformer in them yet, so the gap to the target is worse than it reads.
+Those are the `sql/` rows of `benchmarks/main.mojo`, ten repetitions, the median, on Apple M4, Mojo 1.0.0 (ed45d567), firepanda 0.6.54, with the grammar and the jump table built once outside the timed section because that is what a process does. Interquartile range was under five per cent on every row. The machine had other work on it, so these read high rather than low, and they are here because a number anybody can reproduce with `pixi run bench -- --filter=sql/` is worth more than a better one nobody can.
 
-Where the time went when the matcher landed: not the tokenizer, which is 1.7 us for q1 and 64 ns for `SELECT 1`, and not the allocator, which is five per cent of a parse. It was 27,814 node visits and 10,504 rule entries to parse one hundred tokens, which is the interpreter doing an honest amount of work an honest number of times. Closing the gap means visiting fewer nodes rather than shaving the visit. What is left after sections 4 and 5 is the recursion itself, and turning the matcher into an explicit stack machine is the remaining lever.
+The split is the useful part. Tokenizing is under one per cent of a parse either way, so the tokenizer is done. The matcher is 38 per cent of q1 and 61 per cent of `SELECT 1`, and the transformer is the rest. The last time this table was written its measured column had no transformer in it, because there was no transformer, so it was comparing two thirds of the work against a budget for all of it. Against the whole of it, q1 is nearly eight times over and `SELECT 1` is nearly five times over, and the work to close that is on both sides rather than only in the matcher.
+
+Two changes have already been made to the matcher and both are still worth what they were: the first token filter in section 4, worth about three times on its own, and memoizing successes as well as failures in section 5, worth about one and a half times on top of it. Both were measured back to back in one binary against the matcher as it was before them, so they are speedups against a build that no longer exists and the absolute readings that went with them are not comparable to the table above.
+
+Where the time went when the matcher landed: not the tokenizer, and not the allocator, which is five per cent of a parse. It was 27,814 node visits and 10,504 rule entries to parse one hundred tokens, which is the interpreter doing an honest amount of work an honest number of times. Closing the gap means visiting fewer nodes rather than shaving the visit, so what is left after sections 4 and 5 is the recursion itself, and turning the matcher into an explicit stack machine is the remaining lever on that side.
 
 ## 2. The tokenizer
 

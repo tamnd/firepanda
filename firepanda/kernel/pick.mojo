@@ -52,6 +52,10 @@ from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
 from firepanda.exec import parallel_morsels
+from firepanda.kernel.dictionary import (
+    check_same_categories,
+    dictionary_codes,
+)
 
 
 def _selected_word(cond: Array[DType.bool], w: Int) -> UInt64:
@@ -372,6 +376,20 @@ def pick_any(
             + String(a.type)
             + " and "
             + String(b.type)
+        )
+    check_same_categories(a, b, "pick")
+    if a.is_dictionary():
+        # The codes and not the values, because that is the whole point of the
+        # layout, and both sides name the same categories or the check above
+        # already refused them. `dictionary_codes` widens whatever width came in
+        # to int32, which is the width every rewrite in this library produces,
+        # so a column that arrived over Arrow at int8 comes back at int32.
+        var left = dictionary_codes(a)
+        var right = dictionary_codes(b)
+        return AnyArray.dictionary(
+            pick[DType.int32](cond, left, right),
+            StringArray(copy=a.categories()),
+            a.type.ordered,
         )
     if a.is_string():
         return AnyArray(text_pick(cond, a.strings(), b.strings())).retyped(
