@@ -973,6 +973,13 @@ class DataFrame(DataFrameMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def astype(self, dtype: Any, copy: Any = NO_DEFAULT, errors: Any = "raise") -> DataFrame:
+        """Every column converted to another type, or the ones a dict names."""
+        try:
+            return self._astype(dtype, copy, errors)
+        except Exception as error:
+            raise translate(error) from None
+
     def isna(self) -> DataFrame:
         """True where a value is missing."""
         try:
@@ -1690,6 +1697,13 @@ class Series(SeriesMixin):
         """The values that are not missing."""
         try:
             return self._transform("dropna", 0, axis, inplace, ignore_index)
+        except Exception as error:
+            raise translate(error) from None
+
+    def astype(self, dtype: Any, copy: Any = NO_DEFAULT, errors: Any = "raise") -> Series:
+        """The column converted to another type."""
+        try:
+            return self._astype(dtype, copy, errors)
         except Exception as error:
             raise translate(error) from None
 

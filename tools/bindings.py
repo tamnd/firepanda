@@ -958,6 +958,21 @@ def _transformations(py: str) -> tuple[Member, ...]:
             )
         )
 
+    out.append(
+        Member(
+            name="astype",
+            kind="method",
+            signature='dtype: Any, copy: Any = NO_DEFAULT, errors: Any = "raise"',
+            body="self._astype(dtype, copy, errors)",
+            doc=(
+                "Every column converted to another type, or the ones a dict names."
+                if frame
+                else "The column converted to another type."
+            ),
+            returns=gives,
+        )
+    )
+
     for name, what in (
         ("isna", "True where a value is missing."),
         ("notna", "True where a value is present."),
@@ -1140,6 +1155,17 @@ FRAME = Exposed(
             name="dropna",
             doc="The rows with no missing value in them.",
             params=(("subset", "list[str]"),),
+            returns="DataFrame",
+        ),
+        Binding(
+            mojo="PyDataFrame.cast",
+            name="cast",
+            doc="Some columns converted to other types, as a new frame.",
+            params=(
+                ("names", "list[str]"),
+                ("dtypes", "list[str]"),
+                ("strict", "bool"),
+            ),
             returns="DataFrame",
         ),
         Binding(
@@ -1411,6 +1437,13 @@ SERIES = Exposed(
             name="transform",
             doc="The column put through one named transformation.",
             params=(("kind", "str"), ("periods", "int")),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.cast",
+            name="cast",
+            doc="The column converted to another type.",
+            params=(("dtype", "str"), ("strict", "bool")),
             returns="Series",
         ),
         Binding(

@@ -23,7 +23,7 @@ from std.python.bindings import check_arguments_arity
 
 from firepanda.array.any import AnyArray
 from firepanda.array.strings import strings_from_list
-from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.logical import LogicalType, named_type
 from firepanda.frame import DataFrame
 from firepanda.frame.concat import concat_series
 from firepanda.frame.index import Index
@@ -431,6 +431,70 @@ struct PyDataFrame(Movable, Writable):
             return PythonObject(alloc=Self(ArcPointer(DataFrame(copy=frame))))
         var out = DataFrame.from_series(parts^)
         out.index = Index(copy=frame.index)
+        return PythonObject(alloc=Self(ArcPointer(out^)))
+
+    @staticmethod
+    def cast(
+        py_self: PythonObject,
+        names: PythonObject,
+        dtypes: PythonObject,
+        strict: PythonObject,
+    ) raises -> PythonObject:
+        """Converts some columns to other types and hands back a new frame.
+
+        Two lists rather than a mapping, because a mapping would have to be read
+        out of a Python dict in an order the caller did not choose and the order
+        matters here: a column named twice would be converted twice and the
+        second answer would win silently. Paired lists keep the order the caller
+        wrote and let the Python side be the one that decides what a repeat
+        means.
+
+        A name not in the frame is the caller's mistake and is reported as one,
+        because pandas reports it too and a frame that quietly ignored it would
+        hand back the column unconverted with nothing said.
+
+        Args:
+            py_self: The frame.
+            names: The columns to convert.
+            dtypes: The type for each of them, in the same order.
+            strict: Whether a text value that is not a number raises rather
+                than becoming a null.
+
+        Returns:
+            A new frame with those columns converted and the rest untouched.
+
+        Raises:
+            Error: Tagged `value` if the two lists are different lengths or a
+                name is not one this layer prints, tagged `column` if a column
+                is not in the frame, and tagged `dtype` if the conversion is not
+                one firepanda has or a text value is not a number.
+        """
+        if len(names) != len(dtypes):
+            raise tagged(
+                VALUE,
+                String(
+                    "cast was given ",
+                    len(names),
+                    " columns and ",
+                    len(dtypes),
+                    " types, which have to come in pairs",
+                ),
+            )
+        var strictly = flag(strict, "strict")
+        var out = DataFrame(copy=Self._frame(py_self)[].frame[])
+        for i in range(len(names)):
+            var name = String(names[i])
+            var wanted: LogicalType
+            try:
+                wanted = named_type(String(dtypes[i]))
+            except cause:
+                raise retagged(VALUE, cause)
+            if not out.schema.has(name):
+                raise tagged(COLUMN, String("no column named ", name))
+            try:
+                out = out.cast(name, wanted, strictly)
+            except cause:
+                raise retagged(DTYPE, cause)
         return PythonObject(alloc=Self(ArcPointer(out^)))
 
     @staticmethod
