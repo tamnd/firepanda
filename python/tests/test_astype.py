@@ -207,13 +207,125 @@ def test_the_two_marks_that_mean_native_are_dropped(firepanda: ModuleType) -> No
 
 @needs_pandas
 def test_a_value_that_will_not_convert_raises(firepanda: ModuleType) -> None:
-    """Naming the row and the value, which pandas does not do and should."""
+    """A `ValueError` in both, saying the same sentence, plus the row here.
+
+    The class is the part that matters, because `except ValueError` around a
+    cast is ordinary code and a `TypeError` walks straight past it. The value
+    was the wrong value and not the wrong type, which is the distinction Python
+    draws and the one pandas draws here.
+
+    The message is the pandas one word for word up to the row number, so that a
+    program matching on it keeps working. The row number is ours: pandas says
+    which value would not read and not where it was, and on a column of any size
+    that is the first thing a person then has to go and find out.
+    """
     import pandas as pd
 
-    with pytest.raises(TypeError):
+    for series in (firepanda.Series(["1", "x"]), pd.Series(["1", "x"])):
+        with pytest.raises(ValueError, match=r"invalid literal for int\(\)"):
+            series.astype("int64")
+
+    with pytest.raises(ValueError, match="at row 1"):
         firepanda.Series(["1", "x"]).astype("int64")
-    with pytest.raises(ValueError):
-        pd.Series(["1", "x"]).astype("int64")
+
+
+@needs_pandas
+def test_a_value_that_will_not_read_as_a_float_says_float(
+    firepanda: ModuleType,
+) -> None:
+    """A different sentence for a different target, and again the pandas one."""
+    import pandas as pd
+
+    for series in (firepanda.Series(["1", "x"]), pd.Series(["1", "x"])):
+        with pytest.raises(ValueError, match="could not convert string to float"):
+            series.astype("float64")
+
+
+@needs_pandas
+@pytest.mark.parametrize(
+    "values",
+    [
+        pytest.param([1.0, float("nan")], id="nan"),
+        pytest.param([1.0, float("inf")], id="inf"),
+        pytest.param([1.0, float("-inf")], id="negative-inf"),
+        pytest.param([1.0, None], id="missing"),
+    ],
+)
+def test_nothing_a_float_holds_and_an_integer_cannot_gets_through(
+    firepanda: ModuleType, values: list[float | None]
+) -> None:
+    """The three shapes of the same refusal, which pandas has a class for.
+
+    Before this, firepanda handed back a null in an integer column for the first
+    and the last of these and the largest int64 there is for the two infinities.
+    The null is the worse of the two, because nothing failed and the caller ended
+    up holding a column pandas could not have made.
+    """
+    import pandas as pd
+
+    for series in (firepanda.Series(values), pd.Series(values)):
+        with pytest.raises(ValueError, match="Cannot convert non-finite values"):
+            series.astype("int64")
+
+
+@needs_pandas
+def test_the_refusal_has_the_name_pandas_gives_it(firepanda: ModuleType) -> None:
+    """`IntCastingNaNError`, caught by name and by the broad class both.
+
+    pandas has a class with this exact name in `pandas.errors` and a program
+    that catches it is asking a specific question. It is a `ValueError` in both
+    libraries, so the broad catch keeps working either way.
+    """
+    import pandas as pd
+
+    with pytest.raises(pd.errors.IntCastingNaNError):
+        pd.Series([1.0, float("nan")]).astype("int64")
+    with pytest.raises(firepanda.errors.IntCastingNaNError):
+        firepanda.Series([1.0, float("nan")]).astype("int64")
+
+    assert issubclass(firepanda.errors.IntCastingNaNError, ValueError)
+
+
+@needs_pandas
+def test_an_integer_column_holding_a_null_is_refused_too(
+    firepanda: ModuleType,
+) -> None:
+    """A door pandas does not have, answered the way pandas would have answered.
+
+    `firepanda.Series([1, None, 3])` is an int64 column with a null in it, where
+    the pandas one is a float64 column with a NaN, so a caller here can ask to
+    convert an integer column that already holds a missing value. There is
+    nowhere for it to go, and the column pandas would have had is the one it
+    refuses, so this refuses it too.
+    """
+    with pytest.raises(firepanda.errors.IntCastingNaNError):
+        firepanda.Series([1, None, 3]).astype("int64")
+
+
+@needs_pandas
+def test_a_column_with_room_for_the_value_is_not_refused(
+    firepanda: ModuleType,
+) -> None:
+    """The check is about integers and asks nothing of any other target."""
+    import math
+
+    values = [1.0, float("nan"), float("inf")]
+    assert math.isnan(firepanda.Series(values).astype("float32").tolist()[1])
+    assert firepanda.Series(values).astype("string").tolist()[0] == "1.0"
+
+
+@needs_pandas
+def test_a_frame_refuses_the_same_column_the_same_way(firepanda: ModuleType) -> None:
+    """The check sits under both surfaces rather than under the Series alone."""
+    import pandas as pd
+
+    values = {"a": [1.0, float("nan")], "b": [1.0, 2.0]}
+    for frame in (firepanda.DataFrame(values), pd.DataFrame(values)):
+        with pytest.raises(ValueError, match="Cannot convert non-finite values"):
+            frame.astype({"a": "int64"})
+        # The clean column on its own goes through, so it is the values that
+        # decided and not the frame having a bad column somewhere in it.
+        assert frame.astype({"b": "int64"})["b"].tolist() == [1, 2]
 
 
 @needs_pandas
@@ -231,6 +343,25 @@ def test_errors_ignore_hands_the_column_back_unchanged(firepanda: ModuleType) ->
     theirs = pd.Series(["1", "x"]).astype("int64", errors="ignore")
     assert mine.tolist() == theirs.tolist() == ["1", "x"]
     assert mine.dtype == "string"
+
+
+@needs_pandas
+def test_errors_ignore_covers_the_non_finite_refusal_as_well(
+    firepanda: ModuleType,
+) -> None:
+    """It is a `ValueError`, and `errors="ignore"` swallows every one of those.
+
+    Worth its own test because this refusal is raised before the conversion
+    starts rather than by the conversion failing, and a check in the wrong place
+    would have escaped the handler that reads the keyword.
+    """
+    import pandas as pd
+
+    values = [1.0, float("nan")]
+    mine = firepanda.Series(values).astype("int64", errors="ignore")
+    theirs = pd.Series(values).astype("int64", errors="ignore")
+    assert mine.dtype == "float64" == str(theirs.dtype)
+    assert mine.tolist()[0] == theirs.tolist()[0] == 1.0
 
 
 @needs_pandas
@@ -414,5 +545,5 @@ def test_text_to_bool_reads_the_text_here_and_does_not_there(firepanda: ModuleTy
     import pandas as pd
 
     assert pd.Series(["x", "0", ""]).astype("bool").tolist() == [True, True, False]
-    with pytest.raises(TypeError, match="not a bool"):
+    with pytest.raises(ValueError, match="not a bool"):
         firepanda.Series(["x", "0", ""]).astype("bool")

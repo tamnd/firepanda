@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: the three ways a cast fails, all three of them wrong
+
+A conversion that cannot be made now fails the way pandas fails it, in the class it raises, in the sentence it says and in whether it fails at all.
+
+Text that will not read as a number was raising a `TypeError`. It is a `ValueError` in pandas and it is a `ValueError` here now, which matters more than it sounds: `except ValueError` around a cast is ordinary code and a `TypeError` walks straight past it. The message is the pandas one word for word, so `invalid literal for int() with base 10: 'x'` for an integer target and `could not convert string to float: 'x'` for a float one, with the row number added on the end. pandas says which value would not read and not where it was, and on a column of any size that is the first thing a person then has to go and find out.
+
+A float column holding a NaN, an infinity or a missing value converted to an integer was not failing at all, which was the worse of the two bugs. The first and the last handed back a null sitting in an integer column and the infinity handed back the largest int64 there is. Nothing raised, so a caller ended up holding a column pandas could not have made, having asked for one pandas would have refused. All three are now refused, with the class pandas gives that refusal, `IntCastingNaNError`, which is in `firepanda.errors` under the name it has in `pandas.errors`. It is a `ValueError` too, so a broad catch still fires.
+
+The check sits in `firepanda/py/cast.mojo` and not in the kernel, because it is a pandas rule and not an Arrow one. An Arrow integer column holding a null is perfectly legal and firepanda keeps making them. That leaves one door pandas does not have: `firepanda.Series([1, None, 3])` is an int64 column with a null where the pandas one is float64 with a NaN, so a caller here can ask to convert an integer column that already holds a missing value. It is refused too, since the column pandas would have had is the one pandas refuses.
+
+`errors="ignore"` covers the new refusal the same as the old ones, because it covers every `ValueError` and this is one.
+
 ### Added: astype, and about sixty ways to spell a type
 
 `Series.astype` and `DataFrame.astype`, with the pandas signature, and `dtype=` honoured in both constructors instead of refused. The frame form takes one type name for every column or a dict naming some of them, which is what pandas takes.
