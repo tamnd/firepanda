@@ -406,9 +406,9 @@ comptime STMT_GROUP: UInt8 = 10
 """One entry of a `GROUP BY`.
 
 `b` is one of the `GROUP_` tags. For `GROUP_EXPRESSION` the expression is `a`,
-and for `GROUP_SETS`, `GROUP_CUBE` and `GROUP_ROLLUP` the nested entries are a
-run of further `STMT_GROUP` nodes in `children`. `GROUP_ALL` and `GROUP_EMPTY`
-carry nothing.
+and for `GROUP_SETS`, `GROUP_CUBE`, `GROUP_ROLLUP` and `GROUP_TUPLE` the nested
+entries are a run of further `STMT_GROUP` nodes in `children`. `GROUP_ALL` and
+`GROUP_EMPTY` carry nothing.
 """
 
 
@@ -485,6 +485,9 @@ comptime GROUP_CUBE: UInt32 = 4
 
 comptime GROUP_ROLLUP: UInt32 = 5
 """`ROLLUP (...)`."""
+
+comptime GROUP_TUPLE: UInt32 = 6
+"""`(a, b)`, several columns grouped as one set inside `GROUPING SETS`."""
 
 
 comptime MATERIALIZE_DEFAULT: UInt32 = 0
