@@ -195,7 +195,9 @@ def _c_string(text: StringSlice) -> List[UInt8]:
     return out^
 
 
-def _as_void[o: MutOrigin](p: Pointer[UInt8, o]) -> VoidPtr:
+def _as_void[
+    mut: Bool, //, o: Origin[mut=mut]
+](p: Pointer[UInt8, o]) -> VoidPtr:
     """Reinterprets a byte pointer as the `void*` Arrow's buffer array holds.
 
     The origin is dropped rather than translated. What keeps the memory alive is
@@ -208,7 +210,17 @@ def _as_void[o: MutOrigin](p: Pointer[UInt8, o]) -> VoidPtr:
     Returns:
         The same address, as a `void*`.
     """
-    return p.unsafe_origin_cast[MutUntrackedOrigin]().unsafe_bitcast[NoneType]()
+    # The mutability is put back on because the field this lands in is typed
+    # `void*` and not `const void*`, which is the C struct's shape and not a
+    # claim about what the consumer may do. Arrow's contract is that a consumer
+    # reads the buffers it is handed and never writes them, so an exported
+    # column stays shared with the frame it came out of rather than being copied
+    # on the way out.
+    return (
+        p.unsafe_mut_cast[True]()
+        .unsafe_origin_cast[MutUntrackedOrigin]()
+        .unsafe_bitcast[NoneType]()
+    )
 
 
 def pack_bools(column: AnyArray) -> Bitmap:

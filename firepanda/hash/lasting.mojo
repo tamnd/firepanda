@@ -243,9 +243,9 @@ struct LastingKeys(Movable):
         """
         var base = self.base
         var span = self.span
-        var into = self.slots.unsafe_ptr()
+        var into = self.slots.unsafe_mut_ptr()
         var src = col.unsafe_ptr()
-        var out = codes.unsafe_ptr()
+        var out = codes.unsafe_mut_ptr()
         var n = self.groups
         var i = 0
         while i < rows:

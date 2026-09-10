@@ -300,7 +300,7 @@ def _take_strings(
                 var view = source_views.unsafe_offset(at)[]
                 if not view.is_inline():
                     wide += len(view)
-            totals.bitcast[DType.int64]().unsafe_offset(w).unsafe_store(
+            totals.mut_bitcast[DType.int64]().unsafe_offset(w).unsafe_store(
                 Int64(wide)
             )
 
@@ -317,8 +317,8 @@ def _take_strings(
     var built = Bitmap(n, all_valid=False)
 
     def gather(w: Int) raises {mut views, mut payload, mut built, imm}:
-        var target = views.unsafe_ptr().unsafe_bitcast[StringView]()
-        var into = payload.unsafe_ptr()
+        var target = views.unsafe_mut_ptr().unsafe_bitcast[StringView]()
+        var into = payload.unsafe_mut_ptr()
         var cursor = carried[w]
 
         # The output positions are consecutive, so the validity bits are built in
@@ -399,7 +399,7 @@ def _take_core[
     # four so that no two workers write the same validity word, which is the only
     # thing here that is not per row.
     def gather(start: Int, stop: Int) raises {mut out, mut built, imm}:
-        var target = out.unsafe_ptr()
+        var target = out.unsafe_mut_ptr()
 
         # A run of consecutive ascending indices is a copy, and it is not a rare
         # shape. An inner join that matches every probe row once hands the left
@@ -668,10 +668,10 @@ def _filter_strings(
                 var view = source_views.unsafe_offset(i)[]
                 if not view.is_inline():
                     wide += len(view)
-        kept_totals.bitcast[DType.int64]().unsafe_offset(w).unsafe_store(
+        kept_totals.mut_bitcast[DType.int64]().unsafe_offset(w).unsafe_store(
             Int64(rows)
         )
-        byte_totals.bitcast[DType.int64]().unsafe_offset(w).unsafe_store(
+        byte_totals.mut_bitcast[DType.int64]().unsafe_offset(w).unsafe_store(
             Int64(wide)
         )
 
@@ -696,8 +696,8 @@ def _filter_strings(
     var built = Bitmap(kept, all_valid=not nulls)
 
     def compact(w: Int) raises {mut views, mut payload, imm}:
-        var target = views.unsafe_ptr().unsafe_bitcast[StringView]()
-        var into = payload.unsafe_ptr()
+        var target = views.unsafe_mut_ptr().unsafe_bitcast[StringView]()
+        var into = payload.unsafe_mut_ptr()
         var at = rows_before[w]
         var cursor = bytes_before[w]
         for i in range(bounds[w], bounds[w + 1]):
@@ -783,7 +783,7 @@ def _filter_core[
     # output slot at least once and the last write to a slot is the row that
     # belongs there.
     var out = Array[dt](overwritten=kept)
-    var target = out.unsafe_ptr()
+    var target = out.unsafe_mut_ptr()
 
     if not has_null:
         # Nothing to record, because a filter of a column with no nulls has no
@@ -919,8 +919,8 @@ def _filter_spread[
     var flags = Buffer(overwritten=kept if has_null else 0)
 
     def compact(w: Int) raises {mut out, mut flags, imm}:
-        var target = out.unsafe_ptr()
-        var marks = flags.bitcast[DType.uint8]()
+        var target = out.unsafe_mut_ptr()
+        var marks = flags.mut_bitcast[DType.uint8]()
         var limit = offsets[w + 1]
         var written = offsets[w]
         var i = w * FILTER_MORSEL_ROWS
@@ -1006,7 +1006,7 @@ def take_range(start: Int, indices: List[Int]) raises -> Array[DType.int64]:
     var base = Int64(start)
 
     def gather(begin: Int, stop: Int) raises {mut out, mut built, imm}:
-        var target = out.unsafe_ptr()
+        var target = out.unsafe_mut_ptr()
         var word = UInt64(0)
         for i in range(begin, stop):
             var at = indices[i]
@@ -1063,7 +1063,7 @@ def filter_range(start: Int, mask: Array[DType.bool]) -> Array[DType.int64]:
             kept += 1
 
     var out = Array[DType.int64](overwritten=kept)
-    var target = out.unsafe_ptr()
+    var target = out.unsafe_mut_ptr()
     var base = Int64(start)
 
     var written = 0

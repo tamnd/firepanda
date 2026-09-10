@@ -1818,7 +1818,7 @@ def bench_hash(mut harness: Harness) raises:
     harness.record("hash/hash_into", "rows", rows, hash_column)
 
     var keys = Buffer(rows * 8)
-    var key_ptr = keys.bitcast[DType.uint64]()
+    var key_ptr = keys.mut_bitcast[DType.uint64]()
     for i in range(rows):
         key_ptr.unsafe_offset(i).unsafe_write(mix(UInt64(i), DEFAULT_SEED))
 
@@ -1855,7 +1855,7 @@ def bench_hash(mut harness: Harness) raises:
     harness.record("hash/table_probe", "keys", rows, table_probe)
 
     var hashes = Buffer(rows * 8)
-    var hash_ptr = hashes.bitcast[DType.uint64]()
+    var hash_ptr = hashes.mut_bitcast[DType.uint64]()
     for i in range(rows):
         hash_ptr.unsafe_offset(i).unsafe_write(mix(UInt64(i), DEFAULT_SEED))
 
@@ -2619,7 +2619,7 @@ def bench_text(mut harness: Harness) raises:
     harness.record("text/take_number", "rows", rows, take_number)
 
     var mask = Array[DType.bool](rows)
-    var bits = mask.unsafe_ptr()
+    var bits = mask.unsafe_mut_ptr()
     for i in range(rows):
         bits.unsafe_offset(i).unsafe_write(i % 2 == 0)
 
@@ -4870,9 +4870,15 @@ def _bench_release_schema(schema: SchemaPtr) abi("C") -> None:
     pass
 
 
-def _bench_void[o: MutOrigin](p: Pointer[UInt8, o]) -> VoidPtr:
+def _bench_void[
+    mut: Bool, //, o: Origin[mut=mut]
+](p: Pointer[UInt8, o]) -> VoidPtr:
     """Reinterprets a byte pointer as the `void*` a buffer array holds."""
-    return p.unsafe_origin_cast[MutUntrackedOrigin]().unsafe_bitcast[NoneType]()
+    return (
+        p.unsafe_mut_cast[True]()
+        .unsafe_origin_cast[MutUntrackedOrigin]()
+        .unsafe_bitcast[NoneType]()
+    )
 
 
 def _bench_format(
@@ -4953,19 +4959,19 @@ def bench_arrow(mut harness: Harness) raises:
     var block0 = Buffer(len(text.payload))
     var block1 = Buffer(len(text.payload))
     var split_views = Buffer(rows * VIEW_SIZE)
-    var split_target = split_views.unsafe_ptr().unsafe_bitcast[StringView]()
+    var split_target = split_views.unsafe_mut_ptr().unsafe_bitcast[StringView]()
     var w0 = 0
     var w1 = 0
     for i in range(rows):
         var element = text.unsafe_bytes(i)
         var count = len(element)
         if i % 2 == 0:
-            var dest = block0.unsafe_ptr().unsafe_offset(w0)
+            var dest = block0.unsafe_mut_ptr().unsafe_offset(w0)
             unsafe_memcpy(dest=dest, src=element.unsafe_ptr(), count=count)
             split_target.unsafe_offset(i)[] = make_long_at(dest, count, 0, w0)
             w0 += count
         else:
-            var dest = block1.unsafe_ptr().unsafe_offset(w1)
+            var dest = block1.unsafe_mut_ptr().unsafe_offset(w1)
             unsafe_memcpy(dest=dest, src=element.unsafe_ptr(), count=count)
             split_target.unsafe_offset(i)[] = make_long_at(dest, count, 1, w1)
             w1 += count
@@ -4991,7 +4997,7 @@ def bench_arrow(mut harness: Harness) raises:
         offsets.append(Int32(written))
         var element = text.unsafe_bytes(i)
         unsafe_memcpy(
-            dest=payload.unsafe_ptr().unsafe_offset(written),
+            dest=payload.unsafe_mut_ptr().unsafe_offset(written),
             src=element.unsafe_ptr(),
             count=len(element),
         )

@@ -70,10 +70,10 @@ struct Bitmap(Copyable, Movable, Sized):
             self.set_all()
 
     def __init__(out self, *, copy: Self):
-        """Copies a bitmap.
+        """Shares a bitmap's bits, which become private on the first write.
 
         Args:
-            copy: The bitmap to copy.
+            copy: The bitmap to share with.
         """
         self._buffer = Buffer(copy=copy._buffer)
         self._length = copy._length
@@ -94,13 +94,26 @@ struct Bitmap(Copyable, Movable, Sized):
         """
         return bytes_for(self._length)
 
-    def unsafe_ptr(ref self) -> Pointer[UInt8, origin_of(self)]:
+    def unsafe_ptr(self) -> Pointer[UInt8, origin_of(self)]:
         """Returns a pointer to the packed bytes.
 
         Returns:
             A pointer to the first byte.
         """
         return self._buffer.unsafe_ptr().unsafe_origin_cast[origin_of(self)]()
+
+    def unsafe_mut_ptr(mut self) -> Pointer[UInt8, origin_of(self)]:
+        """Returns a pointer to the first byte of the words, for writing.
+
+        Takes a private copy of the buffer first if anything else is holding
+        it. See `Buffer` for why reading and writing are separate names.
+
+        Returns:
+            A pointer to the first byte.
+        """
+        return self._buffer.unsafe_mut_ptr().unsafe_origin_cast[
+            origin_of(self)
+        ]()
 
     def get(self, i: Int) -> Bool:
         """Returns the bit at a position without bounds checking.
@@ -121,7 +134,7 @@ struct Bitmap(Copyable, Movable, Sized):
             i: The bit position. Must be less than `len(self)`.
             value: True to mark the value present, False to mark it null.
         """
-        var slot = self._buffer.unsafe_ptr().unsafe_offset(i >> 3)
+        var slot = self._buffer.unsafe_mut_ptr().unsafe_offset(i >> 3)
         var mask = UInt8(1) << UInt8(i & 7)
         var byte = slot.unsafe_load()
         if value:
@@ -129,10 +142,18 @@ struct Bitmap(Copyable, Movable, Sized):
         else:
             slot.unsafe_write(byte & ~mask)
 
+    def make_private(mut self):
+        """Takes this bitmap's own copy of the bits now rather than on a write.
+
+        Call it after copying a bitmap that several workers are about to write.
+        See `Buffer.make_private` for what goes wrong without it.
+        """
+        self._buffer.make_private()
+
     def set_all(mut self):
         """Marks every value present."""
         var nbytes = self.byte_length()
-        var ptr = self._buffer.unsafe_ptr()
+        var ptr = self._buffer.unsafe_mut_ptr()
         for i in range(nbytes):
             ptr.unsafe_offset(i).unsafe_write(0xFF)
         self._clear_tail()
@@ -151,7 +172,7 @@ struct Bitmap(Copyable, Movable, Sized):
         if used == 0:
             return
         var last = self.byte_length() - 1
-        var slot = self._buffer.unsafe_ptr().unsafe_offset(last)
+        var slot = self._buffer.unsafe_mut_ptr().unsafe_offset(last)
         var mask = UInt8((1 << used) - 1)
         slot.unsafe_write(slot.unsafe_load() & mask)
 
@@ -195,7 +216,7 @@ struct Bitmap(Copyable, Movable, Sized):
             w: The word index. Must be less than `word_count()`.
             value: The word.
         """
-        self._buffer.bitcast[DType.uint64]().unsafe_offset(w).unsafe_write(
+        self._buffer.mut_bitcast[DType.uint64]().unsafe_offset(w).unsafe_write(
             value
         )
 
@@ -265,7 +286,7 @@ struct Bitmap(Copyable, Movable, Sized):
         for i in range(start, first_full * 8):
             self.set(i, value)
         var fill = UInt8(0xFF) if value else UInt8(0)
-        var ptr = self._buffer.unsafe_ptr()
+        var ptr = self._buffer.unsafe_mut_ptr()
         for byte in range(first_full, last_full):
             ptr.unsafe_offset(byte).unsafe_write(fill)
         for i in range(last_full * 8, end):
@@ -334,7 +355,7 @@ struct Bitmap(Copyable, Movable, Sized):
         Args:
             other: The bitmap to intersect with. Must be the same length.
         """
-        var ptr = self._buffer.unsafe_ptr()
+        var ptr = self._buffer.unsafe_mut_ptr()
         var rhs = other._buffer.unsafe_ptr()
         for i in range(self.byte_length()):
             var slot = ptr.unsafe_offset(i)
@@ -349,7 +370,7 @@ struct Bitmap(Copyable, Movable, Sized):
         Args:
             other: The bitmap to union with. Must be the same length.
         """
-        var ptr = self._buffer.unsafe_ptr()
+        var ptr = self._buffer.unsafe_mut_ptr()
         var rhs = other._buffer.unsafe_ptr()
         for i in range(self.byte_length()):
             var slot = ptr.unsafe_offset(i)
@@ -360,7 +381,7 @@ struct Bitmap(Copyable, Movable, Sized):
 
     def invert(mut self):
         """Flips every bit below `length`."""
-        var ptr = self._buffer.unsafe_ptr()
+        var ptr = self._buffer.unsafe_mut_ptr()
         for i in range(self.byte_length()):
             var slot = ptr.unsafe_offset(i)
             slot.unsafe_write(~slot.unsafe_load())
@@ -389,7 +410,7 @@ struct Bitmap(Copyable, Movable, Sized):
             # Byte aligned, so the copy is a memcpy plus a tail fixup.
             var nbytes = bytes_for(end - start)
             unsafe_memcpy(
-                dest=out._buffer.unsafe_ptr(),
+                dest=out._buffer.unsafe_mut_ptr(),
                 src=self._buffer.unsafe_ptr().unsafe_offset(start >> 3),
                 count=nbytes,
             )
@@ -405,7 +426,7 @@ struct Bitmap(Copyable, Movable, Sized):
         var shift = UInt8(start & 7)
         var carry = UInt8(8) - shift
         var source = self._buffer.unsafe_ptr()
-        var target = out._buffer.unsafe_ptr()
+        var target = out._buffer.unsafe_mut_ptr()
         var first = start >> 3
         var available = self.byte_length()
         var nbytes = bytes_for(end - start)

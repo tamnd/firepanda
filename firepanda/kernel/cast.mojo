@@ -93,7 +93,7 @@ def cast_to[src: DType, dst: DType](col: Array[src]) raises -> Array[dst]:
 
     def convert(start: Int, stop: Int) raises {mut out, imm}:
         var source = col.unsafe_ptr()
-        var target = out.unsafe_ptr()
+        var target = out.unsafe_mut_ptr()
         var i = start
         while i < stop:
             target.unsafe_offset(i).unsafe_store(
@@ -407,7 +407,7 @@ def _cast_erased[dst: DType](col: AnyArray) raises -> Array[dst]:
 
             def convert(start: Int, stop: Int) raises {mut out, imm}:
                 var values = col.unsafe_ptr[source]()
-                var target = out.unsafe_ptr()
+                var target = out.unsafe_mut_ptr()
                 var i = start
                 while i < stop:
                     target.unsafe_offset(i).unsafe_store(

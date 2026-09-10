@@ -184,7 +184,7 @@ def hash_chunk[
     comptime width = simd_width_of[DType.uint64]()
 
     var ptr = col.unsafe_ptr()
-    var out = hashes.bitcast[DType.uint64]()
+    var out = hashes.mut_bitcast[DType.uint64]()
     var i = 0
     while i < count:
         var k = key_bits(
@@ -279,7 +279,7 @@ def hash_strings_chunk(
         hashes: Where to write them, from its own first element. Must be at least
             `8 * count` bytes.
     """
-    var out = hashes.bitcast[DType.uint64]()
+    var out = hashes.mut_bitcast[DType.uint64]()
     for i in range(count):
         out.unsafe_offset(i).unsafe_store(
             hash_bytes(col.unsafe_bytes(start + i), seed)

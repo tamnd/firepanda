@@ -222,7 +222,7 @@ def text_contains(
     var validity = Bitmap(copy=a.validity)
 
     def compute(start: Int, stop: Int) {mut out, imm}:
-        var dst = out.unsafe_ptr()
+        var dst = out.unsafe_mut_ptr()
         for i in range(start, stop):
             var found = find_bytes(a.unsafe_bytes(i), needle, 0) >= 0
             dst.unsafe_offset(i).unsafe_write(Scalar[DType.bool](found))
@@ -260,7 +260,7 @@ def text_contains_in_order(
     var validity = Bitmap(copy=a.validity)
 
     def compute(start: Int, stop: Int) {mut out, imm}:
-        var dst = out.unsafe_ptr()
+        var dst = out.unsafe_mut_ptr()
         for i in range(start, stop):
             var bytes = a.unsafe_bytes(i)
             var at = find_bytes(bytes, first, 0)
@@ -297,7 +297,7 @@ def text_starts_with(
     var m = len(prefix)
 
     def compute(start: Int, stop: Int) {mut out, imm}:
-        var dst = out.unsafe_ptr()
+        var dst = out.unsafe_mut_ptr()
         for i in range(start, stop):
             var bytes = a.unsafe_bytes(i)
             var found = len(bytes) >= m and _starts_at(bytes, prefix, 0)
@@ -331,7 +331,7 @@ def text_ends_with(
     var m = len(suffix)
 
     def compute(start: Int, stop: Int) {mut out, imm}:
-        var dst = out.unsafe_ptr()
+        var dst = out.unsafe_mut_ptr()
         for i in range(start, stop):
             var bytes = a.unsafe_bytes(i)
             var room = len(bytes) - m

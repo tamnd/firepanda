@@ -278,7 +278,7 @@ struct AnyArray(Copyable, Movable, Sized):
         return NestedNode(name^, type, parent, self.data^)
 
     def __init__(out self, *, copy: Self):
-        """Deep-copies a column.
+        """Copies a column, sharing its bytes until one side writes.
 
         Args:
             copy: The column to copy.
@@ -850,7 +850,7 @@ struct AnyArray(Copyable, Movable, Sized):
         var values = Buffer(n * width)
         if n > 0:
             unsafe_memcpy(
-                dest=values.unsafe_ptr(),
+                dest=values.unsafe_mut_ptr(),
                 src=self.data.values.unsafe_ptr().unsafe_offset(start * width),
                 count=n * width,
             )
@@ -859,12 +859,15 @@ struct AnyArray(Copyable, Movable, Sized):
             self.type,
         )
 
-    def unsafe_ptr[dt: DType](ref self) -> Pointer[Scalar[dt], origin_of(self)]:
-        """Returns a typed pointer to the values without checking the dtype.
+    def unsafe_ptr[dt: DType](self) -> Pointer[Scalar[dt], origin_of(self)]:
+        """Returns a typed pointer to the values, for reading, dtype unchecked.
 
         Callers must have checked the dtype already, normally by going through
         `dispatch`. This exists so that dispatch does not pay for a second check
         and a buffer copy on the hot path.
+
+        Borrowed rather than `ref`, so the buffer underneath stays shared. See
+        `Buffer` for why reading and writing are separate names.
 
         Parameters:
             dt: The dtype to view the values as.
@@ -873,6 +876,23 @@ struct AnyArray(Copyable, Movable, Sized):
             A pointer to the first value.
         """
         return self.data.values.bitcast[dt]().unsafe_origin_cast[
+            origin_of(self)
+        ]()
+
+    def unsafe_mut_ptr[
+        dt: DType
+    ](mut self) -> Pointer[Scalar[dt], origin_of(self)]:
+        """Returns a typed pointer to the values, for writing, dtype unchecked.
+
+        Takes a private copy of the buffer first if anything else is holding it.
+
+        Parameters:
+            dt: The dtype to view the values as.
+
+        Returns:
+            A pointer to the first value.
+        """
+        return self.data.values.mut_bitcast[dt]().unsafe_origin_cast[
             origin_of(self)
         ]()
 

@@ -132,7 +132,7 @@ def is_in[
     if k == 0:
 
         def none(start: Int, stop: Int) {mut out, imm}:
-            var dst = out.unsafe_ptr()
+            var dst = out.unsafe_mut_ptr()
             for i in range(start, stop):
                 dst.unsafe_offset(i).unsafe_write(False)
             repair_range(out, validity, start, stop)
@@ -146,7 +146,7 @@ def is_in[
 
         def linear(start: Int, stop: Int) {mut out, imm}:
             var src = a.unsafe_ptr()
-            var dst = out.unsafe_ptr()
+            var dst = out.unsafe_mut_ptr()
             var i = start
             while i < stop:
                 var x = src.unsafe_offset(i).unsafe_load[width=width]()
@@ -171,7 +171,7 @@ def is_in[
 
     def probed(start: Int, stop: Int) {mut out, imm}:
         var src = a.unsafe_ptr()
-        var dst = out.unsafe_ptr()
+        var dst = out.unsafe_mut_ptr()
         for i in range(start, stop):
             var key = hash_of(src.unsafe_offset(i).unsafe_load(), DEFAULT_SEED)
             dst.unsafe_offset(i).unsafe_write(table.find(key) >= 0)
@@ -213,7 +213,7 @@ def text_is_in(a: StringArray, values: StringArray) raises -> Array[DType.bool]:
     var k = len(wanted)
 
     def write_false(start: Int, stop: Int) {mut out, imm}:
-        var dst = out.unsafe_ptr()
+        var dst = out.unsafe_mut_ptr()
         for i in range(start, stop):
             dst.unsafe_offset(i).unsafe_write(False)
         repair_range(out, validity, start, stop)
@@ -249,7 +249,7 @@ def text_is_in(a: StringArray, values: StringArray) raises -> Array[DType.bool]:
     if not distinct:
 
         def linear(start: Int, stop: Int) {mut out, imm}:
-            var dst = out.unsafe_ptr()
+            var dst = out.unsafe_mut_ptr()
             for i in range(start, stop):
                 var hit = False
                 for j in range(k):
@@ -267,7 +267,7 @@ def text_is_in(a: StringArray, values: StringArray) raises -> Array[DType.bool]:
         return out^
 
     def probed(start: Int, stop: Int) {mut out, imm}:
-        var dst = out.unsafe_ptr()
+        var dst = out.unsafe_mut_ptr()
         for i in range(start, stop):
             var at = table.find(hash_bytes(a.unsafe_bytes(i), DEFAULT_SEED))
             var hit = False

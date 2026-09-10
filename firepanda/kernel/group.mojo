@@ -343,7 +343,7 @@ def _partition_starts(
     var tally = Buffer(workers * parts * 8)
 
     def count(w: Int) raises {mut tally, imm}:
-        var mine = tally.bitcast[DType.int64]().unsafe_offset(w * parts)
+        var mine = tally.mut_bitcast[DType.int64]().unsafe_offset(w * parts)
         var at = codes.unsafe_ptr()
         for i in range(bounds[w], bounds[w + 1]):
             if skip_null and not validity.get(i):
@@ -419,8 +419,8 @@ def _partitioned_sums[
 
     def place(w: Int) raises {mut held, mut carried, imm}:
         var at = codes.unsafe_ptr()
-        var ordinals = held.bitcast[DType.uint32]()
-        var values = carried.bitcast[acc]()
+        var ordinals = held.mut_bitcast[DType.uint32]()
+        var values = carried.mut_bitcast[acc]()
         var cursor = List[Int](capacity=parts)
         for p in range(parts):
             cursor.append(starts[p * workers + w])
@@ -437,7 +437,7 @@ def _partitioned_sums[
     var out = Array[acc](groups)
 
     def fold(p: Int) raises {mut out, imm}:
-        var totals = out.unsafe_ptr()
+        var totals = out.unsafe_mut_ptr()
         var ordinals = held.bitcast[DType.uint32]()
         var values = carried.bitcast[acc]()
         for i in range(starts[p * workers], starts[(p + 1) * workers]):
@@ -489,7 +489,7 @@ def _partitioned_tally(
 
     def place(w: Int) raises {mut held, imm}:
         var at = codes.unsafe_ptr()
-        var ordinals = held.bitcast[DType.uint32]()
+        var ordinals = held.mut_bitcast[DType.uint32]()
         var cursor = List[Int](capacity=parts)
         for p in range(parts):
             cursor.append(starts[p * workers + w])
@@ -506,7 +506,7 @@ def _partitioned_tally(
     var out = Array[DType.int64](groups)
 
     def fold(p: Int) raises {mut out, imm}:
-        var totals = out.unsafe_ptr()
+        var totals = out.unsafe_mut_ptr()
         var ordinals = held.bitcast[DType.uint32]()
         for i in range(starts[p * workers], starts[(p + 1) * workers]):
             var g = Int(ordinals.unsafe_offset(i).unsafe_load())
@@ -1051,7 +1051,7 @@ def _tally_core[
             return _partitioned_tally(validity, check, codes, groups, parts)
 
         var out = Array[DType.int64](groups)
-        var totals = out.unsafe_ptr()
+        var totals = out.unsafe_mut_ptr()
         var at = codes.unsafe_ptr()
         for i in range(n):
             comptime if check:
@@ -1067,7 +1067,7 @@ def _tally_core[
     var partials = Array[DType.int64](groups * workers)
 
     def one(w: Int) raises {mut partials, imm}:
-        var totals = partials.unsafe_ptr().unsafe_offset(w * groups)
+        var totals = partials.unsafe_mut_ptr().unsafe_offset(w * groups)
         var at = codes.unsafe_ptr()
         for i in range(bounds[w], bounds[w + 1]):
             comptime if check:
@@ -1168,7 +1168,7 @@ def _sum_core[
             return _partitioned_sums[acc=acc](source, codes, groups, parts)
 
         var out = Array[acc](groups)
-        var totals = out.unsafe_ptr()
+        var totals = out.unsafe_mut_ptr()
         var at = codes.unsafe_ptr()
         for i in range(n):
             var g = Int(at.unsafe_offset(i).unsafe_load())
@@ -1182,7 +1182,7 @@ def _sum_core[
     var partials = Array[acc](groups * workers)
 
     def one(w: Int) raises {mut partials, imm}:
-        var totals = partials.unsafe_ptr().unsafe_offset(w * groups)
+        var totals = partials.unsafe_mut_ptr().unsafe_offset(w * groups)
         var at = codes.unsafe_ptr()
         for i in range(bounds[w], bounds[w + 1]):
             var g = Int(at.unsafe_offset(i).unsafe_load())
@@ -1258,8 +1258,8 @@ def _fused_sum_count[
     var tally = Array[DType.int64](groups * workers)
 
     def one(w: Int) raises {mut sums, mut tally, imm}:
-        var totals = sums.unsafe_ptr().unsafe_offset(w * groups)
-        var seen = tally.unsafe_ptr().unsafe_offset(w * groups)
+        var totals = sums.unsafe_mut_ptr().unsafe_offset(w * groups)
+        var seen = tally.unsafe_mut_ptr().unsafe_offset(w * groups)
         var at = codes.unsafe_ptr()
         for i in range(bounds[w], bounds[w + 1]):
             var g = Int(at.unsafe_offset(i).unsafe_load())
@@ -1365,7 +1365,7 @@ def _divide_sums(
         A column of `groups` means, NaN where a group counted nothing.
     """
     var out = Array[DType.float64](groups)
-    var target = out.unsafe_ptr()
+    var target = out.unsafe_mut_ptr()
     var total = sums.unsafe_ptr()
     var n = counts.unsafe_ptr()
     for g in range(groups):
@@ -1542,7 +1542,7 @@ def _extreme_core[
     # Every slot is written by the identity fill below, so the zero fill the
     # plain constructor does is a pass over the output for nothing.
     var out = Array[dt](overwritten=groups)
-    var best = out.unsafe_ptr()
+    var best = out.unsafe_mut_ptr()
     out.data.validity.clear_all()
     var head = 0
     while head + width <= groups:
@@ -1571,7 +1571,7 @@ def _extreme_core[
         var bounds = _row_bounds(n, workers)
         var slots = groups * workers
         var partials = Array[dt](overwritten=slots)
-        var start = partials.unsafe_ptr()
+        var start = partials.unsafe_mut_ptr()
         var filled = 0
         while filled + width <= slots:
             start.unsafe_offset(filled).unsafe_store(SIMD[dt, width](identity))
@@ -1588,8 +1588,8 @@ def _extreme_core[
         var seen = Array[DType.uint8](groups * workers)
 
         def one(w: Int) raises {mut partials, mut seen, imm}:
-            var mine = partials.unsafe_ptr().unsafe_offset(w * groups)
-            var hit = seen.unsafe_ptr().unsafe_offset(w * groups)
+            var mine = partials.unsafe_mut_ptr().unsafe_offset(w * groups)
+            var hit = seen.unsafe_mut_ptr().unsafe_offset(w * groups)
             var at = codes.unsafe_ptr()
             for i in range(bounds[w], bounds[w + 1]):
                 if not _there(source, validity, has_null, i):
@@ -1609,7 +1609,7 @@ def _extreme_core[
 
         comptime bytes = simd_width_of[DType.uint8]()
         var tables = partials.unsafe_ptr()
-        var hits = seen.unsafe_ptr()
+        var hits = seen.unsafe_mut_ptr()
         for w in range(workers):
             var table = tables.unsafe_offset(w * groups)
             var g = 0
@@ -1755,7 +1755,7 @@ def _edge_core[
     over a low cardinality column cost almost nothing.
     """
     var out = Array[dt](groups)
-    var target = out.unsafe_ptr()
+    var target = out.unsafe_mut_ptr()
     out.data.validity.clear_all()
 
     var at = codes.unsafe_ptr()
@@ -1988,8 +1988,8 @@ def _var_core[
     var bounds = _row_bounds(rows, workers)
 
     def one(w: Int) raises {mut deltas, mut partials, imm}:
-        var plain = deltas.unsafe_ptr().unsafe_offset(w * groups)
-        var totals = partials.unsafe_ptr().unsafe_offset(w * groups)
+        var plain = deltas.unsafe_mut_ptr().unsafe_offset(w * groups)
+        var totals = partials.unsafe_mut_ptr().unsafe_offset(w * groups)
         for i in range(bounds[w], bounds[w + 1]):
             if not _there(source, validity, has_null, i):
                 continue
@@ -2011,7 +2011,7 @@ def _var_core[
         deltas = _merge_sums(deltas, groups, workers)
         partials = _merge_sums(partials, groups, workers)
     var out = partials^
-    var target = out.unsafe_ptr()
+    var target = out.unsafe_mut_ptr()
     var missed = deltas.unsafe_ptr()
     var n = totals.counts.unsafe_ptr()
     for g in range(groups):
@@ -2077,7 +2077,7 @@ def _sem_core[
         source, validity, has_null, codes, groups, ddof
     )
     var counts = _count_core(source, validity, has_null, codes, groups)
-    var target = out.unsafe_ptr()
+    var target = out.unsafe_mut_ptr()
     var n = counts.unsafe_ptr()
     for g in range(groups):
         if not out.data.validity.get(g):
@@ -2155,9 +2155,9 @@ def _skew_core[
     var bounds = _row_bounds(rows, workers)
 
     def one(w: Int) raises {mut deltas, mut squares, mut cubes, imm}:
-        var first = deltas.unsafe_ptr().unsafe_offset(w * groups)
-        var second = squares.unsafe_ptr().unsafe_offset(w * groups)
-        var third = cubes.unsafe_ptr().unsafe_offset(w * groups)
+        var first = deltas.unsafe_mut_ptr().unsafe_offset(w * groups)
+        var second = squares.unsafe_mut_ptr().unsafe_offset(w * groups)
+        var third = cubes.unsafe_mut_ptr().unsafe_offset(w * groups)
         for i in range(bounds[w], bounds[w + 1]):
             if not _there(source, validity, has_null, i):
                 continue
@@ -2184,7 +2184,7 @@ def _skew_core[
         squares = _merge_sums(squares, groups, workers)
         cubes = _merge_sums(cubes, groups, workers)
     var out = squares^
-    var target = out.unsafe_ptr()
+    var target = out.unsafe_mut_ptr()
     var first_total = deltas.unsafe_ptr()
     var third_total = cubes.unsafe_ptr()
     var n = totals.counts.unsafe_ptr()
@@ -2410,7 +2410,7 @@ def _fill_slab_serial[
     for g in range(groups):
         cursor.append(bounds[g])
 
-    var into = slab.unsafe_ptr()
+    var into = slab.unsafe_mut_ptr()
     var at = codes.unsafe_ptr()
     for i in range(len(codes)):
         if not _there(source, validity, has_null, i):
@@ -2506,8 +2506,8 @@ def _fill_slab[
 
     def place(w: Int) raises {mut held, mut carried, imm}:
         var at = codes.unsafe_ptr()
-        var ordinals = held.bitcast[DType.uint32]()
-        var values = carried.bitcast[dt]()
+        var ordinals = held.mut_bitcast[DType.uint32]()
+        var values = carried.mut_bitcast[dt]()
         var cursor = List[Int](capacity=parts)
         for p in range(parts):
             cursor.append(starts[p * workers + w])
@@ -2526,7 +2526,7 @@ def _fill_slab[
     parallel_for(place, workers)
 
     def settle(p: Int) raises {mut slab, imm}:
-        var into = slab.unsafe_ptr()
+        var into = slab.unsafe_mut_ptr()
         var ordinals = held.bitcast[DType.uint32]()
         var values = carried.bitcast[dt]()
         var low = p << shift
@@ -2576,8 +2576,8 @@ def _quantile_core[
     var cuts = _group_bounds(groups, blocks)
 
     def one(b: Int) raises {mut slab, mut out, imm}:
-        var values = slab.unsafe_ptr()
-        var target = out.unsafe_ptr()
+        var values = slab.unsafe_mut_ptr()
+        var target = out.unsafe_mut_ptr()
         for g in range(cuts[b], cuts[b + 1]):
             var start = bounds[g]
             var count = bounds[g + 1] - start
@@ -2647,8 +2647,8 @@ def _nunique_core[
     var cuts = _group_bounds(groups, blocks)
 
     def one(b: Int) raises {mut slab, mut out, imm}:
-        var values = slab.unsafe_ptr()
-        var target = out.unsafe_ptr()
+        var values = slab.unsafe_mut_ptr()
+        var target = out.unsafe_mut_ptr()
         for g in range(cuts[b], cuts[b + 1]):
             var start = bounds[g]
             var count = bounds[g + 1] - start
@@ -2867,7 +2867,7 @@ def _pair_core[
     var tables = Array[DType.float64](groups * workers * SLOT)
 
     def spreads(w: Int) raises {mut tables, imm}:
-        var mine = tables.unsafe_ptr().unsafe_offset(w * groups * SLOT)
+        var mine = tables.unsafe_mut_ptr().unsafe_offset(w * groups * SLOT)
         for i in range(bounds[w], bounds[w + 1]):
             if not _there(left, left_valid, left_has_null, i):
                 continue
@@ -2913,7 +2913,7 @@ def _pair_core[
     # sums and takes part in the same arithmetic without a conversion per use.
     # Every count here is a row count under two to the fifty three, so it is
     # exact.
-    var first = tables.unsafe_ptr()
+    var first = tables.unsafe_mut_ptr()
 
     if workers > 1:
         # The slots cannot simply be added, because each worker measured the
@@ -3342,7 +3342,7 @@ def _fuse_run[
 
     comptime if mode == _FUSE_SUM:
         comptime if acc == DType.float64:
-            var totals = sums.unsafe_ptr().unsafe_offset(at)
+            var totals = sums.unsafe_mut_ptr().unsafe_offset(at)
             for i in range(begin, end):
                 var g = Int(group_of.unsafe_offset(i).unsafe_load())
                 totals.unsafe_offset(g).unsafe_store(
@@ -3353,7 +3353,7 @@ def _fuse_run[
             # As in `_sum_core`, no bitmap is read on either branch. A null holds
             # a zero and `_addend` turns a NaN into one, so both spellings of
             # missing add nothing without being looked up.
-            var totals = tally.unsafe_ptr().unsafe_offset(at)
+            var totals = tally.unsafe_mut_ptr().unsafe_offset(at)
             for i in range(begin, end):
                 var g = Int(group_of.unsafe_offset(i).unsafe_load())
                 totals.unsafe_offset(g).unsafe_store(
@@ -3363,7 +3363,7 @@ def _fuse_run[
         return
 
     comptime if mode == _FUSE_COUNT:
-        var seen = tally.unsafe_ptr().unsafe_offset(at)
+        var seen = tally.unsafe_mut_ptr().unsafe_offset(at)
         for i in range(begin, end):
             if not _there(source, validity, check, i):
                 continue
@@ -3377,8 +3377,8 @@ def _fuse_run[
     # slice. The sum is taken in float64 and not in the natural accumulator for
     # the reason `_mean_core` gives: pandas converts before dividing, so the mean
     # of a group of large int64 values must not come out of a wrapped total.
-    var totals = sums.unsafe_ptr().unsafe_offset(at)
-    var seen = tally.unsafe_ptr().unsafe_offset(at)
+    var totals = sums.unsafe_mut_ptr().unsafe_offset(at)
+    var seen = tally.unsafe_mut_ptr().unsafe_offset(at)
     for i in range(begin, end):
         var g = Int(group_of.unsafe_offset(i).unsafe_load())
         var value = source.unsafe_offset(i).unsafe_load().cast[DType.float64]()
@@ -3579,7 +3579,7 @@ def _merge_tables[
     comptime width = simd_width_of[dt]()
 
     var out = Array[dt](groups)
-    var totals = out.unsafe_ptr()
+    var totals = out.unsafe_mut_ptr()
     var tables = slab.unsafe_ptr().unsafe_offset(at)
     for w in range(workers):
         var table = tables.unsafe_offset(w * groups)

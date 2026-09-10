@@ -364,7 +364,7 @@ def nan_over_nulls(var col: AnyArray) -> AnyArray:
     var rows = len(col)
     comptime for candidate in FLOAT:
         if col.dtype() == candidate:
-            var values = col.unsafe_ptr[candidate]()
+            var values = col.unsafe_mut_ptr[candidate]()
             for i in range(rows):
                 if not validity.get(i):
                     values.unsafe_offset(i).unsafe_store(nan[candidate]())
@@ -441,6 +441,11 @@ def _drop_nans[
     """
     comptime width = simd_width_of[dt]()
     var out = Bitmap(copy=valid)
+    # The copy shares the caller's bits until somebody writes, and what writes
+    # here is every worker at once. Taking the private copy now, on this thread,
+    # means each of them finds a bitmap that is already alone instead of racing
+    # to be the one that un-shares it. See `Buffer.make_private`.
+    out.make_private()
 
     def scan(start: Int, stop: Int) {mut out, imm source, imm}:
         for w in range(start // 64, (stop + 63) // 64):
@@ -515,9 +520,9 @@ def _present_count[
     var partials = Array[DType.int64](count)
 
     def tally(start: Int, stop: Int) {mut partials, imm source, imm valid, imm}:
-        partials.unsafe_ptr().unsafe_offset(start // MORSEL_ROWS).unsafe_write(
-            Int64(_present_range(source, valid, start, stop))
-        )
+        partials.unsafe_mut_ptr().unsafe_offset(
+            start // MORSEL_ROWS
+        ).unsafe_write(Int64(_present_range(source, valid, start, stop)))
 
     parallel_morsels(tally, rows)
 
@@ -624,7 +629,7 @@ def _null_mask[
     var out = Array[DType.bool](overwritten=rows)
 
     def expand(start: Int, stop: Int) {mut out, imm valid, imm}:
-        var target = out.unsafe_ptr()
+        var target = out.unsafe_mut_ptr()
         for w in range(start // 64, (stop + 63) // 64):
             var word = valid.unsafe_word(w)
             var base = w * 64
@@ -812,7 +817,7 @@ def _coalesce_core[
     var broadcast = b_len == 1
 
     def pick(start: Int, stop: Int) {mut out, imm a_valid, imm b_valid, imm}:
-        var target = out.unsafe_ptr()
+        var target = out.unsafe_mut_ptr()
         var i = start
         while i + width <= stop:
             target.unsafe_offset(i).unsafe_store(
@@ -998,7 +1003,7 @@ def _fill_core[
     """
     comptime width = simd_width_of[dt]()
     var out = Array[dt](rows)
-    var target = out.unsafe_ptr()
+    var target = out.unsafe_mut_ptr()
     var carry = Scalar[dt](0)
     var have = False
     var run = 0

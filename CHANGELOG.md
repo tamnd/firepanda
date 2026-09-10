@@ -82,6 +82,26 @@ The check sits in `firepanda/py/cast.mojo` and not in the kernel, because it is 
 
 `errors="ignore"` covers the new refusal the same as the old ones, because it covers every `ValueError` and this is one.
 
+### Changed: a projection stopped copying the columns it keeps
+
+`select` clones every column it keeps, and until now a clone was a memcpy of the whole thing. The TPC-H queries project `lineitem` before they join it, which is how anybody would write them, so on the four slowest queries that copy ran over the largest table in the query and computed nothing.
+
+It was measured in place rather than reasoned about. Inserting a second redundant projection of the same columns right after the existing one and taking the difference gives what the existing one costs, and on sf1 on a 13900K it came to 15.8 ms on q5, 16.6 on q8 and 30.3 on q9, against a total suite gap to polars of 85 ms. q6 and q10 project no lineitem columns and moved by -0.4 and +0.9 ms, which is the control.
+
+So a buffer is now behind a refcount and a copy of one shares the allocation. The copy becomes real the first time somebody asks for a pointer they could write through. That is the whole of it, and the interesting part is how it is enforced. The accessors come in pairs: `unsafe_ptr` and `bitcast` take a borrowed receiver and hand back pointers the compiler will not let anyone write through, and `unsafe_mut_ptr` and `mut_bitcast` take a mutable one, un-share first, and hand back pointers that can be written. A reader therefore cannot accidentally pay for a copy and a writer cannot accidentally skip one, because writing through a reader's pointer does not compile.
+
+Splitting them turned every write site in the library into a build error, which is the point: the compiler produced the list and will produce it again for any call site written later. There were about four hundred and twenty of them across thirty five files, two thirds in the sort and select kernels, and every one is the same edit.
+
+The comment that used to justify the deep copy said copies are rare because kernels move buffers rather than copying them. The kernels do. The frame layer does not, and projection is the second thing a query does. The reasoning was sound and the premise was wrong.
+
+Two things are worth writing down, and the first of them cost a day. The refcount is atomic and the un-sharing is not, so a shared buffer has to be made private before several workers write it. The first draft of this entry said the case does not arise, on the grounds that every parallel kernel allocates its output before it starts. Most of them do. Two of them make their output by copying an input and then editing it, and there every worker reaches the un-share at the same moment, every one sees a count above one and every one allocates. One wins the assignment and the rest leak, and the buffer they all copied from has its count taken down once per worker for the single copy that exists. It is a torn refcount rather than torn data, so nothing looks wrong at the time and no query comes back with a different answer. It surfaces much later as a free of memory somebody is still reading.
+
+It was found by AddressSanitizer rather than by a failing assertion, as a use after free in an `ArcPointer` control block, and narrowed by holding twenty spare copies of a bitmap and watching the count fall by one on every call into the float branch of the group count. `Buffer.make_private` is how a caller says so now, on the thread that made the copy and before the workers start, after which each worker finds a count of one and takes the early return. A scan of the library for a buffer or bitmap made by copying and later captured mutably by a closure in the same function turns up exactly two places: `_drop_nans` clearing the bits of the rows holding a NaN, and the constant divisor path in floordiv clearing the bits of the rows dividing by zero. Both call it, and the buffer docstring now states the rule rather than the wrong reassurance.
+
+The second thing is smaller. A pooled buffer can still be sharing with a column that outlived it, which is safe because the pool zeroes on the way out and zeroing un-shares first, so it hands back a private allocation and loses the recycling rather than writing over somebody's bytes.
+
+Closes #406.
+
 ### Added: astype, and about sixty ways to spell a type
 
 `Series.astype` and `DataFrame.astype`, with the pandas signature, and `dtype=` honoured in both constructors instead of refused. The frame form takes one type name for every column or a dict naming some of them, which is what pandas takes.

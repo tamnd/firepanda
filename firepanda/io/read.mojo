@@ -1110,19 +1110,25 @@ def build_blocks(
         var int_at = List[Pointer[Scalar[DType.int64], MutUntrackedOrigin]]()
         for i in range(len(ints)):
             int_at.append(
-                ints[i].unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+                ints[i]
+                .unsafe_mut_ptr()
+                .unsafe_origin_cast[MutUntrackedOrigin]()
             )
         var float_at = List[
             Pointer[Scalar[DType.float64], MutUntrackedOrigin]
         ]()
         for i in range(len(floats)):
             float_at.append(
-                floats[i].unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+                floats[i]
+                .unsafe_mut_ptr()
+                .unsafe_origin_cast[MutUntrackedOrigin]()
             )
         var bool_at = List[Pointer[Scalar[DType.bool], MutUntrackedOrigin]]()
         for i in range(len(bools)):
             bool_at.append(
-                bools[i].unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+                bools[i]
+                .unsafe_mut_ptr()
+                .unsafe_origin_cast[MutUntrackedOrigin]()
             )
         sweep_fixed(
             data,
@@ -1462,7 +1468,7 @@ def fill_text(
     var views = Buffer(overwritten=rows * VIEW_SIZE)
     # The origins are dropped for the reason `fill_column` gives: the blocks
     # partition both buffers and that is not a fact the origin system can hold.
-    var slots = views.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+    var slots = views.unsafe_mut_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
     var payload = Buffer(overwritten=0)
     var parts = List[TextFill](capacity=blocks)
     for b in range(blocks):
@@ -1470,7 +1476,7 @@ def fill_text(
 
     var inline_only = True
     for _ in range(2):
-        var bytes = payload.unsafe_ptr().unsafe_origin_cast[
+        var bytes = payload.unsafe_mut_ptr().unsafe_origin_cast[
             MutUntrackedOrigin
         ]()
 
@@ -1671,7 +1677,7 @@ def fill_column[
     # The origin is dropped deliberately. Every block writes a range of its own
     # and the ranges partition the column, which is the fact that makes this
     # safe, and it is not a fact the origin system can be told.
-    var values = out.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+    var values = out.unsafe_mut_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
     var parts = List[BlockFill](capacity=blocks)
     for b in range(blocks):
         parts.append(BlockFill(Bitmap(layout[b].count), True, 0, False))

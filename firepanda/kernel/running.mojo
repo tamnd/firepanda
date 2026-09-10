@@ -153,7 +153,7 @@ def _widen[
     var have = len(old)
     var out = Array[dt](capacity)
     var src = old.unsafe_ptr()
-    var dst = out.unsafe_ptr()
+    var dst = out.unsafe_mut_ptr()
 
     if not reached:
         for i in range(have):
@@ -209,7 +209,7 @@ def _blank_unreached(mut state: AnyArray, groups: Int) raises:
     comptime for slot in ALL:
         if state.dtype() == slot:
             ref view = state.as_typed_view[slot]()
-            var at = view.unsafe_ptr()
+            var at = view.unsafe_mut_ptr()
             for g in range(groups):
                 if not view.data.validity.get(g):
                     at.unsafe_offset(g).unsafe_write(Scalar[slot](0))
@@ -275,7 +275,7 @@ def _accumulate[
     if kind == AggKind.SUM:
         comptime acc = accumulator(dt)
         ref into = state.as_typed_view[acc]()
-        var total = into.unsafe_ptr()
+        var total = into.unsafe_mut_ptr()
         # Validity is ignored here on purpose, the same way `_sum_core` ignores
         # it: a null holds a zero and adding a zero is what skipping it would
         # have done, without the branch.
@@ -289,7 +289,7 @@ def _accumulate[
 
     if kind == AggKind.SIZE:
         ref into = state.as_typed_view[DType.int64]()
-        var tally = into.unsafe_ptr()
+        var tally = into.unsafe_mut_ptr()
         for i in range(rows):
             var g = Int(at.unsafe_offset(i).unsafe_load())
             tally.unsafe_offset(g).unsafe_store(
@@ -299,7 +299,7 @@ def _accumulate[
 
     if kind == AggKind.COUNT:
         ref into = state.as_typed_view[DType.int64]()
-        var tally = into.unsafe_ptr()
+        var tally = into.unsafe_mut_ptr()
         for i in range(rows):
             if has_null and not column.data.validity.get(i):
                 continue
@@ -319,7 +319,7 @@ def _accumulate[
 
     if kind == AggKind.FIRST:
         ref into = state.as_typed_view[dt]()
-        var best = into.unsafe_ptr()
+        var best = into.unsafe_mut_ptr()
         for i in range(rows):
             if has_null and not column.data.validity.get(i):
                 continue
@@ -334,7 +334,7 @@ def _accumulate[
 
     if kind == AggKind.LAST:
         ref into = state.as_typed_view[dt]()
-        var best = into.unsafe_ptr()
+        var best = into.unsafe_mut_ptr()
         for i in range(rows):
             if has_null and not column.data.validity.get(i):
                 continue
@@ -367,7 +367,7 @@ def _extreme_into[
     same reason: a branch to avoid a bit write is not worth a branch.
     """
     ref into = state.as_typed_view[dt]()
-    var best = into.unsafe_ptr()
+    var best = into.unsafe_mut_ptr()
     var src = column.unsafe_ptr()
     var at = codes.unsafe_ptr()
     for i in range(rows):

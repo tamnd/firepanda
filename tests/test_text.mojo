@@ -211,7 +211,7 @@ def test_filter_keeps_the_long_elements_intact() raises:
         ),
     )
     var mask = Array[DType.bool](4)
-    var bits = mask.unsafe_ptr()
+    var bits = mask.unsafe_mut_ptr()
     bits.unsafe_offset(0).unsafe_write(True)
     bits.unsafe_offset(1).unsafe_write(False)
     bits.unsafe_offset(2).unsafe_write(True)
@@ -225,7 +225,7 @@ def test_filter_keeps_the_long_elements_intact() raises:
 def test_a_null_in_the_mask_drops_the_row() raises:
     var s = Series("s", strings_from_list(["a", "b"]))
     var mask = Array[DType.bool](2)
-    var bits = mask.unsafe_ptr()
+    var bits = mask.unsafe_mut_ptr()
     bits.unsafe_offset(0).unsafe_write(True)
     bits.unsafe_offset(1).unsafe_write(True)
     mask.data.validity.set(1, False)
@@ -277,7 +277,7 @@ def every_third(rows: Int) raises -> Array[DType.bool]:
         If the mask cannot be allocated.
     """
     var mask = Array[DType.bool](rows)
-    var bits = mask.unsafe_ptr()
+    var bits = mask.unsafe_mut_ptr()
     for i in range(rows):
         bits.unsafe_offset(i).unsafe_write(i % 3 != 2)
     mask.data.validity.set(rows - 2, False)
@@ -560,7 +560,7 @@ def test_summing_text_says_what_is_missing() raises:
 def test_a_frame_holds_text_beside_numbers() raises:
     var names = Series("name", strings_from_list(["oslo", "lima", "cairo"]))
     var counts = Array[DType.int64](3)
-    var values = counts.unsafe_ptr()
+    var values = counts.unsafe_mut_ptr()
     values.unsafe_offset(0).unsafe_write(1)
     values.unsafe_offset(1).unsafe_write(2)
     values.unsafe_offset(2).unsafe_write(3)

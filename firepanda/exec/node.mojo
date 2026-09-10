@@ -1219,7 +1219,7 @@ def _mean_of(sums: AnyArray, counts: AnyArray) raises -> AnyArray:
     var t = totals.unsafe_ptr[DType.float64]()
     var n = counts.unsafe_ptr[DType.int64]()
     var out = Array[DType.float64](len(counts))
-    var dst = out.unsafe_ptr()
+    var dst = out.unsafe_mut_ptr()
     for g in range(len(out)):
         var count = n.unsafe_offset(g).unsafe_load()
         if count == 0:

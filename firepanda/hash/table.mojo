@@ -241,7 +241,7 @@ struct HashTable(Movable, Sized):
         if (self._count + 1) * 2 > self._capacity:
             self._grow()
 
-        var slots = self._slots.bitcast[DType.uint64]()
+        var slots = self._slots.mut_bitcast[DType.uint64]()
         var i = hash & self._mask
         while True:
             var at = Int(i) * SLOT_WORDS
@@ -287,7 +287,7 @@ struct HashTable(Movable, Sized):
         if (self._count + 1) * 2 > self._capacity:
             self._grow()
 
-        var slots = self._slots.bitcast[DType.uint64]()
+        var slots = self._slots.mut_bitcast[DType.uint64]()
         var i = hash & self._mask
         while True:
             var at = Int(i) * SLOT_WORDS
@@ -387,8 +387,8 @@ struct HashTable(Movable, Sized):
                 that rather than copying each one to the front of a scratch.
         """
         var hash = hashes.bitcast[DType.uint64]().unsafe_offset(hash_at)
-        var out = codes.unsafe_ptr()
-        var slots = self._slots.bitcast[DType.uint64]()
+        var out = codes.unsafe_mut_ptr()
+        var slots = self._slots.mut_bitcast[DType.uint64]()
         var mask = self._mask
         var capacity = self._capacity
         var found = self._count
@@ -419,7 +419,7 @@ struct HashTable(Movable, Sized):
                             found * EARLY_JUMP,
                         )
                     )
-                    slots = self._slots.bitcast[DType.uint64]()
+                    slots = self._slots.mut_bitcast[DType.uint64]()
                     mask = self._mask
                     capacity = self._capacity
                     mark = SIZING_LATE // 2
@@ -433,7 +433,7 @@ struct HashTable(Movable, Sized):
                 else:
                     self._count = found
                     self._reserve(project_groups(found, half, seen, rows))
-                    slots = self._slots.bitcast[DType.uint64]()
+                    slots = self._slots.mut_bitcast[DType.uint64]()
                     mask = self._mask
                     capacity = self._capacity
                     mark = -1
@@ -445,7 +445,7 @@ struct HashTable(Movable, Sized):
             if (found + 1) * 2 > capacity:
                 self._count = found
                 self._grow()
-                slots = self._slots.bitcast[DType.uint64]()
+                slots = self._slots.mut_bitcast[DType.uint64]()
                 mask = self._mask
                 capacity = self._capacity
 
@@ -532,7 +532,7 @@ struct HashTable(Movable, Sized):
             codes: Where the per-row ordinals go, indexed by absolute row.
         """
         var hash = hashes.bitcast[DType.uint64]()
-        var out = codes.unsafe_ptr()
+        var out = codes.unsafe_mut_ptr()
         var slots = self._slots.bitcast[DType.uint64]()
         var mask = self._mask
 
@@ -626,7 +626,7 @@ struct HashTable(Movable, Sized):
             missing.
         """
         var hash = hashes.bitcast[DType.uint64]()
-        var out = codes.unsafe_ptr().unsafe_offset(out_at)
+        var out = codes.unsafe_mut_ptr().unsafe_offset(out_at)
         var slots = self._slots.bitcast[DType.uint64]()
         var mask = self._mask
         var absent = 0
@@ -756,8 +756,8 @@ struct HashTable(Movable, Sized):
         var hash = hashes.bitcast[DType.uint64]().unsafe_offset(hash_at)
         var lookup = rows_at.bitcast[DType.uint32]()
         var brought = views_at.unsafe_ptr().unsafe_bitcast[StringView]()
-        var out = codes.unsafe_ptr()
-        var slots = self._slots.bitcast[DType.uint64]()
+        var out = codes.unsafe_mut_ptr()
+        var slots = self._slots.mut_bitcast[DType.uint64]()
         var mask = self._mask
         var capacity = self._capacity
         var found = self._count
@@ -785,7 +785,7 @@ struct HashTable(Movable, Sized):
                             found * EARLY_JUMP,
                         )
                     )
-                    slots = self._slots.bitcast[DType.uint64]()
+                    slots = self._slots.mut_bitcast[DType.uint64]()
                     mask = self._mask
                     capacity = self._capacity
                     mark = SIZING_LATE // 2
@@ -799,7 +799,7 @@ struct HashTable(Movable, Sized):
                 else:
                     self._count = found
                     self._reserve(project_groups(found, half, seen, rows))
-                    slots = self._slots.bitcast[DType.uint64]()
+                    slots = self._slots.mut_bitcast[DType.uint64]()
                     mask = self._mask
                     capacity = self._capacity
                     mark = -1
@@ -819,7 +819,7 @@ struct HashTable(Movable, Sized):
             if (found + 1) * 2 > capacity:
                 self._count = found
                 self._grow()
-                slots = self._slots.bitcast[DType.uint64]()
+                slots = self._slots.mut_bitcast[DType.uint64]()
                 mask = self._mask
                 capacity = self._capacity
 
@@ -886,7 +886,7 @@ struct HashTable(Movable, Sized):
                 fill one buffer back to back.
         """
         var slots = self._slots.bitcast[DType.uint64]()
-        var dest = out.bitcast[DType.uint64]()
+        var dest = out.mut_bitcast[DType.uint64]()
         for slot in range(self._capacity):
             var word = slot * SLOT_WORDS
             var ordinal = slots.unsafe_offset(word + 1).unsafe_load()
@@ -931,7 +931,7 @@ struct HashTable(Movable, Sized):
         var mask = UInt64(capacity - 1)
 
         var old = self._slots.bitcast[DType.uint64]()
-        var new = grown.bitcast[DType.uint64]()
+        var new = grown.mut_bitcast[DType.uint64]()
 
         for slot in range(self._capacity):
             var at = slot * SLOT_WORDS
