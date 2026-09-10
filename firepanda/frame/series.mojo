@@ -52,6 +52,10 @@ from firepanda.kernel.nulls import (
     nan_over_nulls,
     widen_for_missing,
 )
+from firepanda.kernel.parse_time import (
+    numbers_to_timestamps,
+    parse_timestamps,
+)
 from firepanda.kernel.pattern import (
     text_contains,
     text_contains_in_order,
@@ -1331,6 +1335,61 @@ struct Series(Copyable, Movable, Sized, Writable):
         """
         return self._relabelled(
             self.name, temporal_to_duration(self.values, unit_named(unit))
+        )
+
+    def to_datetime(
+        self,
+        fmt: StringSlice = "",
+        unit: StringSlice = "ns",
+        coerce: Bool = False,
+        utc: Bool = False,
+    ) raises -> Self:
+        """Reads a series of text or of whole numbers as a series of instants.
+
+        This is `pandas.to_datetime`, and it is a method here for the same
+        reason `to_timedelta` is one: the series is the thing being read and
+        there is nowhere else to hang it that does not need a second import.
+
+        Which door the series goes through is decided by what it holds, which
+        is the same rule pandas uses. Text is parsed, whole numbers are counts
+        of the unit and are relabelled rather than converted, and a series that
+        is already instants is handed back, because `to_datetime` of a datetime
+        column is a no-op in pandas rather than an error.
+
+        Args:
+            fmt: The format the text is written in. The empty string means work
+                it out from the first row that is not missing, which is what
+                pandas does with no format given.
+            unit: What whole numbers are counts of, as one of `s`, `ms`, `us`
+                and `ns`. Ignored for text, which pandas also ignores it for.
+            coerce: Whether a row that will not read becomes missing rather
+                than stopping the whole series. This is `errors="coerce"`.
+            utc: Whether to read every row against UTC, which is the only way a
+                series carrying more than one offset can be read at all.
+
+        Returns:
+            A timestamp series of the same height, null where this one is null.
+
+        Raises:
+            Error: If the series is none of text, whole numbers and instants,
+                if a row does not match the format, or if the rows carry
+                different offsets and `utc` was not asked for.
+        """
+        if self.logical().kind == TypeKind.TIMESTAMP:
+            return Self(copy=self)
+        if self.logical().kind == TypeKind.STRING:
+            return self._relabelled(
+                self.name,
+                parse_timestamps(
+                    self.values.strings(),
+                    fmt,
+                    fmt.byte_length() == 0,
+                    coerce,
+                    utc,
+                ),
+            )
+        return self._relabelled(
+            self.name, numbers_to_timestamps(self.values, unit_named(unit))
         )
 
     def _relabelled(self, name: String, var values: AnyArray) raises -> Self:

@@ -164,6 +164,12 @@ def register(mut module: PythonModuleBuilder) raises:
             "The clock or the resolution of a temporal column, as a string."
         ),
     )
+    _ = series.def_method[PySeries.to_datetime](
+        "to_datetime",
+        docstring=(
+            "A column of text or of whole numbers read as a column of instants."
+        ),
+    )
     _ = series.def_method[PySeries.binary_series](
         "binary_series",
         docstring="An operation between two series, matching rows by label.",
