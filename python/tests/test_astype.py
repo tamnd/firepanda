@@ -198,6 +198,28 @@ def test_a_type_firepanda_does_not_have_says_so_by_name(
         firepanda.Series(WHOLE).astype(name)
 
 
+def test_longdouble_follows_the_machine_the_way_numpy_does(firepanda: ModuleType) -> None:
+    """The one spelling whose answer is the hardware's rather than ours.
+
+    `longdouble` and `g` name the C compiler's extended float. On arm macOS that
+    is eight bytes and is a float64, so the cast works. On x86 it is wider,
+    firepanda has no column that holds it, and the cast refuses rather than
+    handing back half the precision that was asked for.
+
+    The test asks the same question the library asks rather than reading the
+    library's answer back, so a machine where the two disagree fails here.
+    """
+    import ctypes
+
+    same = ctypes.sizeof(ctypes.c_longdouble) == ctypes.sizeof(ctypes.c_double)
+    for name in ("longdouble", "g"):
+        if same:
+            assert firepanda.Series(WHOLE).astype(name).dtype == "float64"
+        else:
+            with pytest.raises(NotImplementedError, match="extended float"):
+                firepanda.Series(WHOLE).astype(name)
+
+
 def test_the_two_marks_that_mean_native_are_dropped(firepanda: ModuleType) -> None:
     """Arrow is little endian, so `<i8`, `=i8` and `|i1` are the plain types."""
     assert firepanda.Series(WHOLE).astype("<i8").dtype == "int64"

@@ -26,6 +26,7 @@ exactly the shape the generator cannot write and exactly the shape `_refuse` and
 
 from __future__ import annotations
 
+import ctypes
 import datetime
 import warnings
 from typing import TYPE_CHECKING, Any
@@ -339,10 +340,10 @@ def _quantile_wanted(q: Any, interpolation: str) -> float:
 # though `i`, `f` and `b` are, `long` is int64 while `longdouble` is float64,
 # and `unicode`, `str_`, `U` and `O` are all the object dtype rather than text.
 #
-# Three rows are platform dependent and are written as this machine measured
-# them, which is what pandas would report here too, since both libraries are
-# asking the same C compiler how wide a `long` is: `long` and `uint` are sixty
-# four bits and `longdouble` is a float64.
+# Three rows are platform dependent, because both libraries are asking the same
+# C compiler how wide a type is. `long` and `uint` are sixty four bits on every
+# platform firepanda builds on, so they are written out. `longdouble` is not,
+# and is settled below the table rather than in it.
 _DTYPE_NAMES: dict[str, str] = {
     "bool": "bool",
     "bool_": "bool",
@@ -402,13 +403,27 @@ _DTYPE_NAMES: dict[str, str] = {
     "float64": "float64",
     "double": "float64",
     "float": "float64",
-    "longdouble": "float64",
     "d": "float64",
-    "g": "float64",
     "f8": "float64",
     "str": "string",
     "string": "string",
 }
+
+_LONGDOUBLE_IS_DOUBLE = ctypes.sizeof(ctypes.c_longdouble) == ctypes.sizeof(ctypes.c_double)
+"""Whether the C compiler's extended float is the ordinary one on this machine.
+
+`longdouble` and its letter `g` do not name a width, they name whatever the
+compiler calls a `long double`, and numpy resolves them that way, so pandas does
+too. On arm macOS that is eight bytes and is a float64, which firepanda has. On
+x86 it is wider and firepanda has no column that holds it.
+
+The width is read through ctypes rather than through numpy so that importing
+firepanda does not pull numpy in. The two agree because both are reading the
+same compiler."""
+
+if _LONGDOUBLE_IS_DOUBLE:
+    _DTYPE_NAMES["longdouble"] = "float64"
+    _DTYPE_NAMES["g"] = "float64"
 
 _NO_OBJECT = (
     "Arrow has no type that holds anything at all, so there is no column for an"
@@ -486,6 +501,23 @@ _REFUSED_DTYPES: dict[str, str] = {
     "void": "there is no void column",
     "V": "there is no void column",
 }
+
+_NO_LONGDOUBLE = (
+    "`longdouble` is the C compiler's extended float, which is wider than a"
+    " double on this machine, and firepanda's widest float is float64. Handing"
+    " back a float64 would quietly drop the precision that was asked for, so"
+    " the name refuses. On a machine where a long double is a double, which is"
+    " most arm ones, the same name is a float64 and works"
+)
+"""Only reached where the two widths differ, which is x86 and not arm macOS.
+
+The message says what the machine is rather than what firepanda is, because a
+caller who wrote `longdouble` and had it work on their laptop needs to know the
+answer changed with the hardware and not with the version."""
+
+if not _LONGDOUBLE_IS_DOUBLE:
+    _REFUSED_DTYPES["longdouble"] = _NO_LONGDOUBLE
+    _REFUSED_DTYPES["g"] = _NO_LONGDOUBLE
 
 _NULLABLE_DTYPES: frozenset[str] = frozenset(
     ["boolean"]
