@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: a filter runs on every core
+
+`filter_rows` and `filter_any` were the last two kernels of their size still running on one thread. The reason was structural rather than an oversight. A gather knows where every output row goes before it starts, so it splits by output row and the workers never meet; a filter does not, because where a row lands depends on how many rows before it survived, and a worker handed the middle of the mask has no idea where to write.
+
+Counting answers exactly that. The serial version already made two passes, one to count the kept rows so the output could be allocated once at the right size and one to copy, and the count is per morsel for free. A prefix sum over the per morsel counts is the output position each morsel begins at, and with that the copy is as independent as a gather's, every worker writing a run of output that nobody else touches.
+
+The copy loop is the serial one unchanged, including the trick of writing every row and advancing the cursor by the mask bit rather than branching on it, since the mask is data and the branch predictor cannot learn it. The bound matters more now than it did: a worker stops when it has written the number of rows it counted, and that is what keeps the last speculative write inside its own run instead of in the next worker's first slot.
+
+Nulls in the filtered column were the one part that did not fall out for free, because sixty four output rows share a validity word and two morsels can land in the same one. Rather than synchronize, the copy records a byte per kept row and a third pass packs those into words, which is independent again because a word is sixty four consecutive output rows, and the byte buffer is the size of the answer rather than the size of the input.
+
+Measured on TPC-H q6 at sf1 on a 13900K, which filters two columns of `lineitem` down to a hundred and fourteen thousand rows out of six million: seventeen milliseconds to five and a half. At the other end of the selectivity range, one double column of six million rows kept almost whole is six milliseconds, which is about sixteen gigabytes a second of traffic in and out.
+
+Below `PARALLEL_FILTER_ROWS`, sixty five thousand rows, it stays on one thread and nothing about it changes. That is the threshold the variable width filter already used, and the two routes now share it: they pay for the split differently, one sizing its payload ahead of writing it and the other counting its kept rows, but the two costs come out close enough that a second constant would be a number with nothing behind it.
+
 ### A join on two columns stops being a group by over both tables
 
 `align_keys` had two routes and the fast one was reserved for a single key column. One key builds a dictionary on the shorter side and asks it one question per row of the taller one, which is what a join actually wants. Two keys did something else entirely: concatenate each key column with its opposite number, hand the whole set to `group_ordinals`, and factorize a tuple over the sum of the two heights. On a fact table of ten million rows joined to a dimension of eight thousand, that is a copy of twenty million values and a dictionary built over every distinct pair on both sides, to learn eight thousand of them.
