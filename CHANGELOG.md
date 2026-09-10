@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### The groupby a pandas program can finally reach
+
+`df.groupby("k").sum()` works, along with fourteen more reductions on a frame group and the same fifteen on a narrowed one. Until now 120 rows of the conformance board reported the same sentence, which was that `DataFrame` has no attribute called `groupby`, and behind that sentence the whole implementation was already written and tested. This is the fourth time the gap has been the binding rather than the library.
+
+Nothing in the core changed. `DataFrame.group_by`, `group_agg` and `group_count` were there, `AggKind` has had seventeen reductions since the aggregation work landed, and `reduce.mojo` was already reading twelve pandas method names off the boundary. What is new is one binding, `PyDataFrame.group_agg`, and three more names that a grouped reduction reads on top of the twelve. `size`, `first` and `last` mean something on a group and something else or nothing at all on a whole column, so they live in a second entry point that is the first one plus three rather than a table of its own, which is the arrangement that cannot drift.
+
+`DataFrameGroupBy` and `SeriesGroupBy` are generated from a table of fifteen reductions against ten parameter shapes. Thirty methods that differ in a word and a return type are thirty places for a hand written set to drift, and the shapes are not guesses: `min` and `max` take an engine and `first` and `last` do not, though all four take `numeric_only`, `min_count` and `skipna` before it with the same defaults, and the first version of this table had the four as one shape until the signature board said otherwise on its first run.
+
+`df.groupby(...)` is the one member written by hand rather than generated, because it builds a different class from the one it is written on and the seven arguments have to be read before there is an object to read them into.
+
+Two shapes measured against a running pandas rather than read out of the documentation. `size` with the key in the index is a series with no name at all, and with `as_index=False` it is a two column frame whose count column is called `size`. A `SeriesGroupBy` does not always answer a series either, since `as_index=False` outranks the narrowing and gives back a frame, so every method on that class declares a union and means it.
+
+`groups`, `indices` and `get_group` are absent rather than slow. They are the grouping made visible, and keeping them would mean every group by object holds an index per group whether or not anybody asks, which is the cost this library exists to not pay. `agg`, `apply` and `transform` are absent because each is a piece of work rather than a longer list. `Series.groupby(other)`, grouping by a function and grouping by a mapping are refused with one sentence, since all three need somewhere to put a key that came from outside the frame.
+
+The shared mixin carries a type parameter. Without it the thirty generated methods each declare a return type that resolves to `Any`, which mypy said thirty six times the moment the classes were generated, and a wrapper this thin has to be the shape it says it is. That closes #356.
+
 ### Text and whole numbers read as a column of instants
 
 `firepanda.to_datetime` exists, and with it the first way to build a timestamp column that is not Arrow. Every temporal test in the library until now started by importing pyarrow, and every pandas program starts by calling this, which is the gap it closes.

@@ -83,6 +83,10 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = dataframe.def_method[PyDataFrame.dropna](
         "dropna", docstring="The rows with no missing value in them."
     )
+    _ = dataframe.def_method[PyDataFrame.group_agg](
+        "group_agg",
+        docstring="One reduction applied to every column that is not a key.",
+    )
     _ = dataframe.def_method[PyDataFrame.labels](
         "labels", docstring="The row labels, as an index."
     )
@@ -129,6 +133,9 @@ def register(mut module: PythonModuleBuilder) raises:
     )
     _ = series.def_method[PySeries.label](
         "label", docstring="The name of the column."
+    )
+    _ = series.def_method[PySeries.relabel](
+        "relabel", docstring="A copy of the column under a different name."
     )
     _ = series.def_method[PySeries.dtype](
         "dtype", docstring="The type, as firepanda spells it."

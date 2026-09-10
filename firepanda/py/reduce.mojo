@@ -23,13 +23,22 @@ conversions to say the same thing.
 
 ### The twelve that are here and the five that are not
 
-`AggKind` has seventeen reductions and twelve of them cross. `size`, `first` and
-`last` are grouped shapes that a whole column reduction spells differently or
-not at all, and `corr` and `cov` read a second column, which is a second entry
-point and a question about aligning two indexes that this does not answer yet. A
-name that is not on the list is a bug in the generated table rather than
-something a user typed, because the Python layer never passes a word a user
-wrote.
+`AggKind` has seventeen reductions and twelve of them cross through `reduction`.
+`corr` and `cov` read a second column, which is a second entry point and a
+question about aligning two indexes that this does not answer yet.
+
+The other three, `size`, `first` and `last`, are grouped shapes and are the
+reason for the second entry point below. `first` and `last` on a whole column
+mean something else in pandas, since `s.first` was a date offset selection and
+is gone in version 3, and `size` on a whole column is a row count rather than a
+reduction. On a group all three are ordinary reductions, so `grouped_reduction`
+is `reduction` plus those three rather than a separate table, which is the
+arrangement that cannot drift: a change to how `std` reads its parameter is
+written once and both doors get it.
+
+A name that is not on either list is a bug in the generated table rather than
+something a user typed, because the Python layer holds the pandas vocabulary and
+never passes a word a user wrote straight through.
 """
 
 from firepanda.kernel.group import AggKind
@@ -76,3 +85,36 @@ def reduction(name: String, param: Float64) raises -> AggKind:
     if name == "quantile":
         return AggKind(AggKind.QUANTILE.code, param)
     raise tagged(VALUE, String("unknown reduction ", name))
+
+
+def grouped_reduction(name: String, param: Float64) raises -> AggKind:
+    """Reads the name of a reduction that is being applied to a group.
+
+    Three more names than `reduction` takes, and the same twelve otherwise.
+    `first` and `last` are the first and last row of the group in the frame's own
+    order, which is a reduction only because a group has an order, and `size` is
+    the number of rows in it. None of the three is a whole column reduction, and
+    all three are how pandas spells a grouped one.
+
+    `size` counts rows rather than values, so it is the one name here that does
+    not read the column it is pointed at. The caller decides which column that
+    is and the answer is the same whichever it picks, which is why the frame
+    level `group_count` points it at the first key.
+
+    Args:
+        name: The reduction, as pandas spells the method on a group.
+        param: As `reduction`.
+
+    Returns:
+        The kind, carrying the parameter for the four that use one.
+
+    Raises:
+        Error: Tagged `value`, if the name is not one of the fifteen.
+    """
+    if name == "size":
+        return AggKind.SIZE
+    if name == "first":
+        return AggKind.FIRST
+    if name == "last":
+        return AggKind.LAST
+    return reduction(name, param)

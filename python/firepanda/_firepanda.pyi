@@ -43,6 +43,11 @@ class DataFrame:
     def dropna(self, subset: list[str]) -> DataFrame:
         """The rows with no missing value in them."""
         ...
+    def group_agg(
+        self, by: list[str], kind: str, param: float, dropna: bool, sort: bool, as_index: bool
+    ) -> DataFrame:
+        """One reduction applied to every column that is not a key."""
+        ...
     def labels(self) -> Index:
         """The row labels, as an index."""
         ...
@@ -83,6 +88,9 @@ class Series:
         ...
     def label(self) -> str:
         """The name of the column."""
+        ...
+    def relabel(self, name: str) -> Series:
+        """A copy of the column under a different name."""
         ...
     def dtype(self) -> str:
         """The type, as firepanda spells it."""
