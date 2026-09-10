@@ -86,12 +86,18 @@ from firepanda.array.chunked import ChunkedArray
 from firepanda.array.value import Value
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
-from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.logical import LogicalType, TypeKind
 from firepanda.dtype.schema import Field, Schema
 from firepanda.frame.frame import DataFrame
 from firepanda.hash.grouping import group_ordinals
 from firepanda.hash.lasting import LastingKeys
-from firepanda.join.keys import BuildSide, build_side, probe_side
+from firepanda.join.keys import (
+    BuildSide,
+    build_side,
+    build_side_strings,
+    probe_side,
+    probe_side_strings,
+)
 from firepanda.join.pairs import (
     JoinKind,
     ProbeTable,
@@ -665,14 +671,22 @@ struct Join(Movable):
 
     ## What it will not do
 
-    Right and outer joins are refused, and so is a key that is not a single
-    fixed width column on each side. Both refusals are the same refusal: this
-    node emits a chunk per chunk and nothing else. An outer join has to emit the
-    right rows that nothing matched, which it cannot know until the last chunk
-    has gone past, so it is a breaker wearing this node's clothes. A right join
-    is an outer join's left half by the same argument. A composite or text key
-    needs the ordinal space that `align_keys` builds by concatenating both sides,
-    and concatenating both sides is having them both, which a stream does not.
+    Right and outer joins are refused, and so is a key that is more than one
+    column. Both refusals are the same refusal: this node emits a chunk per chunk
+    and nothing else. An outer join has to emit the right rows that nothing
+    matched, which it cannot know until the last chunk has gone past, so it is a
+    breaker wearing this node's clothes. A right join is an outer join's left
+    half by the same argument. A composite key needs the ordinal space that
+    `align_keys` builds by concatenating both sides, and concatenating both sides
+    is having them both, which a stream does not.
+
+    A text key used to be refused for that same reason and is not any more. It
+    only ever needed the concatenation because the table it had stored a hash and
+    a hash is not an exact answer for a string. A table that compares the bytes
+    on a hash match does not need it, and once one side can be built and read
+    without the other, text is an ordinary key here: build over the right frame,
+    probe with each chunk as it arrives, hand the probe the right frame's key
+    column back so it has the bytes to compare against.
 
     Neither refusal loses anything. A planner that meets one of them uses
     `Materialize` and the whole frame `join_on`, which is what it did before this
@@ -704,6 +718,14 @@ struct Join(Movable):
 
     var _left_at: Int
     """Where the key sits in the chunk, settled by `bind`."""
+
+    var _right_at: Int
+    """Where the key sits in the right frame, settled by `bind`.
+
+    Kept because a text probe has to be handed the column the table was built
+    from, since the views the table kept point into it. A fixed width probe never
+    reads it.
+    """
 
     var _side: BuildSide
     """The right frame's key table, filled by `bind`."""
@@ -751,6 +773,7 @@ struct Join(Movable):
         self.suffix = suffix^
         self.columns = columns^
         self._left_at = -1
+        self._right_at = -1
         self._side = BuildSide()
         self._table = ProbeTable()
         self._absent = List[Bool]()
@@ -768,8 +791,8 @@ struct Join(Movable):
 
         Raises:
             If the kind is one this node does not do, if either key name is
-            missing, if the two keys have different dtypes, if the key is text,
-            or if a projected name is not one the result has.
+            missing, if the two keys have different dtypes, if one is text and
+            the other is not, or if a projected name is not one the result has.
         """
         if self.kind == JoinKind.RIGHT or self.kind == JoinKind.OUTER:
             raise Error(
@@ -784,16 +807,20 @@ struct Join(Movable):
         var here = input.index_of(self.left_on)
         var there = self.right.schema.index_of(self.right_on)
         var dt = self.right.schema[there].dtype.physical
-        if (
-            input[here].dtype.physical != dt
-            or self.right.columns[there].only().is_string()
-        ):
+        # The string test is separate from the dtype test rather than folded into
+        # it, because a string column's physical dtype is its byte type and a
+        # column of bytes has the same one. Without this a text key on one side
+        # and a uint8 key on the other would agree here and then build a table
+        # over the first byte of each view.
+        var mine = self.right.schema[there].dtype.kind == TypeKind.STRING
+        var theirs = input[here].dtype.kind == TypeKind.STRING
+        if input[here].dtype.physical != dt or theirs != mine:
             raise Error(
-                "join: this node needs one fixed width key of the same dtype on"
-                " each side; got "
-                + String(input[here].dtype.physical)
+                "join: this node needs one key of the same dtype on each side;"
+                " got "
+                + ("text" if theirs else String(input[here].dtype.physical))
                 + " and "
-                + String(dt)
+                + ("text" if mine else String(dt))
             )
 
         var rows = self.right.rows
@@ -803,6 +830,7 @@ struct Join(Movable):
         self._side = side^
         self._absent = absent^
         self._left_at = here
+        self._right_at = there
         self._table = bucket_side(
             codes,
             0,
@@ -911,7 +939,13 @@ struct Join(Movable):
 
         ref key = chunk.columns[self._left_at]
         var codes = Array[DType.uint32](overwritten=rows)
-        _probe_key(self._side, key, codes, spread)
+        _probe_key(
+            self._side,
+            self.right.columns[self._right_at].only(),
+            key,
+            codes,
+            spread,
+        )
         var absent = _key_nulls(key, rows)
         var matched = Bitmap(0, all_valid=False)
         var pairs = pair_probe(
@@ -1001,23 +1035,26 @@ def _build_key(
         codes: Filled with one ordinal per row of it.
 
     Returns:
-        The table, ready to probe.
+        The table, ready to probe. A text one has to be probed with the same
+        column handed back, because the views it kept point into it.
 
     Raises:
-        If the dtype is text or has no fixed width layout.
+        If the dtype has no fixed width layout and is not text.
     """
     # Before the dispatch, because uint8 is in ALL and a string column would
     # match it and build a table over the first byte of each view.
-    if not key.is_string():
-        comptime for candidate in ALL:
-            if key.dtype() == candidate:
-                ref view = key.as_typed_view[candidate]()
-                return build_side[candidate](view, 0, codes)
+    if key.is_string():
+        return build_side_strings(key.strings(), 0, codes)
+    comptime for candidate in ALL:
+        if key.dtype() == candidate:
+            ref view = key.as_typed_view[candidate]()
+            return build_side[candidate](view, 0, codes)
     raise Error("join: no key table for dtype " + String(key.dtype()))
 
 
 def _probe_key(
     built: BuildSide,
+    source: AnyArray,
     key: AnyArray,
     mut codes: Array[DType.uint32],
     spread: Bool = True,
@@ -1026,19 +1063,25 @@ def _probe_key(
 
     Args:
         built: The table the build side filled.
+        source: The column the table was built from. Read only on the text
+            route, where the views the table kept point into it and the
+            comparison needs its bytes. Ignored otherwise.
         key: The probe side's key column.
         codes: Filled with one ordinal per row of it.
         spread: Whether the probe may use more than one core.
 
     Raises:
-        If the dtype is text, has no fixed width layout, or is not the one the
-        table was built from.
+        If the dtype has no fixed width layout and is not text, or is not the
+        one the table was built from.
     """
-    if not key.is_string():
-        comptime for candidate in ALL:
-            if key.dtype() == candidate:
-                ref view = key.as_typed_view[candidate]()
-                return probe_side[candidate](built, view, 0, codes, spread)
+    if key.is_string():
+        return probe_side_strings(
+            built, source.strings(), key.strings(), 0, codes, spread
+        )
+    comptime for candidate in ALL:
+        if key.dtype() == candidate:
+            ref view = key.as_typed_view[candidate]()
+            return probe_side[candidate](built, view, 0, codes, spread)
     raise Error("join: no key table for dtype " + String(key.dtype()))
 
 

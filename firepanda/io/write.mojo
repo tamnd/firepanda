@@ -25,6 +25,7 @@ from std.collections.span import Span
 from firepanda.array import AnyArray
 from firepanda.dtype import ALL
 from firepanda.frame import DataFrame
+from firepanda.kernel.temporal import instant_text
 
 from .scan import Dialect, default_dialect, NEWLINE
 
@@ -116,6 +117,14 @@ def cell_text(column: AnyArray, i: Int) raises -> String:
         return String("")
     if column.is_string():
         return column.strings()[i]
+    # Before the layout dispatch below, because a date is laid out as an int32
+    # and a timestamp as an int64, and falling through would write the day count
+    # instead of the day. A reader parsing that back gets an integer where the
+    # schema promised a date, so the round trip this file's docstring claims for
+    # nulls would not hold for dates.
+    var instant = instant_text(column, i)
+    if instant:
+        return instant.take()
     if column.dtype() == DType.bool:
         var value = (
             column.unsafe_ptr[DType.bool]().unsafe_offset(i).unsafe_load()

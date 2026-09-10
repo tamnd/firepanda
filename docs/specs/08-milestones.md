@@ -4,7 +4,7 @@ This document commits to an order, not to a calendar. There are no durations in 
 
 Where relative size matters it is stated in relative terms. M6 is the largest by volume and the smallest by risk. M4 is the hardest. M0 is the smallest and the one whose mistakes are most expensive later.
 
-The engine track is M0 through M11 and it is what produces a defensible 1.0. There is no separate bindings track, because the bindings are M3 and they are in the middle of the engine work rather than beside it.
+The engine track is M0 through M11, with M4b between M4 and M5, and it is what produces a defensible 1.0. There is no separate bindings track, because the bindings are M3 and they are in the middle of the engine work rather than beside it.
 
 M0 through M3 produces something a Python user can `pip install` and form an opinion about. That is the point at which the project either proves itself or should be stopped.
 
@@ -108,6 +108,18 @@ Done when every optimizer pass has a test asserting on `explain()` output, becau
 
 The risk is that a wrong query plan still returns a plausible looking result. The defence is that the M1 test suite becomes the differential oracle, which is only true if it was written well, which is why M1 is deliberately oversized for what it delivers.
 
+## M4b, SQL, the DuckDB dialect
+
+Pulled forward from M11. The full argument is in `docs/specs/sql/12-stages.md` and the short version is three sentences. DuckDB published its SQL grammar as forty MIT licensed `.gram` files in August 2026, so the compatibility half of the work is now vendoring 61 KB of declarative text and generating a matcher from it rather than reverse engineering a Bison grammar and a hand written transformer. M4 and this milestone build the same logical plan and the same optimizer, so leaving SQL at M11 risks building both twice. And SQL is a consumer of the plan that cannot be changed to suit it, which is what makes the plan right the first time.
+
+Vendor the grammar and generate the rule table. Write the tokenizer and the PEG matcher with selective memoization. Write the AST, the transformer for the analytical `SELECT` surface, and the refusal table that names every statement we parse and do not run. Write the binder, the catalog as a session namespace, the type lattice with decimals and 128 bit integers, and the tier one function registry at around 150 names. Lower to the same `LogicalPlan` M4 builds. Add the physical operators the plan needs and the dataframe surface also wants. Ship `sql()`, `df.sql()`, `query()`, `eval()`, the prepared statement cache, the CLI and the ADBC driver.
+
+The nine stages S0 through S8 are in `docs/specs/sql/12-stages.md` with exit criteria on each, and the tracking issue is #304.
+
+Done when the parse differential harness agrees with DuckDB on accept against reject across all 4,046 files of its test corpus. Done when all 22 TPC-H queries return correct results at SF10 and the per directory conformance rate is published in the README, generated from the harness rather than typed. Done when the physical plan from `sql()` is structurally equal to the plan from the equivalent dataframe chain for every one of the 22 queries. Done when peak RSS is within 1.2x of DuckDB on every SF10 query, and when a small statement over a registered frame completes end to end in under 100 microseconds.
+
+The risk is scope. DuckDB has 948 distinct function names and we implement about 150 of them, so the refusal table is not a fallback, it is the deliverable that keeps the compatibility number honest. The counter risk is that this delays M6, which is the product's headline claim, and the reassessment point after M3 is where that gets decided rather than assumed.
+
 ## M5, Parallel execution
 
 Build the morsel driven scheduler over `parallelize` with a worker pool sized to the physical core count and work stealing. Build partitioned hash aggregation where each worker owns a private table over a radix partition of the key space. Parallelize the joins and the sort. Add late materialization through selection vectors. Thread the cancellation flag through to morsel boundaries.
@@ -166,24 +178,24 @@ Done when db-benchmark at 50 GB completes within a memory budget smaller than th
 
 Highest effort, least parity value. Ship 1.0 without it if anything is pressing, since nothing earlier depends on it.
 
-## M11, SQL, remaining IO, and 1.0
+## M11, Remaining IO, and 1.0
 
-Build `firepanda.sql()`, parsing into the same logical plan so the optimizer is shared, plus `query()` and `eval()` for pandas parity, and an ADBC driver. Add the remaining IO formats marked M11 in document 06: SQL, ORC, fixed width, Excel, HTML, XML and clipboard.
+The SQL work moved to M4b. What is left here is the remaining IO formats marked M11 in document 06: SQL, ORC, fixed width, Excel, HTML, XML and clipboard.
 
 Then the API review and freeze, the complete docstring coverage with runnable examples, and the migration guide for pandas users organized by pandas function name.
 
-Done when all 22 TPC-H queries run correctly at SF10 with published timings against DuckDB, Polars and MojoFrame. Done when the public API is frozen and every exported symbol is documented. Done when every checkbox in document 06 outside the explicitly post 1.0 sections is ticked.
+Done when the TPC-H timings from M4b are republished at SF10 against DuckDB, Polars and MojoFrame with peak memory beside each. Done when the public API is frozen and every exported symbol is documented. Done when every checkbox in document 06 outside the explicitly post 1.0 sections is ticked.
 
 # Dependencies
 
 ```
 M0 -> M1 -> M2 -> M3 (publish)
              |
-             +--> M4 -> M5 -> M8
-                   |     |     |
-                   |     +-----+---> M9
-                   |     |
-                   |     +---------> M10
+             +--> M4 -> M4b (SQL) -> M5 -> M8
+                   |                  |     |
+                   |                  +-----+---> M9
+                   |                  |
+                   |                  +---------> M10
                    |
                    +--> M6 -> M7 -----------> M11
 
@@ -193,11 +205,15 @@ pandas differential testing: continuous from M1
 
 M6 and M7 are surface area. M8, M9 and M10 are performance. They are independent of each other after M5, they need different skills, and with more than one contributor that is the natural split.
 
+M4b sits between M4 and M5 because it shares M4's plan and optimizer and because M5's parallel breakers are what the SQL benchmarks need at SF10. It is not on M6's path, so a contributor working on pandas parity is not blocked by it.
+
 # Four points to stop and reassess
 
 **After M2: does the Arrow bridge work well enough that being incomplete is survivable?** If handing a frame to DuckDB is not genuinely zero copy and genuinely easy, the whole plan is built on a false assumption and every later milestone gets harder rather than easier.
 
 **After M3: does `pip install firepanda` work, and does anyone do it?** Two questions and both are gates. If the wheel cannot be made self contained, the project has a distribution problem that no amount of engine work fixes. If it works and nobody installs it, that is the cheapest signal about demand this project will ever get, and it costs four milestones to obtain rather than twelve.
+
+This gate also decides M4b against M6. If the early users ask for SQL, M4b runs where the graph puts it. If they ask for the pandas surface and do not mention SQL, M6 goes first and the SQL work returns to its old slot after M7. Either way the logical plan built in M4 is the one specified in `docs/specs/sql/08-plan-and-optimizer.md`, because that costs nothing extra and it is what prevents a rewrite under either ordering.
 
 **After M5: is the engine within 4x of Polars on db-benchmark?** By here the kernels are vectorized, the executor is parallel and the optimizer exists. If the answer is no, the problem is architectural, and M8 will not rescue it. The numbers to answer it with are already in `firepanda-bench` because it has been running since M1.
 
