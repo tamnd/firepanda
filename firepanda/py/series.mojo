@@ -28,9 +28,9 @@ from firepanda.py.convert import array_capsule, schema_capsule
 from firepanda.py.index import PyIndex
 from firepanda.py.errors import DTYPE, UNSUPPORTED, VALUE, retagged, tagged
 from firepanda.py.ops import (
+    binary_failure,
     binary_op,
     constant,
-    binary_tag,
     constant_tag,
     fill,
     unary_op,
@@ -633,7 +633,8 @@ struct PySeries(Movable, Writable):
                 operation is not defined on the two dtypes.
         """
         var right = Self._other(other, "other")
-        var which = binary_op(words(op, "op"))
+        var spelling = words(op, "op")
+        var which = binary_op(spelling)
         var filled = fill(fill_value)
         var flipped = flag(flip, "flip")
         try:
@@ -651,7 +652,7 @@ struct PySeries(Movable, Writable):
             mine.append(Self._held(py_self)[].series[].logical())
             var theirs = List[LogicalType](capacity=1)
             theirs.append(right[].logical())
-            raise retagged(binary_tag(which, mine, theirs), cause)
+            raise binary_failure(spelling, which, mine, theirs, cause)
 
     @staticmethod
     def binary_value(
