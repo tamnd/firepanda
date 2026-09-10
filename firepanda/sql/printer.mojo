@@ -39,6 +39,7 @@ from .ast import (
     EXPR_COLLATE,
     EXPR_COLUMN,
     EXPR_EXISTS,
+    EXPR_FRAME,
     EXPR_FUNCTION,
     EXPR_IN,
     EXPR_IN_SUBQUERY,
@@ -49,6 +50,13 @@ from .ast import (
     EXPR_STRUCT,
     EXPR_SUBQUERY,
     EXPR_UNARY,
+    EXPR_WINDOW,
+    BOUND_CURRENT_ROW,
+    BOUND_FOLLOWING,
+    BOUND_NONE,
+    BOUND_PRECEDING,
+    BOUND_UNBOUNDED_FOLLOWING,
+    BOUND_UNBOUNDED_PRECEDING,
     CALL_DISTINCT,
     CALL_STAR,
     CLAUSE_FROM,
@@ -57,6 +65,15 @@ from .ast import (
     CLAUSE_PROJECTION,
     CLAUSE_QUALIFY,
     CLAUSE_WHERE,
+    CLAUSE_WINDOW,
+    EXCLUDE_CURRENT_ROW,
+    EXCLUDE_GROUP,
+    EXCLUDE_NONE,
+    EXCLUDE_NO_OTHERS,
+    EXCLUDE_TIES,
+    FRAME_GROUPS,
+    FRAME_RANGE,
+    FRAME_ROWS,
     GROUP_ALL,
     GROUP_CUBE,
     GROUP_EMPTY,
@@ -72,6 +89,10 @@ from .ast import (
     LITERAL_STRING,
     MATERIALIZE_NO,
     MATERIALIZE_YES,
+    frame_end,
+    frame_exclude,
+    frame_mode,
+    frame_start,
     NO_NODE,
     NULLS_FIRST,
     NULLS_LAST,
@@ -95,6 +116,7 @@ from .ast import (
     STMT_SET_OPERATION,
     STMT_TABLE,
     STMT_VALUES,
+    STMT_WINDOW,
 )
 from .generated.keywords import (
     KEYWORD_COLUMN_NAME,
@@ -466,6 +488,7 @@ def _write_step(
             out += "("
             if item.a & CALL_STAR != 0:
                 out += "*)"
+                _write_over(ast, item.b, grammar, out)
                 return
             if item.a & CALL_DISTINCT != 0:
                 out += "DISTINCT "
@@ -473,6 +496,7 @@ def _write_step(
             return
         if phase == count + 1:
             out += ")"
+            _write_over(ast, item.b, grammar, out)
             return
         var argument = phase - 1
         if argument > 0:
@@ -669,7 +693,172 @@ def _write_step(
         out += "))"
         return
 
+    if kind == EXPR_WINDOW:
+        _write_window(ast, node, grammar, out)
+        return
+
+    if kind == EXPR_FRAME:
+        _write_frame(ast, node, grammar, out)
+        return
+
     raise Error(String("the printer has no case for expression kind ", kind))
+
+
+def _write_over(
+    ast: Ast, node: UInt32, grammar: Grammar, mut out: String
+) raises:
+    """Appends the `OVER` a call carries, if it carries one.
+
+    Args:
+        ast: The AST.
+        node: The `EXPR_WINDOW`, or 0 for a call with no `OVER`.
+        grammar: A loaded grammar.
+        out: The buffer.
+
+    Raises:
+        Error: If the window could not be printed.
+    """
+    if node == NO_NODE:
+        return
+    out += " OVER "
+    _write_window(ast, node, grammar, out)
+
+
+def _write_window(
+    ast: Ast, node: UInt32, grammar: Grammar, mut out: String
+) raises:
+    """Appends one window specification, parentheses and all.
+
+    The calls back into `_write` here are recursive, for the reason the star
+    modifiers are: getting to a window costs a parenthesis in the query text
+    and the matcher caps how many of those there can be, so the depth is
+    bounded by what somebody typed.
+
+    `OVER w` comes out as `OVER (w)`, because the AST records that a window is
+    a name and not which of the two spellings it was written in, and the two
+    mean the same thing.
+
+    Args:
+        ast: The AST.
+        node: The index in the expression arena.
+        grammar: A loaded grammar.
+        out: The buffer.
+
+    Raises:
+        Error: If the node is not a window, or could not be printed.
+    """
+    if node == NO_NODE:
+        raise Error("the printer was handed the null expression")
+    ref item = ast.exprs[Int(node)]
+    if item.kind != EXPR_WINDOW:
+        raise Error(String("a window holding expression kind ", item.kind))
+    out += "("
+    var written = False
+    if item.payload != NO_NODE:
+        out += quote_name(ast.text(item.payload), grammar)
+        written = True
+    for i in range(ast.length(item.children)):
+        if i == 0:
+            out += " PARTITION BY " if written else "PARTITION BY "
+            written = True
+        else:
+            out += ", "
+        _write(ast, ast.at(item.children, i), grammar, out)
+    for i in range(ast.length(item.a)):
+        if i == 0:
+            out += " ORDER BY " if written else "ORDER BY "
+            written = True
+        else:
+            out += ", "
+        _write_order(ast, ast.at(item.a, i), grammar, out)
+    if item.b != NO_NODE:
+        if written:
+            out += " "
+        _write_frame(ast, item.b, grammar, out)
+    out += ")"
+
+
+def _write_frame(
+    ast: Ast, node: UInt32, grammar: Grammar, mut out: String
+) raises:
+    """Appends the `ROWS`, `RANGE` or `GROUPS` clause of a window.
+
+    Args:
+        ast: The AST.
+        node: The index in the expression arena.
+        grammar: A loaded grammar.
+        out: The buffer.
+
+    Raises:
+        Error: If the node is not a frame, or carries a tag this does not know.
+    """
+    if node == NO_NODE:
+        raise Error("the printer was handed the null expression")
+    ref item = ast.exprs[Int(node)]
+    if item.kind != EXPR_FRAME:
+        raise Error(String("a frame holding expression kind ", item.kind))
+    var tags = item.payload
+    var mode = frame_mode(tags)
+    if mode == FRAME_ROWS:
+        out += "ROWS "
+    elif mode == FRAME_RANGE:
+        out += "RANGE "
+    elif mode == FRAME_GROUPS:
+        out += "GROUPS "
+    else:
+        raise Error(String("the printer has no case for framing ", mode))
+
+    var end = frame_end(tags)
+    if end != BOUND_NONE:
+        out += "BETWEEN "
+    _write_bound(ast, frame_start(tags), item.a, grammar, out)
+    if end != BOUND_NONE:
+        out += " AND "
+        _write_bound(ast, end, item.b, grammar, out)
+
+    var exclude = frame_exclude(tags)
+    if exclude == EXCLUDE_CURRENT_ROW:
+        out += " EXCLUDE CURRENT ROW"
+    elif exclude == EXCLUDE_GROUP:
+        out += " EXCLUDE GROUP"
+    elif exclude == EXCLUDE_TIES:
+        out += " EXCLUDE TIES"
+    elif exclude == EXCLUDE_NO_OTHERS:
+        out += " EXCLUDE NO OTHERS"
+    elif exclude != EXCLUDE_NONE:
+        raise Error(String("the printer has no case for exclusion ", exclude))
+
+
+def _write_bound(
+    ast: Ast, tag: UInt32, at: UInt32, grammar: Grammar, mut out: String
+) raises:
+    """Appends one end of a frame.
+
+    Args:
+        ast: The AST.
+        tag: One of the `BOUND_` constants.
+        at: The bound's expression, for the two tags that have one.
+        grammar: A loaded grammar.
+        out: The buffer.
+
+    Raises:
+        Error: If the tag is not one this knows, or the count is missing.
+    """
+    if tag == BOUND_CURRENT_ROW:
+        out += "CURRENT ROW"
+        return
+    if tag == BOUND_UNBOUNDED_PRECEDING:
+        out += "UNBOUNDED PRECEDING"
+        return
+    if tag == BOUND_UNBOUNDED_FOLLOWING:
+        out += "UNBOUNDED FOLLOWING"
+        return
+    if tag != BOUND_PRECEDING and tag != BOUND_FOLLOWING:
+        raise Error(String("the printer has no case for frame bound ", tag))
+    if at == NO_NODE:
+        raise Error("a counted frame bound with no count on it")
+    _write(ast, at, grammar, out)
+    out += " PRECEDING" if tag == BOUND_PRECEDING else " FOLLOWING"
 
 
 def _write_stmt(
@@ -832,10 +1021,41 @@ def _write_query(
         out += " HAVING "
         _write(ast, having, grammar, out)
 
+    # Before the `QUALIFY` and not after it, because that is the order
+    # `SimpleSelect` puts them in and the printed text has to parse again.
+    var windows = ast.slot(clauses, CLAUSE_WINDOW)
+    for i in range(ast.length(windows)):
+        out += ", " if i > 0 else " WINDOW "
+        _write_window_definition(ast, ast.at(windows, i), grammar, out)
+
     var qualify = ast.slot(clauses, CLAUSE_QUALIFY)
     if qualify != NO_NODE:
         out += " QUALIFY "
         _write(ast, qualify, grammar, out)
+
+
+def _write_window_definition(
+    ast: Ast, node: UInt32, grammar: Grammar, mut out: String
+) raises:
+    """Appends one entry of a `WINDOW` clause.
+
+    Args:
+        ast: The AST.
+        node: The index in the statement arena.
+        grammar: A loaded grammar.
+        out: The buffer.
+
+    Raises:
+        Error: If the node is not a window definition, or could not be printed.
+    """
+    if node == NO_NODE:
+        raise Error("the printer was handed the null statement")
+    ref item = ast.stmts[Int(node)]
+    if item.kind != STMT_WINDOW:
+        raise Error(String("a WINDOW holding statement kind ", item.kind))
+    out += quote_name(ast.text(item.payload), grammar)
+    out += " AS "
+    _write_window(ast, item.a, grammar, out)
 
 
 def _write_item(

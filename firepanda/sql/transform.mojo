@@ -49,12 +49,26 @@ this much control flow in it hangs the compiler outright, which is #369.
 
 from .ast import (
     Ast,
+    BOUND_CURRENT_ROW,
+    BOUND_FOLLOWING,
+    BOUND_NONE,
+    BOUND_PRECEDING,
+    BOUND_UNBOUNDED_FOLLOWING,
+    BOUND_UNBOUNDED_PRECEDING,
     CALL_DISTINCT,
     CALL_STAR,
+    EXCLUDE_CURRENT_ROW,
+    EXCLUDE_GROUP,
+    EXCLUDE_NONE,
+    EXCLUDE_NO_OTHERS,
+    EXCLUDE_TIES,
     EXPR_COLUMN,
     EXPR_FUNCTION,
     EXPR_STAR,
     Expr,
+    FRAME_GROUPS,
+    FRAME_RANGE,
+    FRAME_ROWS,
     GROUP_ALL,
     GROUP_CUBE,
     GROUP_EMPTY,
@@ -300,6 +314,24 @@ implementation is one sentence of English does not need an action byte and a
 dispatch arm of its own. It needs a row in a table.
 """
 
+comptime _WINDOW_NAME: UInt8 = 63
+"""`OVER w` and `OVER (w)`, a window that is nothing but a name."""
+
+comptime _WINDOW_CONTENTS: UInt8 = 64
+"""`WindowFrameContents`, the `PARTITION BY`, `ORDER BY` and frame."""
+
+comptime _WINDOW_NAMED: UInt8 = 65
+"""`WindowFrameNameContents`, the same with a base window name in front."""
+
+comptime _FRAME: UInt8 = 66
+"""`FrameClause`, the `ROWS`, `RANGE` or `GROUPS` inside a window."""
+
+comptime _WINDOW_LIST: UInt8 = 67
+"""`WindowClause`, the `WINDOW w AS (...)` that trails a `SELECT`."""
+
+comptime _WINDOW_DEFINITION: UInt8 = 68
+"""`WindowDefinition`, one name and one window in that clause."""
+
 # A marker is a rule that builds nothing. The rule above it reads it directly,
 # and the byte is here so that rule can pick it out of its siblings with the
 # same array lookup the dispatch uses. The alternative is guessing from a
@@ -518,6 +550,16 @@ struct Transform(Movable):
             "Parens_SelectStatementInternal",
             "Parens_SimpleSelect",
             "Parens_TableRef",
+            # The window side. Every one of these is a name the grammar needed
+            # so it could say `Parens(...)` or offer alternatives, and each one
+            # has exactly one child.
+            "OverClause",
+            "WindowFrame",
+            "WindowFrameDefinition",
+            "WindowFrameNameContentsParens",
+            "WindowFrameContentsParens",
+            "Parens_WindowFrameNameContents",
+            "Parens_WindowFrameContents",
         ]
         for name in descends:
             self._set(grammar, name, _DESCEND)
@@ -602,6 +644,17 @@ struct Transform(Movable):
         self._set(grammar, "ValuesClause", _VALUES)
         self._set(grammar, "ValuesExpressions", _VALUES_ROW)
         self._set(grammar, "TableStatement", _TABLE_STATEMENT)
+
+        # The window side. `WindowFrame` is the three spellings of what follows
+        # `OVER`, and the two that are nothing but a name go to the same form,
+        # which tells them apart by whether there is a parenthesis in front.
+        self._set(grammar, "IdentifierWindowFrame", _WINDOW_NAME)
+        self._set(grammar, "ParensIdentifier", _WINDOW_NAME)
+        self._set(grammar, "WindowFrameContents", _WINDOW_CONTENTS)
+        self._set(grammar, "WindowFrameNameContents", _WINDOW_NAMED)
+        self._set(grammar, "FrameClause", _FRAME)
+        self._set(grammar, "WindowClause", _WINDOW_LIST)
+        self._set(grammar, "WindowDefinition", _WINDOW_DEFINITION)
 
         # `Statement` is thirty seven alternatives and one of them is the one
         # firepanda runs. It descends into whichever matched, and every other
@@ -1135,6 +1188,24 @@ struct Transform(Movable):
                 tree, sql, node, STATEMENT_NEVER, _word(tree, sql, node)
             )
 
+        if action == _WINDOW_NAME:
+            return self._window_name(tree, sql, node, ast)
+
+        if action == _WINDOW_CONTENTS:
+            return self._window_contents(tree, sql, node, ast, work, "")
+
+        if action == _WINDOW_NAMED:
+            return self._window_named(tree, sql, node, ast, work)
+
+        if action == _FRAME:
+            return self._frame(tree, sql, node, ast, work)
+
+        if action == _WINDOW_LIST:
+            return self._collect(tree, self._items(tree, node), ast, work)
+
+        if action == _WINDOW_DEFINITION:
+            return self._window_definition(tree, sql, node, ast, work)
+
         if action == _REFUSE:
             # The first word goes along whether the message has a slot for it or
             # not, because `filled` drops it when there is no `{}` and most of
@@ -1613,16 +1684,28 @@ struct Transform(Movable):
         Raises:
             Error: If the call carries a modifier this has no case for.
         """
+        # `FunctionExpression <- FunctionIdentifier FunctionExpressionArguments
+        # WithinGroupClause? FilterClause? ExportClause? OverClause?`. The four
+        # optional ones are told apart by their first word rather than by
+        # position, because any of them can be absent and then the rest move up.
         var kids = tree.children(node)
         var at = tree.nodes[Int(node)].token_start
-        if len(kids) > 2:
+        var over = NO_NODE
+        for i in range(2, len(kids)):
+            if _word(tree, sql, kids[i]) == "OVER":
+                over = kids[i]
+                continue
             raise _unsupported(
                 tree,
                 sql,
-                kids[2],
+                kids[i],
                 CALL_MODIFIER,
-                _word(tree, sql, kids[2]),
+                _word(tree, sql, kids[i]),
             )
+        if over != NO_NODE:
+            var only = List[UInt32]()
+            only.append(over)
+            work.warm(only)
 
         var parts = self._parts(tree, sql, self._only(tree, kids[0]))
         var names = List[UInt32]()
@@ -1671,6 +1754,7 @@ struct Transform(Movable):
                 kind=EXPR_FUNCTION,
                 token=at,
                 a=flags,
+                b=work.value(over) if over != NO_NODE else NO_NODE,
                 children=ast.run(arguments),
                 payload=ast.run(names),
             )
@@ -2382,6 +2466,7 @@ struct Transform(Movable):
         var grouping = NO_NODE
         var having = NO_NODE
         var qualify = NO_NODE
+        var windows = NO_NODE
         for i in range(1, len(kids)):
             var lead = _word(tree, sql, kids[i])
             if lead == "WHERE":
@@ -2392,6 +2477,8 @@ struct Transform(Movable):
                 having = kids[i]
             elif lead == "QUALIFY":
                 qualify = kids[i]
+            elif lead == "WINDOW":
+                windows = kids[i]
             elif self._marked(tree, kids[i], _MARK_SAMPLE):
                 raise _unsupported(tree, sql, kids[i], SELECT_SAMPLE)
             else:
@@ -2407,6 +2494,8 @@ struct Transform(Movable):
             wanted.append(having)
         if qualify != NO_NODE:
             wanted.append(qualify)
+        if windows != NO_NODE:
+            wanted.append(windows)
         work.warm(wanted)
 
         var parts = work.value(block)
@@ -2422,6 +2511,9 @@ struct Transform(Movable):
         var grouped = List[UInt32]()
         if grouping != NO_NODE:
             grouped = ast.items(work.value(grouping))
+        var named = List[UInt32]()
+        if windows != NO_NODE:
+            named = ast.items(work.value(windows))
         return ast.query(
             projection,
             ast.items(ast.slot(parts, _BLOCK_TABLES)),
@@ -2431,6 +2523,7 @@ struct Transform(Movable):
             work.value(qualify) if qualify != NO_NODE else NO_NODE,
             flags,
             distinct_on,
+            named,
             tree.nodes[Int(node)].token_start,
         )
 
@@ -3171,6 +3264,297 @@ struct Transform(Movable):
             )
             return NULLS_LAST if text == "NULLS LAST" else NULLS_FIRST
         return NULLS_DEFAULT
+
+    def _window_name(
+        self, tree: Parse, sql: StringSlice, node: UInt32, mut ast: Ast
+    ) raises -> UInt32:
+        """Builds `OVER w` or `OVER (w)`, which are the same window.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `IdentifierWindowFrame` or `ParensIdentifier` node.
+            ast: Where to put the nodes.
+
+        Returns:
+            The expression node.
+
+        Raises:
+            Error: If the name is a dotted one, which a window is not.
+        """
+        # `IdentifierWindowFrame <- Identifier` and
+        # `ParensIdentifier <- Parens(Identifier)`, so the identifier is one
+        # step down or two, and the parenthesis says which.
+        var inner = self._only(tree, node)
+        if _first_byte(tree, sql, node) == _LEFT_PAREN:
+            inner = self._only(tree, inner)
+        return ast.window(
+            base=self._plain(tree, sql, inner),
+            token=tree.nodes[Int(node)].token_start,
+        )
+
+    def _window_named(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds a window written on top of a named one.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `WindowFrameNameContents` node.
+            ast: Where to put the nodes.
+            work: The walk, for the parts.
+
+        Returns:
+            The expression node.
+
+        Raises:
+            Error: If a part is one this has no case for.
+        """
+        # `WindowFrameNameContents <- BaseWindowName? WindowFrameContents`, and
+        # the contents are the last child either way. The name is read here and
+        # the contents are built by the same form that builds a window with no
+        # name in front of it, so there is one place that knows the three
+        # clauses and it is not this one.
+        var kids = tree.children(node)
+        var base = String()
+        if len(kids) > 1:
+            base = self._plain(tree, sql, self._only(tree, kids[0]))
+        return self._window_contents(
+            tree, sql, kids[len(kids) - 1], ast, work, base
+        )
+
+    def _window_contents(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+        base: StringSlice,
+    ) raises -> UInt32:
+        """Builds the three clauses a window is made of.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `WindowFrameContents` node.
+            ast: Where to put the nodes.
+            work: The walk, for the partition, the order and the frame.
+            base: The named window this one starts from, empty for none.
+
+        Returns:
+            The expression node.
+
+        Raises:
+            Error: If a clause is one this has no case for.
+        """
+        # `WindowFrameContents <- WindowPartition? OrderByClause? FrameClause?`,
+        # all three optional, so `OVER ()` gets here with no children at all.
+        var partition = List[UInt32]()
+        var ordering = NO_NODE
+        var frame = NO_NODE
+        for kid in tree.children(node):
+            var lead = _word(tree, sql, kid)
+            if lead == "PARTITION":
+                partition = self._items(tree, kid)
+            elif lead == "ORDER":
+                ordering = kid
+            else:
+                frame = kid
+
+        var wanted = partition.copy()
+        if ordering != NO_NODE:
+            wanted.append(ordering)
+        if frame != NO_NODE:
+            wanted.append(frame)
+        work.warm(wanted)
+
+        var by = List[UInt32]()
+        for item in partition:
+            by.append(work.value(item))
+        return ast.window(
+            by,
+            ast.items(work.value(ordering)) if ordering
+            != NO_NODE else List[UInt32](),
+            work.value(frame) if frame != NO_NODE else NO_NODE,
+            base,
+            tree.nodes[Int(node)].token_start,
+        )
+
+    def _window_definition(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds one entry of a `WINDOW` clause.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `WindowDefinition` node.
+            ast: Where to put the nodes.
+            work: The walk, for the window itself.
+
+        Returns:
+            The statement node.
+
+        Raises:
+            Error: If the window is one this has no case for.
+        """
+        # `WindowDefinition <- Identifier 'AS' WindowFrameDefinition`.
+        var kids = tree.children(node)
+        return ast.window_definition(
+            self._plain(tree, sql, kids[0]),
+            work.value(kids[1]),
+            tree.nodes[Int(node)].token_start,
+        )
+
+    def _frame(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+    ) raises -> UInt32:
+        """Builds the `ROWS`, `RANGE` or `GROUPS` clause of a window.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `FrameClause` node.
+            ast: Where to put the nodes.
+            work: The walk, for the expression on a counted bound.
+
+        Returns:
+            The expression node.
+
+        Raises:
+            Error: If a bound or an exclusion is one this has no case for.
+        """
+        # `FrameClause <- Framing FrameExtent WindowExcludeClause?`.
+        var kids = tree.children(node)
+        var mode = FRAME_RANGE
+        var framing = _word(tree, sql, kids[0])
+        if framing == "ROWS":
+            mode = FRAME_ROWS
+        elif framing == "GROUPS":
+            mode = FRAME_GROUPS
+
+        # `FrameExtent <- BetweenFrameExtent / SingleFrameExtent`, and the two
+        # are told apart by the word, because `BETWEEN` is the whole difference.
+        var extent = self._only(tree, kids[1])
+        var bounds = tree.children(extent)
+        var between = _word(tree, sql, extent) == "BETWEEN"
+
+        var start_at = self._bound_expression(tree, bounds[0])
+        var end_at = NO_NODE
+        if between:
+            end_at = self._bound_expression(tree, bounds[1])
+        var wanted = List[UInt32]()
+        if start_at != NO_NODE:
+            wanted.append(start_at)
+        if end_at != NO_NODE:
+            wanted.append(end_at)
+        work.warm(wanted)
+
+        return ast.frame(
+            mode,
+            self._bound(tree, sql, bounds[0]),
+            self._bound(tree, sql, bounds[1]) if between else BOUND_NONE,
+            self._exclude(tree, sql, kids),
+            work.value(start_at) if start_at != NO_NODE else NO_NODE,
+            work.value(end_at) if end_at != NO_NODE else NO_NODE,
+            tree.nodes[Int(node)].token_start,
+        )
+
+    def _bound_expression(self, tree: Parse, node: UInt32) raises -> UInt32:
+        """The expression a frame bound counts by, for the two that have one.
+
+        Args:
+            tree: The parse.
+            node: The `FrameBound` node.
+
+        Returns:
+            The `Expression` parse node, or 0 for a bound written in keywords.
+
+        Raises:
+            Error: If the bound has nothing under it.
+        """
+        # `FrameBound <- FrameUnbounded / FrameCurrentRow / FrameExpression`,
+        # and only the last of the three starts with an expression.
+        var form = self._only(tree, node)
+        var kids = tree.children(form)
+        return kids[0] if len(kids) > 1 else NO_NODE
+
+    def _bound(
+        self, tree: Parse, sql: StringSlice, node: UInt32
+    ) raises -> UInt32:
+        """Reads the tag off one frame bound.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `FrameBound` node.
+
+        Returns:
+            One of the `BOUND_` constants.
+
+        Raises:
+            Error: If the bound has nothing under it.
+        """
+        var form = self._only(tree, node)
+        var lead = _word(tree, sql, form)
+        if lead == "CURRENT":
+            return BOUND_CURRENT_ROW
+        # The direction is the last child either way, because `FrameUnbounded`
+        # is `'UNBOUNDED' PrecedingOrFollowing` and `FrameExpression` is
+        # `Expression PrecedingOrFollowing`.
+        var kids = tree.children(form)
+        var forward = _word(tree, sql, kids[len(kids) - 1]) == "FOLLOWING"
+        if lead == "UNBOUNDED":
+            return (
+                BOUND_UNBOUNDED_FOLLOWING if forward else BOUND_UNBOUNDED_PRECEDING
+            )
+        return BOUND_FOLLOWING if forward else BOUND_PRECEDING
+
+    def _exclude(
+        self, tree: Parse, sql: StringSlice, kids: List[UInt32]
+    ) raises -> UInt32:
+        """Reads the `EXCLUDE` off a frame, if it has one.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            kids: The `FrameClause` children.
+
+        Returns:
+            One of the `EXCLUDE_` constants.
+
+        Raises:
+            Error: If the clause has nothing under it.
+        """
+        if len(kids) < 3:
+            return EXCLUDE_NONE
+        # `WindowExcludeClause <- 'EXCLUDE' WindowExcludeElement`, and the four
+        # elements are told apart by their first word.
+        var lead = _word(tree, sql, self._only(tree, kids[2]))
+        if lead == "CURRENT":
+            return EXCLUDE_CURRENT_ROW
+        if lead == "GROUP":
+            return EXCLUDE_GROUP
+        if lead == "TIES":
+            return EXCLUDE_TIES
+        return EXCLUDE_NO_OTHERS
 
     def _modifiers(
         self,
