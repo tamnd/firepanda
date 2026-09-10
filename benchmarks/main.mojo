@@ -170,6 +170,7 @@ from firepanda.kernel import (
 from firepanda.kernel.arith import OP_ADD
 from firepanda.kernel.compare import CMP_EQ, CMP_LT
 from firepanda.kernel.binary import BinaryOp
+from firepanda.sql import Ast, Grammar, Transform, parse, tokenize
 from firepanda.testing.rng import Rng
 from firepanda.kernel.scalar import (
     add_scalar,
@@ -4756,6 +4757,99 @@ def _text_fact(rows: Int, keys: Int, mut rng: Rng) raises -> DataFrame:
     return DataFrame.from_series(series^)
 
 
+comptime TPCH_Q1 = String(
+    "SELECT l_returnflag, l_linestatus, sum(l_quantity) AS sum_qty,",
+    " sum(l_extendedprice) AS sum_base_price,",
+    " sum(l_extendedprice * (1 - l_discount)) AS sum_disc_price,",
+    " sum(l_extendedprice * (1 - l_discount) * (1 + l_tax)) AS sum_charge,",
+    " avg(l_quantity) AS avg_qty, avg(l_extendedprice) AS avg_price,",
+    " avg(l_discount) AS avg_disc, count(*) AS count_order FROM lineitem",
+    " WHERE l_shipdate <= CAST('1998-09-02' AS date)",
+    " GROUP BY l_returnflag, l_linestatus",
+    " ORDER BY l_returnflag, l_linestatus",
+)
+"""The query docs/specs/sql/04-the-parser.md states its budget against.
+
+479 bytes, one hundred tokens, ten aggregates, a nested arithmetic expression
+and a cast, which is a fair shape for an analytical query and is the one DuckDB
+was measured on so the two numbers mean the same thing.
+"""
+
+
+def bench_sql(mut harness: Harness) raises:
+    """Measures a query going from text to AST.
+
+    docs/specs/sql/04-the-parser.md sets a budget per query and has so far only
+    been able to state speedups against an earlier build, because the absolute
+    readings were taken by hand on a machine that has not been quiet since. These
+    rows are that number taken the same way as every other number in this file,
+    which means the spec can quote a figure that a later commit will be measured
+    against rather than one nobody can reproduce.
+
+    Three rows per query rather than one, because the budget is spent in three
+    places and the interesting question is which. Tokenizing is a single pass and
+    should be a rounding error. Matching is the PEG interpreter and is where the
+    time went last time it was looked at. Transforming walks the tree the matcher
+    built, so its cost is the difference between the second row and the third.
+
+    The grammar and the jump table are built once, out of the timed section, which
+    is what a process does: a `Grammar` is a parse of a table with 1,187 rules in
+    it and a `Transform` walks that table, and paying for either per query would
+    be measuring the wrong thing entirely.
+
+    Args:
+        harness: The harness.
+
+    Raises:
+        If a benchmark raises.
+    """
+    var grammar = Grammar()
+    var rules = Transform(grammar)
+
+    _bench_sql_query(harness, "q1", TPCH_Q1, grammar, rules)
+    _bench_sql_query(harness, "trivial", "SELECT 1", grammar, rules)
+
+
+def _bench_sql_query(
+    mut harness: Harness,
+    label: StaticString,
+    sql: StringSlice,
+    grammar: Grammar,
+    rules: Transform,
+) raises:
+    """Records the three rows for one query.
+
+    Args:
+        harness: The harness.
+        label: What the query is called in the row name.
+        sql: The query text.
+        grammar: The loaded grammar, built once by the caller.
+        rules: The jump table, built once by the caller.
+
+    Raises:
+        If a benchmark raises.
+    """
+
+    def tokens() raises {imm sql, imm grammar}:
+        var out = tokenize(sql, grammar)
+        keep(len(out))
+
+    harness.record(String("sql/tokenize_", label), "queries", 1, tokens)
+
+    def matched() raises {imm sql, imm grammar}:
+        var tree = parse(sql, grammar)
+        keep(len(tree.nodes))
+
+    harness.record(String("sql/match_", label), "queries", 1, matched)
+
+    def transformed() raises {imm sql, imm grammar, imm rules}:
+        var ast = Ast()
+        var node = rules.parse_statement(sql, grammar, ast)
+        keep(node)
+
+    harness.record(String("sql/parse_", label), "queries", 1, transformed)
+
+
 def machine_json(options: Options) -> String:
     """Describes the machine the numbers came from.
 
@@ -5146,6 +5240,7 @@ def main() raises:
     bench_text(harness)
     bench_dispatch(harness)
     bench_arrow(harness)
+    bench_sql(harness)
     var elapsed = Float64(perf_counter_ns() - started) / 1e9
 
     print()
