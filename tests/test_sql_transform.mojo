@@ -464,7 +464,9 @@ def test_a_subscript_refuses() raises:
 def test_a_refusal_says_where_it_was() raises:
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="issues/307"):
+    with assert_raises(contains="LINE 1: INTERVAL 1 DAY"):
+        _ = _printed("INTERVAL 1 DAY", g, rules)
+    with assert_raises(contains="issues/"):
         _ = _printed("INTERVAL 1 DAY", g, rules)
 
 
