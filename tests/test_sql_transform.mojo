@@ -426,11 +426,13 @@ def test_a_subquery_in_an_expression_reaches_the_statement_arena() raises:
     assert_equal(_printed("a + (SELECT 1)", g, rules), "(a + (SELECT 1))")
 
 
-def test_a_window_function_refuses_and_names_the_clause() raises:
+def test_a_call_carries_the_window_that_over_names() raises:
+    # The window itself is tested in `test_sql_window.mojo`. This is here for
+    # the call side of it, since `OVER` used to be one of the four call
+    # modifiers that refused and the other three still do.
     var g = Grammar()
     var rules = Transform(g)
-    with assert_raises(contains="OVER on a call"):
-        _ = _printed("sum(a) OVER ()", g, rules)
+    assert_equal(_printed("sum(a) OVER ()", g, rules), "sum(a) OVER ()")
 
 
 def test_an_ordered_aggregate_refuses() raises:
