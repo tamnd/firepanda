@@ -48,11 +48,12 @@ Three divergences are worth knowing before reading further, because they are wha
 | 05 | `05-kernels.md` | the kernel layer, `vectorize`, `parallelize`, the hash table, the GPU path |
 | 06 | `06-pandas-parity.md` | the conformance checklist, every pandas feature, one to one |
 | 07 | `07-python-bindings.md` | `PythonModuleBuilder`, Arrow PyCapsule, wheels, and the ABI problem |
-| 08 | `08-milestones.md` | M0 through M11, exit criteria, the four places to stop |
+| 08 | `08-milestones.md` | M0 through M11 including M4b for SQL, exit criteria, the four places to stop |
 | 09 | `09-quality-bar.md` | what stdlib quality means in a language with no race detector |
 | 10 | `10-benchmarks.md` | `tamnd/firepanda-bench`, against pandas, Polars, DuckDB, cuDF and MojoFrame |
 | 11 | `11-package-layout.md` | the tree, Mojo 1.0's re-export rules, stability tiers |
 | | `engine/` | how DuckDB and Polars execute a query, and the firepanda plan that came out of reading them |
+| | `sql/` | DuckDB's dialect, the vendored grammar, the shared logical plan, and how compatibility gets measured |
 
 Read 04 first if you only read one, because the product is the developer experience and everything else is in service of it. Read 03 second, because it is where the engine differs from every other dataframe library.
 

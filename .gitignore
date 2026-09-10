@@ -2,6 +2,10 @@
 .pixi/
 *.pixi
 
+# DuckDB's test corpus, fetched rather than vendored. tools/fetch_corpus.sh puts
+# it here, named after the commit the grammar is pinned to.
+.cache/
+
 # Mojo
 *.mojopkg
 *.o
