@@ -11,6 +11,14 @@ constant, for the reason `test_astype.py` gives, with one exception. The
 infinities are compared against what is true, because pandas carries one running
 total and cannot recover from an infinity passing through it, and the two tests
 at the bottom assert the difference rather than working around it.
+
+The last section is the same surface over a frame. It repeats the reductions and
+the placements rather than trusting that a frame window is the columns windowed
+one at a time, because that is the claim being made and a test that assumes it
+tests nothing. What is genuinely new down there is the row labels a step leaves
+behind, the eleven properties a window object reports about itself, and the two
+arguments that mean something different on a frame from what they mean on a
+column.
 """
 
 from __future__ import annotations
@@ -330,3 +338,242 @@ def test_the_low_bits_survive_a_row_leaving_the_window(firepanda: ModuleType) ->
     assert got[1] == 1e16
     assert got[2] == 2.0
     assert got[3] == 2.0
+
+
+COLUMNS: dict[str, list[Any]] = {"a": ROWS, "b": [x * 3 for x in ROWS], "c": HOLED + ROWS[:4]}
+"""Three columns of ten rows, one of them holed, so that a frame window has both
+a column where every window fills and one where they do not."""
+
+
+def framed(firepanda: ModuleType) -> Any:
+    """The three columns as a firepanda frame."""
+    return firepanda.DataFrame(COLUMNS)
+
+
+def their_frame() -> Any:
+    """The same three columns in pandas."""
+    import pandas as pd
+
+    return pd.DataFrame(COLUMNS, dtype="float64")
+
+
+def matching(mine: Any, them: Any) -> bool:
+    """Compares two frames column by column, reading a missing row as equal to a
+    missing row, which is what `same` does for a column."""
+    if list(mine.columns) != list(them.columns):
+        return False
+    return all(same(mine[name], them[name]) for name in list(mine.columns))
+
+
+@needs_pandas
+@pytest.mark.parametrize("kind", ["sum", "mean", "count", "min", "max"])
+def test_every_reduction_matches_over_a_frame(firepanda: ModuleType, kind: str) -> None:
+    """The same five names over a frame, which answers a frame of the same
+    columns in the same order rather than a column."""
+    mine = getattr(framed(firepanda).rolling(4), kind)()
+    them = getattr(their_frame().rolling(4), kind)()
+    assert type(mine).__name__ == "DataFrame"
+    assert matching(mine, them)
+
+
+@needs_pandas
+@pytest.mark.parametrize("kind", ["sum", "mean", "count", "min", "max"])
+def test_every_reduction_matches_over_an_expanding_frame(firepanda: ModuleType, kind: str) -> None:
+    """The five again over the window with no near end."""
+    assert matching(
+        getattr(framed(firepanda).expanding(), kind)(),
+        getattr(their_frame().expanding(), kind)(),
+    )
+
+
+@needs_pandas
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"window": 3, "center": True},
+        {"window": 4, "center": True},
+        {"window": 3, "closed": "left"},
+        {"window": 3, "closed": "both"},
+        {"window": 3, "closed": "neither"},
+        {"window": 3, "min_periods": 1},
+        {"window": 10, "step": 3},
+        {"window": 1},
+        {"window": 0},
+        {"window": 40},
+    ],
+)
+def test_where_the_window_sits_matches_over_a_frame(
+    firepanda: ModuleType, arguments: dict[str, Any]
+) -> None:
+    """Ten placements, each answered by both.
+
+    The same list the column form is checked against, because a frame window is
+    the columns windowed one at a time and there is nothing about where a window
+    sits that a frame can get wrong on its own. What this catches is the row
+    labels, which `step` makes different from the frame's own and which are
+    taken off the first answered column rather than off the frame.
+    """
+    assert matching(
+        framed(firepanda).rolling(**arguments).sum(),
+        their_frame().rolling(**arguments).sum(),
+    )
+
+
+@needs_pandas
+def test_a_frame_window_is_built_off_the_frame_and_named_the_same(
+    firepanda: ModuleType,
+) -> None:
+    """One class for a column and a frame here, where pandas has two, and both of
+    pandas' are named what this one is named. A program that checks what it was
+    handed back checks the name."""
+    assert type(framed(firepanda).rolling(2)).__name__ == "Rolling"
+    assert type(framed(firepanda).expanding()).__name__ == "Expanding"
+    assert type(their_frame().rolling(2)).__name__ == "Rolling"
+    assert type(their_frame().expanding()).__name__ == "Expanding"
+
+
+@needs_pandas
+def test_the_window_reports_back_what_it_was_given(firepanda: ModuleType) -> None:
+    """The eleven properties pandas puts on a window object, read off both.
+
+    Six of them are the arguments handed straight back, and the reason they are
+    kept rather than resolved is here: pandas answers None for a `closed` that
+    was not given and for a `min_periods` that was not given, so filling in the
+    default when the object is built would report a decision as an argument.
+    """
+    named = ("window", "min_periods", "center", "closed", "step", "method", "win_type", "on")
+    mine = framed(firepanda).rolling(3, center=True, closed="left", step=2)
+    them = their_frame().rolling(3, center=True, closed="left", step=2)
+    for name in named:
+        assert getattr(mine, name) == getattr(them, name), name
+    assert mine.ndim == them.ndim == 2
+    assert mine.exclusions == them.exclusions == frozenset()
+    assert list(mine.obj.columns) == list(them.obj.columns)
+
+    plain = framed(firepanda).rolling(3)
+    other = their_frame().rolling(3)
+    assert plain.closed is other.closed is None
+    assert plain.min_periods is other.min_periods is None
+
+    grown = framed(firepanda).expanding(2)
+    same_grown = their_frame().expanding(2)
+    for name in named:
+        assert getattr(grown, name) == getattr(same_grown, name), name
+
+
+@needs_pandas
+def test_a_column_window_reports_itself_as_one_dimensional(firepanda: ModuleType) -> None:
+    """The one property that is not the same on both owners, and the only reason
+    the mixin has to know which of the two it is holding outside the reduction."""
+    mine = made(firepanda).rolling(2)
+    them = theirs().rolling(2)
+    assert mine.ndim == them.ndim == 1
+    assert type(mine.obj).__name__ == type(them.obj).__name__ == "Series"
+
+
+@needs_pandas
+def test_a_frame_with_a_text_column_in_it_names_the_column(firepanda: ModuleType) -> None:
+    """Both refuse, and this library says which column it was.
+
+    pandas says `Cannot aggregate non-numeric type: str`, which over a frame of
+    forty columns sends the reader back to look for the column themselves. The
+    class is the same difference `test_a_text_column_has_nothing_to_reduce`
+    measures on a column.
+    """
+    import pandas as pd
+
+    mine = firepanda.DataFrame({"a": [1.0, 2.0, 3.0], "t": ["x", "y", "z"]})
+    them = pd.DataFrame({"a": [1.0, 2.0, 3.0], "t": ["x", "y", "z"]})
+    with pytest.raises(TypeError, match="'t'"):
+        mine.rolling(2).sum()
+    with pytest.raises(pd.errors.DataError):
+        them.rolling(2).sum()
+
+
+@needs_pandas
+def test_the_column_that_cannot_be_reduced_is_found_before_any_column_is_read(
+    firepanda: ModuleType,
+) -> None:
+    """The text column is last, and it still raises rather than half answering.
+
+    Cheap to get wrong and invisible when it is, because the answer is thrown
+    away either way. It matters because a caller who gets an error should not
+    have to wonder what was already spent, and it is the one thing about a frame
+    window that is not per column.
+    """
+    mine = firepanda.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0], "t": ["x", "y"]})
+    with pytest.raises(TypeError, match="'t'"):
+        mine.rolling(2).sum()
+
+
+@needs_pandas
+def test_dropping_the_columns_a_window_cannot_read_is_refused(
+    firepanda: ModuleType,
+) -> None:
+    """`numeric_only` is one name asking two questions.
+
+    On a column both values agree everywhere there is an answer, so both are
+    accepted, which the test above this section checks. On a frame True says to
+    drop the columns rather than refuse them, which decides which columns come
+    back, so it is refused the way the group by path refuses it.
+    """
+    import pandas as pd
+
+    mine = firepanda.DataFrame({"a": [1.0, 2.0], "t": ["x", "y"]})
+    them = pd.DataFrame({"a": [1.0, 2.0], "t": ["x", "y"]})
+    with pytest.raises(NotImplementedError, match="numeric_only"):
+        mine.rolling(2).sum(numeric_only=True)
+    assert list(them.rolling(2).sum(numeric_only=True).columns) == ["a"]
+    assert matching(
+        framed(firepanda).rolling(2).sum(numeric_only=False),
+        their_frame().rolling(2).sum(numeric_only=False),
+    )
+
+
+@needs_pandas
+def test_ordering_the_window_by_a_column_is_refused_on_a_frame_too(
+    firepanda: ModuleType,
+) -> None:
+    """`on` is the one refusal whose reason changes on a frame and whose answer
+    does not.
+
+    On a frame pandas both orders the window by the named column and carries it
+    through into the answer unreduced. Carrying it is the easy half and the
+    ordering is the point, and ordering by a column means a window given as a
+    duration, so writing the copying half would be a `rolling("2D", on="t")`
+    that silently counted rows.
+    """
+    with pytest.raises(NotImplementedError, match="on"):
+        framed(firepanda).rolling(2, on="a")
+    with pytest.raises(NotImplementedError, match="win_type"):
+        framed(firepanda).rolling(2, win_type="boxcar")
+    with pytest.raises(NotImplementedError, match="method"):
+        framed(firepanda).rolling(2, method="table")
+    with pytest.raises(NotImplementedError, match="method"):
+        framed(firepanda).expanding(method="table")
+
+
+@needs_pandas
+def test_a_frame_of_no_columns_is_handed_back(firepanda: ModuleType) -> None:
+    """There was nothing to reduce and nothing was reduced.
+
+    Worth a test because the obvious implementation puts the answered columns
+    back together and putting nothing together makes a frame of no rows, which
+    is a different frame from one of no columns.
+    """
+    mine = firepanda.DataFrame({})
+    assert mine.rolling(2).sum().shape == (0, 0)
+    assert mine.expanding().sum().shape == (0, 0)
+
+
+@needs_pandas
+def test_an_integer_frame_comes_back_as_float64(firepanda: ModuleType) -> None:
+    """Every column of the answer is float64, the same as on a column, because
+    there is nowhere else to put the holes at the top."""
+    import pandas as pd
+
+    mine = firepanda.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+    them = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+    got = mine.rolling(2).sum()
+    assert [str(got[name].dtype) for name in list(got.columns)] == ["float64", "float64"]
+    assert matching(got, them.rolling(2).sum())

@@ -42,7 +42,7 @@ from firepanda.io.arrow_stream import (
     import_stream,
 )
 from firepanda.io.read import read_csv
-from firepanda.py.args import flag, number, whole, words
+from firepanda.py.args import flag, maybe_whole, number, whole, words
 from firepanda.py.build import empty_column, frame_from
 from firepanda.py.cast import (
     NOT_FINITE,
@@ -84,6 +84,7 @@ from firepanda.py.reduce import grouped_reduction, reduction
 from firepanda.py.series import PySeries
 from firepanda.py.temporal import iso_calendar
 from firepanda.py.transform import transformation, transformed
+from firepanda.py.window import window_frame
 
 
 @fieldwise_init
@@ -438,6 +439,58 @@ struct PyDataFrame(Movable, Writable):
         var out = DataFrame.from_series(parts^)
         out.index = Index(copy=frame.index)
         return PythonObject(alloc=Self(ArcPointer(out^)))
+
+    @staticmethod
+    def window_agg(
+        py_self: PythonObject,
+        kind: PythonObject,
+        width: PythonObject,
+        min_periods: PythonObject,
+        center: PythonObject,
+        closed: PythonObject,
+        step: PythonObject,
+    ) raises -> PythonObject:
+        """Runs one reduction over every window of every column.
+
+        The frame half of the one door behind `Rolling` and `Expanding`. It
+        takes the same six arguments the column one takes and means the same
+        thing by all six of them, because a window is a pair of row numbers and
+        a frame's columns all have the same rows.
+
+        Args:
+            py_self: The frame.
+            kind: The reduction, as pandas spells the method.
+            width: How many rows wide, or `None` for an expanding window.
+            min_periods: How many values a window needs, or `None` for the
+                default of whichever window type this is.
+            center: Whether the window sits around its row.
+            closed: Which of the two ends the window keeps.
+            step: How many rows apart the answered rows are, or `None`.
+
+        Returns:
+            A new frame of the same column names in the same order, every one
+            of them float64.
+
+        Raises:
+            Error: Tagged `dtype` if any column holds nothing a window can
+                reduce, and tagged `value` if the parameters do not describe a
+                window.
+        """
+        return PythonObject(
+            alloc=Self(
+                ArcPointer(
+                    window_frame(
+                        Self._frame(py_self)[].frame[],
+                        words(kind, "kind"),
+                        maybe_whole(width, "window"),
+                        maybe_whole(min_periods, "min_periods"),
+                        flag(center, "center"),
+                        words(closed, "closed"),
+                        maybe_whole(step, "step"),
+                    )
+                )
+            )
+        )
 
     @staticmethod
     def cast(
