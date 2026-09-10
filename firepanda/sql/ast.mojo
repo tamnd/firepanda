@@ -36,11 +36,11 @@ the arena it came from, so every field says which arena it points into.
 
 A node whose kind needs more parts than the four fields hold keeps them in a
 fixed length run instead, and the entries are named by constant. The query node
-is the only one that does this, because six clauses do not fit in four fields
+is the only one that does this, because seven clauses do not fit in four fields
 and splitting a `SELECT` across two nodes to make them fit would be worse.
 
-What is not here yet is window specifications, `PIVOT` and `UNPIVOT`, and the
-statements that are not a `SELECT`. They arrive with the rest of S2.
+What is not here yet is `PIVOT` and `UNPIVOT`, and the statements that are not
+a `SELECT`. They arrive with the rest of S2.
 """
 
 comptime NO_NODE: UInt32 = 0
