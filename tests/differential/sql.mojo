@@ -57,12 +57,12 @@ here. One that fails any other way is.
 comptime SYNTAX = "Parser Error:"
 """What the matcher says when a rule did not match the text.
 
-The transformer is aimed at the query rule today, so every statement that is not
-a query fails there rather than in a transformer case, and it fails with this
-rather than with a refusal. That is not a bug and it is not a refusal either, so
-it gets a count of its own. It goes away as the tier two and tier three
-statements land and the transformer starts being aimed at the whole statement
-rule, and until then it is the size of the job that is left.
+Now that the transformer is aimed at the whole statement rule, what is left in
+this bucket is text the grammar itself will not take. The corpus is a test suite
+and part of what it tests is that bad SQL is rejected, so a hundred or so of
+these are the corpus checking DuckDB's error messages and firepanda agreeing
+with it. That is not a bug and it is not a refusal either, so it keeps a count
+of its own.
 """
 
 comptime EXHAUSTED = "memory exhausted"
@@ -129,15 +129,16 @@ something is a wrong answer with no error attached to it. This is the property
 document 05 section 6 says the printer exists for.
 """
 
-comptime TOO_DEEP_CEILING = 1
+comptime TOO_DEEP_CEILING = 3
 """How many statements may print to text the matcher will not read back.
 
 The printer parenthesizes every operand, so a chain of two thousand additions
 prints with two thousand nested parentheses in front of it, and the matcher's
-own depth guard stops at about twenty two. The one that is left is the eight
-kilobyte expression in `overflow/expression_tree_depth.test`, and it is the same
-`MAX_DEPTH` that `DUCKDB_ONLY_CEILING` above is about. Both go when the matcher
-becomes an explicit stack machine.
+own depth guard stops at about twenty two. The three that are left are the eight
+kilobyte expression in `overflow/expression_tree_depth.test` and two wide
+generated CTEs in `cte/materialized/test_materialized_cte.test`, and they are the
+same `MAX_DEPTH` that `DUCKDB_ONLY_CEILING` above is about. All of them go when
+the matcher becomes an explicit stack machine.
 
 It is a bucket of its own rather than an unstable one because nothing was lost.
 The AST is right, the text is right, and the only thing that cannot read it is

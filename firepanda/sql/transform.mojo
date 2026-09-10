@@ -116,6 +116,8 @@ from .unsupported import (
     QUOTED_NAME,
     SELECT_CLAUSE,
     SELECT_SAMPLE,
+    STATEMENT_LATER,
+    STATEMENT_NEVER,
     SUBSCRIPT,
     TABLE_AT,
     TABLE_MODIFIER,
@@ -253,6 +255,30 @@ comptime _CTE: UInt8 = 55
 comptime _VALUES: UInt8 = 56
 comptime _VALUES_ROW: UInt8 = 57
 comptime _TABLE_STATEMENT: UInt8 = 58
+
+comptime _STATEMENT_LATER: UInt8 = 59
+"""A statement firepanda will run and does not run yet, refused by name."""
+
+comptime _STATEMENT_NEVER: UInt8 = 60
+"""A statement firepanda will not run, refused by name.
+
+The two are separate actions rather than one because a user who reads `not yet`
+waits and a user who reads `not this` writes their query another way, and
+telling them apart is the whole reason `Statement` is what the transformer is
+aimed at. A statement that fell out of the matcher instead would say `syntax
+error` about text that is perfectly good SQL.
+"""
+
+comptime _TOP_LEVEL: UInt8 = 61
+"""One statement and the semicolons after it, if there are any.
+
+This is where a statement starts, rather than `Statement` itself, because a
+query copied out of a file or a shell ends in a semicolon and a reader who is
+told that is a syntax error will not believe it. The rule also matches nothing
+at all, which is how a file of nothing but whitespace parses, so this is the one
+place the transformer has to look at a missing child instead of trusting the
+grammar to have provided one.
+"""
 
 # A marker is a rule that builds nothing. The rule above it reads it directly,
 # and the byte is here so that rule can pick it out of its siblings with the
@@ -547,6 +573,67 @@ struct Transform(Movable):
         self._set(grammar, "ValuesExpressions", _VALUES_ROW)
         self._set(grammar, "TableStatement", _TABLE_STATEMENT)
 
+        # `Statement` is thirty seven alternatives and one of them is the one
+        # firepanda runs. It descends into whichever matched, and every other
+        # one carries a refusal, so a `CREATE INDEX` gets a sentence naming it
+        # rather than a syntax error about text that is perfectly good SQL.
+        # docs/specs/sql/05-ast-and-binder.md section 4, tiers two and three.
+        self._set(grammar, "Statement", _DESCEND)
+        self._set(grammar, "TopLevelStatement", _TOP_LEVEL)
+
+        # Tier two. Each of these is a frame operation with SQL spelling, so it
+        # says `not yet` and points at the milestone.
+        var later: List[StaticString] = [
+            "CreateStatement",
+            "InsertStatement",
+            "CopyStatement",
+            "ExplainStatement",
+            "PrepareStatement",
+            "ExecuteStatement",
+            "DeallocateStatement",
+            "SetStatement",
+            "ResetStatement",
+            "PragmaStatement",
+        ]
+        for name in later:
+            self._set(grammar, name, _STATEMENT_LATER)
+
+        # Tier three. Each of these wants a catalog, a transaction, a file on
+        # disk that outlives the process, or an extension, and firepanda has
+        # none of those. `UPDATE` and `DELETE` are here rather than above on
+        # purpose: they are expressible over an immutable frame as a rewrite,
+        # they are not what a dataframe user reaches for, and half of them is
+        # worse than none of them.
+        var never: List[StaticString] = [
+            "AlterStatement",
+            "AnalyzeStatement",
+            "AttachStatement",
+            "CallStatement",
+            "CheckpointStatement",
+            "CommentStatement",
+            "ConnectStatement",
+            "DeleteStatement",
+            "DetachStatement",
+            "DisconnectStatement",
+            "DropStatement",
+            "ExportStatement",
+            "ExpressionStatement",
+            "ExtensionRepositoryStatement",
+            "ExternalResourceStatement",
+            "ImportStatement",
+            "InstallStatement",
+            "LoadStatement",
+            "MergeIntoStatement",
+            "TransactionStatement",
+            "TruncateStatement",
+            "UpdateExtensionsStatement",
+            "UpdateStatement",
+            "UseStatement",
+            "VacuumStatement",
+        ]
+        for name in never:
+            self._set(grammar, name, _STATEMENT_NEVER)
+
         # The markers, which build nothing and are only ever recognized.
         self._set(grammar, "TableAlias", _MARK_TABLE_ALIAS)
         self._set(grammar, "TableAliasColon", _MARK_ALIAS_COLON)
@@ -564,7 +651,7 @@ struct Transform(Movable):
         self._set(grammar, "JoinWithoutOnClause", _MARK_JOIN_PLAIN)
 
         self.expression_rule = grammar.rule("Expression")
-        self.statement_rule = grammar.rule("SelectStatement")
+        self.statement_rule = grammar.rule("TopLevelStatement")
         self.parens_rule = grammar.rule("ParenthesisExpression")
 
     def _set(
@@ -618,10 +705,10 @@ struct Transform(Movable):
     def parse_statement(
         self, sql: StringSlice, grammar: Grammar, mut ast: Ast
     ) raises -> UInt32:
-        """Parses one `SELECT` and transforms it.
+        """Parses one statement and transforms it.
 
         Args:
-            sql: The statement text, with no trailing semicolon.
+            sql: The statement text, with or without a trailing semicolon.
             grammar: The grammar it was parsed against.
             ast: Where to put the nodes.
 
@@ -629,8 +716,9 @@ struct Transform(Movable):
             The root statement node.
 
         Raises:
-            Error: If the text is not a `SELECT`, or holds something this does
-                not transform yet.
+            Error: If the text is not one statement, or is a statement
+                firepanda does not run, or holds something this does not
+                transform yet.
         """
         var tree = parse_rule(sql, grammar, self.statement_rule)
         return self.walk(tree, sql, tree.root, ast)
@@ -719,6 +807,12 @@ struct Transform(Movable):
 
         if action == _DESCEND:
             return work.value(self._only(tree, node))
+
+        if action == _TOP_LEVEL:
+            var only = tree.nodes[Int(node)].first_child
+            if only == NO_NODE:
+                raise Error("Parser Error: syntax error at end of input")
+            return work.value(only)
 
         if action == _FOLD:
             return self._fold(tree, sql, node, ast, work)
@@ -935,6 +1029,16 @@ struct Transform(Movable):
         if action == _TABLE_STATEMENT:
             return ast.table_statement(
                 self._name_parts(tree, sql, self._only(tree, node)), at
+            )
+
+        if action == _STATEMENT_LATER:
+            raise _unsupported(
+                tree, sql, node, STATEMENT_LATER, _word(tree, sql, node)
+            )
+
+        if action == _STATEMENT_NEVER:
+            raise _unsupported(
+                tree, sql, node, STATEMENT_NEVER, _word(tree, sql, node)
             )
 
         raise _no_case(tree, sql, node)
@@ -2789,6 +2893,16 @@ struct Transform(Movable):
 
         # `ParenthesisExpression <- Parens(List(Expression)?)`.
         var items = self._items(tree, self._only(tree, tuple))
+        # `GROUPING SETS ((a, ))` is a set of one column, and so is
+        # `GROUPING SETS (a)`, so the one entry row builds as the entry. Leaving
+        # the row there would print as `(a)`, which reads back as the plain
+        # entry it already was and makes the print of a print differ from the
+        # print. The empty row is not this: `()` is the grand total and has to
+        # stay a row.
+        if len(items) == 1:
+            return ast.group(
+                GROUP_EXPRESSION, work.value(items[0]), List[UInt32](), at
+            )
         work.warm(items)
         var nested = List[UInt32]()
         for item in items:
