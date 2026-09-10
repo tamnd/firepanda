@@ -215,7 +215,7 @@ def text_character_length(a: StringArray) raises -> Array[DType.int64]:
     var validity = Bitmap(copy=a.validity)
 
     def compute(start: Int, stop: Int) {mut out, imm}:
-        var dst = out.unsafe_ptr()
+        var dst = out.unsafe_mut_ptr()
         for i in range(start, stop):
             dst.unsafe_offset(i).unsafe_write(
                 Int64(character_count(a.unsafe_bytes(i)))
@@ -263,7 +263,7 @@ def text_find(
     var validity = Bitmap(copy=a.validity)
 
     def compute(first: Int, last: Int) {mut out, imm}:
-        var dst = out.unsafe_ptr()
+        var dst = out.unsafe_mut_ptr()
         for i in range(first, last):
             var bytes = a.unsafe_bytes(i)
             var from_ = 0
