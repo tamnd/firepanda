@@ -23,6 +23,11 @@ computed.
 `print.mojo` writes a plan out as an indented tree with the expressions in the
 notation they were written in.
 
+`json.mojo` writes the same plan out for a program rather than for a person, and
+reads it back. The round trip is the point: a pass test is an input plan and an
+expected output plan, and writing both down as text is what makes writing one
+worth doing.
+
 `bind.mojo` turns every name into a position and gives every expression a type,
 which is what stops execution looking columns up by name and what makes a type
 error a plan error rather than a kernel error.
@@ -99,6 +104,7 @@ from .bind import Bound, bind, bind_all, bind_expr
 from .cse import cse
 from .empty import empty
 from .expr import UNBOUND, Expr, ExprKind, Expressions
+from .json import Loaded, from_json, to_json
 from .limits import limits
 from .lower import lower
 from .merge import merge

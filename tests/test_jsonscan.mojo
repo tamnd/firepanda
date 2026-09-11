@@ -18,6 +18,7 @@ from std.testing import (
     assert_true,
 )
 
+from firepanda.io.jsonscan import Value as JsonValue
 from firepanda.io.jsonscan import (
     JSON_ARRAY,
     JSON_FALSE,
@@ -27,6 +28,7 @@ from firepanda.io.jsonscan import (
     JSON_STRING,
     JSON_TRUE,
     Member,
+    scan_array,
     scan_object,
     scan_value,
     skip_space,
@@ -45,6 +47,13 @@ def _members(text: StringSlice) raises -> List[Member]:
     var raw = _bytes(text)
     var out = List[Member]()
     _ = scan_object(Span(raw), 0, out)
+    return out^
+
+
+def _elements(text: StringSlice) raises -> List[JsonValue]:
+    var raw = _bytes(text)
+    var out = List[JsonValue]()
+    _ = scan_array(Span(raw), 0, out)
     return out^
 
 
@@ -262,6 +271,77 @@ def test_scanning_a_value_on_its_own_works_too() raises:
     assert_equal(value.kind, JSON_NUMBER)
     assert_equal(value.start, 2)
     assert_equal(value.end, 4)
+
+
+def test_an_array_reports_a_value_per_element() raises:
+    var raw = _bytes('[1, "two", true, null]')
+    var elements = List[JsonValue]()
+    var after = scan_array(Span(raw), 0, elements)
+    assert_equal(after, len(raw))
+    assert_equal(len(elements), 4)
+    assert_equal(elements[0].kind, JSON_NUMBER)
+    assert_equal(elements[1].kind, JSON_STRING)
+    assert_equal(elements[2].kind, JSON_TRUE)
+    assert_equal(elements[3].kind, JSON_NULL)
+    assert_equal(text_of(Span(raw), elements[1]), "two")
+
+
+def test_an_empty_array_reports_nothing_and_is_not_an_error() raises:
+    var elements = _elements("[   ]")
+    assert_equal(len(elements), 0)
+
+
+def test_an_element_that_is_itself_an_array_is_one_span() raises:
+    # The same rule `scan_object` follows. What is inside is asked for with
+    # another call rather than arriving flattened into the caller's list.
+    var raw = _bytes("[[1, 2], [3]]")
+    var elements = List[JsonValue]()
+    _ = scan_array(Span(raw), 0, elements)
+    assert_equal(len(elements), 2)
+    assert_equal(elements[0].kind, JSON_ARRAY)
+    assert_equal(text_of(Span(raw), elements[0]), "[1, 2]")
+    assert_equal(text_of(Span(raw), elements[1]), "[3]")
+    var inner = List[JsonValue]()
+    _ = scan_array(Span(raw), elements[0].start, inner)
+    assert_equal(len(inner), 2)
+
+
+def test_an_element_that_is_an_object_is_one_span_too() raises:
+    var raw = _bytes('[{"a": 1}, {}]')
+    var elements = List[JsonValue]()
+    _ = scan_array(Span(raw), 0, elements)
+    assert_equal(len(elements), 2)
+    assert_equal(elements[0].kind, JSON_OBJECT)
+    assert_equal(text_of(Span(raw), elements[0]), '{"a": 1}')
+    var members = List[Member]()
+    _ = scan_object(Span(raw), elements[0].start, members)
+    assert_equal(len(members), 1)
+
+
+def test_an_array_scanned_somewhere_other_than_the_start_works() raises:
+    var raw = _bytes('{"xs": [7, 8]}')
+    var members = List[Member]()
+    _ = scan_object(Span(raw), 0, members)
+    var elements = List[JsonValue]()
+    var after = scan_array(Span(raw), members[0].value.start, elements)
+    assert_equal(after, members[0].value.after)
+    assert_equal(len(elements), 2)
+    assert_equal(text_of(Span(raw), elements[0]), "7")
+
+
+def test_something_that_is_not_an_array_is_an_error() raises:
+    with assert_raises(contains="an array was expected"):
+        _ = _elements('{"a": 1}')
+
+
+def test_an_array_with_a_missing_comma_is_an_error() raises:
+    with assert_raises(contains="a comma or a closing bracket"):
+        _ = _elements("[1 2]")
+
+
+def test_an_array_that_never_closes_is_an_error() raises:
+    with assert_raises(contains="never closes"):
+        _ = _elements("[1, 2")
 
 
 def main() raises:
