@@ -120,6 +120,28 @@ Twenty tests in `tests/test_ordered.mojo`, which check the tree on its own befor
 
 `quantile` and `rank` are written against the same structure and are not on the surface yet. What is stopping them is the door rather than the arithmetic: `quantile` adds a required fraction and an interpolation word, `rank` adds a method word, a direction and a percentage flag, and the seventh argument slot after the object is the last one a bound method has. Section 16 of the window document says what has to change and records the two facts about `rank` that are already settled, including that it ranks the value at the window's last row rather than the value at the answered row.
 
+### Added: the plan layer can now be run, by lowering it into the chunked engine
+
+Everything written in `firepanda/plan/` so far said what a query wants and none of it could produce a row. `firepanda/plan/lower.mojo` is the piece that closes that: it takes a bound plan and returns a `Pipeline` of the physical operators that already exist, so a plan can be run and a pass can be measured against real data rather than against the text of a printed plan.
+
+An expression becomes a line of appends. `Compute` has always said in its own docstring that an expression is a tree and a tree is a line of these, and this is the code that takes it at its word: `(qty * price) >= 100` lowers to a compute that appends the product at the end of the chunk and a second one that compares that new column against a hundred, and the intermediate is dropped by a projection at the end. Lowering an expression is therefore a post order walk that returns a column position. The reason it is safe is that a compute only ever appends, so a position that binding handed out still means the same column no matter how many intermediates have been added above it.
+
+A conjunction becomes a line of filters rather than a mask. There is no `AND` among the thirteen physical binary operations, so there is no column that holds the answer to `a AND b`, and what fills that gap is better than the gap would have been. A filter whose predicate is a conjunction lowers to one filter per part, in order, so the second comparison only reads the rows the first kept. Computing an and mask would have evaluated every part on every row first. It falls out of the representation too, since `AND` is a call with a child list and the simplify pass has already flattened the nested ones.
+
+Grouping and whole frame reduction lower too, to `Group` and `Reduce` respectively. Choosing between them on whether there are keys is the one physical choice this file makes, and it is the choice the plan node's own docstring already said was physical: knowing there is one group rather than hashing every row to find out is not a difference in what the query means. That is enough for a TPC-H q6 shaped query, a scan and a conjunction of three range predicates and a product and a sum, to lower and run end to end.
+
+What it will not lower, it refuses by name. Joins, sorts, distincts and unions have no operator here yet, and neither does a unary expression, a conditional, a window, a limit that skips rows first, a projection that renames a column, or a cast of an input column, which would convert that column where it lies and change what its position means for everything bound against it. Each of those raises an error saying what it was, and a caller that gets one keeps whatever route it had. It does not fall back to `Materialize`, because `Materialize` holds a function pointer that captures nothing and there would be no way to hand it the expression that could not be lowered.
+
+Thirty eight tests. Most of them build a plan, bind it, lower it, run it over a ten row frame cut into three chunks, and check the rows that come out, because the rows are the thing a later pass is not allowed to change and the operator count is. The two that do count operators are the conjunction tests, where the count is the point.
+
+TPC-H q6 at scale factor one, on an idle i9-13900K, six million rows of lineitem, both routes agreeing on revenue 123141078.2283. Written by hand against the eager API, which is five masks over every row anded together and one filter, 19.6 ms. The same query as a plan, bound, simplified, lowered and run, 19.2 ms. Those being the same number is the finding rather than a disappointment, and it is worth saying plainly: lowering a plan buys nothing on its own here. The fourteen operators the plan produces are strictly less work than the five full width masks the hand written route computes, and none of that shows, because the driver runs its elementwise prefix one chunk per worker and the frame it is given arrives in one chunk. One chunk is one core, on a machine with thirty two of them.
+
+What that says is where the next change has to go, and it is the read rather than the plan. The same fourteen operators over the same rows in chunks of sixteen thousand take 7.9 ms, which is 2.5x, and getting the frame into that shape without copying every byte a second time is a separate piece of work. What none of this yet reaches is the fused single pass at 1.25 ms or DuckDB 1.5.5 at 2.64 ms, and that remaining gap is the per operator materialisation that a selection vector and operator fusion are there to remove.
+
+### Fixed: a conjunction of three arguments would not bind
+
+Binding required `and` and `or` to have exactly two arguments, and the simplify pass flattens `a AND (b AND c)` into one call with three. A plan that had been through a pass therefore would not bind again afterwards, which is the ordinary order of events rather than an unusual one. Both connectives now take two or more. `not` still takes exactly one.
+
 ### Added: the first optimizer pass, which makes every expression smaller before any row is read
 
 A predicate like `l_discount between 0.05 - 0.01 and 0.05 + 0.01` contains two subtractions of two constants, and without a pass that notices, both are evaluated once per row. On TPC-H q6 at scale factor one that is twelve million additions that all answer the same thing. `firepanda/plan/simplify.mojo` is the pass that notices, and it is the first of the thirteen in `docs/specs/planner/02-the-pass-pipeline.md`.
@@ -136,7 +158,7 @@ A null is not a truth value and does not drop out of a conjunction, since `a and
 
 Twenty seven tests, each written as an expression in and a printed expression out compared as text, which is how an optimizer is tested everywhere and is the only form of the test that says anything useful when it fails. The last one is the whole q6 predicate, which comes out with both bounds folded and three nested conjunctions collapsed into one.
 
-Nothing calls this yet. The lowering into the existing chunked engine is what connects the plan layer to execution and it is still ahead.
+Nothing calls this yet. The lowering into the existing chunked engine is what connects the plan layer to execution, and it arrives in the entry above.
 
 ### Changed: a projection stopped copying the columns it keeps
 

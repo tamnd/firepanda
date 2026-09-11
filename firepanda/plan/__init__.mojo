@@ -37,12 +37,19 @@ thirteen. It works out which columns anything above a node reads, narrows every
 scan, project and aggregate to those, and hands the plan back to `bind` so that
 the positions come out right without any of them being remapped by hand.
 
-The rest of the passes and the lowering into `exec` follow. Nothing calls any
-of this yet and the eager API does not change when they do.
+`lower.mojo` turns a bound plan into a `Pipeline` of physical operators, which
+is what makes any of the rest of it reachable from a running query. It lowers a
+line of scan, filter, projection and limit, and it raises by name on everything
+nobody has written an operator for yet, so a caller can try it and fall back to
+what it did before at no cost.
+
+The rest of the passes follow. Nothing calls any of this yet and the eager API
+does not change when they do.
 """
 
 from .bind import Bound, bind, bind_all, bind_expr
 from .expr import UNBOUND, Expr, ExprKind, Expressions
+from .lower import lower
 from .node import NO_LIMIT, NodeKind, Plan, PlanNode
 from .print import explain, render_expr
 from .prune import prune
