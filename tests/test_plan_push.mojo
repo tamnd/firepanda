@@ -457,5 +457,22 @@ def test_a_filter_over_a_values_stays_where_it_was() raises:
     )
 
 
+def test_a_filter_over_a_table_function_stays_where_it_was() raises:
+    # The third node with no input, and the same answer as the other two.
+    var plan = Plan()
+    var five = plan.exprs.literal(Value(Int64(5)))
+    var rows = plan.table_function("range", [five], ["i"])
+    var i = plan.exprs.column("i")
+    var two = plan.exprs.literal(Value(Int64(2)))
+    var big = plan.exprs.binary(BinaryOp.GT, i, two)
+    var kept = plan.filter(rows, big)
+    var at = push(plan, kept, List[Schema]())
+    assert_equal(
+        explain(plan, at),
+        "FILTER i > 2\n  range(5) [i]\n",
+        "one filter, still above the call",
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

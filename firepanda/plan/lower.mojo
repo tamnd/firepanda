@@ -147,6 +147,19 @@ by with nothing to reduce from the section before. A difference and an
 intersection are the same node with another code on it and neither is a stack,
 so both are refused by name.
 
+### A table function is a source with no table under it
+
+A `range` or a `generate_series` is a source the same way a literal table is,
+and the frame it stands for is built here out of the arguments the query wrote
+down. That makes `SELECT * FROM range(5)` a query that reads no file and touches
+no catalog, which is the shortest end to end query there is and the one worth
+having in a test.
+
+The whole series is a frame before the query starts, so a series longer than
+`LONGEST_SERIES` is refused by name rather than allocated. DuckDB hands out one
+chunk at a time and never holds all of it, and a source that produced its rows
+as they were asked for is a driver change rather than an operator.
+
 ### A distinct is a group by that reduces nothing
 
 A group by holds one row per group and the rows of a group differ only in what
@@ -214,6 +227,17 @@ from firepanda.plan.node import (
     Plan,
 )
 
+comptime LONGEST_SERIES = 100_000_000
+"""How many rows a table function is allowed to produce here.
+
+A series is built before the query starts, the way a literal table is, so
+`range(1000000000000)` is an allocation of eight terabytes rather than a query
+that takes a while. DuckDB produces one chunk at a time and never holds the
+whole thing, and until this does too the length is refused by name at a hundred
+million rows, which is eight hundred megabytes and already more than a test
+should ask for.
+"""
+
 
 def _spine(plan: Plan, root: Int) raises -> List[Int]:
     """Walks from the root down to the scan, following first inputs.
@@ -242,6 +266,7 @@ def _spine(plan: Plan, root: Int) raises -> List[Int]:
         if (
             plan.nodes[at].kind == NodeKind.SCAN
             or plan.nodes[at].kind == NodeKind.VALUES
+            or plan.nodes[at].kind == NodeKind.TABLE_FUNCTION
             or plan.nodes[at].kind == NodeKind.UNION
         ):
             break
@@ -1059,6 +1084,130 @@ def _literals(plan: Plan, at: Int) raises -> DataFrame:
     return DataFrame(Schema(fields^), columns^)
 
 
+def _series(plan: Plan, at: Int) raises -> DataFrame:
+    """Turns a `range` or a `generate_series` into the frame a pipeline reads.
+
+    The two functions differ by one row. `range` stops before the bound it was
+    given and `generate_series` stops on it, which is why `range(3)` is three
+    rows and `generate_series(3)` is four. Everything else about them is the
+    same, including what one argument means: the bound is the last argument, so
+    a single argument is the bound and the series starts at zero and counts by
+    one.
+
+    A null argument answers no rows rather than raising, which is what DuckDB
+    does and is the only sensible reading of a series whose end nobody knows.
+    A step of zero is refused instead, because that one is not a series with
+    nothing in it, it is a series that never ends.
+
+    Args:
+        plan: The plan, bound.
+        at: The table function node.
+
+    Returns:
+        The frame the node stands for.
+
+    Raises:
+        Error: If an argument is not a literal, if the step is zero, or if the
+            series is longer than `LONGEST_SERIES`.
+    """
+    var name = plan.nodes[at].source.copy()
+    var inclusive = name == "generate_series"
+
+    var bounds = List[Int64](capacity=3)
+    var unknown = False
+    for i in range(len(plan.nodes[at].exprs)):
+        ref arg = plan.exprs.nodes[plan.nodes[at].exprs[i]]
+        if arg.kind != ExprKind.LITERAL:
+            raise Error(
+                String(
+                    "lower: argument ",
+                    i + 1,
+                    " of ",
+                    name,
+                    " is a ",
+                    arg.kind,
+                    (
+                        " expression, and there is no chunk under a table"
+                        " function to compute it over"
+                    ),
+                )
+            )
+        if arg.value.is_null():
+            unknown = True
+        else:
+            bounds.append(arg.value.as_scalar[DType.int64]())
+
+    var values = List[Int64]()
+    if not unknown:
+        var start = Int64(0)
+        var step = Int64(1)
+        var stop = bounds[0]
+        if len(bounds) > 1:
+            start = bounds[0]
+            stop = bounds[1]
+        if len(bounds) > 2:
+            step = bounds[2]
+        if step == 0:
+            raise Error(
+                String(
+                    "lower: ",
+                    name,
+                    (
+                        " was given a step of zero, and a series that never"
+                        " moves never reaches its end"
+                    ),
+                )
+            )
+        # How many rows there are is arithmetic rather than something to find
+        # out by counting them, and working it out first is what makes a series
+        # that is too long to build refused in no time rather than refused once
+        # it has been half built. The span is worked out unsigned so that a
+        # start below zero and a stop above it is a width and not an overflow.
+        var rows = UInt64(0)
+        if step > 0 and stop > start:
+            var span = UInt64(stop) - UInt64(start)
+            var by = UInt64(step)
+            rows = span // by
+            if inclusive or span % by != 0:
+                rows += 1
+        elif step < 0 and stop < start:
+            var span = UInt64(start) - UInt64(stop)
+            var by = UInt64(0) - UInt64(step)
+            rows = span // by
+            if inclusive or span % by != 0:
+                rows += 1
+        elif stop == start and inclusive:
+            rows = 1
+        if rows > LONGEST_SERIES:
+            raise Error(
+                String(
+                    "lower: this ",
+                    name,
+                    " is ",
+                    rows,
+                    " rows, which is longer than ",
+                    LONGEST_SERIES,
+                    ", and the whole of it is built before the query starts",
+                )
+            )
+        values = List[Int64](capacity=Int(rows))
+        var cur = start
+        for _ in range(Int(rows)):
+            values.append(cur)
+            cur += step
+
+    var col = Array[DType.int64](len(values))
+    for i in range(len(values)):
+        col.set_valid(i, values[i])
+    var chunk = ChunkedArray(LogicalType.INT64)
+    chunk.append(AnyArray(col^))
+    var columns = List[ChunkedArray](capacity=1)
+    columns.append(chunk^)
+    var fields = List[Field](capacity=1)
+    fields.append(Field(plan.nodes[at].names[0], LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
 def _stacked(
     plan: Plan,
     at: Int,
@@ -1348,6 +1497,8 @@ def _lower_from(
     var source: DataFrame
     if plan.nodes[first].kind == NodeKind.VALUES:
         source = _literals(plan, first)
+    elif plan.nodes[first].kind == NodeKind.TABLE_FUNCTION:
+        source = _series(plan, first)
     elif plan.nodes[first].kind == NodeKind.UNION:
         source = _stacked(plan, first, frames, taken)
     else:

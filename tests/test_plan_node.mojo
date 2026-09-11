@@ -288,6 +288,46 @@ def test_a_values_cannot_read_anything() raises:
         _ = plan.values([one, one, total, one], ["a", "b"])
 
 
+def test_a_table_function_prints_its_name_and_its_arguments() raises:
+    var plan = Plan()
+    var start = plan.exprs.literal(Value(Int64(1)))
+    var stop = plan.exprs.literal(Value(Int64(10)))
+    var rows = plan.table_function("range", [start, stop], ["i"])
+    assert_equal(
+        explain(plan, rows),
+        "range(1, 10) [i]\n",
+        "what it is called, what it was given, and what comes out",
+    )
+
+
+def test_a_table_function_with_no_arguments_still_prints() raises:
+    # There is no such function yet, and the node does not know which functions
+    # there are, so the empty argument list has to print as an empty argument
+    # list rather than as something the reader has to guess at.
+    var plan = Plan()
+    var rows = plan.table_function("now", List[Int](), ["t"])
+    assert_equal(explain(plan, rows), "now() [t]\n", "the call with nothing in")
+
+
+def test_a_table_function_needs_a_name_and_a_column() raises:
+    var plan = Plan()
+    var one = plan.exprs.literal(Value(Int64(1)))
+    with assert_raises(contains="a table function with no name"):
+        _ = plan.table_function("", [one], ["i"])
+    with assert_raises(contains="a table of no columns"):
+        _ = plan.table_function("range", [one], List[String]())
+
+
+def test_a_table_function_cannot_read_anything() raises:
+    # Same as a VALUES. It is called where a table goes, so there is nothing
+    # under it for a column reference to resolve against.
+    var plan = Plan()
+    var one = plan.exprs.literal(Value(Int64(1)))
+    var k = plan.exprs.column("k")
+    with assert_raises(contains="argument 2 of range reads something"):
+        _ = plan.table_function("range", [one, k], ["i"])
+
+
 def test_an_input_outside_the_plan_is_refused() raises:
     var plan = Plan()
     _ = plan.scan("lineitem", ["l_quantity"], 0)

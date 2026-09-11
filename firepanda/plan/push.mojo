@@ -159,9 +159,14 @@ def _rebuild(
         plan.exprs.conjuncts(plan.nodes[old].exprs[0], carried)
         return _rebuild(plan, inputs[0], bound, carried^, into)
 
-    if kind == NodeKind.SCAN or kind == NodeKind.VALUES:
-        # The two with no input, and therefore the two where a predicate that
-        # got this far has nowhere further to go and is written back above.
+    if (
+        kind == NodeKind.SCAN
+        or kind == NodeKind.VALUES
+        or kind == NodeKind.TABLE_FUNCTION
+    ):
+        # The three with no input, and therefore the three where a predicate
+        # that got this far has nowhere further to go and is written back
+        # above.
         var at = _emit(plan, old, List[Int](), into)
         return _apply(plan, at, carried^, into)
 
