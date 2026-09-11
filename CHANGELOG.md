@@ -23,6 +23,9 @@ Two new methods and one new frame method:
 - `DataFrame.nunique(name)` is the frame spelling of `prove_distinct`.
 
 `agg` reads the same field, so a `NUNIQUE` spec over a column that already knows skips `reduce_any` and its hash table.
+
+Part of #479 and of the column metadata in #375.
+
 ### Added: a cross join onto one row runs
 
 A cross join was refused at lowering because pairing every left row with every right row is a whole frame operation rather than anything a chunk at a time operator can do. One right row is the exception and it runs now. Pairing every left row with one right row adds a column to each row and moves nothing, so it lowers to one constant column per right column and the left side streams past untouched.
