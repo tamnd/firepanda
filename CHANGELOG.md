@@ -206,6 +206,24 @@ What it is worth depends on run length rather than on cardinality, and the measu
 The walk is split across cores the way the parallel filter is. Which ordinal a row gets depends on how many groups closed before it, which a worker handed the middle of the column does not know, so the boundaries are counted first and a prefix sum over the per worker counts is the ordinal each worker starts at. The comparison a worker makes at the first row of its own stretch reads the row before it, which belongs to the worker before, and reads are what make that safe.
 
 Two things are refused rather than attempted, and both hand back nothing so the caller falls through to the route that gets them right. A column holding a null does not come in at all, because `Sortedness` says nothing about which end a sort put the nulls at. And only a single key column qualifies, because the flag is per column and two columns each sorted on their own say nothing about whether the pairs are in lexicographic order. A descending column does qualify, since equal values are adjacent either way round and the runs come out in the order they appear either way round. Text is refused for now, because it would otherwise match the uint8 arm of the dtype dispatch and group on the first byte of each view.
+### Added: the SQL bind context, where a name becomes a pair of indices
+
+The second piece of the binder, and the one the optimizer is later built on. A query level holds the bindings its `FROM` offers, a subquery is another level with a parent pointer, and resolving a name walks that chain outward. What comes back is a binding position and a column position and never a name, which is the property that makes a pass that reorders or duplicates plan nodes safe: there is no scope left for a name to be reinterpreted in.
+
+Four rules in it are DuckDB's rather than ours, and each is a wrong answer rather than an error when it is missed.
+
+A bare name that two bindings both have is ambiguous, and the error names both ways of writing it. The exception is a column merged by `USING` or `NATURAL`, which is one column with two homes rather than two columns, so `SELECT x FROM a JOIN b USING (x)` is not ambiguous, `b.x` still means something, and a `*` expands the merged column once. A flag on the right hand copy gives all three of those without copying a column anywhere.
+
+A qualified name is tried longest first, so `a.b` is a column of table `a` when `a` is a binding and a field of a struct column `a` when it is not. The order those are attempted in is observable, so the question is a function with a name on it rather than whichever branch came first.
+
+Resolution records what it crossed. A name that resolves at an outer level makes the subquery correlated, and the outer column is written down at the point it is found rather than rediscovered later by a pass walking for outer references, because a pass that has to go looking is a pass that can miss one.
+
+Names fold, including quoted ones, for the same reason they fold at the catalog.
+
+The three errors are DuckDB's text: the ambiguity, the column nothing has with up to three near misses after it, and the qualifier nothing binds with the tables that are in scope listed. The near misses are deduplicated, since two tables that both have an `x` are one suggestion and not two.
+
+Nothing builds a bind context yet. It is what the `FROM` binder fills in.
+
 ### Added: the SQL catalog, which is the set of names a query is allowed to say
 
 The first piece of the binder. A catalog is a session scoped namespace holding a frame or a view under each name, it dies with the process, and there is no storage under it, no schemas and no `ATTACH`, because firepanda has nothing to attach to.

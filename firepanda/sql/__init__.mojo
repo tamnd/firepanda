@@ -26,6 +26,10 @@ the AST, and it is the only file that knows a grammar rule name.
 `catalog.mojo` is the namespace a query's names are resolved against: session
 scoped, no storage, a frame or a view under each name.
 
+`bind.mojo` is where a name written in a query becomes a pair of indices: the
+bindings a query level offers, the chain of levels a subquery sits inside, and
+the record of what a correlated one reached out for.
+
 `unsupported.mojo` is the line between what the grammar accepts and what
 firepanda runs. Every refusal is an entry in its table rather than a `raise`
 written where the cases ran out, which is what lets `sql_support()` list the
@@ -33,6 +37,7 @@ whole set. See docs/specs/sql/00-README.md.
 """
 
 from .ast import Ast, Expr, Ref, Stmt
+from .bind import Binding, Reference, Scope, Scopes
 from .catalog import Catalog, View
 from .matcher import Parse, ParseNode, parse, parse_rule, parse_unfiltered
 from .printer import (
