@@ -94,7 +94,7 @@ from firepanda.kernel.group import (
     aggregate_group_many,
     aggregate_group_pair_any,
 )
-from firepanda.kernel.nulls import all_valid_mask, coalesce_any
+from firepanda.kernel.nulls import all_valid_mask, coalesce_any, nan_over_nulls
 from firepanda.kernel.reduce import reduce_any
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.sort import (
@@ -1112,11 +1112,14 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         there arrives whole and a column that is not is made out of nothing.
 
         What type the made up column has is the only decision in it. With no
-        fill value it is a column of missing float64, which is what pandas
-        answers and is the only choice that says nothing about data that does
-        not exist. With a fill value it takes the value's own type, so asking
-        for a column that is not there and filling it with a whole number gives
-        an integer column rather than a float one, which is pandas again.
+        fill value it is a column of float64 NaN, which is what pandas answers
+        and is the only choice that says nothing about data that does not
+        exist. It is a NaN in the values rather than a cleared bit in a bitmap,
+        for the same reason the row half widens: pandas has one missing value
+        for a number and a column read the pandas way spells it that way. With
+        a fill value the column takes the value's own type, so asking for a
+        column that is not there and filling it with a whole number gives an
+        integer column rather than a float one, which is pandas again.
 
         Args:
             names: The column names the result should have, in order.
@@ -1159,8 +1162,17 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                     )
                 )
             else:
+                # A NaN rather than a null, which is the same rule the row half
+                # applies through `widen_for_missing`: a column that does not
+                # exist is read the way pandas would have read it, and pandas
+                # has one missing value for a number.
                 wanted.append(
-                    Series(names[i], all_null(LogicalType.FLOAT64, self.rows))
+                    Series(
+                        names[i],
+                        nan_over_nulls(
+                            all_null(LogicalType.FLOAT64, self.rows)
+                        ),
+                    )
                 )
         return self._rebuilt(wanted^, Index(copy=self.index))
 

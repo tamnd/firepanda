@@ -196,7 +196,7 @@ What that leaves is the intermediate nobody needs. Lowering turns each condition
 
 `fill_value` is done on the way past rather than as a second pass over the answer. One row holding the value is appended to each column and every not found label is pointed at that row, so the gather fills as it goes. Writing it as a fill over the result would also have filled the nulls the frame already had, which pandas does not do, and that is the kind of wrong answer that ships.
 
-An integer column that loses a row comes back as float64 with a NaN in it, which is pandas' rule and lives above the gather rather than in it. A fill value stops the widening, because with a fill there is no missing row to widen for.
+An integer column that loses a row comes back as float64 with a NaN in it, which is pandas' rule and lives above the gather rather than in it. A fill value stops the widening, because with a fill there is no missing row to widen for. A column made out of nothing by the other half of the method is spelled the same way, which is a NaN in the values rather than a cleared bit in a bitmap.
 
 `method` is refused, since filling a label from the label beside it needs the labels in order and is a different operation. `limit` and `tolerance` without it give pandas' own sentence back word for word. `copy` and `level` are accepted and ignored, which is what pandas does on a flat index. Two answers here are deliberately not pandas': a column name asked for twice is refused rather than answered with two columns under one name, and a label whose type is not the index's is refused rather than answered with a frame of nothing but missing rows.
 

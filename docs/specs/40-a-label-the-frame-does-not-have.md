@@ -8,7 +8,7 @@ Status: implemented. One frame method with ten parameters, of which two do the w
 
 On the rows it is a lookup. The caller hands over a set of labels, `get_indexer` says where each of them sits in the frame, and the answer is a gather through those positions. A label the frame does not have comes back as a row of missing values, which costs no branch of its own because `get_indexer` answers a not found label with a negative position and `take_any` already reads a negative position as a null row. Document 19 is the lookup, and document 20 is where the same gather was used to write half of the index editing operations, so between the two of them the row half of this method is four lines.
 
-On the columns it is a different lookup in a different place. The caller hands over a set of names, the schema says whether each one is there, and a name the frame does not have becomes a whole column of missing values as tall as the frame. There is no gather, no index, and no shared code with the row half beyond the fill value, which is why they are two methods in the core and one method at the boundary.
+On the columns it is a different lookup in a different place. The caller hands over a set of names, the schema says whether each one is there, and a name the frame does not have becomes a whole column of NaN as tall as the frame. There is no gather, no index, and no shared code with the row half beyond the fill value, which is why they are two methods in the core and one method at the boundary.
 
 The boundary is where they are one thing, because that is where pandas put them. `reindex(index=..., columns=...)` does both, the columns first and then the rows, in that order because narrowing the frame before gathering it means the gather moves less.
 
@@ -27,6 +27,8 @@ The sentinel row costs one allocation per column and one copy of the column into
 An int64 column has no way to say missing. A frame that loses a row therefore cannot come back as int64 with a hole in it, and pandas' answer is that the column comes back as float64 with a NaN.
 
 That rule is not in the gather. `take_any` on an int64 column with a negative position gives an int64 column with a null in it, which is correct for Arrow and correct for everything else that calls it. The widening happens one level up, in `DataFrame.reindex`, and only when the lookup actually failed, which is the same place and the same condition the rest of the library uses. `widen_for_missing` is the function, and it is the same one `shift` reaches for when its gap opens in an integer column, which is the other place this rule shows up.
+
+A column made out of nothing by the other half of the method is spelled the same way, which is a NaN in the values rather than a cleared bit in a bitmap. That is not obvious from the code, since the natural thing to write there is `all_null`, and it is what the conformance board asked for: a null is not a NaN, the comparison keeps them apart, and pandas answers a column it had to invent with NaN.
 
 Two consequences are worth writing down. A `fill_value` stops the widening, because with a fill there is no missing row to widen for and the column keeps the type it had. And `widen_for_missing` drops the validity bitmap and writes a NaN rather than keeping the bitmap and widening under it, so a test that asks a widened column whether row two is valid gets yes, and has to ask whether row two is a NaN instead. That caught two tests here before it caught anything else.
 

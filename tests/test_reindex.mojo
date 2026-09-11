@@ -301,7 +301,14 @@ def test_a_column_that_is_not_there_is_made_out_of_nothing() raises:
         made.dtype() == DType.float64,
         "float64, because a missing column says nothing about its own type",
     )
-    assert_equal(made.null_count(), 3, "and every row of it is missing")
+    # A NaN in the values rather than a cleared bit in a bitmap, which is how
+    # the row half spells a missing number as well. pandas has one missing
+    # value for a number and this is it, so a column made out of nothing is
+    # made out of the same nothing pandas would have read.
+    assert_equal(made.null_count(), 0, "and it says so in its values")
+    ref values = made.as_typed_view[DType.float64]()
+    for i in range(3):
+        assert_true(isnan(values[i]), "every row of it is missing")
 
 
 def test_a_made_up_column_takes_the_fill_values_type() raises:
