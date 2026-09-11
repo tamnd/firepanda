@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a FROM of more than one table lowers to a join
+
+`SELECT t.a, u.z FROM t JOIN u ON t.a = u.k` lowers. The plan's join holds a left key and a right key per pair rather than a predicate, because that is what a hash join runs, so the `ON` is split on `AND` and each part is asked which sides it reads. A part that is an equality with one side on the left and the other on the right is a key pair. Which side a part reads is answered by the relation a qualified column carries, and by the column name for one that is not qualified.
+
+What is left over is a filter above the join. Every pairing an inner join produces is a pairing the condition asked about, so testing the rest on top answers the same query, and an inner join with no equality between its sides at all is a cross join with the whole condition over it. On an outer join the same rewrite is wrong, since an outer join's condition decides which rows are padded as well as which rows match and a filter above one would test the padding and throw the row away, so a condition an outer join cannot carry is refused rather than moved.
+
+A comma between two tables is a join with no condition, which is what makes `FROM a, b WHERE a.x = b.y` and the same query written with a `JOIN` the same query: both reach a cross join with the equality over it, and predicate pushdown turns either into the join. The comma nests left, the same as a chain of `JOIN` words does. `INNER`, `LEFT`, `RIGHT`, `FULL` and `CROSS` are all read, and `OUTER` says nothing that `LEFT` did not.
+
+A star over a join is both sides end to end, which is DuckDB's answer, and each column of a name both sides have says which input it is so the projection can read one of each.
+
+Six joins are refused by name rather than lowered wrong. `USING` and `NATURAL` output one column of each matched pair rather than both, `POSITIONAL` pairs rows by number and reads no column, `ASOF` matches against the nearest value rather than an equal one, and `SEMI` and `ANTI` keep none of the right side, so what the rest of the query may name is not the two schemas end to end. A subquery in a `FROM`, a table function, and an alias on a parenthesised join are refused too.
+
+Part of #309.
+
 ### Added: a SQL column can say which table it came from
 
 `SELECT l.a FROM t AS l` lowers. The FROM clause records what each table is called, a two part column name is looked up against that record, and the relation it finds is what goes on the plan's column rather than the word the query wrote. Binding then looks in that relation and nowhere else, so a name two tables both have resolves to the one that was meant instead of being refused.

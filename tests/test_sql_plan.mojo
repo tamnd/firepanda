@@ -10,8 +10,8 @@ The last two are the ones worth having. One asserts that the plan a query
 produces is the plan the equivalent dataframe calls produce, which is the rule
 in docs/specs/sql/08-plan-and-optimizer.md section 6 written as something that
 can fail. The other asserts that every shape this does not lower yet says so by
-name, because a lowering that quietly returned a plan for a join would be a
-wrong answer and a refusal is not.
+name, because a lowering that quietly returned the wrong plan for a join would
+be a wrong answer and a refusal is not.
 """
 
 from std.testing import TestSuite, assert_equal, assert_raises, assert_true
@@ -44,19 +44,39 @@ def _schema() -> Schema:
     return out^
 
 
+def _other() -> Schema:
+    """Three columns, one of which `t` also has.
+
+    The shared name is what a join test needs: a query over both tables that
+    writes it unqualified is ambiguous and one that qualifies it is not, and
+    neither case exists with one table in the catalog.
+
+    Returns:
+        The schema.
+    """
+    var out = Schema()
+    out.append(Field("b", LogicalType.INT64, False))
+    out.append(Field("k", LogicalType.INT64, False))
+    out.append(Field("z", LogicalType.STRING, True))
+    return out^
+
+
 def _catalog() raises -> Catalog:
-    """A session holding one frame called `t`.
+    """A session holding a frame called `t` and one called `u`.
 
     Returns:
         The catalog.
 
     Raises:
-        Error: If the name cannot be registered.
+        Error: If a name cannot be registered.
     """
     var frame = DataFrame()
     frame.schema = _schema()
     var catalog = Catalog()
     catalog.register("t", frame^)
+    var second = DataFrame()
+    second.schema = _other()
+    catalog.register("u", second^)
     return catalog^
 
 
@@ -84,6 +104,18 @@ def _plan(sql: StringSlice) raises -> String:
     var out = lower(ast, node, _catalog())
     _ = bind(out.plan, out.root, out.sources)
     return explain(out.plan, out.root)
+
+
+def _outer(word: StringSlice) -> String:
+    """One query with the join word written into it.
+
+    Args:
+        word: The words in front of `JOIN`.
+
+    Returns:
+        The query.
+    """
+    return String("SELECT a FROM t ", word, " JOIN u ON t.a = u.k")
 
 
 def test_the_smallest_query_that_reads_a_table() raises:
@@ -324,13 +356,6 @@ def test_a_name_the_catalog_does_not_have_suggests_one_it_does() raises:
         _ = _plan("SELECT a FROM tt")
 
 
-def test_a_join_is_refused_by_name_rather_than_lowered_wrong() raises:
-    with assert_raises(contains="one table in a FROM"):
-        _ = _plan("SELECT a FROM t, t")
-    with assert_raises(contains="a named table in a FROM"):
-        _ = _plan("SELECT a FROM t JOIN t u ON t.a = u.a")
-
-
 def test_a_decimal_literal_is_refused_rather_than_made_a_double() raises:
     # The one refusal in here that is not about effort. A double in place of an
     # exact decimal answers a different question and says nothing about it.
@@ -411,6 +436,185 @@ def test_a_qualified_name_can_be_ordered_by() raises:
 def test_column_aliases_on_a_table_are_refused_by_name() raises:
     with assert_raises(contains="column aliases on a table reference"):
         _ = _plan("SELECT x FROM t AS l (x, y, z, w)")
+
+
+def test_a_join_is_one_node_over_two_scans() raises:
+    assert_equal(
+        _plan("SELECT t.a, u.z FROM t JOIN u ON t.a = u.k"),
+        "PROJECT [a, z]\n  JOIN inner [a = k]\n    SCAN t []\n    SCAN u []\n",
+    )
+
+
+def test_a_comma_in_a_from_is_a_join_with_no_condition() raises:
+    # The comma form and the JOIN form are the same query, and this is where
+    # that stops being a claim: both reach a cross join with the equality over
+    # it, and predicate pushdown is what turns either into a hash join later.
+    assert_equal(
+        _plan("SELECT a FROM t, u WHERE t.a = u.k"),
+        (
+            "PROJECT [a]\n"
+            "  FILTER a == k\n"
+            "    JOIN cross []\n"
+            "      SCAN t []\n"
+            "      SCAN u []\n"
+        ),
+    )
+
+
+def test_a_cross_join_is_the_same_node_the_comma_built() raises:
+    assert_equal(
+        _plan("SELECT a FROM t CROSS JOIN u"),
+        "PROJECT [a]\n  JOIN cross []\n    SCAN t []\n    SCAN u []\n",
+    )
+
+
+def test_each_outer_join_keeps_the_side_its_word_names() raises:
+    assert_true("JOIN left [a = k]" in _plan(_outer("LEFT")))
+    assert_true("JOIN right [a = k]" in _plan(_outer("RIGHT")))
+    assert_true("JOIN outer [a = k]" in _plan(_outer("FULL OUTER")))
+    # OUTER says nothing LEFT did not, so the two spellings are one join.
+    assert_equal(_plan(_outer("LEFT")), _plan(_outer("LEFT OUTER")))
+
+
+def test_the_rest_of_an_inner_condition_is_tested_above_the_join() raises:
+    # The equality is a key pair and the comparison is not, and every pairing
+    # the join produces is a pairing the condition asked about, so testing what
+    # is left over above the join answers the same query.
+    assert_equal(
+        _plan("SELECT a FROM t JOIN u ON t.a = u.k AND t.b > u.k"),
+        (
+            "PROJECT [a]\n"
+            "  FILTER b > k\n"
+            "    JOIN inner [a = k]\n"
+            "      SCAN t []\n"
+            "      SCAN u []\n"
+        ),
+    )
+
+
+def test_the_rest_of_an_outer_condition_is_refused_rather_than_moved() raises:
+    # The same rewrite on an outer join is wrong. A row with no match is padded
+    # and kept, and a filter above the join would then test the padding and
+    # throw the row away, which is a different query and not a slower one.
+    with assert_raises(contains="decides which rows are padded"):
+        _ = _plan("SELECT a FROM t LEFT JOIN u ON t.a = u.k AND t.b > 1")
+
+
+def test_two_equalities_are_two_key_pairs() raises:
+    assert_true(
+        "JOIN inner [b = b, a = k]"
+        in _plan("SELECT a FROM t JOIN u ON t.b = u.b AND t.a = u.k")
+    )
+
+
+def test_a_pair_written_right_first_still_comes_out_left_first() raises:
+    # The node holds a left key and a right key, so which side of the equals
+    # sign each was written on is not what decides which list it goes in.
+    assert_equal(
+        _plan("SELECT a FROM t JOIN u ON u.k = t.a"),
+        _plan("SELECT a FROM t JOIN u ON t.a = u.k"),
+    )
+
+
+def test_a_key_may_be_computed_rather_than_a_bare_column() raises:
+    assert_true(
+        "JOIN inner [a + 1 = k]"
+        in _plan("SELECT a FROM t JOIN u ON t.a + 1 = u.k")
+    )
+
+
+def test_an_equality_with_only_one_side_in_it_is_not_a_key() raises:
+    # Nothing about `t.a = 1` pairs a left row with a right row, so there is no
+    # key to carry and what is left is every pairing with the test over it.
+    assert_equal(
+        _plan("SELECT a FROM t JOIN u ON t.a = 1"),
+        (
+            "PROJECT [a]\n"
+            "  FILTER a == 1\n"
+            "    JOIN cross []\n"
+            "      SCAN t []\n"
+            "      SCAN u []\n"
+        ),
+    )
+
+
+def test_a_name_both_sides_have_is_refused_in_a_condition() raises:
+    with assert_raises(contains="both sides of this join"):
+        _ = _plan("SELECT a FROM t JOIN u ON b = k")
+
+
+def test_a_name_neither_side_has_says_that_rather_than_guessing() raises:
+    with assert_raises(contains="on either side of this join"):
+        _ = _plan("SELECT a FROM t JOIN u ON t.a = q")
+
+
+def test_a_star_over_a_join_is_the_two_sides_end_to_end() raises:
+    # Both `b` columns are in it, which is what DuckDB answers, and each of them
+    # says which input it is so that the projection can read one of each.
+    assert_equal(
+        _plan("SELECT * FROM t JOIN u ON t.a = u.k"),
+        (
+            "PROJECT [a, b, g, f, b, k, z]\n"
+            "  JOIN inner [a = k]\n"
+            "    SCAN t []\n"
+            "    SCAN u []\n"
+        ),
+    )
+
+
+def test_a_table_joined_to_itself_is_told_apart_by_its_aliases() raises:
+    assert_equal(
+        _plan("SELECT x.a, y.b FROM t x JOIN t y ON x.a = y.b"),
+        "PROJECT [a, b]\n  JOIN inner [a = b]\n    SCAN t []\n    SCAN t []\n",
+    )
+
+
+def test_three_tables_nest_to_the_left() raises:
+    assert_equal(
+        _plan("SELECT t.a FROM t JOIN u ON t.a = u.k JOIN t s ON s.a = u.k"),
+        (
+            "PROJECT [a]\n"
+            "  JOIN inner [k = a]\n"
+            "    JOIN inner [a = k]\n"
+            "      SCAN t []\n"
+            "      SCAN u []\n"
+            "    SCAN t []\n"
+        ),
+    )
+
+
+def test_a_join_in_parentheses_is_the_join_inside_them() raises:
+    assert_equal(
+        _plan("SELECT a FROM (t JOIN u ON t.a = u.k)"),
+        _plan("SELECT a FROM t JOIN u ON t.a = u.k"),
+    )
+
+
+def test_a_condition_may_reach_only_the_two_tables_it_joins() raises:
+    # The comma binds looser than the JOIN word, so `u` and `t s` are the join
+    # and `t` is beside it, and a condition naming `t` there is reaching out of
+    # the join it was written on.
+    with assert_raises(contains="a table this join does not read"):
+        _ = _plan("SELECT a FROM t, u JOIN t s ON t.a = s.a")
+
+
+def test_the_joins_with_no_node_yet_each_say_which_one() raises:
+    with assert_raises(contains="USING join"):
+        _ = _plan("SELECT a FROM t JOIN u USING (b)")
+    with assert_raises(contains="NATURAL join"):
+        _ = _plan("SELECT a FROM t NATURAL JOIN u")
+    with assert_raises(contains="POSITIONAL join"):
+        _ = _plan("SELECT a FROM t POSITIONAL JOIN u")
+    with assert_raises(contains="ASOF join"):
+        _ = _plan("SELECT a FROM t ASOF JOIN u ON t.a = u.k")
+    with assert_raises(contains="SEMI or ANTI join"):
+        _ = _plan("SELECT a FROM t SEMI JOIN u ON t.a = u.k")
+    with assert_raises(contains="subquery in a FROM"):
+        _ = _plan("SELECT a FROM t JOIN (SELECT 1 AS k) v ON t.a = v.k")
+    with assert_raises(contains="table function"):
+        _ = _plan("SELECT a FROM range(10) r")
+    with assert_raises(contains="parenthesised table reference"):
+        _ = _plan("SELECT a FROM (t JOIN u ON t.a = u.k) v")
 
 
 def main() raises:
