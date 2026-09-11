@@ -873,15 +873,37 @@ struct Expressions(Movable, Sized):
             grown.append(at)
         if same:
             return root
+        return self.rebuild(root, grown^)
 
-        # The type is not carried over. A grafted node produces whatever its new
-        # children produce and the only honest answer here is to let binding say
-        # so, which is what every caller does next anyway.
+    def rebuild(mut self, root: Int, var kids: List[Int]) raises -> Int:
+        """Returns the same node over different operands.
+
+        Nothing is rewritten in place, for the reason `graft` gives: an index
+        may be read by more than one node and an arena that let a caller change
+        one out from under another would be a different data structure. So this
+        adds a node rather than editing one, and a pass that rebuilds a whole
+        expression only pays for the path it changed.
+
+        The type is not carried over. A node over new operands produces whatever
+        the new operands produce, and the only honest answer here is to let
+        binding say so, which is what every caller does next anyway.
+
+        Args:
+            root: The node to copy.
+            kids: The operands the copy gets. Consumed.
+
+        Returns:
+            The new expression.
+
+        Raises:
+            If the node is not in the arena.
+        """
+        self.check(root)
         var name = self.nodes[root].name.copy()
         var value = self.nodes[root].value.copy()
         return self._add(
             Expr(
-                kind,
+                self.nodes[root].kind,
                 name^,
                 self.nodes[root].at,
                 self.nodes[root].table,
@@ -889,7 +911,7 @@ struct Expressions(Movable, Sized):
                 self.nodes[root].op,
                 self.nodes[root].rowwise,
                 self.nodes[root].parts,
-                grown^,
+                kids^,
             )
         )
 

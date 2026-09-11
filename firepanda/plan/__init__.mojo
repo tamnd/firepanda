@@ -54,6 +54,12 @@ rows rather than all of them, and turns a limit above a sort into a bound on
 the sort, which is what lets a sort keep the best n rows as they go past
 instead of ordering the whole thing.
 
+`cse.mojo` is common subexpression elimination. Within one plan node, two
+expressions that are the same shape become one index, which lowering then
+computes once because it remembers where it put an index it has already met. It
+works a node at a time because binding writes a position onto a column and the
+same name under two nodes can bind to two different positions.
+
 `optimize.mojo` is the pipeline: every pass above, in the order the spec fixes,
 run again if a run changed anything and up to a small bound. It is the one entry
 point, and the passes that are not written yet slot into it and nowhere else.
@@ -69,6 +75,7 @@ does not change when they do.
 """
 
 from .bind import Bound, bind, bind_all, bind_expr
+from .cse import cse
 from .expr import UNBOUND, Expr, ExprKind, Expressions
 from .limits import limits
 from .lower import lower
