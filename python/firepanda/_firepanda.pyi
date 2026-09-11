@@ -73,6 +73,9 @@ class DataFrame:
     def reindex_columns(self, names: list[str], fill_value: object) -> DataFrame:
         """The frame under a set of column names, in that order."""
         ...
+    def reindex_like(self, other: object) -> DataFrame:
+        """The frame on another frame's labels and column names."""
+        ...
     def reduce(self, kind: str, param: float) -> Series:
         """Every column reduced to one value, as a series of them."""
         ...
@@ -171,6 +174,9 @@ class Series:
         ...
     def reindex(self, labels: object, fill_value: object) -> Series:
         """The series on a set of labels, whether it has them or not."""
+        ...
+    def reindex_like(self, index: object) -> Series:
+        """The series on the labels an index carries, under its name."""
         ...
     def to_list(self) -> list[object]:
         """Every value, copied into a Python list."""

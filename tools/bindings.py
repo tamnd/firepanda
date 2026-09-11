@@ -1917,6 +1917,13 @@ FRAME = Exposed(
             returns="DataFrame",
         ),
         Binding(
+            mojo="PyDataFrame.reindex_like",
+            name="reindex_like",
+            doc="The frame on another frame's labels and column names.",
+            params=(("other", "object"),),
+            returns="DataFrame",
+        ),
+        Binding(
             mojo="PyDataFrame.reduce",
             name="reduce",
             doc="Every column reduced to one value, as a series of them.",
@@ -2281,6 +2288,17 @@ FRAME = Exposed(
             returns="DataFrame",
         ),
         Member(
+            name="reindex_like",
+            kind="method",
+            signature=(
+                "other: Any, method: Any = None, copy: Any = NO_DEFAULT,"
+                " limit: Any = None, tolerance: Any = None"
+            ),
+            body="self._reindex_like(other, method, copy, limit, tolerance)",
+            doc="The frame shaped the way another frame is shaped.",
+            returns="DataFrame",
+        ),
+        Member(
             name="nlargest",
             kind="method",
             signature="n: int, columns: Any, keep: Any = \"first\"",
@@ -2422,6 +2440,13 @@ SERIES = Exposed(
             name="reindex",
             doc="The series on a set of labels, whether it has them or not.",
             params=(("labels", "object"), ("fill_value", "object")),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.reindex_like",
+            name="reindex_like",
+            doc="The series on the labels an index carries, under its name.",
+            params=(("index", "object"),),
             returns="Series",
         ),
         Binding(
@@ -2747,6 +2772,17 @@ SERIES = Exposed(
                 " limit, tolerance)"
             ),
             doc="The series on a set of labels, whether it has them or not.",
+            returns="Series",
+        ),
+        Member(
+            name="reindex_like",
+            kind="method",
+            signature=(
+                "other: Any, method: Any = None, copy: Any = NO_DEFAULT,"
+                " limit: Any = None, tolerance: Any = None"
+            ),
+            body="self._reindex_like(other, method, copy, limit, tolerance)",
+            doc="The series labelled the way another thing is labelled.",
             returns="Series",
         ),
         Member(

@@ -49,6 +49,12 @@ The whole series is a frame before the query starts, so one longer than a hundre
 The SQL front end does not build the node yet, so `SELECT * FROM range(5)` is still refused where it is parsed. That is the next change and it is a small one.
 
 Part of #309.
+### Added: a frame and a series can be shaped the way another one is shaped
+
+`DataFrame.reindex_like` and `Series.reindex_like`, which are `reindex` with the labels read off another object rather than written out. The reason they are methods rather than a line at the call site is the index name: taking the labels out and passing them as a list gives the right rows back under the name the frame already had, and coming back labelled the way the other frame is labelled is the whole point of asking for its shape. So the core's `reindex` gained an overload that takes an `Index` and keeps its name, and the overload that takes a bare set of labels is now one line that builds an index under this frame's own name and calls the other. The frame's version does both axes and therefore needs another frame, which is why pandas refuses a series there with a sentence about there being no axis named columns on one, while the series' version needs only labels and takes either. There is no fill value, because pandas does not offer one here, so a column that gains a row widens to float64. Document 40 section 11 has the rest.
+
+Part of #156, after #8.
+
 
 ### Added: a UNION runs, and stacking it reads no rows
 

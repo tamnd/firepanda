@@ -506,5 +506,77 @@ def test_an_index_that_repeats_a_label_cannot_be_reindexed() raises:
         _ = index.reindex(_labels([Int64(10)]))
 
 
+def _other() raises -> DataFrame:
+    """A frame labelled twenty, thirty and forty, holding one column of the
+    three `_keyed` has and one it does not."""
+    var value = Array[DType.int64](3)
+    for i in range(3):
+        value.set_valid(i, Int64(0))
+    var series = List[Series]()
+    series.append(Series("other", _labels([Int64(20), 30, 40])))
+    series.append(Series("count", value^))
+    series.append(Series("extra", Array[DType.int64](3)))
+    return DataFrame.from_series(series^).set_index("other")
+
+
+def test_a_frame_reindexed_onto_an_index_takes_that_index_name() raises:
+    # The whole reason the overload exists. A bare set of labels leaves the
+    # answer named after the frame that was asked, and an index says what the
+    # answer should be called as well as what should be in it.
+    var got = _keyed().reindex(Index(_labels([Int64(30), 10]), String("other")))
+    assert_equal(got.index.name.value(), "other", "the target's own name")
+    assert_equal(_label_list(got), [30, 10], "and the labels it asked for")
+
+
+def test_a_frame_reindexed_onto_an_empty_index_takes_its_name_too() raises:
+    # The short circuit is a second path through the method and it has its own
+    # chance to drop the name, so it is asked separately.
+    var got = _keyed().reindex(Index(_labels(List[Int64]()), String("other")))
+    assert_equal(got.rows, 0, "no rows came back")
+    assert_equal(got.index.name.value(), "other", "under the name asked for")
+
+
+def test_a_series_reindexed_onto_an_index_takes_that_index_name() raises:
+    var got = _counted().reindex(Index(_labels([Int64(30)]), String("other")))
+    assert_equal(got.index.name.value(), "other", "the target's own name")
+    assert_equal(got.name, "count", "and the series keeps its own")
+
+
+def test_a_frame_shaped_like_another_takes_its_labels_and_its_columns() raises:
+    var got = _keyed().reindex_like(_other())
+    assert_equal(_label_list(got), [20, 30, 40], "the other frame's labels")
+    assert_equal(got.names(), ["count", "extra"], "and its column names")
+
+
+def test_a_frame_shaped_like_another_is_labelled_the_way_it_is() raises:
+    # The reason this is a method rather than two calls at the boundary: a
+    # caller who took the labels out and handed them over would lose the name.
+    var got = _keyed().reindex_like(_other())
+    assert_equal(got.index.name.value(), "other", "the other frame's name")
+
+
+def test_a_row_the_other_frame_has_and_this_one_does_not_goes_missing() raises:
+    var got = _keyed().reindex_like(_other())
+    assert_equal(_counts_of(got), [2, 3, -1], "forty was not there to bring")
+
+
+def test_a_column_the_other_frame_has_and_this_one_does_not_is_made() raises:
+    var got = _keyed().reindex_like(_other())
+    var made = _column(got, "extra")
+    assert_true(
+        made.dtype() == DType.float64, "made as a float column of nothing"
+    )
+    ref values = made.as_typed_view[DType.float64]()
+    for i in range(3):
+        assert_true(isnan(values[i]), "every row of it is missing")
+
+
+def test_a_frame_shaped_like_itself_comes_back_as_it_was() raises:
+    var got = _keyed().reindex_like(_keyed())
+    assert_equal(_label_list(got), [10, 20, 30], "the labels it already had")
+    assert_equal(_counts_of(got), [1, 2, 3], "and the rows it already had")
+    assert_equal(got.names(), ["count", "size", "word"], "and its columns")
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

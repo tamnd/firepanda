@@ -1930,6 +1930,20 @@ class DataFrame(DataFrameMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def reindex_like(
+        self,
+        other: Any,
+        method: Any = None,
+        copy: Any = NO_DEFAULT,
+        limit: Any = None,
+        tolerance: Any = None,
+    ) -> DataFrame:
+        """The frame shaped the way another frame is shaped."""
+        try:
+            return self._reindex_like(other, method, copy, limit, tolerance)
+        except Exception as error:
+            raise translate(error) from None
+
     def nlargest(self, n: int, columns: Any, keep: Any = "first") -> DataFrame:
         """The n rows holding the largest values in one column."""
         try:
@@ -2740,6 +2754,20 @@ class Series(SeriesMixin):
         """The series on a set of labels, whether it has them or not."""
         try:
             return self._reindex(index, axis, method, copy, level, fill_value, limit, tolerance)
+        except Exception as error:
+            raise translate(error) from None
+
+    def reindex_like(
+        self,
+        other: Any,
+        method: Any = None,
+        copy: Any = NO_DEFAULT,
+        limit: Any = None,
+        tolerance: Any = None,
+    ) -> Series:
+        """The series labelled the way another thing is labelled."""
+        try:
+            return self._reindex_like(other, method, copy, limit, tolerance)
         except Exception as error:
             raise translate(error) from None
 

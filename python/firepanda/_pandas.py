@@ -101,6 +101,39 @@ def _no_level(level: Any) -> None:
         )
 
 
+def _reindex_filling(kind: str, method: Any, limit: Any, tolerance: Any) -> None:
+    """Refuses the three parameters of reindex that are about filling.
+
+    `method` fills a label the caller does not have from the label beside it,
+    which needs the labels in order to mean anything and is a different
+    operation from putting a value in the row, so it is refused rather than
+    approximated. `limit` and `tolerance` belong to `method`, and passing either
+    without it is pandas' own error, given back word for word because the caller
+    made pandas' mistake and document 22 says the wording is theirs in that
+    case.
+
+    Args:
+        kind: The word for what is being reindexed, for the message.
+        method: What was passed for `method`.
+        limit: What was passed for `limit`.
+        tolerance: What was passed for `tolerance`.
+
+    Raises:
+        UnsupportedError: If a `method` was asked for.
+        InvalidArgumentError: If a `limit` or a `tolerance` arrived without one.
+    """
+    if method is not None:
+        raise UnsupportedError(
+            f"reindex with method= fills a label the {kind} does not have from"
+            " the label beside it, which needs the labels in order and is a"
+            " different operation from putting a value in the row"
+        )
+    if limit is not None or tolerance is not None:
+        raise InvalidArgumentError(
+            "limit argument only valid if doing pad, backfill or nearest reindexing"
+        )
+
+
 def _axis_number(axis: Any, owner: str, default: int, allowed: tuple[int, ...]) -> int:
     """Turns the five spellings of an axis into the number the boundary takes.
 
@@ -2082,16 +2115,7 @@ class DataFrameMixin:
         """
         from ._frame import DataFrame
 
-        if method is not None:
-            raise UnsupportedError(
-                "reindex with method= fills a label the frame does not have from"
-                " the label beside it, which needs the labels in order and is a"
-                " different operation from putting a value in the row"
-            )
-        if limit is not None or tolerance is not None:
-            raise InvalidArgumentError(
-                "limit argument only valid if doing pad, backfill or nearest reindexing"
-            )
+        _reindex_filling("frame", method, limit, tolerance)
 
         if index is not None or columns is not None:
             if axis is not None:
@@ -2123,6 +2147,49 @@ class DataFrameMixin:
             if index is not None:
                 inner = inner.reindex(index, value)
             return DataFrame._wrap(inner)
+        except Exception as error:
+            raise translate(error) from None
+
+    def _reindex_like(
+        self, other: Any, method: Any, copy: Any, limit: Any, tolerance: Any
+    ) -> DataFrame:
+        """The frame shaped the way another frame is shaped.
+
+        Both axes of `reindex` with the labels read off `other` rather than
+        written out, and the reason it is a method of its own rather than two
+        keyword arguments is the third thing it carries: the name of the other
+        frame's index. A caller who took the labels out and passed them as a
+        sequence would get the answer back under this frame's own index name,
+        which is not what asking for another frame's shape means.
+
+        `other` has to be a frame. pandas refuses a series here with a sentence
+        about there being no axis named columns on one, which is true and is
+        copied rather than improved for the reason document 22 gives.
+
+        There is no `fill_value`, because pandas does not offer one: a row or a
+        column the other frame has and this one does not comes back missing, so
+        an integer column that gains a row widens the way it does everywhere
+        else.
+
+        Args:
+            other: The frame whose labels and column names to take.
+            method: Refused, as it is on `reindex`.
+            copy: Ignored, as it is on `reindex`.
+            limit: Refused, since it only means something with `method`.
+            tolerance: Refused, for the same reason.
+
+        Returns:
+            A new frame with the other frame's labels and columns.
+        """
+        from ._frame import DataFrame
+
+        _reindex_filling("frame", method, limit, tolerance)
+        if not isinstance(other, DataFrameMixin):
+            raise InvalidArgumentError(
+                f"No axis named columns for object type {type(other).__name__}"
+            )
+        try:
+            return DataFrame._wrap(self._inner.reindex_like(other._inner))
         except Exception as error:
             raise translate(error) from None
 
@@ -2626,22 +2693,51 @@ class SeriesMixin:
         """
         from ._frame import Series
 
-        if method is not None:
-            raise UnsupportedError(
-                "reindex with method= fills a label the series does not have"
-                " from the label beside it, which needs the labels in order and"
-                " is a different operation from putting a value in the row"
-            )
-        if limit is not None or tolerance is not None:
-            raise InvalidArgumentError(
-                "limit argument only valid if doing pad, backfill or nearest reindexing"
-            )
+        _reindex_filling("series", method, limit, tolerance)
         if index is None:
             return Series._wrap(self._inner)
 
         value = None if isinstance(fill_value, float) and math.isnan(fill_value) else fill_value
         try:
             return Series._wrap(self._inner.reindex(index, value))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _reindex_like(
+        self, other: Any, method: Any, copy: Any, limit: Any, tolerance: Any
+    ) -> Series:
+        """The series labelled the way another thing is labelled.
+
+        `reindex` with the labels read off whatever was handed over, and the
+        name of its index coming across with them, which is the difference
+        between this and taking the labels out and passing them as a list.
+
+        `other` can be a frame or a series, since pandas asks it for its index
+        and both have one. Unlike the frame's version there is no second axis to
+        disagree about, so a frame is accepted here where a series is refused
+        there.
+
+        Args:
+            other: The frame or series whose labels to take.
+            method: Refused, as it is on `reindex`.
+            copy: Ignored, as it is on `reindex`.
+            limit: Refused, since it only means something with `method`.
+            tolerance: Refused, for the same reason.
+
+        Returns:
+            A new series on the other thing's labels.
+        """
+        from ._frame import Series
+
+        _reindex_filling("series", method, limit, tolerance)
+        if not isinstance(other, (DataFrameMixin, SeriesMixin)):
+            raise DTypeError(
+                "reindex_like takes a frame or a series, since it reads the"
+                f" labels off one, and {type(other).__name__} has none"
+            )
+        shape: Any = other
+        try:
+            return Series._wrap(self._inner.reindex_like(shape.index._inner))
         except Exception as error:
             raise translate(error) from None
 
