@@ -367,7 +367,7 @@ def test_the_shapes_with_no_node_yet_each_say_which_one() raises:
     with assert_raises(contains="GROUPING SETS"):
         _ = _plan("SELECT g FROM t GROUP BY CUBE (g)")
     with assert_raises(contains="subquery in an expression"):
-        _ = _plan("SELECT a FROM t WHERE b IN (SELECT b FROM u)")
+        _ = _plan("SELECT a FROM t WHERE (SELECT b FROM u) > 1")
     with assert_raises(contains="subquery in an expression"):
         _ = _plan("SELECT a FROM t WHERE EXISTS (SELECT b FROM u)")
     with assert_raises(contains="TRY_CAST"):
@@ -1015,6 +1015,89 @@ def test_a_semi_join_needs_an_equality_between_its_two_sides() raises:
         _ = _plan("SELECT a FROM t SEMI JOIN u ON t.b > u.b")
     with assert_raises(contains="anti join on equalities"):
         _ = _plan("SELECT a FROM t ANTI JOIN u ON t.b = u.b AND t.a > u.k")
+
+
+def test_an_in_over_a_subquery_is_a_semi_join() raises:
+    assert_equal(
+        _plan("SELECT a FROM t WHERE b IN (SELECT k FROM u)"),
+        (
+            "PROJECT [a]\n"
+            "  JOIN semi [b = k]\n"
+            "    SCAN t []\n"
+            "    PROJECT [k]\n"
+            "      SCAN u []\n"
+        ),
+    )
+
+
+def test_the_rest_of_a_where_stays_a_filter_under_the_semi_join() raises:
+    # A semi join hands out the left side unchanged, so the filter and the join
+    # commute and the filter goes first, which is the side with fewer rows to
+    # probe with.
+    assert_equal(
+        _plan("SELECT a FROM t WHERE a > 1 AND b IN (SELECT k FROM u)"),
+        (
+            "PROJECT [a]\n"
+            "  JOIN semi [b = k]\n"
+            "    FILTER a > 1\n"
+            "      SCAN t []\n"
+            "    PROJECT [k]\n"
+            "      SCAN u []\n"
+        ),
+    )
+
+
+def test_two_ins_in_one_where_are_two_semi_joins() raises:
+    assert_true(
+        _plan(
+            "SELECT a FROM t WHERE b IN (SELECT k FROM u)"
+            " AND a IN (SELECT b FROM u)"
+        ).startswith(
+            "PROJECT [a]\n  JOIN semi [a = b]\n    JOIN semi [b = k]\n"
+        )
+    )
+
+
+def test_a_subquery_naming_a_column_the_outer_query_has_is_not_ambiguous() raises:
+    # Both tables have a `b`. The right key binds against the build side alone,
+    # so the name resolves there and nowhere else.
+    assert_equal(
+        _plan("SELECT a FROM t WHERE b IN (SELECT b FROM u)"),
+        (
+            "PROJECT [a]\n"
+            "  JOIN semi [b = b]\n"
+            "    SCAN t []\n"
+            "    PROJECT [b]\n"
+            "      SCAN u []\n"
+        ),
+    )
+
+
+def test_a_not_in_over_a_subquery_is_refused_rather_than_an_anti_join() raises:
+    # The classic wrong answer. One null in the subquery makes NOT IN null for
+    # every row, and an anti join keeps those rows rather than dropping them.
+    with assert_raises(contains="null aware anti join"):
+        _ = _plan("SELECT a FROM t WHERE b NOT IN (SELECT k FROM u)")
+
+
+def test_an_in_whose_subquery_hands_out_two_columns_is_refused() raises:
+    with assert_raises(contains="hands out 2 columns"):
+        _ = _plan("SELECT a FROM t WHERE b IN (SELECT k, z FROM u)")
+
+
+def test_a_correlated_in_is_refused_by_the_scope_it_lowers_against() raises:
+    # The subquery lowers against a scope of its own, which is the ordinary rule
+    # and is also what keeps this rewrite honest: a subquery that reads an outer
+    # column runs once per outer row and a join's build side runs once.
+    with assert_raises(contains="nothing in this query is called 't'"):
+        _ = _plan(
+            "SELECT a FROM t WHERE b IN (SELECT k FROM u WHERE u.b = t.b)"
+        )
+
+
+def test_an_in_written_anywhere_but_a_top_level_and_is_still_refused() raises:
+    with assert_raises(contains="does not lower a subquery in an expression"):
+        _ = _plan("SELECT a FROM t WHERE a > 1 OR b IN (SELECT k FROM u)")
 
 
 def test_a_condition_may_reach_only_the_two_tables_it_joins() raises:

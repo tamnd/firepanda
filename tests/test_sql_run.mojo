@@ -1109,6 +1109,58 @@ def test_the_right_side_of_a_semi_join_cannot_be_read_above_it() raises:
         )
 
 
+def test_an_in_over_a_subquery_runs_as_a_semi_join() raises:
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE qty IN (SELECT band FROM tiers)"
+                " ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [3, 20, 40],
+        "qty",
+    )
+
+
+def test_an_in_answers_a_row_once_however_many_matched_it() raises:
+    # Band 3 is in the dupes frame twice, and `IN` asks whether a value is in a
+    # set rather than how many times.
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE qty IN (SELECT band FROM dupes)"
+                " ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [3, 20],
+        "qty",
+    )
+
+
+def test_the_rest_of_the_where_still_holds_beside_an_in() raises:
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE price > 4"
+                " AND qty IN (SELECT band FROM tiers) ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [3],
+        "qty",
+    )
+
+
+def test_a_not_in_over_a_subquery_says_why_it_is_refused() raises:
+    with assert_raises(contains="null aware anti join"):
+        _ = run(
+            "SELECT qty FROM sales WHERE qty NOT IN (SELECT band FROM tiers)",
+            session(),
+        )
+
+
 def test_a_right_join_has_no_operator_yet_either() raises:
     with assert_raises(contains="breaker rather than an operator"):
         _ = run(

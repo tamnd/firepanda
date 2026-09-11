@@ -168,6 +168,26 @@ carries key pairs rather than a predicate, and the rest of a condition is
 ordinarily tested in a filter above the join, which here would be a filter over
 columns the join did not keep.
 
+### An `IN` over a subquery is that join rather than a predicate
+
+`WHERE x IN (SELECT k FROM u)` is a semi join between whatever the `FROM` built
+and the subquery's own plan, on `x = k`. So the `WHERE` is split on `AND` first
+and the parts that are an `IN` over a subquery are taken out of it and put above
+the rest, which stays one filter underneath. A query with no such part is split
+and put back exactly as it was written, so its plan is the shape it always was.
+
+The rewrite is the whole of `IN` and not a near miss. A left row that matched
+several right rows comes back once, which is what a semi join does anyway, and a
+null on either side matches nothing, which is what `IN` answers. `NOT IN` is
+refused, because the anti join it looks like is the classic wrong answer: one
+null anywhere in the subquery makes `NOT IN` null for every row rather than true,
+and an anti join keeps those rows rather than dropping them.
+
+The subquery lowers against a scope of its own, which is the ordinary rule, and
+here it is also what makes the rewrite safe: a subquery that reads no outer
+column runs once, and running it once is what a join does with its build side. A
+correlated one refuses, since the name it reaches for is not in reach inside it.
+
 ### What is not lowered yet
 
 Named tables, the table functions above, the derived tables and the CTEs above,
@@ -1092,7 +1112,9 @@ def _lower_expr(
             "firepanda does not lower a subquery in an expression yet. A"
             " correlated one is a dependent join that decorrelation has to"
             " remove, and an uncorrelated one is a plan of its own that the"
-            " outer plan has nowhere to hold"
+            " outer plan has nowhere to hold. An IN over a subquery does lower"
+            " where a WHERE is the AND of it and other things, because there it"
+            " is a semi join rather than a value"
         )
     raise Error("an expression shape firepanda does not lower yet")
 
@@ -2725,6 +2747,90 @@ def _values(ast: Ast, body: UInt32, mut plan: Plan) raises -> Int:
     return plan.values(lowered^, names^)
 
 
+def _in_join(
+    ast: Ast,
+    at: UInt32,
+    catalog: Catalog,
+    mut plan: Plan,
+    mut sources: List[Schema],
+    mut scope: _Scope,
+    mut walk: _Walk,
+    ctes: _Bindings,
+    var left: _From,
+) raises -> _From:
+    """Turns `x IN (SELECT ...)` written in a `WHERE` into a semi join.
+
+    The subquery is a query of its own and it lowers as one, against a scope of
+    its own, so a name the outer query put in reach is not in reach inside it.
+    That is the ordinary rule for a subquery and it is also what makes this
+    rewrite safe: a subquery that reads no outer column runs once, and running
+    it once is what a join does with its build side.
+
+    The join is a semi join on one equality, the left side being whatever was
+    written in front of the `IN` and the right being the one column the subquery
+    hands out. That is the whole of `IN` and not an approximation of it. A left
+    row that matched several right rows comes back once, which is what a semi
+    join does anyway, and a null on either side matches nothing, which is what
+    `IN` answers: `NULL IN (1, 2)` is null and a row a filter does not keep, and
+    `3 IN (1, NULL)` is null and the same.
+
+    Args:
+        ast: The arenas.
+        at: The `EXPR_IN_SUBQUERY`.
+        catalog: What the table names inside it are resolved against.
+        plan: Where the nodes go.
+        sources: One schema per scan, appended to.
+        scope: What the outer `FROM` put in reach, which the left side reads.
+        walk: What the aggregates found so far are recorded in.
+        ctes: The CTE names in reach, which the subquery may name.
+        left: What the join probes with.
+
+    Returns:
+        The join, which produces what the left side produced and nothing else.
+
+    Raises:
+        If it is a `NOT IN`, if the subquery hands out other than one column, or
+        if the subquery is one this does not lower.
+    """
+    var node = ast.exprs[Int(at)]
+    if node.payload == 1:
+        raise Error(
+            "firepanda lowers an IN over a subquery to a semi join, and the"
+            " anti join a NOT IN looks like is the classic wrong answer: one"
+            " null anywhere in the subquery makes NOT IN null for every row"
+            " rather than true, and an anti join keeps those rows instead of"
+            " dropping them. The null aware anti join that answers it is a node"
+            " nobody has written"
+        )
+    var key = _lower_expr(ast, node.a, plan, walk, scope, False)
+
+    var inner = _Scope()
+    var root = _statement(ast, node.b, catalog, plan, sources, inner, ctes)
+    var names = _produces(plan, root)
+    if len(names) != 1:
+        raise Error(
+            String(
+                "an IN whose subquery hands out ",
+                len(names),
+                " columns, and what a value is looked for in is one column",
+            )
+        )
+
+    # The right key is a bare name and it binds against the build side alone,
+    # which is why a subquery that hands out a column the outer query also has
+    # is not an ambiguity here.
+    var found = plan.exprs.column(String(names[0]))
+    var schema = Schema()
+    schema.append(Field(String(names[0]), LogicalType.NULL, True))
+    var right = _From(root, schema^, List[Int](length=1, fill=UNBOUND))
+
+    var keys = List[Int]()
+    keys.append(key)
+    var others = List[Int]()
+    others.append(found)
+    return _pair(plan, left, right, keys^, others^, JoinKind.SEMI)
+
+
 def _block(
     ast: Ast,
     body: UInt32,
@@ -2814,9 +2920,53 @@ def _block(
     # parameter constraint and then cannot parse the rest of the file.
     var restriction = ast.slot(clauses, CLAUSE_WHERE)
     if restriction != NO_NODE:
-        at = plan.filter(
-            at, _lower_expr(ast, restriction, plan, walk, scope, False)
-        )
+        # An `IN` over a subquery is a join rather than a predicate, so the
+        # WHERE is split on `AND` and the parts that are one are taken out and
+        # put above whatever is left. Splitting only when there is one keeps
+        # every other query's plan the shape it already was, which is one
+        # filter holding the condition as it was written.
+        var conjuncts = List[UInt32]()
+        _conjuncts(ast, restriction, conjuncts)
+        var asked = List[UInt32]()
+        for i in range(len(conjuncts)):
+            if ast.exprs[Int(conjuncts[i])].kind == EXPR_IN_SUBQUERY:
+                asked.append(conjuncts[i])
+        if len(asked) == 0:
+            at = plan.filter(
+                at, _lower_expr(ast, restriction, plan, walk, scope, False)
+            )
+        else:
+            var tested = -1
+            for i in range(len(conjuncts)):
+                if ast.exprs[Int(conjuncts[i])].kind == EXPR_IN_SUBQUERY:
+                    continue
+                var one = _lower_expr(
+                    ast, conjuncts[i], plan, walk, scope, False
+                )
+                if tested < 0:
+                    tested = one
+                else:
+                    tested = plan.exprs.call("and", [tested, one], True)
+            # The rest of the condition goes under the joins rather than over
+            # them, because a semi join hands out the left side unchanged and
+            # so the two commute, and testing first is the side with fewer rows
+            # to probe with.
+            if tested >= 0:
+                at = plan.filter(at, tested)
+            var source = _From(at, Schema(copy=schema), origin.copy())
+            for i in range(len(asked)):
+                source = _in_join(
+                    ast,
+                    asked[i],
+                    catalog,
+                    plan,
+                    sources,
+                    scope,
+                    walk,
+                    ctes,
+                    source^,
+                )
+            at = source.at
 
     var keys = List[Int]()
     var key_names = List[String]()
