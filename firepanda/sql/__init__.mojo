@@ -52,6 +52,12 @@ off one. `bind.mojo` already knows the columns and their order, so this is
 wrong: a `REPLACE` that matches twice loses a column, and a duplicate `RENAME`
 entry is blamed on the `EXCLUDE` list.
 
+`classify.mojo` is which calls in an expression are aggregates and which are
+windows, which clauses refuse each of them, and whether a reference is covered
+by the `GROUP BY` list. The name sets and the wording of every refusal were
+read off DuckDB rather than guessed, down to the two different sentences it
+uses for one rule broken in the select list and in `HAVING`.
+
 `unsupported.mojo` is the line between what the grammar accepts and what
 firepanda runs. Every refusal is an entry in its table rather than a `raise`
 written where the cases ran out, which is what lets `sql_support()` list the
@@ -71,6 +77,32 @@ from .arith import (
     no_such_unary_operator,
 )
 from .ast import Ast, Expr, Ref, Stmt
+from .classify import (
+    CLAUSE_GROUP,
+    CLAUSE_HAVING,
+    CLAUSE_ORDER,
+    CLAUSE_QUALIFY,
+    CLAUSE_SELECT,
+    CLAUSE_WHERE,
+    Uses,
+    aggregate_names,
+    check_clause,
+    check_nesting,
+    covered,
+    inspect,
+    is_aggregate,
+    needs_over,
+    nested_aggregate,
+    no_aggregates_here,
+    no_windows_here,
+    not_grouped,
+    not_grouped_in_having,
+    qualify_needs_a_window,
+    same,
+    window_in_aggregate,
+    window_in_window,
+    window_only_names,
+)
 from .bind import Binding, Reference, Scope, Scopes
 from .cast import cannot_mix, common_type
 from .catalog import Catalog, View

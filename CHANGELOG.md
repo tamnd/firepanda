@@ -345,6 +345,18 @@ It was found by AddressSanitizer rather than by a failing assertion, as a use af
 The second thing is smaller. A pooled buffer can still be sharing with a column that outlived it, which is safe because the pool zeroes on the way out and zeroing un-shares first, so it hands back a private allocation and loses the recycling rather than writing over somebody's bytes.
 
 Closes #406.
+### Added: which calls are aggregates, which are windows, and what that forbids
+
+`firepanda/sql/classify.mojo` answers the question every clause of a select statement has to ask before it can bind anything: does this expression call an aggregate, does it call a window function, or neither. The walk stops at a subquery, because an aggregate written inside one belongs to that query and not to the one around it, and that is the difference between `SELECT (SELECT sum(x) FROM u) FROM t` binding and being refused.
+
+The two are told apart by the `OVER` on the call and not by the name. `sum(a)` is an aggregate and `sum(a) OVER ()` is a window, from the same name and the same argument. Thirteen of DuckDB's eighty eight aggregate names refuse to be called without one, and calling `row_number()` bare is not reported as a missing `OVER` but as `Catalog Error: Scalar Function with name row_number does not exist!`, which is worth knowing before spending an afternoon on why the function is missing. Both sets are read out of `duckdb_functions()` rather than typed in, and a test checks them against it.
+
+A clause either takes them or refuses them, and the refusals do not line up the way the manual suggests. `WHERE` and `GROUP BY` refuse both. `HAVING` takes an aggregate and refuses a window. `QUALIFY` is the other way around and wants at least one window somewhere in the query, and the sentence it produces when there is none talks about the `SELECT` column list even though the query's mistake was in `QUALIFY`. A `JOIN ... ON` holding an aggregate is reported as a `WHERE` clause error, because by the time the binder notices it no longer knows which of the two the query wrote.
+
+Nesting has three separate rules and three separate sentences. An aggregate may not hold an aggregate, an aggregate may not hold a window, and a window definition may not hold a window. A window may hold an aggregate, so `sum(sum(a)) OVER ()` is a legal query and reads like a mistake.
+
+The group key rule is the part that had to be measured hardest. A reference is allowed if the `GROUP BY` list holds an expression it is part of, which is structural rather than by name: grouping by `a` covers `a + 1`, and grouping by `a + 1` covers `a + 1` as a whole. An aggregate exempts everything inside it, and a window does not, so `max(a) OVER (PARTITION BY sum(b))` still needs `a` in the group key. Two spellings of one name are one expression and two spellings of one value are not, so `t.a` and `a` compare equal while `1` and `1.0` do not. And when the rule is broken, DuckDB has two different sentences for it: the select list gets the long one with the name in quotes and an `ANY_VALUE` hint on a second line, and `HAVING` gets a shorter one with no quotes and no hint. Both are reproduced.
+
 ### Added: what a star stands for, and the three modifiers a query can hang off one
 
 `firepanda/sql/star.mojo` turns a `*` into a list of columns. The bind context already knew which columns a query level offers and what order they come back in, so the new part is what a query is allowed to write in front of that: a bare `*`, a qualified `t.*`, and `EXCLUDE`, `REPLACE` and `RENAME` over either of them.
