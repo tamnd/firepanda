@@ -18,6 +18,18 @@ Nothing in firepanda builds a distinct union yet, which is why this went unnotic
 
 Part of #309.
 
+### Added: a filter on one side of a join now reaches the other side
+
+Transitive predicates, in `firepanda/plan/transit.mojo`. A query that joins on `l_orderkey = o_orderkey` and also asks for `l_orderkey < 100` is saying the same thing about `o_orderkey`, for every row the join is going to produce, so the planner now copies the predicate across the equality and pushes the copy down to the other scan. The orders side stops reading rows that had nothing to pair with.
+
+What makes it sound is that an inner join only produces a row when the two keys are equal and present, so a predicate that is a function of one key alone has the same answer on the other. A row the copy throws away could only have paired with rows the original predicate had already thrown away. Nulls are not an exception, because a predicate that answers null drops its row and it answers null on both sides or neither. Inner joins only: an outer join invents rows where one side had none, and filtering the side that was going to be invented changes which rows get invented.
+
+It is a module called from predicate pushdown rather than a pass of its own, and the reason is the arena. Node indices are handed out in creation order so that an input sits below the node reading it, which means there is no index between a node and its parent and so no way to insert a filter above an existing arm in place. Pushdown already rebuilds the node list for exactly that reason and already knows how to route a predicate to a side, so the derivation adds its copies to the list pushdown is carrying when it reaches the join and pushdown places them without knowing they are new. That gets the ordering right for free, since a copy is pushed to its new scan in the same run that created it.
+
+The predicates come from two places: what pushdown is carrying down from above, and what is already sitting in a filter inside either arm. The second matters because after the first sweep everything has already been pushed to the scans, so by the second sweep there is nothing left above the join to carry. The walk into an arm stops at a projection or an aggregate, since below one of those the names are the input's rather than the arm's.
+
+A predicate is copied only if the receiving side does not already ask something that prints the same. Without that check the rule would copy left to right on one sweep and right to left on the next, forever.
+
 ### Added: two lines of Python that read the same rows now read them once
 
 Common subplan elimination, the ninth planner pass, in `firepanda/plan/subplan.mojo`. It is the other half of the spec section that gave us expression elimination, one level up. Two plan nodes of the same shape over the same inputs become one node, and everything that read the second reads the first.
@@ -45,6 +57,7 @@ A null predicate is left alone. It keeps no rows, so it could be folded, but say
 Unlike predicate pushdown this pass rewrites the node list in place. Pushdown has to rebuild because moving a filter down makes new parents for old children and the arena hands out indices in creation order, so an input is always below the node reading it. Removing a node goes the other way: a reader ends up pointing at what the removed node pointed at, and that is below the removed node which is below the reader, so the order still holds. Splicing is now the fourth of the ways a pass can respect that invariant, after rebuilding, merging upward in place, and swapping the contents of two adjacent nodes.
 
 This is where the generated query pays off rather than the benchmark. A `WHERE` clause assembled out of parameters that were not all supplied is the common way to arrive at a constant predicate, and until now the plan carried the whole subtree underneath it.
+
 ### Added: SQL lowers into the plan the dataframe API already builds
 
 `firepanda/sql/plan.mojo` takes a parsed `SELECT` and a catalog and gives back a `firepanda.plan.Plan`, which is the same plan `df.filter(...).group_by(...)` builds and is bound by the same binder. The rule it works under is the one the spec has had all along, that no plan node may have only a SQL constructor, and the test that says so compares the plan for `SELECT a FROM t WHERE b > 1` against the plan the three builder calls produce. If those two ever stop matching then one of the front ends has become a second engine, which is the thing a shared plan exists to stop.
