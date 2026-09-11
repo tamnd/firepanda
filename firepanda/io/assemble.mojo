@@ -170,26 +170,6 @@ comptime PIECE_ROWS = 65536
 a byte of the validity bitmap and the bits are copied rather than shifted."""
 
 
-def _morsel_of(at: Int, height: Int, morsels: Int) -> Int:
-    """Says which chunk a row belongs to.
-
-    Args:
-        at: The row, counted from the first row of the frame.
-        height: The chunk height, or zero for a frame in one chunk.
-        morsels: How many chunks there are.
-
-    Returns:
-        The chunk's position, which is zero whenever the frame is in one chunk.
-    """
-    if height <= 0:
-        return 0
-    var m = at // height
-    # A batch of no rows sits at the row after the last one, which is one past
-    # the last chunk whenever the height divides the total. It copies nothing,
-    # so any chunk will do and the last one is in range.
-    return morsels - 1 if m >= morsels else m
-
-
 @fieldwise_init
 struct _Piece(ImplicitlyCopyable, Movable):
     """One task's share of the copy: a range of rows of one batch."""
@@ -209,6 +189,14 @@ struct _Piece(ImplicitlyCopyable, Movable):
     var whole: Bool
     """Whether the range is the whole batch, which decides whether a view column
     may take the producer's data buffer as it stands rather than compacting."""
+
+    var morsel: Int
+    """Which chunk of the output the range belongs to, and zero for a frame in
+    one chunk. A range never crosses a chunk boundary, so there is one answer."""
+
+    var within: Int
+    """The first row of the range within that chunk, which is where the fill
+    writes. The same number as `at` for a frame in one chunk."""
 
 
 def _slice(array: ArrowArray, start: Int, rows: Int) -> ArrowArray:
@@ -399,11 +387,17 @@ def assemble(
                 var room = height - rows % height
                 if take > room:
                     take = room
-            pieces.append(_Piece(b, start, take, rows, take == length))
+            var morsel = 0 if height <= 0 else rows // height
+            var within = rows if height <= 0 else rows % height
+            pieces.append(
+                _Piece(b, start, take, rows, take == length, morsel, within)
+            )
             start += take
             rows += take
         if length == 0:
-            pieces.append(_Piece(b, 0, 0, rows, True))
+            # A batch of no rows copies nothing, so where it is pointed does not
+            # matter, and the first chunk is the one that is always there.
+            pieces.append(_Piece(b, 0, 0, rows, True, 0, 0))
     var count = len(pieces)
 
     var morsels = 1
@@ -430,7 +424,7 @@ def assemble(
     for k in range(taken):
         var totals = List[Int](length=morsels, fill=0)
         for p in range(count):
-            var m = _morsel_of(pieces[p].at, height, morsels)
+            var m = pieces[p].morsel
             var here = payload[k * count + p]
             payload[k * count + p] = totals[m]
             totals[m] += here
@@ -446,10 +440,9 @@ def assemble(
         var k = task // count
         var c = plain[k]
         ref piece = pieces[task % count]
-        var m = _morsel_of(piece.at, height, morsels)
         validity[task] = fill_column(
-            sinks[k * morsels + m],
-            piece.at - m * height,
+            sinks[k * morsels + piece.morsel],
+            piece.within,
             payload[task],
             _slice(batches[piece.batch][c], piece.start, piece.rows),
             layout.formats[c],
@@ -467,9 +460,8 @@ def assemble(
             ref piece = pieces[p]
             if batches[piece.batch][plain[k]].null_count == 0:
                 continue
-            var m = _morsel_of(piece.at, height, morsels)
-            sinks[k * morsels + m].validity.paste(
-                piece.at - m * height, validity[k * count + p], piece.rows
+            sinks[k * morsels + piece.morsel].validity.paste(
+                piece.within, validity[k * count + p], piece.rows
             )
 
     var fields = List[Field](capacity=width)
