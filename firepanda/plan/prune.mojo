@@ -83,6 +83,7 @@ opinion about which of the two was meant.
 """
 
 from firepanda.dtype.schema import Schema
+from firepanda.join.pairs import JoinKind
 from firepanda.plan.bind import Bound, bind, bind_all
 from firepanda.plan.node import (
     SET_UNION,
@@ -188,11 +189,15 @@ def _demand(
         var left = plan.nodes[at].inputs[0]
         var right = plan.nodes[at].inputs[1]
         var width = len(bound[left].schema)
+        # A mark join's output is the left side and then one column this node
+        # made, so the position at the width is not a right column counted on
+        # and there is nothing below it to demand. The keys below still are.
+        var marks = plan.nodes[at].op == Int(JoinKind.MARK.code)
         for i in range(len(here)):
             var p = here[i]
             if p < width:
                 _want(need[left], p)
-            else:
+            elif not marks:
                 _want(need[right], p - width)
         var keys = plan.nodes[at].parts
         for i in range(len(plan.nodes[at].exprs)):

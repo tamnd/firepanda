@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the mark join, which answers a boolean per row instead of filtering
+
+A semi join keeps the left rows that matched and drops the rest, which is the answer a `WHERE` wants. Written anywhere else, `x IN (SELECT k FROM u)` is a value rather than a filter, and a value has to arrive on every row including the rows that matched nothing. The mark join is that: every left row, none of the right columns, and one boolean column saying whether the row matched.
+
+`JoinKind.MARK` is the eighth kind. It is the only one with an output name of its own to settle, so `plan.join` takes what the column is called, `explain` prints it as `JOIN mark [a = k] -> found`, and the JSON form carries it as `"mark"`.
+
+The booleans are three valued and that is the whole of the difficulty. A row that matched is true. A row that did not is false only when it is known to have matched nothing, and it is not known when a null was involved, because a null is a value nobody wrote down rather than a value that differs from everything. So a probe row whose own key is null is null, and a probe row that matched nothing is null as well when the build side holds a null key anywhere. That rule is why `NOT IN` over a column with a null in it keeps no rows, which surprises people and is what every engine does: `NOT` of null is null, and a `WHERE` keeps a row on true.
+
+Nothing is gathered. Every probe row produces exactly one output row and that row is the row that arrived, so the chunk keeps its own columns and the mark goes beside them. `mark_probe` is the walk, next to `pair_probe`, and the whole frame join refuses the kind by name because a column of booleans is not a pair of index lists and `take_rows` has nothing to do with it.
+
+One case is refused that should answer false on every row, and it is refused for every join kind rather than for this one. A build side that a filter emptied has no chunks at all rather than one empty chunk, and building the key table wants exactly one, so a join against nothing raises. That is filed as #611 and pinned on a semi join as well as on a mark join, since it has been there the whole time.
+
+The SQL front end does not put one there yet. That is the next change.
+
+Part of #309.
+
 ## [0.6.72] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).
