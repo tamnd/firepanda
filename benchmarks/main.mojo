@@ -1506,6 +1506,38 @@ def bench_frame(mut harness: Harness) raises:
 
     harness.record("frame/drop_102_of_105", "columns", 105, wide_drop)
 
+    # ClickBench q23 in miniature: a filter keeps a small fraction of the rows
+    # and ten of those come back in order. Filtering first gathers all hundred
+    # and five columns at the full height of the frame to answer with ten rows,
+    # which is the whole cost of the query and the reason `filter_sort_limit`
+    # exists. These two rows are a pair and the gap between them is the claim.
+    var surviving = Array[DType.bool](wide_rows)
+    for i in range(wide_rows):
+        surviving.set_valid(i, i % 64 == 0)
+    var by_first: List[String] = ["c0"]
+
+    def wide_filter_then_limit() raises {imm wide, imm surviving, imm by_first}:
+        keep(wide.rows)
+        var out = wide.filter(surviving).sort_limit(
+            by_first, [False], [False], 10
+        )
+        keep(out.rows)
+
+    harness.record(
+        "frame/filter_then_limit_105", "columns", 105, wide_filter_then_limit
+    )
+
+    def wide_filter_sort_limit() raises {imm wide, imm surviving, imm by_first}:
+        keep(wide.rows)
+        var out = wide.filter_sort_limit(
+            surviving, by_first, [False], [False], 10
+        )
+        keep(out.rows)
+
+    harness.record(
+        "frame/filter_sort_limit_105", "columns", 105, wide_filter_sort_limit
+    )
+
     # Every text column in the hits file is a bare `BYTE_ARRAY`, so all of them
     # arrive as binary and all of them have to be relabelled before a `LIKE`
     # means anything. This is the row that says whether that relabel is free.

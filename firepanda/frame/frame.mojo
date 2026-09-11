@@ -1517,6 +1517,98 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         )
         return out^
 
+    def filter_sort_limit(
+        self,
+        mask: Array[DType.bool],
+        by: List[String],
+        descending: List[Bool],
+        nulls_first: List[Bool],
+        limit: Int,
+        offset: Int = 0,
+    ) raises -> Self:
+        """Returns the head of the sorted frame, over the rows a mask keeps.
+
+        `filter` then `sort_limit` gives the same rows in the same order. What
+        this does differently is never build the filtered frame. The mask
+        becomes a list of surviving positions, the key columns alone are
+        gathered at those positions, the bounded sort runs over that narrow
+        frame, and the wide columns are gathered once at the handful of rows the
+        limit left.
+
+        The shape is ClickBench q23, and the numbers there say why it is worth a
+        method of its own. A pattern match over `URL` keeps ninety five rows out
+        of a million and then ten of those come back ordered by `EventTime`.
+        Filtering first gathers a hundred and five columns a million rows at a
+        time to answer with ten rows, which is the whole cost of the query.
+
+        The positions are a `List[Int]` and not a bitmap because the two things
+        done with them are a gather and a lookup by rank, and both want a list.
+        On a mask that keeps most of the frame this costs one extra list of
+        positions over what `filter` would have allocated, which is the price of
+        the case it is written for.
+
+        Args:
+            mask: The mask. Must be as long as the frame is tall. A null drops
+                the row, as in `filter`.
+            by: The key columns, most significant first.
+            descending: One flag per key.
+            nulls_first: One flag per key.
+            limit: How many rows to keep.
+            offset: How many rows to drop before those.
+
+        Returns:
+            A frame of at most `limit` rows.
+
+        Raises:
+            If the mask length does not match, or as `argsort_limit` does.
+        """
+        if len(mask) != self.rows:
+            raise Error(
+                "filter mask must be as long as the frame is tall; frame has "
+                + String(self.rows)
+                + " rows and mask has "
+                + String(len(mask))
+            )
+        if len(by) == 0:
+            raise Error("sort needs at least one key column")
+
+        var kept = List[Int]()
+        for i in range(self.rows):
+            if mask.is_valid(i) and mask[i]:
+                kept.append(i)
+
+        var at = List[Int](capacity=len(by))
+        for i in range(len(by)):
+            at.append(self.schema.index_of(by[i]))
+
+        var fields = List[Field](capacity=len(by))
+        var columns = List[ChunkedArray](capacity=len(by))
+        for i in range(len(at)):
+            fields.append(
+                Field(self.schema[at[i]].name, self.schema[at[i]].dtype)
+            )
+            columns.append(take_chunked(self.columns[at[i]], kept))
+        var keys = Self(Schema(fields^), columns^)
+
+        # Positions into `kept`, which are positions into the frame only after
+        # the lookup below. Getting that indirection wrong gives an answer that
+        # is the right shape and the wrong rows, so it happens in one place.
+        var order = keys.argsort_limit(
+            by, descending, nulls_first, limit, offset
+        )
+        var chosen = List[Int](capacity=len(order))
+        var ranks = order.unsafe_ptr()
+        for i in range(len(order)):
+            chosen.append(kept[Int(ranks.unsafe_offset(i).unsafe_load())])
+
+        var out = self.take(chosen)
+        # As in `sort_limit`: a prefix of a sorted frame is sorted on the most
+        # significant key and on no other.
+        out.columns[at[0]].mark_sorted(
+            Sortedness.DESCENDING if descending[0] else Sortedness.ASCENDING
+        )
+        return out^
+
     def sortedness(mut self, name: String) raises -> Sortedness:
         """Returns what is known about a column's order, scanning if it has to.
 
