@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.73] - 2026-09-12
+
+Built against Mojo 1.0.0 (ed45d567).
+
+The mark join, and the `IN` over a subquery that needed it. A semi join keeps the rows that matched, which is the answer a `WHERE` wants and is what an `IN` written there has lowered to for a while. Written anywhere else an `IN` is a value, and a value has to arrive on every row including the rows that matched nothing. The mark join is the node that does that, and with it `NOT IN` stops being refused. The null aware anti join that the spec has had on its list since the beginning turns out to be a mark join and a `NOT`, with nothing written for it.
+
 ### Added: the mark join, which answers a boolean per row instead of filtering
 
 A semi join keeps the left rows that matched and drops the rest, which is the answer a `WHERE` wants. Written anywhere else, `x IN (SELECT k FROM u)` is a value rather than a filter, and a value has to arrive on every row including the rows that matched nothing. The mark join is that: every left row, none of the right columns, and one boolean column saying whether the row matched.
@@ -5947,7 +5953,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.72...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.73...HEAD
+[0.6.73]: https://github.com/tamnd/firepanda/releases/tag/v0.6.73
 [0.6.72]: https://github.com/tamnd/firepanda/releases/tag/v0.6.72
 [0.6.71]: https://github.com/tamnd/firepanda/releases/tag/v0.6.71
 [0.6.70]: https://github.com/tamnd/firepanda/releases/tag/v0.6.70
