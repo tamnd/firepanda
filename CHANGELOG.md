@@ -361,6 +361,25 @@ It was found by AddressSanitizer rather than by a failing assertion, as a use af
 The second thing is smaller. A pooled buffer can still be sharing with a column that outlived it, which is safe because the pool zeroes on the way out and zeroing un-shares first, so it hands back a private allocation and loses the recycling rather than writing over somebody's bytes.
 
 Closes #406.
+
+### Added: what a WITH binds, and where each name can be said
+
+A CTE is a name bound to a statement for the length of one statement, and the rules that follow from that are short and are each one somebody gets wrong. `firepanda/sql/cte.mojo` reads a `WITH` into a list of entries, checks the ones that can be checked without types, and records what the planner will need later.
+
+Entries bind in order. Each one is visible to the entries after it and to the body, and to nothing before it, so `WITH y AS (SELECT n FROM x), x AS (SELECT 1) SELECT * FROM y` is not a forward reference: at the point `y` is bound, `x` is not a name yet, and DuckDB answers with `Table with name x does not exist`. Binding one name twice is a parser error rather than a shadowing, and it is caught while parsing, so the duplicate is refused even in a statement nothing would ever run. A CTE does hide a registered frame of the same name, and an inner `WITH` hides an outer one, and both of those are shadowing and not errors.
+
+The column alias list is positional and it is a prefix rather than a list. `WITH x(p) AS (SELECT 1 AS a, 2 AS b)` gives back `p` and `b`, and `WITH x(p, q, r)` over those same two columns gives back `p` and `q` with the third name dropped on the floor. Neither is an error, which means an alias list of the wrong length is silently half applied. That is DuckDB's and it is reproduced, because a query that binds there and fails here is a query somebody has to rewrite for no gain.
+
+Recursion is a property of the statement rather than of the keyword. An entry that names itself is recursive, `WITH RECURSIVE` is what permits it, and the keyword on its own is not enough: the statement also has to be a `UNION` whose left side does not name the entry, since that side is the anchor the fixed point starts from. `UNION` and `UNION ALL` both count and `EXCEPT` and `INTERSECT` do not. All three ways of getting it wrong, the missing keyword, the missing union and the wrong set operation, come back as one message about the keyword, which means two of the three are DuckDB answering a question the query did not ask. It is still the message we give, for the same reason as everything else in here.
+
+A recursive entry may not carry its own `ORDER BY`, `LIMIT` or `OFFSET`, and those are two separate messages rather than one. The rule reaches the entry's own trailing clause and nothing under it, so a subquery inside the recursive term may order and limit all it likes, and that was measured rather than assumed.
+
+Counting how many times a name is used is part of this and the decision it feeds is not. DuckDB inlines a CTE unless it is named more than once, and `MATERIALIZED` and `NOT MATERIALIZED` override that either way. The hint and the count are both recorded and the planner decides, because which way to go is a cost question and this file knows no costs. The count comes from a walk that crosses into subqueries, since a name said inside one is said, and stops at an inner `WITH` that binds the same name, since that is a different table that happens to be spelled the same.
+
+One thing fixed on the way past. The expression walk in `classify.mojo` had no case for the quantified comparison node, which is new in this release, so classifying an expression holding one raised instead of walking it. It now walks the operand and leaves the statement alone, the way it already does for the other three shapes.
+
+Part of #308.
+
 ### Added: the four shapes a subquery is written in, and a node for the fourth
 
 A `SELECT` inside an expression is one of four things, and they are four different questions rather than one question with a flag on it. A scalar subquery asks for a value, `EXISTS` asks whether there is a row, `IN` asks whether a value is among the rows, and a quantified comparison asks whether a comparison holds against all of them or against any of them. `firepanda/sql/subquery.mojo` tags a node as whichever it is and carries the rules that follow.

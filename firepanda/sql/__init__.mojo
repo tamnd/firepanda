@@ -64,6 +64,12 @@ own arity rule, `EXISTS` is the one that never counts columns at all, and
 correlation is read off what `bind.mojo` recorded rather than found by walking
 the tree afterwards.
 
+`cte.mojo` is what a `WITH` binds and where each name can be said. Entries bind
+in order, so naming a later one is a missing table rather than a forward
+reference, a column alias list is a prefix and is half applied when it is the
+wrong length, and one message covers all three ways a recursive CTE can be
+written wrong.
+
 `unsupported.mojo` is the line between what the grammar accepts and what
 firepanda runs. Every refusal is an entry in its table rather than a `raise`
 written where the cases ran out, which is what lets `sql_support()` list the
@@ -112,6 +118,20 @@ from .classify import (
 from .bind import Binding, Reference, Scope, Scopes
 from .cast import cannot_mix, common_type
 from .catalog import Catalog, View
+from .cte import (
+    NOT_A_CTE,
+    Cte,
+    Ctes,
+    aliased,
+    anchored,
+    check_modifiers,
+    circular_reference,
+    duplicate_name,
+    no_limit,
+    no_ordering,
+    read_ctes,
+    reference_count,
+)
 from .matcher import Parse, ParseNode, parse, parse_rule, parse_unfiltered
 from .printer import (
     needs_quoting,
