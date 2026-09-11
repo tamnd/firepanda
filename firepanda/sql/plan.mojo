@@ -154,18 +154,30 @@ projection is where a column stops carrying the table it came from, which is
 what `t.b` needs to still work. So the pair's other column is left in the node
 and taken out of the names the query may reach instead.
 
+### A `SEMI` or an `ANTI` join asks a question and keeps no answer
+
+Both keep left rows and no right columns, the first the ones that matched and
+the second the ones that did not. So the right side goes out of reach the moment
+it has been lowered: its tables are taken back out of the scope, and what the
+rest of the query may write is the left side alone, which is what DuckDB does
+and is why `SELECT u.k FROM t SEMI JOIN u USING (b)` is a missing table there.
+
+Both need at least one equality between the two sides and nothing else, which is
+tighter than DuckDB, where the condition may be any predicate. The join node
+carries key pairs rather than a predicate, and the rest of a condition is
+ordinarily tested in a filter above the join, which here would be a filter over
+columns the join did not keep.
+
 ### What is not lowered yet
 
 Named tables, the table functions above, the derived tables and the CTEs above,
 and the joins over them. A subquery written where an expression goes is refused,
 and so are the column aliases on a derived table and a `LATERAL` one.
-`POSITIONAL`, `ASOF`, `SEMI` and `ANTI` are each refused by name: the first
-pairs its two sides by row number and so reads no column at all, `ASOF` matches
-on the nearest value rather than an equal one, and the last two keep none of the
-right side, so what the rest of the query may name is not the two schemas end to
-end. A `USING` or `NATURAL` join over a subquery is refused as well, since the
-merged name is on both sides and a column a subquery computed carries no table
-to tell the two apart. A set
+`POSITIONAL` and `ASOF` are refused by name: the first pairs its two sides by
+row number and so reads no column at all, and `ASOF` matches on the nearest
+value rather than an equal one. A `USING` or `NATURAL` join over a subquery is
+refused as well, since the merged name is on both sides and a column a subquery
+computed carries no table to tell the two apart. A set
 operation written `BY NAME` is refused too, since lining two arms up by column
 name is a projection on each arm rather than a different node, and that needs
 each arm's output names threaded back out of the block. Each is a refusal by
@@ -648,6 +660,27 @@ struct _Scope(Movable):
                         return True
                 return False
         return False
+
+    def hide(mut self, names: Int, merged: Int):
+        """Takes back everything put in reach since a point.
+
+        A `SEMI` or an `ANTI` join keeps no column of its right side, so the
+        right side is lowered and then goes out of reach, and the caller says
+        where reach ended before it. Truncating rather than removing by name is
+        what keeps an alias that shadowed an outer one from taking the outer one
+        with it.
+
+        Args:
+            names: How many names were in reach before.
+            merged: How many merged column names there were before.
+        """
+        while len(self.names) > names:
+            _ = self.names.pop()
+            _ = self.tables.pop()
+            _ = self.columns.pop()
+        while len(self.merged) > merged:
+            _ = self.merged.pop()
+            _ = self.pinned.pop()
 
     def merge(mut self, var name: String, table: Int):
         """Records that a join merged a column name into one column.
@@ -1438,12 +1471,13 @@ def _join_kind(text: StringSlice) raises -> JoinKind:
             "firepanda does not lower a POSITIONAL join yet, which pairs the"
             " two sides by row number and so reads no column at all"
         )
-    if said.find("SEMI") != -1 or said.find("ANTI") != -1:
-        raise Error(
-            "firepanda does not lower a SEMI or ANTI join yet, which keep none"
-            " of the right side's columns, so the names the rest of the query"
-            " may write are not the two sides end to end"
-        )
+    # Neither takes a LEFT or a RIGHT in front of it, in DuckDB or here, so
+    # both are read before the words that do and there is nothing to order
+    # these two against each other.
+    if said.find("SEMI") != -1:
+        return JoinKind.SEMI
+    if said.find("ANTI") != -1:
+        return JoinKind.ANTI
     if said.find("CROSS") != -1:
         return JoinKind.CROSS
     if said.find("FULL") != -1:
@@ -1591,7 +1625,9 @@ def _pair(
 
     Returns:
         The join, with the two schemas end to end, which is the order binding
-        puts them in and therefore the order the positions above will mean.
+        puts them in and therefore the order the positions above will mean. A
+        `SEMI` or an `ANTI` join keeps none of the right side, so there it is
+        the left schema alone and binding agrees.
 
     Raises:
         Whatever `plan.join` raises.
@@ -1599,9 +1635,10 @@ def _pair(
     var at = plan.join(left.at, right.at, left_keys^, right_keys^, kind)
     var schema = Schema(copy=left.schema)
     var origin = left.origin.copy()
-    for i in range(len(right.schema)):
-        schema.append(right.schema[i].copy())
-        origin.append(right.origin[i])
+    if kind.keeps_right_columns():
+        for i in range(len(right.schema)):
+            schema.append(right.schema[i].copy())
+            origin.append(right.origin[i])
     return _From(at, schema^, origin^)
 
 
@@ -1741,6 +1778,22 @@ def _merged(
             whose = right.origin[there]
         scope.merge(String(name), whose)
 
+    if len(names) == 0 and not kind.keeps_right_columns():
+        raise Error(
+            String(
+                "a ",
+                kind,
+                " ",
+                word,
+                (
+                    " join whose two sides share no column name, which asks"
+                    " whether the right side has any row at all rather than"
+                    " whether it has a matching one, and this join node carries"
+                    " key pairs rather than a question"
+                ),
+            )
+        )
+
     # No shared column at all is every pairing, which is what a NATURAL join of
     # two tables with nothing in common means and what DuckDB answers.
     var built = JoinKind.CROSS if len(names) == 0 else kind
@@ -1752,6 +1805,10 @@ def _merged(
         # The pair keeps the left's position, which is where DuckDB leaves it,
         # and the relation is whichever side the rows are certainly from.
         origin[_only(left, names[i], word)] = scope.merged_at(names[i])
+    if not kind.keeps_right_columns():
+        # A SEMI or an ANTI join hands out no column of the right side, so
+        # there is no pair to write once and nothing left to append.
+        return _From(at, schema^, origin^)
     for i in range(len(right.schema)):
         var paired = False
         for j in range(len(names)):
@@ -2131,7 +2188,20 @@ def _joined(
     var node = ast.refs[Int(at)]
     var kind = _join_kind(ast.text(node.payload))
     var left = _source(ast, node.a, catalog, plan, sources, scope, ctes)
+    var reach = len(scope.names)
+    var pairs = len(scope.merged)
     var right = _source(ast, node.b, catalog, plan, sources, scope, ctes)
+
+    # A SEMI or an ANTI join keeps left rows and no right column, so the right
+    # side goes back out of reach once it has been lowered. Writing its name in
+    # front of a column is a missing table afterwards, which is what DuckDB
+    # answers for the same query. The join's own condition is the exception and
+    # still reads it, so a join that has one hides it further down instead.
+    var conditional = (
+        node.kind != REF_JOIN_USING and ast.length(node.children) != 0
+    )
+    if not kind.keeps_right_columns() and not conditional:
+        scope.hide(reach, pairs)
 
     if node.kind == REF_JOIN_USING:
         var named = List[String]()
@@ -2149,8 +2219,14 @@ def _joined(
         _conjuncts(ast, written[0], conjuncts)
     elif kind != JoinKind.CROSS and kind != JoinKind.INNER:
         raise Error(
-            "an outer join with no condition, which decides nothing about"
-            " which rows match and so has no reading SQL gives it"
+            String(
+                "a ",
+                kind,
+                (
+                    " join with no condition, which decides nothing about which"
+                    " rows match and so has no reading SQL gives it"
+                ),
+            )
         )
 
     var left_keys = List[Int]()
@@ -2180,12 +2256,21 @@ def _joined(
             continue
         rest.append(_lower_expr(ast, conjuncts[i], plan, walk, scope, False))
 
+    if not kind.keeps_right_columns():
+        scope.hide(reach, pairs)
+
     if len(rest) != 0 and kind != JoinKind.INNER:
         raise Error(
-            "firepanda lowers an outer join on equalities between its two sides"
-            " so far, and the rest of this condition decides which rows are"
-            " padded rather than which rows match, so it cannot be tested above"
-            " the join instead"
+            String(
+                "firepanda lowers a ",
+                kind,
+                (
+                    " join on equalities between its two sides so far, and the"
+                    " rest of this condition decides which rows are kept rather"
+                    " than which rows match, so it cannot be tested above the"
+                    " join instead"
+                ),
+            )
         )
     if (
         len(left_keys) == 0
@@ -2193,8 +2278,15 @@ def _joined(
         and kind != JoinKind.CROSS
     ):
         raise Error(
-            "an outer join with no equality between its two sides, and"
-            " firepanda's join node carries key pairs rather than a predicate"
+            String(
+                "a ",
+                kind,
+                (
+                    " join with no equality between its two sides, and"
+                    " firepanda's join node carries key pairs rather than a"
+                    " predicate"
+                ),
+            )
         )
 
     var built = kind

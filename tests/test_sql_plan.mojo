@@ -526,7 +526,7 @@ def test_the_rest_of_an_outer_condition_is_refused_rather_than_moved() raises:
     # The same rewrite on an outer join is wrong. A row with no match is padded
     # and kept, and a filter above the join would then test the padding and
     # throw the row away, which is a different query and not a slower one.
-    with assert_raises(contains="decides which rows are padded"):
+    with assert_raises(contains="left join on equalities"):
         _ = _plan("SELECT a FROM t LEFT JOIN u ON t.a = u.k AND t.b > 1")
 
 
@@ -964,6 +964,59 @@ def test_a_using_join_over_a_subquery_is_refused_by_name() raises:
         _ = _plan("SELECT b FROM t JOIN (SELECT b FROM u) v USING (b)")
 
 
+def test_a_semi_join_keeps_the_left_rows_that_matched() raises:
+    assert_equal(
+        _plan("SELECT a FROM t SEMI JOIN u ON t.b = u.b"),
+        "PROJECT [a]\n  JOIN semi [b = b]\n    SCAN t []\n    SCAN u []\n",
+    )
+
+
+def test_an_anti_join_is_the_same_node_and_the_other_answer() raises:
+    assert_equal(
+        _plan("SELECT a FROM t ANTI JOIN u ON t.b = u.b"),
+        "PROJECT [a]\n  JOIN anti [b = b]\n    SCAN t []\n    SCAN u []\n",
+    )
+
+
+def test_a_star_over_a_semi_join_is_the_left_side_alone() raises:
+    # The same query with an inner join answers seven columns. A semi join asks
+    # a question about the right side and keeps none of the answer.
+    assert_equal(
+        _plan("SELECT * FROM t SEMI JOIN u ON t.b = u.b"),
+        (
+            "PROJECT [a, b, g, f]\n"
+            "  JOIN semi [b = b]\n"
+            "    SCAN t []\n"
+            "    SCAN u []\n"
+        ),
+    )
+
+
+def test_the_right_side_of_a_semi_join_is_out_of_reach_above_it() raises:
+    # DuckDB answers `Referenced table "u" not found` for this, because the
+    # right side of a semi join is not one of the tables the query is selecting
+    # from. The condition is the exception and still reads it.
+    with assert_raises(contains="nothing in this query is called 'u'"):
+        _ = _plan("SELECT u.k FROM t SEMI JOIN u ON t.b = u.b")
+
+
+def test_a_semi_join_may_name_its_key_with_using() raises:
+    assert_equal(
+        _plan("SELECT a FROM t SEMI JOIN u USING (b)"),
+        _plan("SELECT a FROM t SEMI JOIN u ON t.b = u.b"),
+    )
+
+
+def test_a_semi_join_needs_an_equality_between_its_two_sides() raises:
+    # DuckDB takes any predicate here. This join node carries key pairs, and the
+    # rest of a condition is ordinarily a filter above the join, which here
+    # would read columns the join did not keep.
+    with assert_raises(contains="semi join on equalities"):
+        _ = _plan("SELECT a FROM t SEMI JOIN u ON t.b > u.b")
+    with assert_raises(contains="anti join on equalities"):
+        _ = _plan("SELECT a FROM t ANTI JOIN u ON t.b = u.b AND t.a > u.k")
+
+
 def test_a_condition_may_reach_only_the_two_tables_it_joins() raises:
     # The comma binds looser than the JOIN word, so `u` and `t s` are the join
     # and `t` is beside it, and a condition naming `t` there is reaching out of
@@ -977,8 +1030,6 @@ def test_the_joins_with_no_node_yet_each_say_which_one() raises:
         _ = _plan("SELECT a FROM t POSITIONAL JOIN u")
     with assert_raises(contains="ASOF join"):
         _ = _plan("SELECT a FROM t ASOF JOIN u ON t.a = u.k")
-    with assert_raises(contains="SEMI or ANTI join"):
-        _ = _plan("SELECT a FROM t SEMI JOIN u ON t.a = u.k")
     with assert_raises(contains="alias on a table function"):
         _ = _plan("SELECT a FROM range(10) r")
     with assert_raises(contains="parenthesised table reference"):

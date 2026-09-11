@@ -106,12 +106,29 @@ def shops() raises -> DataFrame:
     return DataFrame(Schema(fields^), columns^)
 
 
+def dupes() raises -> DataFrame:
+    """One column of bands with a repeat in it.
+
+    A semi join answers a left row once however many right rows matched it, and
+    a right side where every key is unique cannot tell that from a join that
+    kept them all.
+    """
+    var band = ChunkedArray(LogicalType.INT64)
+    band.append(numbers([3, 3, 20, 77]))
+    var columns = List[ChunkedArray]()
+    columns.append(band^)
+    var fields = List[Field]()
+    fields.append(Field("band", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
 def session() raises -> Catalog:
-    """A catalog holding the three frames under the names the queries write."""
+    """A catalog holding the four frames under the names the queries write."""
     var catalog = Catalog()
     catalog.register("sales", sales())
     catalog.register("tiers", tiers())
     catalog.register("shops", shops())
+    catalog.register("dupes", dupes())
     return catalog^
 
 
@@ -1037,6 +1054,59 @@ def test_a_using_join_runs_and_writes_the_pair_once() raises:
     same(
         read_back(stars, "floor"), [11, 22, 11, 22, 11, 22, 11, 22, 11, 22], "f"
     )
+
+
+def test_a_semi_join_keeps_the_left_rows_that_matched() raises:
+    var out = run(
+        (
+            "SELECT qty, price FROM sales SEMI JOIN tiers ON qty = band"
+            " ORDER BY qty"
+        ),
+        session(),
+    )
+    assert_equal(len(out.schema), 2, "the right side hands out no column")
+    same(read_back(out, "qty"), [3, 20, 40], "qty")
+    same(read_back(out, "price"), [7, 2, 1], "price")
+
+
+def test_an_anti_join_keeps_the_left_rows_that_did_not() raises:
+    # The other half of the same ten rows, which is the property worth having:
+    # a semi and an anti join over one condition partition the left side.
+    var out = run(
+        "SELECT qty FROM sales ANTI JOIN tiers ON qty = band ORDER BY qty",
+        session(),
+    )
+    same(read_back(out, "qty"), [1, 5, 8, 12, 15, 25, 30], "qty")
+
+
+def test_a_semi_join_writes_a_left_row_once_however_many_matched() raises:
+    # Band 3 is in the dupes frame twice. An inner join would answer with two
+    # rows here and a semi join answers whether there was a match at all, so the
+    # count is what tells the two apart.
+    var out = run(
+        "SELECT qty FROM sales SEMI JOIN dupes ON qty = band ORDER BY qty",
+        session(),
+    )
+    same(read_back(out, "qty"), [3, 20], "qty")
+
+
+def test_a_star_over_a_semi_join_writes_the_left_side_alone() raises:
+    var out = run("SELECT * FROM sales SEMI JOIN shops USING (shop)", session())
+    assert_equal(len(out.schema), 3, "the sales columns and nothing else")
+    assert_equal(out.schema[0].name, "qty")
+    assert_equal(out.schema[1].name, "price")
+    assert_equal(out.schema[2].name, "shop")
+
+
+def test_the_right_side_of_a_semi_join_cannot_be_read_above_it() raises:
+    # DuckDB refuses the same query, and for the same reason: the join answered
+    # a question about that table rather than joining it, so above the node
+    # there is no such table to name.
+    with assert_raises(contains="shops"):
+        _ = run(
+            "SELECT shops.floor FROM sales SEMI JOIN shops USING (shop)",
+            session(),
+        )
 
 
 def test_a_right_join_has_no_operator_yet_either() raises:
