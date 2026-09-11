@@ -51,6 +51,26 @@ and not as the other reading, which is a different answer and not a different
 spelling of the same one. Each arm brings its own table into `sources`, so a scan
 carries the offset of its own schema rather than always zero.
 
+### A join condition becomes key pairs, and what is left becomes a filter
+
+`plan.join` holds a left key and a right key per pair rather than a predicate,
+because that is what a hash join runs. So an `ON` is split on `AND`, and a part
+that is an equality with one side reading the left input and the other reading
+the right is a key pair. Anything else is a residual.
+
+A residual over an inner join is a filter above it. Every pairing the join
+produces is a pairing the condition asked about, so testing the rest on top
+answers the same query, and an inner join with no equality at all is a cross
+join with the whole condition over it. A residual over an outer join is refused
+instead, because an outer join's condition decides which rows are padded as well
+as which rows match, and a filter above one would test the padding and drop the
+row.
+
+Which side a part reads is answered by the relation a qualified column carries,
+and by the name for one that is not qualified. A comma in the `FROM` is a join
+with no condition, which is why `FROM a, b WHERE a.x = b.y` and the same query
+written with a `JOIN` reach the same plan once the filter is pushed down.
+
 ### A HAVING is a filter over a column, not over an aggregate
 
 `plan.filter` refuses a predicate that is not elementwise, which is correct and
@@ -65,12 +85,17 @@ the query runs.
 
 ### What is not lowered yet
 
-One table in the `FROM`, and no joins, no subqueries, no CTEs, no windows and no
-`QUALIFY`. A set operation written `BY NAME` is refused too, since lining two
-arms up by column name is a projection on each arm rather than a different node,
-and that needs each arm's output names threaded back out of the block. Each is a
-refusal by name rather than a silence, so `pixi run sql-support` lists them and
-the conformance harness can tell a missing feature from a crash.
+Named tables and the joins over them, and no subqueries, no CTEs, no windows and
+no `QUALIFY`. `USING`, `NATURAL`, `POSITIONAL`, `ASOF`, `SEMI` and `ANTI` are
+each refused by name: the first three decide their keys or their output columns
+from something other than the condition, `ASOF` matches on the nearest value
+rather than an equal one, and the last two keep none of the right side, so what
+the rest of the query may name is not the two schemas end to end. A set
+operation written `BY NAME` is refused too, since lining two arms up by column
+name is a projection on each arm rather than a different node, and that needs
+each arm's output names threaded back out of the block. Each is a refusal by
+name rather than a silence, so `pixi run sql-support` lists them and the
+conformance harness can tell a missing feature from a crash.
 
 A decimal literal is refused too, and that one is not about effort. The engine's
 `LogicalType` has no decimal and no 128 bit integer, which is the whole reason
@@ -87,6 +112,8 @@ from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.unary import UnaryOp
 from firepanda.array.value import Value
+from firepanda.join.pairs import JoinKind
+from firepanda.plan.expr import UNBOUND, ExprKind
 from firepanda.plan.node import (
     NO_LIMIT,
     SET_EXCEPT,
@@ -122,6 +149,11 @@ from .ast import (
     LITERAL_STRING,
     NO_NODE,
     NULLS_LAST,
+    REF_FUNCTION,
+    REF_JOIN,
+    REF_JOIN_USING,
+    REF_PARENS,
+    REF_SUBQUERY,
     REF_TABLE,
     SELECT_DISTINCT,
     SORT_DESCENDING,
@@ -428,6 +460,74 @@ struct _Scope(Movable):
         return out^
 
 
+struct _From(Movable):
+    """What a `FROM` clause built, and what that node produces.
+
+    The schema travels alongside the node because nothing can get it back out of
+    the plan at this stage. A plan here is unbound, so the only thing that knows
+    what a node produces is the code that built it, and both the star expansion
+    and the next join up need to know.
+
+    The nullability in it is the inputs' and not the join's. An outer join
+    widens it and binding is what works that out, and nothing here reads it, so
+    copying binding's rule into this file would be a second place to keep the
+    same thing right.
+    """
+
+    var at: Int
+    """The node the clause produced."""
+
+    var schema: Schema
+    """Its columns, left to right, which for a join is the two sides end to end
+    the same way binding puts them."""
+
+    var origin: List[Int]
+    """Which relation each of those columns came from, which is the number a
+    qualified column carries and the offset of that table in `sources`."""
+
+    def __init__(out self, at: Int, var schema: Schema, var origin: List[Int]):
+        """Holds the three together.
+
+        Args:
+            at: The node.
+            schema: Its columns.
+            origin: Which relation each column came from.
+        """
+        self.at = at
+        self.schema = schema^
+        self.origin = origin^
+
+    def has(self, name: StringSlice) -> Int:
+        """How many of its columns are called something.
+
+        Args:
+            name: The column name.
+
+        Returns:
+            The count, which is what tells a name one side has from a name it
+            has twice and from one it does not have at all.
+        """
+        var out = 0
+        for i in range(len(self.schema)):
+            if self.schema[i].name == name:
+                out += 1
+        return out
+
+    def reads(self, table: Int) -> Bool:
+        """Whether one of the relations it read is a given one.
+
+        Args:
+            table: The relation.
+
+        Returns:
+            True when a column of it came from there.
+        """
+        for i in range(len(self.origin)):
+            if self.origin[i] == table:
+                return True
+        return False
+
+
 struct _Walk(Movable):
     """The aggregates one statement's lowering has found so far.
 
@@ -691,48 +791,246 @@ def _has_aggregate(ast: Ast, at: UInt32) -> Bool:
     return False
 
 
-def _table_of(
-    ast: Ast, clause: UInt32, catalog: Catalog, mut called: String
-) raises -> String:
-    """The one table a `FROM` names, and what the query calls it.
+comptime _NEITHER = -2
+"""An expression that reads no column of either side of a join."""
+
+comptime _BOTH = -1
+"""An expression that reads a column of both sides of a join."""
+
+comptime _LEFT = 0
+"""An expression that reads the left side of a join and only that."""
+
+comptime _RIGHT = 1
+"""An expression that reads the right side of a join and only that."""
+
+
+def _join_kind(text: StringSlice) raises -> JoinKind:
+    """Reads the words in front of `JOIN` as one of the kinds the plan has.
+
+    The text is what the query wrote, so it is matched a word at a time rather
+    than as a whole. `LEFT JOIN` and `LEFT OUTER JOIN` are the same join and
+    `OUTER` says nothing that `LEFT` did not.
+
+    Args:
+        text: The join as SQL spells it, such as `LEFT OUTER JOIN`.
+
+    Returns:
+        Which rows the join keeps.
+
+    Raises:
+        If it is a join this does not lower yet.
+    """
+    var said = String(text).upper()
+    if said.find("NATURAL") != -1:
+        raise Error(
+            "firepanda does not lower a NATURAL join yet, which takes its keys"
+            " from the column names the two sides happen to share and then"
+            " outputs one of each pair rather than both"
+        )
+    if said.find("ASOF") != -1:
+        raise Error(
+            "firepanda does not lower an ASOF join yet, which matches a row"
+            " against the nearest value rather than an equal one and so is a"
+            " different operator and not a different condition"
+        )
+    if said.find("POSITIONAL") != -1:
+        raise Error(
+            "firepanda does not lower a POSITIONAL join yet, which pairs the"
+            " two sides by row number and so reads no column at all"
+        )
+    if said.find("SEMI") != -1 or said.find("ANTI") != -1:
+        raise Error(
+            "firepanda does not lower a SEMI or ANTI join yet, which keep none"
+            " of the right side's columns, so the names the rest of the query"
+            " may write are not the two sides end to end"
+        )
+    if said.find("CROSS") != -1:
+        return JoinKind.CROSS
+    if said.find("FULL") != -1:
+        return JoinKind.OUTER
+    if said.find("LEFT") != -1:
+        return JoinKind.LEFT
+    if said.find("RIGHT") != -1:
+        return JoinKind.RIGHT
+    return JoinKind.INNER
+
+
+def _conjuncts(ast: Ast, at: UInt32, mut out: List[UInt32]) raises:
+    """Splits a condition into the parts it is the `AND` of.
+
+    Done on the AST rather than on a lowered expression, because the point of
+    the split is to lower the two sides of an equality apart from each other and
+    by the time there is a lowered `and` call to take to pieces they have
+    already been lowered together.
 
     Args:
         ast: The arenas.
-        clause: The `FROM` clause slot.
-        catalog: What the name is resolved against.
-        called: Filled in with the alias, or with the table name when there is
-            no alias, which is the name a qualified column may use.
+        at: The condition.
+        out: Where the parts go, in the order they were written.
+    """
+    var node = ast.exprs[Int(at)]
+    if node.kind == EXPR_BINARY and ast.text(node.payload) == "AND":
+        _conjuncts(ast, node.a, out)
+        _conjuncts(ast, node.b, out)
+        return
+    out.append(at)
+
+
+def _side(plan: Plan, at: Int, left: _From, right: _From) raises -> Int:
+    """Which side of a join an expression reads, when it is only one of them.
+
+    This is what turns a condition into key pairs. `plan.join` holds a left key
+    and a right key per pair rather than a predicate, so an equality is only a
+    key pair if one of its sides reads the left input and the other reads the
+    right, and working that out means asking each column where it came from.
+
+    A column that says its relation is answered by that, and one that does not
+    is answered by the name, which is the same order of preference the rest of
+    this file uses. The names are asked of the schemas the two sides produce
+    rather than of the scope, because the scope says what a table is called and
+    this question is about what a node produces.
+
+    Args:
+        plan: The plan holding the expression.
+        at: The expression.
+        left: The left input.
+        right: The right input.
 
     Returns:
-        The table name as the catalog holds it.
+        `_LEFT`, `_RIGHT`, `_NEITHER` for an expression that reads no column at
+        all, or `_BOTH` for one that reads columns of each.
 
     Raises:
-        If there is no `FROM`, more than one reference in it, or a reference
-        this does not lower.
+        If a column names a table this join does not read, or a name that both
+        sides have with nothing saying which.
     """
-    if clause == NO_NODE:
-        raise Error(
-            "firepanda lowers a SELECT that reads a table, and this one has no"
-            " FROM"
-        )
-    var refs = ast.items(clause)
-    if len(refs) != 1:
-        raise Error(
-            String(
-                (
-                    "firepanda lowers one table in a FROM so far, and this"
-                    " query has "
-                ),
-                len(refs),
+    ref node = plan.exprs.nodes[at]
+    if node.kind == ExprKind.COLUMN:
+        if node.table != UNBOUND:
+            if left.reads(node.table):
+                return _LEFT
+            if right.reads(node.table):
+                return _RIGHT
+            raise Error(
+                String(
+                    "'",
+                    node.name,
+                    (
+                        "' is written in front of a table this join does not"
+                        " read, and a join condition reaches the two tables it"
+                        " joins and nothing else"
+                    ),
+                )
             )
-        )
-    var source = ast.refs[Int(refs[0])]
-    if source.kind != REF_TABLE:
-        raise Error(
-            "firepanda lowers a named table in a FROM so far, and a join, a"
-            " subquery and a table function are each their own node the plan"
-            " does not build yet"
-        )
+        var on_left = left.has(node.name)
+        var on_right = right.has(node.name)
+        if on_left == 0 and on_right == 0:
+            raise Error(
+                String(
+                    "there is no column named '",
+                    node.name,
+                    "' on either side of this join",
+                )
+            )
+        if on_left != 0 and on_right != 0:
+            raise Error(
+                String(
+                    "'",
+                    node.name,
+                    (
+                        "' is the name of a column on both sides of this join,"
+                        " so say which table it is from"
+                    ),
+                )
+            )
+        if on_left > 1 or on_right > 1:
+            raise Error(
+                String(
+                    "'",
+                    node.name,
+                    (
+                        "' is the name of more than one column on one side of"
+                        " this join"
+                    ),
+                )
+            )
+        if on_left != 0:
+            return _LEFT
+        return _RIGHT
+
+    var seen = _NEITHER
+    for i in range(len(node.children)):
+        var here = _side(plan, node.children[i], left, right)
+        if here == _NEITHER:
+            continue
+        if here == _BOTH:
+            return _BOTH
+        if seen != _NEITHER and seen != here:
+            return _BOTH
+        seen = here
+    return seen
+
+
+def _pair(
+    mut plan: Plan,
+    left: _From,
+    right: _From,
+    var left_keys: List[Int],
+    var right_keys: List[Int],
+    kind: JoinKind,
+) raises -> _From:
+    """Puts one join over two inputs and says what the result produces.
+
+    Args:
+        plan: Where the node goes.
+        left: The left input.
+        right: The right input.
+        left_keys: The keys on the left.
+        right_keys: The keys on the right, one per left key.
+        kind: Which rows the join keeps.
+
+    Returns:
+        The join, with the two schemas end to end, which is the order binding
+        puts them in and therefore the order the positions above will mean.
+
+    Raises:
+        Whatever `plan.join` raises.
+    """
+    var at = plan.join(left.at, right.at, left_keys^, right_keys^, kind)
+    var schema = Schema(copy=left.schema)
+    var origin = left.origin.copy()
+    for i in range(len(right.schema)):
+        schema.append(right.schema[i].copy())
+        origin.append(right.origin[i])
+    return _From(at, schema^, origin^)
+
+
+def _table(
+    ast: Ast,
+    at: UInt32,
+    catalog: Catalog,
+    mut plan: Plan,
+    mut sources: List[Schema],
+    mut scope: _Scope,
+) raises -> _From:
+    """Lowers one named table in a `FROM` to a scan.
+
+    Args:
+        ast: The arenas.
+        at: The `REF_TABLE`.
+        catalog: What the name is resolved against.
+        plan: Where the node goes.
+        sources: One schema per scan, appended to.
+        scope: What the FROM has put in reach, added to.
+
+    Returns:
+        The scan and what it produces.
+
+    Raises:
+        If the name is not a table this can read, or the reference carries
+        column aliases.
+    """
+    var source = ast.refs[Int(at)]
     var name = _one_name(ast, source.children, "a table")
     var named = ast.length(source.payload)
     if named > 1:
@@ -741,10 +1039,9 @@ def _table_of(
             " yet, which rename what the table produces rather than what it is"
             " called"
         )
+    var called = name.copy()
     if named == 1:
         called = String(ast.text(ast.at(source.payload, 0)))
-    else:
-        called = name
     var found = catalog.find(name)
     if found < 0:
         raise Error(catalog.missing(name))
@@ -759,7 +1056,220 @@ def _table_of(
                 ),
             )
         )
-    return name
+
+    # The scan carries the offset of its own schema in `sources`, so a query
+    # over two tables hands binding two schemas and each scan reaches its own.
+    var schema = Schema(copy=catalog.frame_at(found).schema)
+    var table = len(sources)
+    sources.append(Schema(copy=schema))
+    scope.add(called^, table)
+    var origin = List[Int](length=len(schema), fill=table)
+    return _From(plan.scan(name, List[String](), table), schema^, origin^)
+
+
+def _joined(
+    ast: Ast,
+    at: UInt32,
+    catalog: Catalog,
+    mut plan: Plan,
+    mut sources: List[Schema],
+    mut scope: _Scope,
+) raises -> _From:
+    """Lowers a `JOIN` in a `FROM`.
+
+    The condition is split on `AND` and each part is asked which sides it reads.
+    A part that is an equality with one side on the left and the other on the
+    right is a key pair, which is what the plan's join carries. Anything else is
+    a residual, and a residual over an inner join is a filter above it, since
+    every pairing the join produces is then tested and that is what the
+    condition asked for.
+
+    An outer join is not the same. Its condition decides which rows are padded
+    rather than only which rows match, so moving a part of it above the join
+    would test the padded rows too and answer a different query. A residual on
+    one is refused rather than moved.
+
+    Args:
+        ast: The arenas.
+        at: The `REF_JOIN`.
+        catalog: What the table names are resolved against.
+        plan: Where the nodes go.
+        sources: One schema per scan, appended to.
+        scope: What the FROM has put in reach, added to.
+
+    Returns:
+        The join, and any filter above it, and what it produces.
+
+    Raises:
+        If the join or its condition is a shape this does not lower yet.
+    """
+    var node = ast.refs[Int(at)]
+    var kind = _join_kind(ast.text(node.payload))
+    var left = _source(ast, node.a, catalog, plan, sources, scope)
+    var right = _source(ast, node.b, catalog, plan, sources, scope)
+
+    var written = ast.items(node.children)
+    var conjuncts = List[UInt32]()
+    if len(written) != 0:
+        _conjuncts(ast, written[0], conjuncts)
+    elif kind != JoinKind.CROSS and kind != JoinKind.INNER:
+        raise Error(
+            "an outer join with no condition, which decides nothing about"
+            " which rows match and so has no reading SQL gives it"
+        )
+
+    var left_keys = List[Int]()
+    var right_keys = List[Int]()
+    var rest = List[Int]()
+
+    # A join condition is not part of any block, so the aggregates it finds
+    # belong to nothing. It cannot hold one, which `_lower_expr` refuses on its
+    # own because nothing here is grouped, so this walk stays empty.
+    var walk = _Walk()
+    for i in range(len(conjuncts)):
+        var one = ast.exprs[Int(conjuncts[i])]
+        if one.kind == EXPR_BINARY and ast.text(one.payload) == "=":
+            var a = _lower_expr(ast, one.a, plan, walk, scope, False)
+            var b = _lower_expr(ast, one.b, plan, walk, scope, False)
+            var first = _side(plan, a, left, right)
+            var second = _side(plan, b, left, right)
+            if first == _LEFT and second == _RIGHT:
+                left_keys.append(a)
+                right_keys.append(b)
+                continue
+            if first == _RIGHT and second == _LEFT:
+                left_keys.append(b)
+                right_keys.append(a)
+                continue
+            rest.append(plan.exprs.binary(BinaryOp.EQ, a, b))
+            continue
+        rest.append(_lower_expr(ast, conjuncts[i], plan, walk, scope, False))
+
+    if len(rest) != 0 and kind != JoinKind.INNER:
+        raise Error(
+            "firepanda lowers an outer join on equalities between its two sides"
+            " so far, and the rest of this condition decides which rows are"
+            " padded rather than which rows match, so it cannot be tested above"
+            " the join instead"
+        )
+    if (
+        len(left_keys) == 0
+        and kind != JoinKind.INNER
+        and kind != JoinKind.CROSS
+    ):
+        raise Error(
+            "an outer join with no equality between its two sides, and"
+            " firepanda's join node carries key pairs rather than a predicate"
+        )
+
+    var built = kind
+    if len(left_keys) == 0:
+        # An inner join with no equality between its sides is every pairing
+        # with the condition tested over it, which is a cross join and a filter
+        # and is what the rest of the list below builds.
+        built = JoinKind.CROSS
+    var out = _pair(plan, left, right, left_keys^, right_keys^, built)
+    for i in range(len(rest)):
+        out.at = plan.filter(out.at, rest[i])
+    return out^
+
+
+def _source(
+    ast: Ast,
+    at: UInt32,
+    catalog: Catalog,
+    mut plan: Plan,
+    mut sources: List[Schema],
+    mut scope: _Scope,
+) raises -> _From:
+    """Lowers one table reference in a `FROM`.
+
+    Args:
+        ast: The arenas.
+        at: The reference.
+        catalog: What the table names are resolved against.
+        plan: Where the nodes go.
+        sources: One schema per scan, appended to.
+        scope: What the FROM has put in reach, added to.
+
+    Returns:
+        The node and what it produces.
+
+    Raises:
+        If the reference is a shape this does not lower yet.
+    """
+    var source = ast.refs[Int(at)]
+    if source.kind == REF_TABLE:
+        return _table(ast, at, catalog, plan, sources, scope)
+    if source.kind == REF_JOIN:
+        return _joined(ast, at, catalog, plan, sources, scope)
+    if source.kind == REF_PARENS:
+        if ast.length(source.payload) != 0:
+            raise Error(
+                "firepanda does not lower an alias on a parenthesised table"
+                " reference yet, which gives a whole join one name and so takes"
+                " the names written inside it back out of reach"
+            )
+        return _source(ast, source.a, catalog, plan, sources, scope)
+    if source.kind == REF_JOIN_USING:
+        raise Error(
+            "firepanda does not lower a USING join yet, which joins on the"
+            " named columns and then outputs one of each pair rather than both"
+        )
+    if source.kind == REF_SUBQUERY:
+        raise Error(
+            "firepanda does not lower a subquery in a FROM yet, which is a"
+            " whole query whose output names become a table's"
+        )
+    if source.kind == REF_FUNCTION:
+        raise Error(
+            "firepanda does not lower a table function yet, which is the"
+            " TableFunction node the plan does not have"
+        )
+    raise Error(
+        String("firepanda does not lower table reference kind ", source.kind)
+    )
+
+
+def _from(
+    ast: Ast,
+    clause: UInt32,
+    catalog: Catalog,
+    mut plan: Plan,
+    mut sources: List[Schema],
+    mut scope: _Scope,
+) raises -> _From:
+    """Lowers a whole `FROM` clause.
+
+    A comma between two references is a join with no condition. That is what
+    makes `FROM a, b WHERE a.x = b.y` and `FROM a JOIN b ON a.x = b.y` the same
+    query: the first lowers to a cross join under a filter and the second to a
+    cross join with the filter already in the condition, and predicate pushdown
+    turns both into the same join. The comma nests left, the same as a chain of
+    JOIN words does.
+
+    Args:
+        ast: The arenas.
+        clause: The `FROM` clause slot.
+        catalog: What the table names are resolved against.
+        plan: Where the nodes go.
+        sources: One schema per scan, appended to.
+        scope: What the FROM puts in reach, filled in.
+
+    Returns:
+        The node the clause produces and what it produces.
+
+    Raises:
+        If the clause is empty or holds a reference this does not lower.
+    """
+    var refs = ast.items(clause)
+    if len(refs) == 0:
+        raise Error("a FROM with nothing in it")
+    var out = _source(ast, refs[0], catalog, plan, sources, scope)
+    for i in range(1, len(refs)):
+        var more = _source(ast, refs[i], catalog, plan, sources, scope)
+        out = _pair(plan, out, more, List[Int](), List[Int](), JoinKind.CROSS)
+    return out^
 
 
 def lower(ast: Ast, statement: UInt32, catalog: Catalog) raises -> Lowered:
@@ -1054,12 +1564,6 @@ def _block(
         )
 
     var from_clause = ast.slot(clauses, CLAUSE_FROM)
-    var schema = Schema()
-    var table = String()
-    var called = String()
-    if from_clause != NO_NODE:
-        table = _table_of(ast, from_clause, catalog, called)
-        schema = Schema(copy=catalog.frame_at(catalog.find(table)).schema)
 
     var group_clause = ast.slot(clauses, CLAUSE_GROUP)
     var having = ast.slot(clauses, CLAUSE_HAVING)
@@ -1077,6 +1581,8 @@ def _block(
 
     var walk = _Walk()
     var at: Int
+    var schema = Schema()
+    var origin = List[Int]()
     if from_clause == NO_NODE:
         # A query with no FROM still has to project over something, and one row
         # of one constant is the smallest something there is. The projection
@@ -1084,13 +1590,10 @@ def _block(
         # only its row count matters.
         at = plan.values([plan.exprs.literal(Value(Int64(0)))], ["__row"])
     else:
-        # The scan carries the offset of its own schema in `sources`, so a query
-        # over two blocks hands binding two schemas and each scan reaches its
-        # own.
-        var table_at = len(sources)
-        sources.append(Schema(copy=schema))
-        scope.add(called.copy(), table_at)
-        at = plan.scan(table, List[String](), table_at)
+        var source = _from(ast, from_clause, catalog, plan, sources, scope)
+        at = source.at
+        schema = Schema(copy=source.schema)
+        origin = source.origin.copy()
 
     # Not called `where`, which the formatter reads as the start of a
     # parameter constraint and then cannot parse the rest of the file.
@@ -1126,7 +1629,7 @@ def _block(
                     "a star in a SELECT with no FROM, and there is nothing for"
                     " it to stand for"
                 )
-            _expand(ast, item.a, schema, plan, outputs, names)
+            _expand(ast, item.a, schema, origin, plan, outputs, names)
             continue
         outputs.append(_lower_expr(ast, item.a, plan, walk, scope, grouped))
         if item.payload != NO_NODE:
@@ -1192,6 +1695,7 @@ def _expand(
     ast: Ast,
     at: UInt32,
     schema: Schema,
+    origin: List[Int],
     mut plan: Plan,
     mut outputs: List[Int],
     mut names: List[String],
@@ -1206,7 +1710,8 @@ def _expand(
     Args:
         ast: The arenas.
         at: The `EXPR_STAR`.
-        schema: What the scan produces.
+        schema: What the FROM produces.
+        origin: Which relation each of those columns came from.
         plan: Where the lowered expressions go.
         outputs: Where the expressions go.
         names: Where their names go.
@@ -1230,7 +1735,20 @@ def _expand(
             " although firepanda/sql/star.mojo is all three of them"
         )
     for i in range(len(schema)):
-        outputs.append(plan.exprs.column(String(schema[i].name)))
+        var same = 0
+        for j in range(len(schema)):
+            if schema[j].name == schema[i].name:
+                same += 1
+        if same == 1:
+            outputs.append(plan.exprs.column(String(schema[i].name)))
+        else:
+            # A join of two tables that share a column name puts both of them in
+            # the star, and an unqualified reference to either would be refused,
+            # so each says which input it is. Which position is still binding's
+            # to work out, and it is the one thing this stage cannot know.
+            outputs.append(
+                plan.exprs.column_of(origin[i], String(schema[i].name))
+            )
         names.append(String(schema[i].name))
 
 
