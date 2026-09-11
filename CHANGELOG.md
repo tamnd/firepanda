@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.64] - 2026-09-12
+
+Built against Mojo 1.0.0 (ed45d567).
+
+This is a small release with three changes in it, one of which is the half of the bounded top n that makes it worth having.
+
+A limit over a sort stopped sorting the blocks it cannot want. The pass that landed last release kept a bound of `offset + limit` rows and sorted every block against it, which is bounded in memory but does the same work per row whether or not the block has anything in it that can win. Ten rows out of a hundred million means almost every block is a block where nothing wins, so it came out slower than the plain sort it replaced. Now the worst row in the kept set is a threshold and a block is read straight out of its first key column, with only the rows that could displace it appended. A block where nothing gets through costs one linear pass, no gather and no sort. At a hundred million rows that is 128 ms against 1012 ms for the sort, where the first version of the bounded path was 2357 ms.
+
+A window is the twelfth plan node, and it is here because a window is the one thing a projection cannot hold: every other expression a project computes reads one row and a window reads the whole partition the row is in. It binds, prints, round trips through JSON and takes part in projection pushdown, and nothing lowers it yet, so a query with an `OVER` in it is still refused by name.
+
+`DataFrame.reindex_like` and `Series.reindex_like` are the pandas side, which is `reindex` with the labels read off another object rather than written out. The reason they are methods rather than a line at the call site is the index name, since coming back labelled the way the other object is labelled is the whole point of asking for its shape.
+
 ### Added: a window is a plan node of its own
 
 The twelfth node kind, and the argument for it is that a window is the one thing a projection cannot hold. Every other expression a project computes reads one row, and a window reads the whole partition the row is in, so putting one in a project would mean every pass that treats a project as elementwise now has to check for it. The node keeps that check in one place, and the builder refuses anything that is not a window expression, so the rule is enforced where it is written down.
@@ -5511,7 +5523,9 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.62...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.64...HEAD
+[0.6.64]: https://github.com/tamnd/firepanda/releases/tag/v0.6.64
+[0.6.63]: https://github.com/tamnd/firepanda/releases/tag/v0.6.63
 [0.6.62]: https://github.com/tamnd/firepanda/releases/tag/v0.6.62
 [0.6.61]: https://github.com/tamnd/firepanda/releases/tag/v0.6.61
 [0.6.60]: https://github.com/tamnd/firepanda/releases/tag/v0.6.60
