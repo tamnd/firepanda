@@ -319,6 +319,24 @@ struct Series(Copyable, Movable, Sized, Writable):
         """
         return self._relabelled(name, AnyArray(copy=self.values))
 
+    def rename_axis(self, var name: Optional[String]) raises -> Self:
+        """Returns the same data with its row labels under a different name.
+
+        The column's own name is not touched, which is the whole difference
+        between this and `rename`. One of them says what the values are called
+        and the other says what the rows are called, and pandas gives them two
+        methods because they are two different names.
+
+        Args:
+            name: The new level name, or an absence to clear it.
+
+        Returns:
+            A copy of the series with the index renamed.
+        """
+        var out = Self(copy=self)
+        out.index = self.index.renamed(name^)
+        return out^
+
     def cast(self, to: DType, strict: Bool = True) raises -> Self:
         """Returns the series converted to another dtype.
 

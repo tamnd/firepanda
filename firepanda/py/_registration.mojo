@@ -122,6 +122,13 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = dataframe.def_method[PyDataFrame.select](
         "select", docstring="Several columns, as a frame."
     )
+    _ = dataframe.def_method[PyDataFrame.renamed_columns](
+        "renamed_columns", docstring="The same data under a different schema."
+    )
+    _ = dataframe.def_method[PyDataFrame.renamed_axis](
+        "renamed_axis",
+        docstring="The frame with its row labels under a different level name.",
+    )
     _ = dataframe.def_method[PyDataFrame.duplicated](
         "duplicated",
         docstring="Which rows repeat a key another row already carries.",
@@ -254,6 +261,12 @@ def register(mut module: PythonModuleBuilder) raises:
     )
     _ = series.def_method[PySeries.cell](
         "cell", docstring="One value, by position."
+    )
+    _ = series.def_method[PySeries.renamed_axis](
+        "renamed_axis",
+        docstring=(
+            "The series with its row labels under a different level name."
+        ),
     )
     _ = series.def_method[PySeries.reindex](
         "reindex",

@@ -543,6 +543,71 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         out.schema.fields[at].name = new
         return out^
 
+    def renamed_columns(
+        self, olds: List[String], news: List[String]
+    ) raises -> Self:
+        """Returns a frame with several columns renamed at once.
+
+        One at a time through `rename` copies the frame once per name, so a
+        mapping over a wide frame would copy it as many times as it has columns.
+        This copies once. Doing them together is also the only way a swap works:
+        renaming `a` to `b` and `b` to `a` at the same time is two edits that are
+        each illegal on their own and legal together, and the only way to see
+        that is to look at the schema after both rather than between them.
+
+        Args:
+            olds: The current names. Every one has to be a column.
+            news: The replacements, one for each entry of `olds`.
+
+        Returns:
+            A renamed copy of the frame.
+
+        Raises:
+            Error: If the two lists are different lengths, if a name in `olds`
+                is not a column, or if the result would have two columns under
+                one name.
+        """
+        if len(olds) != len(news):
+            raise Error(
+                "rename: "
+                + String(len(olds))
+                + " names to change and "
+                + String(len(news))
+                + " to change them to"
+            )
+        var out = Self(copy=self)
+        for i in range(len(olds)):
+            out.schema.fields[self.schema.index_of(olds[i])].name = news[i]
+
+        var seen = Dict[String, Int]()
+        for i in range(len(out.schema.fields)):
+            var name = out.schema.fields[i].name
+            if name in seen:
+                raise Error(
+                    "cannot rename to '"
+                    + name
+                    + "', that name is taken by another column"
+                )
+            seen[name] = i
+        return out^
+
+    def rename_axis(self, var name: Optional[String]) raises -> Self:
+        """Returns a frame whose row labels are under a different level name.
+
+        Not one label moves and not one value is read. The level name is what
+        the index is called, which is a field beside the labels rather than one
+        of them, so this is the schema edit `rename` is for the columns.
+
+        Args:
+            name: The new level name, or an absence to clear it.
+
+        Returns:
+            A copy of the frame with the index renamed.
+        """
+        var out = Self(copy=self)
+        out.index = self.index.renamed(name^)
+        return out^
+
     def with_column(self, var column: Series) raises -> Self:
         """Returns a frame with a column added or replaced.
 
