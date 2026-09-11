@@ -7,7 +7,7 @@ what a reader of the test checks against, and the second is what catches a field
 that was dropped on the way out and therefore never got a chance to come back
 wrong.
 
-The groups are: the ten node kinds, the nine expression kinds, the constants,
+The groups are: the eleven node kinds, the nine expression kinds, the constants,
 what a bound plan keeps, the sharing that `cse` and `subplan` leave behind, JSON
 written by hand rather than by the writer, and the things that are refused.
 """
@@ -300,6 +300,28 @@ def test_a_values_goes_out_as_rows_rather_than_as_one_list() raises:
     )
     var back = _trip(plan, at)
     assert_equal(back.plan.nodes[back.root].parts, 2, "two columns wide")
+
+
+def test_a_table_function_carries_its_name_and_its_arguments() raises:
+    var plan = Plan()
+    var start = plan.exprs.literal(Value(Int64(1)))
+    var stop = plan.exprs.literal(Value(Int64(10)))
+    var at = plan.table_function("range", [start, stop], ["i"])
+    assert_true(
+        to_json(plan, at).find('"function": "range"') != -1,
+        "what it is called is in the document",
+    )
+    var back = _trip(plan, at)
+    assert_equal(
+        len(back.plan.nodes[back.root].exprs), 2, "both arguments came back"
+    )
+
+
+def test_a_table_function_with_no_arguments_comes_back_with_none() raises:
+    var plan = Plan()
+    var at = plan.table_function("now", List[Int](), ["t"])
+    var back = _trip(plan, at)
+    assert_equal(len(back.plan.nodes[back.root].exprs), 0, "and none came back")
 
 
 def test_every_expression_kind_goes_out_and_comes_back() raises:

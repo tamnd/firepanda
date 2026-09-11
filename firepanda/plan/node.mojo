@@ -56,10 +56,10 @@ from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
 
 @fieldwise_init
 struct NodeKind(Equatable, ImplicitlyCopyable, Movable, Writable):
-    """Which of the ten kinds a logical node is."""
+    """Which of the eleven kinds a logical node is."""
 
     var code: Int
-    """The kind, as one of the ten values below."""
+    """The kind, as one of the eleven values below."""
 
     comptime SCAN = Self(0)
     """A table, a file or an in memory frame. The only node with no input, and
@@ -101,6 +101,12 @@ struct NodeKind(Equatable, ImplicitlyCopyable, Movable, Writable):
     """Rows written out rather than read from anywhere. The second node with no
     input, and the one that makes a query with no `FROM` a plan rather than a
     special case."""
+
+    comptime TABLE_FUNCTION = Self(10)
+    """A function called where a table goes, producing rows out of its
+    arguments. The third node with no input. What it is called is in `source`
+    and the arguments are the expressions, and like a `VALUES` every one of them
+    has to read nothing, because there is nothing under it to read."""
 
     def __eq__(self, other: Self) -> Bool:
         """Compares two kinds.
@@ -148,6 +154,8 @@ struct NodeKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("DISTINCT")
         elif self == Self.VALUES:
             writer.write("VALUES")
+        elif self == Self.TABLE_FUNCTION:
+            writer.write("TABLE FUNCTION")
         else:
             writer.write("UNION")
 
@@ -171,18 +179,18 @@ comptime SET_INTERSECT = 2
 struct PlanNode(Copyable, Movable):
     """One node of a logical plan.
 
-    One struct for all ten kinds, on the same grounds as `Expr`: the arena
+    One struct for all eleven kinds, on the same grounds as `Expr`: the arena
     holds them in one list and a list has one element type. Which fields a kind
     uses is documented on the builder that makes it.
     """
 
     var kind: NodeKind
-    """Which of the ten this is."""
+    """Which of the eleven this is."""
 
     var inputs: List[Int]
-    """The nodes this one reads, as plan arena indices. Empty on a `SCAN` and on
-    a `VALUES`, one on the four in the middle, two on a `JOIN`, and any number on
-    a `UNION`."""
+    """The nodes this one reads, as plan arena indices. Empty on a `SCAN`, on a
+    `VALUES` and on a `TABLE_FUNCTION`, one on the four in the middle, two on a
+    `JOIN`, and any number on a `UNION`."""
 
     var exprs: List[Int]
     """The expressions, as expression arena indices, in the order the builder
@@ -196,8 +204,9 @@ struct PlanNode(Copyable, Movable):
     Zero elsewhere."""
 
     var names: List[String]
-    """The output names on a `PROJECT`, an `AGGREGATE` and a `VALUES`, and the
-    column names read on a `SCAN`. Empty elsewhere."""
+    """The output names on a `PROJECT`, an `AGGREGATE`, a `VALUES` and a
+    `TABLE_FUNCTION`, and the column names read on a `SCAN`. Empty
+    elsewhere."""
 
     var flags: List[Bool]
     """The directions on a `SORT`, descending first and nulls last after, each
@@ -220,7 +229,8 @@ struct PlanNode(Copyable, Movable):
     carries. `UNBOUND` elsewhere, and a single input plan leaves it at zero."""
 
     var source: String
-    """What a `SCAN` reads, as a table name or a path. Empty elsewhere."""
+    """What a `SCAN` reads, as a table name or a path, and what a
+    `TABLE_FUNCTION` is called. Empty elsewhere."""
 
     def __init__(
         out self,
@@ -896,5 +906,76 @@ struct Plan(Movable, Sized):
                 0,
                 UNBOUND,
                 String(),
+            )
+        )
+
+    def table_function(
+        mut self,
+        var source: String,
+        var args: List[Int],
+        var names: List[String],
+    ) raises -> Int:
+        """Builds a call to a function that produces rows.
+
+        Uses `source` for what the function is called, `exprs` for its arguments
+        and `names` for the columns it produces. No inputs, the same way a
+        `VALUES` has none and for the same reason: the rows come out of the node
+        rather than out of something below it.
+
+        Every argument has to read nothing at all, which is the rule a `VALUES`
+        gets and is stronger than the one a filter predicate gets. `range(n)`
+        where `n` is a column is a lateral call, which is a table function
+        joined to the rows it was called for, and that is a different node with
+        an input on it rather than this one with a looser rule.
+
+        Which functions exist and what each one produces is binding's business
+        rather than this one's. The plan is a shape, and which names an engine
+        answers to is a question about the engine.
+
+        Args:
+            source: What the function is called.
+            args: Its arguments, in the order they were written.
+            names: What the columns it produces are called.
+
+        Returns:
+            The index of the new node.
+
+        Raises:
+            If the function has no name, if it produces no columns, if an
+            argument is not in the plan, or if an argument reads something.
+        """
+        if source.byte_length() == 0:
+            raise Error("a table function with no name is not a call")
+        if len(names) == 0:
+            raise Error("a table of no columns is not a table")
+        for i in range(len(args)):
+            self.exprs.check(args[i])
+            if not self.exprs.input_independent(args[i]):
+                raise Error(
+                    String(
+                        "argument ",
+                        i + 1,
+                        " of ",
+                        source,
+                        (
+                            " reads something, and a table function is called"
+                            " where a table goes, so there is nothing under it"
+                            " to read"
+                        ),
+                    )
+                )
+        return self._add(
+            PlanNode(
+                NodeKind.TABLE_FUNCTION,
+                List[Int](),
+                args^,
+                0,
+                names^,
+                List[Bool](),
+                0,
+                0,
+                0,
+                UNBOUND,
+                source^,
             )
         )

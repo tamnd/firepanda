@@ -1652,5 +1652,125 @@ def test_an_intersection_is_refused_by_name() raises:
         _ = lower(plan, root, two_frames())
 
 
+def series(mut plan: Plan, root: Int) raises -> DataFrame:
+    """Binds, lowers and runs a plan that reads no relation at all."""
+    _ = bind(plan, root, List[Schema]())
+    var pipe = lower(plan, root, List[DataFrame]())
+    return pipe^.run()
+
+
+def counted(mut plan: Plan, name: String, args: List[Int64]) raises -> Int:
+    """A call to one of the two series functions over whole number arguments."""
+    var written = List[Int](capacity=len(args))
+    for i in range(len(args)):
+        written.append(plan.exprs.literal(Value(args[i])))
+    return plan.table_function(name, written^, ["i"])
+
+
+def test_a_range_of_one_argument_starts_at_zero() raises:
+    var plan = Plan()
+    var root = counted(plan, "range", [5])
+    var out = series(plan, root)
+    same(read_back(out, "i"), [0, 1, 2, 3, 4], "five rows and no table")
+
+
+def test_a_generate_series_stops_on_its_bound() raises:
+    # The whole difference between the two functions is this one row.
+    var plan = Plan()
+    var root = counted(plan, "generate_series", [5])
+    var out = series(plan, root)
+    same(read_back(out, "i"), [0, 1, 2, 3, 4, 5], "six rows")
+
+
+def test_a_range_of_two_arguments_is_a_start_and_a_stop() raises:
+    var plan = Plan()
+    var root = counted(plan, "range", [10, 14])
+    var out = series(plan, root)
+    same(read_back(out, "i"), [10, 11, 12, 13], "from the first to the second")
+
+
+def test_a_range_of_three_arguments_counts_by_the_third() raises:
+    var plan = Plan()
+    var root = counted(plan, "range", [0, 10, 3])
+    var out = series(plan, root)
+    same(read_back(out, "i"), [0, 3, 6, 9], "and stops before ten")
+
+
+def test_a_negative_step_counts_down() raises:
+    var plan = Plan()
+    var root = counted(plan, "range", [5, 0, -2])
+    var out = series(plan, root)
+    same(read_back(out, "i"), [5, 3, 1], "down to the bound and not past it")
+
+
+def test_a_series_that_never_reaches_its_end_is_no_rows() raises:
+    var plan = Plan()
+    var root = counted(plan, "range", [5, 0])
+    var out = series(plan, root)
+    assert_equal(len(out), 0, "counting up from five to zero is nothing")
+
+
+def test_a_step_of_zero_is_refused_by_name() raises:
+    var plan = Plan()
+    var root = counted(plan, "range", [0, 10, 0])
+    _ = bind(plan, root, List[Schema]())
+
+    with assert_raises(contains="a series that never moves"):
+        _ = lower(plan, root, List[DataFrame]())
+
+
+def test_a_series_with_a_null_end_is_no_rows() raises:
+    var plan = Plan()
+    var missing = plan.exprs.literal(Value(null=LogicalType.NULL))
+    var root = plan.table_function("range", [missing], ["i"])
+    var out = series(plan, root)
+    assert_equal(len(out), 0, "nobody said where it ends")
+
+
+def test_a_series_that_is_too_long_to_build_is_refused_by_name() raises:
+    # It is built before the query starts, so a series of a trillion rows is an
+    # allocation rather than a query that takes a while.
+    var plan = Plan()
+    var root = counted(plan, "range", [1_000_000_000_000])
+    _ = bind(plan, root, List[Schema]())
+
+    with assert_raises(contains="longer than 100000000"):
+        _ = lower(plan, root, List[DataFrame]())
+
+
+def test_a_series_takes_the_name_the_call_gave_it() raises:
+    var plan = Plan()
+    var three = plan.exprs.literal(Value(Int64(3)))
+    var root = plan.table_function("range", [three], ["day"])
+    var out = series(plan, root)
+    same(read_back(out, "day"), [0, 1, 2], "under the name the call chose")
+
+
+def test_a_series_is_a_source_the_rest_of_the_line_reads() raises:
+    var plan = Plan()
+    var rows = counted(plan, "range", [10])
+    var i = plan.exprs.column("i")
+    var four = plan.exprs.literal(Value(Int64(4)))
+    var big = plan.exprs.binary(BinaryOp.GT, i, four)
+    var kept = plan.filter(rows, big)
+    var out = series(plan, kept)
+    same(read_back(out, "i"), [5, 6, 7, 8, 9], "the filter ran over the series")
+
+
+def test_an_argument_that_is_computed_is_folded_before_it_gets_here() raises:
+    # Lowering reads the arguments off the tree, so `range(2 + 3)` only works
+    # because simplify has already folded it. One that is not folded is refused
+    # by name rather than computed, the same way a VALUES refuses one.
+    var plan = Plan()
+    var two = plan.exprs.literal(Value(Int64(2)))
+    var three = plan.exprs.literal(Value(Int64(3)))
+    var sum = plan.exprs.binary(BinaryOp.ADD, two, three)
+    var root = plan.table_function("range", [sum], ["i"])
+    _ = bind(plan, root, List[Schema]())
+
+    with assert_raises(contains="argument 1 of range is a binary expression"):
+        _ = lower(plan, root, List[DataFrame]())
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

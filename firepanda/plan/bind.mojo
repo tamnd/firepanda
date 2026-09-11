@@ -661,6 +661,9 @@ def _bind_node(
     if kind == NodeKind.VALUES:
         return _bind_values(plan, at)
 
+    if kind == NodeKind.TABLE_FUNCTION:
+        return _bind_table_function(plan, at)
+
     if kind == NodeKind.UNION:
         return _bind_union(plan, at, done)
 
@@ -764,6 +767,91 @@ def _bind_join(mut plan: Plan, at: Int, done: List[Bound]) raises -> Bound:
         kind == JoinKind.RIGHT or kind == JoinKind.OUTER,
         kind == JoinKind.LEFT or kind == JoinKind.OUTER,
     )
+
+
+def _bind_table_function(mut plan: Plan, at: Int) raises -> Bound:
+    """Binds a call to a function that produces rows.
+
+    Two functions are known and they are the same function with two ends on it.
+    `range` stops before the value it was given and `generate_series` stops on
+    it, which is DuckDB's rule and is the whole difference between them. Both
+    produce one column of int64, and both take a stop, a start and a stop, or a
+    start, a stop and a step.
+
+    Anything else is refused by name, with the names that do work in the
+    message. A plan that carried a function nobody had written would bind
+    happily and fail when a row was asked for, which moves the error from where
+    the query was written to where it was run.
+
+    The arguments are bound against nothing, the way a `VALUES` binds its rows,
+    because a table function is called where a table goes and has nothing under
+    it to read. What binding does here is type them, since `range(2 + 3)` knows
+    its type only after arithmetic.
+
+    Args:
+        plan: The plan, written through.
+        at: The node.
+
+    Returns:
+        What the call produces.
+
+    Raises:
+        If the function is not one of the two, if it has the wrong number of
+        arguments, or if an argument is not a whole number and is not `NULL`.
+    """
+    var name = plan.nodes[at].source
+    if name != "range" and name != "generate_series":
+        raise Error(
+            String(
+                "there is no table function called ",
+                name,
+                ", and the ones there are are range and generate_series",
+            )
+        )
+    var args = plan.nodes[at].exprs.copy()
+    if len(args) == 0 or len(args) > 3:
+        raise Error(
+            String(
+                name,
+                (
+                    " takes a stop, a start and a stop, or a start, a stop and"
+                    " a step, and this call has "
+                ),
+                len(args),
+                " arguments",
+            )
+        )
+    for i in range(len(args)):
+        bind_expr(plan.exprs, args[i], Schema(), List[Int]())
+        var t = plan.exprs.nodes[args[i]].type
+        # A `NULL` argument passes, because a series whose end nobody knows is
+        # a series of no rows rather than a query that was written wrong, which
+        # is DuckDB's reading of it too.
+        if not t.is_integer() and t != LogicalType.NULL:
+            raise Error(
+                String(
+                    "argument ",
+                    i + 1,
+                    " of ",
+                    name,
+                    " counts rows and is a ",
+                    t,
+                    ", and counting is done in whole numbers",
+                )
+            )
+    if len(plan.nodes[at].names) != 1:
+        raise Error(
+            String(
+                name,
+                " produces one column and this call names ",
+                len(plan.nodes[at].names),
+            )
+        )
+    var out = Schema()
+    out.append(Field(plan.nodes[at].names[0], LogicalType.INT64, False))
+    var origin = List[Int]()
+    origin.append(UNBOUND)
+    return Bound(out^, origin^)
 
 
 def _bind_values(mut plan: Plan, at: Int) raises -> Bound:

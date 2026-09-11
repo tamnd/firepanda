@@ -380,6 +380,22 @@ def test_a_values_is_left_alone_and_the_pass_walks_past_it() raises:
     )
 
 
+def test_a_table_function_is_left_alone_too() raises:
+    # There is nothing to narrow. It produces one column and it produces it out
+    # of its arguments, so reading less of it would not save a read.
+    var plan = Plan()
+    var five = plan.exprs.literal(Value(Int64(5)))
+    var rows = plan.table_function("range", [five], ["i"])
+    var i = plan.exprs.column("i")
+    var root = plan.project(rows, [i], ["i"])
+    _ = prune(plan, root, List[Schema]())
+    assert_equal(
+        explain(plan, root),
+        "PROJECT [i]\n  range(5) [i]\n",
+        "the call is what it was",
+    )
+
+
 def test_a_difference_that_keeps_duplicates_reads_the_whole_row_too() raises:
     # The duplicate flag decides nothing here. Whether an orders row is in the
     # right arm is a question about the whole row whatever happens to the

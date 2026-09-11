@@ -497,6 +497,78 @@ def test_a_values_belongs_to_no_relation() raises:
     assert_equal(plan.exprs.nodes[key].table, UNBOUND, "from nowhere")
 
 
+def test_a_table_function_produces_one_int64_column() raises:
+    var plan = Plan()
+    var stop = plan.exprs.literal(Value(Int64(5)))
+    var rows = plan.table_function("range", [stop], ["i"])
+    var schema = bind(plan, rows, List[Schema]())
+    assert_equal(len(schema), 1, "one column")
+    assert_equal(schema[0].name, "i", "named the way the call named it")
+    assert_equal(schema[0].dtype, LogicalType.INT64, "counting is in int64")
+    assert_false(schema[0].nullable, "and a counted row is always there")
+
+
+def test_a_table_function_types_the_arithmetic_in_its_arguments() raises:
+    # The whole reason the arguments are bound at all. A literal knows its type
+    # and `2 + 3` does not, and lowering reads the type off the expression.
+    var plan = Plan()
+    var two = plan.exprs.literal(Value(Int64(2)))
+    var three = plan.exprs.literal(Value(Int64(3)))
+    var sum = plan.exprs.binary(BinaryOp.ADD, two, three)
+    var rows = plan.table_function("generate_series", [sum], ["i"])
+    _ = bind(plan, rows, List[Schema]())
+    assert_equal(plan.exprs.nodes[sum].type, LogicalType.INT64, "worked out")
+
+
+def test_a_table_function_nobody_wrote_is_refused_by_name() raises:
+    var plan = Plan()
+    var stop = plan.exprs.literal(Value(Int64(5)))
+    var rows = plan.table_function("read_parquet", [stop], ["i"])
+    with assert_raises(
+        contains="there is no table function called read_parquet"
+    ):
+        _ = bind(plan, rows, List[Schema]())
+
+
+def test_a_table_function_takes_one_two_or_three_arguments() raises:
+    var plan = Plan()
+    var one = plan.exprs.literal(Value(Int64(1)))
+    var four = plan.table_function("range", [one, one, one, one], ["i"])
+    with assert_raises(contains="this call has 4 arguments"):
+        _ = bind(plan, four, List[Schema]())
+    var none = plan.table_function("range", List[Int](), ["i"])
+    with assert_raises(contains="this call has 0 arguments"):
+        _ = bind(plan, none, List[Schema]())
+
+
+def test_a_table_function_counts_in_whole_numbers() raises:
+    var plan = Plan()
+    var half = plan.exprs.literal(Value(Float64(2.5)))
+    var rows = plan.table_function("range", [half], ["i"])
+    with assert_raises(contains="counts rows and is a float64"):
+        _ = bind(plan, rows, List[Schema]())
+
+
+def test_a_series_with_a_null_end_binds() raises:
+    # It is a series of no rows rather than a query written wrong, which is
+    # what DuckDB answers too.
+    var plan = Plan()
+    var missing = plan.exprs.literal(Value(null=LogicalType.NULL))
+    var rows = plan.table_function("range", [missing], ["i"])
+    var schema = bind(plan, rows, List[Schema]())
+    assert_equal(schema[0].dtype, LogicalType.INT64, "still an int64 column")
+
+
+def test_a_table_function_belongs_to_no_relation() raises:
+    var plan = Plan()
+    var stop = plan.exprs.literal(Value(Int64(5)))
+    var rows = plan.table_function("range", [stop], ["i"])
+    var i = plan.exprs.column("i")
+    var root = plan.project(rows, [i], ["i"])
+    _ = bind(plan, root, List[Schema]())
+    assert_equal(plan.exprs.nodes[i].table, UNBOUND, "from nowhere")
+
+
 def test_a_union_promotes_the_types_of_the_columns_it_stacks() raises:
     var narrow = Schema()
     narrow.append(Field("n", LogicalType.INT32, False))

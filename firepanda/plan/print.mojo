@@ -277,6 +277,17 @@ def _line(plan: Plan, at: Int) raises -> String:
             written += ")"
         return written
 
+    if node.kind == NodeKind.TABLE_FUNCTION:
+        var written = String(node.source, "(")
+        written += _list(plan.exprs, node.exprs, 0, len(node.exprs))
+        written += ") ["
+        for i in range(len(node.names)):
+            if i != 0:
+                written += ", "
+            written += node.names[i]
+        written += "]"
+        return written
+
     var word = "UNION"
     if node.op == SET_EXCEPT:
         word = "EXCEPT"

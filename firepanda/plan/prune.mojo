@@ -24,8 +24,8 @@ of it. No recursion and no visited set, the same shape `bind` already uses.
 
 ## What it rewrites
 
-Three of the ten kinds carry a list of columns that this narrows, and the other
-seven do not.
+Three of the eleven kinds carry a list of columns that this narrows, and the
+other eight do not.
 
 A scan gets its column list narrowed, which is the point of the pass and where
 the reading stops happening. A scan with no list means the whole table, so a
@@ -141,7 +141,11 @@ def _demand(
         If an expression holds a column that binding has not reached.
     """
     var kind = plan.nodes[at].kind
-    if kind == NodeKind.SCAN or kind == NodeKind.VALUES:
+    if (
+        kind == NodeKind.SCAN
+        or kind == NodeKind.VALUES
+        or kind == NodeKind.TABLE_FUNCTION
+    ):
         return
 
     # Copied out once, because every branch below hands it to a routine that

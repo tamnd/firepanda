@@ -820,6 +820,16 @@ def _node_json(
                 plan.exprs, node.exprs, i, i + node.parts, on_exprs
             )
         return out + "]}"
+    if node.kind == NodeKind.TABLE_FUNCTION:
+        return out + String(
+            '"kind": "table_function", "function": ',
+            _quoted(node.source),
+            ', "columns": ',
+            _strings_json(node.names),
+            ', "args": ',
+            _exprs_json(plan.exprs, node.exprs, 0, len(node.exprs), on_exprs),
+            "}",
+        )
     if node.kind == NodeKind.JOIN:
         out += String(
             '"kind": "join", "how": ',
@@ -1451,6 +1461,31 @@ def _node_of(
         )
     elif kind == "values":
         at = _values_of(bytes, members, plan, expr_ids)
+    elif kind == "table_function":
+        at = plan.table_function(
+            text_of(
+                bytes,
+                members[
+                    _need(bytes, members, "function", "a table function")
+                ].value,
+            ),
+            _expr_list(
+                bytes,
+                members[
+                    _need(bytes, members, "args", "a table function")
+                ].value,
+                "the arguments of a table function",
+                plan.exprs,
+                expr_ids,
+            ),
+            _names_of(
+                bytes,
+                members[
+                    _need(bytes, members, "columns", "a table function")
+                ].value,
+                "the columns of a table function",
+            ),
+        )
     elif kind == "join":
         at = _join_node_of(bytes, members, plan, ids, expr_ids)
     elif kind == "union" or kind == "except" or kind == "intersect":

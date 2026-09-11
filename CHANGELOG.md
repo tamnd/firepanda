@@ -8,6 +8,24 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a table function is a source, so range and generate_series run
+
+`TABLE_FUNCTION` is the eleventh plan node and the third one with no input. What it is called is in `source` and its arguments are its expressions, and like a `VALUES` every one of them has to read nothing, because a table function is called where a table goes and there is nothing under it to read.
+
+Two functions are known. `range` stops before the value it was given and `generate_series` stops on it, which is DuckDB's rule and is the whole difference between them. Both take a stop, a start and a stop, or a start, a stop and a step, and both produce one int64 column. A function nobody has written is refused when the plan is bound rather than when a row is asked for, so the error lands where the query was written.
+
+The frame it stands for is built at lowering time out of the arguments, the way a literal table is. That makes `range(5)` a source that reads no file and touches no catalog, and it makes the shortest end to end query there is one that needs no data at all.
+
+How many rows there are is worked out by arithmetic rather than by counting them, which is what lets a series that is too long to build be refused in no time instead of once it has been half built. The span is worked out unsigned so that a start below zero and a stop above it is a width and not an overflow.
+
+A step of zero is refused, because that is not a series with nothing in it, it is a series that never ends. A null argument answers no rows rather than raising, which is DuckDB's reading and the only sensible one for a series whose end nobody knows. A negative step counts down.
+
+The whole series is a frame before the query starts, so one longer than a hundred million rows is refused by name. DuckDB hands out one chunk at a time and never holds all of it, and a source that produced its rows as they were asked for is a change to the driver rather than an operator.
+
+The SQL front end does not build the node yet, so `SELECT * FROM range(5)` is still refused where it is parsed. That is the next change and it is a small one.
+
+Part of #309.
+
 ### Added: a UNION runs, and stacking it reads no rows
 
 `SELECT qty FROM sales UNION ALL SELECT band FROM tiers` gives back one on top of the other, and without `ALL` it gives back one of each row. Every input is a line of the same plan, so each one is lowered and run the way a join's build side is, and the frames that come back become the frame the pipeline reads.

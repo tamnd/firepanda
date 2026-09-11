@@ -1223,8 +1223,9 @@ def _source(
         )
     if source.kind == REF_FUNCTION:
         raise Error(
-            "firepanda does not lower a table function yet, which is the"
-            " TableFunction node the plan does not have"
+            "firepanda does not lower a table function yet, which is a call"
+            " written where a table goes, like range(5). The plan has the node"
+            " and runs it, and what is missing is this front end building one"
         )
     raise Error(
         String("firepanda does not lower table reference kind ", source.kind)
