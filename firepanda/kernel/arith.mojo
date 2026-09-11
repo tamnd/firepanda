@@ -573,7 +573,7 @@ def _arith[dt: DType, op: Int](a: Array[dt], b: Array[dt]) raises -> Array[dt]:
     def compute(start: Int, stop: Int) raises {mut out, imm}:
         var lhs = a.unsafe_ptr()
         var rhs = b.unsafe_ptr()
-        var dst = out.unsafe_ptr()
+        var dst = out.unsafe_mut_ptr()
         var i = start
         while i < stop:
             var x = lhs.unsafe_offset(i).unsafe_load[width=width]()
@@ -670,7 +670,7 @@ def _int_divide[
     def compute(start: Int, stop: Int) {mut out, mut validity, imm}:
         var lhs = a.unsafe_ptr()
         var rhs = b.unsafe_ptr()
-        var dst = out.unsafe_ptr()
+        var dst = out.unsafe_mut_ptr()
         var zeros = SIMD[dt, width](0)
         var i = start
         while i < stop:
@@ -769,7 +769,7 @@ def divide[
     def compute(start: Int, stop: Int) raises {mut out, imm}:
         var lhs = a.unsafe_ptr()
         var rhs = b.unsafe_ptr()
-        var dst = out.unsafe_ptr()
+        var dst = out.unsafe_mut_ptr()
         var i = start
         while i < stop:
             var x = (
@@ -853,7 +853,7 @@ def arith_const[
     # single loop over the whole column.
     def compute(start: Int, stop: Int) raises {mut out, imm}:
         var src = a.unsafe_ptr()
-        var dst = out.unsafe_ptr()
+        var dst = out.unsafe_mut_ptr()
         comptime if op == OP_ADD:
             var i = start
             while i < stop:
@@ -1140,12 +1140,17 @@ def _int_divide_const[
     # Every row is written below, so the zeroing allocation is a wasted pass.
     var out = Array[dt](overwritten=n)
     var validity = Bitmap(copy=a.data.validity)
+    # The workers below clear a bit each time they find a zero divisor, so this
+    # copy has to stop sharing the column's bits before any of them starts,
+    # rather than while all of them are asking at once. See
+    # `Buffer.make_private`.
+    validity.make_private()
     var y = SIMD[dt, width](b)
     var zeros = SIMD[dt, width](0)
 
     def compute(start: Int, stop: Int) {mut out, mut validity, imm}:
         var src = a.unsafe_ptr()
-        var dst = out.unsafe_ptr()
+        var dst = out.unsafe_mut_ptr()
         if flip:
             var i = start
             while i < stop:
@@ -1239,7 +1244,7 @@ def divide_const[
 
     def compute(start: Int, stop: Int) raises {mut out, imm}:
         var src = a.unsafe_ptr()
-        var dst = out.unsafe_ptr()
+        var dst = out.unsafe_mut_ptr()
         if flip:
             var i = start
             while i < stop:

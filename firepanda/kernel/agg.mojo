@@ -253,8 +253,10 @@ def sum_and_skipped_over[
     def add_up(start: Int, stop: Int) {mut partials, mut passed, imm}:
         var found = _sum_range[acc=acc](source, start, stop)
         var at = start // MORSEL_ROWS
-        partials.unsafe_ptr().unsafe_offset(at).unsafe_write(found.total)
-        passed.unsafe_ptr().unsafe_offset(at).unsafe_write(Int64(found.skipped))
+        partials.unsafe_mut_ptr().unsafe_offset(at).unsafe_write(found.total)
+        passed.unsafe_mut_ptr().unsafe_offset(at).unsafe_write(
+            Int64(found.skipped)
+        )
 
     parallel_morsels(add_up, n)
 
@@ -415,8 +417,8 @@ def extreme_over[
             source, validity, start, stop
         )
         var at = start // MORSEL_ROWS
-        values.unsafe_ptr().unsafe_offset(at).unsafe_write(found.value)
-        flags.unsafe_ptr().unsafe_offset(at).unsafe_write(
+        values.unsafe_mut_ptr().unsafe_offset(at).unsafe_write(found.value)
+        flags.unsafe_mut_ptr().unsafe_offset(at).unsafe_write(
             UInt8(1) if found.valid else UInt8(0)
         )
 

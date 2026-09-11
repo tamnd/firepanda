@@ -255,7 +255,7 @@ def _unary[dt: DType, op: Int](a: Array[dt]) raises -> Array[dt]:
 
     def compute(start: Int, stop: Int) raises {mut out, imm}:
         var src = a.unsafe_ptr()
-        var dst = out.unsafe_ptr()
+        var dst = out.unsafe_mut_ptr()
         var i = start
         while i < stop:
             var x = src.unsafe_offset(i).unsafe_load[width=width]()

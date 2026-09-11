@@ -73,7 +73,7 @@ def with_nulls(values: List[String], present: List[Bool]) -> StringArray:
 def group_codes(values: List[Int]) -> Array[DType.uint32]:
     """Builds a codes column from a list of ordinals."""
     var out = Array[DType.uint32](len(values))
-    var at = out.unsafe_ptr()
+    var at = out.unsafe_mut_ptr()
     for i in range(len(values)):
         at.unsafe_offset(i).unsafe_store(UInt32(values[i]))
     return out^
@@ -292,7 +292,7 @@ def test_a_frame_aggregates_text_beside_a_number() raises:
     series.append(Series("k", text(["a", "b", "a"])))
     series.append(Series("city", text(["oslo", "lima", "cairo"])))
     var values = Array[DType.int64](3)
-    var at = values.unsafe_ptr()
+    var at = values.unsafe_mut_ptr()
     at.unsafe_offset(0).unsafe_store(1)
     at.unsafe_offset(1).unsafe_store(2)
     at.unsafe_offset(2).unsafe_store(3)

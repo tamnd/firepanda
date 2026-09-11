@@ -442,7 +442,7 @@ def check_partition(mut rng: Rng, step: Int, seed: UInt64) raises:
         return
     var bits = rng.next_range(1, 6)
     var hashes = Buffer(n * 8)
-    var out = hashes.bitcast[DType.uint64]()
+    var out = hashes.mut_bitcast[DType.uint64]()
     for i in range(n):
         out.unsafe_offset(i).unsafe_write(hash_of(Int64(rng.next_below(1000))))
 

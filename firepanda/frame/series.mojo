@@ -3068,7 +3068,7 @@ def _widen_positions(order: Array[DType.uint32]) -> Array[DType.int64]:
     var n = len(order)
     var out = Array[DType.int64](overwritten=n)
     var source = order.unsafe_ptr()
-    var target = out.unsafe_ptr()
+    var target = out.unsafe_mut_ptr()
     for i in range(n):
         target.unsafe_offset(i).unsafe_store(
             Int64(source.unsafe_offset(i).unsafe_load())

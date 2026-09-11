@@ -73,7 +73,7 @@ def repair_range[
         dt: The column's dtype.
     """
     comptime width = simd_width_of[dt]()
-    var ptr = col.unsafe_ptr()
+    var ptr = col.unsafe_mut_ptr()
     var n = len(col)
 
     # Rounding the end up is what picks up the last partial word of the column;

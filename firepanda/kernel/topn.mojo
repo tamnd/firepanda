@@ -443,8 +443,8 @@ def _group_top_core[
     def scan(
         w: Int,
     ) raises {mut slots, mut rows_at, mut filled, mut worst, imm}:
-        var seeds = worst.bitcast[dt]().unsafe_offset(w * groups)
-        var empty = filled.bitcast[DType.uint32]().unsafe_offset(w * groups)
+        var seeds = worst.mut_bitcast[dt]().unsafe_offset(w * groups)
+        var empty = filled.mut_bitcast[DType.uint32]().unsafe_offset(w * groups)
         for g in range(groups):
             seeds.unsafe_offset(g).unsafe_store(blank)
             empty.unsafe_offset(g).unsafe_store(UInt32(0))
@@ -456,16 +456,16 @@ def _group_top_core[
             bounds[w],
             bounds[w + 1],
             _Table[dt](
-                slots.bitcast[dt]()
+                slots.mut_bitcast[dt]()
                 .unsafe_offset(w * span)
                 .unsafe_origin_cast[MutUntrackedOrigin](),
-                rows_at.bitcast[DType.uint32]()
+                rows_at.mut_bitcast[DType.uint32]()
                 .unsafe_offset(w * span)
                 .unsafe_origin_cast[MutUntrackedOrigin](),
-                filled.bitcast[DType.uint32]()
+                filled.mut_bitcast[DType.uint32]()
                 .unsafe_offset(w * groups)
                 .unsafe_origin_cast[MutUntrackedOrigin](),
-                worst.bitcast[dt]()
+                worst.mut_bitcast[dt]()
                 .unsafe_offset(w * groups)
                 .unsafe_origin_cast[MutUntrackedOrigin](),
                 n,
@@ -484,16 +484,18 @@ def _group_top_core[
     def fold(
         b: Int,
     ) raises {mut slots, mut rows_at, mut filled, mut worst, imm}:
-        var values = slots.bitcast[dt]().unsafe_origin_cast[
+        var values = slots.mut_bitcast[dt]().unsafe_origin_cast[
             MutUntrackedOrigin
         ]()
-        var marks = rows_at.bitcast[DType.uint32]().unsafe_origin_cast[
+        var marks = rows_at.mut_bitcast[DType.uint32]().unsafe_origin_cast[
             MutUntrackedOrigin
         ]()
-        var used = filled.bitcast[DType.uint32]().unsafe_origin_cast[
+        var used = filled.mut_bitcast[DType.uint32]().unsafe_origin_cast[
             MutUntrackedOrigin
         ]()
-        var least = worst.bitcast[dt]().unsafe_origin_cast[MutUntrackedOrigin]()
+        var least = worst.mut_bitcast[dt]().unsafe_origin_cast[
+            MutUntrackedOrigin
+        ]()
         var into = _Table[dt](values, marks, used, least, n)
 
         var first = groups * b // blocks

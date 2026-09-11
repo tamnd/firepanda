@@ -405,7 +405,9 @@ struct _StringStack(Movable):
             return
 
         unsafe_memcpy(
-            dest=self._views.unsafe_ptr().unsafe_offset(self._at * VIEW_SIZE),
+            dest=self._views.unsafe_mut_ptr().unsafe_offset(
+                self._at * VIEW_SIZE
+            ),
             src=col.views.unsafe_ptr(),
             count=n * VIEW_SIZE,
         )
@@ -413,7 +415,7 @@ struct _StringStack(Movable):
         var bytes = len(col.payload)
         if bytes > 0:
             unsafe_memcpy(
-                dest=self._payload.unsafe_ptr().unsafe_offset(self._base),
+                dest=self._payload.unsafe_mut_ptr().unsafe_offset(self._base),
                 src=col.payload.unsafe_ptr(),
                 count=bytes,
             )
@@ -454,10 +456,10 @@ struct _StringStack(Movable):
             rows: The total row count.
             payload_bytes: The total payload size.
         """
-        var views = self._views.unsafe_ptr().unsafe_origin_cast[
+        var views = self._views.unsafe_mut_ptr().unsafe_origin_cast[
             MutUntrackedOrigin
         ]()
-        var payload = self._payload.unsafe_ptr().unsafe_origin_cast[
+        var payload = self._payload.unsafe_mut_ptr().unsafe_origin_cast[
             MutUntrackedOrigin
         ]()
 
@@ -510,7 +512,7 @@ struct _StringStack(Movable):
             n: How many views were just copied.
         """
         var views = (
-            self._views.unsafe_ptr()
+            self._views.unsafe_mut_ptr()
             .unsafe_bitcast[StringView]()
             .unsafe_offset(self._at)
         )
@@ -608,7 +610,7 @@ def _stack_fixed[dt: DType](parts: List[_Part], total: Int) raises -> Array[dt]:
         Error: If a worker fails.
     """
     var out = Array[dt](overwritten=total)
-    var target = out.unsafe_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
+    var target = out.unsafe_mut_ptr().unsafe_origin_cast[MutUntrackedOrigin]()
 
     def one(p: Int) raises {imm}:
         ref part = parts[p]

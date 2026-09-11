@@ -193,7 +193,13 @@ struct ChunkedArray(Copyable, Movable, Sized):
         self.order = Sortedness.UNKNOWN
 
     def __init__(out self, *, copy: Self):
-        """Deep-copies a column, chunk by chunk.
+        """Copies a column chunk by chunk, sharing the bytes of each.
+
+        This is the one `select` calls, once per column it keeps, and until #406
+        it was a memcpy of the whole column. Nothing about the call changed. The
+        buffers underneath now share an allocation and take a private one on the
+        first write, so a projection costs an atomic a chunk instead of a pass
+        over the data.
 
         Args:
             copy: The column to copy.

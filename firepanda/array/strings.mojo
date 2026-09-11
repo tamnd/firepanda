@@ -104,7 +104,7 @@ struct StringArray(Copyable, Movable, Sized):
         self.length = length
 
     def __init__(out self, *, copy: Self):
-        """Deep-copies a column.
+        """Copies a column, sharing its bytes until one side writes.
 
         Args:
             copy: The column to copy.
@@ -181,13 +181,18 @@ struct StringArray(Copyable, Movable, Sized):
         """
         return len(self.view(i))
 
-    def unsafe_bytes(ref self, i: Int) -> Span[UInt8, origin_of(self)]:
+    def unsafe_bytes(self, i: Int) -> Span[UInt8, origin_of(self)]:
         """Returns one element's bytes without copying them.
 
         The span points either into the views buffer or into the payload, so it
         is valid exactly as long as the column is. Nothing here can outlive the
         column, which is what makes this safe to hand to a kernel and unsafe to
         store.
+
+        Borrowed rather than `ref`, so the span cannot be written through. The
+        buffers underneath are shared until somebody asks to write, and a reader
+        that could write would have to un-share them, which would turn every
+        read of an element into a possible copy of the whole payload.
 
         Args:
             i: The element index.
@@ -634,7 +639,7 @@ struct StringBuilder(Movable, Sized):
             var offset = self._payload_size
             self._reserve(offset + len(bytes))
             unsafe_memcpy(
-                dest=self._payload.unsafe_ptr().unsafe_offset(offset),
+                dest=self._payload.unsafe_mut_ptr().unsafe_offset(offset),
                 src=bytes.unsafe_ptr(),
                 count=len(bytes),
             )
@@ -667,7 +672,7 @@ struct StringBuilder(Movable, Sized):
         var count = len(bytes)
         var offset = self._payload_size
         self._reserve(offset + count)
-        var dest = self._payload.unsafe_ptr().unsafe_offset(offset)
+        var dest = self._payload.unsafe_mut_ptr().unsafe_offset(offset)
         var written = collapse_into(dest, bytes, quote)
 
         if written <= INLINE_CAPACITY:
@@ -698,7 +703,7 @@ struct StringBuilder(Movable, Sized):
         var bigger = Buffer(grown)
         if self._payload_size > 0:
             unsafe_memcpy(
-                dest=bigger.unsafe_ptr(),
+                dest=bigger.unsafe_mut_ptr(),
                 src=self._payload.unsafe_ptr(),
                 count=self._payload_size,
             )
@@ -721,7 +726,7 @@ struct StringBuilder(Movable, Sized):
         """
         var count = len(self._views)
         var views = Buffer(count * VIEW_SIZE)
-        var target = views.unsafe_ptr().unsafe_bitcast[StringView]()
+        var target = views.unsafe_mut_ptr().unsafe_bitcast[StringView]()
         for i in range(count):
             target.unsafe_offset(i)[] = self._views[i]
 
