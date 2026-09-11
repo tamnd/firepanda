@@ -42,8 +42,62 @@ factorize passes plus `n - 1` packing passes plus one more factorize. A single
 fused hash of the tuple would be one pass. The reason to start here is that the
 composition reuses the direct route, so grouping on three small integer columns
 hashes once instead of three times, and a fused tuple hash would hash all of
-them. Which of those wins is a measurement, and the benchmark that settles it is
-`group/ordinals_two_keys` against `group/ordinals_one_key`.
+them. Which of those wins is a measurement, it has now been taken, and the
+answer is both of them: see "One hash of the tuple" below.
+
+## One hash of the tuple
+
+The measurement is ClickBench q35, which groups a million rows by an address and
+by that same address minus one, minus two and minus three. Four keys, none of
+which a table can be laid over, and the composition costs 3.7 ms for the first
+key and about 7 more for each one after it: 24.7 ms for the four. That is four
+hash tables built over the same million rows plus a fifth over the packed
+column, to answer a question with sixty eight thousand groups in it.
+
+The fused route builds one. Every key is folded into a running 64 bit hash a row
+at a time, which is a pass over the key and a pass over the hashes and no table
+at all, and the hashes are factorized once. The same four keys cost 6.6 ms, and
+the shape of it is what matters more than the number: a key costs a pass rather
+than a hash table, so the second key is not twice the price of the first. The
+whole query went from 34 ms to 12 ms, and q32, which groups on two keys of the
+same kind, from 41 ms to 25 ms.
+
+What it costs is that the tuple no longer fits in the key. `mix` is a bijection
+on 64 bits, so a single fixed width key's hash is the key and a hash table over
+it is exact. A tuple is wider than 64 bits and its hash is a real hash, two
+different tuples can land on the same value, and a route that stopped there
+would be a route that silently merges two groups every few quadrillion tuples.
+So it does not stop there. `_key_agrees` walks each key column against the
+grouping and asks whether every row holds what the row that opened its group
+holds, which is the same comparison `factorize_strings` does on a hash match and
+is here for the same reason. A key that disagrees means a collision, and
+`_fused_grouping` hands back nothing rather than an answer, the way
+`sorted_ordinals` does, and the composition runs instead.
+
+Both routes are kept because neither wins everywhere, and what fusing buys is
+narrower than it first looks. It buys one thing: a key that would have cost a
+hash table costs a hash pass and a verification pass instead. It pays one thing
+for it: a hash table over the packed hashes, which composing would often have
+laid a plain table over. So it wins exactly when there is a key here whose hash
+table it removes, and `_worth_fusing` is that question and nothing more.
+
+Composing wins when every key can be laid over a table, since a direct factorize
+is a scan and a pass rather than a hash table, and the packed column it produces
+is one more of the same. Fusing wins when a fixed width key cannot, because
+composing then pays for that key's hash table and for the packed column's on top
+of it, where fusing pays for one.
+
+Text is the case where fusing removes nothing, and it is worth writing down
+because the rule above reads as though it should help. Folding a string key
+hashes every row's bytes and verifying it compares every row's bytes against the
+row that opened the group, which is what `factorize_strings` does anyway. So the
+two passes replace the string factorize rather than the hash table inside it,
+and the table at the bottom is paid for with nothing. ClickBench q34 and q39 are
+that measured: a million rows grouped on a URL run 2.6 and 1.5 times slower
+fused than composed, and they are the reason `_worth_fusing` asks about text
+first and answers no. What would change that answer is a cheaper verification,
+since the hash pass is work either route does, and the obvious one is to keep
+the per key hashes the fold already computed and compare those first.
 
 ## Skipping the per key factorize
 
@@ -173,11 +227,13 @@ from firepanda.kernel.agg import max_of
 
 from .factorize import (
     DIRECT_LIMIT,
+    DIRECT_SHARE,
     direct_plan,
     factorize,
     factorize_dense,
     factorize_strings,
 )
+from .function import DEFAULT_SEED, key_bits, mix
 
 
 @fieldwise_init
@@ -243,6 +299,270 @@ struct Grouping(Movable):
         return self.codes^
 
 
+comptime NULL_KEY = UInt64(0x9E3779B97F4A7C15)
+"""What a null row contributes to the tuple hash.
+
+Any constant does, because nothing downstream treats it as special. A null that
+happens to contribute the same bits a real value would is a collision, and a
+collision is what the verification pass catches. The constant is the golden
+ratio's fractional bits, picked for having no structure rather than for anything
+this relies on.
+"""
+
+
+def _fold_key(
+    col: AnyArray,
+    first: Bool,
+    seed: UInt64,
+    rows: Int,
+    mut hashes: Array[DType.uint64],
+) raises:
+    """Folds one key column into the running tuple hash, a row at a time.
+
+    The first key writes and every later one reads, mixes and writes back, so
+    `n` keys is `n` passes over eight bytes a row. That is the whole reason this
+    route exists: a pass is a pass, and the thing it replaces is a hash table.
+
+    Text is not folded here. `_worth_fusing` declines a key list with a string
+    in it, because a pass that hashes bytes and a pass that compares them are
+    what the string factorize was going to cost anyway, so fusing removes no
+    hash table and still pays for one. The module docstring has the numbers.
+
+    Args:
+        col: The key column.
+        first: Whether this is the first key, which writes rather than mixes.
+        seed: The per-query hash seed.
+        rows: The frame's height.
+        hashes: The running hash per row.
+
+    Raises:
+        If the key is text, or if the dtype has no physical layout.
+    """
+    comptime lanes = simd_width_of[DType.uint64]()
+
+    if col.is_string():
+        raise Error("group by: the fused tuple hash does not take text")
+
+    comptime for candidate in ALL:
+        if col.dtype() == candidate:
+            ref view = col.as_typed_view[candidate]()
+            var nullable = view.null_count() > 0
+
+            def fold(begin: Int, stop: Int) raises {mut hashes, imm}:
+                var into = hashes.unsafe_mut_ptr()
+                var from_ = view.unsafe_ptr()
+                var i = begin
+                # Whole registers only while they fit inside this morsel. A
+                # register that ran past `stop` would write the head of the next
+                # morsel's range, which another worker is reading at the time.
+                if not nullable:
+                    while i + lanes <= stop:
+                        var bits = key_bits(
+                            from_.unsafe_offset(i).unsafe_load[width=lanes]()
+                        )
+                        if first:
+                            into.unsafe_offset(i).unsafe_store(mix(bits, seed))
+                        else:
+                            into.unsafe_offset(i).unsafe_store(
+                                mix(
+                                    into.unsafe_offset(i).unsafe_load[
+                                        width=lanes
+                                    ]()
+                                    ^ bits,
+                                    seed,
+                                )
+                            )
+                        i += lanes
+                while i < stop:
+                    var one = NULL_KEY
+                    if not nullable or view.is_valid(i):
+                        one = key_bits(from_.unsafe_offset(i).unsafe_load())
+                    if first:
+                        into.unsafe_offset(i).unsafe_store(mix(one, seed))
+                    else:
+                        into.unsafe_offset(i).unsafe_store(
+                            mix(into.unsafe_offset(i).unsafe_load() ^ one, seed)
+                        )
+                    i += 1
+
+            parallel_morsels(fold, rows)
+            return
+    raise Error("group by: unsupported key dtype")
+
+
+def _key_agrees(
+    col: AnyArray, codes: Array[DType.uint32], firsts: List[Int]
+) raises -> Bool:
+    """Reports whether every row holds the key its group's first row holds.
+
+    The hash is a real hash, so two different tuples can land on the same 64
+    bits and be given one ordinal between them. This is what makes that a
+    detectable event rather than a wrong answer: the groups are exact if, for
+    every key column, every row carries the same value as the row that opened
+    its group, and this asks that question of one column.
+
+    The group's values are gathered into a compact array first rather than read
+    out of the column at `firsts[code]`. It is the same values either way, and
+    the point is where they sit: one entry a group, so a group by that made a
+    few thousand of them is comparing against something that stays in cache
+    while the column streams past it.
+
+    The walk is serial. It is a scan of the codes and of the column with one
+    random read into the gathered values, and it costs about a tenth of what the
+    per key factorizes it replaces cost, so making it parallel is an improvement
+    to something that is no longer the expensive part.
+
+    Args:
+        col: The key column.
+        codes: The ordinal each row was given.
+        firsts: The row that opened each group.
+
+    Returns:
+        True when the column agrees with the grouping, False on the first row
+        that does not.
+
+    Raises:
+        If the key is text, or if the dtype has no physical layout.
+    """
+    var rows = len(codes)
+    var groups = len(firsts)
+    var ranks = codes.unsafe_ptr()
+
+    if col.is_string():
+        raise Error("group by: the fused tuple hash does not take text")
+
+    comptime for candidate in ALL:
+        if col.dtype() == candidate:
+            ref view = col.as_typed_view[candidate]()
+            var reps = Array[candidate](overwritten=groups)
+            var rep = reps.unsafe_mut_ptr()
+            var from_ = view.unsafe_ptr()
+            for g in range(groups):
+                rep.unsafe_offset(g).unsafe_store(
+                    from_.unsafe_offset(firsts[g]).unsafe_load()
+                )
+            var nullable = view.null_count() > 0
+            for i in range(rows):
+                var code = Int(ranks.unsafe_offset(i).unsafe_load())
+                if nullable:
+                    var here = view.is_valid(i)
+                    if here != view.is_valid(firsts[code]):
+                        return False
+                    if not here:
+                        continue
+                if (
+                    from_.unsafe_offset(i).unsafe_load()
+                    != rep.unsafe_offset(code).unsafe_load()
+                ):
+                    return False
+            return True
+    raise Error("group by: unsupported key dtype")
+
+
+def _worth_fusing[
+    o: ImmOrigin
+](columns: ColumnRefs[o], at: List[Int]) raises -> Bool:
+    """Reports whether the fused route is the cheaper one for these keys.
+
+    This is the whole of the choice between the two multi key routes, and the
+    reasoning is in the module docstring. Fusing buys one thing: a key that
+    would have cost a hash table costs a hash pass and a verification pass
+    instead. It pays one thing for it: a hash table over the packed hashes that
+    composing would often have laid a table over instead. So the question is
+    whether there is a key here whose hash table the fusing removes.
+
+    Text is the case where the answer is no however the key looks, and it is
+    asked first because asking costs a dtype comparison. Folding a string key
+    hashes every row's bytes and verifying it compares every row's bytes, which
+    is what `factorize_strings` was going to do anyway, so the pass and the
+    verification replace the string factorize rather than the hash table inside
+    it. The table at the bottom is then paid for with nothing. ClickBench q34
+    and q39 are that case measured, and they are 2.6 and 1.5 times slower fused
+    than composed.
+
+    For a fixed width key the pass really is cheaper than the table, so the
+    question is only whether the key would have had one. An integer has to be
+    scanned before that is known, which is what the second loop does, and a
+    float is hashed whatever its values are.
+
+    Args:
+        columns: The frame's columns, borrowed.
+        at: Which of them are keys.
+
+    Returns:
+        True when no key is text and at least one key would be hashed.
+
+    Raises:
+        If a key dtype has no physical layout.
+    """
+    for k in range(len(at)):
+        ref col = columns[at[k]][]
+        if col.is_string():
+            return False
+
+    for k in range(len(at)):
+        ref col = columns[at[k]][]
+        if not col.dtype().is_integral():
+            return True
+
+    for k in range(len(at)):
+        ref col = columns[at[k]][]
+        var kind = col.dtype()
+        comptime for dt in ALL:
+            comptime if dt.is_integral():
+                if kind == dt:
+                    ref view = col.as_typed_view[dt]()
+                    var ceiling = len(view) // DIRECT_SHARE
+                    if ceiling < DIRECT_LIMIT:
+                        ceiling = min(DIRECT_LIMIT, len(view))
+                    if direct_plan[dt](view, ceiling).span < 0:
+                        return True
+    return False
+
+
+def _fused_grouping[
+    o: ImmOrigin
+](
+    columns: ColumnRefs[o], at: List[Int], rows: Int, seed: UInt64
+) raises -> Optional[Grouping]:
+    """Groups several keys by hashing the tuple once, or declines.
+
+    Nothing here is approximate. The hash decides which rows are offered to each
+    other and the verification decides whether the offer was good, and a route
+    that cannot prove its own grouping hands back nothing rather than an answer,
+    the way `sorted_ordinals` does.
+
+    Args:
+        columns: The frame's columns, borrowed.
+        at: Which of them are keys.
+        rows: The frame's height.
+        seed: The per-query hash seed.
+
+    Returns:
+        The grouping, or nothing when two different tuples shared a hash.
+
+    Raises:
+        If a key dtype has no physical layout.
+    """
+    var hashes = Array[DType.uint64](overwritten=rows)
+    for k in range(len(at)):
+        _fold_key(columns[at[k]][], k == 0, seed, rows, hashes)
+
+    # The hashes have no nulls, whatever the keys had, so `firsts` covers every
+    # group and is in first appearance order. That is what `Grouping` wants and
+    # it is why nothing here needs `_densify`.
+    var found = factorize(hashes, seed)
+    var groups = found.count()
+    var codes = Array[DType.uint32](0)
+    var firsts = List[Int]()
+    found^.into_parts(codes, firsts)
+
+    for k in range(len(at)):
+        if not _key_agrees(columns[at[k]][], codes, firsts):
+            return None
+    return Grouping(codes^, groups, firsts^)
+
+
 def group_ordinals[
     o: ImmOrigin
 ](columns: ColumnRefs[o], at: List[Int], rows: Int) raises -> Grouping:
@@ -286,6 +606,14 @@ def group_ordinals[
                         if plan.space > 0:
                             var packed = tuple_pack[dt](columns, at, rows, plan)
                             return _packed_grouping(packed, plan.space)
+
+        # One hash of the tuple rather than one factorize a key, when there is a
+        # fixed width key here that a table cannot be laid over. `_worth_fusing`
+        # has the argument and the module docstring has the measurement.
+        if _worth_fusing(columns, at):
+            var fused = _fused_grouping(columns, at, rows, DEFAULT_SEED)
+            if fused:
+                return fused.take()
 
     var first = factorize_any(columns[at[0]][])
     var groups = first.groups
