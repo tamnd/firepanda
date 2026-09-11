@@ -33,6 +33,7 @@ A missing single label now raises `KeyError(label)` and nothing else. The index 
 The fourth is not a bug and is not fixed. `Too many indexers` is a `pandas.errors.IndexingError`, firepanda does not import pandas, and so no firepanda exception can be a subclass of a class pandas defines. It is recorded as a divergence in the compat registry rather than left on the board as a failure, because it is the same fact about every pandas defined exception class and not a thing about indexing.
 
 Part of #156, after #504.
+
 ## [0.6.57] - 2026-09-11
 
 Built against Mojo 1.0.0 (ed45d567).
