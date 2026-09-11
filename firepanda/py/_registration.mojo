@@ -214,6 +214,21 @@ def register(mut module: PythonModuleBuilder) raises:
     )
     _ = series.def_method[PySeries.head]("head", docstring="The first n rows.")
     _ = series.def_method[PySeries.tail]("tail", docstring="The last n rows.")
+    _ = series.def_method[PySeries.take](
+        "take",
+        docstring=(
+            "Rows gathered by position, counting from the end when negative."
+        ),
+    )
+    _ = series.def_method[PySeries.slice_rows](
+        "slice_rows", docstring="A half open range of rows."
+    )
+    _ = series.def_method[PySeries.filter_rows](
+        "filter_rows", docstring="The rows a boolean column is true at."
+    )
+    _ = series.def_method[PySeries.cell](
+        "cell", docstring="One value, by position."
+    )
     _ = series.def_method[PySeries.reindex](
         "reindex",
         docstring="The series on a set of labels, whether it has them or not.",

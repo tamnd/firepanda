@@ -31,6 +31,7 @@ from firepanda.py.ewm import ewm as ewm_agg
 from firepanda.py.index import PyIndex
 from firepanda.py.errors import (
     DTYPE,
+    POSITION,
     UNSUPPORTED,
     VALUE,
     reindex_refusal,
@@ -253,6 +254,160 @@ struct PySeries(Movable, Writable):
                 ArcPointer(Self._held(py_self)[].series[].tail(whole(n, "n")))
             )
         )
+
+    @staticmethod
+    def take(
+        py_self: PythonObject, positions: PythonObject
+    ) raises -> PythonObject:
+        """Gathers rows by position, in the order asked for.
+
+        A negative position counts from the end here rather than reaching the
+        core with its sign on, which is the same arrangement the frame has and
+        is there for the same reason: the core reads a negative index as a
+        request for a null row, because that is what an outer join needs from
+        it, and it is never what somebody who wrote a selection meant.
+
+        Args:
+            py_self: The series.
+            positions: The rows to gather.
+
+        Returns:
+            A new series with one row per position.
+
+        Raises:
+            Error: Tagged `position`, if a position is off either end.
+        """
+        ref series = Self._held(py_self)[].series[]
+        var height = len(series)
+        var picks = List[Int](capacity=Int(len(positions)))
+        for i in range(Int(len(positions))):
+            var at = whole(positions[i], "indices")
+            if at < 0:
+                at += height
+            if at < 0 or at >= height:
+                raise tagged(
+                    POSITION,
+                    String(
+                        "positional indexers are out-of-bounds; index ",
+                        positions[i],
+                        " is not in a series of ",
+                        height,
+                        " rows",
+                    ),
+                )
+            picks.append(at)
+        return Self._wrapped(series.take(picks))
+
+    @staticmethod
+    def slice_rows(
+        py_self: PythonObject, start: PythonObject, end: PythonObject
+    ) raises -> PythonObject:
+        """Takes a half open range of rows.
+
+        The bounds arrive already counted from the front and already clamped,
+        because the Python layer read them off a Python slice and a slice has
+        done both by the time anybody looks at it.
+
+        Args:
+            py_self: The series.
+            start: The first row, inclusive.
+            end: The last row, exclusive.
+
+        Returns:
+            A new series of `end - start` rows.
+
+        Raises:
+            Error: Tagged `position`, if the range runs off either end.
+        """
+        try:
+            return Self._wrapped(
+                Self._held(py_self)[]
+                .series[]
+                .slice(whole(start, "start"), whole(end, "end"))
+            )
+        except cause:
+            raise retagged(POSITION, cause)
+
+    @staticmethod
+    def filter_rows(
+        py_self: PythonObject, mask: PythonObject
+    ) raises -> PythonObject:
+        """Keeps the rows a boolean column is true at.
+
+        The mask crosses as a column for the reason the frame's does, which is
+        that a mask written as `s > 0` is already a column on this side and
+        sending it out as objects and back in as positions would be two
+        conversions to ask a question the kernel answers from the bits.
+
+        Args:
+            py_self: The series.
+            mask: A boolean column as tall as the series.
+
+        Returns:
+            A new series of the rows the mask kept.
+
+        Raises:
+            Error: Tagged `dtype`, if the column is not boolean, or `position`,
+                if it is not as tall as the series.
+        """
+        var right = Self._other(mask, "key")
+        if right[].values.dtype() != DType.bool:
+            raise tagged(
+                DTYPE,
+                String(
+                    "cannot mask with a column of ",
+                    right[].values.type_name(),
+                    "; a boolean key has to be boolean",
+                ),
+            )
+        try:
+            return Self._wrapped(
+                Self._held(py_self)[]
+                .series[]
+                .filter(right[].values.as_typed[DType.bool]())
+            )
+        except cause:
+            raise retagged(POSITION, cause)
+
+    @staticmethod
+    def cell(py_self: PythonObject, at: PythonObject) raises -> PythonObject:
+        """Reads one value out, by position.
+
+        This is what `iat` and a scalar `iloc` reach. It exists rather than
+        being a slice of one followed by a read because a slice of one is a
+        series, and building a series with a name and an index on it to answer
+        with a number is most of the work of the answer spent on the wrapping.
+
+        The sentence is the one pandas raises from `iat`, which names the axis
+        and the size. A scalar `iloc` raises a different sentence and the
+        Python layer raises that one itself, because the two callers of this
+        are told different things by pandas about the same mistake.
+
+        Args:
+            py_self: The series.
+            at: The position, counting from the end when negative.
+
+        Returns:
+            The value, or `None` if it is missing.
+
+        Raises:
+            Error: Tagged `position`, if the position is off either end.
+        """
+        ref series = Self._held(py_self)[].series[]
+        var height = len(series)
+        var asked = whole(at, "at")
+        var found = asked + height if asked < 0 else asked
+        if found < 0 or found >= height:
+            raise tagged(
+                POSITION,
+                String(
+                    "index ",
+                    asked,
+                    " is out of bounds for axis 0 with size ",
+                    height,
+                ),
+            )
+        return python_value(series.values, found)
 
     @staticmethod
     def reindex(
