@@ -31,6 +31,7 @@ Lowering now works out what each conjunct leaves behind that a later conjunct st
 TPC-H q6's predicate over six million rows, which is five conditions and the part of that query where the time goes, timed by lowering it and running the pipeline over a generated lineitem: 9.45 milliseconds to 7.93 on a thirty two thread desktop, 78.3 to 61.0 on an eight core server, and 19.2 to 15.0 on an M series laptop. That is between sixteen and twenty two percent, and the spread is what you would expect, since the work removed is memory bandwidth and the machine with the most of it gains the least.
 
 This is a step toward what the engine actually needs, which is a selection vector, and not a substitute for it. Not writing a dead column is worth less than not writing a live one that the next operator is going to filter again, and that is the larger change.
+
 ### Added: which row of a repeat is the one that stays
 
 `DataFrame.duplicated`, and a `keep` parameter on `DataFrame.drop_duplicates`, which had only ever kept the first appearance. The two are one question asked twice: the mask says which rows repeat a key another row already carries, and the drop is that mask inverted and applied. A caller who wants the repeats rather than the survivors could not get them out of `drop_duplicates` before, because the rows that went were gone and their positions with them, and rebuilding them by comparing the frame before against the frame after is a join written by hand.
