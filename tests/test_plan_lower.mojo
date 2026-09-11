@@ -801,17 +801,6 @@ def test_a_projection_of_a_bare_constant_is_refused() raises:
         _ = lower(plan, root, one_frame())
 
 
-def test_a_projection_that_renames_a_column_is_refused() raises:
-    var plan = Plan()
-    var scan = plan.scan("sales", List[String](), 0)
-    var qty = plan.exprs.column("qty")
-    var root = plan.project(scan, [qty], ["amount"])
-    _ = bind(plan, root, schemas())
-
-    with assert_raises(contains="selects by position"):
-        _ = lower(plan, root, one_frame())
-
-
 def test_a_cast_of_an_input_column_is_refused() raises:
     var plan = Plan()
     var scan = plan.scan("sales", List[String](), 0)
@@ -840,14 +829,58 @@ def test_a_cast_of_a_computed_column_is_allowed() raises:
     )
 
 
-def test_a_limit_that_skips_rows_is_refused() raises:
+def test_a_limit_that_skips_rows_starts_further_in() raises:
     var plan = Plan()
     var scan = plan.scan("sales", List[String](), 0)
     var root = plan.limit(scan, 2, 3)
-    _ = bind(plan, root, schemas())
+    var out = run(plan, root)
 
-    with assert_raises(contains="counts from the first row"):
-        _ = lower(plan, root, one_frame())
+    same(read_back(out, "qty"), [3, 40, 12], "skipped two and kept three")
+
+
+def test_a_skip_that_lands_inside_a_chunk_cuts_it() raises:
+    # The first chunk is three rows and the skip is four, so the second chunk
+    # is the one that is cut, and it is cut one row in.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var root = plan.limit(scan, 4, 2)
+    var out = run(plan, root)
+
+    same(read_back(out, "qty"), [12, 8], "the middle of a chunk")
+
+
+def test_a_skip_with_no_limit_keeps_the_rest() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var root = plan.limit(scan, 7, NO_LIMIT)
+    var out = run(plan, root)
+
+    same(read_back(out, "qty"), [1, 30, 15], "everything after the skip")
+
+
+def test_a_skip_past_the_end_gives_nothing_back() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var root = plan.limit(scan, 20, 5)
+    var out = run(plan, root)
+
+    assert_equal(len(out), 0, "no rows")
+
+
+def test_a_projection_may_rename_the_column_it_keeps() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var root = plan.project(scan, [qty], ["howmany"])
+    var out = run(plan, root)
+
+    assert_equal(out.width(), 1, "one column")
+    assert_equal(out.schema[0].name, "howmany", "under the name asked for")
+    same(
+        read_back(out, "howmany"),
+        [5, 20, 3, 40, 12, 8, 25, 1, 30, 15],
+        "and the rows are the ones it renamed",
+    )
 
 
 def test_a_scan_naming_a_column_the_frame_lacks_is_refused() raises:

@@ -422,6 +422,78 @@ def test_a_limit_of_zero_reads_nothing() raises:
     assert_equal(out.width(), 2, "the schema still describes the result")
 
 
+def test_a_projection_may_rename_what_it_keeps() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Project([0], ["count"])))
+    var out = pipeline^.run()
+    assert_equal(out.width(), 1, "columns")
+    assert_equal(out.schema[0].name, "count", "the name it was given")
+    assert_equal(len(out), 6, "rows")
+
+
+def test_a_projection_with_a_name_per_column_renames_them_all() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Project([1, 0], ["yes", "count"])))
+    var out = pipeline^.run()
+    assert_equal(out.schema[0].name, "yes", "first")
+    assert_equal(out.schema[1].name, "count", "second")
+
+
+def test_a_projection_with_the_wrong_number_of_names_is_refused() raises:
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="1 names for 2 columns"):
+        pipeline.add(Node(Project([0, 1], ["count"])))
+
+
+def test_a_limit_can_skip_rows_before_it_counts() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Limit(2, 3)))
+    var out = pipeline^.run()
+    var got = read_back(out, "n")
+    assert_equal(len(got), 2, "rows")
+    assert_equal(got[0], 4, "first")
+    assert_equal(got[1], 5, "second")
+
+
+def test_a_skip_that_covers_a_whole_chunk_drops_it() raises:
+    # The first chunk is two rows and the skip is two, so the first chunk goes
+    # entirely and nothing is cut.
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Limit(2, 2)))
+    var out = pipeline^.run()
+    var got = read_back(out, "n")
+    assert_equal(len(got), 2, "rows")
+    assert_equal(got[0], 3, "first")
+    assert_equal(got[1], 4, "second")
+
+
+def test_a_limit_with_no_bound_only_skips() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Limit(-1, 4)))
+    var out = pipeline^.run()
+    var got = read_back(out, "n")
+    assert_equal(len(got), 2, "rows")
+    assert_equal(got[0], 5, "first")
+    assert_equal(got[1], 6, "second")
+
+
+def test_a_limit_with_no_bound_never_says_it_is_finished() raises:
+    # A limit that only skips has nothing to stop for, and a node that said
+    # FINISHED would cut the pipeline off before the rows it was keeping.
+    var node = Node(Limit(-1, 2))
+    assert_true(
+        node_status(node) == NodeStatus.NEED_MORE_INPUT, "before any rows"
+    )
+
+
+def test_a_skip_past_the_end_lets_nothing_through() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Limit(3, 10)))
+    var out = pipeline^.run()
+    assert_equal(len(out), 0, "rows")
+    assert_equal(out.width(), 2, "the schema still describes the result")
+
+
 def test_a_fallback_runs_a_whole_frame_operation() raises:
     var pipeline = Pipeline(cut_frame())
     pipeline.add(Node(Materialize(identity)))

@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a query text in, rows out
+
+Every stage of the SQL front end has been testable on its own since it was written, and none of that asserted that the stages fit together. `firepanda.sql.run` is the seam written down once: a query text and a catalog go in, the rows come out. It parses, lowers, binds, optimizes, finds the frame each scan named, lowers the plan to a pipeline and runs it, and it decides nothing that another stage has not already decided.
+
+It is not the front door. `sql()`, `df.sql()` and `query()` are a later stage and they own the prepared statement cache, the parameters and the latency budget that makes a cache hit cost two microseconds. This builds a grammar per call, which is the wrong cost for a front door and the right cost for a function whose job is to be obviously correct.
+
+Writing it found three gaps that every stage passing its own tests had hidden, and two of them are fixed here.
+
+A physical projection can now rename what it keeps. It could not before, so `SELECT qty AS howmany` was refused, and so was every aggregate with an alias, since an aggregate names its answer after itself and the projection above it is the only thing that knows what the query called it. A name costs nothing to carry because a chunk is arrays and the names live on the pipeline's schema.
+
+A physical limit can now skip rows before it starts counting, so `LIMIT 3 OFFSET 4` runs. The skip is counted in rows rather than in chunks, so an offset that lands in the middle of a chunk cuts that chunk and lets the rest through, and there is nothing cheaper available: the rows before the offset still have to be produced to be counted. A limit may also have no bound at all, which is what a bare `OFFSET` means, and then it never stops the pipeline and the only thing it does is the skip. That is why the bound is a flag beside the count rather than a count of minus one, since `LIMIT 0` keeps nothing and has to finish at once.
+
+The third gap is still a refusal. The right side of a join is built into a hash table before the first chunk of the left arrives, so today it has to be a frame, and a scan is the only thing that is one. A predicate the optimizer pushes onto that side makes it a filter, and the lowering says so by name rather than dropping the predicate. A condition that reads both sides is not pushed anywhere and runs above the join as it always did.
+
+Part of #309.
+
 ### Added: a plan with an ORDER BY runs
 
 There is a physical sort now, so a plan with a sort in it lowers instead of being refused. It is a breaker, and the one kind of breaker that cannot be anything else: a group by holds one row per group because two rows with the same key are one answer, and a sort has no such reduction, so the first row of the answer is not known until the last row of the input has arrived and there is nothing shorter than the input to hold in the meantime.

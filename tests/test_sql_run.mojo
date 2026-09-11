@@ -1,0 +1,300 @@
+"""A query text in, rows out.
+
+Every other test in the SQL front end checks one stage against the stage's own
+idea of an answer. The transform tests check SQL printed back, the lowering
+tests check the text `explain` produces, and the pipeline tests check frames
+built by hand. All of them can pass while the stages do not fit together, which
+is what this file is for: it names no stage and asserts nothing about a plan, it
+writes a query and checks the rows.
+
+The queries are deliberately small and the numbers are deliberately not in
+order, so that a filter that keeps a middle range is not a slice and a sort that
+does nothing is visible. The frames have three chunks for the same reason they
+do in the pipeline tests, which is that a chunk boundary is where an off by one
+in a position lives.
+
+The refusals matter as much as the answers. A shape nothing runs yet has to say
+so by name, because a query that quietly returned the wrong rows would be the
+kind of defect that only a differential run against DuckDB finds, and a refusal
+is something a caller can act on.
+"""
+
+from std.testing import TestSuite, assert_equal, assert_raises, assert_true
+
+from firepanda.array.any import AnyArray
+from firepanda.array.array import Array
+from firepanda.array.chunked import ChunkedArray
+from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.schema import Field, Schema
+from firepanda.frame.frame import DataFrame
+from firepanda.sql.catalog import Catalog
+from firepanda.sql.run import run
+
+
+def numbers(values: List[Int64]) raises -> AnyArray:
+    """Builds a fully valid int64 array."""
+    var col = Array[DType.int64](len(values))
+    for i in range(len(values)):
+        col.set_valid(i, values[i])
+    return AnyArray(col^)
+
+
+def sales() raises -> DataFrame:
+    """Ten rows in three chunks: a quantity, a price and which shop sold it."""
+    var qty = ChunkedArray(LogicalType.INT64)
+    qty.append(numbers([5, 20, 3]))
+    qty.append(numbers([40, 12, 8, 25]))
+    qty.append(numbers([1, 30, 15]))
+    var price = ChunkedArray(LogicalType.INT64)
+    price.append(numbers([10, 2, 7]))
+    price.append(numbers([1, 5, 9, 3]))
+    price.append(numbers([100, 4, 6]))
+    var shop = ChunkedArray(LogicalType.INT64)
+    shop.append(numbers([1, 2, 1]))
+    shop.append(numbers([2, 1, 2, 1]))
+    shop.append(numbers([2, 1, 2]))
+    var columns = List[ChunkedArray]()
+    columns.append(qty^)
+    columns.append(price^)
+    columns.append(shop^)
+    var fields = List[Field]()
+    fields.append(Field("qty", LogicalType.INT64))
+    fields.append(Field("price", LogicalType.INT64))
+    fields.append(Field("shop", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def tiers() raises -> DataFrame:
+    """Four bands and the rate each one charges.
+
+    The names are disjoint from the sales frame's, so a join over the two can
+    write either side's columns without qualifying them and a test that wants to
+    qualify one still can.
+    """
+    var band = ChunkedArray(LogicalType.INT64)
+    band.append(numbers([3, 20, 40, 99]))
+    var rate = ChunkedArray(LogicalType.INT64)
+    rate.append(numbers([300, 200, 400, 900]))
+    var columns = List[ChunkedArray]()
+    columns.append(band^)
+    columns.append(rate^)
+    var fields = List[Field]()
+    fields.append(Field("band", LogicalType.INT64))
+    fields.append(Field("rate", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def session() raises -> Catalog:
+    """A catalog holding both frames under the names the queries write."""
+    var catalog = Catalog()
+    catalog.register("sales", sales())
+    catalog.register("tiers", tiers())
+    return catalog^
+
+
+def read_back(df: DataFrame, name: String) raises -> List[Int64]:
+    """Reads an int64 column out as a plain list."""
+    var col = df.column(name).as_typed[DType.int64]()
+    var out = List[Int64](capacity=len(col))
+    for i in range(len(col)):
+        out.append(col[i])
+    return out^
+
+
+def answer(sql: StringSlice, name: String) raises -> List[Int64]:
+    """Runs a query against the session and reads one column of the answer."""
+    return read_back(run(sql, session()), name)
+
+
+def same(got: List[Int64], want: List[Int64], what: String) raises:
+    """Checks a column read back against the numbers it should hold."""
+    assert_equal(len(got), len(want), what + ": how many rows")
+    for i in range(len(want)):
+        assert_equal(got[i], want[i], what + " at " + String(i))
+
+
+def test_the_smallest_query_reads_a_column() raises:
+    same(
+        answer("SELECT qty FROM sales", "qty"),
+        [5, 20, 3, 40, 12, 8, 25, 1, 30, 15],
+        "qty",
+    )
+
+
+def test_a_star_reads_every_column() raises:
+    var out = run("SELECT * FROM sales", session())
+    assert_equal(len(out.schema), 3)
+    assert_equal(len(out), 10)
+    same(read_back(out, "price"), [10, 2, 7, 1, 5, 9, 3, 100, 4, 6], "price")
+
+
+def test_a_where_keeps_the_rows_it_says() raises:
+    same(
+        answer("SELECT qty FROM sales WHERE qty > 20", "qty"),
+        [40, 25, 30],
+        "qty",
+    )
+
+
+def test_two_conditions_both_have_to_hold() raises:
+    same(
+        answer(
+            "SELECT qty FROM sales WHERE qty > 4 AND qty < 20",
+            "qty",
+        ),
+        [5, 12, 8, 15],
+        "qty",
+    )
+
+
+def test_an_expression_in_the_select_list_is_computed() raises:
+    same(
+        answer("SELECT qty * price AS total FROM sales", "total"),
+        [50, 40, 21, 40, 60, 72, 75, 100, 120, 90],
+        "total",
+    )
+
+
+def test_an_alias_is_the_name_the_answer_comes_back_under() raises:
+    var out = run("SELECT qty AS howmany FROM sales", session())
+    assert_equal(out.schema[0].name, "howmany")
+
+
+def test_an_aggregate_over_the_whole_table_is_one_row() raises:
+    same(answer("SELECT SUM(qty) AS total FROM sales", "total"), [159], "total")
+
+
+def test_a_group_by_folds_the_rows_into_groups() raises:
+    # Ordered by the key, because which group comes out first is the hash
+    # table's business and not the query's.
+    var out = run(
+        "SELECT shop, SUM(qty) AS total FROM sales GROUP BY shop ORDER BY shop",
+        session(),
+    )
+    same(read_back(out, "shop"), [1, 2], "shop")
+    same(read_back(out, "total"), [75, 84], "total")
+
+
+def test_a_having_drops_a_whole_group() raises:
+    var out = run(
+        (
+            "SELECT shop, SUM(qty) AS total FROM sales GROUP BY shop"
+            " HAVING SUM(qty) > 80"
+        ),
+        session(),
+    )
+    same(read_back(out, "shop"), [2], "shop")
+    same(read_back(out, "total"), [84], "total")
+
+
+def test_an_order_by_orders_the_answer() raises:
+    same(
+        answer("SELECT qty FROM sales ORDER BY qty", "qty"),
+        [1, 3, 5, 8, 12, 15, 20, 25, 30, 40],
+        "qty",
+    )
+
+
+def test_an_order_by_descending_reverses_it() raises:
+    same(
+        answer("SELECT qty FROM sales ORDER BY qty DESC", "qty"),
+        [40, 30, 25, 20, 15, 12, 8, 5, 3, 1],
+        "qty",
+    )
+
+
+def test_a_limit_cuts_the_answer() raises:
+    same(answer("SELECT qty FROM sales LIMIT 3", "qty"), [5, 20, 3], "qty")
+
+
+def test_a_limit_with_an_offset_starts_further_in() raises:
+    same(
+        answer("SELECT qty FROM sales LIMIT 3 OFFSET 4", "qty"),
+        [12, 8, 25],
+        "qty",
+    )
+
+
+def test_an_order_by_with_a_limit_is_the_top_of_the_table() raises:
+    same(
+        answer("SELECT qty FROM sales ORDER BY qty DESC LIMIT 3", "qty"),
+        [40, 30, 25],
+        "qty",
+    )
+
+
+def test_a_join_pairs_the_rows_that_match() raises:
+    var out = run(
+        (
+            "SELECT sales.qty, tiers.rate FROM sales JOIN tiers"
+            " ON sales.qty = tiers.band ORDER BY sales.qty"
+        ),
+        session(),
+    )
+    same(read_back(out, "qty"), [3, 20, 40], "qty")
+    same(read_back(out, "rate"), [300, 200, 400], "rate")
+
+
+def test_a_condition_that_reads_both_sides_runs_above_the_join() raises:
+    # A condition on one side is pushed below the join by the optimizer and a
+    # condition on both cannot be, so this one is the residual filter that stays
+    # where it was written.
+    var out = run(
+        (
+            "SELECT qty, rate FROM sales JOIN tiers ON qty = band"
+            " WHERE qty + rate > 250 ORDER BY qty"
+        ),
+        session(),
+    )
+    same(read_back(out, "qty"), [3, 40], "qty")
+    same(read_back(out, "rate"), [300, 400], "rate")
+
+
+def test_a_where_the_optimizer_pushes_onto_the_build_side_is_refused() raises:
+    # The right side of a join is built into a hash table before the first chunk
+    # of the left arrives, so today it has to be a frame and a scan is the only
+    # thing that is one. A predicate pushed onto it makes it a filter and this
+    # says so rather than dropping the predicate.
+    with assert_raises(contains="it has to be a scan"):
+        _ = run(
+            (
+                "SELECT qty, rate FROM sales JOIN tiers ON qty = band"
+                " WHERE qty > 10"
+            ),
+            session(),
+        )
+
+
+def test_the_whole_shape_of_a_query_runs_at_once() raises:
+    # A WHERE, a GROUP BY, a HAVING, an ORDER BY and a LIMIT in one statement,
+    # which is the clause order the lowering builds bottom up.
+    var out = run(
+        (
+            "SELECT shop, SUM(qty) AS total FROM sales WHERE qty < 30"
+            " GROUP BY shop HAVING SUM(qty) > 20 ORDER BY total DESC LIMIT 1"
+        ),
+        session(),
+    )
+    same(read_back(out, "shop"), [1], "shop")
+    same(read_back(out, "total"), [45], "total")
+
+
+def test_a_table_nobody_registered_is_refused() raises:
+    with assert_raises(contains="nosuch"):
+        _ = run("SELECT qty FROM nosuch", session())
+
+
+def test_a_column_no_table_has_is_refused() raises:
+    with assert_raises(contains="nosuch"):
+        _ = run("SELECT nosuch FROM sales", session())
+
+
+def test_a_distinct_is_refused_by_name() raises:
+    # There is no physical operator for one yet. The refusal is what stops it
+    # being silently dropped, which would return the duplicates.
+    with assert_raises(contains="no operator"):
+        _ = run("SELECT DISTINCT shop FROM sales", session())
+
+
+def main() raises:
+    TestSuite.discover_tests[__functions_in_module()]().run()

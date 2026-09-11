@@ -318,18 +318,38 @@ struct Project(Movable):
     that copied would put a full copy of every kept column into the cost of
     every chunk, and dropping columns early is one of the main things a plan
     does.
+
+    It may also rename what it keeps, which costs nothing at all, because a
+    chunk is arrays and the names live on the pipeline's schema. That is what
+    `SELECT qty AS howmany` is, and what every aggregate with an alias is, since
+    the aggregate writes its answer to a column of its own naming and the
+    projection above it is the only thing that knows what the query called it.
     """
 
     var keep: List[Int]
     """The input positions to keep, in output order."""
 
+    var names: List[String]
+    """What to call them, or empty to keep the names they came with."""
+
     def __init__(out self, var keep: List[Int]):
-        """Constructs a projection.
+        """Constructs a projection that keeps the names it is handed.
 
         Args:
             keep: The input positions, in output order. May repeat.
         """
         self.keep = keep^
+        self.names = List[String]()
+
+    def __init__(out self, var keep: List[Int], var names: List[String]):
+        """Constructs a projection that renames what it keeps.
+
+        Args:
+            keep: The input positions, in output order. May repeat.
+            names: One name per kept position, or empty for no renaming.
+        """
+        self.keep = keep^
+        self.names = names^
 
     def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
         """Rearranges the chunk's columns.
@@ -376,64 +396,100 @@ struct Project(Movable):
 
 
 struct Limit(Movable):
-    """Passes the first n rows through and then stops the pipeline.
+    """Drops the first rows, passes the next n through, stops the pipeline.
 
     Stopping is the interesting half. Once this has emitted the rows it was
     asked for it reports FINISHED, and a pipeline is a line, so nothing upstream
     can produce a row that reaches the sink. The driver stops reading the source
     the moment it sees that. A `head` over a file of ten million rows therefore
     reads one chunk, not the file.
+
+    The skip is counted in rows and not in chunks, so an offset that lands in
+    the middle of a chunk cuts that chunk and lets the rest of it through. There
+    is nothing cheaper available here: the rows before the offset still have to
+    be produced to be counted, and only a source that knows its own row count
+    can do better than reading them.
+
+    A limit may also have no bound, which is what `LIMIT NULL OFFSET 20` and a
+    bare `OFFSET` mean. Then it never says FINISHED and the only thing it does
+    is the skip. That is why the bound is a flag beside the count rather than a
+    count of minus one: `LIMIT 0` keeps nothing and has to finish at once, and
+    the two would otherwise be the same number.
     """
 
     var n: Int
-    """The number of rows to let through."""
+    """The number of rows to let through, when there is a bound."""
+
+    var bounded: Bool
+    """Whether `n` means anything. False is a limit that only skips."""
+
+    var skip: Int
+    """How many rows to drop before the first one that counts."""
 
     var emitted: Int
     """How many have gone through so far."""
 
-    def __init__(out self, n: Int):
+    var dropped: Int
+    """How many of the skip have been taken off the front so far."""
+
+    def __init__(out self, n: Int, skip: Int = 0):
         """Constructs a limit.
 
         Args:
-            n: The number of rows to keep. Zero finishes immediately.
+            n: The number of rows to keep. Zero finishes immediately, and a
+                negative number is a limit with no bound.
+            skip: How many rows to drop first.
         """
         self.n = n if n > 0 else 0
+        self.bounded = n >= 0
+        self.skip = skip if skip > 0 else 0
         self.emitted = 0
+        self.dropped = 0
 
     def update_state(self) -> NodeStatus:
         """Reports whether the limit has been reached.
 
         Returns:
-            FINISHED once n rows have gone through, NEED_MORE_INPUT before that.
+            FINISHED once n rows have gone through, NEED_MORE_INPUT before that
+            and always when there is no bound.
         """
-        if self.emitted >= self.n:
+        if self.bounded and self.emitted >= self.n:
             return NodeStatus.FINISHED
         return NodeStatus.NEED_MORE_INPUT
 
     def process(mut self, var chunk: Chunk) raises -> Optional[Chunk]:
-        """Passes rows through until the limit is reached.
+        """Drops rows until the offset is passed, then passes them through.
 
         Args:
             chunk: The chunk. Consumed.
 
         Returns:
-            The whole chunk while there is room for it, a prefix of it on the
-            chunk that reaches the limit, and None afterwards.
+            The whole chunk when none of it is skipped and there is room for it,
+            a piece of it when either end is cut, and None when all of it falls
+            before the offset or after the limit.
 
         Raises:
             If a column cannot be sliced.
         """
-        if self.emitted >= self.n:
+        if self.bounded and self.emitted >= self.n:
             return None
-        var room = self.n - self.emitted
-        if len(chunk) <= room:
-            self.emitted += len(chunk)
+        var rows = len(chunk)
+        var start = 0
+        if self.dropped < self.skip:
+            start = min(self.skip - self.dropped, rows)
+            self.dropped += start
+            if start == rows:
+                return None
+        var take = rows - start
+        if self.bounded and take > self.n - self.emitted:
+            take = self.n - self.emitted
+        self.emitted += take
+        if start == 0 and take == rows:
             return chunk^
         var cut = List[AnyArray](capacity=chunk.width())
         for i in range(chunk.width()):
-            cut.append(chunk.columns[i].slice(0, room))
-        self.emitted = self.n
-        return Chunk(cut^, room)
+            cut.append(chunk.columns[i].slice(start, start + take))
+        return Chunk(cut^, take)
 
 
 struct Sort(Movable):
@@ -2654,7 +2710,10 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
     if node.isa[Sort]():
         return node[Sort].bind(input^)
     if node.isa[Project]():
-        return _narrow(node[Project].keep, input, "project")
+        return _rename(
+            node[Project].names,
+            _narrow(node[Project].keep, input, "project"),
+        )
     if node.isa[Filter]() and node[Filter].narrows:
         return _narrow(node[Filter].keep, input, "filter")
     return input^
@@ -2686,6 +2745,38 @@ def _narrow(keep: List[Int], input: Schema, who: String) raises -> Schema:
                 + " columns"
             )
         fields.append(input[keep[i]].copy())
+    return Schema(fields^)
+
+
+def _rename(names: List[String], var schema: Schema) raises -> Schema:
+    """Puts a projection's output names onto the columns it kept.
+
+    Args:
+        names: One name per column, or empty to leave them alone.
+        schema: What the projection produces. Consumed.
+
+    Returns:
+        The same columns under the names given.
+
+    Raises:
+        If there is a name for a column that is not there, or a column with no
+        name, since either one means the two lists came from different places.
+    """
+    if len(names) == 0:
+        return schema^
+    if len(names) != len(schema):
+        raise Error(
+            "project: "
+            + String(len(names))
+            + " names for "
+            + String(len(schema))
+            + " columns"
+        )
+    var fields = List[Field](capacity=len(names))
+    for i in range(len(names)):
+        var field = schema[i].copy()
+        field.name = names[i]
+        fields.append(field^)
     return Schema(fields^)
 
 
