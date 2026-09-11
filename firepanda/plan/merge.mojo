@@ -46,12 +46,18 @@ The lower node's output names have to be distinct. A name that appears twice
 resolves to the first, so substituting by name would be guessing which was
 meant. The same refusal `prune` makes, for the same reason.
 
-An output the upper node reads more than once may only be substituted if it is a
-plain column or a literal. `b = a + a` over `a = expensive(x)` merges to
-`expensive(x) + expensive(x)`, and a pass whose whole purpose is to stop walking
-the data twice would have just arranged to compute the expensive thing twice.
-Common subexpression elimination is the pass that makes that shape safe, and
-until it exists this one declines.
+An output the upper node reads more than once may be substituted as long as no
+mention of it is a whole output on its own. `b = a + a` over `a = expensive(x)`
+merges, because the grafted expression is one index in two places and lowering
+computes an index it meets twice once. `b = a, c = a + 1` over the same lower
+node does not, because `b` is the top of an output, the column an output lands
+in carries that output's name, and a column cannot answer to two names. So that
+one mention would be computed on its own and the pass would have arranged for
+the expensive thing to run twice.
+
+That last refusal comes off when a physical projection can rename, which is the
+only reason a top cannot be shared. It is not waiting on common subexpression
+elimination any more.
 """
 
 from firepanda.dtype.schema import Schema
@@ -114,6 +120,8 @@ def _mergeable(plan: Plan, at: Int, readers: List[Int]) raises -> Bool:
 
     Returns:
         True when both are projections and none of the three refusals applies.
+        The third one only bites when a repeated output is also a whole output
+        of the upper node, since lowering shares everything else.
 
     Raises:
         If an expression is not in the arena.
@@ -141,9 +149,20 @@ def _mergeable(plan: Plan, at: Int, readers: List[Int]) raises -> Bool:
             # expression rather than declining would be papering over the bug.
             return False
 
+    # A mention that is a whole output of the upper node is the one lowering
+    # cannot share, because the column it lands in carries that output's name.
+    var tops = List[Int](length=len(names), fill=0)
+    for i in range(len(above)):
+        if plan.exprs.nodes[above[i]].kind != ExprKind.COLUMN:
+            continue
+        for j in range(len(names)):
+            if names[j] == plan.exprs.nodes[above[i]].name:
+                tops[j] += 1
+                break
+
     var onto = plan.nodes[below].exprs.copy()
     for i in range(len(used)):
-        if used[i] < 2:
+        if used[i] < 2 or tops[i] == 0:
             continue
         var kind = plan.exprs.nodes[onto[i]].kind
         if kind != ExprKind.COLUMN and kind != ExprKind.LITERAL:

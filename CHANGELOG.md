@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: projection merging stops refusing to share an expression
+
+The third of the pass's three refusals declined to substitute an output the upper projection reads more than once unless it was a plain column or a literal, because `b = a + a` over `a = expensive(x)` would have merged into two evaluations of the expensive thing. Lowering shares an expression it meets twice now, so that is no longer what happens, and the refusal is narrowed to the one case where it is still true.
+
+The case is a mention that is a whole output of the upper node. A column an output lands in carries that output's name, so lowering never shares the top of one, and `b = a, c = a + 1` over an expensive `a` really would compute it twice. Every other mention is inside a larger expression and costs one evaluation between all of them.
+
+So `b = a + a` merges now and `b = a, c = a + 1` does not. The remaining refusal comes off when a physical projection can rename, which is the only reason a top cannot be shared, and it is not waiting on common subexpression elimination any more.
+
+Three tests changed hands and one is new, plus a test in the lowering file that takes the merged plan all the way to a pipeline and counts the operators, since the claim being relied on lives on the other side of the module boundary.
+
+Part of #377.
+
 ### Added: an expression a plan reaches twice is now computed once
 
 Lowering remembers where it put things. Until now the walk from an expression tree down to a line of `Compute` operators recursed by arena index and kept nothing, so an index it met twice appended the same operator twice, and the second one was a second pass over every row for a column already sitting in the chunk. It now keeps a memo per plan node, from expression index to the column position its value landed in, and a subexpression it has already computed is handed back rather than recomputed.

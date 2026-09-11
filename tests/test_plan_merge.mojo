@@ -174,7 +174,7 @@ def test_a_column_read_twice_still_merges() raises:
     assert_equal(_projects(plan, root), 1, "a column is free to read again")
 
 
-def test_an_expression_read_twice_is_not_merged() raises:
+def test_an_expression_read_twice_inside_one_output_merges() raises:
     var plan = Plan()
     var scan = plan.scan("lineitem", List[String](), 0)
     var lower = plan.project(scan, [_times(plan, "l_quantity", 2)], ["doubled"])
@@ -190,9 +190,35 @@ def test_an_expression_read_twice_is_not_merged() raises:
         ["twice"],
     )
     _ = merge(plan, root, [_lineitem()])
-    # Merging here would compute the multiply twice, which is the opposite of
-    # what a pass about not walking the data twice is for.
+    # Both mentions are inside a larger expression, so the graft puts one index
+    # in two places and lowering computes an index it meets twice once.
+    assert_equal(_projects(plan, root), 1, "the multiply is shared")
+
+
+def test_an_expression_that_is_also_a_whole_output_is_not_merged() raises:
+    var plan = Plan()
+    var scan = plan.scan("lineitem", List[String](), 0)
+    var lower = plan.project(scan, [_times(plan, "l_quantity", 2)], ["doubled"])
+    var root = plan.project(
+        lower,
+        [plan.exprs.column("doubled"), _plus(plan, "doubled", 1)],
+        ["doubled", "more"],
+    )
+    _ = merge(plan, root, [_lineitem()])
+    # One mention is the top of an output, and the column an output lands in
+    # carries that output's name, so that one cannot share. Merging would have
+    # arranged to compute the multiply twice.
     assert_equal(_projects(plan, root), 2, "both projections stayed")
+
+
+def test_a_whole_output_read_only_once_still_merges() raises:
+    var plan = Plan()
+    var scan = plan.scan("lineitem", List[String](), 0)
+    var lower = plan.project(scan, [_times(plan, "l_quantity", 2)], ["doubled"])
+    var root = plan.project(lower, [plan.exprs.column("doubled")], ["doubled"])
+    _ = merge(plan, root, [_lineitem()])
+    # Nothing is repeated, so there is nothing for the cost rule to weigh.
+    assert_equal(_projects(plan, root), 1, "one mention is one evaluation")
 
 
 def test_a_literal_read_twice_still_merges() raises:
