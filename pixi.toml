@@ -62,6 +62,8 @@ pandas = { version = ">=3.0", channel = "conda-forge" }
 pyarrow = { version = ">=24", channel = "conda-forge" }
 duckdb = { version = "*", channel = "conda-forge" }
 polars = { version = ">=1.43", channel = "conda-forge" }
+numpy = { version = ">=2", channel = "conda-forge" }
+scipy = { version = ">=1.14", channel = "conda-forge" }
 
 [environments]
 default = { features = ["dev"], solve-group = "main" }
@@ -172,6 +174,14 @@ check-grammar = "python tools/gen_grammar.py --check"
 # DuckDB in it. docs/specs/sql/07-functions.md.
 gen-functions = { cmd = "python tools/gen_functions.py", default-environment = "differential" }
 check-functions = { cmd = "python tools/gen_functions.py --check", default-environment = "differential" }
+
+# What an implicit cast costs, which is what decides between two overloads that
+# both fit. DuckDB publishes no such table, so this one is solved out of the
+# choices DuckDB makes over a couple of thousand calls, every one of them put
+# to a live DuckDB. Same environment as the catalog and for the same reason.
+# docs/specs/sql/07-functions.md.
+gen-casts = { cmd = "python tools/gen_casts.py", default-environment = "differential" }
+check-casts = { cmd = "python tools/gen_casts.py --check", default-environment = "differential" }
 
 # The README's list of what the SQL front end refuses, written out of
 # `sql_support()` rather than kept beside it. `--check` is the same run with the
