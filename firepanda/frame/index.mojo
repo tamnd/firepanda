@@ -139,6 +139,7 @@ from firepanda.frame.display import DisplayOptions, render_value, visible
 from firepanda.hash.function import key_bits
 from firepanda.hash.grouping import KeyCodes, factorize_any
 from firepanda.kernel.concat import concat_two_any
+from firepanda.kernel.member import is_in_any
 from firepanda.kernel.select import (
     filter_any,
     filter_range,
@@ -1619,6 +1620,60 @@ struct Index(Copyable, Movable, Sized, Writable):
             else:
                 picks.append(i)
         return Self(take_any(both, picks), Optional[String](copy=self.name))
+
+    def searchsorted(
+        self, label: AnyArray, side: String = "left"
+    ) raises -> Int:
+        """Where a label would have to go for the index to stay sorted.
+
+        The same binary search `get_slice_bound` runs, and deliberately without
+        the monotonic check in front of it. pandas does not check either, because
+        it goes to numpy and numpy documents an unsorted input as giving a
+        meaningless answer rather than an error. An index that is not sorted gets
+        a number back here too, and it is the same meaningless number pandas
+        gives, which is the answer a compatibility layer owes even when it is not
+        the answer anybody wanted.
+
+        Args:
+            label: The label, as a column of exactly one row.
+            side: `"left"` for the first row that is at least the label, or
+                `"right"` for the first row past it.
+
+        Returns:
+            A position between zero and the length of the index.
+
+        Raises:
+            Error: If `side` is neither word, if more than one label was passed,
+                or if the dtypes cannot be ordered against each other.
+        """
+        if side != "left" and side != "right":
+            raise Error(
+                String("index: side must be 'left' or 'right'; got ", side)
+            )
+        if len(label) != 1:
+            raise Error(
+                String("index: searchsorted takes one label, got ", len(label))
+            )
+        return _searched(
+            self.materialize(), label, side == "right", ascending=True
+        )
+
+    def isin(self, values: AnyArray) raises -> Array[DType.bool]:
+        """Whether each label is one of a set of values.
+
+        Args:
+            values: The set, as a column. Order and duplicates in it do not
+                matter, since it is read as a set.
+
+        Returns:
+            One bool per label, and False rather than a null for a label that is
+            missing, which is pandas' answer and is the one place in the library
+            where a null in gives a value out.
+
+        Raises:
+            Error: If the two dtypes cannot be compared.
+        """
+        return is_in_any(self.materialize(), values)
 
     def get_slice_bound(self, label: AnyArray, side: String) raises -> Int:
         """Where a label sits when the index is read as an ordered thing.

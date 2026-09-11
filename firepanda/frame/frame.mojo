@@ -88,7 +88,11 @@ from firepanda.kernel.group import (
 from firepanda.kernel.nulls import all_valid_mask, coalesce_any
 from firepanda.kernel.reduce import reduce_any
 from firepanda.kernel.select import filter_any, take_any
-from firepanda.kernel.sort import argsort_any_into, identity_permutation
+from firepanda.kernel.sort import (
+    argsort_any,
+    argsort_any_into,
+    identity_permutation,
+)
 from firepanda.kernel.temporal import TemporalField, temporal_field
 from firepanda.kernel.topn import group_top_rows_any
 from firepanda.kernel.unary import UnaryOp, unary_any
@@ -809,6 +813,102 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             A frame of at most `n` rows.
         """
         return self.slice(_tail_start(n, self.rows), self.rows)
+
+    def set_index(self, name: String, drop: Bool = True) raises -> Self:
+        """Returns a frame whose row labels are one of its columns.
+
+        A column and an index hold the same thing here, so this moves rather
+        than converts: the values are copied across and the column is taken out
+        of the frame, which is why `drop` defaults to True. A caller who wants
+        both wants `drop=False`, and then the frame has the values twice and
+        knows it.
+
+        Nothing about the labels is checked. pandas does not check either, and an
+        index with duplicates in it is a perfectly ordinary thing that `loc`
+        answers with several rows rather than one.
+
+        Args:
+            name: The column to move.
+            drop: Whether to take the column out of the frame.
+
+        Returns:
+            A frame of the same height, labelled by that column.
+
+        Raises:
+            Error: If no column has that name.
+        """
+        var at = self.schema.index_of(name)
+        var labels = ChunkedArray(copy=self.columns[at]).combine()
+        var out = self.drop([name]) if drop else Self(copy=self)
+        out.index = Index(labels^, Optional[String](name))
+        return out^
+
+    def reset_index(self, drop: Bool = False) raises -> Self:
+        """Returns a frame labelled by position, keeping the old labels or not.
+
+        The labels become the first column, which is where pandas puts them and
+        is the only position that makes the round trip with `set_index` work.
+        They are named after the index when it has a name and `index` when it
+        does not, which is pandas' rule and is why a frame that has never been
+        given an index still gets a column called `index` out of this.
+
+        Args:
+            drop: Whether to throw the old labels away rather than keeping them
+                as a column.
+
+        Returns:
+            A frame of the same height, labelled from zero.
+
+        Raises:
+            Error: If the labels would need a column name that is already taken,
+                which is a collision pandas refuses as well rather than making
+                two columns with one name.
+        """
+        var out = Self(copy=self)
+        if drop:
+            out.index = Index(self.rows)
+            return out^
+        var label = self.index.name.value() if self.index.name else String(
+            "index"
+        )
+        if self.schema.has(label):
+            raise Error(String("cannot insert ", label, ", already exists"))
+        var order = List[String](capacity=len(self.schema) + 1)
+        order.append(label)
+        for i in range(len(self.schema)):
+            order.append(self.schema[i].name)
+        var widened = out.with_column(Series(label, self.index.materialize()))
+        var answer = widened.select(order)
+        answer.index = Index(self.rows)
+        return answer^
+
+    def sort_index(self, ascending: Bool = True) raises -> Self:
+        """Returns the frame in the order of its row labels.
+
+        The rows travel with their labels, which is the whole point: this is the
+        operation that makes a label and a position agree again after something
+        has made them disagree.
+
+        Args:
+            ascending: Whether the labels increase.
+
+        Returns:
+            A frame of the same height, reordered.
+
+        Raises:
+            Error: If the labels cannot be ordered.
+        """
+        if self.index.is_range() and ascending:
+            # A range is already sorted and sorting it would cost a pass over a
+            # column that does not exist yet, since the labels would have to be
+            # built before they could be read.
+            return Self(copy=self)
+        var labels = self.index.materialize()
+        var order = argsort_any(labels, descending=not ascending)
+        var picks = List[Int](capacity=len(order))
+        for i in range(len(order)):
+            picks.append(Int(order[i]))
+        return self.take(picks)
 
     def argsort(
         self,

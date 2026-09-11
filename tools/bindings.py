@@ -1794,6 +1794,27 @@ FRAME = Exposed(
             returns="list[str]",
         ),
         Binding(
+            mojo="PyDataFrame.set_index",
+            name="set_index",
+            doc="The frame with one column moved into the row labels.",
+            params=(("name", "str"), ("drop", "bool")),
+            returns="DataFrame",
+        ),
+        Binding(
+            mojo="PyDataFrame.reset_index",
+            name="reset_index",
+            doc="The frame with its row labels put back to a count from zero.",
+            params=(("drop", "bool"),),
+            returns="DataFrame",
+        ),
+        Binding(
+            mojo="PyDataFrame.sort_index",
+            name="sort_index",
+            doc="The frame with its rows in the order of their labels.",
+            params=(("ascending", "bool"),),
+            returns="DataFrame",
+        ),
+        Binding(
             mojo="PyDataFrame.head",
             name="head",
             doc="The first n rows.",
@@ -2041,6 +2062,48 @@ FRAME = Exposed(
             doc="The last n rows.",
             returns="DataFrame",
             wraps="DataFrame",
+        ),
+        Member(
+            name="set_index",
+            kind="method",
+            signature=(
+                "keys: Any, *, drop: bool = True, append: bool = False,"
+                " inplace: bool = False, verify_integrity: Any = NO_DEFAULT"
+            ),
+            body="self._set_index(keys, drop, append, inplace, verify_integrity)",
+            doc="The frame with one of its columns moved into the row labels.",
+            returns="DataFrame",
+        ),
+        Member(
+            name="reset_index",
+            kind="method",
+            signature=(
+                "level: Any = None, *, drop: bool = False, inplace: bool = False,"
+                " col_level: Any = 0, col_fill: Any = \"\","
+                " allow_duplicates: Any = NO_DEFAULT, names: Any = None"
+            ),
+            body=(
+                "self._reset_index(level, drop, inplace, col_level, col_fill,"
+                " allow_duplicates, names)"
+            ),
+            doc="The frame with its row labels put back to a count from zero.",
+            returns="DataFrame",
+        ),
+        Member(
+            name="sort_index",
+            kind="method",
+            signature=(
+                "*, axis: Any = 0, level: Any = None, ascending: Any = True,"
+                " inplace: bool = False, kind: str = \"quicksort\","
+                " na_position: str = \"last\", sort_remaining: bool = True,"
+                " ignore_index: bool = False, key: Any = None"
+            ),
+            body=(
+                "self._sort_index(axis, level, ascending, inplace, na_position,"
+                " sort_remaining, ignore_index, key)"
+            ),
+            doc="The frame with its rows in the order of their labels.",
+            returns="DataFrame",
         ),
         Member(
             name="__arrow_c_schema__",
@@ -2691,6 +2754,20 @@ INDEX = Exposed(
             doc="Every position one label sits at.",
             params=(("label", "object"),),
             returns="list[int]",
+        ),
+        Binding(
+            mojo="PyIndex.searchsorted",
+            name="searchsorted",
+            doc="Where a label would go for the order to hold.",
+            params=(("label", "object"), ("side", "str")),
+            returns="int",
+        ),
+        Binding(
+            mojo="PyIndex.isin",
+            name="isin",
+            doc="Which labels are among a set of values.",
+            params=(("values", "object"),),
+            returns="list[bool]",
         ),
         Binding(
             mojo="PyIndex.get_indexer",

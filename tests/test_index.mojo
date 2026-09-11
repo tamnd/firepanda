@@ -13,7 +13,13 @@ test for each side of that.
 """
 
 from std.collections import Optional
-from std.testing import TestSuite, assert_equal, assert_false, assert_true
+from std.testing import (
+    TestSuite,
+    assert_equal,
+    assert_false,
+    assert_raises,
+    assert_true,
+)
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array, from_list
@@ -32,6 +38,11 @@ def unnamed() -> Optional[String]:
 def labels(values: List[Int64]) raises -> Index:
     """An index over the given labels, unnamed."""
     return Index(AnyArray(from_list[DType.int64](values)), unnamed())
+
+
+def one(value: Int64) raises -> AnyArray:
+    """One label, which is the shape `searchsorted` takes."""
+    return AnyArray(from_list[DType.int64]([value]))
 
 
 def label_at(col: AnyArray, i: Int) raises -> Int:
@@ -447,6 +458,153 @@ def test_group_agg_and_group_count_pass_as_index_through() raises:
     assert_equal(
         label_at(counted_rows.index.materialize(), 0), 10, "the first key"
     )
+
+
+def test_set_index_moves_a_column_into_the_labels() raises:
+    """The column leaves the frame and its name becomes the level name."""
+    var moved = keyed().set_index("k")
+    assert_false(moved.has("k"), "the key is not a column any more")
+    assert_true(moved.has("v"), "the other column stayed")
+    assert_equal(moved.index.name.value(), "k", "the level took the name")
+    assert_equal(label_at(moved.index.materialize(), 0), 30, "the first label")
+    assert_equal(label_at(moved.index.materialize(), 3), 10, "the fourth")
+
+
+def test_set_index_can_leave_the_column_where_it_is() raises:
+    """And then the values are in the frame twice, which is what was asked."""
+    var moved = keyed().set_index("k", drop=False)
+    assert_true(moved.has("k"), "the key is still a column")
+    assert_equal(moved.width(), 2, "and nothing else changed")
+    assert_equal(label_at(moved.index.materialize(), 0), 30, "the first label")
+
+
+def test_set_index_keeps_duplicate_labels() raises:
+    """Duplicates are ordinary here, which is why nothing checks for them."""
+    var moved = keyed().set_index("k")
+    var built = moved.index.materialize()
+    assert_equal(label_at(built, 0), 30, "the first")
+    assert_equal(label_at(built, 4), 30, "and the last is the same label")
+
+
+def test_set_index_says_so_when_there_is_no_such_column() raises:
+    with assert_raises():
+        _ = keyed().set_index("nope")
+
+
+def test_reset_index_puts_the_labels_back_in_the_frame() raises:
+    """The round trip, which is the thing this pair has to get right."""
+    var back = keyed().set_index("k").reset_index()
+    assert_true(back.has("k"), "the key came back as a column")
+    assert_equal(back.schema[0].name, "k", "and it came back first")
+    assert_true(back.index.is_default(), "and the labels are a count again")
+    assert_equal(back.width(), 2, "two columns, the same two")
+
+
+def test_reset_index_drops_the_labels_when_it_is_asked_to() raises:
+    var back = keyed().set_index("k").reset_index(drop=True)
+    assert_false(back.has("k"), "the key is gone for good")
+    assert_equal(back.width(), 1, "one column left")
+    assert_true(back.index.is_default(), "and the labels are a count again")
+
+
+def test_reset_index_names_an_unnamed_level_index() raises:
+    """pandas' rule, and the reason a frame nobody indexed still gets `index`.
+    """
+    var back = frame_of(6).tail(3).reset_index()
+    assert_true(back.has("index"), "the labels landed under `index`")
+    assert_equal(
+        label_at(back.column("index").values, 0), 3, "and they are the old ones"
+    )
+    assert_true(back.index.is_default(), "while the new labels count from zero")
+
+
+def test_reset_index_refuses_to_make_two_columns_with_one_name() raises:
+    """A collision pandas refuses too, rather than answering a frame nobody can read.
+    """
+    with assert_raises():
+        _ = keyed().set_index("k", drop=False).reset_index()
+
+
+def test_sort_index_puts_the_rows_back_in_label_order() raises:
+    var shuffled = keyed().sort_values(["k"], [False], [False])
+    var sorted_back = shuffled.sort_index()
+    var built = sorted_back.index.materialize()
+    for i in range(5):
+        assert_equal(label_at(built, i), i, "label " + String(i))
+    assert_equal(
+        label_at(sorted_back.column("v").values, 0), 1, "row zero came back"
+    )
+
+
+def test_sort_index_can_run_the_other_way() raises:
+    var built = keyed().sort_index(ascending=False).index.materialize()
+    assert_equal(label_at(built, 0), 4, "the largest label first")
+    assert_equal(label_at(built, 4), 0, "and the smallest last")
+
+
+def test_sort_index_on_a_range_hands_the_frame_straight_back() raises:
+    """The fast path, which is worth a test because it skips the sort entirely.
+    """
+    var same = frame_of(6).sort_index()
+    assert_true(same.index.is_default(), "still a default range")
+    assert_equal(len(same), 6, "and still six rows")
+
+
+def test_sort_index_orders_labels_that_came_from_a_column() raises:
+    var ordered = keyed().set_index("k").sort_index()
+    var built = ordered.index.materialize()
+    assert_equal(label_at(built, 0), 10, "the smallest key")
+    assert_equal(label_at(built, 4), 30, "and the largest")
+    assert_equal(ordered.index.name.value(), "k", "the name survived")
+
+
+def test_searchsorted_finds_where_a_label_would_have_to_go() raises:
+    var index = labels([Int64(10), 20, 20, 40])
+    assert_equal(index.searchsorted(one(30)), 3, "between 20 and 40")
+    assert_equal(index.searchsorted(one(5)), 0, "before everything")
+    assert_equal(index.searchsorted(one(50)), 4, "after everything")
+
+
+def test_searchsorted_sides_pick_the_two_ends_of_a_run() raises:
+    """The whole reason `side` exists, and it only shows up on a repeated label.
+    """
+    var index = labels([Int64(10), 20, 20, 40])
+    assert_equal(index.searchsorted(one(20)), 1, "the near end of the run")
+    assert_equal(index.searchsorted(one(20), "right"), 3, "and the far end")
+
+
+def test_searchsorted_refuses_a_side_it_does_not_know() raises:
+    with assert_raises():
+        _ = labels([Int64(10), 20]).searchsorted(one(15), "middle")
+
+
+def test_searchsorted_takes_one_label_at_a_time() raises:
+    var index = labels([Int64(10), 20])
+    with assert_raises():
+        _ = index.searchsorted(AnyArray(from_list[DType.int64]([Int64(1), 2])))
+
+
+def test_isin_answers_one_bool_per_label() raises:
+    var index = labels([Int64(10), 20, 30])
+    var found = index.isin(AnyArray(from_list[DType.int64]([Int64(30), 10])))
+    assert_true(found[0], "10 is in the set")
+    assert_false(found[1], "20 is not")
+    assert_true(found[2], "30 is")
+
+
+def test_isin_against_nothing_finds_nothing() raises:
+    var found = labels([Int64(10), 20]).isin(
+        AnyArray(from_list[DType.int64](List[Int64]()))
+    )
+    assert_false(found[0], "nothing to find")
+    assert_false(found[1], "and still nothing")
+
+
+def test_isin_works_on_a_range_that_was_never_materialized() raises:
+    var found = Index(5).isin(AnyArray(from_list[DType.int64]([Int64(0), 4])))
+    assert_true(found[0], "the first label")
+    assert_false(found[1], "not the second")
+    assert_true(found[4], "and the last")
 
 
 def main() raises:

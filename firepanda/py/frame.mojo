@@ -218,6 +218,83 @@ struct PyDataFrame(Movable, Writable):
         )
 
     @staticmethod
+    def set_index(
+        py_self: PythonObject, name: PythonObject, drop: PythonObject
+    ) raises -> PythonObject:
+        """Moves one column into the row labels.
+
+        Args:
+            py_self: The frame.
+            name: The column to move.
+            drop: Whether to take the column out of the frame.
+
+        Returns:
+            A new frame of the same height.
+        """
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        Self._frame(py_self)[]
+                        .frame[]
+                        .set_index(words(name, "keys"), flag(drop, "drop"))
+                    )
+                )
+            )
+        except cause:
+            raise retagged(COLUMN, cause)
+
+    @staticmethod
+    def reset_index(
+        py_self: PythonObject, drop: PythonObject
+    ) raises -> PythonObject:
+        """Puts the row labels back to a count from zero.
+
+        Args:
+            py_self: The frame.
+            drop: Whether to throw the old labels away rather than keeping them
+                as the first column.
+
+        Returns:
+            A new frame of the same height.
+        """
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        Self._frame(py_self)[]
+                        .frame[]
+                        .reset_index(flag(drop, "drop"))
+                    )
+                )
+            )
+        except cause:
+            raise retagged(VALUE, cause)
+
+    @staticmethod
+    def sort_index(
+        py_self: PythonObject, ascending: PythonObject
+    ) raises -> PythonObject:
+        """Puts the rows in the order of their labels.
+
+        Args:
+            py_self: The frame.
+            ascending: Whether the labels increase.
+
+        Returns:
+            A new frame of the same height.
+        """
+        return PythonObject(
+            alloc=Self(
+                ArcPointer(
+                    Self._frame(py_self)[]
+                    .frame[]
+                    .sort_index(flag(ascending, "ascending"))
+                )
+            )
+        )
+
+    @staticmethod
     def column(
         py_self: PythonObject, name: PythonObject
     ) raises -> PythonObject:

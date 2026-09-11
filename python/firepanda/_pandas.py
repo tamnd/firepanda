@@ -964,6 +964,140 @@ class DataFrameMixin:
         )
         return self._reduce("nunique", 0.0, axis, True, False, 0)
 
+    def _set_index(
+        self, keys: Any, drop: bool, append: bool, inplace: bool, verify_integrity: Any
+    ) -> DataFrame:
+        """Moves one column into the row labels.
+
+        `keys` is a label, or a list holding one. A list holding two or more is
+        a MultiIndex and is refused by saying so rather than by taking the first
+        of them, because taking the first would answer a frame that looks right
+        and is indexed by half of what was asked for.
+        """
+        from ._frame import DataFrame
+
+        _held_at("append", append, False, "keeping the old labels as well needs a MultiIndex")
+        _held_at(
+            "inplace",
+            inplace,
+            False,
+            "every operation here answers a new frame and the Arrow buffers"
+            " underneath are shared rather than owned",
+        )
+        if verify_integrity is not NO_DEFAULT and verify_integrity:
+            raise NotImplementedError(
+                "verify_integrity=True is not supported yet, because checking"
+                " that the new labels are unique is a pass over them that"
+                " nothing else here needs"
+            )
+        wanted = list(keys) if isinstance(keys, (list, tuple)) else [keys]
+        if len(wanted) != 1:
+            raise NotImplementedError(
+                "set_index on more than one column is not supported yet, because"
+                " the result is a MultiIndex and there is not one yet"
+            )
+        try:
+            return DataFrame._wrap(self._inner.set_index(str(wanted[0]), bool(drop)))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _reset_index(
+        self,
+        level: Any,
+        drop: bool,
+        inplace: bool,
+        col_level: Any,
+        col_fill: Any,
+        allow_duplicates: Any,
+        names: Any,
+    ) -> DataFrame:
+        """Puts the row labels back to a count from zero.
+
+        With `drop` the old labels are thrown away and without it they become the
+        frame's first column, under the index's name or under `index` when it
+        does not have one. That is pandas' rule and the name it picks when there
+        is none is the string `index` rather than anything cleverer.
+        """
+        from ._frame import DataFrame
+
+        _no_level(level)
+        _refuse("names", names, "naming the columns the old labels land in needs a MultiIndex")
+        _held_at(
+            "inplace",
+            inplace,
+            False,
+            "every operation here answers a new frame and the Arrow buffers"
+            " underneath are shared rather than owned",
+        )
+        _held_at("col_level", col_level, 0, "there is one level of columns and it is that one")
+        _held_at("col_fill", col_fill, "", "there is nothing above the columns to fill")
+        if allow_duplicates is not NO_DEFAULT and allow_duplicates:
+            raise NotImplementedError(
+                "allow_duplicates=True is not supported yet, because two columns"
+                " under one name is a shape the schema does not carry"
+            )
+        try:
+            return DataFrame._wrap(self._inner.reset_index(bool(drop)))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _sort_index(
+        self,
+        axis: Any,
+        level: Any,
+        ascending: Any,
+        inplace: bool,
+        na_position: str,
+        sort_remaining: bool,
+        ignore_index: bool,
+        key: Any,
+    ) -> DataFrame:
+        """Puts the rows in the order of their labels.
+
+        `kind` is the one argument in the library that is accepted and never
+        looked at, and it does not even reach here. The four names it takes are
+        numpy's sort algorithms, the sort underneath is stable whichever of them
+        is asked for, and a stable order is a correct answer to all four. Every
+        other declared argument that is not implemented raises rather than being
+        ignored, and this is the exception because there is nothing a caller
+        could observe about it.
+        """
+        from ._frame import DataFrame
+
+        _no_level(level)
+        _refuse("key", key, "running a function over the labels before sorting is not written")
+        _axis_number(axis, "DataFrame", 0, (0,))
+        _held_at(
+            "inplace",
+            inplace,
+            False,
+            "every operation here answers a new frame and the Arrow buffers"
+            " underneath are shared rather than owned",
+        )
+        _held_at(
+            "na_position",
+            na_position,
+            "last",
+            "where a missing label sits is decided by the sort kernel and it puts them at the end",
+        )
+        _held_at("sort_remaining", sort_remaining, True, "there is one level to sort")
+        _held_at(
+            "ignore_index",
+            ignore_index,
+            False,
+            "numbering the rows again after sorting them by their labels throws"
+            " away the thing that was just sorted",
+        )
+        if isinstance(ascending, (list, tuple)):
+            raise NotImplementedError(
+                "a direction per level is not supported yet, because there is one"
+                " level for it to describe"
+            )
+        try:
+            return DataFrame._wrap(self._inner.sort_index(bool(ascending)))
+        except Exception as error:
+            raise translate(error) from None
+
     def _transform(
         self, kind: str, periods: int, axis: Any, inplace: bool, ignore_index: bool
     ) -> DataFrame:
@@ -3661,6 +3795,64 @@ class IndexMixin:
             return list(self._inner.get_indexer(target))
         except Exception as error:
             raise translate(error) from None
+
+    def searchsorted(self, value: Any, side: str = "left", sorter: Any = None) -> Any:
+        """Where a label would have to go for the labels to stay in order.
+
+        One label gives back one position and a sequence of labels gives back a
+        list of them, which is pandas' rule and is the reason this is written by
+        hand: the shape of the answer is decided by the shape of the argument.
+
+        Nothing here checks that the index is sorted, and that is deliberate.
+        numpy does not check, pandas does not check, and an unsorted index gets
+        an answer that is meaningless in exactly the way it is in both of them.
+        Checking would cost a pass over the labels on every call to protect
+        against a mistake the callers of this method do not make.
+        """
+        _refuse("sorter", sorter, "sorting the index on the way past needs the sort to be carried")
+        if side not in ("left", "right"):
+            raise InvalidArgumentError(
+                f"firepanda:value: Invalid side: {side}. Side must be one of 'left', 'right'"
+            )
+        try:
+            if isinstance(value, IndexMixin):
+                value = value._inner.to_list()
+            if isinstance(value, (list, tuple)):
+                return [self._inner.searchsorted(one, side) for one in value]
+            return self._inner.searchsorted(value, side)
+        except Exception as error:
+            raise translate(error) from None
+
+    def isin(self, values: Any, level: Any = None) -> Any:
+        """Whether each label is one of a set of values.
+
+        pandas gives back a numpy array of bools and this gives back a list of
+        them, which is the divergence `values` and `__eq__` already have and
+        which document 21 records once for all three.
+
+        A set the column's type cannot hold falls back to comparing in Python,
+        and that is not a shortcut. pandas compares by value rather than by type,
+        so `pd.Index([1, 2]).isin([1.0])` finds the one and `isin(["a", 2])`
+        finds the two without complaining about the string. The kernel looks up
+        one type in a set of one type, which is the fast answer and is the right
+        one whenever it applies, so it is tried first and the slow path exists
+        for the calls it refuses. An empty set never reaches it at all, because a
+        list with nothing in it has no type to build a column from.
+        """
+        _no_level(level)
+        if isinstance(values, IndexMixin):
+            values = values._inner.to_list()
+        wanted = list(values)
+        if wanted:
+            try:
+                return list(self._inner.isin(wanted))
+            except Exception:
+                pass
+        try:
+            mine = self._inner.to_list()
+        except Exception as error:
+            raise translate(error) from None
+        return [any(label == one for one in wanted) for label in mine]
 
     def equals(self, other: Any) -> bool:
         """Whether two indexes hold the same labels in the same order.

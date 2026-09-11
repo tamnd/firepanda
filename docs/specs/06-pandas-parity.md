@@ -124,9 +124,10 @@ A second note, internal rather than user facing: Mojo 1.0 removed negative index
 ### Reshaping and sorting
 
 - [ ] `sort_values` with multiple keys, `ascending` list, `na_position` (M1)
-- [ ] `sort_index` (M6)
+- [x] `sort_index` (M6, `level`, `key` and a direction per level still to come)
 - [ ] `rank` with all `method=` values (M6)
-- [ ] `reindex`, `reindex_like`, `set_index`, `reset_index`, `rename`, `rename_axis`, `set_axis` (M6)
+- [x] `set_index`, `reset_index` (M6, one column only until there is a MultiIndex)
+- [ ] `reindex`, `reindex_like`, `rename`, `rename_axis`, `set_axis` (M6)
 - [ ] `stack`, `unstack`, `melt`, `pivot`, `pivot_table`, `explode`, `squeeze` (M6)
 - [ ] `transpose` — see `T` above
 - [ ] `droplevel`, `swaplevel`, `reorder_levels` (M6, compound index only)

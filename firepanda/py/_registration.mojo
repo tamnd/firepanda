@@ -60,6 +60,20 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = dataframe.def_method[PyDataFrame.names](
         "names", docstring="The column names, in order."
     )
+    _ = dataframe.def_method[PyDataFrame.set_index](
+        "set_index",
+        docstring="The frame with one column moved into the row labels.",
+    )
+    _ = dataframe.def_method[PyDataFrame.reset_index](
+        "reset_index",
+        docstring=(
+            "The frame with its row labels put back to a count from zero."
+        ),
+    )
+    _ = dataframe.def_method[PyDataFrame.sort_index](
+        "sort_index",
+        docstring="The frame with its rows in the order of their labels.",
+    )
     _ = dataframe.def_method[PyDataFrame.head](
         "head", docstring="The first n rows."
     )
@@ -318,6 +332,13 @@ def register(mut module: PythonModuleBuilder) raises:
     )
     _ = index.def_method[PyIndex.get_loc](
         "get_loc", docstring="Every position one label sits at."
+    )
+    _ = index.def_method[PyIndex.searchsorted](
+        "searchsorted",
+        docstring="Where a label would go for the order to hold.",
+    )
+    _ = index.def_method[PyIndex.isin](
+        "isin", docstring="Which labels are among a set of values."
     )
     _ = index.def_method[PyIndex.get_indexer](
         "get_indexer",
