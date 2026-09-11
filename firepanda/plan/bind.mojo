@@ -59,7 +59,13 @@ from firepanda.kernel.binary import BinaryOp, binary_type
 from firepanda.kernel.group import AggKind, agg_type
 from firepanda.kernel.unary import UnaryOp, unary_type
 from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
-from firepanda.plan.node import NodeKind, Plan
+from firepanda.plan.node import (
+    SET_EXCEPT,
+    SET_INTERSECT,
+    SET_UNION,
+    NodeKind,
+    Plan,
+)
 
 
 comptime SUGGESTIONS = 3
@@ -697,13 +703,30 @@ def _bind_join(mut plan: Plan, at: Int, done: List[Bound]) raises -> Bound:
 
 
 def _bind_union(mut plan: Plan, at: Int, done: List[Bound]) raises -> Bound:
-    """Binds a union and works out what it produces.
+    """Binds a set operation and works out what it produces.
 
     Takes the names from the first input, because that is what pandas and SQL
     both do and because the alternative is refusing a query over two tables that
     spell the same column differently, which nobody wants. The types are
     promoted pairwise, so stacking an int32 column on an int64 one gives int64
-    rather than an error.
+    rather than an error, and that is true of all three operations: comparing an
+    int32 against an int64 to decide whether a row is in both needs a type that
+    holds both as much as stacking them does.
+
+    Where the three differ is what can be missing. Every row a union produces
+    came from one of its inputs, so a column is nullable if any input's is. Every
+    row a difference produces came from the left one, so only the left's
+    nullability counts. And every row an intersection produces was in both, so a
+    column that cannot be missing on either side cannot be missing in the answer,
+    which is the only one of the three where a nullable column comes out not
+    nullable.
+
+    Which relation a column came from follows the same reasoning. A union's
+    column is two columns stacked, so a qualified name above it would be a
+    guess and the origin is dropped. A difference's rows are the left's rows, and
+    an intersection's rows are in both and therefore are the left's rows too, so
+    both of them keep the left input's origin and a qualified name still
+    resolves.
 
     Args:
         plan: The plan.
@@ -711,23 +734,30 @@ def _bind_union(mut plan: Plan, at: Int, done: List[Bound]) raises -> Bound:
         done: What every node below produces.
 
     Returns:
-        What the union produces.
+        What the set operation produces.
 
     Raises:
         If the inputs are different widths, or a column pair has no type that
         holds both.
     """
+    var op = plan.nodes[at].op
     ref inputs = plan.nodes[at].inputs
     var out = Schema(copy=done[inputs[0]].schema)
     var origin = done[inputs[0]].origin.copy()
+    var word = "a union"
+    if op == SET_EXCEPT:
+        word = "a difference"
+    elif op == SET_INTERSECT:
+        word = "an intersection"
     for i in range(1, len(inputs)):
         ref other = done[inputs[i]]
         if len(other.schema) != len(out):
             raise Error(
                 String(
-                    "a union stacks a ",
+                    word,
+                    " is between a ",
                     len(out),
-                    " column input on a ",
+                    " column input and a ",
                     len(other.schema),
                     " column one",
                 )
@@ -740,16 +770,25 @@ def _bind_union(mut plan: Plan, at: Int, done: List[Bound]) raises -> Bound:
             except:
                 raise Error(
                     String(
-                        "a union stacks ",
+                        word,
+                        " puts ",
                         other.schema[j].dtype,
-                        " on ",
+                        " against ",
                         out[j].dtype,
                         " in column ",
                         j,
                         ", and there is no type that holds both",
                     )
                 )
-            out.fields[j].nullable = out[j].nullable or other.schema[j].nullable
-            if origin[j] != other.origin[j]:
+            if op == SET_UNION:
+                out.fields[j].nullable = (
+                    out[j].nullable or other.schema[j].nullable
+                )
+            elif op == SET_INTERSECT:
+                out.fields[j].nullable = (
+                    out[j].nullable and other.schema[j].nullable
+                )
+            # A difference keeps the left side's, which it already has.
+            if op == SET_UNION and origin[j] != other.origin[j]:
                 origin[j] = UNBOUND
     return Bound(out^, origin^)

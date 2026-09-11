@@ -46,7 +46,9 @@ Two of the nine ask for more than anything above them wants. A distinct with no
 keys compares whole rows, and so does a union that drops duplicates, so a column
 nothing above reads is still a column that decides whether two rows are one. Both
 of them demand every column of their input whatever the node above asked for,
-because narrowing either one deletes rows rather than reads.
+because narrowing either one deletes rows rather than reads. A difference and an
+intersection are the same node as the union and they compare whole rows whether
+duplicates survive or not, since being on both sides is what they are asking.
 
 ## Why it rebinds
 
@@ -66,7 +68,11 @@ which of the two was meant.
 
 from firepanda.dtype.schema import Schema
 from firepanda.plan.bind import Bound, bind, bind_all
-from firepanda.plan.node import NodeKind, Plan
+from firepanda.plan.node import (
+    SET_UNION,
+    NodeKind,
+    Plan,
+)
 
 
 def prune(mut plan: Plan, root: Int, sources: List[Schema]) raises -> Schema:
@@ -142,7 +148,14 @@ def _demand(
         # nothing above reads are two rows, and a union narrowed to the columns
         # above it are one, so narrowing that union deletes a row rather than a
         # read. It asks for the whole of every input for that reason.
-        var whole = not plan.nodes[at].flags[0]
+        #
+        # A difference and an intersection compare whole rows whatever the
+        # duplicate flag says, since deciding whether a row is on both sides is
+        # the operation rather than a step in it. They ask for the whole of every
+        # input always.
+        var whole = (
+            not plan.nodes[at].flags[0] or plan.nodes[at].op != SET_UNION
+        )
         for i in range(len(plan.nodes[at].inputs)):
             var input = plan.nodes[at].inputs[i]
             _want_all(need[input], here)

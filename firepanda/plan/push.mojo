@@ -385,6 +385,12 @@ def _union(
     that one arm can answer by name and another cannot is a predicate that would
     mean two different things depending on which arm the row came from.
 
+    The same rewrite is right for a difference and an intersection, which are the
+    same node with a different code on it. A row of the right arm that the
+    predicate throws away could only ever have cancelled a row of the left arm
+    that the predicate throws away too, so pushing into both sides is the answer
+    the filter above would have given.
+
     Args:
         plan: The plan.
         old: The union.

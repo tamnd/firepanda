@@ -23,6 +23,17 @@ The recurring theme across all four is the arena's creation order. Node indices 
 `firepanda/sql/plan.mojo` takes a parsed `SELECT` and gives back the same `Plan` the builder methods produce, bound by the same binder. The rule it works under is the one the spec has had from the start, that no plan node may have only a SQL constructor, and there is a test that compares the plan for `SELECT a FROM t WHERE b > 1` against the plan the three builder calls produce. If those ever stop matching then one of the front ends has quietly become a second engine.
 
 None of this moves a benchmark number yet, and it is worth being plain about why. The eager API does not call the optimizer, which is #376, and the executor cannot spend what subplan elimination found, because lowering walks a line of operators and a shared node is a fork. Both passes are still right and still worth having now: the day lowering grows an operator that can hand one chunk stream to two readers, the plans arriving at it already say where to put one.
+### Added: UNION, EXCEPT and INTERSECT lower into the plan
+
+The plan had a union node and nothing else, so a query with `EXCEPT` or `INTERSECT` in it was refused by name at the lowering. All three are the same node now, carrying which operation it is next to the flag that says whether duplicates survive, and `EXPLAIN` prints the word that was written rather than `UNION` with a code nobody can see.
+
+Adding them to the node rather than beside it is what keeps the three passes honest. Binding promotes the column types pairwise for all three, because comparing an int32 against an int64 to decide whether a row is on both sides needs a type that holds both as much as stacking them does. What can be missing differs: a union's row came from either input so a column is nullable if either input's is, a difference's row came from the left so only the left counts, and an intersection's row was on both sides so a column that cannot be missing on either cannot be missing in the answer. Projection pushdown leaves both arms of a difference and an intersection at full width whatever the duplicate flag says, since being on both sides is a question about the whole row.
+
+A difference and an intersection take exactly two inputs and a union takes any number, which is not a limitation but the shape of the question: being on both sides says nothing about a third.
+
+On the SQL side a chain nests to the left, so `a EXCEPT b EXCEPT c` lowers as `(a EXCEPT b) EXCEPT c` and not as the other reading, which holds different rows. An `ORDER BY` or a `LIMIT` written after the last arm applies to the whole set operation rather than to that arm. `UNION BY NAME` is still refused by name, since lining two arms up by column name is a projection on each arm rather than a different node.
+
+Part of #309.
 
 ### Fixed: projection pushdown narrowed a union that drops duplicates
 

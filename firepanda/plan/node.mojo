@@ -12,6 +12,12 @@ the list in `docs/specs/planner/01-what-a-plan-is.md` and the spec says to refus
 to add to it without an argument, so it is written down in `NodeKind` and
 nowhere else.
 
+Union is the one that carries more than its name says. `EXCEPT` and `INTERSECT`
+are the same node with a different code in `op`, because all three line their
+inputs up by position, take the first input's names, and have the same question
+about duplicates hanging off them. Three kinds for that would be three copies of
+every pass that touches one.
+
 ## The arena, and why the expressions are in it
 
 A `Plan` holds the nodes and the expression arena together. A node holds
@@ -84,8 +90,10 @@ struct NodeKind(Equatable, ImplicitlyCopyable, Movable, Writable):
     """Keys, or the whole row when the key list is empty."""
 
     comptime UNION = Self(8)
-    """Several inputs stacked. Covers concat as well, since the difference is
-    whether duplicates survive and that is a flag rather than a node."""
+    """Several inputs combined by position: a union, an intersection or a
+    difference. Covers concat as well, since the difference is whether
+    duplicates survive and that is a flag rather than a node. Which of the three
+    is in `op` and the kind keeps the name the common case has."""
 
     def __eq__(self, other: Self) -> Bool:
         """Compares two kinds.
@@ -140,6 +148,16 @@ comptime NO_LIMIT = -1
 length is a real thing to write and zero is a real length, so the absence needs a
 value of its own."""
 
+comptime SET_UNION = 0
+"""Every row of every input, which is the one a `UNION` node had before the other
+two arrived. Zero, so a node built before this existed still says union."""
+
+comptime SET_EXCEPT = 1
+"""The rows of the first input that the second does not have."""
+
+comptime SET_INTERSECT = 2
+"""The rows the first input and the second both have."""
+
 
 struct PlanNode(Copyable, Movable):
     """One node of a logical plan.
@@ -175,8 +193,9 @@ struct PlanNode(Copyable, Movable):
     survive. Empty elsewhere."""
 
     var op: Int
-    """The `JoinKind` code on a `JOIN`. Zero elsewhere, which is a real code, so
-    read it only after checking the kind."""
+    """The `JoinKind` code on a `JOIN` and one of the `SET_` codes on a `UNION`.
+    Zero elsewhere, which is a real code in both, so read it only after checking
+    the kind."""
 
     var offset: Int
     """The rows a `LIMIT` skips. Zero elsewhere."""
@@ -729,8 +748,54 @@ struct Plan(Movable, Sized):
         Raises:
             If an input is not in the plan, or there are none.
         """
+        return self.setop(inputs^, SET_UNION, all)
+
+    def setop(
+        mut self, var inputs: List[Int], op: Int, all: Bool
+    ) raises -> Int:
+        """Builds a union, a difference or an intersection.
+
+        One node for the three because they differ in which rows of the inputs
+        survive and in nothing else. Every one of them lines its inputs up by
+        position, produces the first input's names, and has the same question
+        about duplicates hanging off it.
+
+        A union takes any number of inputs, since stacking is associative and a
+        chain of them is one node. A difference and an intersection take exactly
+        two, because SQL writes them between two queries and a chain is a nest
+        of nodes rather than a list. `a EXCEPT b EXCEPT c` and `a EXCEPT (b
+        EXCEPT c)` are different answers, so flattening one into a list would
+        lose the thing that tells them apart.
+
+        `all` means the same three things it means in SQL. A union keeps every
+        row, a difference subtracts one copy of a row for each copy on the right
+        rather than every copy, and an intersection keeps as many copies as the
+        thinner side has.
+
+        Args:
+            inputs: The nodes combined, in order.
+            op: One of `SET_UNION`, `SET_EXCEPT` and `SET_INTERSECT`.
+            all: Whether duplicate rows survive.
+
+        Returns:
+            The index of the new node.
+
+        Raises:
+            If an input is not in the plan, if there are none, if a difference
+            or an intersection does not have exactly two, or if the operation is
+            not one of the three.
+        """
+        if op != SET_UNION and op != SET_EXCEPT and op != SET_INTERSECT:
+            raise Error(String("set operation ", op, " is not one of three"))
         if len(inputs) == 0:
             raise Error("a union needs something to stack")
+        if op != SET_UNION and len(inputs) != 2:
+            var word = "a difference" if op == SET_EXCEPT else "an intersection"
+            raise Error(
+                String(
+                    word, " is between two inputs, and this has ", len(inputs)
+                )
+            )
         for i in range(len(inputs)):
             self.check(inputs[i])
         return self._add(
@@ -741,7 +806,7 @@ struct Plan(Movable, Sized):
                 0,
                 List[String](),
                 [all],
-                0,
+                op,
                 0,
                 0,
                 UNBOUND,
