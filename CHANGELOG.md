@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.59] - 2026-09-11
+
+Built against Mojo 1.0.0 (ed45d567).
+
+The filter operator stops writing columns nobody reads, and a chunk learns how to say that its rows are not where its arrays put them.
+
+Those two are the same piece of work from either end. Filtering a column means writing a new one, so a predicate of five conditions was writing the same rows out five times over, and the last write carried four spent masks along with them. Dropping the dead columns is measurable on its own, sixteen to twenty two percent of TPC-H q6's predicate. Not writing the live ones either is the larger half, and it needs a chunk that can carry a list of positions rather than a set of arrays. That type is here and nothing produces one yet, which is deliberate: the operators can now be converted to it one at a time instead of all at once.
+
+Around that, a plan can be written out as JSON and read back, `duplicated` and `drop_duplicates` learned which row of a repeat is the one that stays, and three more pandas methods for naming a set of labels without writing them down.
+
 ### Added: a chunk can carry a selection, which nothing produces yet
 
 A chunk now has a `picks` list saying where each of its rows lives in its arrays, and a `dense` flag per column saying whether that column is already at the chunk's rows or has to be read through the positions. A chunk with no selection has every column dense, which is what every chunk in the engine is today and what most of them will stay.
@@ -55,6 +65,7 @@ Details in document 38. Part of #156, after #517.
 `duplicated` is what made it visible, because the mask carries the frame's labels and a mask whose labels are missing cannot be handed back to `filter`, which is the whole of what a caller does with it. The fix builds a default index when the index and the height disagree, which can only happen on the first column and cannot overwrite labels somebody set, because a frame with no rows has none to set.
 
 Part of #156, after #517.
+
 ### Added: a plan as JSON, and the same JSON back as a plan
 
 `plan/json.mojo`, with `to_json` and `from_json`. The point of the pair is the round trip, and the reason to want the round trip is that it is what makes an optimizer pass testable. A pass test is an input plan and an expected output plan, and writing both down as text rather than as thirty lines of builder calls is the difference between a test somebody reads and a test somebody skips. `docs/specs/sql/08-plan-and-optimizer.md` asks for this in its section 7 and the reason it asks is its section 9, which wants a unit test per pass whose input and output are both written down.
@@ -5019,7 +5030,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.58...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.59...HEAD
+[0.6.59]: https://github.com/tamnd/firepanda/releases/tag/v0.6.59
 [0.6.58]: https://github.com/tamnd/firepanda/releases/tag/v0.6.58
 [0.6.57]: https://github.com/tamnd/firepanda/releases/tag/v0.6.57
 [0.6.56]: https://github.com/tamnd/firepanda/releases/tag/v0.6.56
