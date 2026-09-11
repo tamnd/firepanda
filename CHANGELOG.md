@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a date literal in a filter is read once rather than once a row
+
+`EventDate >= '2013-07-01'` is the shape of nine ClickBench queries and there are two ways to answer it. One is to parse the literal once and then compare two integers over ninety million rows. The other is to compare text and parse the same eight characters again on every row. `parse_instant` in `firepanda/kernel/parse_time.mojo` is the one row form of `parse_timestamps`, and `resolve_constant` now calls it, so a text constant meeting a column of instants has become an instant before anything sees the column.
+
+`resolve_constant` is the right place because it is the function `binary_value_any` and `ComputeNode.schema` share. A rule applied in one and not the other is a plan whose declared dtype is not the dtype of the data under it, and a literal read in one and not the other would be exactly that. The answer comes back at the column's own resolution as well, so a microsecond column meets a count of microseconds and nothing rescales a column of ninety million rows to meet a constant fixed at seconds.
+
+The zone rules were read off pandas row by row rather than reasoned about. A literal with no offset against a zoned column is a wall clock reading in that column's zone, so `s >= '1970-01-01 05:30:00'` on a UTC+05:30 column keeps the row stored as the epoch, which is what pandas answers. A literal that names its own offset is an instant and the column's zone does not come into it. A naive column meeting a literal with an offset is refused, which is pandas' own `Invalid comparison between dtype=datetime64[s] and str`. A zone whose offset is a rule rather than a number has no single reading to compare against and is refused with a message saying to write the offset into the literal.
+
+One deliberate divergence from DuckDB. `DATE '2013-07-01' >= '2013-07-01 12:00:00'` is true in DuckDB, because the literal is cast to a date and the noon is dropped on the way past. That is a filter boundary quietly moving back twelve hours, which is the direction nobody checks, so firepanda refuses a clock reading against a date column and says to compare against a timestamp column instead.
+
+`Value.date` arrives beside `Value.timestamp` for the date column's constant, at int32 days, because a date is a day on a calendar and is on no clock at all.
+
+`temporal/range_literal` and `temporal/range_integer` are the new benchmark pair. They are the same comparison over the same numbers and the only difference is that one of them arrives as eight characters, so if they are not within noise of each other the parse is still inside the loop.
+
+Part of #483.
+
 ## [0.6.62] - 2026-09-11
 
 Built against Mojo 1.0.0 (ed45d567).
@@ -31,7 +47,6 @@ A missing value is a row like any other, and a temporal value keeps the type bin
 `SELECT 1 + 1` is still refused, and it is refused above the VALUES rather than at it. A query with no `FROM` is already a literal table of one row in the plan, and what does not run is the projection over it, because a projection of a bare constant has no operator that makes a column out of one. That is the next change.
 
 Part of #309.
-
 ### Added: a frame on a set of labels it may not have
 
 `DataFrame.reindex`, with both of its halves and eight of pandas' ten parameters. On the rows it is `get_indexer` and then a gather, and a label the frame does not have costs no branch of its own, since the lookup answers a not found label with a negative position and the gather already reads a negative position as a null row. On the columns it is a lookup in the schema instead, and a name the frame does not have becomes a column of missing values as tall as the frame. The boundary applies the columns first and then the rows, because narrowing the frame before gathering it means the gather moves less.

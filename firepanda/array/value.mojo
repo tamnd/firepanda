@@ -169,6 +169,26 @@ struct Value(Copyable, Equatable, Movable, Writable):
         return out^
 
     @staticmethod
+    def date(count: Int32) -> Self:
+        """Constructs a calendar day, counted from the epoch.
+
+        A date is not a timestamp at a coarse resolution. It is a day on a
+        calendar and it is on no clock at all, which is why there is no zone
+        argument here and why it is stored at int32 rather than int64: that is
+        the layout Arrow gives a date and it reaches either end of recorded
+        history.
+
+        Args:
+            count: How many days since 1970-01-01, negative before it.
+
+        Returns:
+            The value.
+        """
+        var out = Self(count)
+        out.type = LogicalType.DATE32
+        return out^
+
+    @staticmethod
     def timestamp(
         count: Int64, unit: TimeUnit, zone: TimeZone = TimeZone()
     ) -> Self:

@@ -47,6 +47,7 @@ from firepanda.kernel.parse_time import (
     guess_format,
     is_missing_word,
     numbers_to_timestamps,
+    parse_instant,
     parse_timestamps,
 )
 from firepanda.kernel.temporal import civil_from_days, temporal_strftime
@@ -540,6 +541,124 @@ def test_the_reader_and_the_renderer_come_back_to_the_same_number() raises:
             Int(values[i]),
             Int(wanted[i]) * 1_000_000,
             "row " + String(i),
+        )
+
+
+def test_a_date_literal_comes_back_at_the_columns_own_resolution() raises:
+    """Because the point of parsing it here is that the loop compares integers.
+
+    The same literal against a second column and a microsecond column is two
+    different numbers, and each one is the number that column holds, so nothing
+    downstream has to rescale a column of ninety million rows to meet it."""
+    var second = parse_instant(
+        "2013-07-01".as_bytes(), LogicalType.timestamp(TimeUnit.SECOND)
+    )
+    assert_equal(Int(second.as_scalar[DType.int64]()), 1372636800)
+    assert_equal(String(second.type), "datetime64[s]")
+
+    var micro = parse_instant(
+        "2013-07-01".as_bytes(), LogicalType.timestamp(TimeUnit.MICRO)
+    )
+    assert_equal(Int(micro.as_scalar[DType.int64]()), 1372636800_000000)
+    assert_equal(String(micro.type), "datetime64[us]")
+
+
+def test_a_literal_below_the_epoch_is_negative_and_not_refused() raises:
+    """1969 is a year somebody will filter on and the count for it is negative.
+    """
+    var got = parse_instant(
+        "1969-12-31T23:59:59".as_bytes(),
+        LogicalType.timestamp(TimeUnit.SECOND),
+    )
+    assert_equal(Int(got.as_scalar[DType.int64]()), -1)
+
+
+def test_a_date_column_takes_a_count_of_days_and_not_of_seconds() raises:
+    """A date is on no clock, so the constant it meets is days at int32.
+
+    2013-07-01 is 15887 days after the epoch, which is the same instant the
+    second column above holds as 1372636800."""
+    var got = parse_instant("2013-07-01".as_bytes(), LogicalType.DATE32)
+    assert_equal(Int(got.as_scalar[DType.int32]()), 15887)
+    assert_equal(String(got.type), "date32[day]")
+
+
+def test_a_clock_reading_against_a_date_column_is_refused() raises:
+    """DuckDB truncates this one and firepanda will not, deliberately.
+
+    `DATE '2013-07-01' >= '2013-07-01 12:00:00'` is true in DuckDB, because the
+    literal is cast to a date and the noon is dropped on the way. That is a
+    filter boundary quietly moving back twelve hours, which is the direction
+    nobody checks, so this refuses and says where the clock reading should go
+    instead."""
+    with assert_raises(contains="nowhere to put it"):
+        _ = parse_instant(
+            "2013-07-01 12:00:00".as_bytes(), LogicalType.DATE32
+        )
+
+
+def test_a_naive_column_will_not_meet_a_literal_that_names_an_offset() raises:
+    """pandas raises on the same pair and this is the same refusal.
+
+    A naive column holds readings on a clock nobody has named. A literal with an
+    offset in it names an instant. There is no comparison between the two that
+    is not a guess about which clock the column is on."""
+    with assert_raises(contains="no one clock"):
+        _ = parse_instant(
+            "1970-01-01T00:00:00+01:00".as_bytes(),
+            LogicalType.timestamp(TimeUnit.SECOND),
+        )
+
+
+def test_a_naive_literal_against_a_zoned_column_is_a_wall_clock() raises:
+    """Checked against pandas, which answers True for all three rows.
+
+    A column on UTC+05:30 holding the epoch reads 05:30 on its own clock, and
+    pandas says that row is at or after the literal `1970-01-01 05:30:00`. So
+    the literal is a reading on the column's clock rather than an instant, and
+    the zone's offset comes off before the comparison."""
+    var zoned = LogicalType.timestamp(TimeUnit.SECOND, TimeZone("UTC+05:30"))
+    var got = parse_instant("1970-01-01 05:30:00".as_bytes(), zoned)
+    assert_equal(Int(got.as_scalar[DType.int64]()), 0)
+
+
+def test_a_literal_with_an_offset_against_a_zoned_column_is_an_instant() raises:
+    """The other half of the pair above, and pandas agrees with this one too.
+
+    Once the literal names its own offset there is nothing left to work out. The
+    column's zone does not come into it, because both sides are already saying
+    which instant they mean."""
+    var zoned = LogicalType.timestamp(TimeUnit.SECOND, TimeZone("UTC+05:30"))
+    var got = parse_instant("1970-01-01T05:00:00+00:00".as_bytes(), zoned)
+    assert_equal(Int(got.as_scalar[DType.int64]()), 18000)
+
+
+def test_a_zone_that_is_a_rule_has_no_one_offset_to_take_off() raises:
+    """`America/New_York` is two offsets depending on the month.
+
+    A naive literal against such a column has no single reading, and working one
+    out needs the IANA database that this library does not carry. The message
+    says to write the offset into the literal, which is the one thing the caller
+    can do about it."""
+    var ruled = LogicalType.timestamp(
+        TimeUnit.SECOND, TimeZone("America/New_York")
+    )
+    with assert_raises(contains="a rule rather than a number"):
+        _ = parse_instant("2013-07-01".as_bytes(), ruled)
+
+
+def test_a_column_that_is_not_temporal_has_no_instant_in_it() raises:
+    """An integer column against a date literal is a mistake, not a comparison.
+    """
+    with assert_raises(contains="not a column of instants"):
+        _ = parse_instant("2013-07-01".as_bytes(), LogicalType.INT64)
+
+
+def test_a_literal_that_is_not_a_date_is_refused_by_the_guesser() raises:
+    """The same refusal a column of it would get, and the same message."""
+    with assert_raises(contains="does not start with a four digit year"):
+        _ = parse_instant(
+            "yesterday".as_bytes(), LogicalType.timestamp(TimeUnit.SECOND)
         )
 
 

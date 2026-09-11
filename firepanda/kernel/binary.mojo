@@ -76,6 +76,7 @@ from firepanda.kernel.dictionary import (
     dictionary_codes,
     same_categories,
 )
+from firepanda.kernel.parse_time import parse_instant
 
 from .arith import (
     OP_ADD,
@@ -647,6 +648,18 @@ def resolve_constant(
         for {dtype}`, since that is what somebody who hits this will search for.
         The binding turns it into an `OverflowError`.
     """
+    # A text constant against a column of instants is the date literal, and it
+    # is read here rather than anywhere further in, so that everything below this
+    # line is comparing two numbers. Both callers get it: the operation runs on
+    # the parsed constant and the plan declares the type the parsed constant
+    # produces, which is the whole reason this function is shared.
+    if (
+        value.present
+        and value.type.is_variable_width()
+        and column.is_temporal()
+    ):
+        return parse_instant(value.text.value().as_bytes(), column)
+
     if not value.weak or value.is_null() or not column.is_numeric():
         return Value(copy=value)
     var want = weak_operand_type(column, value.type)

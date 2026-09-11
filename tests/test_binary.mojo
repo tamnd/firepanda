@@ -26,6 +26,7 @@ from firepanda.array.array import Array
 from firepanda.array.strings import strings_from_list
 from firepanda.array.value import Value
 from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.temporal import TimeUnit
 from firepanda.kernel.binary import (
     BinaryOp,
     binary_any,
@@ -1134,6 +1135,83 @@ def test_resolving_a_constant_twice_is_the_same_answer() raises:
     assert_true(once.type == LogicalType.INT8, "once")
     assert_true(twice.type == LogicalType.INT8, "twice")
     assert_true(not once.weak, "a resolved constant is no longer weak")
+
+
+def test_a_date_literal_is_parsed_once_and_compared_as_a_number() raises:
+    """The range filter nine ClickBench queries are built on, end to end.
+
+    What this is really asserting is what the constant is by the time the loop
+    starts. It arrives as text, and if it were still text there the loop would
+    be comparing bytes and parsing the same eight characters ninety million
+    times. `resolve_constant` turns it into an instant before anything sees the
+    column, so the row below runs `compare_const` on two int64s."""
+    var clock = typed[DType.int64](
+        [1372550400, 1372636800, 1375228800, 1375315200]
+    ).retyped(LogicalType.timestamp(TimeUnit.SECOND))
+    var got = read[DType.bool](
+        binary_value_any(clock, Value(String("2013-07-01")), BinaryOp.GE)
+    )
+    assert_true(not got[0], "2013-06-30 is before the range")
+    assert_true(got[1], "2013-07-01 is the boundary and is kept")
+    assert_true(got[2], "2013-07-31")
+    assert_true(got[3], "2013-08-01")
+
+
+def test_the_parsed_literal_takes_the_columns_resolution_and_not_seconds(
+) raises:
+    """A microsecond column meets a count of microseconds, so nothing rescales.
+
+    The alternative is a literal fixed at seconds, which would drag the whole
+    column up to the finer of the two units on the way past
+    `_temporal_const_erased`, and that is a pass over every row to avoid one
+    multiplication."""
+    var resolved = resolve_constant(
+        LogicalType.timestamp(TimeUnit.MICRO),
+        Value(String("2013-07-01")),
+        BinaryOp.GE,
+    )
+    assert_equal(
+        Int(resolved.as_scalar[DType.int64]()), 1372636800_000000, "count"
+    )
+    assert_true(
+        resolved.type == LogicalType.timestamp(TimeUnit.MICRO), "type"
+    )
+
+
+def test_resolving_a_date_literal_twice_is_the_same_answer() raises:
+    """The same invariant the weak integers above have, for the same reason.
+
+    `ComputeNode.schema` and `binary_value_any` both call this, and a resolved
+    literal is an instant rather than text, so the second call has nothing left
+    to do and must not try."""
+    var once = resolve_constant(
+        LogicalType.timestamp(TimeUnit.SECOND),
+        Value(String("2013-07-01")),
+        BinaryOp.GE,
+    )
+    var twice = resolve_constant(
+        LogicalType.timestamp(TimeUnit.SECOND), once, BinaryOp.GE
+    )
+    assert_equal(
+        Int(once.as_scalar[DType.int64]()),
+        Int(twice.as_scalar[DType.int64]()),
+        "count",
+    )
+    assert_true(once.type == twice.type, "type")
+
+
+def test_a_text_literal_against_a_text_column_is_still_text() raises:
+    """The new arm reads the column's type, so it must not fire on this one."""
+    var got = read[DType.bool](
+        binary_value_any(
+            AnyArray(strings_from_list(["a", "b", "c"])),
+            Value(String("b")),
+            BinaryOp.GE,
+        )
+    )
+    assert_true(not got[0], "a")
+    assert_true(got[1], "b")
+    assert_true(got[2], "c")
 
 
 def main() raises:
