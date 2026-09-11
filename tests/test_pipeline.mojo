@@ -1042,13 +1042,99 @@ def test_a_reduction_holds_everything_until_the_input_is_done() raises:
     )
 
 
-def test_a_reduction_that_does_not_fold_is_refused_at_plan_time() raises:
-    """A median of medians is not a median, and there is no state short of the
-    values that would make it one, so this is an error before a row moves."""
+def repeat_frame() raises -> DataFrame:
+    """Six rows in chunks of two, three and one, with repeats across the joins.
+
+    The 2 is in the first chunk and the second, and the 1 is in the first and
+    the second as well, so a distinct count that added the chunks up would say
+    eight where the answer is four. That is the case a held column exists for
+    and a per chunk partial cannot see.
+    """
+    var n = ChunkedArray(LogicalType.INT64)
+    n.append(numbers([1, 2]))
+    n.append(numbers([2, 3, 1]))
+    n.append(numbers([4]))
+    var keep = ChunkedArray(LogicalType.BOOL)
+    keep.append(flags([True, True]))
+    keep.append(flags([True, True, True]))
+    keep.append(flags([True]))
+    var columns = List[ChunkedArray]()
+    columns.append(n^)
+    columns.append(keep^)
+    var fields = List[Field]()
+    fields.append(Field("n", LogicalType.INT64))
+    fields.append(Field("keep", LogicalType.BOOL))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def test_a_median_over_chunks_is_the_median_of_the_whole_input() raises:
+    """A median of medians is not a median, so the column is held and the
+    kernel runs once over all of it. Six rows, so it is the middle pair."""
     var aggs = List[GroupAgg]()
     aggs.append(GroupAgg(0, AggKind.MEDIAN, "middle"))
     var pipeline = Pipeline(cut_frame())
-    with assert_raises(contains="cannot be computed a chunk at a time"):
+    pipeline.add(Node(Reduce(aggs^)))
+    var out = pipeline^.run()
+    assert_equal(len(out), 1, "one row")
+    var got = out.column("middle").as_typed[DType.float64]()[0]
+    assert_equal(got, Float64(3.5), "between the third and the fourth")
+
+
+def test_a_distinct_count_counts_a_value_in_two_chunks_once() raises:
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.NUNIQUE, "distinct"))
+    aggs.append(GroupAgg(0, AggKind.COUNT, "seen"))
+    var pipeline = Pipeline(repeat_frame())
+    pipeline.add(Node(Reduce(aggs^)))
+    var out = pipeline^.run()
+    assert_equal(len(out), 1, "one row")
+    assert_equal(one_int(out, "seen"), 6, "six rows arrived")
+    assert_equal(one_int(out, "distinct"), 4, "1, 2, 3 and 4")
+
+
+def test_a_fold_and_a_hold_in_one_reduction_both_answer() raises:
+    """The sum is folded a chunk at a time and the median holds the column, and
+    the two run beside each other over the same input."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.SUM, "total"))
+    aggs.append(GroupAgg(0, AggKind.MEDIAN, "middle"))
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Reduce(aggs^)))
+    var out = pipeline^.run()
+    assert_equal(len(out), 1, "one row")
+    assert_equal(one_int(out, "total"), 21, "1 through 6")
+    var got = out.column("middle").as_typed[DType.float64]()[0]
+    assert_equal(got, Float64(3.5), "the median of the same six")
+
+
+def test_a_held_column_survives_the_parallel_route() raises:
+    """Two hundred rows in forty chunks through a filter, which is the shape
+    that runs the front of the pipeline on every core and hands the reduction
+    one partial per chunk. A held column rides in those partials, so this is
+    the check that none of them was dropped or counted twice."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.NUNIQUE, "distinct"))
+    var pipeline = Pipeline(many_chunk_frame())
+    pipeline.add(Node(Filter(1)))
+    pipeline.add(Node(Reduce(aggs^)))
+    var out = pipeline^.run()
+    assert_equal(len(out), 1, "one row")
+
+    var whole = many_chunk_frame()
+    var mask = whole.column("keep").as_typed[DType.bool]()
+    var kept = len(read_back(whole.filter(mask), "n"))
+    # The numbers are consecutive and the mask keeps whole rows, so every row
+    # that survives holds a value no other row holds.
+    assert_equal(one_int(out, "distinct"), Int64(kept), "all of them differ")
+
+
+def test_a_reduction_that_reads_two_columns_is_refused() raises:
+    """A correlation wants a pair and a `GroupAgg` names one column, so there
+    is nothing for the second one to be."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.CORR, "together"))
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="reads two columns"):
         pipeline.add(Node(Reduce(aggs^)))
 
 

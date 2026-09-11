@@ -927,7 +927,7 @@ def test_a_group_by_that_renames_its_key_is_refused() raises:
         _ = lower(plan, root, one_frame())
 
 
-def test_a_reduction_that_cannot_fold_a_chunk_at_a_time_is_refused() raises:
+def test_a_reduction_that_cannot_fold_a_chunk_at_a_time_still_lowers() raises:
     var plan = Plan()
     var scan = plan.scan("sales", List[String](), 0)
     var qty = plan.exprs.column("qty")
@@ -935,10 +935,12 @@ def test_a_reduction_that_cannot_fold_a_chunk_at_a_time_is_refused() raises:
     var root = plan.aggregate(scan, List[Int](), [middle], ["middle"])
     _ = bind(plan, root, schemas())
 
-    # The refusal comes from the physical node rather than from lowering, which
-    # is the right place for it: what folds is a property of the reduction.
-    with assert_raises(contains="cannot be computed a chunk at a time"):
-        _ = lower(plan, root, one_frame())
+    # It used to be refused here. `Reduce` holds the column for a reduction
+    # whose state is the values themselves, so lowering has nothing to say
+    # about it and what folds stays a property of the reduction.
+    var pipe = lower(plan, root, one_frame())
+    var out = pipe^.run()
+    assert_equal(len(out), 1, "one row")
 
 
 def test_a_sort_puts_the_rows_in_order() raises:

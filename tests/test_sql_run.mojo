@@ -1538,12 +1538,48 @@ def test_count_distinct_over_a_partition_does_not_count_a_null() raises:
     )
 
 
-def test_count_distinct_says_it_does_not_fold_rather_than_counting_rows() raises:
-    # It used to answer count(band), which is 4. Now the word reaches the plan,
-    # and the operator that cannot run a distinct count a chunk at a time says
-    # so by name. A wrong number is the worse of the two.
-    with assert_raises(contains="nunique cannot be computed a chunk at a time"):
-        _ = run("SELECT count(DISTINCT band) AS n FROM dupes", session())
+def test_count_distinct_counts_the_values_rather_than_the_rows() raises:
+    # It used to answer count(band), which is 4.
+    same(answer("SELECT count(band) AS n FROM dupes", "n"), [4], "rows")
+    same(
+        answer("SELECT count(DISTINCT band) AS n FROM dupes", "n"),
+        [3],
+        "values",
+    )
+
+
+def test_count_distinct_does_not_count_a_null() raises:
+    same(
+        answer("SELECT count(DISTINCT mark) AS n FROM gappy", "n"),
+        [3],
+        "three values",
+    )
+    same(answer("SELECT count(mark) AS n FROM gappy", "n"), [4], "not null")
+
+
+def test_a_median_comes_back_through_sql() raises:
+    # Not a distinct count, and here for the same reason: it does not fold
+    # either, it went through the same hole, and nothing covered it.
+    var out = run("SELECT median(qty) AS mid FROM sales", session())
+    assert_equal(len(out), 1, "one row")
+    assert_equal(
+        out.column("mid").as_typed[DType.float64]()[0],
+        Float64(13.5),
+        "between 12 and 15",
+    )
+
+
+def test_a_spread_comes_back_through_sql() raises:
+    # qty is 1, 3, 5, 8, 12, 15, 20, 25, 30, 40, whose mean is 15.9 and whose
+    # squared distances from it add up to 1464.9 over nine degrees of freedom.
+    var out = run(
+        "SELECT var_samp(qty) AS v, stddev(qty) AS s FROM sales", session()
+    )
+    assert_equal(len(out), 1, "one row")
+    var v = out.column("v").as_typed[DType.float64]()[0]
+    var s = out.column("s").as_typed[DType.float64]()[0]
+    assert_true(abs(v - Float64(1464.9) / 9.0) < 1e-9, "the variance")
+    assert_true(abs(s * s - v) < 1e-9, "the deviation squared is the variance")
 
 
 def test_a_grouped_count_distinct_says_the_same_thing() raises:
