@@ -345,6 +345,87 @@ It was found by AddressSanitizer rather than by a failing assertion, as a use af
 The second thing is smaller. A pooled buffer can still be sharing with a column that outlived it, which is safe because the pool zeroes on the way out and zeroing un-shares first, so it hands back a private allocation and loses the recycling rather than writing over somebody's bytes.
 
 Closes #406.
+### Added: what a star stands for, and the three modifiers a query can hang off one
+
+`firepanda/sql/star.mojo` turns a `*` into a list of columns. The bind context already knew which columns a query level offers and what order they come back in, so the new part is what a query is allowed to write in front of that: a bare `*`, a qualified `t.*`, and `EXCLUDE`, `REPLACE` and `RENAME` over either of them.
+
+The three modifiers do not behave alike, and none of the differences are the ones a reader would guess. `EXCLUDE` and `REPLACE` refuse a name no binding has, and `RENAME` silently ignores it, so a typo in a rename list is the one that gets through. `EXCLUDE` and `RENAME` can be qualified and `REPLACE` cannot, because the name after its `AS` is an identifier and a dot there is a syntax error. A bare name applies to every column that has it, so over two tables that both have an `a` the bare exclude removes both and the bare rename gives the query two columns with the same name, which DuckDB allows.
+
+Two of the behaviours are DuckDB's and are wrong, and both are reproduced rather than fixed. A `REPLACE` naming a column that two bindings both have replaces the first and drops the second, so `SELECT * REPLACE (99 AS a) FROM t, u` gives three columns where `SELECT *` gives four and nothing says a column went missing. And a duplicate entry in a `RENAME` list is reported as a duplicate in the `EXCLUDE` list, naming a list the query may not have written at all. A query that binds here and fails there is worse than a query that is wrong the same way in both.
+
+A qualified star does not walk outward the way a qualified column does. `SELECT (SELECT o.* FROM u) FROM t o` is refused while `SELECT (SELECT o.a FROM u) FROM t o` is fine, so the qualifier is looked up at one level and no further. That is measured rather than reasoned about, along with the order the collision checks fire in: the lists are taken as written and each entry as it appears, which is why `EXCLUDE (a) REPLACE (1 AS a, 2 AS a)` is reported as a collision between two lists rather than as a duplicate inside one.
+
+`COLUMNS()` stays refused by name, and struct unpacking is not here because the type set carries no nested types yet.
+
+### Added: what an arithmetic operator gives back, which the lattice does not know
+
+The lattice answers what two types agree on when a query puts them side by side. An operator asks something else, and the two answers differ: the common type of a `TINYINT` and a `UTINYINT` is a `SMALLINT`, and adding those same two gives a `BIGINT`. DuckDB binds an operator by picking an overload rather than by joining a lattice, and there is no overload taking one signed and one unsigned argument, so a mixed pair widens until it reaches a type that holds both sides of the operation. Reusing the lattice here would be wrong on every mixed pair a real schema produces, so this is a second table and not a view of the first one.
+
+`/` is not in that table. Division on two integers is floating point in this dialect, so `1 / 2` is `0.5` and a `DOUBLE`, and `//` is how integer division is spelled. That is one of the differences most likely to go unnoticed, because the query still runs and the number is still a number.
+
+A decimal derives its width and scale from the operands rather than taking them from a table, and each operator derives them differently. Addition needs one more digit than the wider operand because a carry can happen, so `DECIMAL(4,2) + DECIMAL(6,3)` is `DECIMAL(7,3)`. Multiplication adds both widths and both scales, so the same pair multiplied is `DECIMAL(10,5)`. Modulo takes the join instead, because the answer is smaller than the divisor. The four of them disagree about overflow as well: where `+` quietly saturates at width 38 and the carry it asked for is simply not there, `%` gives up on being exact and returns a `DOUBLE`. Both of those are DuckDB's.
+
+Dates and intervals are not symmetric and the asymmetries are the point. A date plus an integer is a date, a date minus a date is a `BIGINT` of days rather than an interval, a date plus an interval is a `TIMESTAMP` and not a date because an interval carries microseconds, a date plus a time is a `TIMESTAMP` while a date minus a time is an error, and an interval divided by a number is an interval while a number divided by an interval is nothing. A timestamp kept in seconds or nanoseconds does not keep its unit either, since there is one overload and it takes microseconds.
+
+A `NULL` written in a query has no type and does not take the other side's. DuckDB picks an overload for it, and the result is lopsided in ways substitution would never produce: `DATE + NULL` is a `DATE` because the cheapest candidate counts days, while `NULL - DATE` is a `BIGINT` because the cheapest one there is a date minus a date. `NULL + NULL` is a `BIGINT` rather than a `NULL`. A decimal meeting one loses its width and comes back as the `NULL` type, which is DuckDB's answer and not a useful one. Where two candidates tie, as they do for `TIME + NULL`, DuckDB refuses the query rather than choosing, and that refusal is reported here as no overload rather than as an ambiguity until the function registry can list what it could not choose between.
+
+The whole module was checked against DuckDB 1.5 over all 5,046 combinations of six operators and twenty nine types, and separately over unary minus, before any of it was written down as a test.
+
+### Added: the SQL type lattice, generated from DuckDB and defects included
+
+`COALESCE`, `CASE`, `UNION`, `IN` and an `IN` list all hand the binder a set of expressions and expect one column back, so each of them has to answer what the one type is. This is that answer. It is observable through `typeof()`, so it is measured rather than reasoned about: both tables were generated by asking DuckDB 1.5 for `typeof(coalesce(NULL::a, NULL::b))` over every pair of types.
+
+A decimal joins by rule rather than by table. The scale of the answer is the larger of the two scales and the width is the larger of the two integer parts plus that scale, so `DECIMAL(4,2)` and `DECIMAL(6,3)` give `DECIMAL(6,3)` and neither side loses a digit. An integer entering that rule counts as a decimal wide enough to hold it, which is where `DECIMAL(4,2)` and `BIGINT` giving `DECIMAL(21,2)` comes from, and the width saturates at 38 rather than raising, which is why `DECIMAL(4,2)` and `HUGEINT` give `DECIMAL(38,2)`. A decimal meeting a binary float gives the float, which is the one place the exactness a decimal exists for is thrown away, and DuckDB throws it away without asking.
+
+One entry in the table is wrong and is reproduced anyway. DuckDB says the common type of a `TINYINT` and a `UHUGEINT` is a `SMALLINT`, which cannot hold a `UHUGEINT`, so a query with a large value in it fails at runtime with a conversion error rather than at bind time. Getting that right here would mean binding queries DuckDB refuses and refusing queries DuckDB binds, and both of those are worse than agreeing with it. It is going upstream as a bug report separately.
+
+Two more entries look like oversights and are also DuckDB's: a `DATE` and a `TIME` have no common type, and neither do a `TIME` and a `TIME_NS`.
+
+What is not here is the literal rule. `coalesce('a', 1)` is an `INTEGER` in DuckDB while `coalesce(NULL::VARCHAR, 1)` is an error, because an unadorned literal carries a type that is still open when the binder reaches it. That belongs to expression binding rather than to the lattice.
+
+### Added: the SQL type set, which is DuckDB's and not firepanda's
+
+The third piece of the binder, and the one that decides what a query's answers actually are. A type here is an identifier plus, for a decimal, a width and a scale, which covers every type in tier one because every type in tier one is scalar.
+
+It is a separate type set from the engine's on purpose. `LogicalType` has no `DECIMAL` and no 128 bit integer, so a front end that reused it would answer `1.1 + 2.2` with `3.3000000000000003` where DuckDB gives exactly `3.3`, and would answer `sum` over an integer column with a `BIGINT` where DuckDB gives a `HUGEINT`. Both of those are wrong answers rather than missing features, and neither can be fixed later by a cast at the edge. The mapping down to `LogicalType` happens where the plan is built, and it is allowed to lose things there because that is a place a refusal can be written.
+
+A spelling is not a type, and the mapping is not the one a C programmer would guess. DuckDB takes 82 spellings for 39 types: `int8` is `BIGINT` because it is eight bytes, `int1` is `TINYINT`, `float8` is `DOUBLE` and `float4` is `FLOAT`. Reading any of those the obvious way silently narrows a column. The table was read out of `duckdb_types()` on 1.5 rather than out of the documentation, and a test walks every one of the 82 and checks it against what DuckDB says it means.
+
+The two arguments a type can carry are handled the way DuckDB handles them rather than the way they read. A bare `DECIMAL` is `DECIMAL(18,3)`, `DECIMAL(4)` is `DECIMAL(4,0)`, and a width over 38 or a scale over the width gets DuckDB's own two error messages. `VARCHAR(3)` parses and throws the three away, because the length carries no semantics at all in DuckDB, `typeof('a'::VARCHAR(3))` is `VARCHAR` and `'abcd'::VARCHAR(3)` is `'abcd'`. A helpful truncation there would be a wrong answer, so there is nowhere on the type to put it.
+
+`LIST`, `ARRAY`, `STRUCT` and `MAP` have identifiers so a query mentioning one is not a parse failure, and `ARRAY` is separate from `LIST` because `typeof([1, 2, 3]::INT[3])` is `INTEGER[3]` and not `INTEGER[]`. Their element types need an arena the way the AST has one, and that arrives with the nested work rather than being guessed at now.
+
+A type name nobody recognizes gets a `Did you mean` line under the same rule the catalog uses. DuckDB always names something, so `1::nosuchtype` there answers `Did you mean "struct"?`, which is no use to anybody. A name within half its own length of a real one is a typo and anything further away gets no suggestion.
+
+### Added: the SQL bind context, where a name becomes a pair of indices
+
+The second piece of the binder, and the one the optimizer is later built on. A query level holds the bindings its `FROM` offers, a subquery is another level with a parent pointer, and resolving a name walks that chain outward. What comes back is a binding position and a column position and never a name, which is the property that makes a pass that reorders or duplicates plan nodes safe: there is no scope left for a name to be reinterpreted in.
+
+Four rules in it are DuckDB's rather than ours, and each is a wrong answer rather than an error when it is missed.
+
+A bare name that two bindings both have is ambiguous, and the error names both ways of writing it. The exception is a column merged by `USING` or `NATURAL`, which is one column with two homes rather than two columns, so `SELECT x FROM a JOIN b USING (x)` is not ambiguous, `b.x` still means something, and a `*` expands the merged column once. A flag on the right hand copy gives all three of those without copying a column anywhere.
+
+A qualified name is tried longest first, so `a.b` is a column of table `a` when `a` is a binding and a field of a struct column `a` when it is not. The order those are attempted in is observable, so the question is a function with a name on it rather than whichever branch came first.
+
+Resolution records what it crossed. A name that resolves at an outer level makes the subquery correlated, and the outer column is written down at the point it is found rather than rediscovered later by a pass walking for outer references, because a pass that has to go looking is a pass that can miss one.
+
+Names fold, including quoted ones, for the same reason they fold at the catalog.
+
+The three errors are DuckDB's text: the ambiguity, the column nothing has with up to three near misses after it, and the qualifier nothing binds with the tables that are in scope listed. The near misses are deduplicated, since two tables that both have an `x` are one suggestion and not two.
+
+Nothing builds a bind context yet. It is what the `FROM` binder fills in.
+
+### Added: the SQL catalog, which is the set of names a query is allowed to say
+
+The first piece of the binder. A catalog is a session scoped namespace holding a frame or a view under each name, it dies with the process, and there is no storage under it, no schemas and no `ATTACH`, because firepanda has nothing to attach to.
+
+Three of its rules are decisions rather than defaults. It is one namespace and not two, so a frame called `t` and a view called `t` cannot both exist, because a query saying `FROM t` has to mean one of them and picking by kind is a rule nobody could guess. Registering over a name that is taken replaces what was there, which is what a notebook does every time a cell is rerun. And lookup folds while storage does not, so `CREATE TABLE "MyTable"` is reachable as `mytable`, as `"MYTABLE"` and as `MyTable`, and `MyTable` is the spelling that comes back in an error.
+
+That last one is the one worth stating, because it is the only place in the dialect where a quoted identifier is not case sensitive. It was measured against DuckDB rather than read from anywhere, and getting it the other way round would refuse queries DuckDB accepts.
+
+A name that does not resolve gets DuckDB's own text, `Catalog Error: Table with name t does not exist!`, with a `Did you mean` line when a registered name is close. The threshold is ours and not DuckDB's. DuckDB suggests out of a catalog that includes the Postgres compatibility tables, so it can answer a name resembling nothing the user registered with a system table they have never heard of, and we have no such tables, so a guess with nothing behind it would read as a bug. An edit distance below half the shorter name is a typo and above it is a different word.
+
+Frames go in by move and come back by reference. A catalog is the session's working set and a query that copied it to read a schema would be the most expensive thing in the front end. Lookup is a linear scan over a short list, which is what the specification asks for and what wins at the size a REPL actually has.
 
 ## [0.6.55] - 2026-09-11
 

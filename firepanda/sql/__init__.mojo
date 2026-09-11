@@ -46,6 +46,12 @@ adding the same two is a `BIGINT`. DuckDB binds an operator by picking an
 overload rather than by joining a lattice, so this is a second table and not a
 view of the first one.
 
+`star.mojo` is what a `*` stands for, and the three modifiers a query can hang
+off one. `bind.mojo` already knows the columns and their order, so this is
+`EXCLUDE`, `REPLACE` and `RENAME` over that, including the two places DuckDB is
+wrong: a `REPLACE` that matches twice loses a column, and a duplicate `RENAME`
+entry is blamed on the `EXCLUDE` list.
+
 `unsupported.mojo` is the line between what the grammar accepts and what
 firepanda runs. Every refusal is an entry in its table rather than a `raise`
 written where the cases ran out, which is what lets `sql_support()` list the
@@ -76,6 +82,15 @@ from .printer import (
     print_stmt,
     quote_name,
     quote_string,
+)
+from .star import (
+    NOT_REPLACED,
+    Renaming,
+    Replacement,
+    Selected,
+    Target,
+    empty_select_list,
+    expand,
 )
 from .table import Grammar, GrammarNode, memoized_rules, overridden_rules
 from .token import Token, tokenize, token_text
