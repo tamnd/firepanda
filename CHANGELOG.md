@@ -26,6 +26,20 @@ Two new methods and one new frame method:
 
 Part of #479 and of the column metadata in #375.
 
+### Added: a subquery that answers one value lowers and runs
+
+`WHERE qty > (SELECT min(band) FROM tiers)` works. An uncorrelated subquery written where a value goes answers the same value for every row of the query around it, so it is taken out of the expression, lowered into a plan of its own, and cross joined onto the query above the `FROM`. The expression around it is then an ordinary expression over an ordinary column, which is the same move an aggregate in a select list already made. The subquery runs once rather than once per row, because a cross join onto one row lowers to a constant per right column.
+
+Only a subquery that is one row by construction is taken, which is one that folds with no `GROUP BY` or one with no `FROM`. In SQL both answer exactly one row whatever is in the tables, including nothing at all, where a fold answers a null. A `LIMIT 1` looks like the same guarantee and is not: over an empty table it answers no rows, where SQL says the subquery is null, so it is refused rather than read as one. So is a subquery that hands out a row per row of its table, since the check that there is exactly one of them is a node nobody has written.
+
+One case is refused that SQL answers. A fold with no `GROUP BY` over an empty input hands out no rows in firepanda rather than one row of null, so a subquery whose block reads nothing gives the cross join a right side of no rows and it refuses by name. That is a gap in the aggregate rather than in this rewrite, and both halves of it are pinned by tests. Refusing is the safe end of it, because the alternative is quietly dropping every row of the query around it.
+
+The cross join goes above the `FROM` and below everything else, so a subquery in a `WHERE` is always reachable and one in a select list is reachable when the query does not aggregate. Above an aggregate it is not, because an aggregate hands up its keys and its folds rather than everything it read, and that is a refusal with the reason in it rather than a binding error further along. A correlated one is refused by the scope it lowers against, which is the same refusal a correlated `IN` gets and the same dependent join behind it.
+
+The answer is renamed on the way out, so a subquery whose column is called what a table of the outer query calls one of its own cannot clash.
+
+Part of #309.
+
 ### Added: a cross join onto one row runs
 
 A cross join was refused at lowering because pairing every left row with every right row is a whole frame operation rather than anything a chunk at a time operator can do. One right row is the exception and it runs now. Pairing every left row with one right row adds a column to each row and moves nothing, so it lowers to one constant column per right column and the left side streams past untouched.

@@ -1263,6 +1263,84 @@ def test_an_uncorrelated_exists_says_why_it_is_refused() raises:
         )
 
 
+def test_a_subquery_that_answers_one_value_runs() raises:
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE qty > (SELECT min(band) FROM"
+                " tiers) ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [5, 8, 12, 15, 20, 25, 30, 40],
+        "qty",
+    )
+
+
+def test_two_subqueries_in_one_where_both_run() raises:
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE qty > (SELECT min(band) FROM"
+                " tiers) AND price < (SELECT min(band) FROM tiers) ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [20, 40],
+        "qty",
+    )
+
+
+def test_a_subquery_in_a_select_list_runs() raises:
+    same(
+        answer(
+            (
+                "SELECT (SELECT max(rate) FROM tiers) AS top FROM sales"
+                " WHERE qty = 1"
+            ),
+            "top",
+        ),
+        [900],
+        "top",
+    )
+
+
+def test_a_subquery_over_no_table_runs() raises:
+    same(
+        answer(
+            "SELECT qty FROM sales WHERE qty > (SELECT 24) ORDER BY qty", "qty"
+        ),
+        [25, 30, 40],
+        "qty",
+    )
+
+
+def test_a_fold_over_no_rows_hands_out_no_row_rather_than_one_null() raises:
+    # SQL says a fold with no GROUP BY over an empty input is one row with null
+    # in it, and DuckDB answers that. firepanda hands out no rows instead. That
+    # is a gap in the aggregate rather than in the rewrite that puts a subquery
+    # on a cross join, and it is pinned here because the next test is what it
+    # costs.
+    var got = run(
+        "SELECT max(band) AS top FROM tiers WHERE band > 1000", session()
+    )
+    assert_equal(len(got), 0)
+
+
+def test_a_subquery_over_no_rows_is_refused_while_that_gap_is_open() raises:
+    # Were the fold above one null row, this would answer no rows, because a
+    # comparison against null keeps nothing. It raises instead, and the message
+    # is the one the cross join gives a right side that is not one row.
+    with assert_raises(contains="right side of 0 rows"):
+        _ = run(
+            (
+                "SELECT qty FROM sales WHERE qty > (SELECT max(band) FROM"
+                " tiers WHERE band > 1000)"
+            ),
+            session(),
+        )
+
+
 def test_a_cross_join_onto_one_row_runs() raises:
     # One right row adds a column and moves nothing, so it is a constant per
     # right column rather than the whole frame join the general case needs.
