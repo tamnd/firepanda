@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: an expression a plan reaches twice is now computed once
+
+Lowering remembers where it put things. Until now the walk from an expression tree down to a line of `Compute` operators recursed by arena index and kept nothing, so an index it met twice appended the same operator twice, and the second one was a second pass over every row for a column already sitting in the chunk. It now keeps a memo per plan node, from expression index to the column position its value landed in, and a subexpression it has already computed is handed back rather than recomputed.
+
+The memo is per node rather than per plan because the positions in it are positions in a chunk that only exists between one node's base width and its trim. Once the node's intermediates have been dropped the positions mean nothing, so carrying them further would be carrying a lie.
+
+It is consulted for every subexpression and not for the top of an output. An output owns the name of the column it lands in, so two outputs sharing a top would be one column answering to two names, and the case is worth nothing anyway since a projection that asks for the same thing twice has no work in it to save. A fold is the exception and does get to share a top, because a fold names its own output and reads its input by position, which is what makes `sum(x)` and `max(x)` read one column between them.
+
+A cast is the one thing that can make a memo wrong. It converts where the column lies rather than appending, so the position it was handed holds something else afterwards, and lowering one forgets that position. An expression that was there gets computed again if it is wanted again, which is the slow answer rather than the wrong one, and there is a test that a cast of a shared product leaves the other reader of it an integer.
+
+Four tests. A product under two outputs lowers to four operators rather than five. Two outputs that are the same expression keep their own names. Two folds over one product lower to two operators. And the cast case above.
+
+What this unblocks is the third refusal in the projection merging pass, which declines to substitute an expression an upper projection reads more than once, on the grounds that one evaluation would become two. That is no longer true.
+
+Part of #377.
+
 ### Added: the pass pipeline, so the planner is one call rather than five
 
 `optimize` runs simplification, projection pushdown, predicate pushdown, projection merging and slice pushdown, in that order, and runs the whole thing again if a run changed anything, up to four times. Until now every pass was a thing a caller could run on its own and nothing ran any of them. This is the first code in the planner that a query could go through end to end.
