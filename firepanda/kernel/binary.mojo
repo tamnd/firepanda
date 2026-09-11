@@ -65,7 +65,7 @@ the decoded column would do. The six rules pandas has for it are in
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
-from firepanda.array.strings import StringArray
+from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.array.value import Value
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
@@ -1245,6 +1245,58 @@ def all_null(type: LogicalType, rows: Int) raises -> AnyArray:
             out.data.validity = Bitmap(rows, all_valid=False)
             return AnyArray(out^.into_data(), type)
     raise Error("binary: unsupported dtype")
+
+
+def filled_block(type: LogicalType, rows: Int, fill: Value) raises -> AnyArray:
+    """Builds a column of a given type with every row holding the same value.
+
+    `all_null` above is this with nothing to put in the rows, and it stays a
+    function of its own rather than becoming a branch here because it writes no
+    values at all: the buffer arrives zeroed and a null holds a zero, so it only
+    has to install a bitmap.
+
+    Two callers want a block of one value repeated and they are further apart
+    than they look. A shift fills the gap it opens at one end of a column, and a
+    reindex fills the rows whose label the frame does not have. In both cases
+    the value arrives without a width of its own and takes the column's, which
+    is why the type is a parameter rather than being read off the value.
+
+    Args:
+        type: The type the block should have. A filled timestamp is a timestamp
+            and not an integer of the same width, and the difference shows up
+            the moment somebody stacks the block onto a real column.
+        rows: How many rows.
+        fill: What to put in them. A null value leaves them missing.
+
+    Returns:
+        A column of `rows` rows, all of them the same.
+
+    Raises:
+        Error: If the type has no physical layout, or the value cannot be read
+            as that type.
+    """
+    if type.is_variable_width():
+        var builder = StringBuilder(capacity=rows)
+        if fill.is_null():
+            for _ in range(rows):
+                builder.append_null()
+        else:
+            var text = fill.as_string()
+            for _ in range(rows):
+                builder.append(text.as_bytes())
+        return AnyArray(builder^.finish())
+
+    if fill.is_null():
+        return all_null(type, rows)
+
+    comptime for candidate in ALL:
+        if type.physical == candidate:
+            var out = Array[candidate](rows)
+            var one = fill.as_scalar[candidate]()
+            for i in range(rows):
+                out[i] = one
+            return AnyArray(out^.into_data(), type)
+    raise Error("binary: unsupported dtype " + String(type))
 
 
 def _compare_text_const_erased(

@@ -115,6 +115,16 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = dataframe.def_method[PyDataFrame.top_rows](
         "top_rows", docstring="The n best rows of the frame, by one column."
     )
+    _ = dataframe.def_method[PyDataFrame.reindex](
+        "reindex",
+        docstring=(
+            "The frame on a set of row labels, whether it has them or not."
+        ),
+    )
+    _ = dataframe.def_method[PyDataFrame.reindex_columns](
+        "reindex_columns",
+        docstring="The frame under a set of column names, in that order.",
+    )
     _ = dataframe.def_method[PyDataFrame.reduce](
         "reduce",
         docstring="Every column reduced to one value, as a series of them.",

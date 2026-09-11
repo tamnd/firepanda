@@ -1903,6 +1903,20 @@ FRAME = Exposed(
             returns="DataFrame",
         ),
         Binding(
+            mojo="PyDataFrame.reindex",
+            name="reindex",
+            doc="The frame on a set of row labels, whether it has them or not.",
+            params=(("labels", "object"), ("fill_value", "object")),
+            returns="DataFrame",
+        ),
+        Binding(
+            mojo="PyDataFrame.reindex_columns",
+            name="reindex_columns",
+            doc="The frame under a set of column names, in that order.",
+            params=(("names", "list[str]"), ("fill_value", "object")),
+            returns="DataFrame",
+        ),
+        Binding(
             mojo="PyDataFrame.reduce",
             name="reduce",
             doc="Every column reduced to one value, as a series of them.",
@@ -2248,6 +2262,22 @@ FRAME = Exposed(
             ),
             body="self._drop_duplicates(subset, keep, inplace, ignore_index)",
             doc="The frame with the repeated rows removed, by a chosen rule.",
+            returns="DataFrame",
+        ),
+        Member(
+            name="reindex",
+            kind="method",
+            signature=(
+                "labels: Any = None, *, index: Any = None, columns: Any = None,"
+                " axis: Any = None, method: Any = None, copy: Any = NO_DEFAULT,"
+                ' level: Any = None, fill_value: Any = float("nan"),'
+                " limit: Any = None, tolerance: Any = None"
+            ),
+            body=(
+                "self._reindex(labels, index, columns, axis, method, copy,"
+                " level, fill_value, limit, tolerance)"
+            ),
+            doc="The frame on a set of row labels or column names, or both.",
             returns="DataFrame",
         ),
         Member(

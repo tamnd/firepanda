@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -244,6 +245,12 @@ def test_the_python_signature_matches_pandas(firepanda: ModuleType) -> None:
         """
         if ours is NO_DEFAULT or theirs is lib.no_default:
             return ours is NO_DEFAULT and theirs is lib.no_default
+        # The other exception, and there is one parameter in the whole surface
+        # that needs it. pandas spells nothing was passed as NaN in `reindex`,
+        # and a NaN is not equal to itself, so the only way to ask whether two
+        # of them mean the same thing is to ask whether both of them are one.
+        if isinstance(ours, float) and isinstance(theirs, float) and math.isnan(ours):
+            return math.isnan(theirs)
         return bool(ours == theirs)
 
     def compare(label: str, ours: object, theirs: object) -> None:

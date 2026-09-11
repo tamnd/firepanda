@@ -43,7 +43,7 @@ from firepanda.io.arrow_stream import (
 )
 from firepanda.io.read import read_csv
 from firepanda.py.args import flag, maybe_whole, number, whole, words
-from firepanda.py.build import empty_column, frame_from
+from firepanda.py.build import array_from, empty_column, frame_from
 from firepanda.py.cast import (
     NOT_FINITE,
     checks_finite,
@@ -710,6 +710,87 @@ struct PyDataFrame(Movable, Writable):
             if "numeric" in String(cause):
                 raise retagged(DTYPE, cause)
             raise retagged(COLUMN, cause)
+
+    @staticmethod
+    def reindex(
+        py_self: PythonObject,
+        labels: PythonObject,
+        fill_value: PythonObject,
+    ) raises -> PythonObject:
+        """Puts the frame on a set of row labels, whether it has them or not.
+
+        The labels arrive as a Python sequence and go through the same builder
+        that makes a column out of one, so the type of the labels is inferred
+        the same way everywhere and an index of words is asked for with words.
+
+        One thing can go wrong under here that pandas has a class for, which is
+        a frame whose own labels repeat: there is then no single row to answer
+        a label with and pandas raises `ValueError`. Anything else the core
+        refuses here is about a type, so the rule is that the message with the
+        word unique in it is the value error and the rest are type errors.
+
+        Args:
+            py_self: The frame.
+            labels: The row labels the result should have, in order.
+            fill_value: What to put in a row whose label was not found, or
+                `None` to leave it missing.
+
+        Returns:
+            A new frame of one row per label.
+        """
+        var wanted = array_from("labels", labels)
+        var value = fill(fill_value)
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        Self._frame(py_self)[].frame[].reindex(wanted, value)
+                    )
+                )
+            )
+        except cause:
+            if "unique" in String(cause):
+                raise retagged(VALUE, cause)
+            raise retagged(DTYPE, cause)
+
+    @staticmethod
+    def reindex_columns(
+        py_self: PythonObject,
+        names: PythonObject,
+        fill_value: PythonObject,
+    ) raises -> PythonObject:
+        """Puts the frame under a set of column names, in that order.
+
+        The only refusal is a name asked for twice, which pandas answers rather
+        than refusing: it hands back two columns under one name. A schema here
+        cannot hold that, so it is reported as something the library does not do
+        rather than as something the caller got wrong.
+
+        Args:
+            py_self: The frame.
+            names: The column names the result should have, in order.
+            fill_value: What to put in a column that is not there, or `None` to
+                leave it missing.
+
+        Returns:
+            A new frame under those names.
+        """
+        var wanted = List[String](capacity=Int(len(names)))
+        for name in names:
+            wanted.append(String(name))
+        var value = fill(fill_value)
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        Self._frame(py_self)[]
+                        .frame[]
+                        .reindex_columns(wanted, value)
+                    )
+                )
+            )
+        except cause:
+            raise retagged(UNSUPPORTED, cause)
 
     @staticmethod
     def reduce(

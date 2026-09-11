@@ -189,6 +189,24 @@ The first measurement timed only the whole five condition predicate of TPC-H q6,
 The cause is that a mask and a selection are two descriptions of the same answer with opposite cost profiles, and the kernels that consume them are not the same speed. A mask is one byte per input row. A selection is eight bytes per surviving row, so it is the smaller description only below one row in eight. On top of that, the same chunk of sixty five thousand int64 rows keeping seven in ten costs 43 microseconds a column to copy through the mask and 120 to gather back through the positions, with another 110 to write the positions in the first place. The copy reads and writes sequentially and the gather does a scalar indexed load per row, and no amount of arranging the operators around it changes that ratio. A selection can only win by avoiding copies, and it was never avoiding enough of them to pay for one gather at the end.
 
 What stays is the part that was worth having on its own. `Chunk` keeps its `picks` and `dense` fields and the flatten that `node_reads_selection` drives, which cost nothing while nothing produces a selection, and `select_positions` keeps the single pass rewrite that halved it from 118 microseconds to 62. What would have to change before this is worth trying again is the gather: a selection is always ascending, so reading a column through one is a sequential walk with holes in it and should cost close to what the filtered copy costs, and it currently costs nearly three times as much. Narrowing the positions from `Int` to `UInt32` halves the index traffic and is the other half of it. Issue #521 carries both.
+What that leaves is the intermediate nobody needs. Lowering turns each condition into a compare that writes a mask column and a filter that reads it, so the pair currently gathers the operand, writes a mask, scans the mask into positions and maps those back through the selection. Measured apart it is 379 microseconds on the chunk above; fused into one pass that loads through each position and writes the position again when it passes, with no mask and no gathered operand at any point, it is 166. That is the change worth making and this one is what makes it possible, because it needs a filter that already speaks in positions.
+### Added: a frame on a set of labels it may not have
+
+`DataFrame.reindex`, with both of its halves and eight of pandas' ten parameters. On the rows it is `get_indexer` and then a gather, and a label the frame does not have costs no branch of its own, since the lookup answers a not found label with a negative position and the gather already reads a negative position as a null row. On the columns it is a lookup in the schema instead, and a name the frame does not have becomes a column of missing values as tall as the frame. The boundary applies the columns first and then the rows, because narrowing the frame before gathering it means the gather moves less.
+
+`fill_value` is done on the way past rather than as a second pass over the answer. One row holding the value is appended to each column and every not found label is pointed at that row, so the gather fills as it goes. Writing it as a fill over the result would also have filled the nulls the frame already had, which pandas does not do, and that is the kind of wrong answer that ships.
+
+An integer column that loses a row comes back as float64 with a NaN in it, which is pandas' rule and lives above the gather rather than in it. A fill value stops the widening, because with a fill there is no missing row to widen for.
+
+`method` is refused, since filling a label from the label beside it needs the labels in order and is a different operation. `limit` and `tolerance` without it give pandas' own sentence back word for word. `copy` and `level` are accepted and ignored, which is what pandas does on a flat index. Two answers here are deliberately not pandas': a column name asked for twice is refused rather than answered with two columns under one name, and a label whose type is not the index's is refused rather than answered with a frame of nothing but missing rows.
+
+Part of #156, after #8.
+
+### Changed: the block of one value repeated has a name now
+
+`filled_block` in `kernel/binary.mojo`, next to the `all_null` it is the filled half of. It was `_gap_block` in `shift.mojo` and it moved because `reindex` wanted the same thing, which is a column of one value in a type the value did not arrive with. The two other copies of it, in `frame/align.mojo` and `plan/simplify.mojo`, were left where they are: the first refuses text for a reason that belongs to alignment and not to block building, and folding that in would have moved a domain rule into a place that has no domain.
+
+Part of #156, after #8.
 
 ### Added: the n best rows of a column, without sorting the frame
 

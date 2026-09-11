@@ -26,17 +26,18 @@ one loop. A null `Value` means the gap stays missing, which is what pandas does
 when `fill_value` is not passed, and it is also the only case where the answer's
 type can differ from the input's. See `Series.shift` for that part; it is a
 pandas rule and it does not belong down here.
+
+The block for the gap is `filled_block` in `binary.mojo`, next to the `all_null`
+it is the filled half of. It was written here and moved there when `reindex`
+turned out to want the same thing, which is a block of one value repeated in a
+type the value did not come with.
 """
 
 from firepanda.array.any import AnyArray
-from firepanda.array.array import Array
-from firepanda.array.strings import StringBuilder
 from firepanda.array.value import Value
-from firepanda.dtype.lists import ALL
-from firepanda.dtype.logical import LogicalType
 from firepanda.kernel.dictionary import with_categories
 
-from .binary import all_null
+from .binary import filled_block
 from .concat import concat_two_any
 
 
@@ -89,61 +90,15 @@ def shift_any(col: AnyArray, periods: Int, fill: Value) raises -> AnyArray:
     # missing rather than in any category, which is why the block needs no
     # categories of its own and the source's list is the whole answer.
     if gap >= rows:
-        return with_categories(_gap_block(col.type, rows, fill), col)
+        return with_categories(filled_block(col.type, rows, fill), col)
     if periods > 0:
         return with_categories(
             concat_two_any(
-                _gap_block(col.type, gap, fill), col.slice(0, rows - gap)
+                filled_block(col.type, gap, fill), col.slice(0, rows - gap)
             ),
             col,
         )
     return with_categories(
-        concat_two_any(col.slice(gap, rows), _gap_block(col.type, gap, fill)),
+        concat_two_any(col.slice(gap, rows), filled_block(col.type, gap, fill)),
         col,
     )
-
-
-def _gap_block(type: LogicalType, rows: Int, fill: Value) raises -> AnyArray:
-    """Builds the run of rows the shift has nothing to put in.
-
-    Four cases and they are the product of two questions, which is whether the
-    gap is missing or filled and whether the column holds bytes or numbers. The
-    missing fixed width case is the one that costs nothing, because a null holds
-    a zero everywhere in this package and the values buffer starts zeroed, so
-    `all_null` only has to install a bitmap.
-
-    Args:
-        type: The column's type. The block takes it, so a shifted timestamp is
-            still a timestamp and the concat below does not refuse the pair.
-        rows: How many rows of gap there are.
-        fill: What to put in them. A null value leaves them missing.
-
-    Returns:
-        A column of `rows` rows, all of them the same.
-
-    Raises:
-        Error: If the type has no physical layout, or the fill value cannot be
-            read as that type.
-    """
-    if type.is_variable_width():
-        var builder = StringBuilder(capacity=rows)
-        if fill.is_null():
-            for _ in range(rows):
-                builder.append_null()
-        else:
-            var text = fill.as_string()
-            for _ in range(rows):
-                builder.append(text.as_bytes())
-        return AnyArray(builder^.finish())
-
-    if fill.is_null():
-        return all_null(type, rows)
-
-    comptime for candidate in ALL:
-        if type.physical == candidate:
-            var out = Array[candidate](rows)
-            var one = fill.as_scalar[candidate]()
-            for i in range(rows):
-                out[i] = one
-            return AnyArray(out^.into_data(), type)
-    raise Error("shift: unsupported dtype " + String(type))

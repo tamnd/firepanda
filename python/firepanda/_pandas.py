@@ -2019,6 +2019,113 @@ class DataFrameMixin:
         except Exception as error:
             raise translate(error) from None
 
+    def _reindex(
+        self,
+        labels: Any,
+        index: Any,
+        columns: Any,
+        axis: Any,
+        method: Any,
+        copy: Any,
+        level: Any,
+        fill_value: Any,
+        limit: Any,
+        tolerance: Any,
+    ) -> DataFrame:
+        """The frame on a set of row labels or column names, or both.
+
+        Ten parameters and two of them do the work. The rest are here because
+        pandas has them and a caller who passes one should get an answer about
+        that parameter rather than an answer about a parameter it does not have,
+        which is why they are named in the signature and answered one at a time
+        below rather than swept into a `**kwargs` nobody reads.
+
+        `labels` is the axis `axis` names when it is the only one given, and it
+        is the axis nobody named when one of `index=` and `columns=` is. That
+        second rule is pandas' and it is not the rule a reader expects:
+        `df.reindex([1], index=[2])` does not complain about being told twice
+        and does not take the `index=` over the labels, it reads the labels as
+        the columns, because the columns are the axis left over. Naming both of
+        them and passing labels as well is the error, and so is naming an axis
+        twice by writing `axis=` next to `index=`.
+
+        `method` is the refusal. It fills a row the frame does not have from the
+        row beside it, which is a different operation from putting a value in it
+        and wants the labels sorted to mean anything. `limit` and `tolerance`
+        belong to `method`, so passing either without it is the error pandas
+        gives, word for word, rather than a refusal of our own.
+
+        `copy` and `level` are accepted and ignored, which is also what pandas
+        does. `copy` is deprecated there and everything here is immutable
+        anyway, and `level` selects one level of a MultiIndex, of which a flat
+        index has exactly one.
+
+        A `fill_value` of NaN is read as no fill value at all. pandas' own
+        default for the parameter is NaN, so a caller writing it out has asked
+        for the rows to be missing, which is what happens when nothing is
+        passed.
+
+        Args:
+            labels: The labels for whichever axis `axis` names.
+            index: The row labels.
+            columns: The column names.
+            axis: Which axis `labels` is for. The rows by default.
+            method: Refused.
+            copy: Ignored.
+            level: Ignored.
+            fill_value: What to put in a row or column the frame does not have.
+            limit: Refused, since it only means something with `method`.
+            tolerance: Refused, for the same reason.
+
+        Returns:
+            A new frame on the labels asked for.
+        """
+        from ._frame import DataFrame
+
+        if method is not None:
+            raise UnsupportedError(
+                "reindex with method= fills a label the frame does not have from"
+                " the label beside it, which needs the labels in order and is a"
+                " different operation from putting a value in the row"
+            )
+        if limit is not None or tolerance is not None:
+            raise InvalidArgumentError(
+                "limit argument only valid if doing pad, backfill or nearest reindexing"
+            )
+
+        if index is not None or columns is not None:
+            if axis is not None:
+                raise TypeError("Cannot specify both 'axis' and any of 'index' or 'columns'")
+            if labels is not None:
+                if index is not None and columns is not None:
+                    raise TypeError("Cannot specify all of 'labels', 'index', 'columns'.")
+                if index is None:
+                    index = labels
+                else:
+                    columns = labels
+        elif labels is not None:
+            if _axis_number(axis, "DataFrame", 0, (0, 1)) == 0:
+                index = labels
+            else:
+                columns = labels
+
+        value = None if isinstance(fill_value, float) and math.isnan(fill_value) else fill_value
+
+        inner = self._inner
+        try:
+            if columns is not None:
+                if isinstance(columns, str) or not hasattr(columns, "__iter__"):
+                    raise DTypeError(
+                        "Index(...) must be called with a collection of some"
+                        f" kind, {columns!r} was passed"
+                    )
+                inner = inner.reindex_columns([str(one) for one in columns], value)
+            if index is not None:
+                inner = inner.reindex(index, value)
+            return DataFrame._wrap(inner)
+        except Exception as error:
+            raise translate(error) from None
+
     def _transform(
         self, kind: str, periods: int, axis: Any, inplace: bool, ignore_index: bool
     ) -> DataFrame:

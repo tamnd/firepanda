@@ -1908,6 +1908,28 @@ class DataFrame(DataFrameMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def reindex(
+        self,
+        labels: Any = None,
+        *,
+        index: Any = None,
+        columns: Any = None,
+        axis: Any = None,
+        method: Any = None,
+        copy: Any = NO_DEFAULT,
+        level: Any = None,
+        fill_value: Any = float("nan"),
+        limit: Any = None,
+        tolerance: Any = None,
+    ) -> DataFrame:
+        """The frame on a set of row labels or column names, or both."""
+        try:
+            return self._reindex(
+                labels, index, columns, axis, method, copy, level, fill_value, limit, tolerance
+            )
+        except Exception as error:
+            raise translate(error) from None
+
     def nlargest(self, n: int, columns: Any, keep: Any = "first") -> DataFrame:
         """The n rows holding the largest values in one column."""
         try:
