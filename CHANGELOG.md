@@ -35,6 +35,19 @@ A null predicate is left alone. It keeps no rows, so it could be folded, but say
 Unlike predicate pushdown this pass rewrites the node list in place. Pushdown has to rebuild because moving a filter down makes new parents for old children and the arena hands out indices in creation order, so an input is always below the node reading it. Removing a node goes the other way: a reader ends up pointing at what the removed node pointed at, and that is below the removed node which is below the reader, so the order still holds. Splicing is now the fourth of the ways a pass can respect that invariant, after rebuilding, merging upward in place, and swapping the contents of two adjacent nodes.
 
 This is where the generated query pays off rather than the benchmark. A `WHERE` clause assembled out of parameters that were not all supplied is the common way to arrive at a constant predicate, and until now the plan carried the whole subtree underneath it.
+### Added: SQL lowers into the plan the dataframe API already builds
+
+`firepanda/sql/plan.mojo` takes a parsed `SELECT` and a catalog and gives back a `firepanda.plan.Plan`, which is the same plan `df.filter(...).group_by(...)` builds and is bound by the same binder. The rule it works under is the one the spec has had all along, that no plan node may have only a SQL constructor, and the test that says so compares the plan for `SELECT a FROM t WHERE b > 1` against the plan the three builder calls produce. If those two ever stop matching then one of the front ends has become a second engine, which is the thing a shared plan exists to stop.
+
+The lowering is written in the order a `SELECT` runs in rather than the order it is written in: scan, the `WHERE` filter, the aggregate, the `HAVING` filter, the projection, `DISTINCT`, the sort, then the limit. Writing it that way is what makes the clause rules fall out instead of being enforced, since a `WHERE` built below the projection has no way to see an alias the select list invented and an `ORDER BY` built above it does.
+
+`HAVING` is the part that needed a decision. `plan.filter` refuses a predicate that is not elementwise, correctly, so `HAVING sum(a) > 10` cannot lower to a filter holding a `sum`. The fold is added to the aggregate under a generated name instead and the filter reads that name, so the aggregate is computed once and the projection above drops the column again. The generated names start with two underscores because a query cannot write one, and they show up in `EXPLAIN`, which is the right trade: a reader who sees `__agg_0` learns something true about how the query runs.
+
+A decimal literal is refused rather than lowered. The engine's `LogicalType` has no decimal and no 128 bit integer, which is the whole reason `firepanda/sql/types.mojo` exists as a second type set, and lowering `1.1` to a double would answer `1.1 + 2.2` with `3.3000000000000003` where DuckDB gives exactly `3.3`. A refusal is visible and a wrong answer is not. Joins, subqueries, CTEs, set operations, windows and `QUALIFY` are refused by name for the ordinary reason, which is that the nodes are not built yet.
+
+`docs/specs/sql/08-plan-and-optimizer.md` said there was no planning layer, which stopped being true when the planner milestone landed one. It now records what exists, and reconciles its own fourteen node kinds with the nine in `docs/specs/planner/01-what-a-plan-is.md`: the five that are missing are the ones TPC-H does not use, and each is a gap to close in the plan rather than a node for SQL to add on the side.
+
+Part of #309.
 
 ### Fixed: three messages and a class that the conformance board found on loc
 
