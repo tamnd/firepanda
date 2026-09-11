@@ -107,13 +107,27 @@ measured as the ceiling for a bound method. The eighth window parameter,
 whichever it turns out to be, goes through a keyword route. `skew` and `kurt`
 take no `ddof` in pandas and so cost nothing on that door.
 
+## The order statistics are here on the same terms
+
+`median` is the first reduction that is not a fold. What it carries is not a
+number and not a state that can be corrected, it is a count of how many values
+the window holds at each rank, and selecting the middle of that is a descent of
+a tree rather than an arithmetic step. The structure and the three answers read
+out of it live in `ordered.mojo`, and this file does for them what it does for
+the spreads, which is to walk the edges and hand over the rows that changed.
+
+The one respect in which they are easier is that there is nothing to rebuild.
+A count is exact however long the pass runs, so the loop below has no bound to
+check and no window to redo, and the rows to add and drop are written as the
+difference between two windows rather than as two runs that assume an overlap.
+
 ## What is not here
 
-The order statistics, `median`, `quantile` and `rank`, which need the window
-sorted rather than folded and are a different data structure. The exponentially
-weighted window, which has no edges at all and so has nothing to do with this
-file. And the windows given as a frequency rather than a count, which need a
-calendar before they need any of this.
+`quantile` and `rank`, which are the other two order statistics and are waiting
+on room at the Python boundary rather than on anything in the kernel. The
+exponentially weighted window, which has no edges at all and so has nothing to
+do with this file. And the windows given as a frequency rather than a count,
+which need a calendar before they need any of this.
 """
 
 from std.math import isinf, isnan, nan
@@ -125,6 +139,7 @@ from firepanda.dtype.logical import LogicalType
 
 from .cast import cast_any
 from .nulls import present_bitmap_any
+from .ordered import Ordered, Ranks, halved, ranked
 from .spread import (
     MOMENT_KURT,
     MOMENT_SKEW,
@@ -165,6 +180,9 @@ comptime OP_SKEW = 8
 comptime OP_KURT = 9
 """Operation code for the excess kurtosis of the window."""
 
+comptime OP_MEDIAN = 10
+"""Operation code for the middle value of the window."""
+
 comptime EDGE_RIGHT = 0
 """Closed code for a window that drops the first row of its span."""
 
@@ -188,7 +206,7 @@ struct WindowOp(Equatable, ImplicitlyCopyable, Movable, Writable):
     """
 
     var code: Int
-    """The operation, as one of the ten values below."""
+    """The operation, as one of the eleven values below."""
 
     comptime SUM = Self(OP_SUM)
     """The total over the window."""
@@ -220,6 +238,9 @@ struct WindowOp(Equatable, ImplicitlyCopyable, Movable, Writable):
     comptime KURT = Self(OP_KURT)
     """The excess kurtosis of the window."""
 
+    comptime MEDIAN = Self(OP_MEDIAN)
+    """The middle value of the window."""
+
     def spreads(self) -> Bool:
         """Says whether this reduction measures a spread rather than a level.
 
@@ -238,7 +259,17 @@ struct WindowOp(Equatable, ImplicitlyCopyable, Movable, Writable):
             fourth moment beside the spread and which take no `ddof`, because
             pandas gives neither of them one.
         """
-        return self.code >= OP_SKEW
+        return self.code == OP_SKEW or self.code == OP_KURT
+
+    def orders(self) -> Bool:
+        """Says whether this reduction asks about the order of the values.
+
+        Returns:
+            True for the median, which is the first of the three that read a
+            position in the sorted window rather than folding the window into a
+            number, and so is the first that runs through `ordered.mojo`.
+        """
+        return self.code == OP_MEDIAN
 
     def __eq__(self, other: Self) -> Bool:
         """Compares two operations.
@@ -286,8 +317,10 @@ struct WindowOp(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("sem")
         elif self == Self.SKEW:
             writer.write("skew")
-        else:
+        elif self == Self.KURT:
             writer.write("kurt")
+        else:
+            writer.write("median")
 
 
 def op_named(name: StringSlice) raises -> WindowOp:
@@ -300,7 +333,7 @@ def op_named(name: StringSlice) raises -> WindowOp:
         The reduction it names.
 
     Raises:
-        Error: If it is not one of the ten this file answers.
+        Error: If it is not one of the eleven this file answers.
     """
     if name == "sum":
         return WindowOp.SUM
@@ -322,6 +355,8 @@ def op_named(name: StringSlice) raises -> WindowOp:
         return WindowOp.SKEW
     if name == "kurt":
         return WindowOp.KURT
+    if name == "median":
+        return WindowOp.MEDIAN
     raise Error("window: no window reduction is called " + String(name))
 
 
@@ -614,6 +649,8 @@ def window_agg(
     if op.shapes():
         var form = MOMENT_SKEW if op == WindowOp.SKEW else MOMENT_KURT
         return AnyArray(_moments(src, present, seen, rows, shape, form))
+    if op.orders():
+        return AnyArray(_ordered(src, present, seen, rows, shape))
     return AnyArray(
         _total(src, present, seen, rows, shape, op == WindowOp.MEAN)
     )
@@ -1065,6 +1102,65 @@ def _gather[
     for j in range(start, stop):
         if present.get(j):
             into.add(src.unsafe_offset(j).unsafe_load())
+
+
+def _ordered[
+    origin: ImmOrigin
+](
+    src: Pointer[Scalar[DType.float64], origin],
+    present: Bitmap,
+    seen: List[Int],
+    rows: Int,
+    shape: Shape,
+) raises -> Array[DType.float64]:
+    """Reads the middle out of every window, carrying the counts between them.
+
+    The same walk as `_spread` with two differences. What is carried is a count
+    of the window's values by rank rather than a number, so there is no bound to
+    check and no window that has to be rebuilt. And the rows that changed are
+    written as the difference between the last window and this one rather than
+    as two runs either side of it, which is the same thing whenever the two
+    overlap and is still right when a step has moved the window clear of where
+    it was. Doing it that way costs one comparison per row and saves clearing
+    the tree, which would be the number of distinct values in the whole column
+    every time a stepped window jumped.
+
+    Args:
+        src: The values, already float64.
+        present: Which rows hold a value.
+        seen: The running count of rows holding a value.
+        rows: How tall the column is.
+        shape: Where the windows sit.
+
+    Parameters:
+        origin: The origin of the values.
+
+    Returns:
+        A float64 column with one row per step.
+
+    Raises:
+        Error: Only what allocation raises.
+    """
+    var answer = Array[DType.float64](shape.answered(rows))
+    var target = answer.unsafe_mut_ptr()
+    var ranks = ranked(src, present, rows)
+    var carried = Ordered(len(ranks.values))
+    var last = Edges(0, 0)
+    for k in range(len(answer)):
+        var span = shape.edges(k * shape.step, rows)
+        for j in range(last.start, min(last.stop, span.start)):
+            if present.get(j):
+                carried.drop(Int(ranks.of_row[j]))
+        for j in range(max(span.start, last.stop), span.stop):
+            if present.get(j):
+                carried.add(Int(ranks.of_row[j]))
+        last = span
+        var found = seen[span.stop] - seen[span.start]
+        var value = nan[DType.float64]()
+        if found >= shape.min_periods and found > 0:
+            value = halved(carried, ranks, found)
+        target.unsafe_offset(k).unsafe_store(value)
+    return answer^
 
 
 def _extreme[

@@ -29,11 +29,12 @@ in on the Python side by a layer that would then own the rule.
 
 ### What is not here
 
-`median`, `quantile` and `rank`, which need the window sorted. `apply`, `corr`
-and `cov`. The exponentially weighted window, which has no edges and so shares
-nothing with any of this. And a window given as a frequency, which needs a
-calendar first. None of them resolves rather than resolving and refusing, for the
-reason document 07 gives.
+`quantile` and `rank`, which read out of the same ordered window the median
+already reads out of and are waiting on room at this door rather than on
+anything in the kernel. `apply`, `corr` and `cov`. The exponentially weighted
+window, which has no edges and so shares nothing with any of this. And a window
+given as a frequency, which needs a calendar first. None of them resolves rather
+than resolving and refusing, for the reason document 07 gives.
 
 ### Why ddof is the last parameter this door can take
 

@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a rolling and expanding median, and the structure the other two order statistics will read out of
+
+`median` is the eleventh window reduction and the first that is not a fold. The ten before it carry a number or a state from one window to the next and correct it for the rows that changed, which is what section 3 of `docs/specs/31-a-window-is-a-pair-of-rows.md` is about. A median cannot be carried that way, because the answer is a position in the sorted window and one row arriving can move that position past any number of values.
+
+pandas keeps a skip list per column and inserts into it and deletes from it, which costs the logarithm of the width per row. That is the right structure for a stream of values arriving one at a time and this is not a stream: the whole column is in memory before the first window is formed. So `firepanda/kernel/ordered.mojo` ranks the column's values once and then holds a window as a count of how many values it has at each rank, in a Fenwick tree. Adding a row is one update, dropping one is another, selecting the k-th smallest is one descent of the tree, and counting how many values a row beats is one prefix sum. The pass is n log n whatever the width, against n log w for a skip list and n times w log w for sorting each window separately.
+
+It is also the one reduction in this section with nothing to lose. A count of values is exact, it stays exact however long the pass runs, and a large value leaving the window takes no digits with it, so there is no error bound here and no window that has to be rebuilt. The loop is shorter than the loop for a variance and it is shorter for a reason.
+
+The rows that change between two windows are computed as the difference between them rather than as two runs either side. That only matters for a `step` wider than the window, where consecutive windows share no rows, and it is what lets the tree never be cleared. Clearing a Fenwick tree costs the number of distinct values in the whole column, and paying that per answered row would have made a stepped median dearer than sorting each window from scratch.
+
+Two answers differ from pandas and both are the difference this section already has. pandas replaces every infinity in a column with a missing value before it forms a window, so a window holding an infinity is a shorter window to pandas and its median is the median of the rows either side. Here an infinity is a value that sorts above every finite one. And the median of an even window is the mean of its two middle values, which pandas computes as their sum over two, so a window holding the largest finite double twice has a median of infinity in pandas. This computes the sum over two as well, so the two agree to the bit everywhere that sum is a number, and falls back to half of each value only in the window where the sum overflowed and both values were finite.
+
+Twenty tests in `tests/test_ordered.mojo`, which check the tree on its own before any median is taken, because a Fenwick tree whose descent starts from the wrong power of two gives a plausible wrong answer for some widths rather than crashing. Four more at the Python boundary, and `median` joins the shared parametrization in `python/tests/test_windows.py`, which is now eleven names over four placements.
+
+`quantile` and `rank` are written against the same structure and are not on the surface yet. What is stopping them is the door rather than the arithmetic: `quantile` adds a required fraction and an interpolation word, `rank` adds a method word, a direction and a percentage flag, and the seventh argument slot after the object is the last one a bound method has. Section 16 of the window document says what has to change and records the two facts about `rank` that are already settled, including that it ranks the value at the window's last row rather than the value at the answered row.
+
 ### Added: the first optimizer pass, which makes every expression smaller before any row is read
 
 A predicate like `l_discount between 0.05 - 0.01 and 0.05 + 0.01` contains two subtractions of two constants, and without a pass that notices, both are evaluated once per row. On TPC-H q6 at scale factor one that is twelve million additions that all answer the same thing. `firepanda/plan/simplify.mojo` is the pass that notices, and it is the first of the thirteen in `docs/specs/planner/02-the-pass-pipeline.md`.
