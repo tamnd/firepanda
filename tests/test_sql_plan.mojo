@@ -646,6 +646,131 @@ def test_a_lateral_table_function_is_refused_by_name() raises:
         _ = _plan("SELECT a FROM t, LATERAL range(t.a)")
 
 
+def test_a_subquery_in_a_from_is_the_plan_it_lowers_to() raises:
+    # Nothing wraps it. A derived table is a statement whose output becomes a
+    # source, so the node under the outer projection is the inner projection
+    # itself and not a node that stands for one.
+    assert_equal(
+        _plan("SELECT x FROM (SELECT a AS x FROM t) v"),
+        "PROJECT [x]\n  PROJECT [a as x]\n    SCAN t []\n",
+    )
+
+
+def test_a_derived_table_may_be_written_without_a_name() raises:
+    # The name is only what a column may be qualified by, so leaving it out
+    # costs the qualifier and nothing else.
+    assert_equal(
+        _plan("SELECT a FROM (SELECT a FROM t)"),
+        "PROJECT [a]\n  PROJECT [a]\n    SCAN t []\n",
+    )
+
+
+def test_a_column_of_a_derived_table_may_be_qualified_by_its_name() raises:
+    # `v` is not a relation, so the qualifier does not survive into the plan.
+    # What it does is say which columns are meant, and the plan then holds the
+    # same bare name the unqualified spelling holds.
+    assert_equal(
+        _plan("SELECT v.x FROM (SELECT a AS x FROM t) v"),
+        _plan("SELECT x FROM (SELECT a AS x FROM t) v"),
+    )
+
+
+def test_a_name_qualified_by_a_derived_table_has_to_be_one_it_produces() raises:
+    # `b` is a column of `t` and the subquery did not hand it out, so the outer
+    # query cannot read it. Without the check the name would lower to a bare
+    # `b`, and binding would answer it from the scan below and return a column
+    # the query has no way to name.
+    with assert_raises(contains="'v' produces no column called 'b'"):
+        _ = _plan("SELECT v.b FROM (SELECT a AS x FROM t) v")
+
+
+def test_a_star_over_a_derived_table_is_what_the_subquery_produces() raises:
+    assert_equal(
+        _plan("SELECT * FROM (SELECT b, a AS x FROM t) v"),
+        "PROJECT [b, x]\n  PROJECT [b, a as x]\n    SCAN t []\n",
+    )
+
+
+def test_a_derived_table_keeps_its_own_order_by_and_limit() raises:
+    assert_equal(
+        _plan("SELECT x FROM (SELECT a AS x FROM t ORDER BY x LIMIT 3) v"),
+        (
+            "PROJECT [x]\n"
+            "  LIMIT 3\n"
+            "    SORT [x asc nulls last]\n"
+            "      PROJECT [a as x]\n"
+            "        SCAN t []\n"
+        ),
+    )
+
+
+def test_a_derived_table_may_aggregate_and_the_query_reads_it() raises:
+    assert_equal(
+        _plan(
+            "SELECT g, total FROM"
+            " (SELECT g, sum(a) AS total FROM t GROUP BY g) v"
+        ),
+        (
+            "PROJECT [g, total]\n"
+            "  PROJECT [g, __agg_0 as total]\n"
+            "    AGGREGATE [g] -> [sum(a)]\n"
+            "      SCAN t []\n"
+        ),
+    )
+
+
+def test_a_derived_table_joins_on_the_columns_it_produces() raises:
+    # The key pair is found by name, because a column of a derived table has no
+    # relation to be found by, and the names are what the source carries
+    # alongside its node for exactly this.
+    assert_equal(
+        _plan("SELECT a FROM t JOIN (SELECT k FROM u) v ON t.a = v.k"),
+        (
+            "PROJECT [a]\n"
+            "  JOIN inner [a = k]\n"
+            "    SCAN t []\n"
+            "    PROJECT [k]\n"
+            "      SCAN u []\n"
+        ),
+    )
+
+
+def test_a_name_two_sources_both_have_is_refused_not_answered() raises:
+    # `b` is a column of `t` and the subquery hands out a `b` of its own, and
+    # the qualifier cannot save it because a derived column is unpinned. So the
+    # answer is binding's ambiguity, which is the refusal this is here to pin:
+    # the alternative is picking one of the two and being right half the time.
+    with assert_raises(contains="more than one column"):
+        _ = _plan("SELECT v.b FROM t, (SELECT b FROM u) v")
+
+
+def test_the_scans_inside_a_derived_table_number_with_the_rest() raises:
+    # Two tables, one of them inside the subquery, and the qualified names on
+    # the outside have to reach the right one. A relation number that counted
+    # from zero inside the subquery would make `t.a` and the inner scan's first
+    # column the same relation.
+    assert_equal(
+        _plan("SELECT t.a, v.z FROM t, (SELECT z FROM u) v"),
+        (
+            "PROJECT [a, z]\n"
+            "  JOIN cross []\n"
+            "    SCAN t []\n"
+            "    PROJECT [z]\n"
+            "      SCAN u []\n"
+        ),
+    )
+
+
+def test_a_lateral_subquery_is_refused_by_name() raises:
+    with assert_raises(contains="LATERAL subquery"):
+        _ = _plan("SELECT a FROM t, LATERAL (SELECT b FROM u WHERE b = t.a) v")
+
+
+def test_the_column_aliases_on_a_derived_table_are_refused_by_name() raises:
+    with assert_raises(contains="column aliases on a subquery"):
+        _ = _plan("SELECT n FROM (SELECT a FROM t) v(n)")
+
+
 def test_a_condition_may_reach_only_the_two_tables_it_joins() raises:
     # The comma binds looser than the JOIN word, so `u` and `t s` are the join
     # and `t` is beside it, and a condition naming `t` there is reaching out of
@@ -665,8 +790,6 @@ def test_the_joins_with_no_node_yet_each_say_which_one() raises:
         _ = _plan("SELECT a FROM t ASOF JOIN u ON t.a = u.k")
     with assert_raises(contains="SEMI or ANTI join"):
         _ = _plan("SELECT a FROM t SEMI JOIN u ON t.a = u.k")
-    with assert_raises(contains="subquery in a FROM"):
-        _ = _plan("SELECT a FROM t JOIN (SELECT 1 AS k) v ON t.a = v.k")
     with assert_raises(contains="alias on a table function"):
         _ = _plan("SELECT a FROM range(10) r")
     with assert_raises(contains="parenthesised table reference"):

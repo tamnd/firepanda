@@ -8,6 +8,24 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a subquery may be written where a table goes
+
+`FROM (SELECT ...) v` was refused and runs now. A derived table is a whole statement whose output becomes a source, so it lowers to that statement's own root and nothing is wrapped around it, and what the query outside gets out of it is the names that root produces.
+
+Those names are read back off the plan rather than threaded out of every function that lowers a body. A projection, an aggregate, a `VALUES` and a table function each write their output names into the node, everything in the middle hands out what it was given, and a union takes its first arm's. One caller wants the names and half a dozen functions would have had to change shape to pass them along, so the reading happens in one place instead.
+
+The alias is not a relation. A scan is one because it has a schema in the source list and a number that names it, and a derived table has neither, since its columns are computed by the nodes under it. So `v` goes into the scope as a name that says which columns are meant, and `v.x` is checked against the columns the subquery hands out and then lowered as a bare `x`. A name the subquery did not hand out is refused where it is written, and a name that two sources in one `FROM` both produce comes back from binding as an ambiguity, which is a refusal rather than the wrong column.
+
+The scans inside a subquery are numbered along with the rest, because a relation number is a number in the whole plan rather than in one block. Names work the other way round: a name the outer query put in reach is not in reach inside the subquery, so the statement lowers against a scope of its own and that scope ends at the closing bracket.
+
+A join against a derived table finds its key pairs by name, since a derived column has no relation to be found by. That path already existed for an unqualified column and did not have to be widened for this.
+
+A `VALUES` in parentheses goes through the same door, so `SELECT * FROM (VALUES (1, 2), (3, 4)) AS t` answers two rows under the names a `VALUES` invents, where before it said that a subquery in a `FROM` was not lowered.
+
+`LATERAL` is refused by name, because it reads the columns of the sources written to the left of it and so runs once per row of them rather than once for the query. The column aliases in `(SELECT ...) v(x, y)` are refused by name too, the same way a named table's are. A `WITH` is still refused, and it is the same hole one step further along: a CTE is a name bound to a plan and the plan has nowhere to hold one.
+
+Part of #309.
+
 ## [0.6.66] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).
