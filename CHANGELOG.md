@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.72] - 2026-09-12
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Three changes. Two of them are the same feature arriving in two halves: physical lowering learned the cross join onto one row, and the SQL front end learned to put an uncorrelated scalar subquery on it, so `WHERE qty > (SELECT max(band) FROM tiers)` runs and runs the subquery once. The third saves a hash table, by having a column remember the distinct count a factorize already worked out.
+
 ### Added: a column remembers how many distinct values it holds
 
 A factorize hands out an ordinal per distinct value, so the number it handed out is the distinct count of the column it read. Every caller threw that away, and a group by on a key followed by a `nunique` on the same key built two hash tables over the same values to arrive at the same number twice.
@@ -32,7 +38,7 @@ Part of #479 and of the column metadata in #375.
 
 Only a subquery that is one row by construction is taken, which is one that folds with no `GROUP BY` or one with no `FROM`. In SQL both answer exactly one row whatever is in the tables, including nothing at all, where a fold answers a null. A `LIMIT 1` looks like the same guarantee and is not: over an empty table it answers no rows, where SQL says the subquery is null, so it is refused rather than read as one. So is a subquery that hands out a row per row of its table, since the check that there is exactly one of them is a node nobody has written.
 
-One case is refused that SQL answers. A fold with no `GROUP BY` over an empty input hands out no rows in firepanda rather than one row of null, so a subquery whose block reads nothing gives the cross join a right side of no rows and it refuses by name. That is a gap in the aggregate rather than in this rewrite, and both halves of it are pinned by tests. Refusing is the safe end of it, because the alternative is quietly dropping every row of the query around it.
+One case is refused that SQL answers. A fold with no `GROUP BY` over an empty input hands out no rows in firepanda rather than one row of null, so a subquery whose block reads nothing gives the cross join a right side of no rows and it refuses by name. That is a gap in the aggregate rather than in this rewrite, filed as #608, and both halves of it are pinned by tests. Refusing is the safe end of it, because the alternative is quietly dropping every row of the query around it.
 
 The cross join goes above the `FROM` and below everything else, so a subquery in a `WHERE` is always reachable and one in a select list is reachable when the query does not aggregate. Above an aggregate it is not, because an aggregate hands up its keys and its folds rather than everything it read, and that is a refusal with the reason in it rather than a binding error further along. A correlated one is refused by the scope it lowers against, which is the same refusal a correlated `IN` gets and the same dependent join behind it.
 
@@ -5915,7 +5921,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.71...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.72...HEAD
+[0.6.72]: https://github.com/tamnd/firepanda/releases/tag/v0.6.72
 [0.6.71]: https://github.com/tamnd/firepanda/releases/tag/v0.6.71
 [0.6.70]: https://github.com/tamnd/firepanda/releases/tag/v0.6.70
 [0.6.69]: https://github.com/tamnd/firepanda/releases/tag/v0.6.69
