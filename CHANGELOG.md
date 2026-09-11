@@ -8,6 +8,19 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a filter, a sort and a limit over a wide frame, without the frame in the middle
+
+`DataFrame.filter_sort_limit`. `filter` then `sort_limit` already gave the right answer and the cost was all in the frame between them. ClickBench q23 is the shape: a pattern match over `URL` keeps ninety five rows out of a million and ten of those come back ordered by `EventTime`, and filtering first gathers a hundred and five columns a million rows at a time so that ten rows can be read out of the result.
+
+What it does instead is what `argsort_limit` was written to allow and nothing had yet used. The mask becomes a list of surviving positions in one pass, the key columns alone are gathered at those positions, the bounded sort runs over that narrow frame, and the wide columns are gathered once at the rows the limit left. The positions through the middle are positions into the kept list and not into the frame, and the lookup that turns one into the other happens in exactly one place, because getting that indirection wrong gives an answer of the right shape holding the wrong rows.
+
+A null in the mask drops the row, which is what `filter` does and what every comparison in this library produces from a null input.
+
+`frame/filter_then_limit_105` and `frame/filter_sort_limit_105` are the new benchmark pair, over a hundred and five columns with one row in sixty four surviving: 619 us against 72 us. The real query is far more selective than that and far taller, so the gap there is larger, but the pair is what the claim rests on rather than the query.
+
+Tested against the long way round rather than against a written answer wherever the answer is longer than a line, since `filter` then `sort_limit` is the definition of what this returns and both are already tested. The tie rule is written out by hand as well, because a comparison against the long way round cannot catch the case where both of them have it wrong.
+
+Part of #481 and #478.
 ### Added: sorting by value, which the core had finished and Python could not reach
 
 `DataFrame.sort_values`, `Series.sort_values`, `Series.argsort`, `Index.sort_values` and `Index.argsort` all answer now. None of them needed a kernel. The multi key sort, the single key sort and the erased pair underneath both of them were already written, tested and fast in `firepanda/kernel/sort.mojo` and on the two core types, and there was simply no way to call any of it from Python, so `df.sort_values("a")` was an `AttributeError` sitting on top of a finished sort.

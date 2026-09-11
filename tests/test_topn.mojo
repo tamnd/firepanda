@@ -816,5 +816,91 @@ def test_a_limit_refuses_the_arguments_it_cannot_answer() raises:
         _ = df.argsort_limit(["nope"], [False], [False], 3)
 
 
+def _mask(values: List[Bool]) raises -> Array[DType.bool]:
+    """Builds a filter mask out of a list, every row present.
+
+    Args:
+        values: One flag per row.
+
+    Returns:
+        The mask.
+    """
+    var out = Array[DType.bool](len(values))
+    for i in range(len(values)):
+        out.set_valid(i, values[i])
+    return out^
+
+
+def test_a_filtered_limit_is_the_filter_then_the_limit() raises:
+    # The definition, checked against itself. `filter_sort_limit` exists to
+    # avoid building the frame in the middle, so what it has to prove is that
+    # skipping it changes nothing about the answer.
+    var df = _ranked()
+    var keep = _mask([True, False, True, True, True, True, False, True])
+    var want = _rows_of(
+        df.filter(keep).sort_limit(["key"], [False], [False], 3)
+    )
+    var got = _rows_of(df.filter_sort_limit(keep, ["key"], [False], [False], 3))
+    _assert_same(got, want, "three of the six kept rows")
+    # Written out too, because a comparison against the long way round cannot
+    # catch the case where both have the tie rule wrong. The kept keys are
+    # rows 0, 2, 3, 4, 5, 7 holding 3, 3, 2, 1, 3, 1, so the smallest three are
+    # the two ones and then the two, in the order the frame holds them.
+    assert_equal(got[0], 4, "the first one")
+    assert_equal(got[1], 7, "the second one")
+    assert_equal(got[2], 3, "then the two")
+
+
+def test_a_filtered_limit_carries_the_offset() raises:
+    var df = _ranked()
+    var keep = _mask([True, True, True, True, True, True, True, True])
+    var want = _rows_of(
+        df.filter(keep).sort_limit(["key"], [False], [False], 2, 3)
+    )
+    var got = _rows_of(
+        df.filter_sort_limit(keep, ["key"], [False], [False], 2, 3)
+    )
+    _assert_same(got, want, "two rows after three, nothing filtered out")
+
+
+def test_a_filtered_limit_drops_the_rows_a_null_mask_does_not_keep() raises:
+    # A null in the mask drops the row, which is what `filter` does and what
+    # every comparison in this library produces for a null input. The row it
+    # hides here is the only two, so getting it wrong changes the answer.
+    var df = _ranked()
+    var keep = Array[DType.bool](8)
+    for i in range(8):
+        if i == 3:
+            keep.set_null(i)
+        else:
+            keep.set_valid(i, True)
+    var got = _rows_of(df.filter_sort_limit(keep, ["key"], [False], [False], 4))
+    assert_equal(len(got), 4, "four rows kept")
+    assert_equal(got[0], 1, "the three ones first")
+    assert_equal(got[1], 4, "then the second")
+    assert_equal(got[2], 7, "then the third")
+    assert_equal(got[3], 6, "then the two that was not hidden")
+
+
+def test_a_filtered_limit_that_keeps_nothing_gives_nothing() raises:
+    var df = _ranked()
+    var keep = _mask([False, False, False, False, False, False, False, False])
+    var got = df.filter_sort_limit(keep, ["key"], [False], [False], 3)
+    assert_equal(len(got), 0, "no rows")
+    assert_equal(got.width(), 2, "and both columns still there")
+
+
+def test_a_filtered_limit_refuses_a_mask_of_the_wrong_length() raises:
+    var df = _ranked()
+    var short = _mask([True, False, True])
+    with assert_raises(contains="as long as the frame is tall"):
+        _ = df.filter_sort_limit(short, ["key"], [False], [False], 3)
+    var none = List[String]()
+    var no_flags = List[Bool]()
+    var keep = _mask([True, True, True, True, True, True, True, True])
+    with assert_raises(contains="at least one key"):
+        _ = df.filter_sort_limit(keep, none, no_flags, no_flags, 3)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
