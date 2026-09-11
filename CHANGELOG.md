@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: slice pushdown and top n, so ten rows are not paid for six million times
+
+Four of the twenty two TPC-H queries end in an order by with a limit on it, and the difference between answering one of those by sorting the whole table and answering it by keeping the best ten rows as they go past is most of the query. `limits` is the pass that spots the shape.
+
+Three rules. A limit above a sort puts a bound on the sort, which is a sort that only has to get the first n rows right, which is what a heap of size n does in one pass instead of what a full sort does in several. A limit above a limit becomes one limit, because two slices of a row sequence compose into one slice and working out which one is arithmetic that is easier to get right once here than at every place that builds a pair. And a limit above a projection swaps with it, so the projection evaluates n rows rather than all of them.
+
+The bound on a sort is deliberately advisory. The limit that produced it is still sitting above the sort and still doing the cutting, so an operator that has not learned to read the bound is slower than one that has and is not wrong. That is what lets the rule land now, before anything lowers a sort at all. A sort node comes out of the builder with its length set to `NO_LIMIT` rather than to zero, since zero would mean a sort that owes nobody any rows and the absence of a bound has to be written as an absence.
+
+The swap is worth describing because it is the way around the thing that made predicate pushdown rebuild the entire node list. Pushing a node down makes a new parent for an old child, which the arena's creation order forbids. But when both nodes have exactly one input, nothing has to move: the two nodes trade contents and keep their indices and their inputs. The upper index goes on being the upper index and simply holds the projection now. Same plan, same order, no rebuild, and the root index a caller is holding still means the root. The trick works for any two adjacent unary nodes and nothing about it is specific to limits.
+
+A projection is only swapped with when every expression in it is elementwise. A window function reads its whole partition, so cutting the rows down before it runs gives a different answer rather than the same answer sooner. A filter is never swapped with, because a limit below a filter counts rows the filter was going to throw away, and the same goes for a distinct and an aggregate. A union is not pushed into either, since capping each arm means a new node above each arm and a new node comes out above the union rather than below it, which wants the rebuild machinery and belongs with a pass that already has it. Every rule declines when the node below has more than one reader.
+
+Twenty three tests, and the composition cases read as a table, since a slice of a slice has four different answers depending on which of the two lengths is absent. An outer limit that runs off the end of an inner one keeps what is left rather than what was asked for, and an offset past the end of an inner limit keeps nothing.
+
+Part of #377.
+
 ### Added: a column that is also the labels
 
 `DataFrame.set_index`, `DataFrame.reset_index` and `DataFrame.sort_index`, plus `Index.searchsorted` and `Index.isin`. A column and an index hold the same thing in this library, so `set_index` moves rather than converts: the values are copied across, the column is taken out unless `drop=False` says to leave it, and the level takes the column's name.
