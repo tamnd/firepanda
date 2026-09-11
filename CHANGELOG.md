@@ -41,6 +41,7 @@ Three refusals are stricter than pandas on purpose. `adjust`, `ignore_na` and `b
 Twenty five tests in `tests/test_ewm.mojo`, which quote pandas' answers so the recurrence can be checked without pandas installed, and ninety eight at the Python boundary in `python/tests/test_ewm.py`, every one of them against a running pandas, including the eighteen properties the window object reports about itself. The eight that answer nothing are checked against pandas rather than against a written down `None`, because an absent attribute is a different answer from `None` and only pandas can say which of the two it gives.
 
 Closes #491. Part of #161, after #488. `corr` and `cov` are not here, because they need a second column and are the same piece of work as `Rolling.corr` and `Rolling.cov`, so all four should land together, and the crossing keeps its seventh argument slot free for them.
+
 ### Added: projection pushdown, so a column nothing reads is never read
 
 The third pass in `docs/specs/planner/02-the-pass-pipeline.md` and the one the spec calls the single largest by a wide margin. In a column store the difference between reading three columns and reading forty is most of the query. The first version of the TPC-H driver in `firepanda-bench` filtered all sixteen columns of `lineitem` to answer questions that read two, and naming the needed columns by hand is most of the distance from 6.671 seconds to about two across the twenty two queries. `firepanda/plan/prune.mojo` is the planner doing that instead of the person writing the query.
