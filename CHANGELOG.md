@@ -23,6 +23,16 @@ One deliberate divergence from DuckDB. `DATE '2013-07-01' >= '2013-07-01 12:00:0
 `temporal/range_literal` and `temporal/range_integer` are the new benchmark pair. They are the same comparison over the same numbers and the only difference is that one of them arrives as eight characters, so if they are not within noise of each other the parse is still inside the loop.
 
 Part of #483.
+### Fixed: a plan declared the wrong type for ten of the seventeen reductions
+
+`agg_type` names the type a reduction produces, and binding a plan asks it before any row moves. It had a case for a count, a size, a mean and a sum, and handed the input type straight back for everything else. That rule is right for exactly four reductions. A minimum, a maximum, a first and a last report an element that was in the column, so they answer the column's type. The other ten report a number about the column and do not.
+
+So a bound plan holding `stddev(qty)` over an int32 column declared int32, while the kernel answers float64, and the same went for a variance, a median, a quantile, a skew, a standard error, a correlation and a covariance. A distinct count over a column of words declared a column of words. The reachable half of that is SQL, where `stddev`, `var_samp` and `median` all parse today, and no wrong data has shipped because those three are refused later at lowering, which is luck rather than design: a plan whose declared type is not the type of the data under it is the one thing this function exists to prevent.
+
+The rule is now written down as the rule rather than as a list of cases, and it is asserted over all seventeen kinds against `AggKind.result_dtype` rather than over the ones somebody thought of, because the two were written at different times and a kind missing from one of them is what this was.
+
+A temporal column is still not asked about here, and the docstring says so rather than leaving it to be found. `temporal_agg_type` is the pandas table for those and the grouped kernel reads it, while the streaming group operator computes a mean of instants as a float and declares one, so the two front doors of this library answer that query differently. That is its own change and it has an issue rather than a line in this function.
+
 ### Changed: the null and the empty string in a text reduction are pinned to pandas and DuckDB
 
 No behaviour changed. What changed is that the rule is now written down against something rather than argued from first principles, because the ClickBench hits table has empty strings and no nulls, and the next dataset will have both.

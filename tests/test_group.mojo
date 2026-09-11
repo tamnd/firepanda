@@ -52,6 +52,7 @@ from firepanda.kernel.group import (
     AggKind,
     _partition_parts,
     _slab_shift,
+    agg_type,
     aggregate_group,
     aggregate_group_any,
     aggregate_group_many,
@@ -74,6 +75,7 @@ from firepanda.kernel.group import (
     group_sum,
     group_var,
 )
+from firepanda.dtype.logical import LogicalType
 
 
 def codes_of(values: List[Scalar[DType.uint32]]) -> Array[DType.uint32]:
@@ -2624,6 +2626,99 @@ def test_a_partitioned_grouped_sum_steps_over_a_nan() raises:
             break
 
     assert_equal(wrong, -1, String(what, " is wrong at group ", wrong))
+
+
+def all_kinds() -> List[AggKind]:
+    """Every reduction there is, so a rule can be asserted over all of them."""
+    var kinds = List[AggKind]()
+    kinds.append(AggKind.SUM)
+    kinds.append(AggKind.MEAN)
+    kinds.append(AggKind.MIN)
+    kinds.append(AggKind.MAX)
+    kinds.append(AggKind.COUNT)
+    kinds.append(AggKind.FIRST)
+    kinds.append(AggKind.LAST)
+    kinds.append(AggKind.SIZE)
+    kinds.append(AggKind.VAR)
+    kinds.append(AggKind.STD)
+    kinds.append(AggKind.MEDIAN)
+    kinds.append(AggKind.QUANTILE)
+    kinds.append(AggKind.NUNIQUE)
+    kinds.append(AggKind.CORR)
+    kinds.append(AggKind.COV)
+    kinds.append(AggKind.SEM)
+    kinds.append(AggKind.SKEW)
+    return kinds^
+
+
+def test_the_declared_type_is_the_type_the_kernel_produces() raises:
+    """`agg_type` names a schema and `result_dtype` names a buffer, and a plan
+    whose declared type is not the type of the data under it is the thing the
+    first of those exists to prevent.
+
+    Asserted over every reduction rather than over the ones somebody thought of,
+    because the two were written at different times and the gap that started
+    this was a kind missing from one of them.
+    """
+    var kinds = all_kinds()
+    for k in range(len(kinds)):
+        var declared = agg_type(kinds[k], LogicalType.INT32)
+        assert_true(
+            declared.physical == kinds[k].result_dtype(DType.int32),
+            String(kinds[k], " declares ", declared, " over an int32 column"),
+        )
+
+
+def test_a_distinct_count_is_a_number_and_not_a_value_of_the_column() raises:
+    """A distinct count over a column of words is an int64, not a word. It was
+    the column's own type here until this test, which meant a plan that counted
+    the distinct values of a text column declared a text column."""
+    assert_true(
+        agg_type(AggKind.NUNIQUE, LogicalType.STRING) == LogicalType.INT64
+    )
+    assert_true(
+        agg_type(AggKind.NUNIQUE, LogicalType.INT32) == LogicalType.INT64
+    )
+
+
+def test_a_spread_is_a_float_whatever_it_measured() raises:
+    """The nine that measure a spread or an order statistic go through float64
+    for every input dtype, which is what the cores answer, so the schema says so
+    rather than saying what went in."""
+    var kinds = List[AggKind]()
+    kinds.append(AggKind.VAR)
+    kinds.append(AggKind.STD)
+    kinds.append(AggKind.SEM)
+    kinds.append(AggKind.SKEW)
+    kinds.append(AggKind.MEDIAN)
+    kinds.append(AggKind.QUANTILE)
+    kinds.append(AggKind.CORR)
+    kinds.append(AggKind.COV)
+    for k in range(len(kinds)):
+        assert_true(
+            agg_type(kinds[k], LogicalType.INT32) == LogicalType.FLOAT64,
+            String(kinds[k], " over an int32 column"),
+        )
+
+
+def test_the_four_that_report_an_element_keep_the_column_type() raises:
+    """The other half of the rule. These four hand back something that was in
+    the column, so a minimum over a column of instants is an instant and not a
+    count of seconds."""
+    var kinds = List[AggKind]()
+    kinds.append(AggKind.MIN)
+    kinds.append(AggKind.MAX)
+    kinds.append(AggKind.FIRST)
+    kinds.append(AggKind.LAST)
+    for k in range(len(kinds)):
+        assert_true(
+            agg_type(kinds[k], LogicalType.INT32) == LogicalType.INT32,
+            String(kinds[k], " over an int32 column"),
+        )
+        assert_true(
+            agg_type(kinds[k], LogicalType.STRING) == LogicalType.STRING,
+            String(kinds[k], " over a text column"),
+        )
 
 
 def main() raises:
