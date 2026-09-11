@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: an `IN` over a subquery lowers and runs
+
+`WHERE x IN (SELECT k FROM u)` is a semi join between whatever the `FROM` built and the subquery's own plan, on `x = k`. That is the first subquery shape the front end lowers at all, and it is the rewrite decorrelation is built out of rather than a special case beside it.
+
+The `WHERE` is split on `AND` and the parts that are an `IN` over a subquery are taken out and put above the rest, which stays one filter underneath. A query with no such part is split and put back exactly as it was written, so its plan is the shape it always was. The rest of the condition goes under the join rather than over it, since a semi join hands out the left side unchanged and the two commute.
+
+The rewrite is the whole of `IN` and not a near miss. A left row that matched several right rows comes back once, which is what a semi join does anyway, and a null on either side matches nothing, which is what `IN` answers: `NULL IN (1, 2)` is null and a row a filter does not keep, and `3 IN (1, NULL)` is null and the same.
+
+`NOT IN` is refused, and that one is not about effort. The anti join it looks like is the classic wrong answer: one null anywhere in the subquery makes `NOT IN` null for every row rather than true, and an anti join keeps those rows rather than dropping them. The null aware anti join that answers it is a node nobody has written. A correlated `IN` refuses too, since the subquery lowers against a scope of its own and the outer name it reaches for is not in reach there.
+
+Part of #309.
+
 ### Added: a `SEMI` or an `ANTI` join lowers and runs
 
 Both were refused by name and both work now. They keep left rows and no right columns, the first the rows that matched and the second the rows that did not, so the two of them over one condition partition the left side. The join operator already had both kinds, which is why this is front end work rather than engine work: the lowering had to learn the words and then take the right side back out of reach.
