@@ -474,5 +474,69 @@ def test_an_intersect_is_refused_by_name() raises:
         )
 
 
+def test_a_range_is_a_table_that_reads_no_table() raises:
+    var out = run("SELECT * FROM range(5)", session())
+    assert_equal(len(out.schema), 1, "one column")
+    assert_equal(
+        out.schema[0].name, "range", "called after the function, as DuckDB does"
+    )
+    same(read_back(out, "range"), [0, 1, 2, 3, 4], "five rows out of nothing")
+
+
+def test_a_generate_series_stops_on_its_bound() raises:
+    same(
+        read_back(
+            run("SELECT * FROM generate_series(3)", session()),
+            "generate_series",
+        ),
+        [0, 1, 2, 3],
+        "the one row that tells the two functions apart",
+    )
+
+
+def test_a_range_takes_a_start_and_a_stop_and_a_step() raises:
+    same(
+        read_back(run("SELECT * FROM range(10, 20, 4)", session()), "range"),
+        [10, 14, 18],
+        "and stops before the bound",
+    )
+
+
+def test_an_argument_is_folded_before_the_series_is_built() raises:
+    same(
+        read_back(run("SELECT * FROM range(2 + 3)", session()), "range"),
+        [0, 1, 2, 3, 4],
+        "simplify folded it on the way down",
+    )
+
+
+def test_a_where_runs_over_a_series() raises:
+    same(
+        read_back(
+            run("SELECT * FROM range(10) WHERE range > 6", session()), "range"
+        ),
+        [7, 8, 9],
+        "the rest of the query does not care where the rows came from",
+    )
+
+
+def test_a_series_can_be_counted() raises:
+    same(
+        read_back(run("SELECT count(*) AS n FROM range(7)", session()), "n"),
+        [7],
+        "an aggregate over a source that read nothing",
+    )
+
+
+def test_a_table_function_nobody_wrote_is_refused_by_name() raises:
+    with assert_raises(contains="there is no table function called read_csv"):
+        _ = run("SELECT * FROM read_csv(1)", session())
+
+
+def test_an_alias_on_a_table_function_is_refused_by_name() raises:
+    with assert_raises(contains="does not lower an alias on a table function"):
+        _ = run("SELECT * FROM range(5) AS r(i)", session())
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

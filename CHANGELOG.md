@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: SELECT * FROM range(5) runs
+
+The SQL front end builds the table function node now, so a query may write a call where a table goes. `range` and `generate_series` both work, with a stop, a start and a stop, or a start, a stop and a step.
+
+The column comes out called after the function, so `SELECT * FROM range(5)` answers a column called `range`. That is what DuckDB calls it, and a name firepanda invents is a name a query can write, so inventing the same one is the difference between a query that ports and one that almost does.
+
+Nothing about it touches the catalog and nothing is added to the list of schemas a scan reads, so this is the first query that runs without a frame behind it. `SELECT count(*) FROM range(7)` answers seven and reads nothing.
+
+The arguments are lowered as expressions against nothing, the way a `VALUES` lowers its rows, so `range(2 + 3)` works because constant folding has already run by the time the series is built.
+
+An alias is refused for now. The column belongs to no relation, so a name written in front of it would have nothing to resolve against, and putting the alias in scope pointing at a relation that does not exist would resolve to the wrong one rather than to none. A `LATERAL` call is refused too, since it is called once per row to its left rather than once for the query.
+
+Part of #309.
+
 ### Added: a table function is a source, so range and generate_series run
 
 `TABLE_FUNCTION` is the eleventh plan node and the third one with no input. What it is called is in `source` and its arguments are its expressions, and like a `VALUES` every one of them has to read nothing, because a table function is called where a table goes and there is nothing under it to read.
