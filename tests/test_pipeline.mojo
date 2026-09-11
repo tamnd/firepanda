@@ -42,6 +42,7 @@ from firepanda.exec import (
     Reduce,
     Scan,
     Sort,
+    Window,
     node_apply,
     node_computes_per_row,
     node_ends_early,
@@ -1848,6 +1849,130 @@ def test_a_sort_over_nothing_gives_nothing_back() raises:
     var out = pipeline^.run()
     assert_equal(len(out), 0, "rows")
     assert_equal(out.width(), 2, "and the schema still describes the result")
+
+
+def test_a_window_over_the_whole_frame_writes_one_value_on_every_row() raises:
+    # No partition keys is one partition, and the six rows arrived in three
+    # chunks, so the answer on the first row is a sum over rows that were not
+    # in the chunk it came in.
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Window(List[Int](), [0], [AggKind.SUM], ["total"])))
+    var out = pipeline^.run()
+    assert_equal(out.width(), 3, "the input's columns and then the window")
+    assert_equal(out.schema[2].name, "total", "under the name it was given")
+    var got = read_back(out, "total")
+    assert_equal(len(got), 6, "every row comes back")
+    for i in range(6):
+        assert_equal(got[i], 21, "row " + String(i))
+
+
+def test_a_window_partitions_on_a_column_of_the_chunk() raises:
+    # Two windows over one partitioning, which is one grouping pass. The mask
+    # splits the six rows into four and two, and each row reads its own side.
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(
+        Node(
+            Window(
+                [1],
+                [0, 0],
+                [AggKind.SUM, AggKind.COUNT],
+                ["total", "how_many"],
+            )
+        )
+    )
+    var out = pipeline^.run()
+    assert_equal(out.width(), 4, "two windows on two columns")
+    var totals = read_back(out, "total")
+    assert_equal(totals[0], 14, "the rows the mask kept sum to this")
+    assert_equal(totals[1], 7, "and the two it dropped to this")
+    assert_equal(totals[4], 7, "which the last of them reads too")
+    assert_equal(totals[5], 14, "and the last kept row reads the other")
+    var counts = read_back(out, "how_many")
+    assert_equal(counts[0], 4, "four rows on that side")
+    assert_equal(counts[1], 2, "and two on this one")
+
+
+def test_a_window_leaves_the_rows_where_they_were() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Window([1], [0], [AggKind.SUM], ["total"])))
+    var out = pipeline^.run()
+    var got = read_back(out, "n")
+    for i in range(6):
+        assert_equal(got[i], Int64(i + 1), "row " + String(i))
+
+
+def test_a_window_hands_back_the_chunks_it_was_given() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Window(List[Int](), [0], [AggKind.SUM], ["total"])))
+    var out = pipeline^.run()
+    assert_equal(out.columns[0].num_chunks(), 3, "two, three and one again")
+    assert_equal(out.columns[2].num_chunks(), 3, "the window is cut the same")
+
+
+def test_a_window_is_a_breaker_and_cuts_the_pipeline() raises:
+    assert_true(
+        node_is_breaker(
+            Node(Window(List[Int](), [0], [AggKind.SUM], ["total"]))
+        ),
+        "it is one",
+    )
+
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Filter(1)))
+    pipeline.add(Node(Window(List[Int](), [0], [AggKind.SUM], ["total"])))
+    pipeline.add(Node(Limit(2)))
+    var cuts = pipeline.cut_points()
+    assert_equal(len(cuts), 1, "one breaker")
+    assert_equal(cuts[0], 1, "at the second operator")
+    assert_equal(pipeline.stages(), 2, "stages")
+
+
+def test_a_window_after_a_filter_reduces_what_survived() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Filter(1)))
+    pipeline.add(Node(Window(List[Int](), [0], [AggKind.SUM], ["total"])))
+    var out = pipeline^.run()
+    var got = read_back(out, "total")
+    assert_equal(len(got), 4, "the rows the mask kept")
+    for i in range(4):
+        assert_equal(got[i], 14, "row " + String(i))
+
+
+def test_a_window_over_nothing_gives_nothing_back() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Limit(0)))
+    pipeline.add(Node(Window(List[Int](), [0], [AggKind.SUM], ["total"])))
+    var out = pipeline^.run()
+    assert_equal(len(out), 0, "rows")
+    assert_equal(out.width(), 3, "and the schema still describes the result")
+
+
+def test_a_window_with_no_window_in_it_is_refused() raises:
+    with assert_raises(contains="is the operator below it"):
+        _ = Window(List[Int](), List[Int](), List[AggKind](), List[String]())
+
+
+def test_a_window_whose_lists_do_not_line_up_is_refused() raises:
+    with assert_raises(contains="2 columns, 1 reductions"):
+        _ = Window(List[Int](), [0, 0], [AggKind.SUM], ["total", "how_many"])
+
+
+def test_a_window_on_a_column_the_chunk_does_not_have_is_refused() raises:
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="window: column 7 is outside"):
+        pipeline.add(Node(Window(List[Int](), [7], [AggKind.SUM], ["total"])))
+
+
+def test_a_window_partitioned_on_a_column_that_is_not_there_is_refused() raises:
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="partition column 7 is outside"):
+        pipeline.add(Node(Window([7], [0], [AggKind.SUM], ["total"])))
+
+
+def test_a_window_given_the_same_partition_column_twice_is_refused() raises:
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="partition column 1 was given twice"):
+        pipeline.add(Node(Window([1, 1], [0], [AggKind.SUM], ["total"])))
 
 
 def main() raises:

@@ -737,6 +737,319 @@ struct Sort(Movable):
             at = start
 
 
+struct Window(Movable):
+    """Holds every row, reduces each partition, writes the answer on every row.
+
+    A breaker for the same reason a sort is one. `sum(x) OVER (PARTITION BY k)`
+    on the first row is a sum over rows that have not arrived yet, so there is
+    nothing to emit until the input has run out, and unlike a group by there is
+    nothing shorter than the input to hold in the meantime, because every row
+    that went in comes back out.
+
+    What comes out is wider than what went in. The input's columns are handed
+    through at the positions they had and the windows are appended after them,
+    which is what `SELECT x, sum(x) OVER ()` asks for and what the logical node
+    above this says it produces. It is the only operator here that adds a column
+    without computing it from the row it is on.
+
+    One partitioning per operator, and the partition is the whole frame when
+    there are no keys. Two windows over different keys are two of these stacked,
+    which is also how DuckDB runs them, and the plan is what decides the order
+    they go in.
+
+    The frame is the partition and nothing else. There is no `ROWS BETWEEN`
+    here and no ordering inside the window, so every row of a partition gets the
+    same value, which is the whole of `OVER (PARTITION BY ...)` with no frame
+    clause and none of `OVER (ORDER BY ...)`. An ordered window is a running
+    fold rather than one value broadcast, and it is a different loop rather than
+    an argument to this one, so lowering refuses it rather than answering it
+    wrongly.
+
+    Chunk boundaries survive, as they do through a sort. The input's row counts
+    are recorded on the way in and the output is cut at the same places, so a
+    window in the middle of a pipeline does not hand ten million rows up as one
+    chunk. Unlike a sort, each output chunk holds the rows that arrived in it.
+    """
+
+    var keys: List[Int]
+    """The partition columns, as input positions. Empty is the whole frame."""
+
+    var sources: List[Int]
+    """The column each window reduces, as input positions."""
+
+    var kinds: List[AggKind]
+    """Which reduction each window is."""
+
+    var names: List[String]
+    """The name each appended column gets."""
+
+    var input: Schema
+    """The schema of the chunks coming in, filled in by `Pipeline.add`."""
+
+    var held: List[ChunkedArray]
+    """The chunks seen so far, one column per position."""
+
+    var sizes: List[Int]
+    """How many rows each chunk that arrived had, in order."""
+
+    var output: List[AnyArray]
+    """The result, in chunks, in reverse order so `finish` can pop."""
+
+    var ran: Bool
+    """Whether the windows have been computed."""
+
+    var width: Int
+    """The number of input columns, known once `bind` has run."""
+
+    def __init__(
+        out self,
+        var keys: List[Int],
+        var sources: List[Int],
+        var kinds: List[AggKind],
+        var names: List[String],
+    ) raises:
+        """Constructs a window.
+
+        Args:
+            keys: The partition columns, as input positions, or none for the
+                whole frame. Consumed.
+            sources: The column each window reduces. Consumed.
+            kinds: The reduction each window runs. Consumed.
+            names: The name each appended column gets. Consumed.
+
+        Raises:
+            If there is no window to compute, or if the three lists that
+            describe them are a different length from each other.
+        """
+        if len(sources) == 0:
+            raise Error(
+                "window: a window operator that computes no window is the"
+                " operator below it"
+            )
+        if len(kinds) != len(sources) or len(names) != len(sources):
+            raise Error(
+                String(
+                    "window: ",
+                    len(sources),
+                    " columns, ",
+                    len(kinds),
+                    " reductions and ",
+                    len(names),
+                    " names",
+                )
+            )
+        self.keys = keys^
+        self.sources = sources^
+        self.kinds = kinds^
+        self.names = names^
+        self.input = Schema()
+        self.held = List[ChunkedArray]()
+        self.sizes = List[Int]()
+        self.output = List[AnyArray]()
+        self.ran = False
+        self.width = 0
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Records the input schema and adds the columns the windows produce.
+
+        Args:
+            input: The schema of the chunks that will arrive. Consumed.
+
+        Returns:
+            The input's columns as they were, then one column per window.
+
+        Raises:
+            If a position is outside the input, if a key is repeated, or if a
+            reduction has no meaning on the column it was given.
+        """
+        for k in range(len(self.keys)):
+            var at = self.keys[k]
+            if at < 0 or at >= len(input):
+                raise Error(
+                    String(
+                        "window: partition column ",
+                        at,
+                        " is outside a schema of ",
+                        len(input),
+                        " columns",
+                    )
+                )
+            for j in range(k):
+                if self.keys[j] == at:
+                    raise Error(
+                        String(
+                            "window: partition column ", at, " was given twice"
+                        )
+                    )
+
+        var fields = List[Field](capacity=len(input) + len(self.sources))
+        for i in range(len(input)):
+            fields.append(input[i].copy())
+        for a in range(len(self.sources)):
+            var at = self.sources[a]
+            if at < 0 or at >= len(input):
+                raise Error(
+                    String(
+                        "window: column ",
+                        at,
+                        " is outside a schema of ",
+                        len(input),
+                        " columns",
+                    )
+                )
+            var kind = self.kinds[a]
+            if kind.reads_two_columns():
+                raise Error(
+                    String(
+                        "window: ",
+                        kind,
+                        " reads two columns and a window here reads one",
+                    )
+                )
+            var source = input[at].dtype
+            if source.is_variable_width() and (
+                kind == AggKind.SUM or kind == AggKind.MEAN
+            ):
+                raise Error(String("window: ", kind, " is not defined on text"))
+            fields.append(Field(self.names[a], agg_type(kind, source)))
+
+        self.input = input^
+        self.width = len(self.input)
+        for i in range(self.width):
+            self.held.append(ChunkedArray(self.input[i].dtype))
+        return Schema(fields^)
+
+    def update_state(self) -> NodeStatus:
+        """Reports whether the windows have been computed and handed back.
+
+        Returns:
+            NEED_MORE_INPUT until `finish` has run them, then HAVE_OUTPUT while
+            chunks remain and FINISHED after that.
+        """
+        if not self.ran:
+            return NodeStatus.NEED_MORE_INPUT
+        if len(self.output) > 0:
+            return NodeStatus.HAVE_OUTPUT
+        return NodeStatus.FINISHED
+
+    def process(mut self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Keeps the chunk and emits nothing.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            None, always. The first row's answer reads rows that have not
+            arrived.
+
+        Raises:
+            If the chunk's width does not match the input schema.
+        """
+        if chunk.width() != self.width:
+            raise Error(
+                String(
+                    "window: chunk has ",
+                    chunk.width(),
+                    " columns and the input schema has ",
+                    self.width,
+                )
+            )
+        self.sizes.append(len(chunk))
+        var backwards = chunk^.into_columns()
+        var forwards = List[AnyArray](capacity=len(backwards))
+        while len(backwards) > 0:
+            forwards.append(backwards.pop())
+        for i in range(self.width):
+            self.held[i].append(forwards.pop())
+        return None
+
+    def finish(mut self) raises -> Optional[Chunk]:
+        """Runs the windows the first time, then hands the rows back in chunks.
+
+        Returns:
+            One chunk of the result per call, in the order the chunks arrived,
+            and None when there are none left.
+
+        Raises:
+            If a partition key's dtype has no physical layout, or if a reduction
+            fails on the column it was given.
+        """
+        if not self.ran:
+            self.ran = True
+            self._run()
+        if len(self.output) == 0:
+            return None
+        var wide = self.width + len(self.names)
+        var row = List[AnyArray](capacity=wide)
+        for _ in range(wide):
+            row.append(self.output.pop())
+        return Chunk(row^)
+
+    def _run(mut self) raises:
+        """Reduces each partition and lays the rows out as chunks to be popped.
+
+        The columns are flattened once each, because a partition reaches any row
+        from any chunk and the grouping is one pass over the whole column. Then
+        each window is reduced to one value per partition and read back out
+        through the same ordinals that produced it, which is a gather per window
+        rather than a scan per row.
+
+        The whole frame case gets a column of zero ordinals rather than a branch
+        of its own. It is one pass over four bytes a row to avoid a second way
+        of writing the same three lines, and a whole frame window on a frame big
+        enough for that to matter is rare enough to leave until it is measured.
+
+        Raises:
+            If a partition key's dtype has no physical layout, or if a reduction
+            fails on the column it was given.
+        """
+        var backwards = List[AnyArray](capacity=self.width)
+        while len(self.held) > 0:
+            backwards.append(self.held.pop().combine())
+        var flat = List[AnyArray](capacity=self.width)
+        while len(backwards) > 0:
+            flat.append(backwards.pop())
+        if self.width == 0:
+            return
+        var rows = len(flat[0])
+        if rows == 0:
+            return
+
+        var codes = Array[DType.uint32](rows)
+        var groups = 1
+        if len(self.keys) > 0:
+            var refs = borrow_columns(flat)
+            var local = group_ordinals(refs, self.keys, rows)
+            groups = local.groups
+            codes = local^.into_codes()
+
+        var made = List[AnyArray](capacity=len(self.sources))
+        for a in range(len(self.sources)):
+            made.append(
+                aggregate_group_any(
+                    flat[self.sources[a]],
+                    self.kinds[a],
+                    codes,
+                    groups,
+                    trusted=True,
+                )
+            )
+
+        # Backwards, and columns backwards inside a chunk, because `finish`
+        # takes what it hands over off the end of this list.
+        var at = rows
+        for c in range(len(self.sizes) - 1, -1, -1):
+            var start = at - self.sizes[c]
+            var pick = List[Int](capacity=self.sizes[c])
+            for i in range(start, at):
+                pick.append(Int(codes[i]))
+            for i in range(len(made) - 1, -1, -1):
+                self.output.append(take_any(made[i], pick))
+            for i in range(self.width - 1, -1, -1):
+                self.output.append(flat[i].slice(start, at))
+            at = start
+
+
 struct Compute(Movable):
     """Appends a column computed from two columns of the chunk.
 
@@ -2752,6 +3065,7 @@ comptime Node = Variant[
     Join,
     Limit,
     Sort,
+    Window,
     Group,
     Reduce,
     Materialize,
@@ -2797,6 +3111,8 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
         return node[Join].bind(input^)
     if node.isa[Sort]():
         return node[Sort].bind(input^)
+    if node.isa[Window]():
+        return node[Window].bind(input^)
     if node.isa[Project]():
         return _rename(
             node[Project].names,
@@ -2883,6 +3199,8 @@ def node_status(node: Node) -> NodeStatus:
         return node[Materialize].update_state()
     if node.isa[Sort]():
         return node[Sort].update_state()
+    if node.isa[Window]():
+        return node[Window].update_state()
     if node.isa[Group]():
         return node[Group].update_state()
     if node.isa[Reduce]():
@@ -2898,9 +3216,10 @@ def node_is_row_local(node: Node) -> Bool:
     first chunk arrived. What that buys is that the node reads itself and never
     writes itself, so one of them can be handed to every core at once without a
     copy per worker and without a lock. `Limit` counts rows, `Sort` holds every
-    row until it knows where the first one goes, `Group` holds a table it is
-    still filling, `Reduce` holds a running answer and `Materialize` holds the
-    input, so all five say no.
+    row until it knows where the first one goes, `Window` holds every row until
+    it knows what the partition sums to, `Group` holds a table it is still
+    filling, `Reduce` holds a running answer and `Materialize` holds the input,
+    so all six say no.
 
     Args:
         node: The node.
@@ -2921,7 +3240,8 @@ def node_is_row_local(node: Node) -> Bool:
 def node_ends_early(node: Node) -> Bool:
     """Reports whether a node can say FINISHED before its input runs out.
 
-    Only `Limit` can. `Sort`, `Group` and `Materialize` say FINISHED too, but
+    Only `Limit` can. `Sort`, `Window`, `Group` and `Materialize` say FINISHED
+    too, but
     not until `finish` has handed back everything they held, which is after the
     source is empty. The distinction matters to the driver: a pipeline that can stop early
     must be fed one chunk at a time, because reading ahead on behalf of thirty
@@ -2972,6 +3292,7 @@ def node_is_breaker(node: Node) -> Bool:
     return (
         node.isa[Materialize]()
         or node.isa[Sort]()
+        or node.isa[Window]()
         or node.isa[Group]()
         or node.isa[Reduce]()
     )
@@ -3032,6 +3353,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Limit].process(chunk^)
     if node.isa[Sort]():
         return node[Sort].process(chunk^)
+    if node.isa[Window]():
+        return node[Window].process(chunk^)
     if node.isa[Group]():
         return node[Group].process(chunk^)
     if node.isa[Reduce]():
@@ -3099,6 +3422,8 @@ def node_finish(mut node: Node) raises -> Optional[Chunk]:
         return node[Materialize].finish()
     if node.isa[Sort]():
         return node[Sort].finish()
+    if node.isa[Window]():
+        return node[Window].finish()
     if node.isa[Group]():
         return node[Group].finish()
     if node.isa[Reduce]():
