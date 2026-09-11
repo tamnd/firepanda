@@ -662,6 +662,74 @@ def test_a_not_in_a_select_list_turns_the_column_over() raises:
     )
 
 
+def test_a_cast_of_a_column_leaves_the_column_it_read_alone() raises:
+    # The converted column is a column of its own, so qty is still the int64
+    # every other expression in the query was bound against.
+    var out = run(
+        "SELECT qty, CAST(qty AS DOUBLE) AS wide FROM sales", session()
+    )
+
+    assert_equal(len(out.schema), 2, "two columns")
+    assert_true(out.schema[0].dtype == LogicalType.INT64, "qty as it was")
+    assert_true(out.schema[1].dtype == LogicalType.FLOAT64, "and the cast")
+    same(read_back(out, "qty"), [5, 20, 3, 40, 12, 8, 25, 1, 30, 15], "qty")
+
+    var wide = out.column("wide").as_typed[DType.float64]()
+    assert_equal(wide[0], 5.0, "the first row converted")
+    assert_equal(wide[6], 25.0, "and one from the middle chunk")
+
+
+def test_a_cast_narrows_a_column_to_the_type_the_query_named() raises:
+    var out = run("SELECT CAST(qty AS SMALLINT) AS small FROM sales", session())
+
+    assert_true(out.schema[0].dtype == LogicalType.INT16, "int16")
+    var col = out.column("small").as_typed[DType.int16]()
+    assert_equal(len(col), 10, "every row")
+    assert_equal(col[3], 40, "the value came across")
+
+
+def test_a_cast_to_varchar_writes_the_numbers_out() raises:
+    var out = run(
+        "SELECT CAST(qty AS VARCHAR) AS written FROM sales", session()
+    )
+
+    assert_true(out.schema[0].dtype == LogicalType.STRING, "text")
+    var col = out.column("written").as_strings()
+    assert_equal(col[0], "5", "the first")
+    assert_equal(col[3], "40", "and a two digit one")
+
+
+def test_a_cast_of_an_expression_converts_what_the_expression_made() raises:
+    var out = run(
+        "SELECT CAST(qty * price AS DOUBLE) AS total FROM sales", session()
+    )
+
+    assert_true(out.schema[0].dtype == LogicalType.FLOAT64, "float64")
+    var col = out.column("total").as_typed[DType.float64]()
+    assert_equal(col[0], 50.0, "the first product")
+    assert_equal(col[9], 90.0, "and the last")
+
+
+def test_a_cast_in_a_where_runs_before_the_rows_are_kept() raises:
+    same(
+        answer(
+            "SELECT qty FROM sales WHERE CAST(qty AS DOUBLE) > 20",
+            "qty",
+        ),
+        [40, 25, 30],
+        "qty",
+    )
+
+
+def test_a_cast_to_a_type_the_engine_has_no_column_for_says_so() raises:
+    with assert_raises(contains="integers stop at 64 bits"):
+        _ = run("SELECT CAST(qty AS HUGEINT) FROM sales", session())
+    with assert_raises(contains="no exact decimal"):
+        _ = run("SELECT CAST(qty AS DECIMAL(9,2)) FROM sales", session())
+    with assert_raises(contains="TRY_CAST"):
+        _ = run("SELECT TRY_CAST(qty AS BIGINT) FROM sales", session())
+
+
 def test_a_window_over_the_whole_table_is_on_every_row() raises:
     # The same 159 the aggregate test asks for, except that here it arrives
     # beside the ten rows rather than instead of them.

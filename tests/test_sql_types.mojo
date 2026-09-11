@@ -17,6 +17,7 @@ from std.testing import (
     assert_true,
 )
 
+from firepanda.dtype.logical import LogicalType
 from firepanda.sql.types import (
     DECIMAL_DEFAULT_SCALE,
     DECIMAL_DEFAULT_WIDTH,
@@ -49,6 +50,7 @@ from firepanda.sql.types import (
     TINYINT,
     VARCHAR,
     decimal,
+    engine_type,
     nearest_type,
     parse_type,
     spellings,
@@ -172,6 +174,14 @@ def test_a_length_on_a_varchar_parses_and_goes_nowhere() raises:
     assert_equal(parsed.width, 0)
 
 
+def test_a_type_arrives_with_its_tokens_spaced_and_still_reads() raises:
+    # This is how a type written in a query reaches here. The transformer joins
+    # the tokens of a type with single spaces, so the name has a space after it
+    # and a lookup that did not strip would not find DECIMAL.
+    assert_equal(parse_type("DECIMAL ( 9 , 2 )"), decimal(9, 2))
+    assert_equal(parse_type("VARCHAR ( 3 )"), VARCHAR)
+
+
 def test_a_type_argument_that_is_not_a_number_is_refused() raises:
     with assert_raises(contains="is not a number a type can be given"):
         _ = parse_type("DECIMAL(x)")
@@ -236,6 +246,72 @@ def test_an_interval_is_not_a_point_in_time() raises:
     assert_true(SqlType(type_for("time_ns")).is_temporal())
     assert_false(INTERVAL.is_temporal())
     assert_false(BIGINT.is_temporal())
+
+
+def test_the_twelve_types_a_cast_reaches_map_onto_engine_types() raises:
+    assert_equal(engine_type(BOOLEAN), LogicalType.BOOL)
+    assert_equal(engine_type(TINYINT), LogicalType.INT8)
+    assert_equal(engine_type(parse_type("smallint")), LogicalType.INT16)
+    assert_equal(engine_type(INTEGER), LogicalType.INT32)
+    assert_equal(engine_type(BIGINT), LogicalType.INT64)
+    assert_equal(engine_type(parse_type("utinyint")), LogicalType.UINT8)
+    assert_equal(engine_type(parse_type("usmallint")), LogicalType.UINT16)
+    assert_equal(engine_type(parse_type("uinteger")), LogicalType.UINT32)
+    assert_equal(engine_type(parse_type("ubigint")), LogicalType.UINT64)
+    assert_equal(engine_type(FLOAT), LogicalType.FLOAT32)
+    assert_equal(engine_type(DOUBLE), LogicalType.FLOAT64)
+    assert_equal(engine_type(VARCHAR), LogicalType.STRING)
+
+
+def test_a_spelling_reaches_the_engine_type_its_type_reaches() raises:
+    # int8 is BIGINT, so it is int64 on the other side and not int8. This is
+    # the narrowing the spelling table exists to stop, seen from the far end.
+    assert_equal(engine_type(parse_type("int8")), LogicalType.INT64)
+    assert_equal(engine_type(parse_type("int1")), LogicalType.INT8)
+    assert_equal(engine_type(parse_type("float4")), LogicalType.FLOAT32)
+    assert_equal(engine_type(parse_type("float8")), LogicalType.FLOAT64)
+    assert_equal(engine_type(parse_type("varchar(3)")), LogicalType.STRING)
+
+
+def test_the_wide_integers_have_no_engine_type_to_become() raises:
+    with assert_raises(contains="integers stop at 64 bits"):
+        _ = engine_type(HUGEINT)
+    with assert_raises(contains="integers stop at 64 bits"):
+        _ = engine_type(parse_type("uhugeint"))
+
+
+def test_a_decimal_is_refused_rather_than_read_as_a_double() raises:
+    # The one refusal here that is a correctness decision rather than a gap.
+    # 1.1 + 2.2 is 3.3 in DuckDB and 3.3000000000000003 in binary floating
+    # point, and a wrong answer is worse than a missing one.
+    with assert_raises(contains="DECIMAL(9,2)"):
+        _ = engine_type(decimal(9, 2))
+    with assert_raises(contains="no exact decimal"):
+        _ = engine_type(decimal(9, 2))
+
+
+def test_the_temporal_types_wait_on_a_cast_that_converts_values() raises:
+    # The engine has a date and it has timestamps. What it does not have is a
+    # cast that converts to one, so the column would come back as the integer
+    # the type sits on while answering to the date's name.
+    with assert_raises(contains="firepanda does not cast to DATE yet"):
+        _ = engine_type(DATE)
+    with assert_raises(contains="firepanda does not cast to TIMESTAMP yet"):
+        _ = engine_type(TIMESTAMP)
+    with assert_raises(contains="the integer underneath"):
+        _ = engine_type(parse_type("time"))
+
+
+def test_the_types_with_nowhere_to_land_say_so_by_name() raises:
+    with assert_raises(contains="cast to BLOB yet"):
+        _ = engine_type(parse_type("blob"))
+    with assert_raises(contains="cast to INTERVAL yet"):
+        _ = engine_type(INTERVAL)
+    with assert_raises(contains="cast to UUID yet"):
+        _ = engine_type(parse_type("uuid"))
+    # The null type prints with the quotes in it, the way typeof(NULL) does.
+    with assert_raises(contains='cast to "NULL" yet'):
+        _ = engine_type(NULL)
 
 
 def test_a_type_writes_itself_the_way_typeof_prints_it() raises:

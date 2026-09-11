@@ -310,6 +310,22 @@ def test_a_graft_of_a_bare_column_is_the_replacement() raises:
     assert_equal(tree.graft(a, ["a"], [one]), one, "nothing left of the column")
 
 
+def test_a_graft_through_a_cast_keeps_the_type_the_cast_was_for() raises:
+    # The target type is written on the node and nowhere else, so a copy that
+    # dropped it would come back a cast to the null type and the query's type
+    # would be gone with nothing to say it ever existed.
+    var tree = Expressions()
+    var doubled = tree.binary(
+        BinaryOp.MUL, tree.column("x"), tree.literal(Value(Int64(2)))
+    )
+    var wider = tree.cast(LogicalType.FLOAT64, tree.column("a"))
+    var out = tree.graft(wider, ["a"], [doubled])
+    assert_true(out != wider, "the cast was copied")
+    assert_true(
+        tree.nodes[out].type == LogicalType.FLOAT64, "and it is still a double"
+    )
+
+
 def test_a_graft_with_more_names_than_expressions_is_refused() raises:
     var tree = Expressions()
     var a = tree.column("a")

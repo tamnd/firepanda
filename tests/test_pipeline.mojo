@@ -629,6 +629,22 @@ def test_a_cast_changes_a_column_in_place_and_says_so_in_the_schema() raises:
         assert_equal(col[i], Float64(i + 1), "row " + String(i))
 
 
+def test_a_cast_that_was_given_a_name_appends_instead() raises:
+    # What SELECT n, CAST(n AS DOUBLE) needs: the column it read is still
+    # wanted at the type it had, so the converted one lands beside it.
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Cast(0, LogicalType.FLOAT64, "wide")))
+    var out = pipeline^.run()
+
+    assert_equal(out.width(), 3, "one column more than went in")
+    assert_true(out.schema[0].dtype == LogicalType.INT64, "n as it was")
+    assert_equal(out.schema[2].name, "wide", "the name it was given")
+    assert_true(out.schema[2].dtype == LogicalType.FLOAT64, "the new type")
+    var col = out.column("wide").as_typed[DType.float64]()
+    for i in range(6):
+        assert_equal(col[i], Float64(i + 1), "row " + String(i))
+
+
 def test_a_cast_over_a_missing_column_is_caught_when_the_plan_is_built() raises:
     var pipeline = Pipeline(cut_frame())
     with assert_raises(contains="is outside a schema of 2 columns"):

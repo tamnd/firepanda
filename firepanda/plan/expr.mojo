@@ -934,6 +934,13 @@ struct Expressions(Movable, Sized):
         the new operands produce, and the only honest answer here is to let
         binding say so, which is what every caller does next anyway.
 
+        A literal and a cast are the two exceptions, and they are exceptions
+        because binding leaves them alone: both knew what they produce before it
+        ran. A cast is the one that shows it, since its target type is written
+        nowhere else, so a copy that dropped it would come back as a cast to the
+        null type and the pass that rebuilt it would have quietly deleted the
+        type the query wrote.
+
         Args:
             root: The node to copy.
             kids: The operands the copy gets. Consumed.
@@ -945,11 +952,13 @@ struct Expressions(Movable, Sized):
             If the node is not in the arena.
         """
         self.check(root)
+        var kind = self.nodes[root].kind
         var name = self.nodes[root].name.copy()
         var value = self.nodes[root].value.copy()
-        return self._add(
+        var type = self.nodes[root].type
+        var at = self._add(
             Expr(
-                self.nodes[root].kind,
+                kind,
                 name^,
                 self.nodes[root].at,
                 self.nodes[root].table,
@@ -960,6 +969,9 @@ struct Expressions(Movable, Sized):
                 kids^,
             )
         )
+        if kind == ExprKind.LITERAL or kind == ExprKind.CAST:
+            self.nodes[at].type = type
+        return at
 
     def conjuncts(self, root: Int, mut out: List[Int]) raises:
         """Splits a predicate at its `and` nodes into the pieces under them.
