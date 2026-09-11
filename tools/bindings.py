@@ -1821,6 +1821,17 @@ FRAME = Exposed(
             returns="DataFrame",
         ),
         Binding(
+            mojo="PyDataFrame.sort_values",
+            name="sort_values",
+            doc="The frame with its rows in the order of some of its columns.",
+            params=(
+                ("by", "list[str]"),
+                ("descending", "list[bool]"),
+                ("nulls_first", "list[bool]"),
+            ),
+            returns="DataFrame",
+        ),
+        Binding(
             mojo="PyDataFrame.head",
             name="head",
             doc="The first n rows.",
@@ -2223,6 +2234,22 @@ FRAME = Exposed(
             returns="DataFrame",
         ),
         Member(
+            name="sort_values",
+            kind="method",
+            signature=(
+                "by: Any, *, axis: Any = 0, ascending: Any = True,"
+                " inplace: bool = False, kind: str = \"quicksort\","
+                " na_position: str = \"last\", ignore_index: bool = False,"
+                " key: Any = None"
+            ),
+            body=(
+                "self._sort_values(by, axis, ascending, inplace, na_position,"
+                " ignore_index, key)"
+            ),
+            doc="The frame with its rows in the order of some of its columns.",
+            returns="DataFrame",
+        ),
+        Member(
             name="filter",
             kind="method",
             signature=(
@@ -2456,6 +2483,20 @@ SERIES = Exposed(
             name="take",
             doc="Rows gathered by position, counting from the end when negative.",
             params=(("positions", "list[int]"),),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.sort_values",
+            name="sort_values",
+            doc="The column with its rows in the order of their own values.",
+            params=(("descending", "bool"), ("nulls_first", "bool")),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.argsort",
+            name="argsort",
+            doc="The row order a sort would put the values in, as a column.",
+            params=(("descending", "bool"), ("nulls_first", "bool")),
             returns="Series",
         ),
         Binding(

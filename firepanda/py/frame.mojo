@@ -510,6 +510,63 @@ struct PyDataFrame(Movable, Writable):
         )
 
     @staticmethod
+    def sort_values(
+        py_self: PythonObject,
+        by: PythonObject,
+        descending: PythonObject,
+        nulls_first: PythonObject,
+    ) raises -> PythonObject:
+        """Puts the rows in the order of one or more of their columns.
+
+        Three lists rather than one list and two scalars, because pandas lets a
+        caller give a direction per key and the core takes the keys most
+        significant first with a flag beside each. The Python layer is what
+        turns one bool into a list of them when the caller gave only one, since
+        it is the side that knows how many keys there are.
+
+        Two different things can go wrong and they are pandas' `KeyError` and
+        its `TypeError`. A name that is not a column says so in those words and
+        a dtype that cannot be ordered says the word sort, so they are told
+        apart by the message the way `top_rows` above tells its two apart.
+
+        Args:
+            py_self: The frame.
+            by: The key columns, most significant first.
+            descending: One flag per key, largest first when true.
+            nulls_first: One flag per key.
+
+        Returns:
+            A new frame of the same height.
+
+        Raises:
+            Error: Tagged `column` for a name that is not there, `dtype` for a
+                column that cannot be ordered.
+        """
+        var keys = List[String](capacity=Int(len(by)))
+        for i in range(Int(len(by))):
+            keys.append(words(by[i], "by"))
+        var down = List[Bool](capacity=Int(len(descending)))
+        for i in range(Int(len(descending))):
+            down.append(flag(descending[i], "ascending"))
+        var front = List[Bool](capacity=Int(len(nulls_first)))
+        for i in range(Int(len(nulls_first))):
+            front.append(flag(nulls_first[i], "na_position"))
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        Self._frame(py_self)[]
+                        .frame[]
+                        .sort_values(keys, down, front)
+                    )
+                )
+            )
+        except cause:
+            if "for sort" in String(cause):
+                raise retagged(DTYPE, cause)
+            raise retagged(COLUMN, cause)
+
+    @staticmethod
     def column(
         py_self: PythonObject, name: PythonObject
     ) raises -> PythonObject:

@@ -89,6 +89,12 @@ def register(mut module: PythonModuleBuilder) raises:
         "sort_index",
         docstring="The frame with its rows in the order of their labels.",
     )
+    _ = dataframe.def_method[PyDataFrame.sort_values](
+        "sort_values",
+        docstring=(
+            "The frame with its rows in the order of some of its columns."
+        ),
+    )
     _ = dataframe.def_method[PyDataFrame.head](
         "head", docstring="The first n rows."
     )
@@ -231,6 +237,14 @@ def register(mut module: PythonModuleBuilder) raises:
         docstring=(
             "Rows gathered by position, counting from the end when negative."
         ),
+    )
+    _ = series.def_method[PySeries.sort_values](
+        "sort_values",
+        docstring="The column with its rows in the order of their own values.",
+    )
+    _ = series.def_method[PySeries.argsort](
+        "argsort",
+        docstring="The row order a sort would put the values in, as a column.",
     )
     _ = series.def_method[PySeries.slice_rows](
         "slice_rows", docstring="A half open range of rows."

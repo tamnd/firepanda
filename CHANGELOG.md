@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: sorting by value, which the core had finished and Python could not reach
+
+`DataFrame.sort_values`, `Series.sort_values`, `Series.argsort`, `Index.sort_values` and `Index.argsort` all answer now. None of them needed a kernel. The multi key sort, the single key sort and the erased pair underneath both of them were already written, tested and fast in `firepanda/kernel/sort.mojo` and on the two core types, and there was simply no way to call any of it from Python, so `df.sort_values("a")` was an `AttributeError` sitting on top of a finished sort.
+
+What the change is instead is translation. pandas names the direction it sorts in and the core names the other one. pandas takes one direction for all the keys or one per key, and the core takes a list either way. pandas says where the missing values sit with a word and the core says it with a flag. pandas takes one key name or a list of them, and a string is one key even though a string is also a sequence. All of that is undone above the boundary, because the side that knows how many keys there are is the side that read `by`, and the binding takes three lists of the same length and interprets nothing.
+
+`ignore_index` numbers the rows again afterwards, which is `reset_index(drop=True)` on the answer and is written as exactly that. It is implemented here and refused on `sort_index`, which is not inconsistency: sorting rows by their labels and then throwing the labels away discards the thing that was just sorted, and sorting rows by a column and then renumbering them is an ordinary thing to want.
+
+`kind` is accepted and never read, because the four names it takes are numpy's sort algorithms and the sort underneath is stable whichever one is asked for. `Series.argsort` accepts `stable` and does not read that either, which is the same fact stated twice rather than a second gap. Everything else is read or refused: `key` is refused, `inplace` is refused, `axis=1` is refused, and `order` on `argsort` names the fields of a numpy record array that does not exist here.
+
+One divergence, and it is the core's rather than this layer's. pandas puts a negative position in the row a missing value sat in, because numpy has a sentinel going spare there. firepanda places a null instead of removing it, so a null gets a real position like every other row and nothing comes back negative.
+
+Part of #156, after #8.
+
 ### Added: a column can become a frame, and thirteen members that follow from it
 
 `Series.to_frame` hands back a frame of one column, carrying the column's own labels rather than a fresh range, and that is the door the rest of this entry goes through. The count that found it is one subtraction: the public members the frame has minus the ones the column has is thirteen names, three of which are a frame's business and ten of which are members of the pandas series that were missing here. They were not ten oversights. They were one missing thing, which is that a column could not be handed to a frame.
