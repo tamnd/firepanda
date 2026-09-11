@@ -758,6 +758,20 @@ class Rolling(RollingMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def skew(self, numeric_only: bool = False) -> Series | DataFrame:
+        """The skewness of the values in the window. Over every rolling window."""
+        try:
+            return self._reduce("skew", numeric_only)
+        except Exception as error:
+            raise translate(error) from None
+
+    def kurt(self, numeric_only: bool = False) -> Series | DataFrame:
+        """The excess kurtosis of the values in the window. Over every rolling window."""
+        try:
+            return self._reduce("kurt", numeric_only)
+        except Exception as error:
+            raise translate(error) from None
+
 
 class Expanding(ExpandingMixin):
     """A window that starts at the first row and grows, waiting for a reduction.
@@ -935,6 +949,20 @@ class Expanding(ExpandingMixin):
         """
         try:
             return self._reduce("sem", numeric_only, ddof=ddof)
+        except Exception as error:
+            raise translate(error) from None
+
+    def skew(self, numeric_only: bool = False) -> Series | DataFrame:
+        """The skewness of the values in the window. Over every expanding window."""
+        try:
+            return self._reduce("skew", numeric_only)
+        except Exception as error:
+            raise translate(error) from None
+
+    def kurt(self, numeric_only: bool = False) -> Series | DataFrame:
+        """The excess kurtosis of the values in the window. Over every expanding window."""
+        try:
+            return self._reduce("kurt", numeric_only)
         except Exception as error:
             raise translate(error) from None
 

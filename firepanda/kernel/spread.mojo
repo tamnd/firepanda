@@ -82,6 +82,73 @@ pandas answers something else, and not because it disagrees. Its window layer
 replaces every infinity with NaN before the kernel sees the column, so an
 infinity in a window is a missing value to pandas and the window is reduced over
 the rows either side of it.
+
+## The third and fourth moments are the same argument twice more
+
+A skewness is the third central moment over the three halves power of the
+second, and a kurtosis is the fourth over the square of the second. So both
+need the same state this file already carries plus two more numbers, and both
+need them carried for the same reason: the mean moves, so a cube or a fourth
+power folded in earlier was measured against a mean that has since changed.
+
+The recurrence that updates all four together is standard and the removal is it
+run backwards, so everything above about the removal applies unchanged and is
+worse rather than better. A fourth power of a large value against a small
+spread cancels more digits than a second power does. On a column near ten to
+the eight the fourth power is near ten to the thirty two and the answer is
+about a spread near one, and a double does not hold both. `Moments` therefore
+carries a bound for each of the two moments and rebuilds when either has
+outgrown its own answer.
+
+Those bounds also count something the variance's bound does not, and it is the
+thing that turned out to matter. A deviation is a value take a mean, and when
+the mean is much larger than the deviation the subtraction throws away the
+digits they agree in before any cube is taken. The variance's bound counts only
+the rounding of its own additions, which on a column of four thousand values
+let a carried kurtosis drift into the ninth digit while pandas held the
+eleventh. Measuring the loss in the deviation as well, and holding the rebuild
+to a tighter figure than the variance uses, puts the skewness in the thirteenth
+digit and the kurtosis in the twelfth, which is ahead of pandas on the same
+column, and costs a rebuild on a few rows in a hundred at the narrowest widths
+and on one in a thousand at the wide ones. `TRUSTED` carries the figures.
+
+pandas carries the raw sums of the value, its square, its cube and its fourth
+power instead, and reconstructs the central moments at the end. That is the
+arrangement the top of this file rejects for the variance, one power further
+along, and it was measured against this one on two columns. On four thousand
+values spread either side of nought with three far away rows in them, this file
+is thirty four times closer to the right answer on a four wide skewness and
+level on a four wide kurtosis, and pandas is closer on a three wide skewness,
+which is the one window narrow enough that there is almost nothing to carry. On
+two hundred values near ten to the eight stepping a thousandth at a time, which
+is the case a power sum is worst at, this file is between seven and forty seven
+times closer across the three. Both lose digits there and neither can avoid it,
+because the deviation itself only has five left before anything is cubed.
+
+## What pandas states, and what it refuses
+
+A window whose values are all the same answers a skewness of zero and a
+kurtosis of minus three, for every width. Zero is right, because a constant is
+symmetric. Minus three is not a value arithmetic supports: a degenerate
+distribution has no kurtosis, the standardized fourth moment of a real one is
+never below one, and minus three is what falls out of subtracting the excess
+offset from a ratio taken to be nought. It is copied here rather than derived,
+because a caller comparing the two libraries on a column of one repeated value
+would read a NaN as a bug in this one.
+
+The refusal is the other way round. When the population variance of a window is
+at or below ten to the minus fourteen, pandas answers NaN for both. Measured
+against pandas 3.0.5, a window whose variance is 1.001e-14 answers and one
+whose variance is 9.999999999999998e-15 does not. It is absolute rather than
+relative, so whether pandas will tell you the skewness of your readings depends
+on the units
+you wrote them in: the same four measurements in kilometres and in millimetres
+differ by twelve orders of magnitude in variance and pandas answers one and
+refuses the other. A one pass power sum cannot compute a skewness down there, so
+the threshold is doing real work for pandas. A carried central moment with a
+rebuild can, so this answers the number and the difference is registered rather
+than copied. A variance of exactly zero with values that are not all the same is
+still a NaN in both, because there the ratio has no numerator either.
 """
 
 from std.math import isinf, isnan, nan, sqrt
@@ -94,6 +161,13 @@ comptime SPREAD_STD = 1
 
 comptime SPREAD_SEM = 2
 """Form code for the deviation divided by the root of the count."""
+
+comptime MOMENT_SKEW = 0
+"""Form code for the third moment over the second to the three halves."""
+
+comptime MOMENT_KURT = 1
+"""Form code for the fourth moment over the square of the second, in the excess
+form, which is the one pandas answers."""
 
 comptime EPSILON = 2.220446049250313e-16
 """The distance from one to the next double, which is the relative error one
@@ -270,3 +344,251 @@ struct Spread(ImplicitlyCopyable, Movable):
         if form == SPREAD_STD:
             return root
         return root / sqrt(Float64(found))
+
+
+comptime TRUSTED = 1e-12
+"""How much of a moment the carried state is allowed to have lost before it is
+thrown away and rebuilt. Four figures tighter than `CREDIBLE`, which the spread
+uses, and the reason is measured rather than argued. A spread is a square and a
+kurtosis is a fourth power, so the same lost digit in a deviation comes out
+twice as far along, and at `CREDIBLE` a rolling kurtosis over four thousand
+values drifted into the ninth digit where pandas held the eleventh. At this
+figure the skewness holds the thirteenth and the kurtosis the twelfth, both
+ahead of pandas, and the rebuild fires on eight rows in a hundred at a width of
+three, on four at a width of four, and on one in a thousand from a width of
+thirty two up. The cost is bounded whatever the column does, because a rebuild
+reads the window once and the row is then answered whether the rebuilt state is
+settled or not, so the worst a pass can cost is what recomputing every window
+from scratch would."""
+
+
+def _slipped(value: Float64, centre: Float64, away: Float64) -> Float64:
+    """Says how much of a deviation the subtraction that made it threw away.
+
+    A deviation is one value take another, and when the two are close together
+    the answer keeps only the digits they differ in. A value of eight hundred
+    and a mean of seven hundred and ninety leave a deviation of ten, which a
+    double holds to thirteen digits rather than sixteen, and a cube of it to
+    eleven. That loss is invisible to a bound that only counts the rounding of
+    its own addition, which is why it is measured here and handed to the bounds
+    before they are widened.
+
+    Args:
+        value: The row.
+        centre: The mean it was measured against.
+        away: The deviation that came out.
+
+    Returns:
+        The error in the deviation as a fraction of the deviation, and nought
+        when the row sits exactly on the mean, because a deviation of nought
+        contributes nothing for the error to be a fraction of.
+    """
+    if away == 0.0:
+        return 0.0
+    return EPSILON * (abs(value) + abs(centre)) / abs(away)
+
+
+struct Moments(ImplicitlyCopyable, Movable):
+    """A running third and fourth central moment, over a running spread.
+
+    The spread is held rather than repeated, so the mean the cube and the fourth
+    power are measured around is the same mean the variance is measured around
+    and the two cannot drift apart. Each update reads the spread's state from
+    before the row was folded in, which is why the order inside `add` and `drop`
+    matters and is written down there.
+    """
+
+    var spread: Spread
+    """The count, the mean and the sum of squared deviations, with its own bound
+    and its own run length and its own count of infinities."""
+
+    var third: Float64
+    """The sum of the cubed deviations from the mean."""
+
+    var fourth: Float64
+    """The sum of the fourth powers of the deviations from the mean."""
+
+    var third_bound: Float64
+    """An upper bound on the error the updates could have put into the third
+    moment."""
+
+    var fourth_bound: Float64
+    """An upper bound on the error the updates could have put into the fourth
+    moment. The two are kept apart rather than shared because the two moments do
+    not lose their digits at the same row: a skewness at a width of three drifts
+    where a kurtosis at the same width is not even answered, and one bound
+    standing in for the other was measured to let that drift through."""
+
+    def __init__(out self):
+        """Starts a moment state with nothing in it."""
+        self.spread = Spread()
+        self.third = 0.0
+        self.fourth = 0.0
+        self.third_bound = 0.0
+        self.fourth_bound = 0.0
+
+    def add(mut self, value: Float64):
+        """Folds one row into the moments.
+
+        The deviation, the count and the two moments all have to be read from
+        before the spread is updated, because the recurrence is written in terms
+        of the state the row is arriving at rather than the state it produced.
+
+        Args:
+            value: The row's value, which is never a NaN.
+        """
+        if isinf(value):
+            self.spread.add(value)
+            return
+        var older = Float64(self.spread.count)
+        var second = self.spread.squares
+        var cubed = self.third
+        var centre = self.spread.mean - self.spread.lost
+        var away = value - centre
+        self.spread.add(value)
+        var size = Float64(self.spread.count)
+        var share = away / size
+        var square = share * share
+        var moved = away * away * older / size
+        var lift = (
+            moved * square * (size * size - 3.0 * size + 3.0)
+            + 6.0 * square * second
+            - 4.0 * share * cubed
+        )
+        var tilt = moved * share * (size - 2.0) - 3.0 * share * second
+        self.fourth = self.fourth + lift
+        self.third = cubed + tilt
+        self._widen(_slipped(value, centre, away), tilt, lift)
+
+    def _widen(mut self, slip: Float64, tilt: Float64, lift: Float64):
+        """Widens both bounds by what the update it was given could have lost.
+
+        Args:
+            slip: How far the deviation could be out, as a fraction of itself.
+            tilt: What was added to or taken off the third moment.
+            lift: What was added to or taken off the fourth moment.
+        """
+        self.third_bound = (
+            self.third_bound
+            + EPSILON * (abs(tilt) + abs(self.third))
+            + 3.0 * slip * abs(tilt)
+        )
+        self.fourth_bound = (
+            self.fourth_bound
+            + EPSILON * (abs(lift) + abs(self.fourth))
+            + 4.0 * slip * abs(lift)
+        )
+
+    def drop(mut self, value: Float64):
+        """Takes one row back out of the moments.
+
+        Here the order is the other way round. The deviation the recurrence was
+        written with is the one from the mean the window had before this row
+        arrived, and what is available is the mean it has now, so the first is
+        recovered from the second by scaling by the two counts. The third moment
+        has to be undone before the fourth, because the fourth's term reads the
+        third from before the row was added.
+
+        Args:
+            value: The row's value.
+        """
+        if isinf(value):
+            self.spread.drop(value)
+            return
+        var size = Float64(self.spread.count)
+        var centre = self.spread.mean - self.spread.lost
+        var short = value - centre
+        self.spread.drop(value)
+        if self.spread.count == 0:
+            self.third = 0.0
+            self.fourth = 0.0
+            self.third_bound = 0.0
+            self.fourth_bound = 0.0
+            return
+        var older = Float64(self.spread.count)
+        var away = size * short / older
+        var share = away / size
+        var square = share * share
+        var moved = away * away * older / size
+        var second = self.spread.squares
+        var tilt = moved * share * (size - 2.0) - 3.0 * share * second
+        self.third = self.third - tilt
+        var lift = (
+            moved * square * (size * size - 3.0 * size + 3.0)
+            + 6.0 * square * second
+            - 4.0 * share * self.third
+        )
+        self.fourth = self.fourth - lift
+        self._widen(_slipped(value, centre, short), tilt, lift)
+
+    def settled(self) -> Bool:
+        """Says whether the carried state is still worth carrying.
+
+        Returns:
+            False if the spread underneath has given up, and False once either
+            moment has stopped being a number, and False once the fourth has
+            gone below zero, and False once either moment has lost more of
+            itself than `TRUSTED` allows to the error the updates could have
+            made. A symmetric window has a third moment of nought and that is
+            an answer rather than a failure, so the third's bound is not
+            measured against the third itself. It is measured against the root
+            of the second times the fourth, which no third moment can exceed
+            and which only goes to nought when the window holds one value
+            repeated.
+        """
+        if not self.spread.settled():
+            return False
+        if isnan(self.fourth) or isinf(self.fourth):
+            return False
+        if isnan(self.third) or isinf(self.third):
+            return False
+        if self.fourth < 0.0:
+            return False
+        if self.fourth_bound > TRUSTED * self.fourth:
+            return False
+        return self.third_bound <= TRUSTED * sqrt(
+            self.spread.squares * self.fourth
+        )
+
+    def answer(self, found: Int, form: Int) -> Float64:
+        """Returns the skewness or the kurtosis of the window.
+
+        Args:
+            found: How many rows of the window hold a value, counting the
+                infinities.
+            form: One of the two form codes at the top of the file.
+
+        Returns:
+            A NaN when the window holds fewer values than the moment needs, or
+            holds an infinity, or has no spread to standardize by, and the
+            skewness or the excess kurtosis otherwise.
+        """
+        var needed = 3 if form == MOMENT_SKEW else 4
+        if found < needed:
+            return nan[DType.float64]()
+        if self.spread.highs > 0 or self.spread.lows > 0:
+            return nan[DType.float64]()
+        var size = Float64(found)
+        if self.spread.runs >= found:
+            # What pandas answers for a window of one repeated value. Zero is
+            # right and minus three is copied, for the reasons at the top.
+            return 0.0 if form == MOMENT_SKEW else -3.0
+        var second = self.spread.squares if self.spread.squares > 0.0 else 0.0
+        var spread = second / size
+        if spread == 0.0:
+            # The values are not all the same and their squared deviations came
+            # to nought anyway, which happens when they differ by less than the
+            # square root of the smallest double. There is no ratio to take.
+            return nan[DType.float64]()
+        if form == MOMENT_SKEW:
+            var cubed = self.third / size
+            return (
+                sqrt(size * (size - 1.0))
+                * cubed
+                / ((size - 2.0) * spread * sqrt(spread))
+            )
+        var quartic = self.fourth / size
+        return (
+            (size * size - 1.0) * quartic / (spread * spread)
+            - 3.0 * (size - 1.0) * (size - 1.0)
+        ) / ((size - 2.0) * (size - 3.0))
