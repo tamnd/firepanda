@@ -88,11 +88,102 @@ def read_back(df: DataFrame, name: String) raises -> List[Int64]:
     return out^
 
 
+def same(got: List[Int64], want: List[Int64], what: String) raises:
+    """Checks a column read back against the numbers it should hold."""
+    assert_equal(len(got), len(want), what + ": how many rows")
+    for i in range(len(want)):
+        assert_equal(got[i], want[i], what + " at " + String(i))
+
+
+def valid(got: List[Bool], want: List[Bool], what: String) raises:
+    """Checks which rows of a column have a value against which should."""
+    assert_equal(len(got), len(want), what + ": how many rows")
+    for i in range(len(want)):
+        assert_equal(got[i], want[i], what + " at " + String(i))
+
+
 def run(mut plan: Plan, root: Int) raises -> DataFrame:
     """Binds, lowers and runs a plan over the sales frame."""
     _ = bind(plan, root, schemas())
     var pipe = lower(plan, root, one_frame())
     return pipe^.run()
+
+
+def tiers() raises -> DataFrame:
+    """Four bands and the rate each one charges.
+
+    The names are disjoint from the sales frame's on purpose. The probe operator
+    renames a right column whose name the left already has, which moves the
+    columns the plan's schema numbered, so a join over two frames that share a
+    name is refused and has a test of its own.
+    """
+    var band = ChunkedArray(LogicalType.INT64)
+    band.append(numbers([3, 20, 40, 99]))
+    var rate = ChunkedArray(LogicalType.INT64)
+    rate.append(numbers([300, 200, 400, 900]))
+    var columns = List[ChunkedArray]()
+    columns.append(band^)
+    columns.append(rate^)
+    var fields = List[Field]()
+    fields.append(Field("band", LogicalType.INT64))
+    fields.append(Field("rate", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def two_frames() raises -> List[DataFrame]:
+    """The sales frame as relation zero and the tiers frame as relation one."""
+    var frames = List[DataFrame]()
+    frames.append(sales())
+    frames.append(tiers())
+    return frames^
+
+
+def two_schemas() raises -> List[Schema]:
+    """The schema of each of those two, for binding."""
+    var out = List[Schema]()
+    out.append(Schema(copy=sales().schema))
+    out.append(Schema(copy=tiers().schema))
+    return out^
+
+
+def run_two(mut plan: Plan, root: Int) raises -> DataFrame:
+    """Binds, lowers and runs a plan over both frames."""
+    _ = bind(plan, root, two_schemas())
+    var pipe = lower(plan, root, two_frames())
+    return pipe^.run()
+
+
+def present(df: DataFrame, name: String) raises -> List[Bool]:
+    """Which rows of an int64 column have a value in them."""
+    var col = df.column(name).as_typed[DType.int64]()
+    var out = List[Bool](capacity=len(col))
+    for i in range(len(col)):
+        out.append(col.is_valid(i))
+    return out^
+
+
+def joined(
+    mut plan: Plan, kind: JoinKind, left_names: List[String] = List[String]()
+) raises -> Int:
+    """A join of sales to tiers on the quantity and the band.
+
+    Args:
+        plan: Where the nodes go.
+        kind: Which rows to keep.
+        left_names: The columns the left scan reads, or empty for all of them.
+
+    Returns:
+        The join node.
+    """
+    var left = plan.scan("sales", left_names.copy(), 0)
+    var right = plan.scan("tiers", List[String](), 1)
+    return plan.join(
+        left,
+        right,
+        [plan.exprs.column("qty")],
+        [plan.exprs.column("band")],
+        kind,
+    )
 
 
 def test_a_bare_scan_gives_the_frame_back() raises:
@@ -564,19 +655,6 @@ def test_a_distinct_is_refused_by_name() raises:
         _ = lower(plan, root, one_frame())
 
 
-def test_a_join_is_refused_by_name() raises:
-    var plan = Plan()
-    var left = plan.scan("sales", List[String](), 0)
-    var right = plan.scan("sales", List[String](), 0)
-    var a = plan.exprs.column("qty")
-    var b = plan.exprs.column("qty")
-    var root = plan.join(left, right, [a], [b], JoinKind.INNER)
-    _ = bind(plan, root, schemas())
-
-    with assert_raises(contains="no operator for a JOIN node"):
-        _ = lower(plan, root, one_frame())
-
-
 def test_a_unary_expression_is_refused() raises:
     var plan = Plan()
     var scan = plan.scan("sales", List[String](), 0)
@@ -778,6 +856,252 @@ def test_a_merged_projection_computes_the_shared_expression_once() raises:
 
     var out = pipe^.run()
     assert_equal(read_back(out, "doubled")[0], 100, "twice five times ten")
+
+
+def test_an_inner_join_pairs_the_rows_that_match() raises:
+    # The three quantities a band has, in the order the probe side arrived in,
+    # which is what a join in a pipeline keeps and a whole frame join does not
+    # have to.
+    var plan = Plan()
+    var root = joined(plan, JoinKind.INNER)
+    var out = run_two(plan, root)
+    same(read_back(out, "qty"), [20, 3, 40], "the matched quantities")
+    same(read_back(out, "rate"), [200, 300, 400], "the rate of each")
+
+
+def test_a_join_produces_the_two_schemas_end_to_end() raises:
+    # The positions the plan numbered. A projection above the join reads by
+    # position, so a right column landing anywhere else is a wrong answer with
+    # nothing to catch it.
+    var plan = Plan()
+    var root = joined(plan, JoinKind.INNER)
+    var out = run_two(plan, root)
+    assert_equal(len(out.schema), 4)
+    assert_equal(out.schema[0].name, "qty")
+    assert_equal(out.schema[1].name, "price")
+    assert_equal(out.schema[2].name, "band")
+    assert_equal(out.schema[3].name, "rate")
+
+
+def test_a_projection_over_a_join_reads_either_side() raises:
+    var plan = Plan()
+    var at = joined(plan, JoinKind.INNER)
+    var root = plan.project(
+        at,
+        [plan.exprs.column("rate"), plan.exprs.column("price")],
+        ["rate", "price"],
+    )
+    var out = run_two(plan, root)
+    same(read_back(out, "rate"), [200, 300, 400], "the rate of each")
+    same(read_back(out, "price"), [2, 7, 1], "the price of each")
+
+
+def test_a_left_join_keeps_the_rows_that_matched_nothing() raises:
+    var plan = Plan()
+    var root = joined(plan, JoinKind.LEFT)
+    var out = run_two(plan, root)
+    assert_equal(out.rows, 10)
+    same(
+        read_back(out, "qty"),
+        [5, 20, 3, 40, 12, 8, 25, 1, 30, 15],
+        "every row of the left",
+    )
+    # The rate is missing wherever the quantity was not a band, which is the
+    # padding a left join is for.
+    valid(
+        present(out, "rate"),
+        [
+            False,
+            True,
+            True,
+            True,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+        ],
+        "the padded rows",
+    )
+
+
+def test_a_semi_join_keeps_the_left_row_and_none_of_the_right() raises:
+    var plan = Plan()
+    var root = joined(plan, JoinKind.SEMI)
+    var out = run_two(plan, root)
+    assert_equal(len(out.schema), 2)
+    same(read_back(out, "qty"), [20, 3, 40], "the matched quantities")
+
+
+def test_an_anti_join_keeps_the_rows_no_band_matched() raises:
+    var plan = Plan()
+    var root = joined(plan, JoinKind.ANTI)
+    var out = run_two(plan, root)
+    same(
+        read_back(out, "qty"),
+        [5, 12, 8, 25, 1, 30, 15],
+        "the quantities no band matched",
+    )
+
+
+def test_a_filter_under_a_join_runs_before_the_probe() raises:
+    var plan = Plan()
+    var left = plan.scan("sales", List[String](), 0)
+    var right = plan.scan("tiers", List[String](), 1)
+    var keep = plan.exprs.binary(
+        BinaryOp.GT,
+        plan.exprs.column("qty"),
+        plan.exprs.literal(Value(Int64(5))),
+    )
+    var root = plan.join(
+        plan.filter(left, keep),
+        right,
+        [plan.exprs.column("qty")],
+        [plan.exprs.column("band")],
+        JoinKind.INNER,
+    )
+    var out = run_two(plan, root)
+    same(read_back(out, "qty"), [20, 40], "over five and a band")
+
+
+def test_a_narrowed_scan_narrows_the_build_side_too() raises:
+    # The build side is a frame rather than a stream, so the scan's column list
+    # is applied by selecting columns of it and not by an operator over it.
+    var plan = Plan()
+    var left = plan.scan("sales", List[String](), 0)
+    var right = plan.scan("tiers", ["band"], 1)
+    var root = plan.join(
+        left,
+        right,
+        [plan.exprs.column("qty")],
+        [plan.exprs.column("band")],
+        JoinKind.INNER,
+    )
+    var out = run_two(plan, root)
+    assert_equal(len(out.schema), 3)
+    same(read_back(out, "qty"), [20, 3, 40], "the matched quantities")
+
+
+def test_a_right_join_is_refused_by_name() raises:
+    var plan = Plan()
+    var root = joined(plan, JoinKind.RIGHT)
+    _ = bind(plan, root, two_schemas())
+    with assert_raises(contains="not known until the last chunk"):
+        _ = lower(plan, root, two_frames())
+
+
+def test_an_outer_join_is_refused_by_name() raises:
+    var plan = Plan()
+    var root = joined(plan, JoinKind.OUTER)
+    _ = bind(plan, root, two_schemas())
+    with assert_raises(contains="not known until the last chunk"):
+        _ = lower(plan, root, two_frames())
+
+
+def test_a_cross_join_is_refused_by_name() raises:
+    var plan = Plan()
+    var left = plan.scan("sales", List[String](), 0)
+    var right = plan.scan("tiers", List[String](), 1)
+    var root = plan.join(left, right, List[Int](), List[Int](), JoinKind.CROSS)
+    _ = bind(plan, root, two_schemas())
+    with assert_raises(contains="no key to build a table from"):
+        _ = lower(plan, root, two_frames())
+
+
+def test_a_join_whose_right_side_is_not_a_scan_is_refused_by_name() raises:
+    var plan = Plan()
+    var left = plan.scan("sales", List[String](), 0)
+    var right = plan.scan("tiers", List[String](), 1)
+    var keep = plan.exprs.binary(
+        BinaryOp.GT,
+        plan.exprs.column("band"),
+        plan.exprs.literal(Value(Int64(5))),
+    )
+    var root = plan.join(
+        left,
+        plan.filter(right, keep),
+        [plan.exprs.column("qty")],
+        [plan.exprs.column("band")],
+        JoinKind.INNER,
+    )
+    _ = bind(plan, root, two_schemas())
+    with assert_raises(contains="it has to be a scan"):
+        _ = lower(plan, root, two_frames())
+
+
+def test_a_join_on_two_key_pairs_is_refused_by_name() raises:
+    var plan = Plan()
+    var left = plan.scan("sales", List[String](), 0)
+    var right = plan.scan("tiers", List[String](), 1)
+    var root = plan.join(
+        left,
+        right,
+        [plan.exprs.column("qty"), plan.exprs.column("price")],
+        [plan.exprs.column("band"), plan.exprs.column("rate")],
+        JoinKind.INNER,
+    )
+    _ = bind(plan, root, two_schemas())
+    with assert_raises(contains="joins on one column"):
+        _ = lower(plan, root, two_frames())
+
+
+def test_a_computed_key_is_refused_by_name() raises:
+    var plan = Plan()
+    var left = plan.scan("sales", List[String](), 0)
+    var right = plan.scan("tiers", List[String](), 1)
+    var key = plan.exprs.binary(
+        BinaryOp.ADD,
+        plan.exprs.column("qty"),
+        plan.exprs.literal(Value(Int64(0))),
+    )
+    var root = plan.join(
+        left, right, [key], [plan.exprs.column("band")], JoinKind.INNER
+    )
+    _ = bind(plan, root, two_schemas())
+    with assert_raises(contains="joins on a column on each side"):
+        _ = lower(plan, root, two_frames())
+
+
+def test_a_name_both_sides_have_is_refused_by_name() raises:
+    var plan = Plan()
+    var left = plan.scan("sales", List[String](), 0)
+    var right = plan.scan("sales", List[String](), 1)
+    var root = plan.join(
+        left,
+        right,
+        [plan.exprs.column("qty")],
+        [plan.exprs.column("qty")],
+        JoinKind.INNER,
+    )
+    var schemas = List[Schema]()
+    schemas.append(Schema(copy=sales().schema))
+    schemas.append(Schema(copy=sales().schema))
+    _ = bind(plan, root, schemas)
+    var frames = List[DataFrame]()
+    frames.append(sales())
+    frames.append(sales())
+    with assert_raises(contains="both sides of this join have a column"):
+        _ = lower(plan, root, frames^)
+
+
+def test_two_scans_of_one_relation_say_so() raises:
+    # A relation is a frame, so a table joined to itself is two relations and
+    # two frames. A plan that says one of each is a plan that was built wrong,
+    # and saying that here beats a missing column further down.
+    var plan = Plan()
+    var left = plan.scan("sales", List[String](), 0)
+    var right = plan.scan("sales", List[String](), 0)
+    var root = plan.join(
+        left,
+        right,
+        [plan.exprs.column("qty")],
+        [plan.exprs.column("qty")],
+        JoinKind.INNER,
+    )
+    _ = bind(plan, root, schemas())
+    with assert_raises(contains="both read relation 0"):
+        _ = lower(plan, root, one_frame())
 
 
 def main() raises:
