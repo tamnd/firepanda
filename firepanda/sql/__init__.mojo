@@ -58,6 +58,12 @@ by the `GROUP BY` list. The name sets and the wording of every refusal were
 read off DuckDB rather than guessed, down to the two different sentences it
 uses for one rule broken in the select list and in `HAVING`.
 
+`subquery.mojo` is the four shapes a `SELECT` can be written in inside an
+expression: scalar, `EXISTS`, `IN` and a quantified comparison. Each has its
+own arity rule, `EXISTS` is the one that never counts columns at all, and
+correlation is read off what `bind.mojo` recorded rather than found by walking
+the tree afterwards.
+
 `unsupported.mojo` is the line between what the grammar accepts and what
 firepanda runs. Every refusal is an entry in its table rather than a `raise`
 written where the cases ran out, which is what lets `sql_support()` list the
@@ -123,6 +129,21 @@ from .star import (
     Target,
     empty_select_list,
     expand,
+)
+from .subquery import (
+    SHAPE_EXISTS,
+    SHAPE_IN,
+    SHAPE_NONE,
+    SHAPE_QUANTIFIED,
+    SHAPE_SCALAR,
+    Subquery,
+    about,
+    cannot_compare,
+    check_columns,
+    correlated,
+    outer_references,
+    too_many_rows,
+    wrong_column_count,
 )
 from .table import Grammar, GrammarNode, memoized_rules, overridden_rules
 from .token import Token, tokenize, token_text

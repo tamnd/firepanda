@@ -201,7 +201,10 @@ comptime UNPIVOT_NULLS: UInt16 = 39
 comptime UNPIVOT_GROUPS: UInt16 = 40
 """More than one `FOR` group on an `UNPIVOT`."""
 
-comptime NO_CASE: UInt16 = 41
+comptime QUANTIFIED_VALUE: UInt16 = 41
+"""`ANY` or `ALL` over a value rather than over a subquery."""
+
+comptime NO_CASE: UInt16 = 42
 """A grammar rule the transformer has no case for at all."""
 
 
@@ -594,6 +597,16 @@ def sql_support() -> List[Refusal]:
             (
                 "One UNPIVOT node holds one name column and one set of value"
                 " columns, so a second group has nowhere to go."
+            ),
+            STAGE_ISSUE,
+        ),
+        Refusal(
+            "quantified-value",
+            "ANY or ALL over a value",
+            (
+                "DuckDB unnests the right side when it is a list, so x = ANY"
+                " ([1, 2]) is a membership test written the long way. Write it"
+                " as IN, or put a SELECT on the right."
             ),
             STAGE_ISSUE,
         ),
