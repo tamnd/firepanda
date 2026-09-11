@@ -79,6 +79,42 @@ def schemas() raises -> List[Schema]:
     return out^
 
 
+def shifts() raises -> DataFrame:
+    """Nine rows in two chunks over three teams, for a window to partition.
+
+    The teams are interleaved and they straddle the chunk boundary, so a window
+    that reduced a chunk at a time or that let the rows move would give an
+    answer that looks nearly right.
+    """
+    var team = ChunkedArray(LogicalType.INT64)
+    team.append(numbers([1, 2, 1, 2]))
+    team.append(numbers([3, 1, 3, 2, 1]))
+    var hours = ChunkedArray(LogicalType.INT64)
+    hours.append(numbers([4, 7, 2, 5]))
+    hours.append(numbers([9, 1, 3, 8, 6]))
+    var columns = List[ChunkedArray]()
+    columns.append(team^)
+    columns.append(hours^)
+    var fields = List[Field]()
+    fields.append(Field("team", LogicalType.INT64))
+    fields.append(Field("hours", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def shift_frame() raises -> List[DataFrame]:
+    """The shifts frame as the single relation a plan can scan."""
+    var frames = List[DataFrame]()
+    frames.append(shifts())
+    return frames^
+
+
+def shift_schemas() raises -> List[Schema]:
+    """The schema of that one relation, for binding."""
+    var out = List[Schema]()
+    out.append(Schema(copy=shifts().schema))
+    return out^
+
+
 def read_back(df: DataFrame, name: String) raises -> List[Int64]:
     """Reads an int64 column out as a plain list."""
     var col = df.column(name).as_typed[DType.int64]()
@@ -1772,19 +1808,143 @@ def test_an_argument_that_is_computed_is_folded_before_it_gets_here() raises:
         _ = lower(plan, root, List[DataFrame]())
 
 
-def test_a_window_is_refused_by_name() raises:
-    # There is no physical operator for one yet. The node binds and prints and
-    # goes through every pass, and running it says so rather than answering
-    # something that is not what was asked.
+def test_a_window_over_the_whole_frame_broadcasts_one_value() raises:
+    # No partition keys is one partition, so every row gets the same answer and
+    # the columns the frame had come through beside it.
     var plan = Plan()
     var scan = plan.scan("sales", List[String](), 0)
     var qty = plan.exprs.column("qty")
-    var running = plan.exprs.window(AggKind.SUM, qty, List[Int](), List[Int]())
-    var root = plan.window(scan, [running], ["running"])
-    _ = bind(plan, root, schemas())
+    var total = plan.exprs.window(AggKind.SUM, qty, List[Int](), List[Int]())
+    var root = plan.window(scan, [total], ["total"])
+    var got = run(plan, root)
 
-    with assert_raises(contains="no operator for a WINDOW node yet"):
-        _ = lower(plan, root, one_frame())
+    assert_equal(len(got.schema), 3, "the window adds a column")
+    assert_equal(got.schema[2].name, "total", "and it is called what it asked")
+    same(
+        read_back(got, "qty"),
+        [5, 20, 3, 40, 12, 8, 25, 1, 30, 15],
+        "the rows come back as they were",
+    )
+    same(
+        read_back(got, "total"),
+        [159, 159, 159, 159, 159, 159, 159, 159, 159, 159],
+        "every row gets the sum of all of them",
+    )
+
+
+def test_a_window_partitions_and_each_row_reads_its_own() raises:
+    # Two windows over one partitioning, which is one grouping pass and one
+    # operator. The rows stay where they were and each one gets the answer for
+    # the team it is on.
+    var plan = Plan()
+    var scan = plan.scan("shifts", List[String](), 0)
+    var team = plan.exprs.column("team")
+    var hours = plan.exprs.column("hours")
+    var worked = plan.exprs.window(AggKind.SUM, hours, [team], List[Int]())
+    var shifts = plan.exprs.window(AggKind.COUNT, hours, [team], List[Int]())
+    var root = plan.window(scan, [worked, shifts], ["worked", "shifts"])
+    _ = bind(plan, root, shift_schemas())
+    var pipe = lower(plan, root, shift_frame())
+    var got = pipe^.run()
+
+    assert_equal(len(got.schema), 4, "two windows on two columns")
+    same(
+        read_back(got, "team"),
+        [1, 2, 1, 2, 3, 1, 3, 2, 1],
+        "the rows come back in the order they arrived",
+    )
+    same(
+        read_back(got, "worked"),
+        [13, 20, 13, 20, 12, 13, 12, 20, 13],
+        "each row reads its own team's hours",
+    )
+    same(
+        read_back(got, "shifts"),
+        [4, 3, 4, 3, 2, 4, 2, 3, 4],
+        "and its own team's count",
+    )
+
+
+def test_a_window_over_a_computed_expression_drops_the_intermediate() raises:
+    # The product is appended before the breaker and the window lands after it,
+    # so what the node hands up is the frame's columns and then the window, with
+    # the column in between cut out.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var price = plan.exprs.column("price")
+    var line = plan.exprs.binary(BinaryOp.MUL, qty, price)
+    var total = plan.exprs.window(AggKind.SUM, line, List[Int](), List[Int]())
+    var root = plan.window(scan, [total], ["revenue"])
+    var got = run(plan, root)
+
+    assert_equal(len(got.schema), 3, "the product is not one of the columns")
+    assert_equal(
+        got.schema[0].name, "qty", "the frame's columns keep their place"
+    )
+    assert_equal(got.schema[1].name, "price", "both of them")
+    same(
+        read_back(got, "revenue"),
+        [668, 668, 668, 668, 668, 668, 668, 668, 668, 668],
+        "every row gets the revenue of all of them",
+    )
+
+
+def test_a_column_above_a_window_reads_what_the_window_added() raises:
+    # The node above is bound against the input's columns and then the window's,
+    # so a projection that asks for the last one has to find it there.
+    var plan = Plan()
+    var scan = plan.scan("shifts", List[String](), 0)
+    var team = plan.exprs.column("team")
+    var hours = plan.exprs.column("hours")
+    var worked = plan.exprs.window(AggKind.SUM, hours, [team], List[Int]())
+    var window = plan.window(scan, [worked], ["worked"])
+    var back = plan.exprs.column("worked")
+    var root = plan.project(window, [back], ["worked"])
+    _ = bind(plan, root, shift_schemas())
+    var pipe = lower(plan, root, shift_frame())
+    var got = pipe^.run()
+
+    assert_equal(len(got.schema), 1, "the projection keeps the one column")
+    same(
+        read_back(got, "worked"),
+        [13, 20, 13, 20, 12, 13, 12, 20, 13],
+        "and it is the column the window added",
+    )
+
+
+def test_two_windows_that_partition_differently_are_refused() raises:
+    # One operator makes one set of ordinals. Splitting the node here would put
+    # the second window in a column the node above was not bound against, so
+    # the split belongs to the plan and this says so.
+    var plan = Plan()
+    var scan = plan.scan("shifts", List[String](), 0)
+    var team = plan.exprs.column("team")
+    var hours = plan.exprs.column("hours")
+    var by_team = plan.exprs.window(AggKind.SUM, hours, [team], List[Int]())
+    var overall = plan.exprs.window(
+        AggKind.SUM, hours, List[Int](), List[Int]()
+    )
+    var root = plan.window(scan, [by_team, overall], ["worked", "total"])
+    _ = bind(plan, root, shift_schemas())
+
+    with assert_raises(contains="partitions differently from the first one"):
+        _ = lower(plan, root, shift_frame())
+
+
+def test_an_ordered_window_is_refused_by_name() raises:
+    # An ordering inside the window is a running fold, which is a different loop
+    # rather than an argument to this one.
+    var plan = Plan()
+    var scan = plan.scan("shifts", List[String](), 0)
+    var team = plan.exprs.column("team")
+    var hours = plan.exprs.column("hours")
+    var running = plan.exprs.window(AggKind.SUM, hours, [team], [hours])
+    var root = plan.window(scan, [running], ["running"])
+    _ = bind(plan, root, shift_schemas())
+
+    with assert_raises(contains="is ordered, and an ordered window"):
+        _ = lower(plan, root, shift_frame())
 
 
 def main() raises:

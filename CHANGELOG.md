@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a window runs, so `sum(x) OVER (PARTITION BY k)` is an answer rather than a refusal
+
+The physical `Window` operator and the lowering that reaches it. A plan with a window node in it now produces rows instead of an error that says nobody wrote the operator yet.
+
+It is a breaker for the same reason a sort is one. The value on the first row of a partition is a reduction over rows that have not arrived, so nothing goes out until the input has run out, and unlike a group by there is nothing shorter than the input to hold in the meantime, because every row that went in comes back out. What it does that no other operator does is come back wider than it went in: the input's columns are handed through at the positions they had and the windows are appended after them, which is what the node above it was bound expecting.
+
+The partition is the frame. A window with no keys is one partition over the whole input and every row reads the same value, and a window with keys is one grouping pass and a gather per window through the ordinals that pass produced. Chunk boundaries survive, so a window in the middle of a pipeline does not hand ten million rows up as one chunk, and unlike a sort each output chunk holds the rows that arrived in it.
+
+Two things are refused by name rather than answered. A window with an ordering inside it is a running fold over the partition rather than one value broadcast across it, which is a different loop rather than an argument to this one. A node whose windows partition two different ways wants an operator each, and splitting it during lowering would move which column each window lands in, after the node above has already been bound against the order the plan wrote down.
+
+Part of #309.
+
 ### Added: a series can be indexed by position and by label, the way a frame can
 
 `Series.loc`, `Series.iloc`, `Series.at`, `Series.iat` and square brackets. A series has one axis, so the whole of the frame's rule about the shape of the key deciding the shape of the answer collapses to deciding between a value and a series, and the two key readers that made that decision moved out of the frame's accessor classes and became functions all four accessors share. Nothing new is computed: the core's `Series` already had the four row operations the frame's accessors reach, so the work was four bindings and a door. Square brackets are the part that is not shared and not defensible: `s[2]` is the label two even on an index of strings, and `s[2:5]` is the rows two to five counting from the front even on an index whose labels are those numbers in another order. What decides is the slice's own bounds rather than the index's type, so `s["a":"c"]` stays a closed slice of labels while `s[0:2]` on the same index is the first two rows, which is pandas' reading and is written down in enough code that reading it any other way would be a different library. The two sentences pandas raises about a position past the end stay two sentences, since `iloc` and `iat` are told different things about the same mistake. Document 36 section 11 has the rest.

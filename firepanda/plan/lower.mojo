@@ -105,6 +105,30 @@ only has to get the first n rows right is a different operator with a heap in it
 and the limit that wrote the bound down is still sitting above the sort and still
 doing the cutting, so ignoring it is slow rather than wrong.
 
+### A window is a breaker that comes back wider than it went in
+
+A window holds every row the way a sort does, and for the same reason: the value
+on the first row of a partition is a reduction over rows that have not arrived.
+What it does that nothing else here does is hand back more columns than it was
+given, because `SELECT x, sum(x) OVER ()` wants both and the node above it was
+bound expecting both.
+
+That makes the trim above it a selection rather than a prefix. The partition
+keys and the expression each window reduces are computed by appends like
+everything else, so the operator's own columns land after those intermediates,
+and what comes out is the input's columns and then the windows with the
+intermediates cut from between them.
+
+One partitioning per operator, because that is one grouping pass and one
+ordinal column. A node whose windows partition two different ways is refused
+rather than split here, since splitting it changes which column each window
+lands in and the node above it has already been bound against the order the
+plan wrote down.
+
+Only the partition is a frame. `OVER (ORDER BY ...)` is a running fold, which is
+a different loop rather than an argument to this one, so a window with an
+ordering is refused by name.
+
 ### A literal table is a frame this file builds
 
 A scan says which frame to read and a VALUES says what the rows are, so the one
@@ -176,8 +200,8 @@ columns the plan's schema numbered.
 ### What it refuses, and why refusing is the design
 
 A distinct on part of the row is not lowered here, and neither is a difference,
-an intersection, a unary expression, a conditional, a window, or a cast over an
-input column.
+an intersection, a unary expression, a conditional, an ordered window, or a cast
+over an input column.
 Every one of those raises an error that names what it was. It does not fall
 back to `Materialize`, and the reason is that `Materialize` holds a function
 pointer that captures nothing, so there is no way to hand it the expression
@@ -212,6 +236,7 @@ from firepanda.exec.node import (
     Project,
     Reduce,
     Sort,
+    Window,
 )
 from firepanda.exec.pipeline import Pipeline
 from firepanda.frame.frame import DataFrame
@@ -847,6 +872,138 @@ def _lower_sort(plan: Plan, at: Int, mut pipe: Pipeline) raises:
 
     pipe.add(Node(Sort(keys^, descending^, nulls_first^)))
     _trim(pipe, base)
+
+
+def _lower_window(plan: Plan, at: Int, mut pipe: Pipeline) raises:
+    """Lowers a window into the computes it needs and one breaker.
+
+    Every window in the node has to partition the same way, because one operator
+    does one grouping pass. The first window says what the partitioning is and
+    the rest have to agree with it, by expression rather than by shape, which
+    they do when they were written the same way, since the arena hands the same
+    index back to a binder that resolved the same name twice.
+
+    The trim afterwards is a selection rather than a prefix. The keys and the
+    aggregated expressions were appended before the breaker and the windows land
+    after them, so what is kept is the input's columns and then the last few,
+    with the intermediates cut from between.
+
+    Args:
+        plan: The plan.
+        at: The window node.
+        pipe: The pipeline, added to.
+
+    Raises:
+        Error: If a window is ordered, if two windows partition differently, or
+            if an expression has a kind no operator computes.
+    """
+    var base = len(pipe.schema)
+    var memo = Memo()
+    var held = plan.nodes[at].exprs.copy()
+    var names = plan.nodes[at].names.copy()
+
+    var keys = List[Int]()
+    var sources = List[Int](capacity=len(held))
+    var kinds = List[AggKind](capacity=len(held))
+    for i in range(len(held)):
+        ref node = plan.exprs.nodes[held[i]]
+        if node.kind != ExprKind.WINDOW:
+            raise Error(
+                String(
+                    "lower: the window node's output '",
+                    names[i],
+                    "' is a ",
+                    node.kind,
+                    (
+                        " expression rather than a window, and there is no"
+                        " operator that computes one beside the partitions"
+                    ),
+                )
+            )
+        if len(node.children) - 1 > node.parts:
+            raise Error(
+                String(
+                    "lower: the window '",
+                    names[i],
+                    (
+                        "' is ordered, and an ordered window is a running fold"
+                        " over the partition rather than one value broadcast"
+                        " across it, so there is no operator for it yet"
+                    ),
+                )
+            )
+        # The first window decides the partitioning and the rest have to be the
+        # same partitioning, since one operator makes one set of ordinals.
+        if i == 0:
+            for k in range(node.parts):
+                keys.append(
+                    _lower_expr(
+                        plan.exprs,
+                        node.children[1 + k],
+                        pipe,
+                        base,
+                        "key",
+                        memo,
+                        reuse=True,
+                    )
+                )
+        else:
+            var same = node.parts == len(keys)
+            if same:
+                for k in range(node.parts):
+                    if (
+                        _lower_expr(
+                            plan.exprs,
+                            node.children[1 + k],
+                            pipe,
+                            base,
+                            "key",
+                            memo,
+                            reuse=True,
+                        )
+                        != keys[k]
+                    ):
+                        same = False
+            if not same:
+                raise Error(
+                    String(
+                        "lower: the window '",
+                        names[i],
+                        (
+                            "' partitions differently from the first one in the"
+                            " same node, and one window operator has one"
+                            " partitioning, so this wants a node each"
+                        ),
+                    )
+                )
+        # The operator names its own output, so the column it reads is an
+        # intermediate with a name of no consequence, and two windows over the
+        # same expression can read the same one. Naming it after the output
+        # would put two columns of that name in the chunk at once, since this
+        # breaker's output holds what it was given as well as what it computed.
+        sources.append(
+            _lower_expr(
+                plan.exprs,
+                node.children[0],
+                pipe,
+                base,
+                "over",
+                memo,
+                reuse=True,
+            )
+        )
+        kinds.append(AggKind(UInt8(node.op)))
+
+    var made = len(pipe.schema) - base
+    pipe.add(Node(Window(keys^, sources^, kinds^, names^)))
+    if made == 0:
+        return
+    var keep = List[Int](capacity=base + len(held))
+    for i in range(base):
+        keep.append(i)
+    for i in range(len(held)):
+        keep.append(base + made + i)
+    pipe.add(Node(Project(keep^)))
 
 
 def _lower_limit(plan: Plan, at: Int, mut pipe: Pipeline) raises:
@@ -1527,6 +1684,8 @@ def _lower_from(
             _lower_filter(plan, at, pipe)
         elif kind == NodeKind.SORT:
             _lower_sort(plan, at, pipe)
+        elif kind == NodeKind.WINDOW:
+            _lower_window(plan, at, pipe)
         elif kind == NodeKind.DISTINCT:
             _lower_distinct(plan, at, pipe)
         elif kind == NodeKind.PROJECT:
