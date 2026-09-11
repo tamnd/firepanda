@@ -28,6 +28,14 @@ a `DOUBLE`. All four saturate at width 38 rather than raising, so
 `DECIMAL(38,2) + DECIMAL(38,2)` is `DECIMAL(38,2)` and the carry it asked for
 is quietly not there.
 
+There is a second ceiling at width 18, which is the one nobody sees coming.
+DuckDB stores a decimal in the narrowest integer that holds it and will not
+promote a pair that both fit in sixty four bits into a hundred and twenty
+eight bit arithmetic, so `DECIMAL(18,6) + DECIMAL(18,6)` is `DECIMAL(18,6)`
+while `DECIMAL(19,6) + DECIMAL(19,6)` is `DECIMAL(20,6)`. Narrowing, not
+widening, is what the wider pair buys. Modulo is the exception and has no such
+ceiling.
+
 Dates and intervals have their own rules and they are not symmetric. A date
 plus an integer is a date and a date minus a date is a `BIGINT` of days, a
 date plus an interval is a `TIMESTAMP` and not a date, a date plus a time is a
@@ -70,6 +78,16 @@ from .types import (
     TYPE_UTINYINT,
     type_name,
 )
+
+
+comptime NARROW_DECIMAL_WIDTH: UInt8 = 18
+"""How many digits of decimal fit in sixty four bits.
+
+Not a limit on the type, which goes to `DECIMAL_MAX_WIDTH`. It is the width
+DuckDB narrows an addition or a multiplication back to when both operands were
+inside it, rather than letting the answer spill into a wider arithmetic than
+either operand needed.
+"""
 
 
 comptime OP_ADD: UInt8 = 0
@@ -373,14 +391,27 @@ def _decimal_type(operator: UInt8, a: SqlType, b: SqlType) -> SqlType:
     var right = _widen(b)
     if left.id == TYPE_INVALID or right.id == TYPE_INVALID:
         return SqlType(TYPE_INVALID)
+    var widest = max(left.width, right.width)
     if operator == OP_MULTIPLY:
-        return _capped(left.width + right.width, left.scale + right.scale)
+        if left.scale + right.scale > DECIMAL_MAX_WIDTH:
+            # There is no answer to give. DuckDB will not round the scale down
+            # and has no wider decimal to put it in, so it refuses the call.
+            # The message we print for that is the one for an operator with no
+            # overload rather than DuckDB's out of range error, which names the
+            # scale it wanted.
+            return SqlType(TYPE_INVALID)
+        return _capped(
+            left.width + right.width,
+            left.scale + right.scale,
+            widest,
+            True,
+        )
     if operator == OP_INT_DIVIDE:
         # Integer division on a decimal is not a decimal at all.
         return SqlType(TYPE_DOUBLE)
     var scale = max(left.scale, right.scale)
     var digits = max(left.width - left.scale, right.width - right.scale)
-    return _capped(digits + scale + 1, scale)
+    return _capped(digits + scale + 1, scale, widest, False)
 
 
 def _modulo_type(a: SqlType, b: SqlType) -> SqlType:
@@ -452,19 +483,39 @@ def _integer_width(id: UInt8) -> UInt8:
     return DECIMAL_MAX_WIDTH
 
 
-def _capped(width: UInt8, scale: UInt8) -> SqlType:
-    """A decimal, narrowed to the widest one there is if it asked for more.
+def _capped(width: UInt8, scale: UInt8, widest: UInt8, whole: Bool) -> SqlType:
+    """A decimal, narrowed if the derivation asked for a wider one than exists.
 
-    DuckDB saturates rather than raising, so the digit the derivation asked
-    for is simply not there.
+    There are two ceilings and not one. The obvious one is thirty eight
+    digits, which is every decimal there is. The other is eighteen, which is
+    what fits in sixty four bits, and it is the one that surprises: DuckDB
+    will not take a pair that both fit in sixty four bits into a hundred and
+    twenty eight bit arithmetic, so `DECIMAL(18,6) + DECIMAL(18,6)` is a
+    `DECIMAL(18,6)` and not the `DECIMAL(19,6)` the derivation wanted, while
+    `DECIMAL(19,6) + DECIMAL(19,6)` is a `DECIMAL(20,6)` because one of those
+    was already past sixty four bits. Either way DuckDB saturates rather than
+    raising, so the digit the derivation asked for is simply not there.
 
     Args:
         width: The width the derivation wanted.
-        scale: The scale.
+        scale: The scale it wanted.
+        widest: The wider of the two operands, which is what says whether the
+            sixty four bit ceiling applies at all.
+        whole: Whether the narrowed decimal has to keep a digit in front of
+            the point. Multiplication insists on that and leaves
+            `DECIMAL(18,9) * DECIMAL(18,9)` at thirty six digits rather than
+            narrowing it to `DECIMAL(18,18)`; addition does not, and
+            `DECIMAL(18,18) + DECIMAL(18,1)` is a `DECIMAL(18,18)`.
 
     Returns:
         The type.
     """
+    if (
+        width > NARROW_DECIMAL_WIDTH
+        and widest <= NARROW_DECIMAL_WIDTH
+        and (scale < NARROW_DECIMAL_WIDTH or not whole)
+    ):
+        return SqlType(TYPE_DECIMAL, NARROW_DECIMAL_WIDTH, scale)
     if width > DECIMAL_MAX_WIDTH:
         return SqlType(TYPE_DECIMAL, DECIMAL_MAX_WIDTH, scale)
     return SqlType(TYPE_DECIMAL, width, scale)

@@ -32,11 +32,27 @@ call collected is replayed through the solved table, and a single disagreement
 fails the run. Two thousand of them, which is every decision the tier 1 catalog
 can be made to show at these arities.
 
-A cost is a property of the target type alone. That was a hypothesis at the
-start and it is now a measured fact: a model with one number per target
-satisfies every inequality, and a richer model with one number per source and
-target pair buys nothing. Note that this is about cost, not about
-reachability, which very much depends on the source.
+A cost is almost a property of the target type alone. The solver starts with
+one number per target, and where that cannot fit it finds the decisions it
+cannot fit and gives the pairs in them a number of their own, one refinement at
+a time, then takes each of those back out again to check it was needed. What
+comes out is the thinnest model the measurements allow rather than a shape
+chosen in advance.
+
+Two pairs survive that on DuckDB 1.5, both of them a 128 bit integer. A
+decimal stops at 38 digits and such an integer needs 39, so a decimal
+parameter cannot widen to hold one the way it widens to hold a `BIGINT`, and
+DuckDB's choices move accordingly: `mod` over a `BIGINT` and a `DECIMAL` comes
+out `DECIMAL(22,3)` and the same call over a `HUGEINT` gives up and comes out
+`DOUBLE`. One number per target says those two calls resolve the same way, and
+they do not.
+
+Where exactly that lands is underdetermined, and the generated header says so.
+Charging a `HUGEINT` more to reach a decimal and charging it less to reach a
+double are the same statement about every call in the catalog, so which of the
+two the solver writes down is a matter of which it tried first. Note that all
+of this is about cost, not about reachability, which has always depended on
+the source.
 
 The matrix covers scalar types only. `LIST`, `ARRAY`, `STRUCT`, `MAP` and
 `UNION` cast by their elements, so one row for `INTEGER[]` would be a claim
@@ -58,6 +74,7 @@ import itertools
 import pathlib
 import re
 import sys
+import textwrap
 
 import duckdb
 import numpy as np
@@ -120,8 +137,17 @@ TYPE_COUNT = 40
 # not already seen.
 ARITIES = (1, 2, 3)
 
-# `EXPLAIN` prints the plan as a box drawing, so the cast is found by pattern
-# rather than by structure. The column names are chosen to be unambiguous.
+# The cast is found in the plan by pattern rather than by structure. The column
+# names are chosen to be unambiguous.
+#
+# The plan is asked for as JSON and not as the box drawing `EXPLAIN` prints by
+# default, and that is not a matter of taste. The box is wrapped to its own
+# width, so `mod(CAST(p0_3 AS DECIMAL(18,3)), p1_15)` arrives split across two
+# lines with a border between the halves, and a pattern over it finds no cast at
+# all. Every such call was silently dropped for having no readable winner, which
+# took `mod` and every other name with a `DECIMAL` overload out of the pile and
+# left the cost of `DECIMAL` resting on nothing. The JSON writes the expression
+# on one line whatever its length.
 CAST = re.compile(r"CAST\((p\d+_\d+) AS ([A-Z0-9_\[\]() ,\"]+?)\)")
 
 def canonical(text: str) -> str:
@@ -261,11 +287,11 @@ call turns on them, so nothing DuckDB does pins them down and they are written
 as the cheapest a cast is allowed to be. The rest are held in place by at
 least one decision.
 
-A cost belongs to the target type alone, except from `NULL`. A `NULL` argument
-is not a value being converted and DuckDB does not price it as one, so the
-`NULL` column is a set of numbers of its own. Whether the cast exists at all
-very much belongs to the pair: `UTINYINT` reaches `SMALLINT` and not
-`TINYINT`, and `TINYINT` reaches neither `VARCHAR` nor any unsigned type.
+{pricing}
+
+Whether the cast exists at all very much belongs to the pair: `UTINYINT`
+reaches `SMALLINT` and not `TINYINT`, and `TINYINT` reaches neither `VARCHAR`
+nor any unsigned type.
 
 Scalar types only. A list, an array, a struct, a map and a union cast by their
 elements, so a row here for one of them would be a claim about every list
@@ -463,11 +489,9 @@ def main() -> int:
                 if len(equal) > 1:
                     observed.append((name, combination, equal, rivals))
                 continue
-            plan = " ".join(
-                connection.execute(f"explain select {call} from probe")
-                .fetchall()[0][1]
-                .split()
-            )
+            plan = connection.execute(
+                f"explain (format json) select {call} from probe"
+            ).fetchall()[0][1]
             seen = dict.fromkeys(
                 (columns[slot][source] for slot, source in enumerate(combination))
             )
@@ -543,71 +567,147 @@ def main() -> int:
         )
         return 1
 
-    # One variable per target type, and a second one for every target reached
-    # from `NULL`, because `NULL` is not a value that gets converted and DuckDB
-    # does not price it as though it were. Everything else shares a column:
-    # what a cast costs is the target and not the pair, which is measured here
-    # and not assumed, since a model this thin either fits all of it or fails.
-    def weight_of(have: str, want: str):
-        return ("NULL", want) if have == '"NULL"' and want != "ANY" else want
+    # Every source and target a decision actually turns on. The model is built
+    # over these and nothing else, so a pair nothing was ever asked about gets
+    # no variable and no number that pretends to be an answer.
+    pairs = {
+        (have, want)
+        for _, combination, winners, losers in decisions
+        for signature in winners + losers
+        for have, want in zip(combination, signature)
+        if have != want
+    }
 
-    keys = sorted(
-        {
-            weight_of(have, want)
-            for _, combination, winners, losers in decisions
-            for signature in winners + losers
-            for have, want in zip(combination, signature)
-            if have != want
-        },
-        key=str,
-    )
-    index = {key: at for at, key in enumerate(keys)}
-
-    def weigh(combination, signature):
-        row = np.zeros(len(keys))
-        for have, want in zip(combination, signature):
-            if have != want:
-                row[index[weight_of(have, want)]] += 1
-        return row
+    # Which variable a cast is charged against. One per target type, so that
+    # one measurement of a target says something about every source that
+    # reaches it, and a variable of its own for a pair in `split` and for every
+    # target reached from `NULL`, since `NULL` is not a value that gets
+    # converted and DuckDB does not price it as though it were. What goes in
+    # `split` is worked out below rather than written down here.
+    def weight_of(have: str, want: str, split):
+        if have == '"NULL"' and want != "ANY":
+            return (have, want)
+        if (have, want) in split:
+            return (have, want)
+        return ("*", want)
 
     # A winner is cheaper than a loser by at least one, and two winners cost
-    # the same. A difference of nothing at all is a call the model cannot
-    # explain whichever numbers go in it, so it is reported rather than
-    # dropped.
-    inequalities = []
-    equalities = []
-    for name, combination, winners, losers in decisions:
-        rows = [weigh(combination, signature) for signature in winners]
-        for row in rows[1:]:
-            if (rows[0] - row).any():
-                equalities.append(rows[0] - row)
-        for loser in losers:
-            difference = rows[0] - weigh(combination, loser)
-            if not difference.any():
-                print(
-                    f"nothing tells {winners[0]} from {loser} in"
-                    f" {name}{combination}, which duckdb decided anyway",
-                    file=sys.stderr,
-                )
-                return 1
-            inequalities.append(difference)
-
-    answer = linprog(
-        np.ones(len(keys)),
-        A_ub=np.array(inequalities),
-        b_ub=-np.ones(len(inequalities)),
-        A_eq=np.array(equalities) if equalities else None,
-        b_eq=np.zeros(len(equalities)) if equalities else None,
-        bounds=[(1, 1000)] * len(keys),
-        method="highs",
-    )
-    if answer.status != 0:
-        print(
-            "no cost on the target type alone explains DuckDB's choices:"
-            f" {answer.message.strip()}",
-            file=sys.stderr,
+    # the same.
+    def model(split):
+        keys = sorted(
+            {weight_of(have, want, split) for have, want in pairs}, key=str
         )
-        return 1
+        index = {key: at for at, key in enumerate(keys)}
+
+        def weigh(combination, signature):
+            row = np.zeros(len(keys))
+            for have, want in zip(combination, signature):
+                if have != want:
+                    row[index[weight_of(have, want, split)]] += 1
+            return row
+
+        inequalities = []
+        equalities = []
+        against = []
+        for name, combination, winners, losers in decisions:
+            rows = [weigh(combination, signature) for signature in winners]
+            for row in rows[1:]:
+                if (rows[0] - row).any():
+                    equalities.append(rows[0] - row)
+            for loser in losers:
+                inequalities.append(rows[0] - weigh(combination, loser))
+                against.append((name, combination, winners[0], loser))
+        return keys, inequalities, equalities, against
+
+    def solve(split):
+        keys, inequalities, equalities, _ = model(split)
+        return keys, linprog(
+            np.ones(len(keys)),
+            A_ub=np.array(inequalities),
+            b_ub=-np.ones(len(inequalities)),
+            A_eq=np.array(equalities) if equalities else None,
+            b_eq=np.zeros(len(equalities)) if equalities else None,
+            bounds=[(1, 1000)] * len(keys),
+            method="highs",
+        )
+
+    # A decision no set of numbers explains: the winner and the loser cast the
+    # same arguments to the same places and DuckDB told them apart anyway.
+    # Held against the finest model there is, one number per pair, because a
+    # difference that does not show up there shows up nowhere.
+    _, finest, _, against = model(pairs)
+    for row, (name, combination, winner, loser) in zip(finest, against):
+        if not row.any():
+            print(
+                f"nothing tells {winner} from {loser} in"
+                f" {name}{combination}, which duckdb decided anyway",
+                file=sys.stderr,
+            )
+            return 1
+
+    # The same inequalities with a slack variable on each, minimizing the total
+    # slack. An infeasible system says only that something does not fit; this
+    # says which rows, and the pairs in those rows are the ones worth giving a
+    # variable of their own.
+    def conflicting(split):
+        keys, inequalities, equalities, against = model(split)
+        width = len(keys)
+        count = len(inequalities)
+        relaxed = linprog(
+            np.concatenate([np.zeros(width), np.ones(count)]),
+            A_ub=np.hstack([np.array(inequalities), -np.eye(count)]),
+            b_ub=-np.ones(count),
+            A_eq=(
+                np.hstack(
+                    [np.array(equalities), np.zeros((len(equalities), count))]
+                )
+                if equalities
+                else None
+            ),
+            b_eq=np.zeros(len(equalities)) if equalities else None,
+            bounds=[(1, 1000)] * width + [(0, None)] * count,
+            method="highs",
+        )
+        if relaxed.status != 0:
+            return set()
+        found = set()
+        for at, slack in enumerate(relaxed.x[width:]):
+            if slack <= 1e-6:
+                continue
+            _, combination, winner, loser = against[at]
+            for signature in (winner, loser):
+                for have, want in zip(combination, signature):
+                    if have != want:
+                        found.add((have, want))
+        return found
+
+    # Thinnest first, and grow only under protest. Each round takes the pairs
+    # out of the decisions that could not hold and gives them their own number,
+    # until the system is feasible or there is nothing left to try.
+    split: set[tuple[str, str]] = set()
+    keys, answer = solve(split)
+    while answer.status != 0:
+        widen = conflicting(split) - split
+        if not widen:
+            print(
+                "no cost on the target type alone explains DuckDB's choices,"
+                f" and nothing narrows it down: {answer.message.strip()}",
+                file=sys.stderr,
+            )
+            return 1
+        split |= widen
+        keys, answer = solve(split)
+
+    # A round splits out every pair in a decision that did not hold, which is
+    # more than the decision needed. Put each one back and keep it out if the
+    # system still stands without it, so what is left is a set that is doing
+    # work rather than a set that was easy to find.
+    for pair in sorted(split):
+        smaller = split - {pair}
+        _, without = solve(smaller)
+        if without.status == 0:
+            split = smaller
+    keys, answer = solve(split)
     weights = {key: int(round(value)) for key, value in zip(keys, answer.x)}
 
     def cost(source, target):
@@ -615,7 +715,7 @@ def main() -> int:
             return 0
         if target != "ANY" and not reaches.get((source, target)):
             return None
-        return weights.get(weight_of(source, target), 1)
+        return weights.get(weight_of(source, target, split), 1)
 
     # The check the whole file rests on. Resolve every collected call the way
     # the generated table says to, and insist DuckDB agreed, down to which
@@ -668,9 +768,51 @@ def main() -> int:
                 # A pair no decision ever weighed. The solver was never asked
                 # about it and the number in it is the bound and not an answer,
                 # which is worth counting rather than hiding.
-                if weight_of(source, target) not in weights:
+                if weight_of(source, target, split) not in weights:
                     guessed += 1
         lines.append(f"{target} " + " ".join(fields))
+
+    # What the header says about the shape of the model, written here rather
+    # than left in the template because it is a reading of the data: which
+    # pairs the solver had to split out is not known until it has solved.
+    written = [f"`{have}` to `{want}`" for have, want in sorted(split)]
+    pricing = [
+        "A cost belongs to the target type alone, except from `NULL`"
+        + (
+            "."
+            if not written
+            else " and except for "
+            + (
+                written[0]
+                if len(written) == 1
+                else ", ".join(written[:-1]) + " and " + written[-1]
+            )
+            + "."
+        )
+        + " The generator starts with one number per target and gives a pair a"
+        " number of its own only where no set of numbers fits otherwise, so"
+        " that list is a reading and not a design. A `NULL` argument is not a"
+        " value being converted and DuckDB does not price it as one."
+    ]
+    if written:
+        if all(
+            have in ("HUGEINT", "UHUGEINT") or want in ("HUGEINT", "UHUGEINT")
+            for have, want in split
+        ):
+            pricing[0] += (
+                " What the others have in common is a 128 bit integer, which is"
+                " the one width a decimal cannot grow to hold: a decimal stops"
+                " at 38 digits and such an integer needs 39, so `mod` over a"
+                " `BIGINT` and a `DECIMAL` comes out `DECIMAL(22,3)` and the"
+                " same call over a `HUGEINT` gives up and comes out `DOUBLE`."
+            )
+        pricing.append(
+            "Which pairs come out of that is not unique, because a discount on"
+            " one cast and a surcharge on the cast it competes against say the"
+            " same thing about which overload wins, and the catalog holds no"
+            " call that tells those two apart. The set below is the one the"
+            " search arrived at, and every decision replays through it."
+        )
 
     text = HEADER.format(
         version=version,
@@ -680,7 +822,10 @@ def main() -> int:
         decisions=len(decisions),
         ambiguities=ambiguities,
         guessed=guessed,
-        any_cost=weights.get("ANY", 1),
+        any_cost=weights.get(("*", "ANY"), 1),
+        pricing="\n\n".join(
+            textwrap.fill(paragraph, width=77) for paragraph in pricing
+        ),
     )
     text += "\n".join(lines) + '\n"""\n'
 
