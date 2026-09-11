@@ -27,6 +27,7 @@ from firepanda.py.build import column_from, empty_column
 from firepanda.py.cast import refuse_if_not_finite
 from firepanda.io.arrow_export import export_array_borrowed, export_schema
 from firepanda.py.convert import array_capsule, schema_capsule
+from firepanda.py.ewm import ewm as ewm_agg
 from firepanda.py.index import PyIndex
 from firepanda.py.errors import DTYPE, UNSUPPORTED, VALUE, retagged, tagged
 from firepanda.py.ops import (
@@ -807,6 +808,63 @@ struct PySeries(Movable, Writable):
                         words(closed, "closed"),
                         maybe_whole(step, "step"),
                         window_settings(words(kind, "kind"), settings),
+                    )
+                )
+            )
+        )
+
+    @staticmethod
+    def ewm_agg(
+        py_self: PythonObject,
+        kind: PythonObject,
+        alpha: PythonObject,
+        min_periods: PythonObject,
+        adjust: PythonObject,
+        ignore_na: PythonObject,
+        settings: PythonObject,
+    ) raises -> PythonObject:
+        """Runs one exponentially weighted reduction down the column.
+
+        A separate door from `window_agg` and not a sixth spelling of it. There
+        is no width here, no centring, no closed rule and no step, because every
+        row is inside every window and what changes is the weight, and
+        `firepanda/kernel/ewm.mojo` argues that at length.
+
+        The four spellings of the decay have already collapsed to one number by
+        the time they arrive, which is the Python layer's job because that is
+        where pandas' sentences for the refusals live.
+
+        Args:
+            py_self: The series.
+            kind: The reduction, as pandas spells the method.
+            alpha: The smoothing factor, above nought and at most one.
+            min_periods: How many values a row needs before it is answered.
+            adjust: Whether every row weighs one rather than the factor.
+            ignore_na: Whether a missing row is skipped rather than taking up a
+                slot in the decay.
+            settings: The parameters the reduction reads and the decay does not,
+                as a tuple, which is `bias` for the two spreads and empty for
+                the mean and the total.
+
+        Returns:
+            A new series of float64, as tall as this one.
+
+        Raises:
+            Error: Tagged `dtype` if the column holds nothing a reduction can
+                read, and tagged `value` if a parameter is out of range or the
+                combination has no pandas answer.
+        """
+        return PythonObject(
+            alloc=Self(
+                ArcPointer(
+                    ewm_agg(
+                        Self._held(py_self)[].series[],
+                        words(kind, "kind"),
+                        number(alpha, "alpha"),
+                        whole(min_periods, "min_periods"),
+                        flag(adjust, "adjust"),
+                        flag(ignore_na, "ignore_na"),
+                        settings,
                     )
                 )
             )
