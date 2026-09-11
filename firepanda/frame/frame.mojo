@@ -1850,6 +1850,156 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         """
         return self._group_top(by, column, n, False, dropna)
 
+    def _top_rows(
+        self, column: String, n: Int, largest: Bool, keep: String
+    ) raises -> Self:
+        """The body behind `nlargest` and `nsmallest`.
+
+        Args:
+            column: The column being ranked.
+            n: How many rows to keep.
+            largest: True to keep the highest values, False the lowest.
+            keep: Which end of a tie survives, "first" or "last".
+
+        Returns:
+            The kept rows of every column, best first.
+
+        Raises:
+            As `nlargest` does.
+        """
+        if keep != "first" and keep != "last":
+            raise Error(
+                "top rows: keep must be either first or last, not " + keep
+            )
+
+        var at = self.schema.index_of(column)
+
+        # The slot table the kernel builds is `n` wide, so a caller who writes
+        # a number far larger than the frame would otherwise buy an allocation
+        # the size of what they wrote rather than the size of what there is.
+        # Asking for more rows than exist is the same question as asking for
+        # all of them, so the number is cut down to that before it is spent.
+        var room = n if n < self.rows else self.rows
+        if room <= 0:
+            return self.take(List[Int]())
+
+        # One group holding every row. The codes are written out rather than
+        # skipped because the kernel reads an ordinal per row and there is no
+        # ungrouped entry point, and a zero filled array is the cheapest way to
+        # say that every row belongs to the same group.
+        var codes = Array[DType.uint32](self.rows)
+
+        var kept: List[Int]
+        if keep == "first":
+            kept = group_top_rows_any(
+                self.columns[at].only(), codes, 1, room, largest
+            ).rows_at.copy()
+        else:
+            # The kernel decides a tie by row number and the earlier row wins,
+            # and that is the only thing `keep` changes. So rather than teach
+            # the kernel a second tie rule, which would double the
+            # instantiations of every function in it, the ranked column is read
+            # back to front. The last row of a tie is then the first one the
+            # kernel sees, and each kept position is turned back into the row it
+            # came from on the way out. This also reproduces pandas' ordering of
+            # the answer, where the tied rows come back in reverse order of
+            # appearance.
+            var backwards = List[Int](capacity=self.rows)
+            for i in range(self.rows):
+                backwards.append(self.rows - 1 - i)
+            var flipped = take_any(self.columns[at].only(), backwards)
+            var back = group_top_rows_any(flipped, codes, 1, room, largest)
+
+            kept = List[Int](capacity=len(back.rows_at))
+            for i in range(len(back.rows_at)):
+                kept.append(self.rows - 1 - back.rows_at[i])
+
+        if len(kept) >= room:
+            return self.take(kept)
+
+        # Fewer rows came back than were asked for, and the kernel keeps every
+        # present value it can, so that can only mean it ran out of them. Every
+        # row missing from the answer is therefore a row whose ranked value is
+        # missing, and pandas pads the answer with those rather than answering
+        # short: a null sorts to the end of the ranking and is still a row.
+        #
+        # Which is why the padding is worked out by elimination rather than by
+        # asking each row whether its value is present. Elimination needs no
+        # dtype dispatch and no second reading of the rule the kernel used for
+        # what counts as missing, and a NaN counts there and is not a null.
+        #
+        # pandas pads in row order under both tie rules, including the one that
+        # reverses everything else, so the walk here is forwards either way.
+        var marked = List[Bool](length=self.rows, fill=False)
+        for i in range(len(kept)):
+            marked[kept[i]] = True
+        for i in range(self.rows):
+            if len(kept) == room:
+                break
+            if not marked[i]:
+                kept.append(i)
+        return self.take(kept)
+
+    def nlargest(
+        self, column: String, n: Int, keep: String = "first"
+    ) raises -> Self:
+        """Keeps the `n` rows with the largest values in one column.
+
+        This is `df.nlargest(n, column)`, the whole frame version of the
+        grouped `group_nlargest` above and the same kernel underneath with one
+        group in it. The rows come back best first, which is a sort of the
+        answer and not of the input, and every column and dtype is carried
+        along because this is a selection of rows rather than a reduction.
+
+        A row whose ranked value is null or NaN is ranked last rather than
+        dropped, so a frame with fewer than `n` present values fills the rest
+        of the answer with missing ones, in row order, which is what pandas
+        does. This is the one place where this differs from `group_nlargest`,
+        which keeps only present values. A frame with fewer than `n` rows in it
+        answers all of them, and asking for none or fewer answers an empty
+        frame rather than raising, because a count is a quantity here and zero
+        is a quantity.
+
+        Two rows holding the same value are separated by `keep`. The default
+        keeps the one that appeared first, and "last" keeps the one that
+        appeared last and hands the tied rows back in reverse order of
+        appearance, which is what pandas does.
+
+        Args:
+            column: The column to rank by. Must be a numeric one.
+            n: How many rows to keep.
+            keep: Which row of a tie survives, "first" or "last".
+
+        Returns:
+            A frame of the kept rows, with the same columns as the input.
+
+        Raises:
+            If the name is missing, if the column is not numeric, or if `keep`
+            is neither of the two words.
+        """
+        return self._top_rows(column, n, True, keep)
+
+    def nsmallest(
+        self, column: String, n: Int, keep: String = "first"
+    ) raises -> Self:
+        """Keeps the `n` rows with the smallest values in one column.
+
+        `nlargest` read the other way round, and the same in every other
+        respect, ties and nulls and the ordering of the answer included.
+
+        Args:
+            column: The column to rank by. Must be a numeric one.
+            n: How many rows to keep.
+            keep: Which row of a tie survives, "first" or "last".
+
+        Returns:
+            A frame of the kept rows, with the same columns as the input.
+
+        Raises:
+            As `nlargest` does.
+        """
+        return self._top_rows(column, n, False, keep)
+
     def group_agg(
         self,
         by: List[String],

@@ -1891,6 +1891,18 @@ FRAME = Exposed(
             returns="DataFrame",
         ),
         Binding(
+            mojo="PyDataFrame.top_rows",
+            name="top_rows",
+            doc="The n best rows of the frame, by one column.",
+            params=(
+                ("column", "str"),
+                ("n", "int"),
+                ("largest", "bool"),
+                ("keep", "str"),
+            ),
+            returns="DataFrame",
+        ),
+        Binding(
             mojo="PyDataFrame.reduce",
             name="reduce",
             doc="Every column reduced to one value, as a series of them.",
@@ -2236,6 +2248,22 @@ FRAME = Exposed(
             ),
             body="self._drop_duplicates(subset, keep, inplace, ignore_index)",
             doc="The frame with the repeated rows removed, by a chosen rule.",
+            returns="DataFrame",
+        ),
+        Member(
+            name="nlargest",
+            kind="method",
+            signature="n: int, columns: Any, keep: Any = \"first\"",
+            body="self._top_rows(n, columns, keep, True)",
+            doc="The n rows holding the largest values in one column.",
+            returns="DataFrame",
+        ),
+        Member(
+            name="nsmallest",
+            kind="method",
+            signature="n: int, columns: Any, keep: Any = \"first\"",
+            body="self._top_rows(n, columns, keep, False)",
+            doc="The n rows holding the smallest values in one column.",
             returns="DataFrame",
         ),
         Member(
