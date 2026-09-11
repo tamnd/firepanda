@@ -353,5 +353,65 @@ def test_the_shapes_with_no_node_yet_each_say_which_one() raises:
         _ = _plan("SELECT CAST(a AS BIGINT) FROM t")
 
 
+def test_a_column_can_say_which_table_it_is_from() raises:
+    # The qualifier resolves here, at lowering, because the FROM that gives it
+    # its meaning has already been walked. Binding then has a relation to look
+    # the name up in rather than a word it would have to resolve itself.
+    assert_equal(_plan("SELECT t.a FROM t"), "PROJECT [a]\n  SCAN t []\n")
+
+
+def test_an_alias_is_what_the_table_is_called_after_it() raises:
+    assert_equal(_plan("SELECT l.a FROM t AS l"), "PROJECT [a]\n  SCAN t []\n")
+
+
+def test_an_alias_hides_the_table_name_rather_than_adding_to_it() raises:
+    # SQL's rule, and the reason it is a rule is that a query which could write
+    # either would have two names for one thing and no way to tell them apart
+    # once a second table arrived.
+    with assert_raises(contains="nothing in this query is called 't'"):
+        _ = _plan("SELECT t.a FROM t AS l")
+
+
+def test_the_message_says_what_the_from_did_bring() raises:
+    with assert_raises(contains="the FROM brought 'l'"):
+        _ = _plan("SELECT x.a FROM t AS l")
+
+
+def test_a_qualified_name_in_a_where_reads_the_same_way() raises:
+    assert_equal(
+        _plan("SELECT a FROM t WHERE t.b > 1"),
+        "PROJECT [a]\n  FILTER b > 1\n    SCAN t []\n",
+    )
+
+
+def test_a_qualified_name_a_table_does_not_have_is_still_missing() raises:
+    with assert_raises(contains="there is no column named 'nope'"):
+        _ = _plan("SELECT t.nope FROM t")
+
+
+def test_a_qualified_name_with_no_from_has_nothing_to_qualify() raises:
+    with assert_raises(contains="the FROM brought nothing"):
+        _ = _plan("SELECT t.a")
+
+
+def test_a_three_part_column_is_refused_by_name() raises:
+    with assert_raises(contains="a table and a name so far"):
+        _ = _plan("SELECT s.t.a FROM t")
+
+
+def test_a_qualified_name_can_be_ordered_by() raises:
+    # The ORDER BY is lowered outside the block, so it only sees the table if
+    # the block hands its scope back, and this is the test that says it does.
+    assert_equal(
+        _plan("SELECT a, b FROM t ORDER BY t.b"),
+        "SORT [b asc nulls last]\n  PROJECT [a, b]\n    SCAN t []\n",
+    )
+
+
+def test_column_aliases_on_a_table_are_refused_by_name() raises:
+    with assert_raises(contains="column aliases on a table reference"):
+        _ = _plan("SELECT x FROM t AS l (x, y, z, w)")
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a SQL column can say which table it came from
+
+`SELECT l.a FROM t AS l` lowers. The FROM clause records what each table is called, a two part column name is looked up against that record, and the relation it finds is what goes on the plan's column rather than the word the query wrote. Binding then looks in that relation and nowhere else, so a name two tables both have resolves to the one that was meant instead of being refused.
+
+An alias replaces the table's own name rather than adding to it, which is SQL's rule and is why `SELECT t.a FROM t AS l` is an error and not a second spelling. A qualifier nothing in the query is called is refused with a message saying what the FROM did bring, since the common version of that mistake is a typo in the alias and the useful thing to print is the list of names that would have worked.
+
+The scope is handed back out of the block so that an `ORDER BY` written after it can qualify a name the same way the block's own clauses can. It is not handed out of a set operation, because the tables were inside the arms and an `ORDER BY` written after a `UNION` sorts what the whole of it produced.
+
+Two shapes are refused by name rather than guessed at. A three part name is either a schema and a table or a struct and a field, and telling those apart needs the catalog to say whether the first part names a schema. Column aliases on a table reference, as in `FROM t AS l (x, y)`, rename what the table produces rather than what it is called, which is a projection over the scan and not an entry in the scope.
+
+Part of #309.
+
 ### Fixed: a column name two inputs both have is no longer resolved to whichever came first
 
 Binding resolved a column name to the first column in the schema that had it. A join puts its two inputs end to end, so joining two tables that both have a `key` produces a schema with two columns called `key`, and a projection above it asking for `key` got the left one without anything saying so. That is a wrong answer rather than a missing feature, and it is the kind that nothing downstream can notice, because the plan binds, the types check and the query runs.
