@@ -56,6 +56,7 @@ from .ast import (
     EXPR_LIST,
     EXPR_LITERAL,
     EXPR_PARAMETER,
+    EXPR_QUANTIFIED,
     EXPR_STAR,
     EXPR_STRUCT,
     EXPR_SUBQUERY,
@@ -178,7 +179,7 @@ def children(ast: Ast, node: UInt32) raises -> List[UInt32]:
         out.append(item.a)
         out.append(item.b)
         return out^
-    if kind == EXPR_IN_SUBQUERY:
+    if kind == EXPR_IN_SUBQUERY or kind == EXPR_QUANTIFIED:
         out.append(item.a)
         return out^
     if kind == EXPR_FUNCTION:
@@ -694,10 +695,16 @@ def _tags(ast: Ast, node: UInt32) raises -> String:
         return String(item.payload)
     if kind == EXPR_WINDOW:
         return String(ast.text(item.payload))
-    # A subquery and a star are each only equal to themselves. Two subqueries
-    # that read the same could still be two different statements, and DuckDB
-    # will not accept either as a group key anyway.
-    if kind == EXPR_SUBQUERY or kind == EXPR_EXISTS or kind == EXPR_STAR:
+    # A subquery and a star are each only equal to themselves, and anything
+    # holding a subquery goes the same way. Two subqueries that read the same
+    # could still be two different statements, and DuckDB will not accept any
+    # of these as a group key anyway.
+    if (
+        kind == EXPR_SUBQUERY
+        or kind == EXPR_EXISTS
+        or kind == EXPR_QUANTIFIED
+        or kind == EXPR_STAR
+    ):
         return String(node)
     if kind == EXPR_CASE or kind == EXPR_LIST:
         return String()

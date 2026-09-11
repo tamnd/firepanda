@@ -408,5 +408,25 @@ def test_thirteen_of_them_will_not_be_called_without_over() raises:
         assert_true(is_aggregate(name))
 
 
+def test_a_quantified_comparison_is_walked_on_the_left_only() raises:
+    # The right side is a statement index, so a walk that followed it would be
+    # reading the wrong arena, and an aggregate in there belongs to that query.
+    var ast = Ast()
+    var node = ast.quantified(
+        _sum(ast, _column(ast, "a")), ">", True, ast.query()
+    )
+    var uses = inspect(ast, node)
+    assert_true(uses.aggregate)
+    assert_false(uses.window)
+
+
+def test_two_quantified_comparisons_are_two_expressions() raises:
+    var ast = Ast()
+    var left = ast.quantified(_column(ast, "a"), ">", True, ast.query())
+    var right = ast.quantified(_column(ast, "a"), ">", True, ast.query())
+    assert_true(same(ast, left, left))
+    assert_false(same(ast, left, right))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

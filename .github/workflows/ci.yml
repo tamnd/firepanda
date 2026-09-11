@@ -404,6 +404,22 @@ jobs:
       - run: pixi run differential
         timeout-minutes: 8
 
+      # The function catalog is read off a live DuckDB, so it belongs in the one
+      # job that has DuckDB installed. It is checked in for the same reason the
+      # grammar tables are, and it goes stale the same way: a DuckDB bump that
+      # changes a signature changes what firepanda binds.
+      - name: Generated function table is current
+        run: pixi run check-functions
+        timeout-minutes: 2
+
+      # The cast costs are measured off the same DuckDB and go stale in a worse
+      # way than the catalog does. A release that makes one more cast implicit
+      # changes which overload a call binds to without changing any signature,
+      # so the diff this step fails on is the only warning there would be.
+      - name: Generated cast table is current
+        run: pixi run check-casts
+        timeout-minutes: 2
+
       # DuckDB's test corpus is 33 MB and is fetched rather than vendored, so it
       # is cached on the commit the grammar is pinned to. A grammar bump changes
       # the key and the next run fetches the corpus that belongs to it.
@@ -426,6 +442,14 @@ jobs:
       # above. docs/specs/sql/11-conformance.md section 4.
       - name: Statements out of the grammar, through both parsers
         run: pixi run differential-sql-generated
+        timeout-minutes: 5
+
+      # The two steps above ask whether a statement parses. This one asks what
+      # an expression's type comes out as, which is the question a wrong answer
+      # with no error attached comes from. It needs no corpus either.
+      # docs/specs/sql/11-conformance.md section 5.
+      - name: Expression types, through both binders
+        run: pixi run differential-semantics
         timeout-minutes: 5
 
   required:

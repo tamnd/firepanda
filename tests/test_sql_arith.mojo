@@ -5,6 +5,10 @@ checked against it over all 5,046 combinations of six operators and twenty
 nine types before this file was written. What is asserted here is the part a
 reader needs to see stated: the cases where a reasonable rule gives a wrong
 answer, and the pairs where two operators disagree about the same overflow.
+
+That sweep is a harness now rather than a thing done once, and it is
+`tests/differential/semantics.mojo`. The narrowing cases below came out of it
+and not out of this file.
 """
 
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
@@ -145,6 +149,58 @@ def test_a_decimal_too_wide_to_exist_quietly_loses_the_digit() raises:
     assert_equal(
         _result(OP_MULTIPLY, "DECIMAL(20,10)", "DECIMAL(20,10)"),
         "DECIMAL(38,20)",
+    )
+
+
+def test_a_result_that_still_fits_in_sixty_four_bits_is_kept_there() raises:
+    # Eighteen digits is what fits in a 64 bit decimal, and where both operands
+    # already fit DuckDB would rather keep that representation than take the
+    # width the derivation asks for. So the carry is dropped and the product is
+    # truncated, and neither says so.
+    assert_equal(
+        _result(OP_ADD, "DECIMAL(18,1)", "DECIMAL(18,1)"), "DECIMAL(18,1)"
+    )
+    assert_equal(
+        _result(OP_MULTIPLY, "DECIMAL(10,4)", "DECIMAL(10,4)"), "DECIMAL(18,8)"
+    )
+    assert_equal(
+        _result(OP_MULTIPLY, "DECIMAL(17,0)", "DECIMAL(17,0)"), "DECIMAL(18,0)"
+    )
+    # Addition has no guard on its scale, so an operand that is all scale keeps
+    # all of it and loses every digit in front of the point it asked for.
+    assert_equal(
+        _result(OP_ADD, "DECIMAL(18,18)", "DECIMAL(18,1)"), "DECIMAL(18,18)"
+    )
+    # One operand too wide and the narrowing does not apply at all.
+    assert_equal(
+        _result(OP_ADD, "DECIMAL(19,2)", "DECIMAL(4,2)"), "DECIMAL(20,2)"
+    )
+
+
+def test_a_product_that_needs_all_the_scale_keeps_all_the_width() raises:
+    # The guard on the guard. A product whose scale reaches eighteen is left at
+    # its derived width, because narrowing it to eighteen digits would leave no
+    # room at all in front of the point.
+    assert_equal(
+        _result(OP_MULTIPLY, "DECIMAL(18,9)", "DECIMAL(18,9)"),
+        "DECIMAL(36,18)",
+    )
+    assert_equal(
+        _result(OP_MULTIPLY, "DECIMAL(18,18)", "DECIMAL(18,18)"),
+        "DECIMAL(36,36)",
+    )
+    # A scale of seventeen is under the line, so this one narrows.
+    assert_equal(
+        _result(OP_MULTIPLY, "DECIMAL(18,8)", "DECIMAL(18,9)"), "DECIMAL(18,17)"
+    )
+
+
+def test_a_product_needing_more_scale_than_exists_has_no_type() raises:
+    # Saturating is what happens to the width. The scale cannot saturate,
+    # because dropping scale changes the value rather than the range, so DuckDB
+    # refuses the multiplication outright and asks for an explicit cast.
+    assert_equal(
+        _result(OP_MULTIPLY, "DECIMAL(30,20)", "DECIMAL(30,20)"), "INVALID"
     )
 
 

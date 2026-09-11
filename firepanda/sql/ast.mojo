@@ -225,6 +225,19 @@ entries for every window that names a frame.
 """
 
 
+comptime EXPR_QUANTIFIED: UInt8 = 20
+"""`x > ALL (SELECT ...)` and `x > ANY (SELECT ...)`.
+
+`a` is the operand, `b` is a statement index, `payload` is the interned
+comparison operator and `children` is 1 for `ALL` and 0 for `ANY`. `SOME` is
+the same node as `ANY`, since the two words mean one thing and the printer has
+to pick one of them.
+
+It is not an `EXPR_BINARY` with a longer operator on it, because the right side
+is a statement index and everything that walks a binary node reads both sides
+out of the expression arena.
+"""
+
 comptime FRAME_ROWS: UInt32 = 1
 """`ROWS`, which counts rows."""
 
@@ -1472,6 +1485,37 @@ struct Ast(Movable):
                 a=operand,
                 b=statement,
                 payload=UInt32(1) if negated else UInt32(0),
+            )
+        )
+
+    def quantified(
+        mut self,
+        operand: UInt32,
+        operator: StringSlice,
+        every: Bool,
+        statement: UInt32,
+        token: UInt32 = 0,
+    ) -> UInt32:
+        """Builds `x > ALL (SELECT ...)` or `x > ANY (SELECT ...)`.
+
+        Args:
+            operand: What is being compared.
+            operator: The comparison, as written.
+            every: True for `ALL`, false for `ANY` and `SOME`.
+            statement: The statement on the right, in the statement arena.
+            token: The token it starts at.
+
+        Returns:
+            The expression node index.
+        """
+        return self.add(
+            Expr(
+                kind=EXPR_QUANTIFIED,
+                token=token,
+                a=operand,
+                b=statement,
+                children=UInt32(1) if every else UInt32(0),
+                payload=self.intern(operator),
             )
         )
 

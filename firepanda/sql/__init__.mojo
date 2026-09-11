@@ -58,6 +58,33 @@ by the `GROUP BY` list. The name sets and the wording of every refusal were
 read off DuckDB rather than guessed, down to the two different sentences it
 uses for one rule broken in the select list and in `HAVING`.
 
+`subquery.mojo` is the four shapes a `SELECT` can be written in inside an
+expression: scalar, `EXISTS`, `IN` and a quantified comparison. Each has its
+own arity rule, `EXISTS` is the one that never counts columns at all, and
+correlation is read off what `bind.mojo` recorded rather than found by walking
+the tree afterwards.
+
+`cte.mojo` is what a `WITH` binds and where each name can be said. Entries bind
+in order, so naming a later one is a missing table rather than a forward
+reference, a column alias list is a prefix and is half applied when it is the
+wrong length, and one message covers all three ways a recursive CTE can be
+written wrong.
+
+`registry.mojo` is the tier 1 function catalog: what a name is, which overloads
+it has, and what the refusal says when there is no such name or no such call.
+Every signature in it was read off DuckDB rather than written down from what a
+function ought to do, which is why `sum` over a boolean gives back a `HUGEINT`
+and `length` accepts a `BIT`.
+
+`casts.mojo` is what an implicit cast costs, which is the other half of what a
+name's overloads are for. DuckDB publishes no such table, so
+`tools/gen_casts.py` solves one out of the choices DuckDB makes over a couple
+of thousand calls and checks it by replaying every one of them.
+
+`resolve.mojo` is the scoring itself: the cheapest candidate wins, an argument
+already of the right type is free, and a call with no cheapest candidate is
+refused in DuckDB's own words rather than decided.
+
 `unsupported.mojo` is the line between what the grammar accepts and what
 firepanda runs. Every refusal is an entry in its table rather than a `raise`
 written where the cases ran out, which is what lets `sql_support()` list the
@@ -105,7 +132,29 @@ from .classify import (
 )
 from .bind import Binding, Reference, Scope, Scopes
 from .cast import cannot_mix, common_type
+from .casts import Casts
 from .catalog import Catalog, View
+from .cte import (
+    NOT_A_CTE,
+    Cte,
+    Ctes,
+    aliased,
+    anchored,
+    check_modifiers,
+    circular_reference,
+    duplicate_name,
+    no_limit,
+    no_ordering,
+    read_ctes,
+    reference_count,
+)
+from .generated.casts import ANY_COST, NO_CAST
+from .generated.functions import (
+    DUCKDB_VERSION,
+    KIND_AGGREGATE,
+    KIND_MACRO,
+    KIND_SCALAR,
+)
 from .matcher import Parse, ParseNode, parse, parse_rule, parse_unfiltered
 from .printer import (
     needs_quoting,
@@ -115,6 +164,24 @@ from .printer import (
     quote_name,
     quote_string,
 )
+from .registry import (
+    NO_SLOT,
+    ROLE_ANY,
+    ROLE_EXACT,
+    ROLE_LIST,
+    ROLE_TEMPLATE,
+    ROLE_UNKNOWN,
+    Overload,
+    Registry,
+)
+from .resolve import (
+    NO_MATCH,
+    TEMPLATE_COST,
+    Resolution,
+    ambiguity,
+    resolve,
+    score,
+)
 from .star import (
     NOT_REPLACED,
     Renaming,
@@ -123,6 +190,21 @@ from .star import (
     Target,
     empty_select_list,
     expand,
+)
+from .subquery import (
+    SHAPE_EXISTS,
+    SHAPE_IN,
+    SHAPE_NONE,
+    SHAPE_QUANTIFIED,
+    SHAPE_SCALAR,
+    Subquery,
+    about,
+    cannot_compare,
+    check_columns,
+    correlated,
+    outer_references,
+    too_many_rows,
+    wrong_column_count,
 )
 from .table import Grammar, GrammarNode, memoized_rules, overridden_rules
 from .token import Token, tokenize, token_text

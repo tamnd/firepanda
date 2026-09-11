@@ -203,6 +203,17 @@ def _common_decimal(a: SqlType, b: SqlType) -> SqlType:
     var width = digits + scale
     if width > DECIMAL_MAX_WIDTH:
         width = DECIMAL_MAX_WIDTH
+        if a.id == TYPE_DECIMAL and b.id == TYPE_DECIMAL:
+            # Two decimals that do not fit give up their scale rather than
+            # their digits in front of the point, so `DECIMAL(18,18)` and
+            # `DECIMAL(38,10)` agree on `DECIMAL(38,10)` and eight digits
+            # after the point are gone. An integer against a decimal does not
+            # do that. It keeps the decimal's scale and takes whatever width
+            # is left for itself, so `HUGEINT` and `DECIMAL(4,2)` agree on
+            # `DECIMAL(38,2)` and not on `DECIMAL(38,0)`, which is the same
+            # two numbers arriving at different answers depending on which of
+            # them was written as an integer.
+            scale = width - digits
     return SqlType(TYPE_DECIMAL, width, scale)
 
 

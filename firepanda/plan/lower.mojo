@@ -26,6 +26,29 @@ which converts in place, is only allowed here on a column this lowering made.
 Casting an input column would change what a position means underneath an
 expression that was bound before the cast was added.
 
+### An expression reached twice is computed once
+
+Two of a node's expressions can be the same expression. The arena hands out an
+index per call rather than per shape, so that only happens when something shared
+one on purpose, which is what `graft` does when a projection merges into the one
+below it and what a caller does when it holds on to a handle. Either way the
+walk would meet the same index twice and append the same `Compute` twice, which
+over six million rows is a second pass for a column that is already sitting in
+the chunk.
+
+So the walk remembers where it put things. The memo is per node, because the
+positions in it are positions in a chunk that only exists between one node's
+`base` and its trim, and it is consulted for every subexpression but not for the
+top of an output. An output has a name and the column it lands in carries that
+name, so two outputs that share a top would be one column answering to two
+names. Sharing what is underneath them costs nothing and is where the work is.
+
+A cast is the one thing that can make the memo wrong, because it converts in
+place rather than appending, so the position it was handed now holds something
+else. Lowering one forgets that position. The expression that was there gets
+computed again if it is wanted again, which is the slow answer rather than the
+wrong one.
+
 ### A conjunction becomes a line of filters
 
 The physical layer has thirteen binary operations and none of them is `AND`, so
@@ -123,6 +146,62 @@ def _spine(plan: Plan, root: Int) raises -> List[Int]:
     return order^
 
 
+struct Memo(Movable):
+    """Where each expression a node has lowered so far ended up.
+
+    A list rather than a dictionary, because a node has a handful of expressions
+    and a scan of a handful is cheaper than hashing one, and because forgetting
+    a position means looking entries up by what is in them rather than by their
+    key, which a dictionary is the wrong shape for.
+    """
+
+    var of: List[Int]
+    """The expression indices, in the order they were lowered."""
+
+    var at: List[Int]
+    """Where each one's value is, in the same order."""
+
+    def __init__(out self):
+        """Constructs an empty memo."""
+        self.of = List[Int]()
+        self.at = List[Int]()
+
+    def place(self, of: Int) -> Int:
+        """Reports where an expression already is.
+
+        Args:
+            of: The expression.
+
+        Returns:
+            Its position, or -1 if this node has not lowered it.
+        """
+        for i in range(len(self.of)):
+            if self.of[i] == of:
+                return self.at[i]
+        return -1
+
+    def remember(mut self, of: Int, at: Int):
+        """Records where an expression was put.
+
+        Args:
+            of: The expression.
+            at: Its position.
+        """
+        self.of.append(of)
+        self.at.append(at)
+
+    def forget(mut self, at: Int):
+        """Drops whatever was recorded at a position, because it has changed.
+
+        Args:
+            at: The position.
+        """
+        for i in range(len(self.of) - 1, -1, -1):
+            if self.at[i] == at:
+                _ = self.of.pop(i)
+                _ = self.at.pop(i)
+
+
 def _conjuncts(exprs: Expressions, root: Int) -> List[Int]:
     """Splits a predicate into the parts that have to hold at once.
 
@@ -149,7 +228,13 @@ def _conjuncts(exprs: Expressions, root: Int) -> List[Int]:
 
 
 def _lower_expr(
-    exprs: Expressions, root: Int, mut pipe: Pipeline, base: Int, name: String
+    exprs: Expressions,
+    root: Int,
+    mut pipe: Pipeline,
+    base: Int,
+    name: String,
+    mut memo: Memo,
+    reuse: Bool = False,
 ) raises -> Int:
     """Appends whatever computes an expression and returns its position.
 
@@ -162,6 +247,12 @@ def _lower_expr(
             intermediates this lowering made.
         name: What to call the column, used only if the top of the expression
             is what makes one.
+        memo: What this node has already computed and where it put it. Read and
+            added to.
+        reuse: Whether a column this node already computed may be handed back
+            instead of computing it again. False from the caller, because the
+            top of an output owns the name of the column it lands in, and true
+            everywhere below that.
 
     Returns:
         The position of the column holding the expression's value.
@@ -171,6 +262,10 @@ def _lower_expr(
             column binding never gave a position to.
     """
     exprs.check(root)
+    if reuse:
+        var had = memo.place(root)
+        if had >= 0:
+            return had
     var kind = exprs.nodes[root].kind
 
     if kind == ExprKind.COLUMN:
@@ -204,7 +299,7 @@ def _lower_expr(
 
     if kind == ExprKind.CAST:
         var over = exprs.nodes[root].children[0]
-        var at = _lower_expr(exprs, over, pipe, base, name)
+        var at = _lower_expr(exprs, over, pipe, base, name, memo, reuse=True)
         if at < base:
             raise Error(
                 String(
@@ -218,6 +313,10 @@ def _lower_expr(
                 )
             )
         pipe.add(Node(Cast(at, exprs.nodes[root].type)))
+        # The position holds the converted column now, so whatever the memo
+        # says is there is no longer there, and the cast itself is not recorded
+        # because a second cast of it would convert it twice.
+        memo.forget(at)
         return at
 
     if kind != ExprKind.BINARY:
@@ -245,14 +344,15 @@ def _lower_expr(
         )
 
     if right_is_value:
-        var at = _lower_expr(exprs, left, pipe, base, name)
+        var at = _lower_expr(exprs, left, pipe, base, name, memo, reuse=True)
         pipe.add(
             Node(Compute(at, Value(copy=exprs.nodes[right].value), op, name))
         )
+        memo.remember(root, len(pipe.schema) - 1)
         return len(pipe.schema) - 1
 
     if left_is_value:
-        var at = _lower_expr(exprs, right, pipe, base, name)
+        var at = _lower_expr(exprs, right, pipe, base, name, memo, reuse=True)
         pipe.add(
             Node(
                 Compute(
@@ -264,11 +364,13 @@ def _lower_expr(
                 )
             )
         )
+        memo.remember(root, len(pipe.schema) - 1)
         return len(pipe.schema) - 1
 
-    var at_left = _lower_expr(exprs, left, pipe, base, name)
-    var at_right = _lower_expr(exprs, right, pipe, base, name)
+    var at_left = _lower_expr(exprs, left, pipe, base, name, memo, reuse=True)
+    var at_right = _lower_expr(exprs, right, pipe, base, name, memo, reuse=True)
     pipe.add(Node(Compute(at_left, at_right, op, name)))
+    memo.remember(root, len(pipe.schema) - 1)
     return len(pipe.schema) - 1
 
 
@@ -306,9 +408,10 @@ def _lower_filter(plan: Plan, at: Int, mut pipe: Pipeline) raises:
         Error: If a conjunct has a kind no operator computes.
     """
     var base = len(pipe.schema)
+    var memo = Memo()
     var parts = _conjuncts(plan.exprs, plan.nodes[at].exprs[0])
     for i in range(len(parts)):
-        var mask = _lower_expr(plan.exprs, parts[i], pipe, base, "mask")
+        var mask = _lower_expr(plan.exprs, parts[i], pipe, base, "mask", memo)
         pipe.add(Node(Filter(mask)))
     _trim(pipe, base)
 
@@ -327,11 +430,14 @@ def _lower_project(plan: Plan, at: Int, mut pipe: Pipeline) raises:
             position and carries the names it is given.
     """
     var base = len(pipe.schema)
+    var memo = Memo()
     var outputs = plan.nodes[at].exprs.copy()
     var names = plan.nodes[at].names.copy()
     var keep = List[Int](capacity=len(outputs))
     for i in range(len(outputs)):
-        var made = _lower_expr(plan.exprs, outputs[i], pipe, base, names[i])
+        var made = _lower_expr(
+            plan.exprs, outputs[i], pipe, base, names[i], memo
+        )
         if made < base and pipe.schema[made].name != names[i]:
             raise Error(
                 String(
@@ -373,13 +479,14 @@ def _lower_aggregate(plan: Plan, at: Int, mut pipe: Pipeline) raises:
             field through, or if an expression has a kind no operator computes.
     """
     var base = len(pipe.schema)
+    var memo = Memo()
     var held = plan.nodes[at].exprs.copy()
     var names = plan.nodes[at].names.copy()
     var count = plan.nodes[at].parts
 
     var keys = List[Int](capacity=count)
     for i in range(count):
-        var made = _lower_expr(plan.exprs, held[i], pipe, base, names[i])
+        var made = _lower_expr(plan.exprs, held[i], pipe, base, names[i], memo)
         if pipe.schema[made].name != names[i]:
             raise Error(
                 String(
@@ -411,7 +518,12 @@ def _lower_aggregate(plan: Plan, at: Int, mut pipe: Pipeline) raises:
                 )
             )
         var over = plan.exprs.nodes[held[i]].children[0]
-        var made = _lower_expr(plan.exprs, over, pipe, base, names[i])
+        # The fold names its own output, so unlike a projection this one does
+        # not own the name of the column it reads, and two folds over the same
+        # expression can read the same column.
+        var made = _lower_expr(
+            plan.exprs, over, pipe, base, names[i], memo, reuse=True
+        )
         var kind = AggKind(UInt8(plan.exprs.nodes[held[i]].op))
         aggs.append(GroupAgg(made, kind, names[i]))
 

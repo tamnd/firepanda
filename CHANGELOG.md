@@ -19,6 +19,71 @@ A missing single label now raises `KeyError(label)` and nothing else. The index 
 The fourth is not a bug and is not fixed. `Too many indexers` is a `pandas.errors.IndexingError`, firepanda does not import pandas, and so no firepanda exception can be a subclass of a class pandas defines. It is recorded as a divergence in the compat registry rather than left on the board as a failure, because it is the same fact about every pandas defined exception class and not a thing about indexing.
 
 Part of #156, after #504.
+## [0.6.57] - 2026-09-11
+
+Built against Mojo 1.0.0 (ed45d567).
+
+The planner runs as one call now, and the thing it was quietly wasting turns out to have been in the layer below it.
+
+`optimize` is the entry point. It runs simplification, projection pushdown, predicate pushdown, common subexpression elimination, projection merging and slice pushdown, in the order the spec fixes, and runs the whole thing again if a run changed anything, up to four times. Until this went in every pass was a thing a caller could run on its own and nothing ran any of them, which is why the pass count could go from zero to five without a single query getting faster. Each adjacency has a reason and the module docstring gives all of them, the shortest being that simplification goes first so every later pass sees the simplest form of every expression, and slice pushdown goes last because a limit is happiest once the nodes it might swap past have stopped moving underneath it.
+
+Writing it turned up something none of the passes could see on its own. Lowering walked an expression tree by arena index and remembered nothing, so an index it met twice appended the same operator twice, and over six million rows that is a second pass for a column already sitting in the chunk. It now keeps a memo per plan node. The rule that makes it safe is that an output owns the name of the column it lands in, so the top of an output is never shared and everything below it always is, and a cast forgets its position because it converts where the column lies rather than appending.
+
+That memo is what made the sixth pass worth writing. Common subexpression elimination makes two expressions of one shape into one index, within one plan node. Before the memo that was a rewrite with no saving attached, since lowering would have computed the one index twice anyway. It works a node at a time because binding writes a position onto a column and the same name under two nodes can bind to two different positions, so shapes that look alike across nodes are not alike. A dataframe library needs this more than a SQL engine does, because the arena hands out an index per call rather than per shape and a person writing Python repeats themselves: q1 asks for the discounted price and then for the discounted price times one plus the tax, and that is the product built twice.
+
+It also took a refusal off the merging pass. That pass declined to substitute an expression an upper projection reads more than once, because one evaluation would have become two. With the memo it does not, so `b = a + a` over an expensive `a` merges now. What is left of the refusal is the case where one of the mentions is a whole output on its own, which is the only shape lowering cannot share, and that comes off when a physical projection can rename.
+
+On the pandas side a frame became addressable. `loc`, `iloc`, `at`, `iat` and `take` went in, with the shape of the answer decided by the shape of the key rather than by the data, and with the off by one that catches everybody asserted both ways: a slice of positions excludes the position it stops at and a slice of labels includes the label it stops at. `set_index`, `reset_index` and `sort_index` went in alongside, specified by the round trip, which is that `df.set_index("k").reset_index()` has to give back the frame that went in.
+
+Patch rather than minor, since the planner milestone is not finished. Seven of its thirteen passes are.
+
+### Added: common subexpression elimination, so one shape is one expression
+
+`cse` in `firepanda/plan/cse.mojo`, section 5 of the pass pipeline spec, and the sixth pass in the pipeline. Within one plan node, two expressions that are the same shape become one index, and lowering then computes them once because it remembers where it put an index it has already met.
+
+For a dataframe library this matters more than it does for SQL. The expression arena hands out an index per call rather than per shape, and a caller writing Python naturally repeats themselves. TPC-H q1 written the way a person writes it asks for the discounted price and then for the discounted price times one plus the tax, and that builds the product twice as two indices that have never heard of each other. Nothing before this noticed.
+
+The shape is decided by a key holding everything about a node that goes into its answer: the kind, the type, the name, the position and table binding gave it, the operation, the flags, and the constant on a literal, followed by the indices its operands were made canonical to. Operands go in as indices rather than as their own keys, because they have already been through the same walk and equal shapes below already share an index, which is what keeps the key a fixed amount of work per node rather than something that grows with the depth of the tree. It is a string compare rather than a hash, because a key that collides here is a wrong answer rather than a slow one and a plan node holds a handful of expressions.
+
+It works one plan node at a time. Binding writes a position and a table onto a column, and the same column name under two nodes can bind to two different positions, so two subtrees that look alike across nodes are not alike. Inside one node every expression binds against the same input schema, which is what makes equal shapes mean equal values. That is also where the whole saving is, since lowering's memo is per node for the same reason and an index shared across two nodes would be computed once per node anyway.
+
+A join is skipped. Its left keys read the left input and its right keys read the right, so one shape there is not one value, and the keys are bare columns with nothing to save.
+
+Nothing is rewritten in place. An index can be read by more than one plan node, so the walk copies the path it changed and leaves the rest, which is the rule `graft` already follows. `Expressions.rebuild` is the primitive both now use, added here and refactored back into `graft`.
+
+One thing worth knowing about the pipeline. This pass is invisible to the printed plan, because the text does not say which index an expression is, so a sweep in which it was the only pass that did anything reads as a sweep in which nothing happened. That is the right answer rather than a gap, since what it does is idempotent by construction and there is nothing left for another sweep to find.
+
+Thirteen tests, plus one in the pipeline file that counts expression nodes rather than reading text, for the reason above.
+
+Part of #377.
+
+### Changed: projection merging stops refusing to share an expression
+
+The third of the pass's three refusals declined to substitute an output the upper projection reads more than once unless it was a plain column or a literal, because `b = a + a` over `a = expensive(x)` would have merged into two evaluations of the expensive thing. Lowering shares an expression it meets twice now, so that is no longer what happens, and the refusal is narrowed to the one case where it is still true.
+
+The case is a mention that is a whole output of the upper node. A column an output lands in carries that output's name, so lowering never shares the top of one, and `b = a, c = a + 1` over an expensive `a` really would compute it twice. Every other mention is inside a larger expression and costs one evaluation between all of them.
+
+So `b = a + a` merges now and `b = a, c = a + 1` does not. The remaining refusal comes off when a physical projection can rename, which is the only reason a top cannot be shared, and it is not waiting on common subexpression elimination any more.
+
+Three tests changed hands and one is new, plus a test in the lowering file that takes the merged plan all the way to a pipeline and counts the operators, since the claim being relied on lives on the other side of the module boundary.
+
+Part of #377.
+
+### Added: an expression a plan reaches twice is now computed once
+
+Lowering remembers where it put things. Until now the walk from an expression tree down to a line of `Compute` operators recursed by arena index and kept nothing, so an index it met twice appended the same operator twice, and the second one was a second pass over every row for a column already sitting in the chunk. It now keeps a memo per plan node, from expression index to the column position its value landed in, and a subexpression it has already computed is handed back rather than recomputed.
+
+The memo is per node rather than per plan because the positions in it are positions in a chunk that only exists between one node's base width and its trim. Once the node's intermediates have been dropped the positions mean nothing, so carrying them further would be carrying a lie.
+
+It is consulted for every subexpression and not for the top of an output. An output owns the name of the column it lands in, so two outputs sharing a top would be one column answering to two names, and the case is worth nothing anyway since a projection that asks for the same thing twice has no work in it to save. A fold is the exception and does get to share a top, because a fold names its own output and reads its input by position, which is what makes `sum(x)` and `max(x)` read one column between them.
+
+A cast is the one thing that can make a memo wrong. It converts where the column lies rather than appending, so the position it was handed holds something else afterwards, and lowering one forgets that position. An expression that was there gets computed again if it is wanted again, which is the slow answer rather than the wrong one, and there is a test that a cast of a shared product leaves the other reader of it an integer.
+
+Four tests. A product under two outputs lowers to four operators rather than five. Two outputs that are the same expression keep their own names. Two folds over one product lower to two operators. And the cast case above.
+
+What this unblocks is the third refusal in the projection merging pass, which declines to substitute an expression an upper projection reads more than once, on the grounds that one evaluation would become two. That is no longer true.
+
+Part of #377.
 
 ### Added: the pass pipeline, so the planner is one call rather than five
 
@@ -333,6 +398,53 @@ A null is not a truth value and does not drop out of a conjunction, since `a and
 Twenty seven tests, each written as an expression in and a printed expression out compared as text, which is how an optimizer is tested everywhere and is the only form of the test that says anything useful when it fails. The last one is the whole q6 predicate, which comes out with both bounds folded and three nested conjunctions collapsed into one.
 
 Nothing calls this yet. The lowering into the existing chunked engine is what connects the plan layer to execution, and it arrives in the entry above.
+Nothing calls this yet. The lowering into the existing chunked engine is what connects the plan layer to execution and it is still ahead.
+
+### Added: what an implicit cast costs, and which overload that picks
+
+A query that says `abs(x)` has to become one of eight signatures, and which one it becomes decides what type comes back out. DuckDB picks by price: every candidate that can take the arguments at all is charged for the casts it would need, and the cheapest one wins. `firepanda/sql/resolve.mojo` is that rule, and `firepanda/sql/generated/casts.mojo` is the price list it reads.
+
+The price list is the hard part, because DuckDB publishes no such thing. `tools/gen_casts.py` measures one. Which casts exist comes straight out of `can_cast_implicitly` over all 961 ordered pairs of the 31 scalar types. What they cost has no function to ask, so it is solved instead: every call DuckDB binds is an inequality saying the signature it chose cost less than the rivals it passed over, and a few thousand of those have one answer up to scale. The generator puts every one, two and three argument tier one call to a live DuckDB over real typed columns, reads the choice back, and hands the pile to a linear program. What comes out is 31 types, 149 implicit casts between them and 7 distinct costs, from 2550 decisions.
+
+Those numbers are not DuckDB's own and do not need to be, since what has to match is the ordering and not the scale. That is checked rather than claimed. The generator replays all 2550 decisions through the table it has just solved and fails the run if a single one comes out differently, `pixi run gen-casts` writes the file, and CI regenerates it and fails on any diff.
+
+Reading a decision back takes three questions and no one of them answers on its own. The plan says which casts went in, which names the signature whenever every slot that mattered was cast, and says nothing about a slot that needed none. `typeof` says what the call came out as, which finishes the job wherever the candidates return different types, and it is only believed for a name whose returns have already been seen to be the ones the catalog declares, since an aggregate is allowed a bind function that computes a return type of its own and several of them have one. The error message says the rest.
+
+The first version of the generator asked only the first of those three, and it was wrong in a way worth writing down. DuckDB folds a call whose arguments are all constant before it prints any plan, including the unoptimised plan under `explain_output='all'`, so every decision involving a `NULL` argument came back as a plan with nothing readable in it. Each of those failed the test that exactly one candidate fits and was quietly skipped, while the emitter went on filling the `NULL` column of the table from the generic per target costs. The column was not measured, and it did not say it was not measured, which is the worse half of that.
+
+A `NULL` turns out to be priced by a rule of its own, and the table now carries a second set of numbers for it. It is not a value being converted and DuckDB does not charge for it as though it were, so its costs order differently from everything else, which is why `abs(NULL)` is a `BIGINT` rather than an error while `century(NULL)` is an error rather than a `DATE`.
+
+The other thing the first version threw away was the errors. A call DuckDB cannot decide comes back as `Could not choose a best candidate`, with a candidate list holding the overloads that tied and nothing else, and that list is the only place DuckDB ever says out loud that two signatures cost the same. Every other reading is an inequality. Keeping them turned 68 refusals into the only equality constraints there are, and they pin down costs that nothing else touches: several values in the first table were the solver's lower bound rather than an answer, precisely because the calls that would have constrained them were the calls being swallowed. Eleven entries are still floor values, and the generated file now says how many that is rather than leaving a reader to assume all 149 were measured.
+
+A cost belongs to the target type alone. That was a hypothesis at the start and it is a measured fact now, since one number per target satisfies every inequality there is and a number per pair of types buys nothing, so `TINYINT` to `SMALLINT` and `UBIGINT` to `SMALLINT` cost the same because both of them end at `SMALLINT`. What depends on the source is whether the cast exists at all, and that is where the surprises live. `UTINYINT` reaches `SMALLINT` and not `TINYINT`, no integer reaches `VARCHAR`, which is why `length` over an integer column is a binder error and not a count of its digits, and `VARIANT` reaches every type there is while only `NULL` reaches `VARIANT`.
+
+Two things a signature can say are not casts and have no row in the matrix. `ANY` takes the argument as it stands, and it is not free: `first` has an `ANY` overload and a `DECIMAL` one and takes the `ANY` one for an integer column, which only says something if both cost something, so `ANY` is solved along with the rest. A single letter template such as the `T` in `first(T)` behaves the same way and cannot cost the same as `ANY`, because `first` carries one of each and DuckDB binds it over any column there is rather than refusing it as ambiguous. It is a shade dearer here. Which way round is not something DuckDB can be made to say, since the one name that carries both returns the same type from both and does the same thing with the argument, so the choice moves which overload gets named and nothing else.
+
+The refusal is reproduced down to the order of its candidate list, which is not catalog order. DuckDB keeps the first overload to reach the cheapest price in one place and the ones that later match it in another, and writes the second lot out ahead of the first, so `century(NULL)` lists `INTERVAL` above `DATE` although `DATE` is the earlier of the two in the catalog. That is the shape of a loop showing through rather than anything meant, and a message that puts them the other way round is a message that does not match.
+
+The table is checked in, so a contributor with no Python and no network can still build firepanda, which means it can go stale and it can also be generated against a different numbering from the one it is read under. Every line carries the name of the type it belongs to and the reader holds each one against `type_name`, so a renumbering on either side is an error the first time a `Casts` is built rather than a table that is quietly off by one.
+
+### Added: every expression's type, asked of both binders, and the five defects that found
+
+The two SQL differential harnesses that already run ask whether a statement parses. `tests/differential/semantics.mojo` and `pixi run differential-semantics` ask the question after that one, which is the question the compatibility claim actually turns on: given columns of known types, what type does an expression over them come out as. A parser that agrees with DuckDB everywhere and a binder that makes a `sum` a `BIGINT` where DuckDB makes it a `HUGEINT` is a library that returns wrong answers with no error attached to them, and `typeof()` is in DuckDB's own corpus, so the difference is not even hidden.
+
+The matrix is 27 columns, every scalar type the binder knows plus six decimals chosen to sit on the edges of DuckDB's width rules. Four things run over it. Arithmetic, over every ordered pair and all six operators, which is the one place firepanda derives a type rather than looking one up. Negation, which is a short list and a different rule from subtraction. The lattice, through `CASE`, over every ordered pair. And calls, over the whole tier one catalog at every arity up to two, which is the overload resolution fuzzer `docs/specs/sql/07-functions.md` has been asking for since it was written. That is 15,001 expressions and it takes about four seconds.
+
+The oracle is `tools/semantics.py`, which builds a table with one column per type and asks DuckDB for `typeof` of each expression over it. Both halves of that are needed and neither is obvious. A column rather than a literal, because DuckDB folds an expression whose arguments are all constants before anything can be read off it. And one row rather than none, because `typeof` over an empty table returns no rows to read. It runs DuckDB in a child process for the same reason `tools/corpus.py` does: importing the module inside the CPython embedded in a Mojo binary registers exit handlers that run after that interpreter has been torn down, and the process then dies in a destructor with the report already printed.
+
+It opened at 348 disagreements over five separate defects, none of which the unit tests or the generators had caught.
+
+DuckDB narrows an addition or a multiplication back to 18 digits when both operands already fit in 18, because 18 digits is what fits in 64 bits and DuckDB would rather keep the cheap representation than take the width the formula asks for. `DECIMAL(18,1) + DECIMAL(18,1)` is `DECIMAL(18,1)` where the formula says 19, and `DECIMAL(10,4) * DECIMAL(10,4)` is `DECIMAL(18,8)` where it says 20. Multiplication has a guard on that guard: a product whose scale reaches 18 keeps its full width, so `DECIMAL(18,9) * DECIMAL(18,9)` is `DECIMAL(36,18)` and not `DECIMAL(18,18)`. And a product needing more than 38 digits of scale is refused outright rather than saturated, because dropping scale changes the value where dropping width only changes the range.
+
+The lattice gives up scale rather than digits when two decimals do not fit in 38 together, so `DECIMAL(30,25)` and `DECIMAL(30,4)` agree on `DECIMAL(38,12)`. It only does that when both sides are decimals. An integer against a decimal keeps the decimal's scale, so `HUGEINT` and `DECIMAL(30,25)` agree on `DECIMAL(38,25)`, and the first fix here truncated both and broke 24 pairs that had been right.
+
+`greatest` and `least` are declared over `ANY` with a variadic and then insist their arguments share a common type, refusing a `TINYINT` against a `VARCHAR` with the same sentence `CASE` gives for the same pair. No signature can say that, so `resolve.mojo` says it.
+
+The last two were in the cast cost generator rather than in the binder, and they are the reason the numbers in the entry above moved. `EXPLAIN` wraps its output to the width of the box it draws and splits a long cast across lines, and `tools/gen_casts.py` was reading those plans, so every decision with a long enough expression in it was being dropped. Asking for `explain (format json)` instead recovered 213 of them, and the recovered ones did not fit the cost model that had been solved without them: the price of reaching a `DECIMAL` against the price of reaching a `DOUBLE` was wrong, which is a wrong overload and then a wrong type for any call that has one of each.
+
+So the generator no longer assumes a cost belongs to the target type alone. It still starts there, and where no set of numbers fits it finds the decisions it cannot fit, gives the pairs inside them a number of their own, and then takes each of those back out again to check it was needed. Two pairs survive that on DuckDB 1.5 and both of them are a 128 bit integer reaching a `DOUBLE`, which is the one width a decimal cannot grow to hold, since a decimal stops at 38 digits and such an integer needs 39. Which pairs come out is not unique, because a discount on one cast and a surcharge on the cast it competes against say the same thing about which overload wins, and the generated header says so rather than presenting the list as a design.
+
+The harness now runs at zero disagreements over 15,001 expressions, with 359 cases in a `known` list that each carry the reason they are there, and it runs in CI beside the two parse harnesses. The rules above are in `tests/test_sql_arith.mojo`, `tests/test_sql_cast.mojo` and `tests/test_sql_resolve.mojo` as well, written out as the cases a reader needs to see stated.
 
 ### Changed: a projection stopped copying the columns it keeps
 
@@ -357,6 +469,59 @@ It was found by AddressSanitizer rather than by a failing assertion, as a use af
 The second thing is smaller. A pooled buffer can still be sharing with a column that outlived it, which is safe because the pool zeroes on the way out and zeroing un-shares first, so it hands back a private allocation and loses the recycling rather than writing over somebody's bytes.
 
 Closes #406.
+
+### Added: the tier one function catalog, read off DuckDB rather than typed in
+
+A query that says `upper(x)` needs somebody to know that `upper` exists, that it is a scalar function, that it takes one `VARCHAR` and gives back one, and what to say when it is handed a boolean instead. `firepanda/sql/registry.mojo` is that, for the 161 names document 07 calls tier one, and `firepanda/sql/generated/functions.mojo` is the table it reads.
+
+The table is generated from `duckdb_functions()` on a live DuckDB by `tools/gen_functions.py`, and the reason is that it holds 802 overloads. Nobody types 802 signatures correctly, and the ones that would be wrong are exactly the ones nobody would think to check. `sum` over a boolean gives back a `HUGEINT`. `min` has a second overload that takes a count and gives back a list. `length` accepts a `BIT`. `round` over a `DECIMAL` stays a decimal instead of going to a double. A registry that was merely sensible would refuse queries DuckDB runs, and refusing a query DuckDB runs is the only kind of defect this front end has.
+
+Three names in the spec's tier one list are in no catalog at all, and each one is written down with what it is instead. `coalesce` and `ifnull` are grammar rules, which is why the wrong number of arguments to either comes back as a parser error rather than a binder error, and `current_timestamp` is a keyword. All three belong to the transformer and none of them is a registry entry.
+
+An alias carries the whole overload list rather than a pointer to the name it aliases, because the candidate list in an error message prints the spelling the query used. Asking about `substr` gets `substr(VARCHAR, BIGINT) -> VARCHAR` and never `substring`'s version of the same line.
+
+There are three refusals and they are three different sentences. An unknown name is a catalog error that says `Scalar Function` whatever the name resembles, so a misspelled aggregate is reported as a missing scalar function, and that is DuckDB's and it is kept. A call that fits no overload is a binder error that lists every candidate for the name. A call to a macro is a third sentence again, listing the macro's parameter names rather than any types, because a macro has none. The suggestion after an unknown name uses the threshold `catalog.mojo` already had, an edit distance below half the shorter name, rather than DuckDB's, which has none at all and will answer `zzzzzzqq` with whichever name sorts nearest.
+
+The ordering was wrong in the first version and the fix is worth recording, because the failure was invisible. Every overload of a name shares one `function_oid`, so ordering the catalog scan by it leaves the order within a name to the sort, and the sort is parallel and does not have to be stable. The table that came out held the right lines and listed them in a scrambled order, which produces error messages that are correct sentence by sentence and do not match DuckDB byte for byte. The generator now runs the scan on one thread with no `ORDER BY`, since the scan is already in catalog order, and then provokes eight calls that match nothing and checks its own output against the candidate list DuckDB printed.
+
+What is here is the table and the questions it can answer alone: whether a name exists, what kind it is, which overloads it has, and what the refusal says. Picking one overload out of several is not here, because that is a scoring problem over the cast lattice and it is the next thing in document 07. Each parameter slot does carry what it is, since the scoring will need it: a concrete type, `ANY`, a single letter template like the `T` in `lag(T, BIGINT, T)`, or a list of one of those.
+
+CI regenerates the table in the differential job, which is the one with DuckDB installed, and fails on any diff. The DuckDB version the table was read off is part of the table rather than a note in a commit message, because a signature that changes between releases changes what firepanda binds.
+
+Part of #308.
+
+### Added: what a WITH binds, and where each name can be said
+
+A CTE is a name bound to a statement for the length of one statement, and the rules that follow from that are short and are each one somebody gets wrong. `firepanda/sql/cte.mojo` reads a `WITH` into a list of entries, checks the ones that can be checked without types, and records what the planner will need later.
+
+Entries bind in order. Each one is visible to the entries after it and to the body, and to nothing before it, so `WITH y AS (SELECT n FROM x), x AS (SELECT 1) SELECT * FROM y` is not a forward reference: at the point `y` is bound, `x` is not a name yet, and DuckDB answers with `Table with name x does not exist`. Binding one name twice is a parser error rather than a shadowing, and it is caught while parsing, so the duplicate is refused even in a statement nothing would ever run. A CTE does hide a registered frame of the same name, and an inner `WITH` hides an outer one, and both of those are shadowing and not errors.
+
+The column alias list is positional and it is a prefix rather than a list. `WITH x(p) AS (SELECT 1 AS a, 2 AS b)` gives back `p` and `b`, and `WITH x(p, q, r)` over those same two columns gives back `p` and `q` with the third name dropped on the floor. Neither is an error, which means an alias list of the wrong length is silently half applied. That is DuckDB's and it is reproduced, because a query that binds there and fails here is a query somebody has to rewrite for no gain.
+
+Recursion is a property of the statement rather than of the keyword. An entry that names itself is recursive, `WITH RECURSIVE` is what permits it, and the keyword on its own is not enough: the statement also has to be a `UNION` whose left side does not name the entry, since that side is the anchor the fixed point starts from. `UNION` and `UNION ALL` both count and `EXCEPT` and `INTERSECT` do not. All three ways of getting it wrong, the missing keyword, the missing union and the wrong set operation, come back as one message about the keyword, which means two of the three are DuckDB answering a question the query did not ask. It is still the message we give, for the same reason as everything else in here.
+
+A recursive entry may not carry its own `ORDER BY`, `LIMIT` or `OFFSET`, and those are two separate messages rather than one. The rule reaches the entry's own trailing clause and nothing under it, so a subquery inside the recursive term may order and limit all it likes, and that was measured rather than assumed.
+
+Counting how many times a name is used is part of this and the decision it feeds is not. DuckDB inlines a CTE unless it is named more than once, and `MATERIALIZED` and `NOT MATERIALIZED` override that either way. The hint and the count are both recorded and the planner decides, because which way to go is a cost question and this file knows no costs. The count comes from a walk that crosses into subqueries, since a name said inside one is said, and stops at an inner `WITH` that binds the same name, since that is a different table that happens to be spelled the same.
+
+One thing fixed on the way past. The expression walk in `classify.mojo` had no case for the quantified comparison node, which is new in this release, so classifying an expression holding one raised instead of walking it. It now walks the operand and leaves the statement alone, the way it already does for the other three shapes.
+
+Part of #308.
+
+### Added: the four shapes a subquery is written in, and a node for the fourth
+
+A `SELECT` inside an expression is one of four things, and they are four different questions rather than one question with a flag on it. A scalar subquery asks for a value, `EXISTS` asks whether there is a row, `IN` asks whether a value is among the rows, and a quantified comparison asks whether a comparison holds against all of them or against any of them. `firepanda/sql/subquery.mojo` tags a node as whichever it is and carries the rules that follow.
+
+Three of the four want exactly one column and say so while binding. `EXISTS` never looks, because it throws the select list away, so `EXISTS (SELECT x, y FROM u)` is a fine query and the division in `EXISTS (SELECT 1/0 FROM u)` never happens. The message counts what it got against what it wanted and spells the count with the same word either way, so a subquery of one column is reported as `Subquery returns 1 columns`, which is DuckDB's and is kept.
+
+A scalar subquery has one more rule the binder cannot check, which is that it gives back at most one row. DuckDB checks it while running, and the message names the setting that turns the check off, a setting whose default changed and which used to hand back a row picked at random. A default like that changing is exactly the kind of thing that quietly rewrites somebody's answers, so the whole message is reproduced rather than paraphrased.
+
+The fourth shape had no node to be tagged as, so `EXPR_QUANTIFIED` is new. It is not an `EXPR_BINARY` with a longer operator on it, because the right side is a statement index and everything that walks a binary node reads both sides out of the expression arena. Only six comparisons may carry `ANY` or `ALL`, and DuckDB refuses the rest while parsing even though its grammar accepts any operator there, so that is where the refusal happens here too. It names six and takes eight, since `!=` and `==` are other spellings of two of them. `SOME` is another spelling of `ANY` that DuckDB's own parser takes and its published grammar has no rule for, so a query written with it is refused by the grammar rather than by us.
+
+`ANY` and `ALL` over a list rather than a subquery is refused by name. DuckDB unnests the right side there, which is `IN` written the long way, and a second path to one answer is a second place for the two to disagree.
+
+Correlation is read rather than rediscovered. The bind context already writes down every outer reference at the level that reached for it, so a subquery is correlated when some level at or under it reached past its own level, and a reference that stops inside the subquery does not correlate it. Going looking afterwards instead means a walk that can miss one, and a missed correlation is a decorrelation that drops rows.
+
 ### Added: which calls are aggregates, which are windows, and what that forbids
 
 `firepanda/sql/classify.mojo` answers the question every clause of a select statement has to ask before it can bind anything: does this expression call an aggregate, does it call a window function, or neither. The walk stops at a subquery, because an aggregate written inside one belongs to that query and not to the one around it, and that is the difference between `SELECT (SELECT sum(x) FROM u) FROM t` binding and being refused.

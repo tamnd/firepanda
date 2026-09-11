@@ -28,6 +28,7 @@ from firepanda.kernel.group import AggKind
 from firepanda.kernel.unary import UnaryOp
 from firepanda.plan.bind import bind
 from firepanda.plan.lower import lower
+from firepanda.plan.merge import merge
 from firepanda.plan.node import NO_LIMIT, Plan
 from firepanda.plan.simplify import simplify
 
@@ -660,6 +661,122 @@ def test_a_scan_naming_a_column_the_frame_lacks_is_refused() raises:
 
     with assert_raises(contains="does not have"):
         _ = lower(plan, root, narrow^)
+
+
+def test_a_shared_subexpression_is_computed_once() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var price = plan.exprs.column("price")
+    var total = plan.exprs.binary(BinaryOp.MUL, qty, price)
+    var one = plan.exprs.binary(
+        BinaryOp.ADD, total, plan.exprs.literal(Value(Int64(1)))
+    )
+    var two = plan.exprs.binary(
+        BinaryOp.SUB, total, plan.exprs.literal(Value(Int64(2)))
+    )
+    var root = plan.project(scan, [one, two], ["up", "down"])
+
+    _ = bind(plan, root, schemas())
+    var pipe = lower(plan, root, one_frame())
+
+    # The product, the two the outputs add to it, and the projection. Without
+    # the memo the product would be there twice.
+    assert_equal(len(pipe.operators), 4, "operators")
+
+    var out = pipe^.run()
+    var up = read_back(out, "up")
+    var down = read_back(out, "down")
+    assert_equal(up[0], 51, "five times ten and one")
+    assert_equal(down[0], 48, "and the same product less two")
+
+
+def test_two_outputs_that_are_the_same_expression_keep_their_names() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var price = plan.exprs.column("price")
+    var total = plan.exprs.binary(BinaryOp.MUL, qty, price)
+    var root = plan.project(scan, [total, total], ["total", "again"])
+    var out = run(plan, root)
+
+    # The top of an output is never shared, because the column it lands in
+    # carries the name and one column cannot answer to two.
+    assert_equal(out.width(), 2, "two columns")
+    assert_equal(out.schema[0].name, "total", "the first name")
+    assert_equal(out.schema[1].name, "again", "and the second")
+    assert_equal(read_back(out, "again")[0], 50, "with the same value in it")
+
+
+def test_two_folds_over_one_expression_read_one_column() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var price = plan.exprs.column("price")
+    var total = plan.exprs.binary(BinaryOp.MUL, qty, price)
+    var root = plan.aggregate(
+        scan,
+        List[Int](),
+        [
+            plan.exprs.aggregate(AggKind.SUM, total),
+            plan.exprs.aggregate(AggKind.MAX, total),
+        ],
+        ["revenue", "biggest"],
+    )
+
+    _ = bind(plan, root, schemas())
+    var pipe = lower(plan, root, one_frame())
+
+    # One product and one reduction. A fold names its own output, so both of
+    # them can read the column the other made.
+    assert_equal(len(pipe.operators), 2, "operators")
+
+    var out = pipe^.run()
+    assert_equal(read_back(out, "revenue")[0], 668, "the whole frame summed")
+    assert_equal(read_back(out, "biggest")[0], 120, "and the largest of them")
+
+
+def test_a_cast_of_a_shared_column_does_not_convert_it_twice() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var price = plan.exprs.column("price")
+    var total = plan.exprs.binary(BinaryOp.MUL, qty, price)
+    var wider = plan.exprs.cast(LogicalType.FLOAT64, total)
+    var root = plan.project(scan, [wider, total], ["wide", "narrow"])
+    var out = run(plan, root)
+
+    # The cast converted the product where it lay, so the second output cannot
+    # have the column it was handed. It gets its own, still an integer.
+    assert_true(out.schema[0].dtype == LogicalType.FLOAT64, "converted")
+    assert_true(out.schema[1].dtype == LogicalType.INT64, "and not converted")
+    assert_equal(read_back(out, "narrow")[0], 50, "with the product in it")
+
+
+def test_a_merged_projection_computes_the_shared_expression_once() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var price = plan.exprs.column("price")
+    var lower_node = plan.project(
+        scan, [plan.exprs.binary(BinaryOp.MUL, qty, price)], ["total"]
+    )
+    var total = plan.exprs.column("total")
+    var root = plan.project(
+        lower_node,
+        [plan.exprs.binary(BinaryOp.ADD, total, total)],
+        ["doubled"],
+    )
+    _ = merge(plan, root, schemas())
+    var pipe = lower(plan, root, one_frame())
+
+    # This is the reason the merging pass is allowed to substitute an
+    # expression an upper projection reads twice. The graft put one index in
+    # two places and the memo is what keeps that from being two multiplies.
+    assert_equal(len(pipe.operators), 3, "a multiply, an add and a projection")
+
+    var out = pipe^.run()
+    assert_equal(read_back(out, "doubled")[0], 100, "twice five times ten")
 
 
 def main() raises:

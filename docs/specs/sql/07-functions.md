@@ -44,10 +44,24 @@ DuckDB's rule, matched exactly because the corpus depends on it:
 
 1. Collect all overloads with the name. An unknown name is an error, with edit distance suggestions over the catalog.
 2. For each, check arity, honouring variadics and defaults.
-3. Score each candidate. An exact type match is free, an implicit cast costs by distance in the type lattice, and an impossible cast disqualifies. Untyped `NULL` and untyped string literals match anything at a small cost, which is why `1 = '1'` works per document 06.
-4. Lowest total cost wins. A tie is an error listing the candidates.
+3. Score each candidate. An exact type match is free, an implicit cast costs what that cast costs, and a cast that does not exist disqualifies the candidate outright.
+4. Lowest total cost wins. A tie is an error listing the candidates that tied, and only those.
 
-The cast cost lattice is the whole of it and it is where a subtle divergence lives forever. Widening within a family is cheap, crossing families is expensive, and narrowing is usually forbidden. Getting one edge weight wrong picks a different overload for some argument combination and produces a different type, then a different answer. Document 11's differential harness therefore includes a resolution fuzzer that calls each implemented name with every combination of a small set of typed arguments and compares the resolved return type against DuckDB's.
+The cast costs are the whole of it and DuckDB publishes none of them, so firepanda measures them instead. `tools/gen_casts.py` reads which casts exist out of `can_cast_implicitly`, then puts every one, two and three argument tier 1 call over real typed columns to a live DuckDB and reads the answer back out of the plan and out of `typeof`. Each choice is an inequality and each refusal to choose is an equality, and the costs are what a linear program makes of the pile. The numbers that come out are not DuckDB's own and do not need to be, because what has to match is the ordering, and the generator checks that by replaying all 2550 decisions through the table it has just solved.
+
+Three things measurement said that guessing would not have.
+
+A cost very nearly belongs to the target type alone. One number per target satisfies almost every inequality there is, so widening within a family being cheap and crossing families being expensive is not the rule: `TINYINT` to `SMALLINT` and `UBIGINT` to `SMALLINT` cost the same, because both of them end at `SMALLINT`. What depends on the source is whether the cast exists at all, and that is where the surprises are. `UTINYINT` reaches `SMALLINT` and not `TINYINT`, and no integer reaches `VARCHAR`.
+
+The almost is two pairs, and both of them are a 128 bit integer. `mod` is declared over `DECIMAL` and over `DOUBLE`, and DuckDB takes the `DOUBLE` one for a `HUGEINT` argument, which one number per target cannot express because everything else prefers the decimal. A decimal stops at 38 digits and a `HUGEINT` needs 39, so the widening a decimal parameter does for a `BIGINT` it cannot do here, and DuckDB charges accordingly. So the generator starts with one number per target and gives a pair a number of its own only where no set of numbers fits otherwise, then takes each of those back out again to check it was needed. Which pairs come out of that is not unique, because a discount on one cast and a surcharge on the cast it competes against say the same thing about which overload wins, and the catalog holds no call that tells the two apart. The generated header says so rather than presenting the list as a design.
+
+A `NULL` is priced by a rule of its own. It is not a value being converted, and its column of costs orders differently from the rest of the table, which is why `abs(NULL)` is a `BIGINT` rather than an error and `century(NULL)` is an error rather than a `DATE`.
+
+A tie is a real case and DuckDB's answer to one is to refuse the call, in a sentence of its own with a candidate list holding the overloads that tied and nothing else. 68 of the 2550 decisions are refusals, and they are the most useful readings in the pile, because that candidate list is the only place DuckDB ever says out loud that two signatures cost the same.
+
+Getting one cost wrong picks a different overload for some argument combination and produces a different type, then a different answer, so the resolution fuzzer in document 11 section 5 calls each name in the catalog with every combination of a small set of typed arguments and compares the resolved return type against DuckDB's. It is not the same check as the replay above and it has already paid for itself twice over: the replay only says the solved table agrees with the calls it was solved from, and the fuzzer is what noticed that some of those calls had been read wrong in the first place.
+
+A signature is not always the whole rule. `greatest` and `least` are declared over `ANY` with a variadic, and DuckDB then insists the arguments share a common type, refusing a `TINYINT` against a `VARCHAR` with the same sentence `CASE` gives for the same pair. The catalog cannot say that, so `resolve.mojo` says it, and the fuzzer is what found it.
 
 ## 4. The tiers
 
