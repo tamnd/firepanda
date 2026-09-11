@@ -1593,13 +1593,58 @@ def test_an_outer_join_is_refused_by_name() raises:
         _ = lower(plan, root, two_frames())
 
 
-def test_a_cross_join_is_refused_by_name() raises:
+def test_a_cross_join_onto_more_than_one_row_is_refused() raises:
     var plan = Plan()
     var left = plan.scan("sales", List[String](), 0)
     var right = plan.scan("tiers", List[String](), 1)
     var root = plan.join(left, right, List[Int](), List[Int](), JoinKind.CROSS)
     _ = bind(plan, root, two_schemas())
-    with assert_raises(contains="no key to build a table from"):
+    with assert_raises(contains="right side of 4 rows"):
+        _ = lower(plan, root, two_frames())
+
+
+def test_a_cross_join_onto_one_row_is_a_column_per_right_column() raises:
+    # One right row moves nothing, so every left row comes back in its own
+    # order with the right row's values beside it.
+    var plan = Plan()
+    var left = plan.scan("sales", List[String](), 0)
+    var right = plan.scan("tiers", List[String](), 1)
+    var one = plan.filter(
+        right,
+        plan.exprs.binary(
+            BinaryOp.EQ,
+            plan.exprs.column("band"),
+            plan.exprs.literal(Value(Int64(3))),
+        ),
+    )
+    var root = plan.join(left, one, List[Int](), List[Int](), JoinKind.CROSS)
+    var out = run_two(plan, root)
+    same(read_back(out, "qty"), [5, 20, 3, 40, 12, 8, 25, 1, 30, 15], "qty")
+    same(read_back(out, "band"), [3, 3, 3, 3, 3, 3, 3, 3, 3, 3], "band")
+    same(
+        read_back(out, "rate"),
+        [300, 300, 300, 300, 300, 300, 300, 300, 300, 300],
+        "rate",
+    )
+
+
+def test_a_cross_join_onto_no_rows_is_refused_rather_than_empty() raises:
+    # An empty right side makes the whole answer empty, which is a row count
+    # this operator cannot produce, since it adds a column and keeps the rows.
+    var plan = Plan()
+    var left = plan.scan("sales", List[String](), 0)
+    var right = plan.scan("tiers", List[String](), 1)
+    var none = plan.filter(
+        right,
+        plan.exprs.binary(
+            BinaryOp.GT,
+            plan.exprs.column("band"),
+            plan.exprs.literal(Value(Int64(1000))),
+        ),
+    )
+    var root = plan.join(left, none, List[Int](), List[Int](), JoinKind.CROSS)
+    _ = bind(plan, root, two_schemas())
+    with assert_raises(contains="right side of 0 rows"):
         _ = lower(plan, root, two_frames())
 
 

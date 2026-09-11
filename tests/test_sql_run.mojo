@@ -1263,6 +1263,42 @@ def test_an_uncorrelated_exists_says_why_it_is_refused() raises:
         )
 
 
+def test_a_cross_join_onto_one_row_runs() raises:
+    # One right row adds a column and moves nothing, so it is a constant per
+    # right column rather than the whole frame join the general case needs.
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales CROSS JOIN"
+                " (SELECT max(band) AS top FROM tiers)"
+                " WHERE qty > top - 60 ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [40],
+        "qty",
+    )
+
+
+def test_the_one_row_of_a_cross_join_is_readable() raises:
+    same(
+        answer(
+            (
+                "SELECT top FROM sales CROSS JOIN"
+                " (SELECT min(band) AS top FROM tiers) WHERE qty = 1"
+            ),
+            "top",
+        ),
+        [3],
+        "top",
+    )
+
+
+def test_a_cross_join_onto_more_than_one_row_says_why_it_is_refused() raises:
+    with assert_raises(contains="right side of 4 rows"):
+        _ = run("SELECT qty FROM sales CROSS JOIN tiers", session())
+
+
 def test_a_right_join_has_no_operator_yet_either() raises:
     with assert_raises(contains="breaker rather than an operator"):
         _ = run(

@@ -23,6 +23,15 @@ Two new methods and one new frame method:
 - `DataFrame.nunique(name)` is the frame spelling of `prove_distinct`.
 
 `agg` reads the same field, so a `NUNIQUE` spec over a column that already knows skips `reduce_any` and its hash table.
+### Added: a cross join onto one row runs
+
+A cross join was refused at lowering because pairing every left row with every right row is a whole frame operation rather than anything a chunk at a time operator can do. One right row is the exception and it runs now. Pairing every left row with one right row adds a column to each row and moves nothing, so it lowers to one constant column per right column and the left side streams past untouched.
+
+No new operator was needed. `Constant` already existed for `SELECT 1`, and a join's right side is already built and run before the first left chunk is read, so the one row is there to be read out at lowering time. A cross join onto any other row count is still refused, and the message now says how many rows it found, since zero is the case that looks like it should work and does not: an empty right side makes the whole answer empty, which is a row count this shape cannot produce.
+
+`SELECT qty FROM sales CROSS JOIN (SELECT max(band) AS top FROM tiers) WHERE qty > top - 60` is the query this was written for. It is the uncorrelated scalar subquery written out by hand, and the next step is the rewrite that puts it there.
+
+Part of #309.
 
 ## [0.6.71] - 2026-09-12
 
