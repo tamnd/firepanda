@@ -443,6 +443,10 @@ def _isocalendar(column: object) -> DataFrame:
     """The ISO 8601 year, week and day of a temporal column, as a frame."""
     ...
 
+def _index_to_series(index: object, labels: object, name: object) -> Series:
+    """The labels of an index, as a column that carries them twice."""
+    ...
+
 def _raise_for_test(kind: str) -> object:
     """Raises one classified error of the given kind. For tests only."""
     ...

@@ -5577,6 +5577,130 @@ class IndexMixin:
         except Exception as error:
             raise translate(error) from None
 
+    def to_series(self, index: Any = None, name: Any = None) -> Series:
+        """The labels as a column, which carries the labels twice.
+
+        The one door between the two types and the reason several of the members
+        below are a line each. A column has the reductions, a column has the
+        transforms, and an index that can turn into one gets all of them without
+        a second copy of any of them living over here.
+
+        `index` names the labels the answer carries and defaults to the ones it
+        was read from, which is what makes the labels come back twice and is
+        what pandas does. `name` names the column and defaults to the index's
+        own name, which is the empty string when the index has none, where
+        pandas leaves the series unnamed.
+        """
+        from ._frame import _index_to_series
+
+        labels = None if index is None else _unwrap(index, "index")
+        return _index_to_series(self._inner, labels, None if name is None else str(name))
+
+    def isna(self) -> Any:
+        """Whether each label is missing.
+
+        pandas gives back a numpy array of bools and this gives back a list of
+        them, which is the divergence `values`, `__eq__` and `isin` already have
+        and which document 21 records once for all of them.
+
+        Most indexes answer a list of `False`, because a range has no missing
+        label and neither has an index read from a list with nothing missing in
+        it. `take` is where a missing label comes from.
+        """
+        return self.to_series().isna().tolist()
+
+    def isnull(self) -> Any:
+        """Whether each label is missing. The older spelling of `isna`."""
+        return self.isna()
+
+    def notna(self) -> Any:
+        """Whether each label is present, which is `isna` turned over."""
+        return self.to_series().notna().tolist()
+
+    def notnull(self) -> Any:
+        """Whether each label is present. The older spelling of `notna`."""
+        return self.notna()
+
+    def dropna(self, how: str = "any") -> Index:
+        """The index with the missing labels taken out.
+
+        `how` is `any` or `all` and on a flat index the two mean the same thing,
+        since a label is one value and there is nothing for the two of them to
+        disagree about. The parameter is here for the reason `level` is here on
+        `unique`, which is that a MultiIndex row holds several values and one
+        signature covers both. Any other word is an error.
+
+        What comes back is the class the index already was, so dropping a
+        missing instant leaves a `DatetimeIndex` rather than a plain index. The
+        labels that are left are the labels that were there, so the type they
+        had is the type they keep.
+        """
+        if how not in ("any", "all"):
+            raise InvalidArgumentError(f"firepanda:value: invalid how option: {how}")
+        column = self.to_series().dropna()
+        # The class the index already was rather than `Index`, because a
+        # `DatetimeIndex` with a missing instant dropped is still a set of
+        # instants. The mixin cannot see `_wrap`, which the generated half
+        # writes, so the class goes through a name the checker leaves alone.
+        made: Any = type(self)
+        try:
+            kept: Index = made._wrap(column._inner.to_index(self._inner.label()))
+        except Exception as error:
+            raise translate(error) from None
+        return kept
+
+    def min(self, axis: Any = None, skipna: bool = True, *args: Any, **kwargs: Any) -> Any:
+        """The smallest label.
+
+        The column's reduction reached through `to_series`, which is the whole
+        method. `axis` and the two catch alls after it are numpy's, since numpy
+        calls these on an index and pandas takes what it passes.
+        """
+        self._numpy_only(axis, args, kwargs)
+        return self.to_series().min(skipna=skipna)
+
+    def max(self, axis: Any = None, skipna: bool = True, *args: Any, **kwargs: Any) -> Any:
+        """The largest label, which is `min` the other way round."""
+        self._numpy_only(axis, args, kwargs)
+        return self.to_series().max(skipna=skipna)
+
+    def _numpy_only(self, axis: Any, args: Any, kwargs: Any) -> None:
+        """Holds the numpy compatibility arguments of `min` and `max` at rest.
+
+        numpy calls `min` and `max` on whatever it is handed with an axis and a
+        few keywords of its own, so pandas takes them and checks that they say
+        nothing. This checks the axis by pandas' rule, which lets `None`, `0`
+        and `-1` through because an index has one dimension, and refuses the
+        rest of them outright rather than dropping them, since a caller who
+        passed `out=` meant something by it.
+        """
+        if axis is not None and (axis >= 1 or axis < -1):
+            raise InvalidArgumentError(
+                "firepanda:value: `axis` must be fewer than the number of dimensions (1)"
+            )
+        if args or kwargs:
+            raise UnsupportedError(
+                "the numpy compatibility arguments of min and max are not taken,"
+                " because the only value any of them can hold that means"
+                " anything here is the default it already has"
+            )
+
+    def nunique(self, dropna: bool = True) -> int:
+        """How many distinct labels there are.
+
+        The column's count, which skips the missing labels, plus one when the
+        caller asked for a missing label to count as a distinct one and there
+        was one. The column refuses `dropna=False` outright, because its kernel
+        drops the missing values before it counts and cannot tell afterwards
+        whether it saw any. An index can tell, since it is asked how many
+        labels are missing often enough to keep the answer, so the two lines
+        here are the whole of the difference.
+        """
+        answer = int(self.to_series().nunique())
+        if dropna or self._inner.null_count() == 0:
+            return answer
+        return answer + 1
+
     def _only_level(self, level: Any) -> None:
         """Holds that `level` names the one level a flat index has.
 
