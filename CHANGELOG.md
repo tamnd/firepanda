@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a `SEMI` or an `ANTI` join lowers and runs
+
+Both were refused by name and both work now. They keep left rows and no right columns, the first the rows that matched and the second the rows that did not, so the two of them over one condition partition the left side. The join operator already had both kinds, which is why this is front end work rather than engine work: the lowering had to learn the words and then take the right side back out of reach.
+
+That last part is the only surprising bit. Above a semi or an anti join there is no right table to name, because the join asked a question about it rather than joining it, so `SELECT u.k FROM t SEMI JOIN u USING (b)` is a missing table rather than a column that came back null. DuckDB refuses the same query with the same reasoning. The join's own condition is the exception and still reads both sides, so the right side goes out of reach after the condition has been read rather than before.
+
+A left row comes back once however many right rows matched it, which is the difference between a semi join and an inner join over a right side with repeats in its key. Both kinds need at least one equality between the two sides and nothing else, which is tighter than DuckDB, where the condition may be any predicate. The rest of a condition is ordinarily rewritten into a filter above the join, and above one of these it would be reading columns the join did not keep.
+
+Part of #309.
+
 ## [0.6.69] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).
