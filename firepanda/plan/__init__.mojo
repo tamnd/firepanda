@@ -43,6 +43,14 @@ end up in different places. It is the one pass that rebuilds the node list rathe
 than rewriting it, because moving a filter down makes new parents for old
 children and the arena's order forbids that in place.
 
+`transit.mojo` is transitive predicates, which pushdown calls when it reaches an
+inner join. A query that says `a.k = b.k` and also says something about `a.k` is
+saying the same thing about `b.k` for every row the join will produce, so the
+predicate is copied onto the other side and pushdown places the copy the way it
+places everything else. It is a module rather than a pass because there is no
+index between a node and its parent, so only the pass that already rebuilds the
+node list can put a new filter above an arm.
+
 `merge.mojo` folds a line of projections down to one, substituting the lower
 one's expressions into the upper one's so that the rows are walked once instead
 of once per node. It is the pass that pays for the two before it, since narrowing
@@ -101,3 +109,4 @@ from .prune import prune
 from .push import push
 from .simplify import ROUNDS, simplify, simplify_expr
 from .subplan import subplan
+from .transit import derive
