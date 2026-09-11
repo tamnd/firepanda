@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: a filter writes a selection instead of writing its columns
+
+The second half of issue #521, and it comes with a result that is not the one the first half predicted, so the numbers are below rather than at the end.
+
+`Filter` no longer copies the columns it keeps. It writes the positions the mask kept and hands on the input's own arrays beside them, which is eight bytes per surviving row rather than a value per surviving row per column. Two filters compose into one selection rather than into a chain of indirections, because the second reads its positions through the first, so the answer is always in terms of the arrays at the bottom. `Compute` and `Cast` read the one column they need through the selection and produce a dense result, `Project` passes the selection through untouched since reordering columns moves no rows, and every other operator still gets a flat chunk through `node_reads_selection`, so no answer anywhere changes.
+
+On TPC-H q6's predicate over six million rows, which is the five conditions this was meant to speed up, it is a wash. Three alternating pairs on a thirty two thread desktop, milliseconds, best of fifteen runs each: 8.01 8.53 7.26 against 7.65 8.01 8.26, with the medians overlapping the same way. The change is correct, it is tested, and on the query it was aimed at it buys nothing.
+
+The reason is worth writing down, because it says what to do next. A random gather costs more than the sequential filtered copy it replaces. One chunk of sixty five thousand rows, four int64 columns, a mask keeping seven in ten: copying one column with `filter_any` is 97 microseconds, writing the selection is 67, and gathering one column back through it is 168. So turning N sequential copies into one selection write plus N gathers only pays when N is large, and after the dead column elimination that landed in 0.6.58 the filter was already copying only the columns something still reads. The gathers that came back in cancelled the copies that went away.
+
+What that leaves is the intermediate nobody needs. Lowering turns each condition into a compare that writes a mask column and a filter that reads it, so the pair currently gathers the operand, writes a mask, scans the mask into positions and maps those back through the selection. Measured apart it is 379 microseconds on the chunk above; fused into one pass that loads through each position and writes the position again when it passes, with no mask and no gathered operand at any point, it is 166. That is the change worth making and this one is what makes it possible, because it needs a filter that already speaks in positions.
+
 ### Added: the n best rows of a column, without sorting the frame
 
 `DataFrame.nlargest` and `DataFrame.nsmallest`, which are the ungrouped form of the `group_nlargest` and `group_nsmallest` that have been here since the top n kernel was written. There is no new kernel: the ungrouped question is the grouped question asked about a frame with one group in it, so `_top_rows` builds a codes array of zeros as tall as the frame, says there is one group, and hands both to the same erased entry point the grouped methods use.
@@ -65,6 +77,7 @@ Lowering now works out what each conjunct leaves behind that a later conjunct st
 TPC-H q6's predicate over six million rows, which is five conditions and the part of that query where the time goes, timed by lowering it and running the pipeline over a generated lineitem: 9.45 milliseconds to 7.93 on a thirty two thread desktop, 78.3 to 61.0 on an eight core server, and 19.2 to 15.0 on an M series laptop. That is between sixteen and twenty two percent, and the spread is what you would expect, since the work removed is memory bandwidth and the machine with the most of it gains the least.
 
 This is a step toward what the engine actually needs, which is a selection vector, and not a substitute for it. Not writing a dead column is worth less than not writing a live one that the next operator is going to filter again, and that is the larger change.
+
 ### Added: which row of a repeat is the one that stays
 
 `DataFrame.duplicated`, and a `keep` parameter on `DataFrame.drop_duplicates`, which had only ever kept the first appearance. The two are one question asked twice: the mask says which rows repeat a key another row already carries, and the drop is that mask inverted and applied. A caller who wants the repeats rather than the survivors could not get them out of `drop_duplicates` before, because the rows that went were gone and their positions with them, and rebuilding them by comparing the frame before against the frame after is a join written by hand.
