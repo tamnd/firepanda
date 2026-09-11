@@ -122,14 +122,37 @@ def dupes() raises -> DataFrame:
     return DataFrame(Schema(fields^), columns^)
 
 
+def gappy() raises -> DataFrame:
+    """One column with a repeat and two nulls in it.
+
+    A distinct count does not count a null, so a column that has some is the
+    only way to tell that rule from the one that counts them as a value of
+    their own. The repeat is why this is not `gaps` below: with no repeat a
+    distinct count and a count of the non null values are the same number and
+    a test over it proves nothing. Six rows, three distinct values, two nulls.
+    """
+    var mark = Array[DType.int64](6)
+    mark.set_valid(0, 4)
+    mark.set_valid(1, 4)
+    mark.set_null(2)
+    mark.set_valid(3, 9)
+    mark.set_null(4)
+    mark.set_valid(5, 1)
+    var column = ChunkedArray(LogicalType.INT64)
+    column.append(AnyArray(mark^))
+    var columns = List[ChunkedArray]()
+    columns.append(column^)
+    var fields = List[Field]()
+    fields.append(Field("mark", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
 def gaps() raises -> DataFrame:
     """Three bands with a null among them.
 
-    The one frame in this file that has a null in it, and it is here for the
-    one answer that turns on having one. A `NOT IN` over a subquery holding a
-    null keeps no rows at all, because a row that matched nothing cannot be
-    told apart from a row that matched the null, and every other frame here
-    would answer that question the easy way.
+    A `NOT IN` over a subquery holding a null keeps no rows at all, because a
+    row that matched nothing cannot be told apart from a row that matched the
+    null, and every other frame here would answer that question the easy way.
     """
     var col = Array[DType.int64](3)
     col.set_valid(0, 3)
@@ -145,12 +168,13 @@ def gaps() raises -> DataFrame:
 
 
 def session() raises -> Catalog:
-    """A catalog holding the five frames under the names the queries write."""
+    """A catalog holding the six frames under the names the queries write."""
     var catalog = Catalog()
     catalog.register("sales", sales())
     catalog.register("tiers", tiers())
     catalog.register("shops", shops())
     catalog.register("dupes", dupes())
+    catalog.register("gappy", gappy())
     catalog.register("gaps", gaps())
     return catalog^
 
@@ -1485,6 +1509,59 @@ def test_a_right_join_has_no_operator_yet_either() raises:
         _ = run(
             "SELECT shop FROM sales RIGHT JOIN shops USING (shop)", session()
         )
+
+
+def test_count_distinct_over_a_partition_counts_the_values() raises:
+    # A window holds its whole partition, so the fold it runs there is the
+    # whole frame one and a distinct count is no harder than a sum.
+    same(
+        answer(
+            (
+                "SELECT count(DISTINCT shop) OVER (PARTITION BY shop) AS n"
+                " FROM sales"
+            ),
+            "n",
+        ),
+        [1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+        "one shop a partition",
+    )
+
+
+def test_count_distinct_over_a_partition_does_not_count_a_null() raises:
+    same(
+        answer(
+            "SELECT count(DISTINCT mark) OVER () AS n FROM gappy",
+            "n",
+        ),
+        [3, 3, 3, 3, 3, 3],
+        "three values and two nulls",
+    )
+
+
+def test_count_distinct_says_it_does_not_fold_rather_than_counting_rows() raises:
+    # It used to answer count(band), which is 4. Now the word reaches the plan,
+    # and the operator that cannot run a distinct count a chunk at a time says
+    # so by name. A wrong number is the worse of the two.
+    with assert_raises(contains="nunique cannot be computed a chunk at a time"):
+        _ = run("SELECT count(DISTINCT band) AS n FROM dupes", session())
+
+
+def test_a_grouped_count_distinct_says_the_same_thing() raises:
+    with assert_raises(contains="nunique cannot be computed a chunk at a time"):
+        _ = run(
+            "SELECT shop, count(DISTINCT qty) AS n FROM sales GROUP BY shop",
+            session(),
+        )
+
+
+def test_distinct_inside_another_aggregate_is_refused_rather_than_ignored() raises:
+    with assert_raises(contains="DISTINCT inside count and not inside sum"):
+        _ = run("SELECT sum(DISTINCT qty) AS n FROM sales", session())
+
+
+def test_count_distinct_star_has_no_column_to_count() raises:
+    with assert_raises(contains="no column to count the distinct values of"):
+        _ = run("SELECT count(DISTINCT *) AS n FROM sales", session())
 
 
 def main() raises:
