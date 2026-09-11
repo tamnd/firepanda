@@ -226,6 +226,7 @@ from firepanda.dtype.schema import Field, Schema
 from firepanda.exec.node import (
     Cast,
     Compute,
+    Connective,
     Constant,
     Filter,
     Group,
@@ -243,6 +244,7 @@ from firepanda.frame.frame import DataFrame
 from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
+from firepanda.kernel.logic import LogicOp, is_logic_name, logic_op
 from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
 from firepanda.plan.node import (
     NO_LIMIT,
@@ -484,6 +486,9 @@ def _lower_expr(
         memo.forget(at)
         return at
 
+    if kind == ExprKind.CALL and is_logic_name(exprs.nodes[root].name):
+        return _lower_connective(exprs, root, pipe, base, name, memo)
+
     if kind != ExprKind.BINARY:
         raise Error(
             String(
@@ -537,6 +542,80 @@ def _lower_expr(
     pipe.add(Node(Compute(at_left, at_right, op, name)))
     memo.remember(root, len(pipe.schema) - 1)
     return len(pipe.schema) - 1
+
+
+def _lower_connective(
+    exprs: Expressions,
+    root: Int,
+    mut pipe: Pipeline,
+    base: Int,
+    name: String,
+    mut memo: Memo,
+) raises -> Int:
+    """Appends whatever computes an and, an or or a not.
+
+    The three are calls rather than binary operations, because their rule for a
+    null is not the one the operations share, and a conjunction or a disjunction
+    is written with as many arguments as the query had rather than as a tree of
+    pairs. So this is where the tree comes back: the arguments are folded left to
+    right, one `Connective` per pair, which is what an `a AND b AND c` in a
+    select list ends up as.
+
+    Left to right is not arbitrary even though the two connectives are
+    associative. It is the order the query was written in, which is the order a
+    reader of the plan expects to see, and once there is a cost model to reorder
+    on, reordering something is better than having to recover what was written.
+
+    Args:
+        exprs: The arena.
+        root: The call, already bound.
+        pipe: The pipeline, added to.
+        base: The width of the chunk before this node started lowering.
+        name: What to call the column the whole call lands in.
+        memo: What this node has already computed and where it put it.
+
+    Returns:
+        The position of the column holding the call's value.
+
+    Raises:
+        Error: If the call has the wrong number of arguments for its
+            connective, or an argument has a kind no operator computes.
+    """
+    var connective = logic_op(exprs.nodes[root].name)
+    var args = exprs.nodes[root].children.copy()
+
+    if connective == LogicOp.NOT:
+        if len(args) != 1:
+            raise Error(
+                String(
+                    "lower: not reads one argument and was given ",
+                    len(args),
+                )
+            )
+        var at = _lower_expr(exprs, args[0], pipe, base, name, memo, reuse=True)
+        pipe.add(Node(Connective(at, name)))
+        memo.remember(root, len(pipe.schema) - 1)
+        return len(pipe.schema) - 1
+
+    if len(args) < 2:
+        raise Error(
+            String(
+                "lower: ",
+                connective,
+                " reads two arguments or more and was given ",
+                len(args),
+            )
+        )
+
+    var at = _lower_expr(exprs, args[0], pipe, base, name, memo, reuse=True)
+    for i in range(1, len(args)):
+        var other = _lower_expr(
+            exprs, args[i], pipe, base, name, memo, reuse=True
+        )
+        pipe.add(Node(Connective(at, other, connective, name)))
+        at = len(pipe.schema) - 1
+    memo.remember(root, at)
+    return at
 
 
 def _trim(mut pipe: Pipeline, base: Int) raises:

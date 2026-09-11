@@ -110,6 +110,16 @@ from .group import (
     group_sum,
     group_var,
 )
+from .logic import (
+    LogicOp,
+    is_logic_name,
+    logic_any,
+    logic_op,
+    logic_type,
+    logical_and,
+    logical_not,
+    logical_or,
+)
 from .mask import apply_validity, combined_validity
 from .member import is_in, is_in_any, text_is_in
 from .nulls import (

@@ -116,6 +116,7 @@ from firepanda.kernel.binary import (
 from firepanda.kernel.cast import cast_any
 from firepanda.kernel.concat import concat_two_any
 from firepanda.kernel.group import AggKind, agg_type, aggregate_group_any
+from firepanda.kernel.logic import LogicOp, logic_any, logic_type
 from firepanda.kernel.reduce import reduce_any
 from firepanda.kernel.running import (
     accumulate_any,
@@ -1232,6 +1233,151 @@ struct Compute(Movable):
             made = binary_any(
                 chunk.columns[self.left], chunk.columns[self.right], self.op
             )
+        var rows = len(chunk)
+        var columns = chunk^.into_columns()
+        columns.append(made^)
+        return Chunk(columns^, rows)
+
+
+struct Connective(Movable):
+    """Appends a column that is two boolean columns joined by and, or or not.
+
+    The same shape as `Compute` and a separate node for the same reason
+    `logic.mojo` is a separate kernel: a connective decides a row where one of
+    its operands is null and the other one settles it, and every operation
+    `Compute` can do answers null there instead. Folding the three into
+    `BinaryOp` would mean one of the two rules being applied by a flag on a node,
+    which is the kind of thing that is right in the test that thought of it and
+    wrong six months later.
+
+    Negation reads one column and is here rather than in a node of its own, for
+    the reason `LogicOp` holds all three: an expression that says `not` is the
+    same shape of thing as one that says `or`, and splitting them would put two
+    node types on one branch of the lowering with nothing downstream telling them
+    apart.
+
+    `a AND b` in a WHERE clause does not normally reach here. The optimizer
+    splits a top level conjunction into a line of filters, which is both cheaper
+    and better for pushdown, so what is left for this node is the conjunction
+    nested inside something else, the disjunction, the negation, and every
+    boolean expression in a select list.
+    """
+
+    var left: Int
+    """The position of the left operand, or of the only one under a negation."""
+
+    var right: Int
+    """The position of the right operand. Ignored under a negation."""
+
+    var op: LogicOp
+    """The connective."""
+
+    var name: String
+    """The name the appended column gets in the output schema."""
+
+    def __init__(out self, left: Int, right: Int, op: LogicOp, name: String):
+        """Constructs a connective over two columns.
+
+        Args:
+            left: The position of the left operand.
+            right: The position of the right operand.
+            op: The connective, which must read two columns.
+            name: The name of the appended column.
+        """
+        self.left = left
+        self.right = right
+        self.op = op
+        self.name = name
+
+    def __init__(out self, column: Int, name: String):
+        """Constructs a negation, which reads one column.
+
+        Args:
+            column: The position of the operand.
+            name: The name of the appended column.
+        """
+        self.left = column
+        self.right = column
+        self.op = LogicOp.NOT
+        self.name = name
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Reports the input schema with the computed column appended.
+
+        The answer is a bool whatever the operands are, so what this is really
+        for is the other half: an operand that is not boolean is a query that
+        means nothing, and it is caught here rather than on the first chunk.
+
+        Args:
+            input: The schema of the chunks that will arrive. Consumed.
+
+        Returns:
+            The input schema with one field on the end.
+
+        Raises:
+            If a position is outside the schema, or an operand is not boolean.
+        """
+        var out = input^
+        if self.left < 0 or self.left >= len(out):
+            raise Error(
+                "connective: column "
+                + String(self.left)
+                + " is outside a schema of "
+                + String(len(out))
+                + " columns"
+            )
+        if self.right < 0 or self.right >= len(out):
+            raise Error(
+                "connective: column "
+                + String(self.right)
+                + " is outside a schema of "
+                + String(len(out))
+                + " columns"
+            )
+        # One interior reference at a time, as `Compute.bind` does, since two
+        # into the same list cannot both be alive.
+        var made = logic_type(self.op, out[self.left].dtype)
+        if self.op.reads_two_columns():
+            made = logic_type(self.op, out[self.right].dtype)
+        out.append(Field(self.name, made))
+        return out^
+
+    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Applies the connective and puts the column on the end of the chunk.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            The chunk with one more column and the same number of rows.
+
+        Raises:
+            If a position is outside the chunk, or an operand is not boolean.
+        """
+        var width = chunk.width()
+        if self.left < 0 or self.left >= width:
+            raise Error(
+                "connective: column "
+                + String(self.left)
+                + " is outside a chunk of "
+                + String(width)
+                + " columns"
+            )
+        if self.right < 0 or self.right >= width:
+            raise Error(
+                "connective: column "
+                + String(self.right)
+                + " is outside a chunk of "
+                + String(width)
+                + " columns"
+            )
+        var made: AnyArray
+        if self.op.reads_two_columns():
+            made = logic_any(
+                chunk.columns[self.left], chunk.columns[self.right], self.op
+            )
+        else:
+            made = logic_any(chunk.columns[self.left], self.op)
         var rows = len(chunk)
         var columns = chunk^.into_columns()
         columns.append(made^)
@@ -3060,6 +3206,7 @@ comptime Node = Variant[
     Filter,
     Project,
     Compute,
+    Connective,
     Constant,
     Cast,
     Join,
@@ -3103,6 +3250,8 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
         return node[Reduce].bind(input^)
     if node.isa[Compute]():
         return node[Compute].bind(input^)
+    if node.isa[Connective]():
+        return node[Connective].bind(input^)
     if node.isa[Constant]():
         return node[Constant].bind(input^)
     if node.isa[Cast]():
@@ -3211,7 +3360,7 @@ def node_status(node: Node) -> NodeStatus:
 def node_is_row_local(node: Node) -> Bool:
     """Reports whether a node's output row depends only on its own input row.
 
-    The four elementwise operators say yes, and so does `Join`, whose output row
+    The five elementwise operators say yes, and so does `Join`, whose output row
     depends on its own input row and on a table that was finished before the
     first chunk arrived. What that buys is that the node reads itself and never
     writes itself, so one of them can be handed to every core at once without a
@@ -3225,12 +3374,14 @@ def node_is_row_local(node: Node) -> Bool:
         node: The node.
 
     Returns:
-        True for `Filter`, `Project`, `Compute`, `Constant`, `Cast` and `Join`.
+        True for `Filter`, `Project`, `Compute`, `Connective`, `Constant`,
+        `Cast` and `Join`.
     """
     return (
         node.isa[Filter]()
         or node.isa[Project]()
         or node.isa[Compute]()
+        or node.isa[Connective]()
         or node.isa[Constant]()
         or node.isa[Cast]()
         or node.isa[Join]()
@@ -3259,8 +3410,9 @@ def node_ends_early(node: Node) -> Bool:
 def node_computes_per_row(node: Node) -> Bool:
     """Reports whether a node works out a value for every row it is given.
 
-    `Filter` evaluates a predicate and `Compute` evaluates an expression, so
-    both do arithmetic once per row and both get faster on more cores. `Join`
+    `Filter` evaluates a predicate, and `Compute` and `Connective` evaluate an
+    expression, so all three do work once per row and all three get faster on
+    more cores. `Join`
     hashes a key and gathers a row per output row, which is more work per row
     than either, and its table is read only once `bind` has run. `Project`
     only rebuilds a chunk out of columns it already has, `Cast` walks a
@@ -3275,9 +3427,14 @@ def node_computes_per_row(node: Node) -> Bool:
         node: The node.
 
     Returns:
-        True for `Filter`, `Compute` and `Join`.
+        True for `Filter`, `Compute`, `Connective` and `Join`.
     """
-    return node.isa[Filter]() or node.isa[Compute]() or node.isa[Join]()
+    return (
+        node.isa[Filter]()
+        or node.isa[Compute]()
+        or node.isa[Connective]()
+        or node.isa[Join]()
+    )
 
 
 def node_is_breaker(node: Node) -> Bool:
@@ -3343,6 +3500,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Project].process(chunk^)
     if node.isa[Compute]():
         return node[Compute].process(chunk^)
+    if node.isa[Connective]():
+        return node[Connective].process(chunk^)
     if node.isa[Constant]():
         return node[Constant].process(chunk^)
     if node.isa[Cast]():
@@ -3365,7 +3524,7 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
 def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
     """Pushes one chunk through a row local node without mutating it.
 
-    The same call as `node_process` for the four elementwise operators, except
+    The same call as `node_process` for the five elementwise operators, except
     that the node is read rather than borrowed mutably, which is what lets the
     same node be used by several workers at once. Anything else raises rather
     than being run, because a node that carries state between chunks run this
@@ -3391,6 +3550,8 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Project].process(chunk^)
     if node.isa[Compute]():
         return node[Compute].process(chunk^)
+    if node.isa[Connective]():
+        return node[Connective].process(chunk^)
     if node.isa[Constant]():
         return node[Constant].process(chunk^)
     if node.isa[Cast]():

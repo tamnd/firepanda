@@ -101,6 +101,18 @@ def read_back(df: DataFrame, name: String) raises -> List[Int64]:
     return out^
 
 
+def truths(df: DataFrame, name: String) raises -> List[Int64]:
+    """Reads a bool column out as ones and zeroes, and a null as a minus one."""
+    var col = df.column(name).as_typed[DType.bool]()
+    var out = List[Int64](capacity=len(col))
+    for i in range(len(col)):
+        if not col.is_valid(i):
+            out.append(-1)
+        else:
+            out.append(Int64(1) if col[i] else Int64(0))
+    return out^
+
+
 def answer(sql: StringSlice, name: String) raises -> List[Int64]:
     """Runs a query against the session and reads one column of the answer."""
     return read_back(run(sql, session()), name)
@@ -567,20 +579,87 @@ def test_an_in_of_one_candidate_runs_as_the_comparison_it_is() raises:
     same(answer("SELECT qty FROM sales WHERE qty IN (25)", "qty"), [25], "qty")
 
 
-def test_the_shapes_that_need_an_or_are_waiting_on_the_operator() raises:
-    # The plans are right and nothing runs them. A conjunction at the top of a
-    # filter is a line of filters, which is why a plain BETWEEN runs, and an OR
-    # or a NOT is one column computed from another with nothing that computes
-    # it yet. A plain `WHERE a = 1 OR a = 2` has the same gap and has had it all
-    # along, so this is not something IN and NOT BETWEEN brought with them.
-    with assert_raises(contains="computes a call expression"):
-        _ = run("SELECT qty FROM sales WHERE qty IN (3, 25)", session())
-    with assert_raises(contains="computes a call expression"):
-        _ = run(
-            "SELECT qty FROM sales WHERE qty NOT BETWEEN 5 AND 20", session()
-        )
-    with assert_raises(contains="computes a call expression"):
-        _ = run("SELECT qty FROM sales WHERE qty = 3 OR qty = 25", session())
+def test_a_plain_or_in_a_where_keeps_both_sides() raises:
+    # The shape that had no operator until the connectives were written, and
+    # the one everything else here is built out of.
+    same(
+        answer("SELECT qty FROM sales WHERE qty = 3 OR qty = 25", "qty"),
+        [3, 25],
+        "qty",
+    )
+
+
+def test_an_in_of_several_candidates_runs_as_the_chain_it_is() raises:
+    same(
+        answer("SELECT qty FROM sales WHERE qty IN (3, 25)", "qty"),
+        [3, 25],
+        "qty",
+    )
+
+
+def test_a_not_in_keeps_everything_the_in_dropped() raises:
+    same(
+        answer("SELECT qty FROM sales WHERE qty NOT IN (3, 25)", "qty"),
+        [5, 20, 40, 12, 8, 1, 30, 15],
+        "qty",
+    )
+
+
+def test_a_not_between_keeps_the_rows_outside_both_bounds() raises:
+    # The complement of the BETWEEN test above, down to the closed ends: the
+    # five and the twenty are in the range and so are not in this answer.
+    same(
+        answer("SELECT qty FROM sales WHERE qty NOT BETWEEN 5 AND 20", "qty"),
+        [3, 40, 25, 1, 30],
+        "qty",
+    )
+
+
+def test_a_chain_of_ors_folds_left_to_right_and_keeps_every_arm() raises:
+    same(
+        answer(
+            "SELECT qty FROM sales WHERE qty = 3 OR qty = 25 OR qty > 29",
+            "qty",
+        ),
+        [3, 40, 25, 30],
+        "qty",
+    )
+
+
+def test_an_and_nested_under_an_or_is_not_split_into_filters() raises:
+    # The conjunction here cannot become a line of filters, because it only has
+    # to hold on the rows the disjunction did not already keep, so this is the
+    # one shape where an AND reaches the connective operator.
+    same(
+        answer(
+            "SELECT qty FROM sales WHERE qty = 1 OR (qty > 10 AND shop = 1)",
+            "qty",
+        ),
+        [12, 25, 1, 30],
+        "qty",
+    )
+
+
+def test_a_boolean_expression_in_a_select_list_is_a_column() raises:
+    same(
+        truths(
+            run("SELECT qty > 10 AND shop = 1 AS big FROM sales", session()),
+            "big",
+        ),
+        [0, 0, 0, 0, 1, 0, 1, 0, 1, 0],
+        "big",
+    )
+
+
+def test_a_not_in_a_select_list_turns_the_column_over() raises:
+    same(
+        truths(
+            run("SELECT NOT (qty > 10) AS small FROM sales", session()),
+            "small",
+        ),
+        [1, 0, 1, 0, 0, 1, 0, 1, 0, 0],
+        "small",
+    )
 
 
 def test_a_window_over_the_whole_table_is_on_every_row() raises:

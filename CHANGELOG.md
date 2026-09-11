@@ -27,6 +27,7 @@ At four million rows the three rows read 6.9 ms with a handful of groups, 11.5 m
 The reason the last row is not much worse than the first is that each group sorts inside its own stretch of the slab, so more groups means shorter sorts. The argument and the memory behaviour are now in `_nunique_core`'s docstring, where the next person to look at this will be.
 
 Part of #479.
+
 ### Added: `BETWEEN` and `IN` lower, and a subquery in an expression says which shape it is
 
 Both are rewrites rather than new plan nodes. `x BETWEEN lo AND hi` is the two comparisons it stands for and `x IN (a, b, c)` is one equality per candidate joined by `OR`. The plan has no range test and no membership test, and it should not grow one: a predicate shape is something every pass over a filter has to know about, and both of these are already sayable, so the only thing a new node would buy is a case to write in pushdown, in the optimizer and in the printer.
@@ -37,7 +38,21 @@ The negated forms are the whole answer negated rather than the comparisons turne
 
 A subquery written in an expression is now refused by name rather than by the sentence that stands for every shape at once. `IN (SELECT ...)`, `EXISTS`, a scalar subquery and a quantified comparison all say that a correlated one is a dependent join decorrelation has to remove and an uncorrelated one is a plan the outer plan has nowhere to hold, which is what #309 has to build next.
 
-What runs is not yet what lowers. A conjunction at the top of a filter is a line of filters, so a plain `BETWEEN` in a `WHERE` runs today, and an `OR` or a `NOT` is a boolean column computed from another one with no operator that computes it. That gap is older than this change, since `WHERE a = 1 OR a = 2` has always had it, and the tests name it rather than working around it.
+When this went in, what ran was not yet what lowered. A conjunction at the top of a filter is a line of filters, so a plain `BETWEEN` in a `WHERE` ran, and an `OR` or a `NOT` was a boolean column computed from another one with no operator that computed it. That gap was older than this change, since `WHERE a = 1 OR a = 2` had always had it, and the tests named it rather than working around it. The entry below closes it.
+
+Part of #309.
+
+### Added: `AND`, `OR` and `NOT` run, three valued, so a disjunction answers rather than being refused
+
+`WHERE a = 1 OR a = 2` had no operator that computes it and had never had one. A conjunction at the top of a filter is split into a line of filters by the optimizer, which is why an `AND` there has always run, and every other shape of boolean expression lowered to a call nothing could evaluate. That covered `NOT`, a disjunction anywhere, an `AND` nested under something else, and any boolean expression written in a select list.
+
+There is now a `logic` kernel and a `Connective` operator. `NOT BETWEEN`, `IN` of more than one candidate, `NOT IN` and a chain of `OR` all run as a result, since those lower to the connectives rather than to anything of their own.
+
+The kernel is three valued and that is the point of it being a kernel rather than three more entries in `binary.mojo`. Every operation there answers null wherever either input is null, which is one shared repair over the two validity bitmaps intersected. A connective answers where one input is null and the other one settles it: a false and a null is false, a true or a null is true, because nothing the null could have been would have changed either. So the validity has to be read off the values.
+
+It is read off them cheaply. The values come out of a morsel loop over the bytes with no branch in it, and the validity starts as the intersection. When neither column holds a null, which is most predicates over most tables, that is the answer and nothing else runs. When one does, only the validity words the intersection marks are walked, and in those words only the rows a null reaches. A column with a thousand nulls in ten million rows pays for a thousand rows.
+
+A call with more than two arguments folds left to right into one operator per pair, in the order the query was written, because that is the order a reader of the plan expects and reordering something later is easier than recovering what was written.
 
 Part of #309.
 
