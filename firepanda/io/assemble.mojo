@@ -38,6 +38,12 @@ happening is free: a piece is trimmed so that it never crosses one, and it then
 writes into its own morsel's sink at an offset rather than into a long sink at a
 larger one.
 
+There is no default height here on purpose. Which height is fastest is a property
+of the query, the machine's cache and how many cores are free, and measuring it
+wants an idle machine, so the caller names a height and this file has no opinion
+about it. The opinion belongs wherever the plan layer decides to run a query
+through the pipeline, which is not written yet.
+
 Nothing here owns the memory the arrays point into. The producer keeps it alive
 across the call and releases it afterwards, by which time every byte that was
 wanted has been copied.
@@ -162,18 +168,6 @@ struct ArrowLayout(Copyable, Movable, Sized):
 comptime PIECE_ROWS = 65536
 """How many rows one task copies. A multiple of eight, so that a piece begins on
 a byte of the validity bitmap and the bits are copied rather than shifted."""
-
-comptime MORSEL_ROWS = 131072
-"""How many rows one chunk of a morselled read holds.
-
-Not the same number as `PIECE_ROWS` and not for the same reason. A piece is a
-share of the copy and wants to be small enough that every core gets several. A
-morsel is a unit of work for everything that happens after the read, and wants to
-be large enough that the per chunk overhead of an operator disappears against it
-and small enough that a core's share of a query stays in cache. This is the
-height q6 was measured at, and the measurement is in the changelog rather than
-here because it will move when the operators do.
-"""
 
 
 def _morsel_of(at: Int, height: Int, morsels: Int) -> Int:
