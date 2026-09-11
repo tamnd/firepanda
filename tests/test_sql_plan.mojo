@@ -590,6 +590,30 @@ def test_a_join_in_parentheses_is_the_join_inside_them() raises:
     )
 
 
+def test_a_table_function_is_a_source_that_names_no_table() raises:
+    assert_equal(
+        _plan("SELECT * FROM range(5)"),
+        "PROJECT [range]\n  range(5) [range]\n",
+        "the column is called after the function, the way DuckDB calls it",
+    )
+
+
+def test_a_table_function_carries_the_arguments_it_was_given() raises:
+    assert_equal(
+        _plan("SELECT * FROM generate_series(1, 10, 2)"),
+        (
+            "PROJECT [generate_series]\n"
+            "  generate_series(1, 10, 2) [generate_series]\n"
+        ),
+        "a start, a stop and a step",
+    )
+
+
+def test_a_lateral_table_function_is_refused_by_name() raises:
+    with assert_raises(contains="LATERAL table function"):
+        _ = _plan("SELECT a FROM t, LATERAL range(t.a)")
+
+
 def test_a_condition_may_reach_only_the_two_tables_it_joins() raises:
     # The comma binds looser than the JOIN word, so `u` and `t s` are the join
     # and `t` is beside it, and a condition naming `t` there is reaching out of
@@ -611,7 +635,7 @@ def test_the_joins_with_no_node_yet_each_say_which_one() raises:
         _ = _plan("SELECT a FROM t SEMI JOIN u ON t.a = u.k")
     with assert_raises(contains="subquery in a FROM"):
         _ = _plan("SELECT a FROM t JOIN (SELECT 1 AS k) v ON t.a = v.k")
-    with assert_raises(contains="table function"):
+    with assert_raises(contains="alias on a table function"):
         _ = _plan("SELECT a FROM range(10) r")
     with assert_raises(contains="parenthesised table reference"):
         _ = _plan("SELECT a FROM (t JOIN u ON t.a = u.k) v")

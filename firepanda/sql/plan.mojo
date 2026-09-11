@@ -83,10 +83,23 @@ because a query cannot write one, and they are visible in `EXPLAIN`, which is
 the right trade: a reader who sees `__having_0` learns something true about how
 the query runs.
 
+### A function may be written where a table goes
+
+`FROM range(5)` is a source that reads no file and names no table, so nothing
+about it touches the catalog and nothing is added to `sources`. Its arguments
+are lowered as expressions against nothing, the way a `VALUES` lowers its rows,
+because there is nothing under a table function to read.
+
+The column comes out called after the function, which is what DuckDB calls it.
+An alias is refused for now: the column belongs to no relation, so a name
+written in front of it would have nothing to resolve against, and a scope entry
+pointing at a relation that does not exist would resolve to the wrong one rather
+than to none.
+
 ### What is not lowered yet
 
-Named tables and the joins over them, and no subqueries, no CTEs, no windows and
-no `QUALIFY`. `USING`, `NATURAL`, `POSITIONAL`, `ASOF`, `SEMI` and `ANTI` are
+Named tables, the table functions above, and the joins over them, and no
+subqueries, no CTEs, no windows and no `QUALIFY`. `USING`, `NATURAL`, `POSITIONAL`, `ASOF`, `SEMI` and `ANTI` are
 each refused by name: the first three decide their keys or their output columns
 from something other than the condition, `ASOF` matches on the nearest value
 rather than an equal one, and the last two keep none of the right side, so what
@@ -107,7 +120,7 @@ is not, so the refusal stands until the plan can carry an exact decimal.
 """
 
 from firepanda.dtype.logical import LogicalType
-from firepanda.dtype.schema import Schema
+from firepanda.dtype.schema import Field, Schema
 from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.unary import UnaryOp
@@ -1067,6 +1080,76 @@ def _table(
     return _From(plan.scan(name, List[String](), table), schema^, origin^)
 
 
+def _function(ast: Ast, at: UInt32, mut plan: Plan) raises -> _From:
+    """Lowers a function written where a table goes.
+
+    `FROM range(5)` is a source that reads no file and names no table, so
+    nothing here touches the catalog and nothing is added to `sources`. The
+    arguments are lowered as expressions against nothing, the way a `VALUES`
+    lowers its rows, because there is nothing under a table function to read.
+
+    The column is called after the function, which is what DuckDB calls it, so
+    `SELECT * FROM range(5)` comes back with a column called `range`. A name
+    firepanda invents is a name a query can write, so inventing the same one
+    DuckDB does is the difference between a query that ports and one that
+    almost does.
+
+    The type is written here as well as in binding, which is one thing known in
+    two places and is the price of the schema travelling alongside the node.
+    See `_From` for why it has to.
+
+    Args:
+        ast: The arenas.
+        at: The `REF_FUNCTION`.
+        plan: Where the node goes.
+
+    Returns:
+        The node and what it produces.
+
+    Raises:
+        If the call is `LATERAL`, if it carries an alias, or if an argument is
+        an expression this does not lower.
+    """
+    var source = ast.refs[Int(at)]
+    if source.b == 1:
+        raise Error(
+            "firepanda does not lower a LATERAL table function yet, which is"
+            " called once for every row to the left of it rather than once for"
+            " the query"
+        )
+    var name = _one_name(ast, source.a, "a table function")
+    if ast.length(source.payload) != 0:
+        raise Error(
+            String(
+                (
+                    "firepanda does not lower an alias on a table function yet."
+                    " The column "
+                ),
+                name,
+                (
+                    " produces belongs to no relation, so a name written in"
+                    " front of it would have nothing to resolve against"
+                ),
+            )
+        )
+
+    # Nothing under it, so nothing can aggregate and nothing can be qualified.
+    # Both are here because lowering an expression takes them.
+    var walk = _Walk()
+    var nothing = _Scope()
+    var written = ast.items(source.children)
+    var args = List[Int](capacity=len(written))
+    for i in range(len(written)):
+        args.append(_lower_expr(ast, written[i], plan, walk, nothing, False))
+
+    var schema = Schema()
+    schema.append(Field(name, LogicalType.INT64, False))
+    var origin = List[Int](length=1, fill=UNBOUND)
+    var names = List[String](capacity=1)
+    names.append(name.copy())
+    return _From(plan.table_function(name^, args^, names^), schema^, origin^)
+
+
 def _joined(
     ast: Ast,
     at: UInt32,
@@ -1222,11 +1305,7 @@ def _source(
             " whole query whose output names become a table's"
         )
     if source.kind == REF_FUNCTION:
-        raise Error(
-            "firepanda does not lower a table function yet, which is a call"
-            " written where a table goes, like range(5). The plan has the node"
-            " and runs it, and what is missing is this front end building one"
-        )
+        return _function(ast, at, plan)
     raise Error(
         String("firepanda does not lower table reference kind ", source.kind)
     )
