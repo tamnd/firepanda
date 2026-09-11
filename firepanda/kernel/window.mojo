@@ -882,7 +882,7 @@ def _spread[
         Error: Only what allocation raises.
     """
     var answer = Array[DType.float64](shape.answered(rows))
-    var target = answer.unsafe_ptr()
+    var target = answer.unsafe_mut_ptr()
     var carried = Spread()
     var last = Edges(0, 0)
     for k in range(len(answer)):
