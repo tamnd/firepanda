@@ -8,6 +8,26 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: common subexpression elimination, so one shape is one expression
+
+`cse` in `firepanda/plan/cse.mojo`, section 5 of the pass pipeline spec, and the sixth pass in the pipeline. Within one plan node, two expressions that are the same shape become one index, and lowering then computes them once because it remembers where it put an index it has already met.
+
+For a dataframe library this matters more than it does for SQL. The expression arena hands out an index per call rather than per shape, and a caller writing Python naturally repeats themselves. TPC-H q1 written the way a person writes it asks for the discounted price and then for the discounted price times one plus the tax, and that builds the product twice as two indices that have never heard of each other. Nothing before this noticed.
+
+The shape is decided by a key holding everything about a node that goes into its answer: the kind, the type, the name, the position and table binding gave it, the operation, the flags, and the constant on a literal, followed by the indices its operands were made canonical to. Operands go in as indices rather than as their own keys, because they have already been through the same walk and equal shapes below already share an index, which is what keeps the key a fixed amount of work per node rather than something that grows with the depth of the tree. It is a string compare rather than a hash, because a key that collides here is a wrong answer rather than a slow one and a plan node holds a handful of expressions.
+
+It works one plan node at a time. Binding writes a position and a table onto a column, and the same column name under two nodes can bind to two different positions, so two subtrees that look alike across nodes are not alike. Inside one node every expression binds against the same input schema, which is what makes equal shapes mean equal values. That is also where the whole saving is, since lowering's memo is per node for the same reason and an index shared across two nodes would be computed once per node anyway.
+
+A join is skipped. Its left keys read the left input and its right keys read the right, so one shape there is not one value, and the keys are bare columns with nothing to save.
+
+Nothing is rewritten in place. An index can be read by more than one plan node, so the walk copies the path it changed and leaves the rest, which is the rule `graft` already follows. `Expressions.rebuild` is the primitive both now use, added here and refactored back into `graft`.
+
+One thing worth knowing about the pipeline. This pass is invisible to the printed plan, because the text does not say which index an expression is, so a sweep in which it was the only pass that did anything reads as a sweep in which nothing happened. That is the right answer rather than a gap, since what it does is idempotent by construction and there is nothing left for another sweep to find.
+
+Thirteen tests, plus one in the pipeline file that counts expression nodes rather than reading text, for the reason above.
+
+Part of #377.
+
 ### Changed: projection merging stops refusing to share an expression
 
 The third of the pass's three refusals declined to substitute an output the upper projection reads more than once unless it was a plain column or a literal, because `b = a + a` over `a = expensive(x)` would have merged into two evaluations of the expensive thing. Lowering shares an expression it meets twice now, so that is no longer what happens, and the refusal is narrowed to the one case where it is still true.

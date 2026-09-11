@@ -203,5 +203,51 @@ def test_a_constant_predicate_is_folded_before_anything_moves() raises:
     assert_true("100" not in printed, "and the pieces of it are gone")
 
 
+def _reached(plan: Plan, at: Int) raises -> Int:
+    """Counts the distinct expression nodes one plan node's expressions reach.
+    """
+    var seen = List[Int]()
+    var stack = plan.nodes[at].exprs.copy()
+    while len(stack) > 0:
+        var one = stack.pop()
+        var had = False
+        for i in range(len(seen)):
+            if seen[i] == one:
+                had = True
+                break
+        if had:
+            continue
+        seen.append(one)
+        var kids = plan.exprs.nodes[one].children.copy()
+        for i in range(len(kids)):
+            stack.append(kids[i])
+    return len(seen)
+
+
+def test_a_repeated_expression_is_unified_by_the_pipeline() raises:
+    var plan = Plan()
+    var scan = plan.scan("lineitem", List[String](), 0)
+    var root = plan.project(
+        scan,
+        [
+            plan.exprs.binary(
+                BinaryOp.MUL,
+                plan.exprs.column("l_extendedprice"),
+                plan.exprs.column("l_discount"),
+            ),
+            plan.exprs.binary(
+                BinaryOp.MUL,
+                plan.exprs.column("l_extendedprice"),
+                plan.exprs.column("l_discount"),
+            ),
+        ],
+        ["a", "b"],
+    )
+    var at = optimize(plan, root, [_lineitem()])
+    # Six nodes went in and three came out. The printed plan is the same either
+    # way, which is why this one counts rather than reading the text.
+    assert_equal(_reached(plan, at), 3, "one product between the two outputs")
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
