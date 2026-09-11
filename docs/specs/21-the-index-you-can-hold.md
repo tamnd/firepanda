@@ -34,15 +34,17 @@ Three copies of the same helper is where a private convention drifts, and this w
 
 The rule from document 17 has not moved: a member belongs in the table when it is one expression written against `self._inner`, and in the hand written mixin when what it does depends on its argument.
 
-Twenty six members are in the table. They are the properties, `dtype` and `inferred_type` and `size` and `shape` and `nbytes` and the rest, the two list conversions, `unique`, `rename`, `take`, `insert`, `get_slice_bound`, `slice_locs`, and the two Arrow dunders.
+Twenty two members are in the table. They are the properties, `dtype` and `inferred_type` and `size` and `shape` and `nbytes` and the rest, the two list conversions, `insert`, `get_slice_bound`, and the two Arrow dunders.
 
-Eighteen are in `IndexMixin`. The clearest case is `__getitem__`, which is three operations wearing one name: an integer takes a label out and gives a Python value, a slice gives an index, and a list gives an index and is read as positions or as a mask depending on what is in it. A slice is resolved with `slice.indices` on the Python side rather than in Mojo, because that function is the definition of what a Python slice means and a second implementation that agreed with it would be work with nothing to gain.
+Twenty two are in `IndexMixin`. The clearest case is `__getitem__`, which is three operations wearing one name: an integer takes a label out and gives a Python value, a slice gives an index, and a list gives an index and is read as positions or as a mask depending on what is in it. A slice is resolved with `slice.indices` on the Python side rather than in Mojo, because that function is the definition of what a Python slice means and a second implementation that agreed with it would be work with nothing to gain.
 
 `get_loc` is the other one worth naming. pandas returns three different types from it and which one it returns depends on the labels rather than on the argument: one hit is an integer, several hits in a row on a sorted index are a slice, and anything else is a boolean mask. The Mojo side returns positions, which is what all three are made of, and the Python side picks among them, so the rule is written once. Note that a run of duplicates is a slice only when the index is monotonic. `Index(["c", "b", "b", "a"]).get_loc("b")` is a mask in pandas despite its two hits being adjacent, and it is a mask here.
 
 The four set operations are in the mixin for a duller reason, which is that `sort` has three values in pandas and a `Bool` in the core. `None` means sort for `union`, `difference` and `symmetric_difference` and means do not sort for `intersection`, and the mixin is where that is turned into a bool so the core takes a bool and means it.
 
 `__eq__` is in the mixin and defining it there has one consequence worth stating: a class that defines `__eq__` and not `__hash__` is unhashable, so an index cannot be a dictionary key. pandas has exactly that property for exactly that reason.
+
+Four members started in the table and moved to the mixin later, which is the rule working rather than the rule bending. `unique`, `rename`, `take` and `slice_locs` were each one expression against `self._inner` for as long as they were spelled with the arguments the core needed, and each of them grew an argument pandas has that changes what the expression means. `take` is the sharpest of the four. pandas reads `allow_fill` and `fill_value` together, so filling happens only when both are on, the default pair means no filling at all, and a negative position counts back from the end the way it does everywhere else in Python. The core's `take` fills at a negative position, which is the Arrow reading, so the mixin now decides between the two readings and normalises the positions before it calls. The default answer changed with it, from a missing label to the last label, which is what pandas answers.
 
 ## 5. A missing label needs a type to be missing in
 

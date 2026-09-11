@@ -17,7 +17,6 @@ nothing when nothing raises, which is measured in document 14.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import Any
 
 from . import _firepanda
@@ -3338,27 +3337,6 @@ class Index(IndexMixin):
         except Exception as error:
             raise translate(error) from None
 
-    def unique(self) -> Index:
-        """The index with each label kept once, in first seen order."""
-        try:
-            return Index._wrap(self._inner.unique())
-        except Exception as error:
-            raise translate(error) from None
-
-    def rename(self, name: str | None) -> Index:
-        """The index under a different level name."""
-        try:
-            return Index._wrap(self._inner.renamed(name))
-        except Exception as error:
-            raise translate(error) from None
-
-    def take(self, indices: Sequence[int]) -> Index:
-        """The labels at a set of positions, in the order given."""
-        try:
-            return Index._wrap(self._inner.take(list(indices)))
-        except Exception as error:
-            raise translate(error) from None
-
     def insert(self, loc: int, item: object) -> Index:
         """The index with one label put in at a position."""
         try:
@@ -3370,13 +3348,6 @@ class Index(IndexMixin):
         """The position a label maps to when the index is read in order."""
         try:
             return self._inner.get_slice_bound(label, side)
-        except Exception as error:
-            raise translate(error) from None
-
-    def slice_locs(self, start: object = None, end: object = None) -> tuple[int, ...]:
-        """The half open row range a pair of labels describes, both ends inclusive."""
-        try:
-            return tuple(self._inner.slice_locs(start, end))
         except Exception as error:
             raise translate(error) from None
 

@@ -32,7 +32,13 @@ import warnings
 from typing import TYPE_CHECKING, Any
 
 from . import _firepanda
-from .errors import ColumnNotFoundError, DTypeError, InvalidArgumentError, translate
+from .errors import (
+    ColumnNotFoundError,
+    DTypeError,
+    InvalidArgumentError,
+    OutOfBoundsError,
+    translate,
+)
 
 if TYPE_CHECKING:
     from ._frame import (
@@ -3661,6 +3667,158 @@ class IndexMixin:
             return Index._wrap(self._inner.putmask([bool(m) for m in mask], list(replacement)))
         except Exception as error:
             raise translate(error) from None
+
+    def slice_locs(self, start: Any = None, end: Any = None, step: Any = None) -> tuple[int, int]:
+        """The half open row range a pair of labels describes, both ends inclusive.
+
+        A forward step is the plain question and the Mojo answers it. A negative
+        step is a different question wearing the same name: the caller means to
+        read the range backwards, so the labels arrive in the order they will be
+        walked in rather than in index order, and the pair that comes back is
+        the pair a backward Python slice wants.
+
+        The way pandas gets there is to swap the two labels, ask the forward
+        question, and then shift both answers down by one, which turns a half
+        open range that excludes its right end into one that excludes its left.
+        A bound that lands on -1 is shifted down by the length of the index as
+        well, because -1 in a Python slice means the last row rather than the
+        row before the first and a bound that means nothing before the start
+        has to say so in a way a slice will read.
+        """
+        forward = step is None or int(step) >= 0
+        try:
+            if forward:
+                first, last = self._inner.slice_locs(start, end)
+                return (first, last)
+            height = self._inner.length()
+            first = 0 if end is None else self._inner.get_slice_bound(end, "left")
+            last = height if start is None else self._inner.get_slice_bound(start, "right")
+        except Exception as error:
+            raise translate(error) from None
+        first, last = last - 1, first - 1
+        if last == -1:
+            last -= height
+        if first == -1:
+            first -= height
+        return (first, last)
+
+    def take(
+        self,
+        indices: Any,
+        axis: Any = 0,
+        allow_fill: bool = True,
+        fill_value: Any = None,
+        **kwargs: Any,
+    ) -> Index:
+        """The labels at a set of positions, in the order given.
+
+        The two arguments that look like one question are `allow_fill` and
+        `fill_value`, and pandas reads them together: filling only happens when
+        both `allow_fill` is on and a `fill_value` was actually passed, so the
+        default pair means no filling at all and a negative position counts back
+        from the end the way it does everywhere else in Python. With filling on,
+        -1 means a row that is not there and anything below -1 is a mistake
+        rather than a position.
+
+        The `fill_value` itself is read for whether it is there and not for what
+        it is, which is pandas' own behaviour and is worth stating because it
+        surprises people: the label that lands in the gap is a missing label
+        whatever value was named. `axis` is accepted and ignored, as pandas
+        accepts and ignores it, since an index has one axis to take along.
+
+        Args:
+            indices: The positions.
+            axis: Accepted and ignored.
+            allow_fill: Whether -1 is allowed to mean a missing label.
+            fill_value: Whether to fill at all. Its value is not used.
+            **kwargs: Accepted and ignored, as in pandas.
+
+        Returns:
+            An index of the labels at those positions.
+        """
+        from ._frame import Index
+
+        wanted = [int(i) for i in indices]
+        if allow_fill and fill_value is not None:
+            if any(i < -1 for i in wanted):
+                raise InvalidArgumentError(
+                    "firepanda:value: when allow_fill=True and fill_value is not"
+                    " None, all indices must be >= -1"
+                )
+        else:
+            height = self._inner.length()
+            wanted = [i + height if i < 0 else i for i in wanted]
+            for was, now in zip(indices, wanted, strict=True):
+                if now < 0:
+                    raise OutOfBoundsError(
+                        f"firepanda:position: index {int(was)} is out of bounds"
+                        f" for axis 0 with size {height}"
+                    )
+        try:
+            return Index._wrap(self._inner.take(wanted))
+        except Exception as error:
+            raise translate(error) from None
+
+    def unique(self, level: Any = None) -> Index:
+        """The index with each label kept once, in first seen order.
+
+        `level` is here because a MultiIndex has levels and this shares the
+        signature with it. On a flat index the only level is the one that is
+        there, so `None`, `0` and `-1` all name it and the index's own name
+        names it too. Anything else is an error rather than a refusal, because
+        the caller asked for a level that does not exist rather than for a
+        feature that is not written.
+        """
+        from ._frame import Index
+
+        self._only_level(level)
+        try:
+            return Index._wrap(self._inner.unique())
+        except Exception as error:
+            raise translate(error) from None
+
+    def _only_level(self, level: Any) -> None:
+        """Holds that `level` names the one level a flat index has.
+
+        Written once because `unique` is the first of several members that take
+        a level and mean nothing by it until there is a MultiIndex. The two
+        errors are pandas' own, an `IndexError` for a number that is out of
+        range and a `KeyError` for a name that is not this index's name.
+        """
+        if level is None:
+            return
+        if isinstance(level, int) and not isinstance(level, bool):
+            if level in (0, -1):
+                return
+            if level < 0:
+                raise IndexError(
+                    f"Too many levels: Index has only 1 level, {level} is not a valid level number"
+                )
+            raise IndexError(f"Too many levels: Index has only 1 level, not {level + 1}")
+        if level != self._inner.label():
+            raise KeyError(
+                f"Requested level ({level}) does not match index name ({self._inner.label()})"
+            )
+
+    def rename(self, name: Any, *, inplace: bool = False) -> Index | None:
+        """The index under a different level name.
+
+        `inplace` is the one place an index is mutable here, and it is mutable
+        in pandas too, because a level name is not a label and changing it does
+        not change what the index holds. The index underneath is still rebuilt
+        rather than edited, since a name lives in Mojo beside the labels, and
+        what `inplace` changes is which object the caller is left holding.
+        """
+        from ._frame import Index
+
+        try:
+            renamed = self._inner.renamed(None if name is None else str(name))
+        except Exception as error:
+            raise translate(error) from None
+        if not inplace:
+            return Index._wrap(renamed)
+        self._inner = renamed
+        return None
 
     def slice_indexer(self, start: Any = None, end: Any = None, step: Any = None) -> slice:
         """The slice a pair of labels describes, with both ends included.

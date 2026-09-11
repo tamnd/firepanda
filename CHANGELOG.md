@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the four arguments `Index` was declaring without
+
+`rename`, `slice_locs`, `take` and `unique` each had the signature the core needed rather than the signature pandas declares, and each of the four missing arguments changes what the call means rather than decorating it. They were the only four signature failures on the board for the flat index, and because `DatetimeIndex` inherits all four they were failing twice.
+
+`take` is the one that changed an answer. pandas reads `allow_fill` and `fill_value` together, so filling happens only when both are on, and since the default `fill_value` is None the default pair means no filling at all and a negative position counts back from the end the way it does everywhere else in Python. The core's `take` fills at a negative position, which is the Arrow reading of the same word. So `Index(["a", "b", "c"]).take([0, -1])` answered `["a", None]` and now answers `["a", "c"]`, which is what pandas answers. With filling actually asked for, -1 is a row that is not there and anything below -1 is a mistake rather than a position. The fill value is read for whether it is there and not for what it is, which is pandas' own behaviour and is the part that surprises people: the label that lands in the gap is a missing label whatever value was named.
+
+`slice_locs` gained `step`, and a negative step is a different question wearing the same name. The caller means to read the range backwards, so the labels arrive in the order they will be walked in, and the pair that comes back is the pair a backward Python slice wants rather than the forward pair reversed. The way pandas gets there is to swap the two labels, ask the forward question and shift both answers down by one, with a bound that lands on -1 shifted down by the length of the index as well, because -1 in a Python slice means the last row rather than the row before the first.
+
+`unique` gained `level`, which is there because a MultiIndex has levels and this shares the signature with it. On a flat index `None`, `0`, `-1` and the index's own name all name the one level there is, and anything else is an `IndexError` or a `KeyError` rather than a refusal, because the caller asked for a level that does not exist rather than for a feature that is not written. `rename` gained `inplace`, which is the one place an index is mutable here and is mutable in pandas too, since a level name is not a label and changing it does not change what the index holds.
+
+All four moved out of the generated table and into `IndexMixin`, which is document 17's rule working rather than bending: a member belongs in the table while it is one expression written against `self._inner`, and each of these stopped being one the moment it had to decide what its arguments meant. Section 4 of `docs/specs/21-the-index-you-can-hold.md` now records the move and the counts either side of it.
+
+Part of #154, after #496.
+
 ### Added: an index whose labels are instants
 
 `pandas.DatetimeIndex` is the fourth thing an ordinary pandas program holds, after a frame, a column and an index, and it is the first one here that is a kind of another one rather than a new thing. It is a Python subclass of `Index` and the core does not know it is here, because a column of instants is int64 underneath and an index over int64 already sorts, hashes, compares and searches by exactly the rules an index of instants wants. Every set operation, every lookup and every slice bound on it is the flat index's own behaviour, correct without having been told about the calendar.
