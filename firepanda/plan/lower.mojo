@@ -240,6 +240,7 @@ from firepanda.exec.node import (
     Window,
 )
 from firepanda.exec.pipeline import Pipeline
+from firepanda.frame.align import value_at
 from firepanda.frame.frame import DataFrame
 from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp
@@ -1557,6 +1558,74 @@ def _stacked(
     return DataFrame(Schema(fields^), columns^)
 
 
+def _lower_cross(
+    plan: Plan,
+    right: Int,
+    mut frames: List[DataFrame],
+    mut taken: List[Bool],
+    mut pipe: Pipeline,
+) raises:
+    """Lowers a cross join whose right side is one row into constant columns.
+
+    A cross join in general is every left row against every right row, which is
+    a whole frame operation rather than anything a chunk at a time operator can
+    do, and it stays refused. One row is the exception, and it is the case that
+    matters, because that is what an uncorrelated subquery that answers one
+    value becomes. Pairing every left row with one right row adds a column to
+    each row and moves nothing, so it is a constant per right column and the
+    left side streams past untouched.
+
+    The right side is run here for the same reason a probe's build side is: it
+    has to be a frame before the first left chunk is read, and a pipeline is
+    what builds pipelines so an operator cannot hold the thing that holds it.
+
+    Args:
+        plan: The plan.
+        right: The join's right input.
+        frames: One frame per relation, taken from.
+        taken: Which relations have already gone, written through.
+        pipe: The pipeline, added to.
+
+    Raises:
+        Error: If the right side has any row count but one, or whatever the
+            right side itself refuses.
+    """
+    var side: DataFrame
+    if plan.nodes[right].kind == NodeKind.SCAN:
+        side = _take(frames, taken, plan, right)
+    else:
+        var built = _lower_from(plan, right, frames, taken)
+        side = built^.run()
+    if len(side) != 1:
+        raise Error(
+            String(
+                (
+                    "lower: a cross join pairs every left row with every right"
+                    " row, and this one has a right side of "
+                ),
+                len(side),
+                (
+                    " rows, which is the whole frame join rather than a column"
+                    " added as each chunk goes past. One right row is the case"
+                    " that lowers"
+                ),
+            )
+        )
+    var fields = Schema(copy=side.schema)
+    var columns = side^.into_columns()
+    for c in range(len(columns)):
+        var one = value_at(columns[c].chunks[0], 0)
+        pipe.add(
+            Node(
+                Constant(
+                    one^,
+                    fields.fields[c].dtype,
+                    String(fields.fields[c].name),
+                )
+            )
+        )
+
+
 def _lower_join(
     plan: Plan,
     at: Int,
@@ -1602,14 +1671,11 @@ def _lower_join(
                 ),
             )
         )
-    if kind == JoinKind.CROSS:
-        raise Error(
-            "lower: a cross join has no key to build a table from, and pairing"
-            " every row with every row is the whole frame join rather than a"
-            " probe"
-        )
-
     var right = plan.nodes[at].inputs[1]
+    if kind == JoinKind.CROSS:
+        _lower_cross(plan, right, frames, taken, pipe)
+        return
+
     var parts = plan.nodes[at].parts
     if parts != 1:
         raise Error(
