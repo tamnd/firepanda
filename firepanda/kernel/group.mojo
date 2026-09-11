@@ -3783,6 +3783,24 @@ def agg_type(kind: AggKind, input: LogicalType) -> LogicalType:
     to hand the input type straight back for the reductions that report a value
     the column held.
 
+    Those reductions are four, and the rule is that they are the only ones. A
+    minimum, a maximum, a first and a last answer an element that was in the
+    column, so they answer the column's type. Everything else answers a number
+    about the column: a count, a size and a distinct count are int64 whatever
+    they counted, a sum is its accumulator, and the nine that measure a spread
+    or an order statistic are float64 whatever they measured. Handing the input
+    back for one of those is a schema that says int32 over data that is float64,
+    and a plan whose declared type is not the type of the data under it is the
+    one thing this function exists to prevent.
+
+    A temporal column is not asked about here, and that is a limit rather than a
+    rule. `temporal_agg_type` below is the pandas table for those and the
+    grouped kernel already reads it, while the streaming group operator computes
+    a mean of instants as a float and declares one. Those two answers disagree
+    and reconciling them is its own change rather than a line in this function.
+    The four that report an element are right either way, and they are the ones
+    a query over a column of times actually asks for.
+
     Args:
         kind: The reduction.
         input: The logical type of the column being reduced.
@@ -3790,9 +3808,19 @@ def agg_type(kind: AggKind, input: LogicalType) -> LogicalType:
     Returns:
         The logical type of the output column.
     """
-    if kind == AggKind.COUNT or kind == AggKind.SIZE:
+    if kind == AggKind.COUNT or kind == AggKind.SIZE or kind == AggKind.NUNIQUE:
         return LogicalType.INT64
-    if kind == AggKind.MEAN:
+    if (
+        kind == AggKind.MEAN
+        or kind == AggKind.VAR
+        or kind == AggKind.STD
+        or kind == AggKind.SEM
+        or kind == AggKind.SKEW
+        or kind == AggKind.MEDIAN
+        or kind == AggKind.QUANTILE
+        or kind == AggKind.CORR
+        or kind == AggKind.COV
+    ):
         return LogicalType.FLOAT64
     if kind == AggKind.SUM:
         var acc = accumulator(input.physical)
