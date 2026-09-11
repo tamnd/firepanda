@@ -267,6 +267,33 @@ struct ChunkedArray(Copyable, Movable, Sized):
         self.starts.append(self.starts[len(self.starts) - 1] + len(chunk))
         self.chunks.append(chunk^)
 
+    def retyped(deinit self, type: LogicalType) raises -> Self:
+        """Returns the column carrying another logical type over the same bytes.
+
+        The chunk level `retyped` lifted to a column, with the same rule: the
+        physical layout has to be the one already there, so this relabels and
+        never converts. What is known about the order survives, because
+        relabelling a column does not move a value.
+
+        Args:
+            type: The type to carry. Its physical dtype must be the one this
+                column already has.
+
+        Returns:
+            The same column, relabelled.
+
+        Raises:
+            If the physical layouts differ.
+        """
+        var out = Self(type)
+        out.chunks = List[AnyArray](capacity=len(self.chunks))
+        for i in range(len(self.chunks)):
+            out.chunks.append(AnyArray(copy=self.chunks[i]).retyped(type))
+        out.starts = self.starts.copy()
+        out.nulls = self.nulls
+        out.order = self.order
+        return out^
+
     def null_count(self) -> Int:
         """Returns the number of nulls across all chunks.
 

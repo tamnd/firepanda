@@ -447,17 +447,42 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         Raises:
             If a name is missing or repeated.
         """
-        var columns = List[ChunkedArray](capacity=len(names))
+        # The names were resolved twice, once here and once inside
+        # `schema.select`, and the repeat check compared every name against every
+        # earlier name. At sixteen columns none of that is visible. At a hundred
+        # and five it is most of what a projection that copies nothing does. The
+        # names are resolved once now and everything after works in positions,
+        # which also makes the repeat check an integer flag per column: two names
+        # resolve to the same position exactly when they are the same name,
+        # because `index_of` always answers with the first.
+        var at = self.schema.index_of_all(names)
+        var seen = List[Bool](length=len(self.schema), fill=False)
         for i in range(len(names)):
-            for j in range(i):
-                if names[j] == names[i]:
-                    raise Error(
-                        "select names a column twice: '" + names[i] + "'"
-                    )
-            columns.append(
-                ChunkedArray(copy=self.columns[self.schema.index_of(names[i])])
-            )
-        var out = Self(self.schema.select(names), columns^)
+            if seen[at[i]]:
+                raise Error("select names a column twice: '" + names[i] + "'")
+            seen[at[i]] = True
+        return self._select_at(at)
+
+    def _select_at(self, at: List[Int]) raises -> Self:
+        """Returns a frame with the columns at those positions, in that order.
+
+        The positional half of `select`. Repeats are the caller's problem here,
+        which is why this is private: `select` has the names and can say which
+        one was repeated, and `drop` cannot produce a repeat in the first place.
+
+        Args:
+            at: The positions to keep.
+
+        Returns:
+            A frame of the same height and those columns.
+
+        Raises:
+            If a position is outside the frame.
+        """
+        var columns = List[ChunkedArray](capacity=len(at))
+        for i in range(len(at)):
+            columns.append(ChunkedArray(copy=self.columns[at[i]]))
+        var out = Self(self.schema.select_at(at), columns^)
         out.rows = self.rows
         # Choosing columns does not choose rows, so the labels come through
         # unchanged. This matters twice over: `drop` is `select` underneath, and
@@ -478,19 +503,21 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         Raises:
             If a name is missing.
         """
-        for i in range(len(names)):
-            _ = self.schema.index_of(names[i])
+        # Dropping used to check each name existed and then ask, for every column
+        # in the frame, whether any of the names matched it. That second part is
+        # the width times the number dropped, and dropping 102 of 105 columns is
+        # where it stops being free. The names are resolved once into positions
+        # and the rest is a flag per column.
+        var going = List[Bool](length=len(self.schema), fill=False)
+        var at = self.schema.index_of_all(names)
+        for i in range(len(at)):
+            going[at[i]] = True
 
-        var keep = List[String]()
+        var keep = List[Int](capacity=len(self.schema))
         for i in range(len(self.schema)):
-            var name = self.schema[i].name
-            var dropped = False
-            for j in range(len(names)):
-                if names[j] == name:
-                    dropped = True
-            if not dropped:
-                keep.append(name)
-        return self.select(keep)
+            if not going[i]:
+                keep.append(i)
+        return self._select_at(keep)
 
     def rename(self, old: String, new: String) raises -> Self:
         """Returns a frame with one column renamed.
@@ -699,6 +726,47 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         var out = Self(copy=self)
         out.schema.fields[at] = Field(name, converted.type)
         out.columns[at] = converted^
+        return out^
+
+    def text_from_binary(self) raises -> Self:
+        """Returns the frame with every binary column relabelled as text.
+
+        The Arrow import says what the producer said. A Parquet writer that put
+        no string logical type on a `BYTE_ARRAY` column produces `z` or `Z` on
+        the way in, and firepanda reads that as binary, which is opaque bytes
+        with no encoding promise on them. That is the honest reading and it is
+        not the one a reader of that file wants.
+
+        The ClickBench hits table is the case this exists for. Every text column
+        in it is a bare `BYTE_ARRAY`, so all of them arrive as binary, and a
+        substring match over binary finds nothing at all rather than failing:
+        six of the 43 queries do not bind and another nine answer with bytes
+        where they should answer with text, and the answers have the right shape
+        either way. A conversion is the wrong tool for that, because the bytes
+        are already UTF-8 and copying a hundred million of them to prove it is
+        the whole cost of the load.
+
+        So this relabels. Binary and text have the same layout in firepanda, the
+        buffers are not touched, and what changes is the type in the schema and
+        the type on each chunk. Nothing validates the encoding, which is the same
+        promise `astype(str)` makes in pandas over a column of bytes, and a
+        column that was not UTF-8 will read as whatever its bytes say.
+
+        A frame with no binary column in it comes back unchanged.
+
+        Returns:
+            The frame with every binary column carrying the text type.
+
+        Raises:
+            Error: If a relabel fails, which it cannot for a binary column.
+        """
+        var out = Self(copy=self)
+        for i in range(len(out.schema)):
+            if out.schema[i].dtype != LogicalType.BINARY:
+                continue
+            var name = out.schema[i].name
+            out.columns[i] = out.columns[i].copy().retyped(LogicalType.STRING)
+            out.schema.fields[i] = Field(name, LogicalType.STRING)
         return out^
 
     def widen_for_missing(self) raises -> Self:

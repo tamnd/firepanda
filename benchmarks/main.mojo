@@ -1366,6 +1366,89 @@ def bench_frame(mut harness: Harness) raises:
 
     harness.record("frame/select_two", "rows", rows, frame_select)
 
+    # Nothing else in this file points at a frame wider than three columns. The
+    # ClickBench hits table is 105 and almost every query over it reads three of
+    # them, which is a ratio no suite here has ever had, and the operations it
+    # makes expensive are the ones that are linear in the width rather than in
+    # the height.
+    #
+    # So these four are per column costs and the frame under them is deliberately
+    # short. The unit is columns rather than rows for that reason: a hundred and
+    # five columns of a million rows would be measuring the allocator, and the
+    # number worth watching is what a projection pays for a column it does not
+    # keep. `frame/select_three_of_105` against `frame/select_two` is the pair,
+    # since both keep about the same amount of data and only one of them has to
+    # find it in a wide schema.
+    var wide_rows = 4096
+    var wide_columns = List[Series]()
+    for j in range(105):
+        var wide_col = Array[DType.int64](wide_rows)
+        for i in range(wide_rows):
+            wide_col[i] = Int64(j * wide_rows + i)
+        wide_columns.append(Series("c" + String(j), wide_col^))
+    var wide = DataFrame.from_series(wide_columns^)
+
+    var three: List[String] = ["c104", "c7", "c0"]
+
+    def wide_select_three() raises {imm wide, imm three}:
+        keep(wide.rows)
+        var out = wide.select(three)
+        keep(out.rows)
+
+    harness.record(
+        "frame/select_three_of_105", "columns", 105, wide_select_three
+    )
+
+    var every = List[String]()
+    for j in range(105):
+        every.append("c" + String(j))
+
+    def wide_select_all() raises {imm wide, imm every}:
+        keep(wide.rows)
+        var out = wide.select(every)
+        keep(out.rows)
+
+    harness.record("frame/select_all_105", "columns", 105, wide_select_all)
+
+    var most = List[String]()
+    for j in range(105):
+        if j != 0 and j != 50 and j != 104:
+            most.append("c" + String(j))
+
+    def wide_drop() raises {imm wide, imm most}:
+        keep(wide.rows)
+        var out = wide.drop(most)
+        keep(out.rows)
+
+    harness.record("frame/drop_102_of_105", "columns", 105, wide_drop)
+
+    # Every text column in the hits file is a bare `BYTE_ARRAY`, so all of them
+    # arrive as binary and all of them have to be relabelled before a `LIKE`
+    # means anything. This is the row that says whether that relabel is free.
+    # It should be: it touches a type on each chunk and no bytes at all, so it
+    # should land near the copy of the frame it makes and nowhere near a cast.
+    var binary_columns = List[Series]()
+    for j in range(105):
+        var text = StringBuilder(capacity=wide_rows)
+        for i in range(wide_rows):
+            text.append(String("http://example.com/", j, "/", i).as_bytes())
+        binary_columns.append(
+            Series(
+                "c" + String(j),
+                AnyArray(text^.finish()).retyped(LogicalType.BINARY),
+            )
+        )
+    var binary = DataFrame.from_series(binary_columns^)
+
+    def wide_text_from_binary() raises {imm binary}:
+        keep(binary.rows)
+        var out = binary.text_from_binary()
+        keep(out.rows)
+
+    harness.record(
+        "frame/text_from_binary_105", "columns", 105, wide_text_from_binary
+    )
+
     def frame_cast() raises {imm df}:
         keep(df.rows)
         var out = df.cast("key", DType.float64)
