@@ -65,6 +65,7 @@ from .ast import (
     EXPR_COLUMN,
     EXPR_FUNCTION,
     EXPR_STAR,
+    EXPR_SUBQUERY,
     Expr,
     FRAME_GROUPS,
     FRAME_RANGE,
@@ -137,6 +138,7 @@ from .unsupported import (
     OPERATOR,
     POSITIONAL,
     POSTFIX_OPERATOR,
+    QUANTIFIED_VALUE,
     QUOTED_NAME,
     ROW_VALUE,
     SELECT_CLAUSE,
@@ -1976,6 +1978,10 @@ struct Transform(Movable):
                 break
 
         var operator = _span(tree, sql, start, cut)
+        if _quantifier(operator) != 0:
+            return self._quantified(
+                tree, sql, tail, ast, work, left, operand, operator, start
+            )
         if Int(cut) - Int(start) > 1 and not _multiword(operator):
             raise _unsupported(tree, sql, tail, OPERATOR, operator)
 
@@ -1983,6 +1989,66 @@ struct Transform(Movable):
         if negation != NO_NODE:
             right = self._negate(tree, negation, ast, right)
         return ast.binary(operator, left, right, start)
+
+    def _quantified(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        tail: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+        left: UInt32,
+        operand: UInt32,
+        operator: StringSlice,
+        start: UInt32,
+    ) raises -> UInt32:
+        """Folds `x > ALL (SELECT ...)` and `x > ANY (SELECT ...)`.
+
+        The grammar puts the whole `> ALL` in one operator and a whole
+        expression on the right, so both halves are checked here. Only six
+        comparisons may carry a quantifier, and DuckDB says so while parsing
+        even though its grammar accepts every operator in that position, so
+        that wording is used here.
+
+        The right side has to be a subquery. DuckDB also takes a list there
+        and unnests it, which is a membership test written the long way, and
+        that is refused by name rather than implemented twice.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            tail: The tail node, for the caret.
+            ast: Where to put the nodes.
+            work: The walk, for the value of the operand.
+            left: What is being compared.
+            operand: The parse node on the right.
+            operator: The operator text, ending in `ANY` or `ALL`.
+            start: The token the operator is at.
+
+        Returns:
+            The expression node.
+
+        Raises:
+            Error: If the comparison is not one of the six, or the right side
+                is not a subquery.
+        """
+        var every = _quantifier(operator) == 2
+        var comparison = String(operator[byte = 0 : operator.byte_length() - 4])
+        if not _comparable(comparison):
+            raise Error(
+                String(
+                    (
+                        "Parser Error: ANY and ALL operators require one of"
+                        " =,<>,>,<,>=,<= comparisons!\n\n"
+                    ),
+                    _at(tree, sql, tail),
+                )
+            )
+        var right = work.value(operand)
+        ref item = ast.exprs[Int(right)]
+        if item.kind != EXPR_SUBQUERY:
+            raise _unsupported(tree, sql, operand, QUANTIFIED_VALUE)
+        return ast.quantified(left, comparison, every, item.a, start)
 
     def _collate(
         self,
@@ -5237,6 +5303,52 @@ def _join_text(tree: Parse, sql: StringSlice, form: UInt32) raises -> String:
     raise Error(
         "the parse tree holds a join with no JOIN in it, which is a bug in"
         " firepanda rather than in the query"
+    )
+
+
+def _quantifier(operator: StringSlice) -> UInt8:
+    """Says whether an operator ends in a quantifier, and which one.
+
+    `SOME` is not in this list because the vendored grammar has no rule for
+    it, even though DuckDB's own parser takes it as another spelling of `ANY`.
+
+    Args:
+        operator: The joined operator text.
+
+    Returns:
+        1 for `ANY`, 2 for `ALL`, 0 for neither.
+    """
+    if operator.byte_length() < 5:
+        return 0
+    var last = operator[byte = operator.byte_length() - 4 :]
+    if last == " ANY":
+        return 1
+    if last == " ALL":
+        return 2
+    return 0
+
+
+def _comparable(operator: StringSlice) -> Bool:
+    """Says whether a comparison may carry `ANY` or `ALL`.
+
+    DuckDB names six in the message and takes eight, since `!=` and `==` are
+    other spellings of two of them and are folded before the check.
+
+    Args:
+        operator: The comparison, with the quantifier taken off.
+
+    Returns:
+        Whether it is one of them.
+    """
+    return (
+        operator == "="
+        or operator == "=="
+        or operator == "<>"
+        or operator == "!="
+        or operator == "<"
+        or operator == "<="
+        or operator == ">"
+        or operator == ">="
     )
 
 

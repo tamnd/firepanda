@@ -345,6 +345,20 @@ It was found by AddressSanitizer rather than by a failing assertion, as a use af
 The second thing is smaller. A pooled buffer can still be sharing with a column that outlived it, which is safe because the pool zeroes on the way out and zeroing un-shares first, so it hands back a private allocation and loses the recycling rather than writing over somebody's bytes.
 
 Closes #406.
+### Added: the four shapes a subquery is written in, and a node for the fourth
+
+A `SELECT` inside an expression is one of four things, and they are four different questions rather than one question with a flag on it. A scalar subquery asks for a value, `EXISTS` asks whether there is a row, `IN` asks whether a value is among the rows, and a quantified comparison asks whether a comparison holds against all of them or against any of them. `firepanda/sql/subquery.mojo` tags a node as whichever it is and carries the rules that follow.
+
+Three of the four want exactly one column and say so while binding. `EXISTS` never looks, because it throws the select list away, so `EXISTS (SELECT x, y FROM u)` is a fine query and the division in `EXISTS (SELECT 1/0 FROM u)` never happens. The message counts what it got against what it wanted and spells the count with the same word either way, so a subquery of one column is reported as `Subquery returns 1 columns`, which is DuckDB's and is kept.
+
+A scalar subquery has one more rule the binder cannot check, which is that it gives back at most one row. DuckDB checks it while running, and the message names the setting that turns the check off, a setting whose default changed and which used to hand back a row picked at random. A default like that changing is exactly the kind of thing that quietly rewrites somebody's answers, so the whole message is reproduced rather than paraphrased.
+
+The fourth shape had no node to be tagged as, so `EXPR_QUANTIFIED` is new. It is not an `EXPR_BINARY` with a longer operator on it, because the right side is a statement index and everything that walks a binary node reads both sides out of the expression arena. Only six comparisons may carry `ANY` or `ALL`, and DuckDB refuses the rest while parsing even though its grammar accepts any operator there, so that is where the refusal happens here too. It names six and takes eight, since `!=` and `==` are other spellings of two of them. `SOME` is another spelling of `ANY` that DuckDB's own parser takes and its published grammar has no rule for, so a query written with it is refused by the grammar rather than by us.
+
+`ANY` and `ALL` over a list rather than a subquery is refused by name. DuckDB unnests the right side there, which is `IN` written the long way, and a second path to one answer is a second place for the two to disagree.
+
+Correlation is read rather than rediscovered. The bind context already writes down every outer reference at the level that reached for it, so a subquery is correlated when some level at or under it reached past its own level, and a reference that stops inside the subquery does not correlate it. Going looking afterwards instead means a walk that can miss one, and a missed correlation is a decorrelation that drops rows.
+
 ### Added: which calls are aggregates, which are windows, and what that forbids
 
 `firepanda/sql/classify.mojo` answers the question every clause of a select statement has to ask before it can bind anything: does this expression call an aggregate, does it call a window function, or neither. The walk stops at a subquery, because an aggregate written inside one belongs to that query and not to the one around it, and that is the difference between `SELECT (SELECT sum(x) FROM u) FROM t` binding and being refused.

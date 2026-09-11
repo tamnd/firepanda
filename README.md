@@ -175,6 +175,7 @@ See https://github.com/tamnd/firepanda/issues/13
 | `default-value` | DEFAULT where a value goes | It stands for whatever a table declares as the default for a column, and that lives in a catalog. firepanda is a dataframe library and has no catalog to ask. | [#13](https://github.com/tamnd/firepanda/issues/13) |
 | `unpivot-nulls` | INCLUDE NULLS on an UNPIVOT | The statement spelling of an UNPIVOT has no way to write it, and that is the spelling the node records, so there is nowhere to keep it. EXCLUDE NULLS is the default and is read. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `unpivot-groups` | more than one FOR group on an UNPIVOT | One UNPIVOT node holds one name column and one set of value columns, so a second group has nowhere to go. | [#304](https://github.com/tamnd/firepanda/issues/304) |
+| `quantified-value` | ANY or ALL over a value | DuckDB unnests the right side when it is a list, so x = ANY ([1, 2]) is a membership test written the long way. Write it as IN, or put a SELECT on the right. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 | `no-case` | grammar rule {} | The grammar accepts more than firepanda runs, and this is a rule the transformer has no case for. Please file it. | [#304](https://github.com/tamnd/firepanda/issues/304) |
 
 <!-- end sql-support -->
