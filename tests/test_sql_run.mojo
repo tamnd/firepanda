@@ -127,7 +127,9 @@ def gappy() raises -> DataFrame:
 
     A distinct count does not count a null, so a column that has some is the
     only way to tell that rule from the one that counts them as a value of
-    their own. Six rows, three distinct values, two nulls.
+    their own. The repeat is why this is not `gaps` below: with no repeat a
+    distinct count and a count of the non null values are the same number and
+    a test over it proves nothing. Six rows, three distinct values, two nulls.
     """
     var mark = Array[DType.int64](6)
     mark.set_valid(0, 4)
@@ -145,14 +147,35 @@ def gappy() raises -> DataFrame:
     return DataFrame(Schema(fields^), columns^)
 
 
+def gaps() raises -> DataFrame:
+    """Three bands with a null among them.
+
+    A `NOT IN` over a subquery holding a null keeps no rows at all, because a
+    row that matched nothing cannot be told apart from a row that matched the
+    null, and every other frame here would answer that question the easy way.
+    """
+    var col = Array[DType.int64](3)
+    col.set_valid(0, 3)
+    col.set_valid(1, 20)
+    col.set_null(2)
+    var band = ChunkedArray(LogicalType.INT64)
+    band.append(AnyArray(col^))
+    var columns = List[ChunkedArray]()
+    columns.append(band^)
+    var fields = List[Field]()
+    fields.append(Field("band", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
 def session() raises -> Catalog:
-    """A catalog holding the five frames under the names the queries write."""
+    """A catalog holding the six frames under the names the queries write."""
     var catalog = Catalog()
     catalog.register("sales", sales())
     catalog.register("tiers", tiers())
     catalog.register("shops", shops())
     catalog.register("dupes", dupes())
     catalog.register("gappy", gappy())
+    catalog.register("gaps", gaps())
     return catalog^
 
 
@@ -1177,12 +1200,92 @@ def test_the_rest_of_the_where_still_holds_beside_an_in() raises:
     )
 
 
-def test_a_not_in_over_a_subquery_says_why_it_is_refused() raises:
-    with assert_raises(contains="null aware anti join"):
-        _ = run(
-            "SELECT qty FROM sales WHERE qty NOT IN (SELECT band FROM tiers)",
-            session(),
-        )
+def test_a_not_in_over_a_subquery_keeps_the_rows_that_matched_nothing() raises:
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE qty NOT IN"
+                " (SELECT band FROM tiers) ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [1, 5, 8, 12, 15, 25, 30],
+        "qty",
+    )
+
+
+def test_a_not_in_over_a_subquery_holding_a_null_keeps_nothing() raises:
+    # The answer everyone gets wrong and DuckDB gets right. A row that matched
+    # nothing might have matched the null, so it is null rather than true, the
+    # NOT over it stays null, and a WHERE keeps a row on true.
+    assert_equal(
+        len(
+            run(
+                (
+                    "SELECT qty FROM sales WHERE qty NOT IN"
+                    " (SELECT band FROM gaps)"
+                ),
+                session(),
+            )
+        ),
+        0,
+    )
+
+
+def test_an_in_written_in_the_select_list_answers_on_every_row() raises:
+    same(
+        truths(
+            run(
+                "SELECT qty IN (SELECT band FROM tiers) AS hit FROM sales",
+                session(),
+            ),
+            "hit",
+        ),
+        [0, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+        "hit",
+    )
+
+
+def test_an_in_over_a_subquery_holding_a_null_is_null_where_it_missed() raises:
+    same(
+        truths(
+            run(
+                "SELECT qty IN (SELECT band FROM gaps) AS hit FROM sales",
+                session(),
+            ),
+            "hit",
+        ),
+        [-1, 1, 1, -1, -1, -1, -1, -1, -1, -1],
+        "hit",
+    )
+
+
+def test_a_not_in_written_in_the_select_list_is_that_negated() raises:
+    same(
+        truths(
+            run(
+                "SELECT qty NOT IN (SELECT band FROM gaps) AS gone FROM sales",
+                session(),
+            ),
+            "gone",
+        ),
+        [-1, 0, 0, -1, -1, -1, -1, -1, -1, -1],
+        "gone",
+    )
+
+
+def test_an_in_under_an_or_keeps_what_either_side_keeps() raises:
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE price > 4 OR qty IN"
+                " (SELECT band FROM tiers) ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [1, 3, 5, 8, 12, 15, 20, 40],
+        "qty",
+    )
 
 
 def test_a_correlated_exists_runs_as_a_semi_join() raises:
@@ -1283,6 +1386,84 @@ def test_an_uncorrelated_exists_says_why_it_is_refused() raises:
     with assert_raises(contains="mark join"):
         _ = run(
             "SELECT qty FROM sales WHERE EXISTS (SELECT 1 FROM tiers)",
+            session(),
+        )
+
+
+def test_a_subquery_that_answers_one_value_runs() raises:
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE qty > (SELECT min(band) FROM"
+                " tiers) ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [5, 8, 12, 15, 20, 25, 30, 40],
+        "qty",
+    )
+
+
+def test_two_subqueries_in_one_where_both_run() raises:
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE qty > (SELECT min(band) FROM"
+                " tiers) AND price < (SELECT min(band) FROM tiers) ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [20, 40],
+        "qty",
+    )
+
+
+def test_a_subquery_in_a_select_list_runs() raises:
+    same(
+        answer(
+            (
+                "SELECT (SELECT max(rate) FROM tiers) AS top FROM sales"
+                " WHERE qty = 1"
+            ),
+            "top",
+        ),
+        [900],
+        "top",
+    )
+
+
+def test_a_subquery_over_no_table_runs() raises:
+    same(
+        answer(
+            "SELECT qty FROM sales WHERE qty > (SELECT 24) ORDER BY qty", "qty"
+        ),
+        [25, 30, 40],
+        "qty",
+    )
+
+
+def test_a_fold_over_no_rows_hands_out_no_row_rather_than_one_null() raises:
+    # SQL says a fold with no GROUP BY over an empty input is one row with null
+    # in it, and DuckDB answers that. firepanda hands out no rows instead. That
+    # is a gap in the aggregate rather than in the rewrite that puts a subquery
+    # on a cross join, and it is pinned here because the next test is what it
+    # costs.
+    var got = run(
+        "SELECT max(band) AS top FROM tiers WHERE band > 1000", session()
+    )
+    assert_equal(len(got), 0)
+
+
+def test_a_subquery_over_no_rows_is_refused_while_that_gap_is_open() raises:
+    # Were the fold above one null row, this would answer no rows, because a
+    # comparison against null keeps nothing. It raises instead, and the message
+    # is the one the cross join gives a right side that is not one row.
+    with assert_raises(contains="right side of 0 rows"):
+        _ = run(
+            (
+                "SELECT qty FROM sales WHERE qty > (SELECT max(band) FROM"
+                " tiers WHERE band > 1000)"
+            ),
             session(),
         )
 

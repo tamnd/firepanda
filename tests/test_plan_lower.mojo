@@ -267,6 +267,35 @@ def run_two(mut plan: Plan, root: Int) raises -> DataFrame:
     return pipe^.run()
 
 
+def run_frames(
+    mut plan: Plan, root: Int, var frames: List[DataFrame]
+) raises -> DataFrame:
+    """Binds, lowers and runs a plan over frames the caller built.
+
+    For the tests that need a fixture with a null in it, which is a frame of
+    their own rather than something the shared ones should carry.
+    """
+    var fields = List[Schema]()
+    for i in range(len(frames)):
+        fields.append(Schema(copy=frames[i].schema))
+    _ = bind(plan, root, fields)
+    var pipe = lower(plan, root, frames^)
+    return pipe^.run()
+
+
+def holey(
+    name: String, values: List[Int64], nulls: List[Int]
+) raises -> DataFrame:
+    """One int64 column of that name with nulls at the positions given."""
+    var col = ChunkedArray(LogicalType.INT64)
+    col.append(gappy(values, nulls))
+    var columns = List[ChunkedArray]()
+    columns.append(col^)
+    var fields = List[Field]()
+    fields.append(Field(name, LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
 def present(df: DataFrame, name: String) raises -> List[Bool]:
     """Which rows of an int64 column have a value in them."""
     var col = df.column(name).as_typed[DType.int64]()
@@ -1537,6 +1566,192 @@ def test_an_anti_join_keeps_the_rows_no_band_matched() raises:
         [5, 12, 8, 25, 1, 30, 15],
         "the quantities no band matched",
     )
+
+
+def test_a_mark_join_answers_a_boolean_on_every_left_row() raises:
+    # The semi join above keeps three rows. This keeps all ten and says which
+    # three they were, which is the difference between a filter and a value.
+    var plan = Plan()
+    var left = plan.scan("sales", List[String](), 0)
+    var right = plan.scan("tiers", List[String](), 1)
+    var root = plan.join(
+        left,
+        right,
+        [plan.exprs.column("qty")],
+        [plan.exprs.column("band")],
+        JoinKind.MARK,
+        "found",
+    )
+    var out = run_two(plan, root)
+    assert_equal(out.rows, 10)
+    assert_equal(len(out.schema), 3, "the left side and the mark")
+    assert_equal(out.schema[2].name, "found", "what the mark is called")
+    same(
+        read_back(out, "qty"),
+        [5, 20, 3, 40, 12, 8, 25, 1, 30, 15],
+        "every row of the left",
+    )
+    same(
+        truths(out, "found"),
+        [0, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+        "which quantities were a band",
+    )
+
+
+def test_a_mark_join_keeps_no_column_of_the_right_side() raises:
+    # The rate is what an inner join would have brought across, and the mark
+    # join asks about the right side rather than reading it.
+    var plan = Plan()
+    var left = plan.scan("sales", List[String](), 0)
+    var right = plan.scan("tiers", List[String](), 1)
+    var root = plan.join(
+        left,
+        right,
+        [plan.exprs.column("qty")],
+        [plan.exprs.column("band")],
+        JoinKind.MARK,
+        "found",
+    )
+    var out = run_two(plan, root)
+    assert_equal(out.schema.has("rate"), False, "no rate came across")
+
+
+def test_a_mark_that_missed_a_side_holding_a_null_is_null() raises:
+    # SQL's `IN` is three valued. A quantity that matched no band is only known
+    # to have matched nothing when there was nothing it might have matched, and
+    # a null band is a band nobody wrote down.
+    var plan = Plan()
+    var left = plan.scan("sales", List[String](), 0)
+    var right = plan.scan("tiers", List[String](), 1)
+    var root = plan.join(
+        left,
+        right,
+        [plan.exprs.column("qty")],
+        [plan.exprs.column("band")],
+        JoinKind.MARK,
+        "found",
+    )
+    var frames = List[DataFrame]()
+    frames.append(holey("qty", [5, 20, 3, 40], List[Int]()))
+    frames.append(holey("band", [3, 20, 0, 99], [2]))
+    var out = run_frames(plan, root, frames^)
+    same(
+        truths(out, "found"),
+        [-1, 1, 1, -1],
+        "a miss against a null band is unknown",
+    )
+
+
+def test_a_mark_whose_own_key_is_null_is_null_even_on_a_clean_side() raises:
+    # The other half of the same rule, on the other side of the comparison. A
+    # quantity nobody wrote down might have been any band there is.
+    var plan = Plan()
+    var left = plan.scan("sales", List[String](), 0)
+    var right = plan.scan("tiers", List[String](), 1)
+    var root = plan.join(
+        left,
+        right,
+        [plan.exprs.column("qty")],
+        [plan.exprs.column("band")],
+        JoinKind.MARK,
+        "found",
+    )
+    var frames = List[DataFrame]()
+    frames.append(holey("qty", [5, 20, 0, 40], [2]))
+    frames.append(holey("band", [3, 20, 40, 99], List[Int]()))
+    var out = run_frames(plan, root, frames^)
+    same(
+        truths(out, "found"),
+        [0, 1, -1, 1],
+        "the null quantity is unknown and the rest are not",
+    )
+
+
+def emptied(
+    mut plan: Plan, kind: JoinKind, mark: String = String()
+) raises -> Int:
+    """A join of sales onto a tiers that a filter has left nothing in."""
+    var left = plan.scan("sales", List[String](), 0)
+    var right = plan.scan("tiers", List[String](), 1)
+    var none = plan.exprs.binary(
+        BinaryOp.GT,
+        plan.exprs.column("band"),
+        plan.exprs.literal(Value(Int64(1000))),
+    )
+    return plan.join(
+        left,
+        plan.filter(right, none),
+        [plan.exprs.column("qty")],
+        [plan.exprs.column("band")],
+        kind,
+        mark,
+    )
+
+
+def test_a_join_whose_build_side_filtered_to_nothing_is_refused() raises:
+    # Not the mark join's doing. Building the key table reads the one chunk of
+    # the key column, and a column that no rows reached has no chunks at all,
+    # so every kind that builds a table lands on the same message. Filed as
+    # #611 and pinned on a semi join, which has been here the whole time.
+    var plan = Plan()
+    var root = emptied(plan, JoinKind.SEMI)
+    with assert_raises(contains="0 chunks"):
+        _ = run_two(plan, root)
+
+
+def test_a_mark_join_over_a_build_side_with_nothing_in_it_is_refused_too() raises:
+    # What this should answer is false on every row, since there is nothing to
+    # match and no null to be unsure about. It raises instead, for the reason
+    # above and in the same place.
+    var plan = Plan()
+    var root = emptied(plan, JoinKind.MARK, "found")
+    with assert_raises(contains="0 chunks"):
+        _ = run_two(plan, root)
+
+
+def test_a_mark_join_has_to_be_told_what_to_call_its_column() raises:
+    var plan = Plan()
+    var left = plan.scan("sales", List[String](), 0)
+    var right = plan.scan("tiers", List[String](), 1)
+    with assert_raises(contains="the name is not optional"):
+        _ = plan.join(
+            left,
+            right,
+            [plan.exprs.column("qty")],
+            [plan.exprs.column("band")],
+            JoinKind.MARK,
+        )
+
+
+def test_only_a_mark_join_is_given_a_mark_name() raises:
+    var plan = Plan()
+    var left = plan.scan("sales", List[String](), 0)
+    var right = plan.scan("tiers", List[String](), 1)
+    with assert_raises(contains="the mark column is the mark join's"):
+        _ = plan.join(
+            left,
+            right,
+            [plan.exprs.column("qty")],
+            [plan.exprs.column("band")],
+            JoinKind.SEMI,
+            "found",
+        )
+
+
+def test_a_mark_join_cannot_take_a_name_the_left_side_already_uses() raises:
+    var plan = Plan()
+    var left = plan.scan("sales", List[String](), 0)
+    var right = plan.scan("tiers", List[String](), 1)
+    var root = plan.join(
+        left,
+        right,
+        [plan.exprs.column("qty")],
+        [plan.exprs.column("band")],
+        JoinKind.MARK,
+        "price",
+    )
+    with assert_raises(contains="already has a column of that name"):
+        _ = bind(plan, root, two_schemas())
 
 
 def test_a_filter_under_a_join_runs_before_the_probe() raises:

@@ -102,6 +102,7 @@ from firepanda.join.pairs import (
     JoinKind,
     ProbeTable,
     bucket_side,
+    mark_probe,
     pair_probe,
 )
 from firepanda.kernel.accum import accumulator
@@ -1663,6 +1664,11 @@ struct Join(Movable):
     var suffix: String
     """Appended to a right column whose name collides."""
 
+    var mark: String
+    """What a mark join's boolean column is called, or empty for every other
+    kind. A mark join keeps no right column and adds this one instead, so it is
+    the only kind with an output name of its own to settle."""
+
     var columns: List[String]
     """The projection, or empty for every output column.
 
@@ -1729,6 +1735,7 @@ struct Join(Movable):
         var wanted: List[Int] = List[Int](),
         left_at: Int = -1,
         right_at: Int = -1,
+        var mark: String = String(),
     ):
         """Constructs a join against a frame.
 
@@ -1740,7 +1747,7 @@ struct Join(Movable):
             right: The build side. Consumed.
             left_on: The key column's name on the probe side. Consumed.
             right_on: The key column's name on the build side. Consumed.
-            kind: Which rows to keep. Inner, left, semi and anti only.
+            kind: Which rows to keep. Inner, left, semi, anti and mark only.
             suffix: Appended to a right column whose name collides. Consumed.
             columns: Which output columns to build, in the order wanted, or
                 empty for all of them in their natural order. Consumed.
@@ -1748,12 +1755,15 @@ struct Join(Movable):
                 or empty to go by name. Consumed.
             left_at: The key's position on the probe side, or -1 for by name.
             right_at: The key's position on the build side, or -1 for by name.
+            mark: What a mark join's boolean column is called. Consumed.
+                Required for a mark join and ignored by every other kind.
         """
         self.right = right^
         self.left_on = left_on^
         self.right_on = right_on^
         self.kind = kind
         self.suffix = suffix^
+        self.mark = mark^
         self.columns = columns^
         self.wanted = wanted^
         self.left_at = left_at
@@ -1789,6 +1799,11 @@ struct Join(Movable):
             )
         if self.kind == JoinKind.CROSS:
             raise Error("join: a cross join has no key to build a table from")
+        if self.kind == JoinKind.MARK and self.mark.byte_length() == 0:
+            raise Error(
+                "join: a mark join hands out a boolean column and the column"
+                " has to be called something, so the name is not optional"
+            )
 
         var here = self.left_at
         var there = self.right_at
@@ -1832,7 +1847,7 @@ struct Join(Movable):
         )
 
         if len(self.wanted) != 0:
-            return self._picked(input)
+            return self._marked(self._picked(input))
 
         # The same plan `join_on` makes, without the coalescing branch: an
         # output row of these four kinds always has a probe side row behind it,
@@ -1896,7 +1911,38 @@ struct Join(Movable):
                 kept.append(fields[found].copy())
                 self._from_right.append(from_right[found])
                 self._source.append(source[found])
-        return Schema(kept^)
+        return self._marked(Schema(kept^))
+
+    def _marked(self, var planned: Schema) raises -> Schema:
+        """Puts the mark join's own column on the end of what it gathers.
+
+        Every other kind's output is columns of one side or the other, so this
+        does nothing for them. A mark join's is the probe side and then one
+        column that neither side holds, which is why it is added here rather
+        than through `_source`: there is no position to gather it from.
+
+        Args:
+            planned: The gathered columns. Consumed.
+
+        Returns:
+            Those columns, with the mark on the end for a mark join.
+
+        Raises:
+            If the mark's name is one the gathered columns already use.
+        """
+        if self.kind != JoinKind.MARK:
+            return planned^
+        if planned.has(self.mark):
+            raise Error(
+                "join: a mark join was told to call its column '"
+                + self.mark
+                + "', and the probe side already has a column of that name"
+            )
+        var fields = List[Field]()
+        for i in range(len(planned)):
+            fields.append(planned[i].copy())
+        fields.append(Field(String(self.mark), LogicalType.BOOL))
+        return Schema(fields^)
 
     def _picked(mut self, input: Schema) raises -> Schema:
         """Plans the output from the positions `wanted` asked for.
@@ -1996,6 +2042,27 @@ struct Join(Movable):
             spread,
         )
         var absent = _key_nulls(key, rows)
+        if self.kind == JoinKind.MARK:
+            # Nothing is gathered. Every row that arrived leaves, in the order
+            # it arrived, so the chunk's own columns are the output columns and
+            # the only new one is the answer.
+            var marks = mark_probe(
+                self._table,
+                codes,
+                0,
+                rows,
+                absent,
+                0,
+                len(absent) > 0,
+                len(self._absent) > 0,
+                spread,
+            )
+            var out = List[AnyArray](capacity=len(self._source) + 1)
+            for w in range(len(self._source)):
+                out.append(chunk.columns[self._source[w]].copy())
+            out.append(AnyArray(marks^))
+            _ = chunk^
+            return Chunk(out^, rows)
         var matched = Bitmap(0, all_valid=False)
         var pairs = pair_probe(
             self._table,

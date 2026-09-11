@@ -178,10 +178,21 @@ and put back exactly as it was written, so its plan is the shape it always was.
 
 The rewrite is the whole of `IN` and not a near miss. A left row that matched
 several right rows comes back once, which is what a semi join does anyway, and a
-null on either side matches nothing, which is what `IN` answers. `NOT IN` is
-refused, because the anti join it looks like is the classic wrong answer: one
-null anywhere in the subquery makes `NOT IN` null for every row rather than true,
-and an anti join keeps those rows rather than dropping them.
+null on either side matches nothing, which is what `IN` answers.
+
+An `IN` written anywhere else is a value rather than a filter, and a value has to
+arrive on every row rather than only on the rows that matched. That is the mark
+join, which hands the left side out unchanged with one boolean column beside it,
+and the `IN` in the expression becomes a read of that column. It goes above the
+`FROM` and below everything else, the same place and for the same reason as the
+cross join a subquery written as a value gets.
+
+`NOT IN` goes there too, wherever it is written, because the anti join it looks
+like is the classic wrong answer: one null anywhere in the subquery makes
+`NOT IN` null for every row rather than true, and an anti join keeps those rows
+rather than dropping them. The mark join marks such a row null rather than false,
+the `NOT` over the column is null in turn, and a filter does not keep a null. So
+the null aware anti join is a mark join and a `NOT`, with nothing written for it.
 
 The subquery lowers against a scope of its own, which is the ordinary rule, and
 here it is also what makes the rewrite safe: a subquery that reads no outer
@@ -211,11 +222,44 @@ there that no table has, and here that name goes unread. Its rows also have to
 be the rows of one block over one `FROM`, so an aggregate, a `LIMIT`, a set
 operation and a `WITH` inside one are each refused by name.
 
+### A subquery that answers one value is a cross join onto one row
+
+An uncorrelated subquery written where a value goes answers the same value for
+every row of the query around it, so it is taken out of the expression, lowered
+into a plan of its own, and cross joined on above the `FROM`. The expression is
+then an ordinary expression over an ordinary column, the same way an aggregate
+in a select list is. The lowering turns a cross join onto one row into a
+constant per right column, so the subquery runs once rather than once per row.
+
+Only a subquery that is one row by construction is taken, which is one that
+folds with no `GROUP BY` or one with no `FROM`. In SQL both answer exactly one
+row whatever is in the tables, including nothing, where a fold answers a null. A
+`LIMIT 1` looks like the same guarantee and is not, since over an empty table it
+answers no rows where SQL says the subquery is null, so it is refused rather
+than read as one.
+
+The fold over nothing is the one place firepanda does not yet answer what SQL
+says. A fold with no `GROUP BY` over an empty input hands out no rows here
+rather than one row of null, so the cross join sees a right side of no rows and
+refuses by name. That is a gap in the aggregate rather than in this rewrite, and
+the refusal is the safe end of it, since the alternative is quietly dropping
+every row of the query around it.
+
+The cross join goes above the `FROM` and below everything else, so a subquery
+written in a `WHERE` is always reachable, and one written in a select list is
+reachable when the query does not aggregate. Above an aggregate it is not, since
+an aggregate hands up its keys and its folds rather than everything it read, and
+that is a refusal with the reason in it rather than a binding error. A
+correlated one is refused too, by the scope it lowers against, which is the same
+refusal a correlated `IN` gets and the same dependent join behind it.
+
 ### What is not lowered yet
 
 Named tables, the table functions above, the derived tables and the CTEs above,
-and the joins over them. A subquery written where an expression goes is refused,
-and so are the column aliases on a derived table and a `LATERAL` one.
+and the joins over them. An `EXISTS`, an `IN` and a quantified comparison
+written where a value goes are refused, because each answers a boolean per row
+and that is a mark join. So are the column aliases on a derived table and a
+`LATERAL` one.
 `POSITIONAL` and `ASOF` are refused by name: the first pairs its two sides by
 row number and so reads no column at all, and `ASOF` matches on the nearest
 value rather than an equal one. A `USING` or `NATURAL` join over a subquery is
@@ -905,6 +949,20 @@ struct _Walk(Movable):
     """What each one partitions by, written out, so that two windows over the
     same keys land in the same node and two over different keys do not."""
 
+    var scalars: List[UInt32]
+    """The uncorrelated subqueries a cross join has already been built for, as
+    they are written in the SQL arena."""
+
+    var scalar_names: List[String]
+    """What the one column each of those produced is called."""
+
+    var marks: List[UInt32]
+    """The `IN` over a subquery a mark join has already been built for, as they
+    are written in the SQL arena."""
+
+    var mark_names: List[String]
+    """What the boolean column each of those produced is called."""
+
     def __init__(out self):
         """Starts an empty walk."""
         self.aggs = List[Int]()
@@ -912,6 +970,40 @@ struct _Walk(Movable):
         self.windows = List[Int]()
         self.window_names = List[String]()
         self.window_keys = List[String]()
+        self.scalars = List[UInt32]()
+        self.scalar_names = List[String]()
+        self.marks = List[UInt32]()
+        self.mark_names = List[String]()
+
+    def _scalar(self, at: UInt32) -> Int:
+        """Where a subquery's answer landed, if a cross join was built for it.
+
+        Args:
+            at: The subquery, in the SQL arena.
+
+        Returns:
+            Its position among the ones taken out, or -1 if this is not one of
+            them and so is a subquery the lowering still refuses.
+        """
+        for i in range(len(self.scalars)):
+            if self.scalars[i] == at:
+                return i
+        return -1
+
+    def _mark(self, at: UInt32) -> Int:
+        """Where an `IN`'s answer landed, if a mark join was built for it.
+
+        Args:
+            at: The `IN` over a subquery, in the SQL arena.
+
+        Returns:
+            Its position among the ones taken out, or -1 if this is not one of
+            them and so is an `IN` the lowering still refuses.
+        """
+        for i in range(len(self.marks)):
+            if self.marks[i] == at:
+                return i
+        return -1
 
     def _record(mut self, at: Int, var name: String) -> Int:
         """Adds an aggregate to the list the `AGGREGATE` node will compute.
@@ -1154,20 +1246,47 @@ def _lower_expr(
         return plan.exprs.cast(engine_type(parse_type(written)), over)
     if node.kind == EXPR_STAR:
         raise Error("a star outside a select list")
-    if (
-        node.kind == EXPR_SUBQUERY
-        or node.kind == EXPR_EXISTS
-        or node.kind == EXPR_IN_SUBQUERY
-        or node.kind == EXPR_QUANTIFIED
-    ):
+    if node.kind == EXPR_SUBQUERY:
+        var place = walk._scalar(at)
+        if place >= 0:
+            return plan.exprs.column(String(walk.scalar_names[place]))
         raise Error(
-            "firepanda does not lower a subquery in an expression yet. A"
-            " correlated one is a dependent join that decorrelation has to"
-            " remove, and an uncorrelated one is a plan of its own that the"
-            " outer plan has nowhere to hold. An IN over a subquery and a"
-            " correlated EXISTS do lower where a WHERE is the AND of one and"
-            " other things, because there each is a semi join rather than a"
-            " value"
+            "firepanda lowers an uncorrelated subquery that answers one value"
+            " where it is written in a WHERE, or in the select list of a query"
+            " that does not aggregate, and this one is written somewhere else."
+            " The answer is a column cross joined on above the FROM, which is"
+            " under the aggregate, and an aggregate hands up its keys and its"
+            " folds rather than everything it read"
+        )
+    if node.kind == EXPR_IN_SUBQUERY:
+        var place = walk._mark(at)
+        if place >= 0:
+            # The mark join answered the `IN` itself, so what is left here is
+            # reading the column it wrote. A `NOT IN` is the same column with a
+            # `NOT` over it, and that is the whole of the three valued rule: a
+            # row that matched nothing on a side holding a null is marked null
+            # rather than false, a `NOT` over a null is a null, and a filter
+            # does not keep a null.
+            var over = plan.exprs.column(String(walk.mark_names[place]))
+            if node.payload == 1:
+                return plan.exprs.call("not", [over], True)
+            return over
+        raise Error(
+            "firepanda lowers an IN over a subquery where it is written in a"
+            " WHERE, or in the select list of a query that does not aggregate,"
+            " and this one is written somewhere else. The answer is a column a"
+            " mark join wrote above the FROM, which is under the aggregate, and"
+            " an aggregate hands up its keys and its folds rather than"
+            " everything it read"
+        )
+    if node.kind == EXPR_EXISTS or node.kind == EXPR_QUANTIFIED:
+        raise Error(
+            "firepanda does not lower an EXISTS or a quantified comparison"
+            " written as a value yet. Each of those answers a boolean per row,"
+            " which is the mark join an IN over a subquery already goes to, and"
+            " neither has the pair of keys that join is given. A correlated"
+            " EXISTS does lower where a WHERE is the AND of one and other"
+            " things, because there it is a semi join rather than a value"
         )
     raise Error("an expression shape firepanda does not lower yet")
 
@@ -1510,6 +1629,92 @@ def _has_aggregate(ast: Ast, at: UInt32) -> Bool:
                 return True
         return _has_aggregate(ast, node.a)
     return False
+
+
+def _taken(ast: Ast, at: UInt32, kind: UInt8, mut found: List[UInt32]):
+    """Collects every subquery of one shape inside one expression.
+
+    The same walk `_has_aggregate` does and for the same reason. A subquery in
+    an expression is not lowered in place, it is lowered into a plan of its own
+    and joined on below, and that has to happen before the expression around it
+    is lowered at all.
+
+    It does not descend into a subquery it has found, because whatever is
+    written inside one belongs to that query and is lowered when that query is.
+
+    Args:
+        ast: The arenas.
+        at: The expression.
+        kind: The expression kind to collect, which is `EXPR_SUBQUERY` for the
+            ones a cross join answers and `EXPR_IN_SUBQUERY` for the ones a
+            mark join does.
+        found: The list to add to, in the order the subqueries are written.
+    """
+    if at == NO_NODE:
+        return
+    var node = ast.exprs[Int(at)]
+    if node.kind == kind:
+        found.append(at)
+        return
+    if node.kind == EXPR_SUBQUERY or node.kind == EXPR_IN_SUBQUERY:
+        # A subquery of the other shape is still a subquery, and what is written
+        # inside one is lowered when that query is rather than out here.
+        return
+    if node.kind == EXPR_FUNCTION:
+        if node.b != NO_NODE:
+            var window = ast.exprs[Int(node.b)]
+            for key in ast.items(window.children):
+                _taken(ast, key, kind, found)
+        for arg in ast.items(node.children):
+            _taken(ast, arg, kind, found)
+        return
+    if node.kind == EXPR_BINARY:
+        _taken(ast, node.a, kind, found)
+        _taken(ast, node.b, kind, found)
+        return
+    if node.kind == EXPR_UNARY or node.kind == EXPR_CAST:
+        _taken(ast, node.a, kind, found)
+        return
+    if node.kind == EXPR_CASE:
+        _taken(ast, node.a, kind, found)
+        _taken(ast, node.b, kind, found)
+        for arm in ast.items(node.children):
+            _taken(ast, arm, kind, found)
+        return
+    if node.kind == EXPR_BETWEEN or node.kind == EXPR_IN:
+        for part in ast.items(node.children):
+            _taken(ast, part, kind, found)
+        _taken(ast, node.a, kind, found)
+
+
+def _scalars(ast: Ast, at: UInt32, mut found: List[UInt32]):
+    """Collects every subquery written as a value inside one expression.
+
+    An `EXISTS`, an `IN` and a quantified comparison are not collected. Each of
+    those answers a boolean per row rather than one value, which is a mark join
+    rather than a cross join onto one row.
+
+    Args:
+        ast: The arenas.
+        at: The expression.
+        found: The list to add to, in the order the subqueries are written.
+    """
+    _taken(ast, at, EXPR_SUBQUERY, found)
+
+
+def _marks(ast: Ast, at: UInt32, mut found: List[UInt32]):
+    """Collects every `IN` over a subquery inside one expression.
+
+    An `EXISTS` and a quantified comparison are not collected, even though both
+    answer a boolean per row the same way. A mark join is given a pair of keys
+    and neither of those is written with one.
+
+    Args:
+        ast: The arenas.
+        at: The expression.
+        found: The list to add to, in the order the subqueries are written.
+    """
+    _taken(ast, at, EXPR_IN_SUBQUERY, found)
 
 
 comptime _NEITHER = -2
@@ -2849,18 +3054,18 @@ def _in_join(
         The join, which produces what the left side produced and nothing else.
 
     Raises:
-        If it is a `NOT IN`, if the subquery hands out other than one column, or
-        if the subquery is one this does not lower.
+        If the subquery hands out other than one column, or if the subquery is
+        one this does not lower.
     """
     var node = ast.exprs[Int(at)]
     if node.payload == 1:
+        # `_asks` does not hand a NOT IN here, because an anti join is the
+        # classic wrong answer for one: a single null anywhere in the subquery
+        # makes NOT IN null for every row rather than true, and an anti join
+        # keeps those rows instead of dropping them. It goes to the mark join
+        # with every other NOT IN. This is the guard that says so.
         raise Error(
-            "firepanda lowers an IN over a subquery to a semi join, and the"
-            " anti join a NOT IN looks like is the classic wrong answer: one"
-            " null anywhere in the subquery makes NOT IN null for every row"
-            " rather than true, and an anti join keeps those rows instead of"
-            " dropping them. The null aware anti join that answers it is a node"
-            " nobody has written"
+            "a NOT IN reached the semi join, and a NOT IN is a mark join"
         )
     var key = _lower_expr(ast, node.a, plan, walk, scope, False)
 
@@ -2897,8 +3102,13 @@ def _asks(ast: Ast, at: UInt32) raises -> UInt32:
     A `NOT EXISTS` parses as a `NOT` written over a plain `EXISTS` rather than
     as an `EXISTS` carrying its own negation, so the `NOT` is looked through
     here and what comes back is the `EXISTS` under it. A `NOT` over anything
-    else is not looked through, so a `NOT (x IN (SELECT ...))` still goes the
-    way it went before, which is refused where the expression is lowered.
+    else is not looked through, so a `NOT (x IN (SELECT ...))` goes the way an
+    `IN` written as a value goes, which is the mark join.
+
+    A `NOT IN` is not claimed here either. It carries its negation on itself
+    rather than in a `NOT` above it, and an anti join is the classic wrong
+    answer for it, so it goes to the mark join too and the `NOT` over the
+    column the mark join wrote is what makes it right.
 
     Args:
         ast: The arenas.
@@ -2912,12 +3122,208 @@ def _asks(ast: Ast, at: UInt32) raises -> UInt32:
         If the text of an operator is not there to read.
     """
     var node = ast.exprs[Int(at)]
-    if node.kind == EXPR_IN_SUBQUERY or node.kind == EXPR_EXISTS:
+    if node.kind == EXPR_IN_SUBQUERY:
+        return NO_NODE if node.payload == 1 else at
+    if node.kind == EXPR_EXISTS:
         return at
     if node.kind == EXPR_UNARY and ast.text(node.payload) == "NOT":
         if ast.exprs[Int(node.a)].kind == EXPR_EXISTS:
             return node.a
     return NO_NODE
+
+
+def _scalar_join(
+    ast: Ast,
+    at: UInt32,
+    catalog: Catalog,
+    mut plan: Plan,
+    mut sources: List[Schema],
+    ctes: _Bindings,
+    mut walk: _Walk,
+    left: Int,
+) raises -> Int:
+    """Puts an uncorrelated subquery that answers one value under the query.
+
+    The subquery is a plan of its own and its answer is one value, the same
+    value for every row of the query around it, so it is a cross join onto one
+    row. That is a column added to each row and nothing moved, and the lowering
+    turns it into a constant per right column, so the cost is the subquery run
+    once rather than once per row.
+
+    Only a subquery that is one row by construction is taken, which means one
+    that aggregates with no `GROUP BY`, or one with no `FROM` at all. Both of
+    those answer exactly one row whatever is in the tables, including no rows,
+    where a fold answers a null and that is the right answer. A `LIMIT 1` looks
+    like the same guarantee and is not, because over an empty table it answers
+    no rows, where SQL says the subquery is null and the cross join here would
+    raise instead.
+
+    A correlated one is not taken either, and it is refused by where it lowers
+    rather than by a check: the subquery gets a scope of its own, so an outer
+    name written inside it is a name nothing in that query has. That is the
+    dependent join, and it is the same refusal a correlated `IN` gets.
+
+    Args:
+        ast: The arenas.
+        at: The `EXPR_SUBQUERY`.
+        catalog: What the table names inside it are resolved against.
+        plan: Where the nodes go.
+        sources: One schema per scan, appended to.
+        ctes: The CTE names in reach.
+        walk: Told what the answer's column is called, so that the expression
+            around it can read it back.
+        left: What the cross join is put over.
+
+    Returns:
+        The cross join, which produces what the left side produced and the one
+        column the subquery answered.
+
+    Raises:
+        If the subquery is a shape whose row count is not one by construction,
+        or if it hands out more than one column.
+    """
+    var node = ast.exprs[Int(at)]
+    var top = ast.stmts[Int(node.a)]
+    if top.kind != STMT_SELECT:
+        raise Error("a subquery over a statement that is not a SELECT")
+    if top.b != NO_NODE:
+        raise Error(
+            "firepanda lowers a subquery that answers one value when its block"
+            " is one row by construction, and an ORDER BY or a LIMIT on one"
+            " does not make it one: a LIMIT 1 over a table with nothing in it"
+            " answers no rows, where SQL says the subquery is null"
+        )
+    var body = ast.stmts[Int(top.a)]
+    if body.kind != STMT_QUERY:
+        raise Error(
+            "firepanda lowers a subquery that answers one value over one SELECT"
+            " block so far, and a VALUES or a set operation inside one is a"
+            " different node"
+        )
+
+    var clauses = body.children
+    var items = ast.items(ast.slot(clauses, CLAUSE_PROJECTION))
+    var from_clause = ast.slot(clauses, CLAUSE_FROM)
+    var folds = False
+    for one in items:
+        if _has_aggregate(ast, ast.stmts[Int(one)].a):
+            folds = True
+            break
+    if from_clause != NO_NODE:
+        if ast.length(ast.slot(clauses, CLAUSE_GROUP)) != 0 or not folds:
+            raise Error(
+                "firepanda lowers a subquery that answers one value when its"
+                " block is one row by construction, which is a fold with no"
+                " GROUP BY under it or a SELECT with no FROM. This one hands"
+                " out a row per row of its table, and the check that there is"
+                " exactly one of them is a node nobody has written"
+            )
+
+    var inner = _Scope()
+    var root = _statement(ast, node.a, catalog, plan, sources, inner, ctes)
+    var names = _produces(plan, root)
+    if len(names) != 1:
+        raise Error(
+            String(
+                "a subquery written as a value that hands out ",
+                len(names),
+                " columns, and a value is one column",
+            )
+        )
+
+    # Renamed on the way out, because the name the subquery gave its column is
+    # whatever was written in there and the query around it may already have a
+    # column called that. Nothing reads the new name but the expression this
+    # was taken out of, which is told it here.
+    var called = String("__sub_", len(walk.scalars))
+    var only = List[Int]()
+    only.append(plan.exprs.column(String(names[0])))
+    var renamed = List[String]()
+    renamed.append(String(called))
+    var one_row = plan.project(root, only^, renamed^)
+    walk.scalars.append(at)
+    walk.scalar_names.append(called^)
+    return plan.join(left, one_row, List[Int](), List[Int](), JoinKind.CROSS)
+
+
+def _mark_join(
+    ast: Ast,
+    at: UInt32,
+    catalog: Catalog,
+    mut plan: Plan,
+    mut sources: List[Schema],
+    ctes: _Bindings,
+    mut walk: _Walk,
+    scope: _Scope,
+    left: Int,
+) raises -> Int:
+    """Puts an `IN` over a subquery under the query as a mark join.
+
+    An `IN` written where a `WHERE` is the `AND` of it and other things is a
+    semi join, because there the question is which rows to keep. Written
+    anywhere else it is a value, and a value has to arrive on every row rather
+    than on the rows that matched. That is the mark join: the left side comes
+    out unchanged and one boolean column comes out beside it.
+
+    A `NOT IN` is the same join. The negation stays in the expression, where it
+    is a `NOT` over the column this wrote, and the three valued rule falls out
+    of that rather than being written anywhere: a row that matched nothing over
+    a build side holding a null is marked null, a `NOT` over a null is null, and
+    a filter does not keep a null. So `x NOT IN (SELECT y FROM t)` keeps no rows
+    at all when any `y` is null, which is what SQL says and what an anti join
+    gets wrong.
+
+    The subquery is a query of its own and it lowers as one, against a scope of
+    its own, so a name the outer query put in reach is not in reach inside it. A
+    correlated one is refused by that rather than by a check, the same way a
+    correlated subquery written as a value is.
+
+    Args:
+        ast: The arenas.
+        at: The `EXPR_IN_SUBQUERY`.
+        catalog: What the table names inside it are resolved against.
+        plan: Where the nodes go.
+        sources: One schema per scan, appended to.
+        ctes: The CTE names in reach.
+        walk: Told what the answer's column is called, so that the expression
+            around it can read it back.
+        scope: What the outer `FROM` put in reach, which the left key reads.
+        left: What the mark join is put over.
+
+    Returns:
+        The mark join, which produces what the left side produced and the one
+        boolean column.
+
+    Raises:
+        If the subquery hands out other than one column, or if it is one this
+        does not lower.
+    """
+    var node = ast.exprs[Int(at)]
+    var key = _lower_expr(ast, node.a, plan, walk, scope, False)
+
+    var inner = _Scope()
+    var root = _statement(ast, node.b, catalog, plan, sources, inner, ctes)
+    var names = _produces(plan, root)
+    if len(names) != 1:
+        raise Error(
+            String(
+                "an IN whose subquery hands out ",
+                len(names),
+                " columns, and what a value is looked for in is one column",
+            )
+        )
+
+    # Named rather than positioned, because the query around it may already have
+    # a column called whatever the subquery called its own, and nothing reads
+    # this name but the expression the `IN` was taken out of.
+    var called = String("__mark_", len(walk.marks))
+    var keys = List[Int]()
+    keys.append(key)
+    var others = List[Int]()
+    others.append(plan.exprs.column(String(names[0])))
+    walk.marks.append(at)
+    walk.mark_names.append(String(called))
+    return plan.join(left, root, keys^, others^, JoinKind.MARK, called^)
 
 
 def _exists_join(
@@ -3210,6 +3616,41 @@ def _block(
     # Not called `where`, which the formatter reads as the start of a
     # parameter constraint and then cannot parse the rest of the file.
     var restriction = ast.slot(clauses, CLAUSE_WHERE)
+
+    # An uncorrelated subquery written as a value is taken out and cross joined
+    # on here, above the FROM and below everything else, so that every clause
+    # under the aggregate can read the column it answered. The select list is
+    # only searched when the query does not aggregate, because there the
+    # projection sits straight on this and the column reaches it. Above an
+    # aggregate it does not, and the refusal in `_lower_expr` says so.
+    var found = List[UInt32]()
+    _scalars(ast, restriction, found)
+    if not grouped:
+        for one in items:
+            _scalars(ast, ast.stmts[Int(one)].a, found)
+    for i in range(len(found)):
+        at = _scalar_join(ast, found[i], catalog, plan, sources, ctes, walk, at)
+
+    # An `IN` over a subquery goes the same way, as a mark join rather than a
+    # cross join. The ones the `WHERE` is the `AND` of are left alone, because
+    # each of those is a semi join below and a semi join is the cheaper answer
+    # to the same question. What is left is every `IN` written as a value, which
+    # includes every `NOT IN` wherever it is written.
+    var asking = List[UInt32]()
+    if restriction != NO_NODE:
+        var parts = List[UInt32]()
+        _conjuncts(ast, restriction, parts)
+        for i in range(len(parts)):
+            if _asks(ast, parts[i]) == NO_NODE:
+                _marks(ast, parts[i], asking)
+    if not grouped:
+        for one in items:
+            _marks(ast, ast.stmts[Int(one)].a, asking)
+    for i in range(len(asking)):
+        at = _mark_join(
+            ast, asking[i], catalog, plan, sources, ctes, walk, scope, at
+        )
+
     if restriction != NO_NODE:
         # An `IN` or a correlated `EXISTS` over a subquery is a join rather than
         # a predicate, so the WHERE is split on `AND` and the parts that are one

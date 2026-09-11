@@ -18,6 +18,38 @@ The flag now reaches the plan. `count(DISTINCT x)` is `AggKind.NUNIQUE`, in the 
 
 Being clear about what runs. The window form runs, because a window holds its whole partition and can call the whole frame kernel. The grouped and ungrouped forms plan correctly and then stop at the operator with "nunique cannot be computed a chunk at a time", which is the same refusal `median` and `stddev` already get and is not new behaviour for this engine. A refusal by name is the fix for a silently wrong number. Making those two run is the streaming distinct count, which is its own change.
 
+### Added: the mark join, which answers a boolean per row instead of filtering
+
+A semi join keeps the left rows that matched and drops the rest, which is the answer a `WHERE` wants. Written anywhere else, `x IN (SELECT k FROM u)` is a value rather than a filter, and a value has to arrive on every row including the rows that matched nothing. The mark join is that: every left row, none of the right columns, and one boolean column saying whether the row matched.
+
+`JoinKind.MARK` is the eighth kind. It is the only one with an output name of its own to settle, so `plan.join` takes what the column is called, `explain` prints it as `JOIN mark [a = k] -> found`, and the JSON form carries it as `"mark"`.
+
+The booleans are three valued and that is the whole of the difficulty. A row that matched is true. A row that did not is false only when it is known to have matched nothing, and it is not known when a null was involved, because a null is a value nobody wrote down rather than a value that differs from everything. So a probe row whose own key is null is null, and a probe row that matched nothing is null as well when the build side holds a null key anywhere. That rule is why `NOT IN` over a column with a null in it keeps no rows, which surprises people and is what every engine does: `NOT` of null is null, and a `WHERE` keeps a row on true.
+
+Nothing is gathered. Every probe row produces exactly one output row and that row is the row that arrived, so the chunk keeps its own columns and the mark goes beside them. `mark_probe` is the walk, next to `pair_probe`, and the whole frame join refuses the kind by name because a column of booleans is not a pair of index lists and `take_rows` has nothing to do with it.
+
+One case is refused that should answer false on every row, and it is refused for every join kind rather than for this one. A build side that a filter emptied has no chunks at all rather than one empty chunk, and building the key table wants exactly one, so a join against nothing raises. That is filed as #611 and pinned on a semi join as well as on a mark join, since it has been there the whole time.
+
+The SQL front end that puts one there is the entry below.
+
+Part of #309.
+
+### Added: an IN over a subquery written as a value, and NOT IN anywhere
+
+`WHERE x IN (SELECT k FROM u) AND price > 4` was already a semi join, and that is still what it lowers to, because there the question is which rows to keep and a semi join is the cheaper way to ask it. Written anywhere else the `IN` is a value: under an `OR`, in a `CASE`, in the select list. Those now lower to a mark join above the `FROM` and a read of the column it wrote, which is the same place and the same shape as the cross join a subquery answering one value gets.
+
+`NOT IN` goes there too, wherever it is written, and it was refused before. The anti join it looks like is the classic wrong answer, silent, and load bearing in TPC-H q16 and q21: one null anywhere in the subquery makes `NOT IN` null for every row rather than true, and an anti join keeps those rows rather than dropping them. Nothing was written to fix that. The mark join marks such a row null rather than false, the `NOT` over the column is null in turn, and a `WHERE` keeps a row on true, so `SELECT qty FROM sales WHERE qty NOT IN (SELECT band FROM gaps)` answers no rows when any band is null. The null aware anti join turns out to be a mark join and a `NOT`.
+
+The negation stays in the expression rather than turning into a second join kind, which is why `NOT (x IN (SELECT ...))` and `x NOT IN (SELECT ...)` lower to the same two nodes. `EXISTS` written as a value is still refused and says so: it answers the same boolean per row, but a mark join is handed a pair of keys and an `EXISTS` is not written with one. It will get there through `count(*) > 0` and the cross join instead.
+
+Part of #309.
+
+## [0.6.72] - 2026-09-12
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Three changes. Two of them are the same feature arriving in two halves: physical lowering learned the cross join onto one row, and the SQL front end learned to put an uncorrelated scalar subquery on it, so `WHERE qty > (SELECT max(band) FROM tiers)` runs and runs the subquery once. The third saves a hash table, by having a column remember the distinct count a factorize already worked out.
+
 ### Added: a column remembers how many distinct values it holds
 
 A factorize hands out an ordinal per distinct value, so the number it handed out is the distinct count of the column it read. Every caller threw that away, and a group by on a key followed by a `nunique` on the same key built two hash tables over the same values to arrive at the same number twice.
@@ -35,6 +67,20 @@ Two new methods and one new frame method:
 `agg` reads the same field, so a `NUNIQUE` spec over a column that already knows skips `reduce_any` and its hash table.
 
 Part of #479 and of the column metadata in #375.
+
+### Added: a subquery that answers one value lowers and runs
+
+`WHERE qty > (SELECT min(band) FROM tiers)` works. An uncorrelated subquery written where a value goes answers the same value for every row of the query around it, so it is taken out of the expression, lowered into a plan of its own, and cross joined onto the query above the `FROM`. The expression around it is then an ordinary expression over an ordinary column, which is the same move an aggregate in a select list already made. The subquery runs once rather than once per row, because a cross join onto one row lowers to a constant per right column.
+
+Only a subquery that is one row by construction is taken, which is one that folds with no `GROUP BY` or one with no `FROM`. In SQL both answer exactly one row whatever is in the tables, including nothing at all, where a fold answers a null. A `LIMIT 1` looks like the same guarantee and is not: over an empty table it answers no rows, where SQL says the subquery is null, so it is refused rather than read as one. So is a subquery that hands out a row per row of its table, since the check that there is exactly one of them is a node nobody has written.
+
+One case is refused that SQL answers. A fold with no `GROUP BY` over an empty input hands out no rows in firepanda rather than one row of null, so a subquery whose block reads nothing gives the cross join a right side of no rows and it refuses by name. That is a gap in the aggregate rather than in this rewrite, filed as #608, and both halves of it are pinned by tests. Refusing is the safe end of it, because the alternative is quietly dropping every row of the query around it.
+
+The cross join goes above the `FROM` and below everything else, so a subquery in a `WHERE` is always reachable and one in a select list is reachable when the query does not aggregate. Above an aggregate it is not, because an aggregate hands up its keys and its folds rather than everything it read, and that is a refusal with the reason in it rather than a binding error further along. A correlated one is refused by the scope it lowers against, which is the same refusal a correlated `IN` gets and the same dependent join behind it.
+
+The answer is renamed on the way out, so a subquery whose column is called what a table of the outer query calls one of its own cannot clash.
+
+Part of #309.
 
 ### Added: a cross join onto one row runs
 
@@ -5911,7 +5957,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.71...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.72...HEAD
+[0.6.72]: https://github.com/tamnd/firepanda/releases/tag/v0.6.72
 [0.6.71]: https://github.com/tamnd/firepanda/releases/tag/v0.6.71
 [0.6.70]: https://github.com/tamnd/firepanda/releases/tag/v0.6.70
 [0.6.69]: https://github.com/tamnd/firepanda/releases/tag/v0.6.69

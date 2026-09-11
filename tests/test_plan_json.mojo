@@ -722,7 +722,8 @@ def test_every_unary_operator_is_written_and_reads_back() raises:
 
 
 def test_every_join_kind_is_named_and_reads_back() raises:
-    for code in range(Int(JoinKind.CROSS.code) + 1):
+    for code in range(Int(JoinKind.MARK.code) + 1):
+        var kind = JoinKind(UInt8(code))
         var plan = Plan()
         var left = plan.scan("t", List[String](), 0)
         var right = plan.scan("u", List[String](), 1)
@@ -731,7 +732,8 @@ def test_every_join_kind_is_named_and_reads_back() raises:
             right,
             [plan.exprs.column("a")],
             [plan.exprs.column("k")],
-            JoinKind(UInt8(code)),
+            kind,
+            "m" if kind == JoinKind.MARK else String(),
         )
         var back = _trip(plan, at)
         assert_equal(
@@ -739,6 +741,28 @@ def test_every_join_kind_is_named_and_reads_back() raises:
             code,
             String("join ", code, " came back as itself"),
         )
+
+
+def test_a_mark_join_writes_what_its_column_is_called_and_reads_it_back() raises:
+    # The one kind with an output name of its own, so the one kind whose object
+    # carries something beyond the keys and the two arms.
+    var plan = Plan()
+    var left = plan.scan("t", List[String](), 0)
+    var right = plan.scan("u", List[String](), 1)
+    var at = plan.join(
+        left,
+        right,
+        [plan.exprs.column("a")],
+        [plan.exprs.column("k")],
+        JoinKind.MARK,
+        "in_u",
+    )
+    var text = to_json(plan, at)
+    assert_true(text.find('"mark": "in_u"') != -1, "the name is written")
+    var back = _trip(plan, at)
+    assert_equal(
+        back.plan.nodes[back.root].names[0], "in_u", "and comes back as itself"
+    )
 
 
 def test_a_plan_can_be_written_by_hand() raises:

@@ -149,6 +149,28 @@ def test_a_join_prints_both_inputs_under_it() raises:
     )
 
 
+def test_a_mark_join_prints_what_its_column_is_called() raises:
+    # Every other kind's output is columns that were already there, so the line
+    # says what it keeps. This one adds a column and the line has to name it.
+    var plan = Plan()
+    var orders = plan.scan("orders", ["o_custkey"], 0)
+    var customer = plan.scan("customer", ["c_custkey"], 1)
+    var o = plan.exprs.column("o_custkey")
+    var c = plan.exprs.column("c_custkey")
+    var joined = plan.join(
+        orders, customer, [o], [c], JoinKind.MARK, "has_customer"
+    )
+    assert_equal(
+        explain(plan, joined),
+        (
+            "JOIN mark [o_custkey = c_custkey] -> has_customer\n"
+            "  SCAN orders [o_custkey]\n"
+            "  SCAN customer [c_custkey]\n"
+        ),
+        "the mark is named on the line that makes it",
+    )
+
+
 def test_a_sort_prints_a_direction_for_each_key() raises:
     var plan = Plan()
     var scan = plan.scan("orders", ["o_orderdate", "o_totalprice"], 0)

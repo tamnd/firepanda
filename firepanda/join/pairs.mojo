@@ -171,7 +171,7 @@ struct JoinKind(Equatable, ImplicitlyCopyable, Movable, Writable):
 
     A runtime tag rather than a parameter, on the same grounds as `AggKind`: the
     kind picks which rows are emitted and the emitting loop is the same loop, so
-    making it a parameter would produce seven copies of one function to save one
+    making it a parameter would produce a copy of one function per kind to save one
     comparison per row.
     """
 
@@ -207,6 +207,17 @@ struct JoinKind(Equatable, ImplicitlyCopyable, Movable, Writable):
     comptime CROSS = Self(6)
     """Every left row against every right row, with no keys."""
 
+    comptime MARK = Self(7)
+    """Every left row, with a boolean saying whether it matched.
+
+    A semi join answers the same question by keeping the rows that matched and
+    dropping the rest, which is the answer a `WHERE` wants. Written anywhere
+    else, an `IN` over a subquery is a value rather than a filter, and a value
+    has to arrive on every row, including the rows that matched nothing. So the
+    right side is kept out of the output the same way and what replaces it is
+    one column.
+    """
+
     def __eq__(self, other: Self) -> Bool:
         """Compares two kinds.
 
@@ -233,18 +244,23 @@ struct JoinKind(Equatable, ImplicitlyCopyable, Movable, Writable):
         """Reports whether the result carries the right frame's columns.
 
         Returns:
-            False for the two filtering joins, which use the right side to
-            decide which left rows survive and then discard it.
+            False for the three that use the right side to decide something
+            about the left rows and then discard it.
         """
-        return self != Self.SEMI and self != Self.ANTI
+        return self != Self.SEMI and self != Self.ANTI and self != Self.MARK
 
     def keeps_unmatched_left(self) -> Bool:
         """Reports whether a left row with no match still produces a row.
 
         Returns:
-            True for left, outer and anti.
+            True for left, outer, anti and mark.
         """
-        return self == Self.LEFT or self == Self.OUTER or self == Self.ANTI
+        return (
+            self == Self.LEFT
+            or self == Self.OUTER
+            or self == Self.ANTI
+            or self == Self.MARK
+        )
 
     def write_to(self, mut writer: Some[Writer]):
         """Writes the name a user would recognise.
@@ -264,6 +280,8 @@ struct JoinKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("semi")
         elif self == Self.ANTI:
             writer.write("anti")
+        elif self == Self.MARK:
+            writer.write("mark")
         else:
             writer.write("cross")
 
@@ -404,8 +422,15 @@ def join_indices[
     Raises:
         If the key lists disagree in length, if they are empty for a kind that
         needs keys or non-empty for a cross join, if a key pair has different
-        dtypes, or if a key dtype has no physical layout.
+        dtypes, if a key dtype has no physical layout, or if the kind is the
+        mark join, which answers a column rather than a pairing.
     """
+    if kind == JoinKind.MARK:
+        raise Error(
+            "join: a mark join answers a column of booleans rather than a"
+            " pairing, so it is not a pair of index lists and there is nothing"
+            " for take_rows to do with it; it runs as a pipeline operator"
+        )
     if kind == JoinKind.CROSS:
         if len(left_keys) != 0 or len(right_keys) != 0:
             raise Error("cross join: takes no key columns")
@@ -705,8 +730,15 @@ def pair_probe(
         One entry per output row, in probe row order.
 
     Raises:
-        Error: If the parallel emit raises.
+        Error: If the parallel emit raises, or if the kind is the mark join,
+            which answers a column rather than a pairing.
     """
+    if kind == JoinKind.MARK:
+        raise Error(
+            "join: a mark join answers a column rather than a pairing, since"
+            " every probe row produces one output row and that row is the row"
+            " that arrived; call mark_probe"
+        )
     var wants_right = kind == JoinKind.OUTER
 
     # The probe side is walked in morsels, and a morsel is counted and then
@@ -945,6 +977,119 @@ def pair_probe(
                         matched.set(table.bucket[p], True)
 
     return JoinIndices(out_left^, out_right^)
+
+
+def mark_probe(
+    table: ProbeTable,
+    codes: Array[DType.uint32],
+    probe_at: Int,
+    probe_rows: Int,
+    absent: List[Bool],
+    absent_at: Int,
+    has_nulls: Bool,
+    built_has_nulls: Bool,
+    spread: Bool = True,
+) raises -> Array[DType.bool]:
+    """Walks one side against a built table and answers whether each row matched.
+
+    This is the mark join's whole emit. Nothing is gathered, because every probe
+    row produces exactly one output row and that row is the row that arrived, so
+    the caller keeps its chunk and puts this column beside it.
+
+    ## The nulls are the point
+
+    The question a mark join is asked is `x IN (SELECT k FROM ...)`, and SQL
+    answers that with three values rather than two. A row that matched is true.
+    A row that did not is false only when it is known to have matched nothing,
+    and it is not known when a null was involved, because a null is a value
+    nobody wrote down rather than a value that differs from everything.
+
+    So a probe row whose own key is null is null, since it might have equalled
+    whatever the missing value was. A probe row whose key is not null and that
+    matched nothing is null as well when the built side holds a null key
+    anywhere, for the same reason and on the other side of the comparison. Only
+    when neither is true is the answer false.
+
+    That rule is why `NOT IN` over a column with a null in it keeps no rows at
+    all, which surprises people and is what every engine does. `NOT` of null is
+    null, and a `WHERE` keeps a row on true.
+
+    Whether the built side holds a null key is a property of the whole build
+    side rather than of anything in this chunk, so the caller works it out once
+    and passes it in.
+
+    Args:
+        table: The other side, bucketed by ordinal.
+        codes: The ordinals of both sides, as `align_keys` returns them.
+        probe_at: Where this side's ordinals start in `codes`.
+        probe_rows: How many rows this side has.
+        absent: The null key flags, or an empty list.
+        absent_at: Where this side's flags start in `absent`.
+        has_nulls: Whether `absent` was filled.
+        built_has_nulls: Whether the built side holds a null key anywhere.
+        spread: Whether this may use more than one core. False when the caller
+            is already running on a worker, for the reason `pair_probe` gives.
+
+    Returns:
+        One boolean per probe row, null where the answer is unknown.
+
+    Raises:
+        Error: If the parallel walk raises.
+    """
+    var out = Array[DType.bool](overwritten=probe_rows)
+    var valid = Bitmap(probe_rows, all_valid=True)
+    var parallel = spread and probe_rows >= PARALLEL_LEFT_ROWS
+
+    # The two routes the table has, kept apart the way `pair_probe` keeps them:
+    # the unique shape asks whether the seat holds a row and the general shape
+    # asks whether the bucket is wider than nothing, and the branch between them
+    # is the same answer on every row.
+    def walk_one(start: Int, stop: Int) raises {mut out, mut valid, imm}:
+        var code_at = codes.unsafe_ptr()
+        var seat = table.only.unsafe_ptr()
+        var dst = out.unsafe_mut_ptr()
+        for i in range(start, stop):
+            if has_nulls and absent[absent_at + i]:
+                dst.unsafe_offset(i).unsafe_write(False)
+                valid.set(i, False)
+                continue
+            var g = Int(code_at.unsafe_offset(probe_at + i).unsafe_load())
+            var hit = seat.unsafe_offset(g).unsafe_load() >= 0
+            dst.unsafe_offset(i).unsafe_write(hit)
+            if not hit and built_has_nulls:
+                valid.set(i, False)
+
+    def walk(start: Int, stop: Int) raises {mut out, mut valid, imm}:
+        var code_at = codes.unsafe_ptr()
+        var dst = out.unsafe_mut_ptr()
+        for i in range(start, stop):
+            if has_nulls and absent[absent_at + i]:
+                dst.unsafe_offset(i).unsafe_write(False)
+                valid.set(i, False)
+                continue
+            var g = Int(code_at.unsafe_offset(probe_at + i).unsafe_load())
+            var hit = table.starts[g + 1] > table.starts[g]
+            dst.unsafe_offset(i).unsafe_write(hit)
+            if not hit and built_has_nulls:
+                valid.set(i, False)
+
+    # A morsel is a run of rows and a validity bit is one of eight in a byte, so
+    # two morsels meeting inside a byte would be a read modify write of the same
+    # location from two cores. The morsel length is a multiple of eight, which
+    # is what keeps them out of each other's bytes, so the split is safe without
+    # the byte per group trick `pair_probe` needs.
+    if not parallel:
+        if table.unique:
+            walk_one(0, probe_rows)
+        else:
+            walk(0, probe_rows)
+    elif table.unique:
+        parallel_morsels(walk_one, probe_rows, LEFT_MORSEL_ROWS)
+    else:
+        parallel_morsels(walk, probe_rows, LEFT_MORSEL_ROWS)
+
+    out.data.validity = valid^
+    return out^
 
 
 def take_pair(

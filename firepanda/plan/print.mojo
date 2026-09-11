@@ -246,7 +246,13 @@ def _line(plan: Plan, at: Int) raises -> String:
             pairs += render_expr(plan.exprs, node.exprs[i])
             pairs += " = "
             pairs += render_expr(plan.exprs, node.exprs[node.parts + i])
-        return String("JOIN ", JoinKind(UInt8(node.op)), " [", pairs, "]")
+        var how = JoinKind(UInt8(node.op))
+        var written = String("JOIN ", how, " [", pairs, "]")
+        if how == JoinKind.MARK:
+            # The one kind that adds a column, so the one kind whose line has
+            # to say what the column is called.
+            written += String(" -> ", node.names[0])
+        return written
 
     if node.kind == NodeKind.SORT:
         var written = String("SORT [")
