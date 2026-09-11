@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a plan with a join runs
+
+Lowering turns a join into the probe operator rather than refusing it, so a plan that reads two tables produces rows. A pipeline is a line and a join has two inputs, which sounds like it cannot be one of these and is not: the operator holds its build side whole and hashes it once before the first chunk arrives, so only the left side is a stream and the join sits on that side's line the same way a filter does.
+
+Being a frame already is the condition, so the right input has to be a scan. Anything else would have to run to completion before this pipeline could start, which is a second pipeline to schedule rather than an operator to add. Inner, left, semi and anti all run. Right and full are refused because emitting the right rows nothing matched is not known until the last chunk has gone past, and cross is refused because there is no key to build a table from.
+
+Three more are refused by name rather than lowered wrong. More than one key pair needs the ordinal space that concatenating both key columns builds, a computed key would have to be computed on the build side too, and a column name both sides have would be renamed by the operator, which moves the columns the plan's schema numbered.
+
+The frame a scan reads is now taken out of the list it was given with an empty one left in its place, because the numbers are relation ids and a list that closes up renumbers every relation above the one that went. With one scan per plan that was invisible, and with two it was the wrong frame. A plan whose two scans read the same relation says so instead, since a relation is one frame and a table joined to itself is two of each.
+
+Part of #309.
+
 ### Added: a FROM of more than one table lowers to a join
 
 `SELECT t.a, u.z FROM t JOIN u ON t.a = u.k` lowers. The plan's join holds a left key and a right key per pair rather than a predicate, because that is what a hash join runs, so the `ON` is split on `AND` and each part is asked which sides it reads. A part that is an equality with one side on the left and the other on the right is a key pair. Which side a part reads is answered by the relation a qualified column carries, and by the column name for one that is not qualified.
