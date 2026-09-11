@@ -1038,6 +1038,56 @@ def take_range(start: Int, indices: List[Int]) raises -> Array[DType.int64]:
     return out^
 
 
+def select_positions(mask: Array[DType.bool]) -> List[Int]:
+    """Returns the positions a mask keeps, which is a selection over it.
+
+    What `Filter` builds instead of copying its columns. The output is one
+    number per surviving row rather than one value per surviving row per column,
+    so on a chunk of any width at all this is the cheap half of what filtering
+    used to cost.
+
+    A null in the mask drops the row, which is the rule `filter_rows` and
+    `filter_range` both follow, so a chunk filtered into a selection keeps the
+    same rows as the same chunk filtered by copying.
+
+    Serial, and on purpose. This writes eight bytes per surviving row into a
+    list whose length is not known until the counting pass has finished, so the
+    second pass is a cursor that only the thread that owns it can advance.
+    Spreading it means a count per morsel, a prefix sum over the counts and a
+    write per morsel at an offset, which is worth doing when the output is a
+    column and is not worth doing when the output is the index of one.
+
+    Args:
+        mask: The mask.
+
+    Returns:
+        The positions where the mask is true and valid, in order.
+    """
+    var n = len(mask)
+    var values = mask.unsafe_ptr()
+
+    var kept = 0
+    for i in range(n):
+        if not mask.data.validity.get(i):
+            continue
+        if Bool(values.unsafe_offset(i).unsafe_load()):
+            kept += 1
+
+    var out = List[Int](length=kept, fill=0)
+    var written = 0
+    var i = 0
+    # The same branch free write `filter_range` uses: the position is written at
+    # the cursor whether or not it is kept, and the cursor only advances when it
+    # was, so a dropped row is overwritten by the next one.
+    while written < kept:
+        var present = mask.data.validity.get(i)
+        var truthy = Bool(values.unsafe_offset(i).unsafe_load())
+        out[written] = i
+        written += Int(present and truthy)
+        i += 1
+    return out^
+
+
 def filter_range(start: Int, mask: Array[DType.bool]) -> Array[DType.int64]:
     """Keeps the labels of the rows a mask keeps, out of an arithmetic range.
 
