@@ -12,10 +12,19 @@ inside it, and exactly `kept - 1` rows beat that worst row. Both halves are one
 pass over the column and neither of them knows how the kernel works. It is sized
 past `TOP_PRIVATE_ROWS` so the parallel route and the fold are what get checked.
 
-The last group of tests is the ungrouped frame spelling, `nlargest` and
+The next group of tests is the ungrouped frame spelling, `nlargest` and
 `nsmallest`, which is the same kernel with one group in it. Those answers are
 written down from what pandas gives for the same eight rows, because the
 ordering of a tie is the part that is easy to get almost right.
+
+The last group is `top_rows`, the limit over a sort, and it is checked against
+the sort rather than against a written down answer wherever the answer is longer
+than a line. Sorting everything and slicing is the definition of what it should
+return, it is already tested in `test_sort.mojo`, and the two have to agree row
+for row and not just as sets, because a limit that returns the right rows in the
+wrong order is wrong. The block size is handed in rather than taken from the
+constant, so the several block path runs over a few dozen rows here instead of
+over a quarter of a million.
 """
 
 from std.testing import TestSuite, assert_equal, assert_raises
@@ -25,7 +34,12 @@ from firepanda.array.array import Array
 from firepanda.array.strings import strings_from_list
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.series import Series
-from firepanda.kernel.topn import group_top_rows, group_top_rows_any
+from firepanda.kernel.topn import (
+    _top_rows_core,
+    group_top_rows,
+    group_top_rows_any,
+    top_rows,
+)
 
 
 def _codes(values: List[Int]) raises -> Array[DType.uint32]:
@@ -470,6 +484,336 @@ def test_a_column_of_words_is_refused_rather_than_read_as_bytes() raises:
 
     with assert_raises(contains="numeric"):
         _ = df.nlargest("word", 2)
+
+
+def _limit_frame(rows: Int) raises -> DataFrame:
+    """A frame with a tied integer key, a word key and a row number.
+
+    The integer key has about fifty distinct values over however many rows are
+    asked for, so a limit of ten lands in the middle of a run of ties and the
+    second key is what decides it. Every eleventh row's key is missing, so the
+    null flags have something to place.
+
+    Args:
+        rows: How many rows to build.
+
+    Returns:
+        The frame.
+    """
+    var row = Array[DType.int64](rows)
+    var key = Array[DType.int64](rows)
+    var words = List[String](capacity=rows)
+    var seed = UInt64(0x2545F4914F6CDD1D)
+    for i in range(rows):
+        seed = seed * 6364136223846793005 + 1442695040888963407
+        var draw = Int((seed >> 33) % 50)
+        row.set_valid(i, Int64(i))
+        if i % 11 == 0:
+            key.set_null(i)
+        else:
+            key.set_valid(i, Int64(draw))
+        words.append("w" + String((i * 7) % 13))
+
+    var series = List[Series]()
+    series.append(Series("row", row^))
+    series.append(Series("key", key^))
+    series.append(Series("word", AnyArray(strings_from_list(words))))
+    return DataFrame.from_series(series^)
+
+
+def _order_of(order: Array[DType.uint32]) -> List[Int]:
+    """Reads a permutation out as plain row numbers.
+
+    Args:
+        order: The rows a sort or a limit gave back.
+
+    Returns:
+        The same rows as a list.
+    """
+    var out = List[Int](capacity=len(order))
+    var values = order.unsafe_ptr()
+    for i in range(len(order)):
+        out.append(Int(values.unsafe_offset(i).unsafe_load()))
+    return out^
+
+
+def _sorted_slice(
+    df: DataFrame,
+    by: List[String],
+    descending: List[Bool],
+    nulls_first: List[Bool],
+    limit: Int,
+    offset: Int,
+) raises -> List[Int]:
+    """Sorts everything and slices, which is what the limit has to agree with.
+
+    Args:
+        df: The frame.
+        by: The key columns.
+        descending: One flag per key.
+        nulls_first: One flag per key.
+        limit: How many rows.
+        offset: How many to drop first.
+
+    Returns:
+        The rows the sort put in that window.
+    """
+    var order = _order_of(df.argsort(by, descending, nulls_first))
+    var out = List[Int]()
+    var at = offset
+    while at < len(order) and len(out) < limit:
+        out.append(order[at])
+        at += 1
+    return out^
+
+
+def _assert_same(got: List[Int], want: List[Int], what: String) raises:
+    """Compares two row lists position by position.
+
+    Args:
+        got: What came back.
+        want: What the sort said.
+        what: The name to report.
+
+    Raises:
+        Error: If the lists differ in length or in any row.
+    """
+    assert_equal(len(got), len(want), what + ": the same number of rows")
+    for i in range(len(got)):
+        assert_equal(got[i], want[i], what + ": row " + String(i))
+
+
+def test_a_limit_is_the_head_of_the_sort() raises:
+    var df = _ranked()
+    var got = _order_of(df.argsort_limit(["key"], [False], [False], 3))
+    _assert_same(
+        got, _sorted_slice(df, ["key"], [False], [False], 3, 0), "limit three"
+    )
+    # Written out as well, because the tie rule is the part a comparison
+    # against the sort cannot catch if both of them have it wrong. The keys are
+    # [3, 1, 3, 2, 1, 3, 2, 1], so the three smallest are the three ones, and
+    # they come back in the order they appear in the frame.
+    assert_equal(got[0], 1, "the first one")
+    assert_equal(got[1], 4, "the second one")
+    assert_equal(got[2], 7, "the third one")
+
+
+def test_an_offset_is_the_rows_after_the_ones_it_dropped() raises:
+    var df = _ranked()
+    var got = _order_of(df.argsort_limit(["key"], [False], [False], 2, 3))
+    _assert_same(
+        got,
+        _sorted_slice(df, ["key"], [False], [False], 2, 3),
+        "two rows after three",
+    )
+    assert_equal(got[0], 3, "the first two")
+    assert_equal(got[1], 6, "the second two")
+
+
+def test_a_bound_that_covers_the_frame_gives_the_whole_order() raises:
+    var df = _ranked()
+    var got = _order_of(df.argsort_limit(["key"], [True], [False], 50))
+    _assert_same(
+        got,
+        _sorted_slice(df, ["key"], [True], [False], 50, 0),
+        "a limit past the end",
+    )
+    assert_equal(len(got), 8, "every row, and not fifty of them")
+
+
+def test_the_answer_does_not_depend_on_where_the_blocks_fell() raises:
+    # The reason this test exists. A bounded scan that keeps the wrong rows at a
+    # block edge, or that breaks a tie by candidate position rather than by row
+    # number, gives an answer that changes with the block size, and at the real
+    # block size no test of this file would ever see a second block.
+    var df = _limit_frame(401)
+    var by = List[String]()
+    by.append("key")
+    by.append("word")
+    var descending = List[Bool]()
+    descending.append(False)
+    descending.append(True)
+    var nulls_first = List[Bool]()
+    nulls_first.append(False)
+    nulls_first.append(False)
+    var want = _sorted_slice(df, by, descending, nulls_first, 10, 7)
+
+    var blocks = [1, 2, 5, 16, 64, 400, 401, 512]
+    for b in range(len(blocks)):
+        var at = List[Int]()
+        at.append(1)
+        at.append(2)
+        var got = _order_of(
+            _top_rows_core(
+                df.column_refs(),
+                at,
+                df.rows,
+                descending,
+                nulls_first,
+                10,
+                7,
+                blocks[b],
+            )
+        )
+        _assert_same(got, want, "block " + String(blocks[b]))
+
+
+def test_a_column_full_of_ties_hands_back_the_same_ten_rows_twice() raises:
+    # Every key equal, so the only thing deciding the answer is the tie rule,
+    # and the tie rule is the frame's own row order. Two runs at two block
+    # sizes, because a stable answer that is only stable within one block is
+    # the bug this is written against.
+    var rows = 300
+    var key = Array[DType.int64](rows)
+    var row = Array[DType.int64](rows)
+    for i in range(rows):
+        key.set_valid(i, Int64(7))
+        row.set_valid(i, Int64(i))
+    var series = List[Series]()
+    series.append(Series("row", row^))
+    series.append(Series("key", key^))
+    var df = DataFrame.from_series(series^)
+
+    var want = List[Int]()
+    for i in range(10):
+        want.append(i)
+
+    var first = _order_of(df.argsort_limit(["key"], [False], [False], 10))
+    _assert_same(first, want, "the first run")
+    var second = _order_of(df.argsort_limit(["key"], [True], [False], 10))
+    _assert_same(second, want, "read the other way round")
+
+    var at = List[Int]()
+    at.append(1)
+    var blocked = _order_of(
+        _top_rows_core(
+            df.column_refs(), at, df.rows, [False], [False], 10, 0, 16
+        )
+    )
+    _assert_same(blocked, want, "in blocks of sixteen")
+
+
+def test_two_keys_can_point_in_different_directions() raises:
+    # The q26 shape, which sorts by one key descending and then by another
+    # ascending. The frame is small enough to write the answer down: the keys
+    # are [3, 1, 3, 2, 1, 3, 2, 1] and the words below break the threes.
+    var key = Array[DType.int64](8)
+    var row = Array[DType.int64](8)
+    var keys = [3, 1, 3, 2, 1, 3, 2, 1]
+    for i in range(8):
+        key.set_valid(i, Int64(keys[i]))
+        row.set_valid(i, Int64(i))
+    var series = List[Series]()
+    series.append(Series("row", row^))
+    series.append(Series("key", key^))
+    series.append(
+        Series(
+            "word",
+            AnyArray(
+                strings_from_list(
+                    [
+                        "pear",
+                        "fig",
+                        "apple",
+                        "fig",
+                        "pear",
+                        "date",
+                        "apple",
+                        "date",
+                    ]
+                )
+            ),
+        )
+    )
+    var df = DataFrame.from_series(series^)
+
+    var by = List[String]()
+    by.append("key")
+    by.append("word")
+    var got = _order_of(df.argsort_limit(by, [True, False], [False, False], 3))
+    assert_equal(got[0], 2, "the largest key, and the first word inside it")
+    assert_equal(got[1], 5, "then date")
+    assert_equal(got[2], 0, "then pear")
+    _assert_same(
+        got,
+        _sorted_slice(df, by, [True, False], [False, False], 3, 0),
+        "three rows on two keys",
+    )
+
+
+def test_a_null_sits_where_the_flag_says_rather_than_dropping_out() raises:
+    # The difference from the grouped kernel above, which drops a null because
+    # a null is not one of the largest values. A limit over a sort is asking
+    # for an order, and a null has a place in it.
+    var key = Array[DType.int64](6)
+    var row = Array[DType.int64](6)
+    for i in range(6):
+        row.set_valid(i, Int64(i))
+        if i % 3 == 0:
+            key.set_null(i)
+        else:
+            key.set_valid(i, Int64(10 - i))
+    var series = List[Series]()
+    series.append(Series("row", row^))
+    series.append(Series("key", key^))
+    var df = DataFrame.from_series(series^)
+
+    var first = _order_of(df.argsort_limit(["key"], [False], [True], 2))
+    assert_equal(first[0], 0, "the first null")
+    assert_equal(first[1], 3, "the second null")
+
+    var last = _order_of(df.argsort_limit(["key"], [False], [False], 2))
+    assert_equal(last[0], 5, "the smallest value")
+    assert_equal(last[1], 4, "then the next one")
+
+
+def test_the_frame_spelling_gathers_the_rows_the_positions_named() raises:
+    var df = _limit_frame(120)
+    var by = List[String]()
+    by.append("key")
+    var want = _order_of(df.argsort_limit(by, [True], [False], 5, 2))
+    var got = df.sort_limit(by, [True], [False], 5, 2)
+    assert_equal(got.rows, 5, "five rows came back")
+    assert_equal(len(got.index), 5, "one label per row")
+
+    var column = got.column("row").as_typed[DType.int64]()
+    for i in range(5):
+        assert_equal(Int(column[i]), want[i], "row " + String(i))
+
+
+def test_asking_past_the_end_gives_what_is_there_and_no_more() raises:
+    var df = _ranked()
+    assert_equal(
+        len(df.argsort_limit(["key"], [False], [False], 4, 8)),
+        0,
+        "an offset past the last row",
+    )
+    assert_equal(
+        len(df.argsort_limit(["key"], [False], [False], 4, 6)),
+        2,
+        "an offset near the end",
+    )
+    assert_equal(
+        len(df.argsort_limit(["key"], [False], [False], 0)),
+        0,
+        "a limit of nothing",
+    )
+
+
+def test_a_limit_refuses_the_arguments_it_cannot_answer() raises:
+    var df = _ranked()
+    var none = List[String]()
+    var no_flags = List[Bool]()
+    with assert_raises(contains="at least one key"):
+        _ = df.argsort_limit(none, no_flags, no_flags, 3)
+    with assert_raises(contains="one descending"):
+        _ = df.argsort_limit(["key"], [False, True], [False], 3)
+    with assert_raises(contains="limit cannot be negative"):
+        _ = df.argsort_limit(["key"], [False], [False], -1)
+    with assert_raises(contains="offset cannot be negative"):
+        _ = df.argsort_limit(["key"], [False], [False], 3, -1)
+    with assert_raises():
+        _ = df.argsort_limit(["nope"], [False], [False], 3)
 
 
 def main() raises:

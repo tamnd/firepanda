@@ -21,6 +21,25 @@ The inputs are run rather than streamed, which is the same trade the join's buil
 `EXCEPT` and `INTERSECT` are the same plan node with another code on it and neither is a stack, so both are refused by name. Deciding a row of the left needs the right hashed first, which is an operator nobody has written.
 
 Part of #309.
+### Added: the ten rows a query asked for, without sorting the other hundred million
+
+`top_rows` in `firepanda/kernel/topn.mojo`, and `DataFrame.argsort_limit` and `DataFrame.sort_limit` over it. `ORDER BY ... LIMIT 10` is how nine ClickBench queries end, and until now the only way to answer one was to sort every row and throw away all but ten of them.
+
+The bound is `offset + limit` and not `limit`. A query that skips ninety rows and takes ten needs a hundred rows kept, and a pass that reads the limit and forgets the offset gives the wrong ten rows rather than a slower right answer.
+
+It runs a block of rows at a time. The kept set, at most `bound` rows, goes in front of the next block, the keys are gathered for that candidate list, the list is sorted and the best `bound` of it becomes the new kept set. A row outside the best `bound` of the kept set and its own block cannot be in the best `bound` of the frame, so dropping it is safe. What that buys is memory: the sort never sees more than a block plus the bound, so ten rows out of a hundred million cost a few megabytes of scratch instead of a permutation of the frame.
+
+The candidate list is built in ascending row order, kept set first because every row in it came from an earlier block. The sort underneath is stable, so two rows the keys cannot tell apart come back in the frame's own row order, and the answer does not depend on where the block boundaries fell. The test asserts that directly: the same ten rows come back at eight different block sizes, including one row at a time, and a column that is nothing but ties gives rows zero to nine both ways round.
+
+Any sortable key type and any number of keys, each with its own direction and its own null placement, which is what q26 needs to sort by `EventTime` descending and then `SearchPhrase`. A null is not dropped here, which is the difference from `group_top_rows` above it in the same file. A limit over a sort is asking for an order and `nulls_first` says where the nulls go in it, where `nlargest` is asking for the largest values and a null is not one.
+
+`argsort_limit` returns positions rather than a frame on purpose. The shape this is for is a filter, then a sort, then a limit over a wide frame, and that should gather the frame once at the end rather than once per step.
+
+`frame/limit_ten` and `frame/sort_then_slice_ten` are the new benchmark pair, with `frame/limit_ten_offset_1000` and `frame/limit_ten_two_keys` beside them. Both halves of the pair stop at the positions, so the gather is in neither number and the ratio is the scan against the sort.
+
+Not done here: the slot table that `group_top_rows` uses would answer a single numeric key with one comparison per row and no gather at all, which is a better loop than this one. Wiring it in needs a scan that takes no group ordinals, since a codes column of zeros costs four bytes a row for nothing, and that is worth doing with the benchmark in front of us.
+
+Part of #481.
 
 ### Added: SELECT 1 runs, because a constant can be a column now
 
@@ -49,6 +68,7 @@ One deliberate divergence from DuckDB. `DATE '2013-07-01' >= '2013-07-01 12:00:0
 `temporal/range_literal` and `temporal/range_integer` are the new benchmark pair. They are the same comparison over the same numbers and the only difference is that one of them arrives as eight characters, so if they are not within noise of each other the parse is still inside the loop.
 
 Part of #483.
+
 ### Fixed: a plan declared the wrong type for ten of the seventeen reductions
 
 `agg_type` names the type a reduction produces, and binding a plan asks it before any row moves. It had a case for a count, a size, a mean and a sum, and handed the input type straight back for everything else. That rule is right for exactly four reductions. A minimum, a maximum, a first and a last report an element that was in the column, so they answer the column's type. The other ten report a number about the column and do not.

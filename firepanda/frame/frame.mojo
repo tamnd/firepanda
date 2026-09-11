@@ -104,7 +104,7 @@ from firepanda.kernel.sort import (
     identity_permutation,
 )
 from firepanda.kernel.temporal import TemporalField, temporal_field
-from firepanda.kernel.topn import group_top_rows_any
+from firepanda.kernel.topn import group_top_rows_any, top_rows
 from firepanda.kernel.unary import UnaryOp, unary_any
 
 from .align import (
@@ -1351,6 +1351,107 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         # only sorted inside a run of equal values above them, which is not what
         # the flag means, so they are left alone. `mark_sorted` refuses a column
         # holding a null, which is the reason `nulls_first` is not consulted.
+        out.columns[self.schema.index_of(by[0])].mark_sorted(
+            Sortedness.DESCENDING if descending[0] else Sortedness.ASCENDING
+        )
+        return out^
+
+    def argsort_limit(
+        self,
+        by: List[String],
+        descending: List[Bool],
+        nulls_first: List[Bool],
+        limit: Int,
+        offset: Int = 0,
+    ) raises -> Array[DType.uint32]:
+        """Returns the rows a sort would put in `[offset, offset + limit)`.
+
+        The same answer as `argsort` followed by a slice, without the sort. What
+        it costs is a pass over the keys and a sort of one block at a time, so a
+        limit of ten over a hundred million rows never builds a permutation of a
+        hundred million rows. `top_rows` says how.
+
+        Positions rather than a frame, because the shape this is for is a filter
+        and then a sort and then a limit over a wide frame, and the frame should
+        be gathered once at the end rather than once per step.
+
+        Args:
+            by: The key columns, most significant first.
+            descending: One flag per key.
+            nulls_first: One flag per key.
+            limit: How many rows to return.
+            offset: How many rows to drop before those.
+
+        Returns:
+            The chosen rows, best first.
+
+        Raises:
+            If the lists disagree in length, if `by` is empty, if a name is
+            missing, if the limit or the offset is negative, or if a key dtype
+            is not sortable.
+        """
+        if len(by) == 0:
+            raise Error("sort needs at least one key column")
+        if len(descending) != len(by) or len(nulls_first) != len(by):
+            raise Error(
+                "sort needs one descending and one nulls_first flag per key;"
+                " got "
+                + String(len(by))
+                + " keys, "
+                + String(len(descending))
+                + " descending and "
+                + String(len(nulls_first))
+                + " nulls_first"
+            )
+
+        var at = List[Int](capacity=len(by))
+        for i in range(len(by)):
+            at.append(self.schema.index_of(by[i]))
+
+        return top_rows(
+            self.column_refs(),
+            at,
+            self.rows,
+            descending,
+            nulls_first,
+            limit,
+            offset,
+        )
+
+    def sort_limit(
+        self,
+        by: List[String],
+        descending: List[Bool],
+        nulls_first: List[Bool],
+        limit: Int,
+        offset: Int = 0,
+    ) raises -> Self:
+        """Returns the head of the sorted frame, without sorting the frame.
+
+        `sort_values` then a slice gives the same rows in the same order. This
+        gathers `limit` rows where that one gathers all of them, which on a wide
+        frame is most of the difference.
+
+        Args:
+            by: The key columns, most significant first.
+            descending: One flag per key.
+            nulls_first: One flag per key.
+            limit: How many rows to keep.
+            offset: How many rows to drop before those.
+
+        Returns:
+            A frame of at most `limit` rows.
+
+        Raises:
+            As `argsort_limit` does.
+        """
+        var out = self.take(
+            _to_positions(
+                self.argsort_limit(by, descending, nulls_first, limit, offset)
+            )
+        )
+        # A prefix of a sorted frame is sorted on the same key, for the same
+        # reason and with the same limit: only the most significant one is.
         out.columns[self.schema.index_of(by[0])].mark_sorted(
             Sortedness.DESCENDING if descending[0] else Sortedness.ASCENDING
         )
