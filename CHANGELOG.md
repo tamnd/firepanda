@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a series can be indexed by position and by label, the way a frame can
+
+`Series.loc`, `Series.iloc`, `Series.at`, `Series.iat` and square brackets. A series has one axis, so the whole of the frame's rule about the shape of the key deciding the shape of the answer collapses to deciding between a value and a series, and the two key readers that made that decision moved out of the frame's accessor classes and became functions all four accessors share. Nothing new is computed: the core's `Series` already had the four row operations the frame's accessors reach, so the work was four bindings and a door. Square brackets are the part that is not shared and not defensible: `s[2]` is the label two even on an index of strings, and `s[2:5]` is the rows two to five counting from the front even on an index whose labels are those numbers in another order. What decides is the slice's own bounds rather than the index's type, so `s["a":"c"]` stays a closed slice of labels while `s[0:2]` on the same index is the first two rows, which is pandas' reading and is written down in enough code that reading it any other way would be a different library. The two sentences pandas raises about a position past the end stay two sentences, since `iloc` and `iat` are told different things about the same mistake. Document 36 section 11 has the rest.
+
+Part of #156, after #8.
+
 ## [0.6.64] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).
@@ -31,11 +37,6 @@ Binding, printing and the JSON round trip all handle it. Projection pushdown dro
 There is no physical operator yet, so lowering refuses it by name the way a difference and an intersection are refused. The SQL front end does not build one yet either, which is waiting on `AggKind` growing a `row_number`, a `rank`, a `lag` and a `lead`.
 
 Part of #309.
-### Added: a series can be indexed by position and by label, the way a frame can
-
-`Series.loc`, `Series.iloc`, `Series.at`, `Series.iat` and square brackets. A series has one axis, so the whole of the frame's rule about the shape of the key deciding the shape of the answer collapses to deciding between a value and a series, and the two key readers that made that decision moved out of the frame's accessor classes and became functions all four accessors share. Nothing new is computed: the core's `Series` already had the four row operations the frame's accessors reach, so the work was four bindings and a door. Square brackets are the part that is not shared and not defensible: `s[2]` is the label two even on an index of strings, and `s[2:5]` is the rows two to five counting from the front even on an index whose labels are those numbers in another order. What decides is the slice's own bounds rather than the index's type, so `s["a":"c"]` stays a closed slice of labels while `s[0:2]` on the same index is the first two rows, which is pandas' reading and is written down in enough code that reading it any other way would be a different library. The two sentences pandas raises about a position past the end stay two sentences, since `iloc` and `iat` are told different things about the same mistake. Document 36 section 11 has the rest.
-
-Part of #156, after #8.
 
 ### Added: a frame and a series can be shaped the way another one is shaped
 
