@@ -19,6 +19,7 @@ Lowering now works out what each conjunct leaves behind that a later conjunct st
 TPC-H q6's predicate over six million rows, which is five conditions and the part of that query where the time goes, measured with the new `tools/probes/q6plan.mojo`: 9.45 milliseconds to 7.93 on a thirty two thread desktop, 78.3 to 61.0 on an eight core server, and 19.2 to 15.0 on an M series laptop. That is between sixteen and twenty two percent, and the spread is what you would expect, since the work removed is memory bandwidth and the machine with the most of it gains the least.
 
 This is a step toward what the engine actually needs, which is a selection vector, and not a substitute for it. Not writing a dead column is worth less than not writing a live one that the next operator is going to filter again, and that is the larger change.
+
 ### Added: three ways of naming a set of labels without writing them down
 
 `DataFrame.filter`, `DataFrame.select_dtypes` and `DataFrame.truncate`. They look like three unrelated methods and they are the same method three times: each computes a set of labels from a rule the caller described, and each then hands that set to the narrowing document 36 already built. None of the three has a kernel, and that is what having `loc` looks like from the far side.
@@ -48,6 +49,7 @@ The recurring theme across all four is the arena's creation order. Node indices 
 `firepanda/sql/plan.mojo` takes a parsed `SELECT` and gives back the same `Plan` the builder methods produce, bound by the same binder. The rule it works under is the one the spec has had from the start, that no plan node may have only a SQL constructor, and there is a test that compares the plan for `SELECT a FROM t WHERE b > 1` against the plan the three builder calls produce. If those ever stop matching then one of the front ends has quietly become a second engine.
 
 None of this moves a benchmark number yet, and it is worth being plain about why. The eager API does not call the optimizer, which is #376, and the executor cannot spend what subplan elimination found, because lowering walks a line of operators and a shared node is a fork. Both passes are still right and still worth having now: the day lowering grows an operator that can hand one chunk stream to two readers, the plans arriving at it already say where to put one.
+
 ### Added: a query can now write its own rows out
 
 `Values`, the tenth logical node, and the one that makes `SELECT 1` a plan rather than a special case. A plan had nothing that produces a row out of nothing, so a query with no `FROM` had no node to sit on and was refused by name at the lowering.
