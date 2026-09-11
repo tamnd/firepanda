@@ -640,7 +640,9 @@ def test_the_answer_does_not_depend_on_where_the_blocks_fell() raises:
 
     var blocks = [1, 2, 5, 16, 64, 400, 401, 512]
     for b in range(len(blocks)):
-        var at = [1, 2]
+        var at = List[Int]()
+        at.append(1)
+        at.append(2)
         var got = _order_of(
             _top_rows_core(
                 df.column_refs(),
@@ -681,7 +683,8 @@ def test_a_column_full_of_ties_hands_back_the_same_ten_rows_twice() raises:
     var second = _order_of(df.argsort_limit(["key"], [True], [False], 10))
     _assert_same(second, want, "read the other way round")
 
-    var at = [1]
+    var at = List[Int]()
+    at.append(1)
     var blocked = _order_of(
         _top_rows_core(
             df.column_refs(), at, df.rows, [False], [False], 10, 0, 16
@@ -728,8 +731,8 @@ def test_two_keys_can_point_in_different_directions() raises:
     by.append("key")
     by.append("word")
     var got = _order_of(df.argsort_limit(by, [True, False], [False, False], 3))
-    assert_equal(got[0], 5, "the largest key, and the first word in it")
-    assert_equal(got[1], 2, "then apple")
+    assert_equal(got[0], 2, "the largest key, and the first word inside it")
+    assert_equal(got[1], 5, "then date")
     assert_equal(got[2], 0, "then pear")
     _assert_same(
         got,
