@@ -33,6 +33,7 @@ from std.math import nan
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
+from firepanda.array.strings import StringArray, StringBuilder
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
 from firepanda.dtype.logical import LogicalType, TypeKind
@@ -44,7 +45,13 @@ from firepanda.hash.factorize import (
 )
 
 from .accum import accumulator
-from .agg import extreme_over, mean_over, sum_over
+from .agg import (
+    extreme_over,
+    mean_over,
+    sum_over,
+    text_edge_row,
+    text_extreme_row,
+)
 from .group import (
     AggKind,
     aggregate_group_any,
@@ -71,6 +78,63 @@ def _takes_fast_route(kind: AggKind) -> Bool:
         or kind == AggKind.COUNT
         or kind == AggKind.SIZE
     )
+
+
+def _reports_a_row(kind: AggKind) -> Bool:
+    """Reports whether this reduction answers with a value the column held.
+
+    Args:
+        kind: Which reduction.
+
+    Returns:
+        True for the four that pick a row rather than computing something out of
+        several of them.
+    """
+    return (
+        kind == AggKind.MIN
+        or kind == AggKind.MAX
+        or kind == AggKind.FIRST
+        or kind == AggKind.LAST
+    )
+
+
+def _reduce_text(col: StringArray, kind: AggKind) raises -> AnyArray:
+    """Reduces a text column to the one element the reduction names.
+
+    All four of these answer with a row of the column, so all four are the same
+    two steps: find the row, then copy that one element out. The finding is in
+    `agg.mojo` beside the numeric extremes, because it is the numeric extreme
+    with a row number where the accumulator used to be.
+
+    What this replaces is a trip through `aggregate_group_any` with a code per
+    row that is always zero. On the hits table that is four hundred megabytes of
+    codes allocated and zeroed so that a scan can read them and scatter into a
+    table of one entry, and ClickBench q21, q22 and q28 all ask for exactly this.
+
+    Args:
+        col: The column.
+        kind: One of MIN, MAX, FIRST or LAST.
+
+    Returns:
+        A text column of exactly one row, null if every input row was null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    var row: Int
+    if kind == AggKind.MIN:
+        row = text_extreme_row[want_min=True](col)
+    elif kind == AggKind.MAX:
+        row = text_extreme_row[want_min=False](col)
+    else:
+        row = text_edge_row(col, kind == AggKind.FIRST)
+
+    var builder = StringBuilder(capacity=1)
+    if row < 0:
+        builder.append_null()
+    else:
+        builder.append(col.unsafe_bytes(row))
+    return AnyArray(builder^.finish())
 
 
 def reduce_any(col: AnyArray, kind: AggKind) raises -> AnyArray:
@@ -111,6 +175,9 @@ def reduce_any(col: AnyArray, kind: AggKind) raises -> AnyArray:
 
     if col.type.is_temporal():
         return _reduce_temporal(col, kind)
+
+    if col.is_string() and _reports_a_row(kind):
+        return _reduce_text(col.strings(), kind)
 
     # As in `aggregate_group_any`: uint8 is in ALL, so a string column would
     # match it and a sum over a column of names would return a number taken from

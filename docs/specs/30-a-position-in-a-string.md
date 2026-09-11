@@ -58,6 +58,14 @@ One detail there is not about strings at all. The generated method runs every er
 
 That is a real cost and it is written down in the mixin next to the code that pays it. Each of the two becomes one column operation the day those exist, and moving them down then is better than writing two kernels now that nothing else would call. A tuple of patterns is also not the common case, and the common case never reaches either fold.
 
+## SQL asks the other question and gets the other answer
+
+`.str.len()` counts characters and `STRLEN` counts bytes, and both of those are correct because they are two different questions from two different callers. DuckDB spells them apart as well: `length('café')` is 4 and `strlen('café')` is 5. So there are two kernels and not one with a flag, `text_character_length` in `chars.mojo` and `text_byte_length` in `substr.mojo`, and each lives with the file whose unit it shares.
+
+They are a long way apart in cost, which is worth knowing before reaching for either. A byte length is four bytes out of every view and no indirection at all. A character length walks every byte of every element counting the ones that are not continuation bytes. On a million thirty two byte elements that is 254 microseconds against 3.3 milliseconds.
+
+ClickBench q27 and q28 are what asked for the byte one. Both average `STRLEN` over a column of real web addresses, which have percent encoding and non ASCII in them, so the two counts differ on real rows rather than only in principle: the averages over the real `URL` column are 88.56 bytes and 86.57 characters. Answering the character question there would be a wrong answer to a benchmark query and not a defensible variation.
+
 ## What is left
 
 Forty five names. They are not one more group, they are five or six, and each has an idea of its own that is worth landing on its own. Padding is a question about what a width means when a character is not a column. Case conversion is where Mojo's `String.lower()` on `İ` gives eight bytes and Python gives nine, which is a real divergence and needs a decision rather than a kernel. The ten `is` predicates need Unicode tables that the standard library does not expose. Splitting produces a column of lists, which is a type this library does not have. The regex methods are a dependency question before they are anything else.

@@ -1,4 +1,4 @@
-"""Cutting a byte range out of every element of a text column.
+"""The byte range of an element of a text column, cut out of it or measured.
 
 This is SQL's `substring` and it is what TPC-H q22 takes the first two characters
 of a phone number with. It cuts by bytes and not by code points, which is the
@@ -27,6 +27,12 @@ empty, and there is nothing to size.
 
 The same shape would work for `filter` and for `take`, and those two are hotter
 than this one. This file is the smallest place to get it right first.
+
+`text_byte_length` is here for the same reason the cut is: it answers a question
+about bytes. The character counting twin is `text_character_length` in
+`chars.mojo`, and that file exists because the `str` accessor asks every question
+in characters. The two are a real divergence and not an accident, and which one a
+caller gets depends on who is asking rather than on which was easier to write.
 """
 
 from std.collections.span import Span
@@ -45,6 +51,8 @@ from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer
 from firepanda.exec import parallel_morsels
 from firepanda.exec.morsel import MORSEL_ROWS
+
+from .mask import repair_range
 
 
 comptime TO_END = -1
@@ -175,3 +183,53 @@ def text_substring(
 
     payload.set_size(payload_bytes)
     return StringArray(views^, payload^, validity^, n)
+
+
+def text_byte_length(a: StringArray) raises -> Array[DType.int64]:
+    """How many bytes each element holds.
+
+    This is DuckDB's `strlen`, which ClickBench q27 and q28 average over `URL`
+    and `Referer`, and it is a read of a field rather than a pass over anything.
+    Every element's length is the first four bytes of its view, so the whole
+    kernel touches sixteen bytes a row in order and follows no pointer into the
+    payload. `text_character_length` in `chars.mojo` has to walk the bytes of
+    every element and this does not, which is why the two are a long way apart in
+    cost as well as in meaning.
+
+    Bytes and not characters, which is a real divergence from pandas'
+    `Series.str.len` and is deliberate. Bytes are what DuckDB computes, what the
+    rest of this library already means by a length, and what the reader that
+    filled the column can actually promise, since nothing here has ever claimed
+    the payload is valid UTF-8. The `str` accessor keeps the character counting
+    one because that is what a caller writing pandas asked for.
+
+    A null's length is null and not zero. `byte_length` answers zero for a null,
+    which is the right answer for a caller sizing a buffer and the wrong one
+    here, so the validity comes across and the repair at the end of each morsel
+    clears those rows. An empty string is a length of zero and is present, and
+    that is the pair worth keeping straight on the hits table, where the missing
+    text is spelled as an empty string.
+
+    Args:
+        a: The column.
+
+    Returns:
+        An int64 column, null wherever the input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    var n = len(a)
+    var out = Array[DType.int64](overwritten=n)
+    var validity = Bitmap(copy=a.validity)
+
+    def measure(start: Int, stop: Int) {mut out, imm}:
+        var dst = out.unsafe_mut_ptr()
+        for i in range(start, stop):
+            dst.unsafe_offset(i).unsafe_write(Int64(a.byte_length(i)))
+        repair_range(out, validity, start, stop)
+
+    parallel_morsels(measure, n)
+
+    out.data.validity = validity^
+    return out^

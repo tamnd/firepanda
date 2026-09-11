@@ -20,6 +20,30 @@ Rows come out in the order the first of each was seen, which is what DuckDB give
 
 Part of #309.
 
+### Added: how long a string is, in bytes
+
+`text_byte_length` in `firepanda/kernel/substr.mojo`. This is DuckDB's `STRLEN` and ClickBench q27 and q28 average it over `URL` and `Referer`. It is a read of a field rather than a pass over anything, because every element's length is already the first four bytes of its view, so the kernel touches sixteen bytes a row in order and never follows a pointer into the payload.
+
+Bytes and not characters, which is a real divergence from pandas' `Series.str.len` and is the point. DuckDB spells the two apart as well: `length('café')` is 4 and `strlen('café')` is 5. So there are two kernels rather than one with a flag, and `text_character_length` in `chars.mojo` keeps answering the `str` accessor. The two are a long way apart in cost as well as in meaning, 254 microseconds against 3.3 milliseconds over a million thirty two byte elements, because one reads a view and the other walks every byte looking for continuation bytes. Written up in document 30.
+
+The `URL` column is real web addresses with percent encoding and non ASCII in them, so the two counts differ on real rows and not only in principle. The averages over it are 88.56 bytes and 86.57 characters.
+
+A null's length is null and not zero, even though `StringArray.byte_length` answers zero for a null, which is the right answer for a caller sizing a buffer and the wrong one for a column. An empty string is a length of zero and is present. That pair has a test, because the hits table spells its missing text as an empty string.
+
+Part of #480.
+
+### Changed: the smallest string in a column stopped going through the group by
+
+`reduce_any` was answering MIN, MAX, FIRST and LAST over a text column by handing it to the grouped kernel with a code per row that is always zero. On the hits table that is four hundred megabytes of codes allocated and zeroed so a scan can read them and scatter into a table of one entry, and ClickBench q21, q22 and q28 all ask for exactly this.
+
+`text_extreme_row` and `text_edge_row` are in `firepanda/kernel/agg.mojo` now, beside the numeric extremes, because a text extreme is the numeric extreme with a row number where the accumulator used to be. A number is its own accumulator and a string is not: keeping the smallest element seen so far as a `String` copies bytes every time a smaller one turns up, which on a sorted column is a copy per row. A row number is eight bytes whatever the element is, nothing moves while the scan runs, and the caller gathers once at the end. That is the same choice `aggregate_group_strings` already made for the grouped form, and the two agree by construction because both settle a comparison with `StringArray.compare_elements`.
+
+Past one morsel it runs on every core, in the shape `extreme_over` uses: a row number per morsel and a serial merge over the slots. `text_edge_row` stays serial because it stops at the first row it finds.
+
+Over a million thirty two byte elements on a ten core laptop, a minimum went from 1.912 milliseconds through the group by to 1.151. That is well short of the core count because the elements of that column share a prefix, so every comparison has to read the payload and the loop is bound by memory rather than by comparisons. The same reduction over a column whose prefixes differ, where almost every comparison ends inside the view, is 225 microseconds. Both are in the benchmark table, and `text/min_grouped` measures the old route beside them the way `kernel/sum_twin` does.
+
+Part of #480.
+
 ## [0.6.61] - 2026-09-11
 
 Built against Mojo 1.0.0 (ed45d567).
