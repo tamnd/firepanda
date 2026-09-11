@@ -1404,6 +1404,87 @@ def test_a_null_key_matches_nothing_on_either_side() raises:
     assert_equal(values[1], Int64(4), "the second")
 
 
+def test_a_join_told_its_columns_by_position_renames_nothing() raises:
+    """Both frames call their key `n`, so left to itself the node drops the
+    right one, which moves every column a caller had numbered. Asked for the two
+    schemas end to end it writes them out as they are."""
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(
+        Node(
+            Join(
+                lookup_frame(),
+                "n",
+                "n",
+                JoinKind.INNER,
+                "_right",
+                List[String](),
+                [0, 1, 2, 3],
+            )
+        )
+    )
+    assert_equal(len(pipeline.schema), 4, "both keys survived")
+    assert_equal(pipeline.schema[0].name, "n", "the probe side's")
+    assert_equal(pipeline.schema[1].name, "keep")
+    assert_equal(pipeline.schema[2].name, "n", "the build side's, unrenamed")
+    assert_equal(pipeline.schema[3].name, "tag")
+    var out = pipeline^.run()
+    assert_equal(len(out), 3, "the three keys that matched")
+
+
+def test_a_join_told_where_its_key_is_does_not_go_by_name() raises:
+    """A name finds the first column that has it, and the caller here means the
+    second. Both are called `n` and they hold different numbers, so a join that
+    looked the name up would pair the wrong rows rather than fail."""
+    var columns = List[AnyArray]()
+    columns.append(numbers([1, 2, 3, 4, 5, 6]))
+    columns.append(numbers([2, 4, 6, 8, 10, 12]))
+    var fields = List[Field]()
+    fields.append(Field("n", LogicalType.INT64))
+    fields.append(Field("n", LogicalType.INT64))
+    var pipeline = Pipeline(DataFrame(Schema(fields^), columns^))
+    pipeline.add(
+        Node(
+            Join(
+                lookup_frame(),
+                "n",
+                "n",
+                JoinKind.INNER,
+                "_right",
+                List[String](),
+                [0],
+                1,
+                0,
+            )
+        )
+    )
+    # All four keys match against the second column and only three match
+    # against the first, so the count alone says which one it read.
+    var values = joined_rows(pipeline^)
+    assert_equal(len(values), 4, "the second column matched every key")
+    assert_equal(values[0], Int64(1), "and these are the rows it was")
+    assert_equal(values[1], Int64(2))
+    assert_equal(values[2], Int64(3))
+    assert_equal(values[3], Int64(4))
+
+
+def test_a_join_asked_for_a_column_neither_side_has_says_so() raises:
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="the two sides have 4 between them"):
+        pipeline.add(
+            Node(
+                Join(
+                    lookup_frame(),
+                    "n",
+                    "n",
+                    JoinKind.INNER,
+                    "_right",
+                    List[String](),
+                    [0, 9],
+                )
+            )
+        )
+
+
 def test_an_outer_join_in_a_pipeline_is_refused() raises:
     """It has to emit right rows nothing matched, which is not known until the
     last chunk, so it is a breaker wearing this node's clothes."""

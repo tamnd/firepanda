@@ -205,10 +205,10 @@ def run(mut plan: Plan, root: Int) raises -> DataFrame:
 def tiers() raises -> DataFrame:
     """Four bands and the rate each one charges.
 
-    The names are disjoint from the sales frame's on purpose. The probe operator
-    renames a right column whose name the left already has, which moves the
-    columns the plan's schema numbered, so a join over two frames that share a
-    name is refused and has a test of its own.
+    The names are disjoint from the sales frame's on purpose, so that a test
+    joining the two can write either side's columns without qualifying them.
+    Two frames that share a name are a case of their own and have a frame of
+    their own below.
     """
     var band = ChunkedArray(LogicalType.INT64)
     band.append(numbers([3, 20, 40, 99]))
@@ -220,6 +220,27 @@ def tiers() raises -> DataFrame:
     var fields = List[Field]()
     fields.append(Field("band", LogicalType.INT64))
     fields.append(Field("rate", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def echoes() raises -> DataFrame:
+    """Four rows whose column names are the sales frame's, both of them.
+
+    A join over this and the sales frame produces a schema with `qty` twice and
+    `price` twice, which is what a plan says a join produces and used to be more
+    than the operator could emit. One chunk, because the build side of a join is
+    hashed as one column and a build side of three chunks is #583.
+    """
+    var qty = ChunkedArray(LogicalType.INT64)
+    qty.append(numbers([3, 20, 40, 99]))
+    var price = ChunkedArray(LogicalType.INT64)
+    price.append(numbers([300, 200, 400, 900]))
+    var columns = List[ChunkedArray]()
+    columns.append(qty^)
+    columns.append(price^)
+    var fields = List[Field]()
+    fields.append(Field("qty", LogicalType.INT64))
+    fields.append(Field("price", LogicalType.INT64))
     return DataFrame(Schema(fields^), columns^)
 
 
@@ -1694,10 +1715,13 @@ def test_a_computed_key_is_refused_by_name() raises:
         _ = lower(plan, root, two_frames())
 
 
-def test_a_name_both_sides_have_is_refused_by_name() raises:
+def test_a_name_both_sides_have_comes_back_twice() raises:
+    # A join binds to the two schemas end to end, names and all, and the
+    # operator is told that by position rather than left to work it out from
+    # names it has two of. This used to be refused.
     var plan = Plan()
     var left = plan.scan("sales", List[String](), 0)
-    var right = plan.scan("sales", List[String](), 1)
+    var right = plan.scan("echoes", List[String](), 1)
     var root = plan.join(
         left,
         right,
@@ -1707,13 +1731,19 @@ def test_a_name_both_sides_have_is_refused_by_name() raises:
     )
     var schemas = List[Schema]()
     schemas.append(Schema(copy=sales().schema))
-    schemas.append(Schema(copy=sales().schema))
-    _ = bind(plan, root, schemas)
+    schemas.append(Schema(copy=echoes().schema))
+    var bound = bind(plan, root, schemas)
     var frames = List[DataFrame]()
     frames.append(sales())
-    frames.append(sales())
-    with assert_raises(contains="both sides of this join have a column"):
-        _ = lower(plan, root, frames^)
+    frames.append(echoes())
+    var out = lower(plan, root, frames^).run()
+    assert_equal(len(out.schema), 4, "qty and price from each side")
+    assert_equal(out.schema[0].name, "qty")
+    assert_equal(out.schema[1].name, "price")
+    assert_equal(out.schema[2].name, "qty", "the right one, unrenamed")
+    assert_equal(out.schema[3].name, "price", "and this one too")
+    assert_equal(len(bound), 4, "which is what the plan bound to")
+    assert_equal(len(out), 3, "three quantities are in both")
 
 
 def test_two_scans_of_one_relation_say_so() raises:
