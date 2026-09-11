@@ -76,6 +76,15 @@ Every signature in it was read off DuckDB rather than written down from what a
 function ought to do, which is why `sum` over a boolean gives back a `HUGEINT`
 and `length` accepts a `BIT`.
 
+`casts.mojo` is what an implicit cast costs, which is the other half of what a
+name's overloads are for. DuckDB publishes no such table, so
+`tools/gen_casts.py` solves one out of the choices DuckDB makes over a couple
+of thousand calls and checks it by replaying every one of them.
+
+`resolve.mojo` is the scoring itself: the cheapest candidate wins, an argument
+already of the right type is free, and a call with no cheapest candidate is
+refused in DuckDB's own words rather than decided.
+
 `unsupported.mojo` is the line between what the grammar accepts and what
 firepanda runs. Every refusal is an entry in its table rather than a `raise`
 written where the cases ran out, which is what lets `sql_support()` list the
@@ -123,6 +132,7 @@ from .classify import (
 )
 from .bind import Binding, Reference, Scope, Scopes
 from .cast import cannot_mix, common_type
+from .casts import Casts
 from .catalog import Catalog, View
 from .cte import (
     NOT_A_CTE,
@@ -138,6 +148,7 @@ from .cte import (
     read_ctes,
     reference_count,
 )
+from .generated.casts import ANY_COST, NO_CAST
 from .generated.functions import (
     DUCKDB_VERSION,
     KIND_AGGREGATE,
@@ -162,6 +173,14 @@ from .registry import (
     ROLE_UNKNOWN,
     Overload,
     Registry,
+)
+from .resolve import (
+    NO_MATCH,
+    TEMPLATE_COST,
+    Resolution,
+    ambiguity,
+    resolve,
+    score,
 )
 from .star import (
     NOT_REPLACED,

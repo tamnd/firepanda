@@ -412,6 +412,14 @@ jobs:
         run: pixi run check-functions
         timeout-minutes: 2
 
+      # The cast costs are measured off the same DuckDB and go stale in a worse
+      # way than the catalog does. A release that makes one more cast implicit
+      # changes which overload a call binds to without changing any signature,
+      # so the diff this step fails on is the only warning there would be.
+      - name: Generated cast table is current
+        run: pixi run check-casts
+        timeout-minutes: 2
+
       # DuckDB's test corpus is 33 MB and is fetched rather than vendored, so it
       # is cached on the commit the grammar is pinned to. A grammar bump changes
       # the key and the next run fetches the corpus that belongs to it.
