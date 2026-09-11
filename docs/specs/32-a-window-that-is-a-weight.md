@@ -48,13 +48,23 @@ Without it, a column of one value repeated does not come back as that value repe
 
 This is one of the few places in the library where a line exists because pandas has it rather than because the mathematics asks for it. It earns that because the behaviour it produces is the correct one and the version without it is not.
 
-## 6. Where the total differs from the mean, and the combination pandas refuses
+## 6. An infinity never leaves this window, and a cancelled one ends the recurrence
+
+Document 31 section 3 records that the last thing `pandas.core.window.rolling.BaseWindow._prep_values` does before handing a column to a kernel is replace every infinity in it with a missing value, under the comment `Convert inf to nan for C funcs`. `ExponentialMovingWindow` is a `BaseWindow`, so that happens here too, and an infinity in a pandas exponentially weighted window is a missing row.
+
+Here it is a value, which is the position the rolling side already took. What is different is that a rolling window eventually drops the row that carried the infinity and the answer recovers, and this window never drops a row. So a column with one infinity in it carries that infinity to the bottom, because the weighted average of an infinity and a finite number is that infinity however small its weight becomes.
+
+A column with one of each sign is the interesting case, because the fold reaches `inf` plus `-inf` and the carried value becomes a NaN. What happens next is pandas' rule rather than a decision made here. pandas' own kernel tests whether the recurrence has started by asking whether the carried value equals itself, which is a NaN test, and this copies that, so a carried NaN reads as nothing having arrived yet and the next value starts the recurrence again. The conflation is real and it is only reachable through an infinity, because a NaN in the data is read as a missing row before it ever reaches the fold. Keeping pandas' sentinel is also what makes the two engines agree again from the row after the cancellation, which is worth more than the alternative reading, where the answer would be a NaN for the rest of the column.
+
+Both shapes are visible on the conformance corpus and both are registered. Its `float64_no_nulls` frame holds a positive infinity in row one and a negative one in row two, they cancel immediately, and exactly one of its sixty four rows differs from pandas. Its `float64_half_null` frame has only the negative one in reach, so it is carried the rest of the way down and sixty two of the sixty four rows differ.
+
+## 7. Where the total differs from the mean, and the combination pandas refuses
 
 `sum` is the numerator of the mean on its own, undivided, so it is the same loop with the division taken out and `total` deciding which. The carried value grows with the weights rather than staying in the range of the data, which is what a total is.
 
 Under `adjust=False` there is no numerator to take, because the unadjusted form carries a mean directly and its weights are reset after every row. pandas does not invent an answer for that. It raises `NotImplementedError("sum is not implemented with adjust=False")`, and this raises the same class with the same sentence, from `EwmMixin._reduce` before anything is read. Choosing one of the two things such a total could mean would be the single place in this family where firepanda answers something pandas does not, and a caller relying on it would be relying on something that is not the pandas API.
 
-## 7. The variance carries two weight totals and a correction
+## 8. The variance carries two weight totals and a correction
 
 `var` and `std` are one reduction with two endings, which is the arrangement document 31 section 6 describes for the rolling side. The state is a weighted mean and a weighted second moment about that mean, folded together so that neither is computed from a sum of squares.
 
@@ -64,7 +74,7 @@ The denominator of that correction is zero while only one value has arrived, whi
 
 `bias` is the one parameter one of these reductions reads that the decay does not, which is why it crosses in the settings tuple rather than as an argument of its own. `mean` and `sum` send an empty tuple. That is the same mechanism `window.mojo` uses and the same reason: the tuple's length is decided by the reduction, so the length is checked before anything is read out of it, and a mismatch means the two halves of the library disagree about a reduction rather than that a caller made a mistake.
 
-## 8. The fused multiply-add in the pandas wheel
+## 9. The fused multiply-add in the pandas wheel
 
 Two of the Mojo tests were written against pandas' answers and failed, both of them by one unit in the last place, on row five of `ewm(span=5).mean()` over the rows nought through nine and on row nine of the same column with `halflife=3`. The recurrence was identical on both sides.
 
@@ -72,13 +82,13 @@ Three algebraic orderings of the fold were written in Python and measured, and n
 
 I did not reproduce it. A kernel whose specification is another kernel's choice of instruction is a kernel nobody can maintain, and the contraction is a property of how that wheel was built rather than of pandas' definition, so a different wheel on a different platform would need a different kernel. The tests carry a relative tolerance of `1e-15` instead, which is about four units in the last place, and both the kernel and the test module say why in their docstrings. Document 31 section 3 declined to reverse engineer pandas' reset rule for the same reason and registered the differences instead, and this is the same call made a second time.
 
-## 9. The flags that pandas reads for truth and this refuses
+## 10. The flags that pandas reads for truth and this refuses
 
 `ewm(adjust="no")`, `ewm(ignore_na="no")` and `var(bias="no")` are all accepted by pandas, and all three of those strings are truthy, so a caller who wrote any of them got the opposite of what they meant and no indication of it.
 
 All three are refused here, with `adjust must be a boolean` and the two like it. That follows the `center must be a boolean` and `pct must be a boolean` refusals the rolling side already has, so it is the position this library has already taken rather than a new one. It is a deliberate strictness and it is a divergence from pandas, and it is a candidate for the registry in `firepanda-compat` the day a conformance case exercises it.
 
-## 10. The Python surface, and the eighteen properties
+## 11. The Python surface, and the eighteen properties
 
 `ewm` is one method on `Series` and one on `DataFrame`, with the full pandas signature, and it answers an `ExponentialMovingWindow` named exactly that on both owners. `times` and `method="table"` are declared so that the signature accepts what pandas accepts, and both are refused by name, because document 07 says a name must not resolve and then silently ignore what it was told.
 
@@ -88,7 +98,7 @@ The frame form is the columns decayed one at a time and put back together, which
 
 The answer is always float64, for both owners and all four reductions, including from a column of whole numbers. A weighted mean of whole numbers is not a whole number.
 
-## 11. What is here and what is not
+## 12. What is here and what is not
 
 Here: `Series.ewm` and `DataFrame.ewm`, all four spellings of the decay, `min_periods`, `adjust`, `ignore_na`, and `mean`, `sum`, `var` and `std` with `bias`.
 

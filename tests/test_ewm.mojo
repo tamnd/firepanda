@@ -22,7 +22,7 @@ tolerance here is `1e-15` relative, which is about four units in the last place
 and tight enough that a genuinely wrong recurrence still fails.
 """
 
-from std.math import exp, isnan, log, nan
+from std.math import exp, inf, isinf, isnan, log, nan
 from std.testing import (
     TestSuite,
     assert_almost_equal,
@@ -467,6 +467,44 @@ def test_the_four_reductions_are_named_after_the_pandas_methods() raises:
     assert_true(EwmOp.MEAN != EwmOp.SUM)
     with assert_raises(contains="no exponentially weighted reduction"):
         _ = ewm_named("median")
+
+
+def test_an_infinity_is_carried_to_the_bottom_of_the_column() raises:
+    """This window never drops a row, so there is nothing to recover from.
+
+    A rolling window loses an infinity and gets the column back once the row
+    that carried it has left. Here every row stays in the window forever and its
+    weight only shrinks, so the weighted average of an infinity and a finite
+    number is that infinity however far down the column it is asked.
+    """
+    var values: List[Float64] = [1.0, inf[DType.float64](), 2.0, 3.0, 4.0]
+    var got = rows(column(values).ewm(EwmOp.MEAN, spec(0.3, True, False)))
+    assert_equal(got[0], 1.0)
+    assert_true(isinf(got[1]) and got[1] > 0.0)
+    assert_true(isinf(got[4]) and got[4] > 0.0)
+
+
+def test_a_cancelled_infinity_starts_the_recurrence_again() raises:
+    """The one place a NaN means two things, and it is pandas' sentinel.
+
+    Folding a positive infinity against a negative one gives a NaN, and the test
+    for whether the recurrence has started is whether the carried value equals
+    itself. So the row after the cancellation starts again from its own value,
+    which is what pandas' kernel would do if pandas let an infinity reach it.
+    The conflation is only reachable this way, because a NaN in the data is read
+    as a missing row before it ever reaches the fold.
+    """
+    var values: List[Float64] = [
+        inf[DType.float64](),
+        -inf[DType.float64](),
+        5.0,
+        7.0,
+    ]
+    var got = rows(column(values).ewm(EwmOp.MEAN, spec(0.3, True, False)))
+    assert_true(isinf(got[0]) and got[0] > 0.0)
+    assert_true(isnan(got[1]))
+    assert_equal(got[2], 5.0)
+    assert_near(got[3], (0.7 * 5.0 + 1.0 * 7.0) / 1.7)
 
 
 def main() raises:

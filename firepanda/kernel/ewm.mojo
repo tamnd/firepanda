@@ -84,6 +84,24 @@ the ten rows by one unit in the last place. It is a fact about a compiler and no
 about pandas, so this file does not chase it, and the gap is four orders of
 magnitude inside the tightest tolerance the conformance board applies.
 
+## An infinity never leaves this window
+
+pandas replaces every infinity in a column with a missing value before any
+window kernel sees it, which document 31 section 3 records and which applies
+here too, since `ExponentialMovingWindow` is a `BaseWindow`. Here an infinity is
+a value. The difference from the rolling side is that a rolling window
+eventually drops the row that carried it and recovers, and this one never drops
+a row, so an infinity is carried to the bottom of the column.
+
+One of each sign is the case worth naming. The fold reaches `inf` plus `-inf`,
+the carried value becomes a NaN, and the test at the top of the loop for whether
+the recurrence has started is `weighted == weighted`, which is pandas' own
+sentinel and is copied. So a cancelled infinity reads as nothing having arrived
+yet and the next value starts the recurrence again. The conflation is only
+reachable through an infinity, because a NaN in the data is turned into a
+missing row before it reaches the fold, and keeping the sentinel is what makes
+the two engines agree again from the row after the cancellation.
+
 ## The variance carries two weight totals and a correction
 
 `var` and `std` take a `bias` flag that none of the ten window spreads has, and

@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Documented: what an infinity does to an exponentially weighted window
+
+Arming the ten reachable `ewm` cases in the conformance suite turned up an answer the unit tests had not asked about, which is what happened with the category kernels in `docs/specs/29-a-category-that-survives-being-moved.md` and is what the second workstream is for. Nothing here is a behaviour change. The behaviour was right and undocumented, which is worse than it sounds, because the two shapes it takes are about to be registered as divergences and a registry entry that points at a section nobody wrote is not a reason.
+
+pandas replaces every infinity in a column with a missing value before any window kernel sees it, which section 3 of `docs/specs/31-a-window-is-a-pair-of-rows.md` already records and which applies here too, since `ExponentialMovingWindow` is a `BaseWindow`. Here an infinity is a value, and the difference from the rolling side is that a rolling window eventually drops the row that carried it and recovers, while this one never drops a row. So a column with one infinity in it carries that infinity to the bottom, because the weighted average of an infinity and a finite number is that infinity however small its weight has become.
+
+One of each sign is the case worth naming. The fold reaches a positive infinity plus a negative one, the carried value becomes a NaN, and the test at the top of the loop for whether the recurrence has started is whether the carried value equals itself. That is pandas' own sentinel and it is copied, so a cancelled infinity reads as nothing having arrived yet and the next value starts the recurrence again. The conflation is real and it is only reachable through an infinity, since a NaN in the data is turned into a missing row before it reaches the fold, and keeping the sentinel is what makes the two engines agree again from the row after the cancellation rather than answering NaN for the rest of the column.
+
+Both shapes are visible on the conformance corpus and both are about to be registered. Its float64 frame holds a positive infinity in row one and a negative one in row two, they cancel immediately, and exactly one of its sixty four rows differs from pandas. Its half null frame has only the negative one in reach, so it is carried the rest of the way down and sixty two of the sixty four rows differ.
+
+Section 6 of `docs/specs/32-a-window-that-is-a-weight.md` is new, the kernel's module docstring gains the same thing shorter, and two tests in `tests/test_ewm.mojo` pin both shapes so that the sentinel cannot be tidied away by somebody who reads it as a bug.
+
+Part of #161, after #492.
+
 ### Added: the exponentially weighted window, which is a weight rather than a pair of rows
 
 `ewm` is pandas' third window type and the last of the three to arrive here. `docs/specs/31-a-window-is-a-pair-of-rows.md` says in its first paragraph that what `rolling` and `expanding` are for is deciding which rows go together, and that is exactly what an exponentially weighted window does not do. Every row before this one is in the window and the ones further back weigh less. There is no width, no centring, no closed rule, no step and no clipping, which is four of the five parameters that document spends its first section on and the whole of `Shape.edges`. So this is a second kernel in `firepanda/kernel/ewm.mojo` rather than a third window shape in the first one, and `docs/specs/32-a-window-that-is-a-weight.md` is why.
