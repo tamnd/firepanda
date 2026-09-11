@@ -790,6 +790,36 @@ struct PyDataFrame(Movable, Writable):
             raise retagged(UNSUPPORTED, cause)
 
     @staticmethod
+    def reindex_like(
+        py_self: PythonObject, other: PythonObject
+    ) raises -> PythonObject:
+        """Puts the frame on another frame's labels and column names.
+
+        Both axes at once, with the labels read off the other frame rather than
+        written out by the caller, and the name of that frame's index coming
+        across with them, which is the reason this is one call rather than the
+        two it is made of.
+
+        Args:
+            py_self: The frame.
+            other: The frame whose shape to take.
+
+        Returns:
+            A new frame with `other`'s labels and `other`'s columns.
+        """
+        var shape = Self._other(other, "other")
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        Self._frame(py_self)[].frame[].reindex_like(shape[])
+                    )
+                )
+            )
+        except cause:
+            raise reindex_refusal(cause)
+
+    @staticmethod
     def reduce(
         py_self: PythonObject, kind: PythonObject, param: PythonObject
     ) raises -> PythonObject:

@@ -290,6 +290,40 @@ struct PySeries(Movable, Writable):
             raise reindex_refusal(cause)
 
     @staticmethod
+    def reindex_like(
+        py_self: PythonObject, index: PythonObject
+    ) raises -> PythonObject:
+        """Puts the series on the labels another thing is labelled by.
+
+        The labels arrive as an index rather than as a sequence, which is the
+        whole difference from `reindex` above: an index knows what it is called
+        and a list of labels does not, and coming back named the way the other
+        thing is named is what a caller asked for. The Python layer is what
+        takes the index off a frame or a series before calling this, since both
+        of those have one and pandas accepts either.
+
+        Args:
+            py_self: The series.
+            index: The index whose labels and name to take.
+
+        Returns:
+            A new series on those labels.
+        """
+        var shape = PyIndex._other(index, "other")
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        Self._held(py_self)[]
+                        .series[]
+                        .reindex(Index(copy=shape[]))
+                    )
+                )
+            )
+        except cause:
+            raise reindex_refusal(cause)
+
+    @staticmethod
     def labels(py_self: PythonObject) raises -> PythonObject:
         """Hands out the row labels, as an index.
 

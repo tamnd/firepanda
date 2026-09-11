@@ -1,6 +1,6 @@
 # 40. A label the frame does not have
 
-Status: implemented. Three methods under one name, on the frame, on the series and on the index, of which the last is the lookup the other two are built on, handed back in the open. One new kernel function that three older private helpers should have been, and one rule about types that is pandas' rather than the gather's.
+Status: implemented. Three methods under one name, on the frame, on the series and on the index, of which the last is the lookup the other two are built on, handed back in the open, plus `reindex_like` on the first two. One new kernel function that three older private helpers should have been, and one rule about types that is pandas' rather than the gather's.
 
 ## 1. Two operations under one name
 
@@ -101,3 +101,13 @@ The name rule was measured rather than reasoned about, and it is not what the re
 This is the one method here that the binding generator could not write. It returns a pair, and the generator's return vocabulary has no way to say a tuple of an index and an optional list, so the extension hands back a Python list of two and the Python layer turns it into a tuple. That is the same shape `get_indexer` already has, where the extension answers a list and pandas answers a numpy array, and it keeps the awkwardness on the Python side of the boundary where it is cheap to read.
 
 `limit` and `tolerance` are refused here rather than given pandas' sentence about pad and backfill, which is a deliberate difference from section 6. On the frame those two are pandas' own error for a real mistake the caller made. Here there is no filling written at all, so the honest answer is that the parameter is not implemented, and saying it is only valid with a method the library does not have would be answering a question about a feature that does not exist.
+
+## 11. Reading the labels off something else
+
+`reindex_like` is `reindex` with the labels taken from another object rather than written out, and the interesting question about it is why it is a method at all rather than a line at the call site.
+
+The answer is the index name. `df.reindex(index=list(other.index))` gives the right rows in the right order and gives them back under the name `df`'s index already had, which is not what asking for another frame's shape means: the point is to come back labelled the way that frame is labelled so that the two can be compared, joined or stacked. A set of labels has nobody to name it and an index does, so the core's `reindex` grew a second overload that takes an `Index` and keeps its name, and the overload that takes a bare set of labels is now one line that builds an index out of them under this frame's own name and calls the other. That is the whole of the change in the core, and it is the same rule section 10 records for `Index.reindex`, which is that the name belongs to whoever was in a position to say what it was.
+
+The frame's version does both axes and the series' version does one, which is where the two disagree about what they will take. A frame needs column names as well as labels, so it needs another frame, and pandas refuses a series there with a sentence about there being no axis named columns on one. A series needs only labels, so a frame is as good a source as a series, and both are accepted. That asymmetry looks like an oversight in pandas and is not: it falls out of how many axes each side has.
+
+There is no `fill_value` here, because pandas does not offer one, so the widening rule from section 3 has nothing to stop it and a column that gains a row comes back as float64. `method`, `limit` and `tolerance` are answered exactly as they are on `reindex`, through the one helper all four paths now share, which exists because the same three refusals written out four times is three chances to reword one of them by accident.

@@ -1078,7 +1078,35 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                 looked up against this index's own, or if the fill value is text
                 and a column is not or the other way round.
         """
-        var target = Index(AnyArray(copy=labels), self.index.name.copy())
+        return self.reindex(
+            Index(AnyArray(copy=labels), self.index.name.copy()), fill_value
+        )
+
+    def reindex(
+        self, var target: Index, fill_value: Optional[Value] = None
+    ) raises -> Self:
+        """Returns the frame on an index, whether it has those labels or not.
+
+        The same operation as the overload above with the name already settled.
+        A bare set of labels has nobody to name it, so that overload gives the
+        answer the name this frame's index had, and a caller holding a whole
+        index is saying what the answer should be called as well as which rows
+        it should have. `reindex_like` is the caller that needs the difference,
+        since coming back labelled the way the other frame is labelled is the
+        whole of what it does.
+
+        Args:
+            target: The index the result should have.
+            fill_value: What to put in a row whose label was not found, or
+                nothing to leave it missing.
+
+        Returns:
+            A frame of `len(target)` rows carrying those labels.
+
+        Raises:
+            Error: For the reasons the overload above raises.
+        """
+        var labels = target.materialize()
         if len(labels) == 0:
             # The lookup is skipped rather than run over nothing, because a list
             # with no values in it has no type in it either, and asking an int64
@@ -1238,6 +1266,38 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                     )
                 )
         return self._rebuilt(wanted^, Index(copy=self.index))
+
+    def reindex_like(self, other: Self) raises -> Self:
+        """Returns the frame shaped the way another frame is shaped.
+
+        Both axes of `reindex` with the labels read off a frame instead of
+        written out, which is all this is, and it is worth having as a method
+        rather than as two calls at the boundary because of the third thing it
+        carries: the name of the other frame's index. A caller who took the
+        labels out and handed them over as a bare set would lose that name, and
+        the whole point of asking for another frame's shape is to come back
+        labelled the way that frame is labelled.
+
+        The columns are done before the rows for the reason the boundary does
+        them in that order, which is that narrowing the frame first means the
+        gather moves less. There is no fill value, because pandas does not offer
+        one here: a row or a column the other frame has and this one does not
+        comes back missing.
+
+        Args:
+            other: The frame whose labels and column names to take.
+
+        Returns:
+            A frame with `other`'s row labels and `other`'s columns, carrying
+            this frame's values wherever the two agree.
+
+        Raises:
+            Error: For the reasons `reindex` raises, and if `other` holds a
+                column name twice.
+        """
+        return self.reindex_columns(other.names()).reindex(
+            Index(copy=other.index)
+        )
 
     def sort_index(self, ascending: Bool = True) raises -> Self:
         """Returns the frame in the order of its row labels.

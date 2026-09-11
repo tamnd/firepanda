@@ -125,6 +125,10 @@ def register(mut module: PythonModuleBuilder) raises:
         "reindex_columns",
         docstring="The frame under a set of column names, in that order.",
     )
+    _ = dataframe.def_method[PyDataFrame.reindex_like](
+        "reindex_like",
+        docstring="The frame on another frame's labels and column names.",
+    )
     _ = dataframe.def_method[PyDataFrame.reduce](
         "reduce",
         docstring="Every column reduced to one value, as a series of them.",
@@ -213,6 +217,10 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = series.def_method[PySeries.reindex](
         "reindex",
         docstring="The series on a set of labels, whether it has them or not.",
+    )
+    _ = series.def_method[PySeries.reindex_like](
+        "reindex_like",
+        docstring="The series on the labels an index carries, under its name.",
     )
     _ = series.def_method[PySeries.to_list](
         "to_list", docstring="Every value, copied into a Python list."

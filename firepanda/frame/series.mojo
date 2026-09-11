@@ -446,7 +446,34 @@ struct Series(Copyable, Movable, Sized, Writable):
                 be looked up against the index's own, or if the fill value is
                 text and the column is not or the other way round.
         """
-        var target = Index(AnyArray(copy=labels), self.index.name.copy())
+        return self.reindex(
+            Index(AnyArray(copy=labels), self.index.name.copy()), fill_value
+        )
+
+    def reindex(
+        self, var target: Index, fill_value: Optional[Value] = None
+    ) raises -> Self:
+        """Returns the series on an index, whether it has those labels or not.
+
+        The same operation as the overload above with the name already decided.
+        A bare set of labels has nobody to name it, so that one gives the result
+        the name this series' index had, and a caller who has a whole index in
+        hand is saying which name the answer should carry as well as which
+        labels. `reindex_like` is the caller that needs this, since the point of
+        it is to come back labelled the way the other frame is labelled.
+
+        Args:
+            target: The index the result should have.
+            fill_value: What to put in a row whose label was not found, or
+                nothing to leave it missing.
+
+        Returns:
+            A series of `len(target)` rows carrying those labels.
+
+        Raises:
+            Error: For the reasons the overload above raises.
+        """
+        var labels = target.materialize()
         if len(labels) == 0:
             # Short circuited for the reason `DataFrame.reindex` gives: a list
             # with no values in it has no type in it either, and the lookup
