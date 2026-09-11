@@ -105,6 +105,19 @@ only has to get the first n rows right is a different operator with a heap in it
 and the limit that wrote the bound down is still sitting above the sort and still
 doing the cutting, so ignoring it is slow rather than wrong.
 
+### A literal table is a frame this file builds
+
+A scan says which frame to read and a VALUES says what the rows are, so the one
+is found and the other is made. Making it is the only place lowering allocates
+an array, and it costs nothing at run time because the rows were known before
+the query started. `SELECT 1 + 1` is that: a query with no `FROM` is a literal
+table of one row that exists only so the projection above it has something to
+be evaluated over.
+
+Every value has to be a literal by then. Constant folding has already run, so
+`VALUES (1 + 1)` is one, and anything left computed is refused by name rather
+than evaluated, because there is no chunk under a VALUES to evaluate it over.
+
 ### A distinct is a group by that reduces nothing
 
 A group by holds one row per group and the rows of a group differ only in what
@@ -135,8 +148,14 @@ change with a query that starts working attached to it. That is the same
 argument `Materialize` makes for the physical layer, one level up.
 """
 
+from firepanda.array.any import AnyArray
+from firepanda.array.array import Array
+from firepanda.array.chunked import ChunkedArray
+from firepanda.array.strings import StringBuilder
 from firepanda.array.value import Value
-from firepanda.dtype.schema import Schema
+from firepanda.dtype.lists import ALL
+from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.schema import Field, Schema
 from firepanda.exec.node import (
     Cast,
     Compute,
@@ -183,7 +202,10 @@ def _spine(plan: Plan, root: Int) raises -> List[Int]:
     var at = root
     while True:
         upwards.append(at)
-        if plan.nodes[at].kind == NodeKind.SCAN:
+        if (
+            plan.nodes[at].kind == NodeKind.SCAN
+            or plan.nodes[at].kind == NodeKind.VALUES
+        ):
             break
         if len(plan.nodes[at].inputs) == 0:
             raise Error(
@@ -866,6 +888,141 @@ def _take(
         )
 
 
+def _column(values: List[Value], type: LogicalType) raises -> AnyArray:
+    """Builds a column out of the values a VALUES node wrote down.
+
+    This is the one place in lowering that makes an array rather than arranging
+    for one to be made, and it is why a literal table costs nothing at run time:
+    the rows are known before the query starts, so they are a frame before the
+    query starts.
+
+    Args:
+        values: One value per row, in row order.
+        type: The type binding gave the column.
+
+    Returns:
+        The column.
+
+    Raises:
+        Error: If the type is one there is no way to write a value of down,
+            which is the nested ones and a dictionary.
+    """
+    if type == LogicalType.STRING:
+        var text = StringBuilder(len(values))
+        for i in range(len(values)):
+            if values[i].is_null():
+                text.append_null()
+            else:
+                text.append(values[i].as_string().as_bytes())
+        return AnyArray(text^.finish())
+
+    if type.is_nested() or type.is_dictionary() or type.is_variable_width():
+        raise Error(
+            String(
+                "lower: a literal table of ",
+                type,
+                (
+                    " has no column to write it into, so this VALUES cannot be"
+                    " a frame"
+                ),
+            )
+        )
+
+    comptime for candidate in ALL:
+        if type.physical == candidate:
+            var col = Array[candidate](len(values))
+            for i in range(len(values)):
+                if values[i].is_null():
+                    col.set_null(i)
+                else:
+                    col.set_valid(i, values[i].as_scalar[candidate]())
+            var out = AnyArray(col^)
+            # A timestamp is an int64 count of units, so the array is the right
+            # array and only its label is wrong. Writing the bound type over it
+            # is what keeps `VALUES (DATE '2020-01-01')` a date.
+            out.type = type
+            return out^
+    raise Error(
+        String(
+            "lower: a literal table of ",
+            type,
+            " has no array behind it, so this VALUES cannot be a frame",
+        )
+    )
+
+
+def _literals(plan: Plan, at: Int) raises -> DataFrame:
+    """Turns a VALUES node into the frame a pipeline reads.
+
+    A VALUES is the one source that names no table. Its rows were written in
+    the query, so the frame is built here rather than found, and the pipeline
+    starts from it the same way it starts from a scan's frame.
+
+    Every value has to be a literal by the time this runs. A `VALUES (1 + 1)`
+    is one after constant folding, and one that is not folded is refused by
+    name rather than computed, because there is no chunk to compute it over and
+    an operator that made a column out of nothing is a bigger change than this.
+
+    Args:
+        plan: The plan, bound.
+        at: The values node.
+
+    Returns:
+        The frame the node stands for.
+
+    Raises:
+        Error: If a value is not a literal, if a column's rows do not agree on
+            a type, or if the type is one no column holds.
+    """
+    var width = plan.nodes[at].parts
+    var names = plan.nodes[at].names.copy()
+    var held = plan.nodes[at].exprs.copy()
+    var rows = len(held) // width
+
+    var columns = List[ChunkedArray](capacity=width)
+    var fields = List[Field](capacity=width)
+    for c in range(width):
+        var values = List[Value](capacity=rows)
+        var type = plan.exprs.nodes[held[c]].type
+        for r in range(rows):
+            var e = held[r * width + c]
+            if plan.exprs.nodes[e].kind != ExprKind.LITERAL:
+                raise Error(
+                    String(
+                        "lower: row ",
+                        r + 1,
+                        " of this literal table computes '",
+                        names[c],
+                        "' with a ",
+                        plan.exprs.nodes[e].kind,
+                        (
+                            " expression, and there is no chunk under a VALUES"
+                            " to compute it over"
+                        ),
+                    )
+                )
+            if plan.exprs.nodes[e].type != type:
+                raise Error(
+                    String(
+                        "lower: the column '",
+                        names[c],
+                        "' of this literal table is a ",
+                        type,
+                        " on its first row and a ",
+                        plan.exprs.nodes[e].type,
+                        " on row ",
+                        r + 1,
+                        ", and a column holds one type",
+                    )
+                )
+            values.append(plan.exprs.nodes[e].value.copy())
+        var chunk = ChunkedArray(type)
+        chunk.append(_column(values, type))
+        columns.append(chunk^)
+        fields.append(Field(names[c], type))
+    return DataFrame(Schema(fields^), columns^)
+
+
 def _lower_join(
     plan: Plan,
     at: Int,
@@ -1036,7 +1193,12 @@ def _lower_from(
     """
     var order = _spine(plan, root)
     var first = order[0]
-    var pipe = Pipeline(_take(frames, taken, plan, first))
+    var source: DataFrame
+    if plan.nodes[first].kind == NodeKind.VALUES:
+        source = _literals(plan, first)
+    else:
+        source = _take(frames, taken, plan, first)
+    var pipe = Pipeline(source^)
 
     for i in range(1, len(order)):
         var at = order[i]

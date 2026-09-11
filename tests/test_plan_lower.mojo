@@ -1396,5 +1396,68 @@ def test_two_scans_of_one_relation_say_so() raises:
         _ = lower(plan, root, one_frame())
 
 
+def test_a_literal_table_is_the_rows_it_names() raises:
+    var plan = Plan()
+    var root = plan.values(
+        [
+            plan.exprs.literal(Value(Int64(1))),
+            plan.exprs.literal(Value(Int64(2))),
+            plan.exprs.literal(Value(Int64(3))),
+            plan.exprs.literal(Value(Int64(4))),
+        ],
+        [String("a"), String("b")],
+    )
+    _ = bind(plan, root, List[Schema]())
+    var pipe = lower(plan, root, List[DataFrame]())
+    var out = pipe^.run()
+    same(read_back(out, "a"), [1, 3], "the first column")
+    same(read_back(out, "b"), [2, 4], "the second")
+
+
+def test_a_literal_table_can_be_filtered_and_projected() raises:
+    var plan = Plan()
+    var table = plan.values(
+        [
+            plan.exprs.literal(Value(Int64(1))),
+            plan.exprs.literal(Value(Int64(9))),
+            plan.exprs.literal(Value(Int64(2))),
+            plan.exprs.literal(Value(Int64(8))),
+            plan.exprs.literal(Value(Int64(3))),
+            plan.exprs.literal(Value(Int64(7))),
+        ],
+        [String("a"), String("b")],
+    )
+    var keep = plan.exprs.binary(
+        BinaryOp.GT,
+        plan.exprs.column("a"),
+        plan.exprs.literal(Value(Int64(1))),
+    )
+    var total = plan.exprs.binary(
+        BinaryOp.ADD, plan.exprs.column("a"), plan.exprs.column("b")
+    )
+    var root = plan.project(
+        plan.filter(table, keep), [total], [String("total")]
+    )
+    _ = bind(plan, root, List[Schema]())
+    var pipe = lower(plan, root, List[DataFrame]())
+    var out = pipe^.run()
+    same(read_back(out, "total"), [10, 10], "the sums of the rows kept")
+
+
+def test_a_literal_table_holds_a_missing_value() raises:
+    var plan = Plan()
+    var root = plan.values(
+        [
+            plan.exprs.literal(Value(Int64(1))),
+            plan.exprs.literal(Value(null=LogicalType.INT64)),
+        ],
+        [String("a")],
+    )
+    _ = bind(plan, root, List[Schema]())
+    var pipe = lower(plan, root, List[DataFrame]())
+    var out = pipe^.run()
+    valid(present(out, "a"), [True, False], "the second row is missing")
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

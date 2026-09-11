@@ -342,5 +342,31 @@ def test_a_distinct_on_part_of_the_row_is_refused_by_name() raises:
         _ = run("SELECT DISTINCT ON (shop) shop, qty FROM sales", session())
 
 
+def test_a_values_is_the_table_it_writes_out() raises:
+    # The rows are in the query rather than in the catalog, so this is the one
+    # statement that reads nothing at all.
+    var out = run("VALUES (1, 2), (3, 4)", session())
+    same(read_back(out, "col0"), [1, 3], "the first column")
+    same(read_back(out, "col1"), [2, 4], "the second")
+
+
+def test_a_values_folds_what_it_can_before_it_is_a_table() raises:
+    # A row of this table is written as an expression and the constant folding
+    # pass turns it into a value. Lowering refuses one that is still an
+    # expression, because there is no chunk under a VALUES to compute it over.
+    same(
+        read_back(run("VALUES (1 + 1), (10 * 2)", session()), "col0"),
+        [2, 20],
+        "the folded rows",
+    )
+
+
+def test_a_subquery_in_a_from_is_still_refused_by_name() raises:
+    # A VALUES is a table and a parenthesised one in a FROM is a derived table,
+    # which is a different thing and is not lowered yet.
+    with assert_raises(contains="does not lower a subquery in a FROM yet"):
+        _ = run("SELECT * FROM (VALUES (1, 2)) AS t", session())
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
