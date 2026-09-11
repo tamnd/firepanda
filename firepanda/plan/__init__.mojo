@@ -43,6 +43,11 @@ end up in different places. It is the one pass that rebuilds the node list rathe
 than rewriting it, because moving a filter down makes new parents for old
 children and the arena's order forbids that in place.
 
+`merge.mojo` folds a line of projections down to one, substituting the lower
+one's expressions into the upper one's so that the rows are walked once instead
+of once per node. It is the pass that pays for the two before it, since narrowing
+a node to the columns above it is done by putting a projection there.
+
 `lower.mojo` turns a bound plan into a `Pipeline` of physical operators, which
 is what makes any of the rest of it reachable from a running query. It lowers a
 line of scan, filter, projection and limit, and it raises by name on everything
@@ -56,6 +61,7 @@ does not change when they do.
 from .bind import Bound, bind, bind_all, bind_expr
 from .expr import UNBOUND, Expr, ExprKind, Expressions
 from .lower import lower
+from .merge import merge
 from .node import NO_LIMIT, NodeKind, Plan, PlanNode
 from .print import explain, render_expr
 from .push import push
