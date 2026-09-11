@@ -8,6 +8,28 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.71] - 2026-09-12
+
+Built against Mojo 1.0.0 (ed45d567).
+
+One change, to the thing every multi key group by goes through. A key that cannot be laid over a table used to cost a hash table of its own and the packed column another one on top, and now the whole tuple is hashed once and verified afterwards. The ClickBench queries that group on keys of that kind are between a third and two thirds faster.
+
+### Changed: a multi key group by hashes the tuple once rather than a table per key
+
+`group_ordinals` turns several key columns into one dense ordinal per row by composing `factorize`: one per key, a pass that packs the resulting ordinals together, and one more over that. It reuses the direct route, so three small integer columns hash once rather than three times, which is why it was written that way.
+
+The cost is on the keys the direct route cannot take. Those get a hash table each, and the packed column they feed gets another. ClickBench q35 groups a million rows by an address and by that same address minus one, minus two and minus three, and the composition spent 3.7 ms on the first key and about 7 more on each one after it, 24.7 ms and five hash tables to find sixty eight thousand groups.
+
+There is now a second route. Every key is folded into a running 64 bit hash a row at a time, which is a pass over the key and a pass over the hashes and no table at all, and the hashes are factorized once. The same four keys cost 6.6 ms, and a key costs a pass rather than a hash table, so the second key is no longer twice the price of the first.
+
+A tuple is wider than 64 bits, so unlike a single fixed width key its hash is a real hash and two tuples can land on the same value. `_key_agrees` walks each key column against the grouping afterwards and asks whether every row holds what the row that opened its group holds, which is the comparison `factorize_strings` already does on a hash match. A key that disagrees means a collision, and the route hands back nothing rather than an answer, the way `sorted_ordinals` does, and the composition runs instead. Nothing here is approximate.
+
+Text is declined. Folding a string key hashes every row's bytes and verifying it compares them back, which is the string factorize's own work, so fusing removes no hash table there and still pays for one over the packed hashes. That was measured the wrong way round first: q34 ran 2.6 times slower fused and q39 1.5 times slower, and `_fold_key` now raises rather than fold a string so a rule that ever lets one through is an error rather than a slow grouping.
+
+ClickBench at a million rows, seven runs each, against the same build with the route turned off: q35 34 ms to 12, q32 41 to 25, q31 7 to 5, q30 4 to 3. The queries the rule declines are flat, duckdb agrees on every one that moved, and the full 43 query run reports no disagreements. Without the parquet file, `group/ordinals_two_keys_hashed` and `group/ordinals_four_keys_hashed` were 18.7 ms and 37.6 ms and are 7.3 and 10.2.
+
+Part of #477.
+
 ## [0.6.70] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).
@@ -5851,7 +5873,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.70...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.71...HEAD
+[0.6.71]: https://github.com/tamnd/firepanda/releases/tag/v0.6.71
 [0.6.70]: https://github.com/tamnd/firepanda/releases/tag/v0.6.70
 [0.6.69]: https://github.com/tamnd/firepanda/releases/tag/v0.6.69
 [0.6.68]: https://github.com/tamnd/firepanda/releases/tag/v0.6.68
