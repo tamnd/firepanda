@@ -76,6 +76,24 @@ What is not here is the partitioned route. Past the point where a table per work
 
 Part of #480.
 
+### Added: an integer column can be called a clock without being rewritten
+
+`DataFrame.timestamps_from_integers`, which relabels named int64 columns as timestamps at a unit the caller picks. It is the sibling of `text_from_binary` and it is here for the same reason: the hits file stores `EventTime` as a plain int64, nothing in Parquet says those integers are seconds, and none of the date arithmetic in ClickBench means anything until somebody says so.
+
+The point of it is that it is a relabel. `numbers_to_timestamps` already turns integers into instants and it copies every row, which is right, because it is `pandas.to_datetime` and a caller who writes that is asking for a conversion. Here there is nothing to convert. A timestamp is laid out as int64 and the values already are the counts they claim to be, so the work is a new type on each chunk and no bytes read at all. Over a hundred and five columns it measures 137 microseconds against `text_from_binary`'s 129, ten runs on a ten core laptop, which is the frame copy in both cases and nothing else.
+
+Only int64 can be relabelled. `EventDate` in the hits file is a uint16 count of days, and asking for that one back as a timestamp is refused with a message saying to cast it first rather than quietly widened, because a widening is a copy and a method whose whole claim is that it does not copy should not do one behind the caller's back.
+
+### Added: the minute of an instant, checked against DuckDB on both sides of the epoch
+
+ClickBench q18 and q42 group a day of visits by the minute, one by truncating the instant and one by reading the minute number out of it, and both already worked. What was missing was anything holding down what they answer below the epoch, which is where the two plausible implementations disagree.
+
+`temporal_round` at `ROUND_DOWN` is SQL's `DATE_TRUNC`, and the docstring now says so. `DATE_TRUNC` floors rather than rounding towards zero, so the last second of 1969 truncates back into 1969 and not forward onto the epoch, and there is now a test asserting all twelve rows against what DuckDB actually answered. The minute field has its own test over sixteen rows either side of the epoch, and pandas and DuckDB agree with each other and with the kernel on every one of them.
+
+There is no leap second row in either test and there cannot be one. A Unix timestamp is a count of seconds that pretends every day has 86,400 of them, so 23:59:60 has no integer to be, and the boundary such a row would be probing is the minute boundary, which the rows around -60 and 0 already cover.
+
+`temporal/floor_minute` and `temporal/field_minute` are new microbenchmarks. Over a million rows on a ten core laptop, ten runs, the truncation runs at 918 million rows a second and the field at 484 million. The gap is the calendar: a minute is a fixed number of seconds, so truncating is two integer divisions, while pulling the minute out means getting from a count of seconds to a civil date first.
+
 ## [0.6.61] - 2026-09-11
 
 Built against Mojo 1.0.0 (ed45d567).

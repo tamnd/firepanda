@@ -1621,6 +1621,11 @@ def temporal_round(
     millisecond column to the hour answers milliseconds that happen to be whole
     hours.
 
+    It is also SQL's `DATE_TRUNC`, which is the same operation under a name from
+    the other tradition. `DATE_TRUNC` always floors, including below the epoch,
+    so it is `ROUND_DOWN` and never `ROUND_HALF_EVEN`: the last second of 1969
+    truncates back into 1969 rather than forward onto the epoch.
+
     Args:
         a: A naive timestamp column.
         freq: The frequency, as pandas spells it.

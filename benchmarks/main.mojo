@@ -71,6 +71,7 @@ from firepanda.dtype.dispatch import dispatch
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.dtype.lists import NUMERIC
+from firepanda.dtype.temporal import TimeUnit
 from firepanda.exec import Cast, Compute, Filter, Group, GroupAgg, Join
 from firepanda.exec import Limit, Materialize, Node, Pipeline, Project, Reduce
 from firepanda.exec.morsel import MORSEL_ROWS
@@ -116,6 +117,8 @@ from firepanda.join import JoinKind, join_indices
 from firepanda.frame.concat import concat
 from firepanda.kernel import (
     AggKind,
+    ROUND_DOWN,
+    TemporalField,
     add,
     aggregate_group_any,
     aggregate_group_strings,
@@ -162,6 +165,8 @@ from firepanda.kernel import (
     take_any,
     take_range,
     take_rows,
+    temporal_field,
+    temporal_round,
     text_contains,
     text_contains_in_order,
     text_ends_with,
@@ -1519,6 +1524,25 @@ def bench_frame(mut harness: Harness) raises:
         "frame/text_from_binary_105", "columns", 105, wide_text_from_binary
     )
 
+    # The same question for the clock columns. `EventTime` arrives from the hits
+    # file as a plain int64 and has to be called a timestamp before any of the
+    # date arithmetic in ClickBench means anything, and the two ways to do that
+    # are a long way apart in cost. Relabelling touches a type per chunk;
+    # `numbers_to_timestamps` reads and writes every row because it is
+    # `pandas.to_datetime` and has to be. This row and `frame/cast_one` together
+    # are what says the relabel stayed a relabel.
+    def wide_timestamps_from_integers() raises {imm wide, imm every}:
+        keep(wide.rows)
+        var out = wide.timestamps_from_integers(every, TimeUnit.SECOND)
+        keep(out.rows)
+
+    harness.record(
+        "frame/timestamps_from_integers_105",
+        "columns",
+        105,
+        wide_timestamps_from_integers,
+    )
+
     def frame_cast() raises {imm df}:
         keep(df.rows)
         var out = df.cast("key", DType.float64)
@@ -1766,14 +1790,14 @@ def bench_index(mut harness: Harness) raises:
     def union_disjoint() raises {imm materialized, imm shifted}:
         keep(materialized.length)
         var out = materialized.union(shifted)
-        keep(out.length)
+        keep(len(out))
 
     harness.record("index/union_disjoint", "rows", rows, union_disjoint)
 
     def union_equal() raises {imm materialized}:
         keep(materialized.length)
         var out = materialized.union(materialized)
-        keep(out.length)
+        keep(len(out))
 
     harness.record("index/union_equal", "rows", rows, union_equal)
 
@@ -3345,6 +3369,55 @@ def bench_dispatch(mut harness: Harness) raises:
         keep(total)
 
     harness.record("dispatch/sum_full_direct", "rows", rows, direct_sum)
+
+
+def bench_temporal(mut harness: Harness) raises:
+    """Times the two calendar operations ClickBench q18 and q42 are built on.
+
+    Both queries group a day of visits by the minute they happened in, one by
+    truncating the instant and one by pulling the minute number out of it, and
+    both then group ninety million rows by the answer. So the calendar work is
+    not the whole of either query, but it runs over every row and it runs before
+    anything else can start, and a slow one would sit in front of the group by
+    where nothing can hide it.
+
+    The two rows are deliberately next to each other because they are not the
+    same shape of work. A truncation is two integer divisions and no calendar at
+    all, since a minute is a fixed number of seconds. A field has to get from a
+    count of seconds to a civil date, which is where the real arithmetic is. The
+    gap between these two rows is the price of the calendar.
+
+    Args:
+        harness: The harness.
+
+    Raises:
+        If a benchmark raises.
+    """
+    var rows = harness.options.rows
+
+    # A day of seconds starting at the same instant the hits file starts at, so
+    # the values are the size the real ones are and every row lands in a
+    # different minute from its neighbours a minute away.
+    var stamps = Array[DType.int64](rows)
+    for i in range(rows):
+        stamps[i] = Int64(1372636800 + i % 86400)
+    var clock = AnyArray(
+        stamps^.into_data(), LogicalType.timestamp(TimeUnit.SECOND)
+    )
+
+    def round_to_minute() raises {imm clock}:
+        keep(clock)
+        var out = temporal_round(clock, "min", ROUND_DOWN)
+        keep(len(out))
+
+    harness.record("temporal/floor_minute", "rows", rows, round_to_minute)
+
+    def minute_field() raises {imm clock}:
+        keep(clock)
+        var out = temporal_field(clock, TemporalField.MINUTE)
+        keep(len(out))
+
+    harness.record("temporal/field_minute", "rows", rows, minute_field)
 
 
 def bench_group(mut harness: Harness) raises:
@@ -5570,6 +5643,7 @@ def main() raises:
     bench_csv(harness)
     bench_strings(harness)
     bench_text(harness)
+    bench_temporal(harness)
     bench_dispatch(harness)
     bench_arrow(harness)
     bench_sql(harness)
