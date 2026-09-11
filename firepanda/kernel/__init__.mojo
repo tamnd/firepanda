@@ -149,7 +149,7 @@ from .pick import (
     pick_constants,
     text_pick,
 )
-from .reduce import reduce_any
+from .reduce import distinct_count, distinct_count_any, reduce_any
 from .select import (
     filter_any,
     filter_range,

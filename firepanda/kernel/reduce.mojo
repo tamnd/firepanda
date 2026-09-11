@@ -36,6 +36,12 @@ from firepanda.array.array import Array
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
 from firepanda.dtype.logical import LogicalType, TypeKind
+from firepanda.hash.factorize import (
+    DIRECT_LIMIT,
+    direct_plan,
+    factorize,
+    factorize_strings,
+)
 
 from .accum import accumulator
 from .agg import extreme_over, mean_over, sum_over
@@ -98,6 +104,11 @@ def reduce_any(col: AnyArray, kind: AggKind) raises -> AnyArray:
         counted[0] = Int64(len(col) - missing_count_any(col))
         return AnyArray(counted^)
 
+    if kind == AggKind.NUNIQUE:
+        var distinct = Array[DType.int64](1)
+        distinct[0] = Int64(distinct_count_any(col))
+        return AnyArray(distinct^)
+
     if col.type.is_temporal():
         return _reduce_temporal(col, kind)
 
@@ -118,6 +129,137 @@ def reduce_any(col: AnyArray, kind: AggKind) raises -> AnyArray:
 
     var codes = Array[DType.uint32](len(col))
     return aggregate_group_any(col, kind, codes^, 1, trusted=True)
+
+
+comptime DISTINCT_SHARE = 8
+"""Slots per row of the widest bit set `distinct_count` will take.
+
+`factorize` accepts a direct table of a quarter of a slot per row, and says why
+in `DIRECT_SHARE`: a slot there is four bytes, so that bound is one byte a row,
+which is a quarter of what the ordinals it hands back already cost and cannot be
+a surprise in anybody's memory budget.
+
+A slot here is one bit, because counting distinct values only needs to know a
+value has been seen and never needs to name it. So eight slots a row is the same
+one byte a row, against a factorize that would have allocated four bytes a row of
+ordinals this count then throws away. The bound is the same promise in different
+units, and it lets the direct route cover thirty two times the range.
+"""
+
+
+def distinct_count_any(col: AnyArray) raises -> Int:
+    """Counts the distinct values in a column, skipping the nulls.
+
+    The whole column spelling of `nunique`. Asking the group by for it means
+    allocating a code per row, sorting a copy of every value into a slab and
+    walking the runs, which is `_nunique_core` doing exactly the right thing for
+    a question nobody asked: it is counting distinct values in each of a million
+    groups, and here there is one.
+
+    What is left when there is one group is a question the hash layer already
+    answers on the way past. A factorize hands out an ordinal per distinct value
+    and the number it handed out is the answer, so the count is the part of a
+    factorize that gets thrown away everywhere else. An integer column with a
+    bounded range does not need even that, because a bit per possible value is
+    smaller than an ordinal per row and a population count is the answer.
+
+    Nulls are not a value, which is pandas' rule for `nunique` and the rule the
+    grouped form here already follows. An empty string is a value. Those two
+    sentences are one line apart in the code and a dataset that spells its
+    missing text as an empty string, which the ClickBench hits table does, turns
+    the difference into a wrong answer rather than a debate.
+
+    Args:
+        col: The column.
+
+    Returns:
+        How many distinct non-null values it holds.
+
+    Raises:
+        If the dtype has no physical layout.
+    """
+    if len(col) == 0:
+        return 0
+    # Before the numeric dispatch, because uint8 is in ALL and a string column
+    # would match it and count distinct first bytes.
+    if col.is_string():
+        return len(factorize_strings(col.strings()).firsts)
+
+    comptime for candidate in ALL:
+        if col.dtype() == candidate:
+            return distinct_count(col.as_typed_view[candidate]())
+    raise Error("nunique: unsupported dtype")
+
+
+def distinct_count[dt: DType](col: Array[dt]) raises -> Int:
+    """Counts the distinct non-null values in a typed column.
+
+    Args:
+        col: The column.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        How many distinct non-null values it holds.
+
+    Raises:
+        If one of the workers the factorize starts cannot be run.
+    """
+    comptime if dt.is_integral():
+        var ceiling = len(col) * DISTINCT_SHARE
+        if ceiling < DIRECT_LIMIT:
+            ceiling = DIRECT_LIMIT
+        var plan = direct_plan[dt](col, ceiling)
+        if plan.span >= 0:
+            return _distinct_direct(col, plan.span, plan.base)
+    # `firsts` holds one row per non-null group and the null group is not in it,
+    # so its length is the count with the nulls already left out. `count()` is
+    # the one that includes them.
+    return len(factorize(col).firsts)
+
+
+def _distinct_direct[
+    dt: DType
+](col: Array[dt], span: Int, base: Scalar[dt]) raises -> Int:
+    """Counts distinct integers by setting a bit per value and counting them.
+
+    No table, no ordinals and no second pass over anything the size of the
+    column. What it costs is `span` bits, which `DISTINCT_SHARE` bounds at one
+    byte a row, and one random bit write per row, which is the same random
+    access the hash route was going to make anyway with a quarter of the
+    footprint and none of the probing.
+
+    It is serial. The parallel shape is a bit set per worker and an `or` at the
+    end, and it was not worth writing yet: the write is one instruction into a
+    region that fits in cache for every column this route accepts, so what bounds
+    the loop is reading the values, and reading them on more cores is a change to
+    make when a measurement asks for it.
+
+    Args:
+        col: The column.
+        span: How many slots the plan says the range needs.
+        base: The value that indexes slot zero, which is the column's minimum.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        How many distinct non-null values it holds.
+    """
+    var seen = Bitmap(span, all_valid=False)
+    var values = col.unsafe_ptr()
+    if col.null_count() == 0:
+        for i in range(len(col)):
+            seen.set(Int(values.unsafe_offset(i).unsafe_load() - base), True)
+    else:
+        ref validity = col.data.validity
+        for i in range(len(col)):
+            if validity.get(i):
+                seen.set(
+                    Int(values.unsafe_offset(i).unsafe_load() - base), True
+                )
+    return seen.count_ones()
 
 
 def _reduce_temporal(col: AnyArray, kind: AggKind) raises -> AnyArray:

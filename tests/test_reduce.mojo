@@ -39,7 +39,7 @@ from firepanda.frame.frame import DataFrame
 from firepanda.frame.groupby import AggSpec
 from firepanda.frame.series import Series
 from firepanda.kernel.group import AggKind
-from firepanda.kernel.reduce import reduce_any
+from firepanda.kernel.reduce import distinct_count_any, reduce_any
 
 
 def ints(values: List[Scalar[DType.int64]]) -> Array[DType.int64]:
@@ -222,6 +222,57 @@ def test_quantile_agrees_with_the_group_by() raises:
 
 def test_nunique_agrees_with_the_group_by() raises:
     agreed(AggKind.NUNIQUE)
+
+
+def test_a_distinct_count_leaves_the_nulls_out() raises:
+    # pandas' rule for `nunique`, and the rule the grouped form here already
+    # follows. Two of the eight rows are null and the other six are distinct.
+    assert_equal(distinct_count_any(AnyArray(sample())), 6)
+
+
+def test_an_empty_string_is_a_value_and_a_null_is_not() raises:
+    # One line apart in the code and a whole answer apart in a dataset that
+    # spells its missing text as an empty string, which the ClickBench hits table
+    # does on most of its text columns.
+    var col = strings_of(["a", "", "a", "b", ""])
+    assert_equal(distinct_count_any(AnyArray(col^)), 3)
+
+    var builder = StringBuilder(capacity=3)
+    builder.append(String("a").as_bytes())
+    builder.append_null()
+    builder.append(String("b").as_bytes())
+    assert_equal(distinct_count_any(AnyArray(builder^.finish())), 2)
+
+
+def test_the_two_integer_routes_agree() raises:
+    # The same values twice, once packed into a range a bit set can cover and
+    # once spread far enough that no bit set would be worth having. The route is
+    # chosen by the spread and the answer must not be.
+    var dense = Array[DType.int64](4096)
+    var sparse = Array[DType.int64](4096)
+    for i in range(4096):
+        dense[i] = Int64(i % 700)
+        sparse[i] = Int64(i % 700) * 1_000_000_007
+    assert_equal(distinct_count_any(AnyArray(dense^)), 700)
+    assert_equal(distinct_count_any(AnyArray(sparse^)), 700)
+
+
+def test_a_distinct_count_of_a_negative_range_counts_from_the_minimum() raises:
+    # The bit set indexes from the column's minimum rather than from zero, so a
+    # column that never holds a non-negative number still takes the cheap route.
+    var col = ints([-9, -4, -9, -1, -4])
+    assert_equal(distinct_count_any(AnyArray(col^)), 3)
+
+
+def test_a_distinct_count_of_nothing_is_zero() raises:
+    var empty = Array[DType.int64](0)
+    assert_equal(distinct_count_any(AnyArray(empty^)), 0)
+
+    var none = ints([5, 5, 5])
+    none.set_null(0)
+    none.set_null(1)
+    none.set_null(2)
+    assert_equal(distinct_count_any(AnyArray(none^)), 0)
 
 
 def test_a_float_column_agrees_too() raises:

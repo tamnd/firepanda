@@ -131,6 +131,7 @@ from firepanda.kernel import (
     concat_any,
     concat_arrays,
     concat_two_any,
+    distinct_count_any,
     divide,
     fill_forward,
     filter_any,
@@ -930,6 +931,72 @@ def bench_kernel(mut harness: Harness) raises:
         keep(avg.value)
 
     harness.record("kernel/mean_sparse", "rows", rows, mean_sparse)
+
+    # Eight of the 43 ClickBench queries count distinct values and two of them
+    # count over the whole column with nothing to group by. The three rows here
+    # are the three shapes that reach: a range a bit set can cover, a range no
+    # bit set would be worth having, and text. The first is most of the hits
+    # table, whose integer columns are mostly enumerations.
+    var nu_packed = AnyArray(Array[BENCH_DTYPE](copy=dense))
+    var nu_spread_col = Array[BENCH_DTYPE](rows)
+    for i in range(rows):
+        nu_spread_col[i] = Scalar[BENCH_DTYPE](i % 1000) * 1_000_000_007
+    var nu_spread = AnyArray(nu_spread_col^)
+
+    def nunique_packed() raises {imm nu_packed}:
+        keep(len(nu_packed))
+        var found = distinct_count_any(nu_packed)
+        keep(found)
+
+    harness.record("reduce/nunique_packed", "rows", rows, nunique_packed)
+
+    def nunique_scattered() raises {imm nu_spread}:
+        keep(len(nu_spread))
+        var found = distinct_count_any(nu_spread)
+        keep(found)
+
+    harness.record("reduce/nunique_scattered", "rows", rows, nunique_scattered)
+
+    var nu_holey = AnyArray(Array[BENCH_DTYPE](copy=sparse))
+
+    def nunique_holey() raises {imm nu_holey}:
+        keep(len(nu_holey))
+        var found = distinct_count_any(nu_holey)
+        keep(found)
+
+    harness.record("reduce/nunique_nulls", "rows", rows, nunique_holey)
+
+    # Text goes through the factorize whatever its range, since a string cannot
+    # index a table by being itself. `SearchPhrase` is the hits table's case and
+    # it is mostly empty, so the column here repeats a thousand members over a
+    # million rows rather than being nearly unique.
+    var nu_pool = _string_column(1000, 24, True)
+    var nu_phrases = StringBuilder(capacity=rows)
+    for i in range(rows):
+        nu_phrases.append(nu_pool.unsafe_bytes(i % 1000))
+    var nu_text = AnyArray(nu_phrases^.finish())
+
+    def nunique_text() raises {imm nu_text}:
+        keep(len(nu_text))
+        var found = distinct_count_any(nu_text)
+        keep(found)
+
+    harness.record("reduce/nunique_text", "rows", rows, nunique_text)
+
+    # The route a whole column distinct count took before it had one of its own,
+    # kept here for the same reason `kernel/sum_twin` is kept: it is the thing
+    # the fast path is claiming to beat, and a claim with nothing beside it is
+    # not a measurement. A code per row, a copy of every value sorted into a
+    # slab, and a walk of the runs, all to count the groups of a group by that
+    # has one group.
+    def nunique_grouped() raises {imm nu_packed}:
+        var codes = Array[DType.uint32](len(nu_packed))
+        var out = aggregate_group_any(
+            nu_packed, AggKind.NUNIQUE, codes^, 1, trusted=True
+        )
+        keep(out.as_typed[DType.int64]()[0])
+
+    harness.record("reduce/nunique_grouped", "rows", rows, nunique_grouped)
 
     # Everything above is int64 and none of it changed when the reductions
     # learned to step over a NaN, because only a float column can hold one and
