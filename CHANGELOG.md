@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: an index whose labels are instants
+
+`pandas.DatetimeIndex` is the fourth thing an ordinary pandas program holds, after a frame, a column and an index, and it is the first one here that is a kind of another one rather than a new thing. It is a Python subclass of `Index` and the core does not know it is here, because a column of instants is int64 underneath and an index over int64 already sorts, hashes, compares and searches by exactly the rules an index of instants wants. Every set operation, every lookup and every slice bound on it is the flat index's own behaviour, correct without having been told about the calendar.
+
+The calendar is the `dt` accessor reached through another door. The labels of an index are a column, so two new bindings on `PyIndex` materialise them, hand them to the same kernels in `firepanda/py/temporal.mojo` that `s.dt.year` calls, and wrap the answer back up. There is no second table of field names and no second set of rules about what a frequency string means, which matters less on the day it is written than three months later when one of the two copies would have been fixed and the other not. A third binding on `PySeries` turns the values of a column into the labels of an index, which is the direction `pandas.Index(series)` goes and is how the type is built. Which struct each binding went on was decided by the import graph, since `series.mojo` already imports `PyIndex` and `temporal.mojo` imports neither.
+
+Seventy six of the hundred and forty four pandas members are there: the nineteen calendar fields in all twenty three of their pandas spellings, `floor`, `ceil`, `round`, `normalize`, `as_unit`, `day_name`, `month_name`, `strftime`, `date`, `tz_localize`, `tz_convert`, the unit and the zone, and everything `Index` already had. A member that answers something about an instant answers a plain `Index` and a member that answers an instant answers a `DatetimeIndex`, which is what pandas does and is the difference between the two private helpers the members go through. The sixty eight that are absent are absent because the thing underneath them does not exist yet, and document 33 section 6 names each one and what it is waiting for, since document 07's rule is that a name must not resolve and then refuse.
+
+One kernel line changed with it. A column with no rows in it now reads as an empty column of instants whatever its type says, because there is nothing there to relabel and an empty column carries no evidence of what it was going to hold. Without that `DatetimeIndex([])` was refused, since an empty list has nothing in it to look at and infers as a column of floats, and pandas builds an empty index out of the same empty list.
+
+Three answers are not pandas' answer and all three are written down in document 33 section 5. An index of instants lists as the whole numbers it stores, which is issue #348 and is not new, though it is a great deal more visible on a thing people print. A yes or no calendar field of a missing label answers missing here and `False` in pandas, because the array pandas hands back has no missing value in it. A fixed offset zone reads back as `+09:00` rather than as `UTC+09:00`.
+
+Part of #495, after #493.
+
 ### Documented: what an infinity does to an exponentially weighted window
 
 Arming the ten reachable `ewm` cases in the conformance suite turned up an answer the unit tests had not asked about, which is what happened with the category kernels in `docs/specs/29-a-category-that-survives-being-moved.md` and is what the second workstream is for. Nothing here is a behaviour change. The behaviour was right and undocumented, which is worse than it sounds, because the two shapes it takes are about to be registered as divergences and a registry entry that points at a section nobody wrote is not a reason.

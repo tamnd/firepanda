@@ -38,6 +38,7 @@ from firepanda.array.strings import StringBuilder
 from firepanda.dtype.lists import ALL
 from firepanda.dtype.logical import LogicalType, TypeKind
 from firepanda.frame.index import Index
+from firepanda.frame.series import Series
 from firepanda.io.arrow_export import export_array_borrowed, export_schema
 from firepanda.py.args import flag, whole, words
 from firepanda.py.build import array_from
@@ -51,6 +52,10 @@ from firepanda.py.errors import (
     retagged,
     tagged,
 )
+from firepanda.py.temporal import column_part
+from firepanda.py.temporal import part as temporal_part
+from firepanda.py.temporal import word as temporal_word
+from firepanda.py.temporal import word_part
 from firepanda.py.values import python_list, python_value
 
 
@@ -1117,6 +1122,77 @@ struct PyIndex(Movable, Writable):
             return out
         except cause:
             raise retagged(COLUMN, cause)
+
+    @staticmethod
+    def temporal_part(
+        py_self: PythonObject, kind: PythonObject, arg: PythonObject
+    ) raises -> PythonObject:
+        """Reads one calendar or clock part of the labels, as another index.
+
+        The `dt` accessor already answers all of this for a column, and the
+        labels of an index are a column, so this borrows the column door in
+        `temporal.mojo` rather than writing a second table of nineteen field
+        names. The labels are materialized into a series, the part is read, and
+        the answer is wrapped back up as an index carrying the level name, which
+        is what pandas does with `DatetimeIndex.year`.
+
+        A range index materializes here, which is the one allocation on this
+        path and is unavoidable, since a range of whole numbers has no calendar
+        in it and the kernel will refuse it on type grounds anyway.
+
+        Args:
+            py_self: The index.
+            kind: The part, as pandas spells the attribute.
+            arg: The frequency, unit, format, zone or locale, and the empty
+                string for the parts that take none.
+
+        Returns:
+            A new index of the same height, holding the part.
+
+        Raises:
+            Error: Tagged `value` if the name is not a part that answers a
+                column, and tagged `dtype` when the labels have no such part.
+        """
+        var name = column_part(words(kind, "kind"))
+        var argument = words(arg, "arg")
+        var held = Pointer(to=Self._held(py_self)[].index[])
+        var labels = Optional[String](copy=held[].name)
+        try:
+            var column = Series(String("labels"), held[].materialize())
+            var answer = temporal_part(column, name, argument)
+            return Self._wrap(Index(answer^.into_values(), labels^))
+        except cause:
+            raise retagged(DTYPE, cause)
+
+    @staticmethod
+    def temporal_word(
+        py_self: PythonObject, kind: PythonObject
+    ) raises -> PythonObject:
+        """Reads the one part of the labels that is a word rather than an index.
+
+        `tz` and `unit` are properties of the label type rather than of the
+        labels, so they come back as strings, and the empty string is how a
+        naive column says it carries no clock. Same door as the accessor's, for
+        the reason `temporal_part` above gives.
+
+        Args:
+            py_self: The index.
+            kind: Either `tz` or `unit`.
+
+        Returns:
+            The zone name, empty when the labels carry none, or the unit.
+
+        Raises:
+            Error: Tagged `value` if the name is not one of the two, and tagged
+                `dtype` when the labels are not temporal.
+        """
+        var name = word_part(words(kind, "kind"))
+        var held = Pointer(to=Self._held(py_self)[].index[])
+        try:
+            var column = Series(String("labels"), held[].materialize())
+            return PythonObject(temporal_word(column, name))
+        except cause:
+            raise retagged(DTYPE, cause)
 
     @staticmethod
     def arrow_c_schema(py_self: PythonObject) raises -> PythonObject:

@@ -293,6 +293,7 @@ pandas 3.0 covers nested data thinly and Polars covers it well. We follow Polars
 
 The milestone that earns finance and observability users, because as of joins and DST correct resampling are simultaneously where pandas is most used and most error prone.
 
+- [x] `DatetimeIndex`, an index whose labels are instants, with the calendar fields, the three roundings, `normalize`, `as_unit`, `day_name`, `month_name`, `strftime` and the two clock moves (M6), documented in `33-an-index-of-instants.md`, whose section 6 names what is still absent from it
 - [ ] `resample` with all closed and label conventions, `origin`, `offset` (M7)
 - [ ] `asfreq`, upsampling with `fill_method` and `limit` (M7)
 - [ ] `merge_asof` with `direction` backward, forward, nearest, plus `by`, `tolerance`, `allow_exact_matches` (M7)

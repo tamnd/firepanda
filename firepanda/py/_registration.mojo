@@ -163,6 +163,10 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = series.def_method[PySeries.labels](
         "labels", docstring="The row labels, as an index."
     )
+    _ = series.def_method[PySeries.to_index](
+        "to_index",
+        docstring="The values of the column, as the labels of an index.",
+    )
     _ = series.def_method[PySeries.reduce](
         "reduce", docstring="The whole column reduced to one Python value."
     )
@@ -339,6 +343,14 @@ def register(mut module: PythonModuleBuilder) raises:
     )
     _ = index.def_method[PyIndex.renamed](
         "renamed", docstring="The index under a different level name."
+    )
+    _ = index.def_method[PyIndex.temporal_part](
+        "temporal_part",
+        docstring="One part of temporal labels, as another index.",
+    )
+    _ = index.def_method[PyIndex.temporal_word](
+        "temporal_word",
+        docstring="The one part of temporal labels that is a word.",
     )
     _ = index.def_method[PyIndex.union](
         "union", docstring="Every label either side has."
