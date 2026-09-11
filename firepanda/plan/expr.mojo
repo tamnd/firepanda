@@ -733,3 +733,66 @@ struct Expressions(Movable, Sized):
         for i in range(len(node.children)):
             seen |= self.tables(node.children[i])
         return seen
+
+    def positions(self, root: Int) raises -> List[Int]:
+        """Which columns of its input the expression reads, as positions.
+
+        The question projection pushdown asks of every expression in a plan,
+        and the reason it is here beside `tables` rather than in the pass is
+        that it is the same analysis one level finer. `tables` says which
+        relations an expression needs and this says which of their columns, so
+        a pass that has both can decide what a subtree has to produce.
+
+        The answer comes back sorted and without repeats, because it is a set
+        and a caller that has to sort it is a caller that will forget to.
+
+        Args:
+            root: The expression.
+
+        Returns:
+            The positions, ascending, each once.
+
+        Raises:
+            If the expression is not in the arena, or holds a column that
+            binding has not reached.
+        """
+        var found = List[Int]()
+        self._positions(root, found)
+        return found^
+
+    def _positions(self, root: Int, mut found: List[Int]) raises:
+        """Adds every column position under one expression to a sorted set.
+
+        Inserted in order rather than appended and sorted afterwards, because
+        an expression reads a handful of columns and a linear insertion into a
+        handful is cheaper than reaching for a sort.
+
+        Args:
+            root: The expression.
+            found: The set, ascending and without repeats, added to.
+
+        Raises:
+            If the expression is not in the arena, or holds a column that
+            binding has not reached.
+        """
+        self.check(root)
+        ref node = self.nodes[root]
+        if node.kind == ExprKind.COLUMN:
+            if node.at == UNBOUND:
+                raise Error(
+                    String(
+                        "column '",
+                        node.name,
+                        "' has no position until binding has run",
+                    )
+                )
+            var to = 0
+            while to < len(found) and found[to] < node.at:
+                to += 1
+            if to == len(found):
+                found.append(node.at)
+            elif found[to] != node.at:
+                found.insert(to, node.at)
+            return
+        for i in range(len(node.children)):
+            self._positions(node.children[i], found)

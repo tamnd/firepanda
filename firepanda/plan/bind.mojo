@@ -490,6 +490,38 @@ def bind(mut plan: Plan, root: Int, sources: List[Schema]) raises -> Schema:
         a column does not resolve, an operation has no answer for its operands,
         or two sides of a join or a union do not line up.
     """
+    var done = bind_all(plan, root, sources)
+    return Schema(copy=done[root].schema)
+
+
+def bind_all(
+    mut plan: Plan, root: Int, sources: List[Schema]
+) raises -> List[Bound]:
+    """Binds a whole plan and returns what every node of it produces.
+
+    The same work `bind` does and the whole of its answer rather than the last
+    line. A pass that rewrites a node has to know the width of what the node
+    below it produces, which is what the schema of that node is, and throwing
+    every one of them away except the root's would mean each pass binding the
+    plan again to get them back.
+
+    A node the root does not reach comes back with an empty schema, which is
+    also what a pass wants: a subtree some earlier rewrite detached is not an
+    error and is not something to rewrite either.
+
+    Args:
+        plan: The plan, written through.
+        root: The node whose output is the answer.
+        sources: The schema of each relation, indexed by the id a scan carries.
+
+    Returns:
+        One `Bound` per node from zero to `root`, in node order.
+
+    Raises:
+        If the root is not in the plan, a scan names a relation with no schema,
+        a column does not resolve, an operation has no answer for its operands,
+        or two sides of a join or a union do not line up.
+    """
     plan.check(root)
 
     # Backwards from the root, so that a subtree a rewrite has detached is left
@@ -511,7 +543,7 @@ def bind(mut plan: Plan, root: Int, sources: List[Schema]) raises -> Schema:
         if not wanted[at]:
             continue
         done[at] = _bind_node(plan, at, sources, done)
-    return Schema(copy=done[root].schema)
+    return done^
 
 
 def _bind_node(
