@@ -76,6 +76,22 @@ A call with more than two arguments folds left to right into one operator per pa
 
 Part of #309.
 
+### Added: `CAST` runs, over the twelve types a query can name and the engine can hold
+
+`CAST(x AS t)` was refused because the type text had to be resolved against a type set the plan does not share. It resolves now. The name goes through the dialect's spelling table first, which is where `int8` is `BIGINT` and `int1` is `TINYINT`, and then across to the engine's `LogicalType`. Twelve types make it over with nothing lost: `BOOLEAN`, the eight fixed width integers, `FLOAT`, `DOUBLE` and `VARCHAR`.
+
+The rest are refused by name, and the refusals split into two kinds that end at different times. `HUGEINT`, `UHUGEINT` and `DECIMAL` have no engine type at all, since there is no 128 bit integer and no exact decimal to name on the other side. `DATE`, the timestamps and the times do have engine types, and what is missing is the conversion: the cast converts a column to the physical layout its target sits on, so a cast to `DATE` would hand back the int32 underneath holding the source numbers rather than the days they stand for, and a column that answers to a date's name while holding something else is worse than a refusal.
+
+The decimal refusal is the one that is a decision rather than a gap, and it is the same decision the decimal literal already rests on. `1.1` read as a double answers `3.3000000000000003` where DuckDB answers `3.3`, so both of them stay refused until the plan can carry an exact decimal. That, and not the type mapping, is what TPC-H q6 waits on, since its `l_discount BETWEEN 0.05 AND 0.07` is decimal literals rather than a cast.
+
+A cast of an input column now lands in a column of its own instead of being refused. Converting it where it lies is what `astype` on a frame means and it is wrong inside an expression, because `SELECT a, CAST(a AS BIGINT)` still wants `a` at the type it arrived with, and changing position zero would change what that position means for every expression already bound against it. A cast of a column the expression just built still converts in place, since that column is what the cast is for.
+
+Two defects turned up on the way and are fixed here. A type written in a query reaches the parser with its tokens joined by single spaces, so `DECIMAL(9,2)` arrives as `DECIMAL ( 9 , 2 )`, and the lookup was reading `DECIMAL ` with the space on it and reporting that no type is spelled that way. And a pass that rebuilds an expression over new operands was dropping the cast's target type, which is written on the node and nowhere else, so a cast that a projection merge had copied became a cast to the null type.
+
+`TRY_CAST` is refused by name, because the plan's cast has no way to say that a value it cannot convert is a null rather than an error.
+
+Part of #309.
+
 ## [0.6.65] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).

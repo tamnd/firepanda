@@ -36,6 +36,8 @@ helpful truncation would be a wrong answer, so there is nowhere to put the
 length and that is deliberate.
 """
 
+from firepanda.dtype.logical import LogicalType
+
 from .catalog import edit_distance, fold
 
 
@@ -751,10 +753,13 @@ def parse_type(text: StringSlice) raises -> SqlType:
                 TYPE_DECIMAL, DECIMAL_DEFAULT_WIDTH, DECIMAL_DEFAULT_SCALE
             )
         return SqlType(id)
-    var head = trimmed[byte=0:open]
+    # Stripped, because the type a query wrote reaches here with its tokens
+    # joined by single spaces, so `DECIMAL(9,2)` arrives as `DECIMAL ( 9 , 2 )`
+    # and the name has a space after it.
+    var head = trimmed[byte=0:open].strip()
     var id = type_for(head)
     if id == TYPE_INVALID:
-        raise Error(_no_such_type(head.strip()))
+        raise Error(_no_such_type(head))
     if id != TYPE_DECIMAL:
         # A length on anything else parses and is dropped, which is what
         # VARCHAR(3) does and is the whole of what it does.
@@ -807,3 +812,105 @@ def _digits(text: StringSlice) raises -> UInt8:
                 "Binder Error: DECIMAL type width must be between 1 and 38"
             )
     return UInt8(value)
+
+
+def engine_type(type: SqlType) raises -> LogicalType:
+    """The engine type a SQL type becomes, where the two sets agree.
+
+    Twelve of the thirty nine cross over with nothing lost: `BOOLEAN`, the eight
+    fixed width integers, `FLOAT`, `DOUBLE` and `VARCHAR`. Those are the types a
+    `CAST` runs today. The rest are refused, and the refusals split into two
+    kinds that are worth keeping apart because they end at different times.
+
+    `HUGEINT`, `UHUGEINT` and `DECIMAL` have no engine type at all. `LogicalType`
+    has no 128 bit integer and no exact decimal, so there is nothing to name on
+    the other side. Reaching for the nearest thing would be worse than the
+    refusal: a decimal read as a double answers `3.3000000000000003` where
+    DuckDB answers `3.3`, which is a wrong answer rather than a missing feature.
+
+    `DATE`, the timestamps and the times do have engine types, and what is
+    missing is the conversion rather than the type. `cast_any` converts a column
+    to the physical layout its target sits on, so a cast to `DATE` would come
+    back an int32 holding the source numbers rather than the days they stand
+    for, and the column would answer to a date's name while holding something
+    else. These wait on a cast that converts values.
+
+    Args:
+        type: The SQL type, as `parse_type` read it.
+
+    Returns:
+        The engine type it becomes.
+
+    Raises:
+        Error: If the engine has no type for it, or has one that no cast reaches
+            yet.
+    """
+    if type.id == TYPE_BOOLEAN:
+        return LogicalType.BOOL
+    if type.id == TYPE_TINYINT:
+        return LogicalType.INT8
+    if type.id == TYPE_SMALLINT:
+        return LogicalType.INT16
+    if type.id == TYPE_INTEGER:
+        return LogicalType.INT32
+    if type.id == TYPE_BIGINT:
+        return LogicalType.INT64
+    if type.id == TYPE_UTINYINT:
+        return LogicalType.UINT8
+    if type.id == TYPE_USMALLINT:
+        return LogicalType.UINT16
+    if type.id == TYPE_UINTEGER:
+        return LogicalType.UINT32
+    if type.id == TYPE_UBIGINT:
+        return LogicalType.UINT64
+    if type.id == TYPE_FLOAT:
+        return LogicalType.FLOAT32
+    if type.id == TYPE_DOUBLE:
+        return LogicalType.FLOAT64
+    if type.id == TYPE_VARCHAR:
+        return LogicalType.STRING
+
+    if type.id == TYPE_HUGEINT or type.id == TYPE_UHUGEINT:
+        raise Error(
+            String(
+                "firepanda has no engine type for ",
+                type.name(),
+                ", because the engine's integers stop at 64 bits",
+            )
+        )
+    if type.id == TYPE_DECIMAL:
+        raise Error(
+            String(
+                "firepanda has no engine type for ",
+                type.name(),
+                (
+                    ", because the engine has no exact decimal and a double"
+                    " would answer 3.3000000000000003 where DuckDB answers 3.3"
+                ),
+            )
+        )
+    if type.is_temporal():
+        raise Error(
+            String(
+                "firepanda does not cast to ",
+                type.name(),
+                (
+                    " yet, because the cast converts to the layout a temporal"
+                    " type sits on and would hand back the integer underneath"
+                    " rather than the "
+                ),
+                type.name(),
+            )
+        )
+    if type.id == TYPE_BLOB:
+        raise Error(
+            "firepanda does not cast to BLOB yet, because the cast writes the"
+            " bytes out as text and the column would come back a VARCHAR"
+        )
+    raise Error(
+        String(
+            "firepanda does not cast to ",
+            type.name(),
+            " yet, because there is no engine type that holds one",
+        )
+    )

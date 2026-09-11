@@ -486,8 +486,10 @@ def sql_support() -> List[Refusal]:
             "a typed literal such as DATE '2020-01-01'",
             (
                 "The type in front of the string decides how the string is"
-                " read, which is a cast, and firepanda has not wired the cast"
-                " up yet. Write CAST('2020-01-01' AS DATE) instead."
+                " read, which is a cast, and a cast is written CAST(x AS t)"
+                " here. The types a cast reaches are the boolean, the eight"
+                " fixed width integers, FLOAT, DOUBLE and VARCHAR, so a date"
+                " literal waits on the date work either way."
             ),
             STAGE_ISSUE,
         ),

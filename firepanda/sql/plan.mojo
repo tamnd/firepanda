@@ -182,6 +182,7 @@ from .ast import (
     STMT_VALUES,
 )
 from .catalog import Catalog, KIND_FRAME, fold
+from .types import engine_type, parse_type
 
 
 struct Lowered(Movable):
@@ -781,10 +782,15 @@ def _lower_expr(
         return _lower_in(ast, at, plan, walk, scope, grouped)
 
     if node.kind == EXPR_CAST:
-        raise Error(
-            "firepanda does not lower a CAST yet, because the type text has to"
-            " be resolved against a type set the plan does not share"
-        )
+        if node.b == 1:
+            raise Error(
+                "firepanda does not lower a TRY_CAST yet, because the plan's"
+                " cast has no way to say that a value it cannot convert is a"
+                " null rather than an error"
+            )
+        var written = ast.text(node.payload)
+        var over = _lower_expr(ast, node.a, plan, walk, scope, grouped)
+        return plan.exprs.cast(engine_type(parse_type(written)), over)
     if node.kind == EXPR_STAR:
         raise Error("a star outside a select list")
     if (

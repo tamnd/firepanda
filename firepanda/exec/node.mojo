@@ -1385,13 +1385,20 @@ struct Connective(Movable):
 
 
 struct Cast(Movable):
-    """Converts one column of the chunk to another type, in place.
+    """Converts one column of the chunk to another type.
 
-    In place is right here and it is wrong for `Compute`, and the difference is
-    what the operation means. A cast says this column is that type now, so the
-    position keeps its meaning and everything downstream that referred to it
-    still refers to the same thing. An expression makes a new column, and giving
-    it a position of its own is what lets the old one still be read.
+    It does that one of two ways, and which one is right depends on who else can
+    see the column. Converting in place says this column is that type now, so
+    the position keeps its meaning and everything downstream that referred to it
+    still refers to the same thing. That is what `astype` on a frame means and
+    it is why a cast is not a `Compute`, which always makes a column of its own.
+
+    Appending is for the other case, and the query `SELECT a, CAST(a AS BIGINT)`
+    is the whole of it. The input column is still wanted at its own type, so
+    converting it where it lies would change what position zero means for every
+    expression already bound against it. A cast written inside an expression
+    lands in a column of its own for the same reason every other expression
+    does, and the name it is given is the name that expression was given.
     """
 
     var on: Int
@@ -1403,8 +1410,14 @@ struct Cast(Movable):
     var strict: Bool
     """Whether text that is not a number raises rather than becoming a null."""
 
+    var appends: Bool
+    """Whether the converted column lands at the end rather than in place."""
+
+    var name: String
+    """The name the appended column takes. Empty when the cast is in place."""
+
     def __init__(out self, on: Int, to: LogicalType, strict: Bool = True):
-        """Constructs a cast.
+        """Constructs a cast that converts the column where it lies.
 
         Args:
             on: The position of the column.
@@ -1415,15 +1428,40 @@ struct Cast(Movable):
         self.on = on
         self.to = to
         self.strict = strict
+        self.appends = False
+        self.name = String()
+
+    def __init__(
+        out self,
+        on: Int,
+        to: LogicalType,
+        var name: String,
+        strict: Bool = True,
+    ):
+        """Constructs a cast that appends the converted column.
+
+        Args:
+            on: The position of the column to read.
+            to: The target type.
+            name: The name the new column gets.
+            strict: Whether a text value that is not a number raises rather than
+                becoming a null. Ignored for a column that is not text.
+        """
+        self.on = on
+        self.to = to
+        self.strict = strict
+        self.appends = True
+        self.name = name^
 
     def bind(mut self, var input: Schema) raises -> Schema:
-        """Reports the input schema with one field's type changed.
+        """Reports the input schema with the converted column in it.
 
         Args:
             input: The schema of the chunks that will arrive. Consumed.
 
         Returns:
-            The same schema with the cast column's type replaced.
+            The same schema with the cast column's type replaced, or with the
+            converted column added at the end.
 
         Raises:
             If the position is outside the schema.
@@ -1437,6 +1475,10 @@ struct Cast(Movable):
                 + String(len(out))
                 + " columns"
             )
+        if self.appends:
+            var nullable = out[self.on].nullable
+            out.append(Field(self.name, self.to, nullable))
+            return out^
         var fields = List[Field](capacity=len(out))
         for i in range(len(out)):
             if i == self.on:
@@ -1454,7 +1496,8 @@ struct Cast(Movable):
             chunk: The chunk. Consumed.
 
         Returns:
-            The chunk with one column converted.
+            The chunk with one column converted, or with the converted column
+            added at the end.
 
         Raises:
             If the position is outside the chunk, or the conversion fails.
@@ -1470,7 +1513,11 @@ struct Cast(Movable):
             )
         var rows = len(chunk)
         var columns = chunk^.into_columns()
-        columns[self.on] = cast_any(columns[self.on], self.to, self.strict)
+        var made = cast_any(columns[self.on], self.to, self.strict)
+        if self.appends:
+            columns.append(made^)
+        else:
+            columns[self.on] = made^
         return Chunk(columns^, rows)
 
 
