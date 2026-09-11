@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: `OVER` and `QUALIFY` are query text now, not just a plan node
+
+The SQL front end lowers a call with an `OVER` on it to a window node, so `SELECT qty, sum(qty) OVER (PARTITION BY shop) FROM sales` runs from the text and comes back with a total on every row. `sum`, `min`, `max`, `count`, `avg`, `first` and `last` are the folds that work, which is the same list a `GROUP BY` gets, since a window here reduces a partition and those are the reductions that exist.
+
+Windows are grouped by what they partition by, one node per distinct partitioning, and the grouping is by the shape of the key expressions rather than by the text, so `PARTITION BY shop` written twice is one node and `PARTITION BY shop` beside `PARTITION BY upper(shop)` is two. Two nodes stack, and which one ends up on top does not change the answer, because a window node adds columns rather than replacing them and the projection above reads each window back by the name the lowering gave it.
+
+The trap worth naming is that a call to `sum` with an `OVER` on it is not a fold over the query. `SELECT a, sum(b) OVER () FROM t` has a plain column beside an aggregate name, and the check that decides whether a statement is a grouped query was counting it, which would have put an aggregate under the projection and returned one row where ten were asked for. That is a wrong answer rather than an error, so it is tested directly.
+
+`QUALIFY` lowers to a filter above the window, which is the clause's whole reason for being there: a `WHERE` runs underneath and cannot see what the window computed, and the two now differ in the way DuckDB says they should. A `QUALIFY` over a query with no window in it is refused, since the same condition in a `WHERE` is what was meant.
+
+Four shapes still say so by name. An `OVER` with an `ORDER BY` inside it is a running fold and the operator underneath does not do one yet. A frame is refused for the same reason, since the only frame there is is the whole partition. `row_number`, `rank` and the rest are window functions rather than folds, so there is nothing for them to reduce and `AggKind` has no entry for them. A `WINDOW` clause naming a window the calls refer to is not read yet, and the same window written out after each `OVER` does lower.
+
+Part of #309.
+
 ### Added: a window runs, so `sum(x) OVER (PARTITION BY k)` is an answer rather than a refusal
 
 The physical `Window` operator and the lowering that reaches it. A plan with a window node in it now produces rows instead of an error that says nobody wrote the operator yet.

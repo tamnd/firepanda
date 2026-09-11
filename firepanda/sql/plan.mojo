@@ -126,7 +126,8 @@ from firepanda.kernel.group import AggKind
 from firepanda.kernel.unary import UnaryOp
 from firepanda.array.value import Value
 from firepanda.join.pairs import JoinKind
-from firepanda.plan.expr import UNBOUND, ExprKind
+from firepanda.plan.cse import key_for
+from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
 from firepanda.plan.node import (
     NO_LIMIT,
     SET_EXCEPT,
@@ -542,7 +543,7 @@ struct _From(Movable):
 
 
 struct _Walk(Movable):
-    """The aggregates one statement's lowering has found so far.
+    """The aggregates and the windows one statement's lowering has found so far.
 
     The plan is not in here. A walk that owned the plan would have to hand it
     back at the end, and moving one field out of a live struct is not a thing
@@ -558,10 +559,24 @@ struct _Walk(Movable):
     var agg_names: List[String]
     """What each of those is called in the aggregate's output."""
 
+    var windows: List[Int]
+    """The window expressions found in the select list and the `QUALIFY`, in the
+    order they were found."""
+
+    var window_names: List[String]
+    """What each of those is called in the window node's output."""
+
+    var window_keys: List[String]
+    """What each one partitions by, written out, so that two windows over the
+    same keys land in the same node and two over different keys do not."""
+
     def __init__(out self):
         """Starts an empty walk."""
         self.aggs = List[Int]()
         self.agg_names = List[String]()
+        self.windows = List[Int]()
+        self.window_names = List[String]()
+        self.window_keys = List[String]()
 
     def _record(mut self, at: Int, var name: String) -> Int:
         """Adds an aggregate to the list the `AGGREGATE` node will compute.
@@ -576,6 +591,25 @@ struct _Walk(Movable):
         var place = len(self.aggs)
         self.aggs.append(at)
         self.agg_names.append(name^)
+        return place
+
+    def _record_window(
+        mut self, at: Int, var name: String, var key: String
+    ) -> Int:
+        """Adds a window to the list a `WINDOW` node will compute.
+
+        Args:
+            at: The lowered window expression.
+            name: What to call its output column.
+            key: What it partitions by, written out.
+
+        Returns:
+            Its position among the windows.
+        """
+        var place = len(self.windows)
+        self.windows.append(at)
+        self.window_names.append(name^)
+        self.window_keys.append(key^)
         return place
 
 
@@ -698,10 +732,7 @@ def _lower_expr(
     if node.kind == EXPR_FUNCTION:
         var name = fold(_one_name(ast, node.payload, "a function"))
         if node.b != NO_NODE:
-            raise Error(
-                "firepanda does not lower a window function yet, since the plan"
-                " has no window node"
-            )
+            return _lower_over(ast, at, name, plan, walk, scope, grouped)
         var args = ast.items(node.children)
         if _is_aggregate(name):
             if not grouped:
@@ -753,6 +784,145 @@ def _lower_expr(
     raise Error("an expression shape firepanda does not lower yet")
 
 
+def _lower_over(
+    ast: Ast,
+    at: UInt32,
+    name: String,
+    mut plan: Plan,
+    mut walk: _Walk,
+    scope: _Scope,
+    grouped: Bool,
+) raises -> Int:
+    """Lowers a call that has an `OVER` on it into a window the plan computes.
+
+    The same arrangement the aggregates have. The window is put on the walk and
+    what comes back in its place is a reference to the column the `WINDOW` node
+    will produce, so the expression the window sits inside stays whatever shape
+    it was and the node that computes it is built afterwards, once the walk has
+    found all of them.
+
+    What it partitions by is written out and kept beside it, because two windows
+    over the same keys are one grouping pass and belong in one node, and two
+    over different keys are two nodes. Written out rather than compared by arena
+    index, since `PARTITION BY k` lowered twice is two indices for one key.
+
+    Args:
+        ast: The arenas.
+        at: The `EXPR_FUNCTION` that has the `OVER` on it.
+        name: Its function name, already folded.
+        plan: Where the lowered expressions go.
+        walk: Where the window is recorded.
+        scope: What the FROM put in reach.
+        grouped: Whether the block aggregates.
+
+    Returns:
+        A reference to the column the window node will produce.
+
+    Raises:
+        If the window is a shape this does not lower yet, or if the function is
+        not one the engine folds.
+    """
+    var node = ast.exprs[Int(at)]
+    var window = ast.exprs[Int(node.b)]
+    if window.payload != 0:
+        raise Error(
+            String(
+                (
+                    "firepanda lowers a window written out in full so far, and"
+                    " this one is written as OVER "
+                ),
+                ast.text(window.payload),
+            )
+        )
+    if ast.length(window.a) != 0:
+        raise Error(
+            String(
+                name,
+                (
+                    " is computed OVER an ORDER BY, which is a running fold"
+                    " over the partition rather than one value across it, and"
+                    " firepanda has no operator for that yet"
+                ),
+            )
+        )
+    if window.b != NO_NODE:
+        raise Error(
+            String(
+                name,
+                (
+                    " is computed OVER a frame, and the only frame firepanda"
+                    " has is the whole partition"
+                ),
+            )
+        )
+    if not _is_aggregate(name):
+        raise Error(
+            String(
+                "firepanda computes a fold OVER a partition, and ",
+                name,
+                (
+                    " is a window function of its own rather than a fold, so"
+                    " there is nothing for it to reduce"
+                ),
+            )
+        )
+
+    var args = ast.items(node.children)
+    var over: Int
+    if name == "count" and (node.a & CALL_STAR) != 0:
+        over = plan.exprs.literal(Value(Int64(1)))
+    elif len(args) == 1:
+        over = _lower_expr(ast, args[0], plan, walk, scope, grouped)
+    else:
+        raise Error(
+            String(
+                "firepanda folds ",
+                name,
+                " over one argument, and this call has ",
+                len(args),
+            )
+        )
+
+    var partition = List[Int]()
+    var key = String()
+    for entry in ast.items(window.children):
+        partition.append(_lower_expr(ast, entry, plan, walk, scope, grouped))
+        key += String(_shape(plan.exprs, partition[len(partition) - 1]), ";")
+
+    var built = plan.exprs.window(
+        _agg_kind(name), over, partition^, List[Int]()
+    )
+    var place = walk._record_window(
+        built, String("__win_", len(walk.windows)), key^
+    )
+    return plan.exprs.column(String(walk.window_names[place]))
+
+
+def _shape(exprs: Expressions, root: Int) raises -> String:
+    """Writes an expression tree out as the thing it computes.
+
+    Two trees that compute the same thing write the same string, which is what
+    decides whether two windows partition the same way. `cse.key_for` is the
+    one node of it and this is the recursion, the same way subplan elimination
+    does it.
+
+    Args:
+        exprs: The arena.
+        root: The expression.
+
+    Returns:
+        The key.
+
+    Raises:
+        If the expression is not in the arena.
+    """
+    exprs.check(root)
+    var kids = List[String](capacity=len(exprs.nodes[root].children))
+    for i in range(len(exprs.nodes[root].children)):
+        kids.append(_shape(exprs, exprs.nodes[root].children[i]))
+    return key_for(exprs, root, kids^)
+
+
 def _has_aggregate(ast: Ast, at: UInt32) -> Bool:
     """Whether an expression holds an aggregate call anywhere in it.
 
@@ -765,6 +935,13 @@ def _has_aggregate(ast: Ast, at: UInt32) -> Bool:
     subquery is refused by the lowering anyway, and the check is written down so
     that the day it is not refused this does not quietly become wrong.
 
+    A call with `OVER` on it is not a fold for this purpose, whatever its name
+    is. `sum(x) OVER ()` reads every row and answers every row, so a query that
+    has one and nothing else does not aggregate, and reading it as one would put
+    an `AGGREGATE` node under the projection and lose every row but one. What is
+    written inside the window still counts, since `sum(sum(a)) OVER ()` does
+    aggregate and so does a partition key that folds.
+
     Args:
         ast: The arenas.
         at: The expression.
@@ -776,11 +953,19 @@ def _has_aggregate(ast: Ast, at: UInt32) -> Bool:
         return False
     var node = ast.exprs[Int(at)]
     if node.kind == EXPR_FUNCTION:
-        try:
-            if _is_aggregate(fold(_one_name(ast, node.payload, "a function"))):
-                return True
-        except:
-            pass
+        if node.b == NO_NODE:
+            try:
+                if _is_aggregate(
+                    fold(_one_name(ast, node.payload, "a function"))
+                ):
+                    return True
+            except:
+                pass
+        else:
+            var window = ast.exprs[Int(node.b)]
+            for key in ast.items(window.children):
+                if _has_aggregate(ast, key):
+                    return True
         for arg in ast.items(node.children):
             if _has_aggregate(ast, arg):
                 return True
@@ -1632,15 +1817,10 @@ def _block(
         )
 
     var clauses = query.children
-    if ast.slot(clauses, CLAUSE_QUALIFY) != NO_NODE:
-        raise Error(
-            "firepanda does not lower QUALIFY yet, which is a filter above a"
-            " window and the plan has no window node"
-        )
     if ast.length(ast.slot(clauses, CLAUSE_WINDOW)) != 0:
         raise Error(
-            "firepanda does not lower a WINDOW clause yet, for the same reason"
-            " it does not lower a window function"
+            "firepanda does not lower a WINDOW clause yet, and the same window"
+            " written out after the OVER of each call does lower"
         )
 
     var from_clause = ast.slot(clauses, CLAUSE_FROM)
@@ -1721,6 +1901,20 @@ def _block(
     if having != NO_NODE:
         predicate = _lower_expr(ast, having, plan, walk, scope, True)
 
+    # Lowered here and filtered on further down, because a QUALIFY is where the
+    # windows it reads are written and the node that computes them has to be
+    # built before anything reads it.
+    var qualify = -1
+    var qualifying = ast.slot(clauses, CLAUSE_QUALIFY)
+    if qualifying != NO_NODE:
+        var before = len(walk.windows)
+        qualify = _lower_expr(ast, qualifying, plan, walk, scope, grouped)
+        if len(walk.windows) == before and len(walk.windows) == 0:
+            raise Error(
+                "a QUALIFY over a query with no window function in it, and the"
+                " same condition written in WHERE does lower"
+            )
+
     if grouped:
         var aggs = walk.aggs.copy()
         var agg_names = walk.agg_names.copy()
@@ -1732,12 +1926,54 @@ def _block(
     if predicate >= 0:
         at = plan.filter(at, predicate)
 
+    at = _windows(plan, at, walk)
+
+    if qualify >= 0:
+        at = plan.filter(at, qualify)
+
     at = plan.project(at, outputs^, names^)
 
     if (query.a & SELECT_DISTINCT) != 0:
         at = plan.distinct(at, List[Int]())
 
     return at
+
+
+def _windows(mut plan: Plan, at: Int, walk: _Walk) raises -> Int:
+    """Puts one `WINDOW` node over the block for each partitioning it uses.
+
+    One node per partitioning rather than one node for all of them, because a
+    node is one grouping pass and two windows over different keys cannot share
+    one. The nodes stack in the order the partitionings were first written, and
+    which one a window landed in does not matter above them, since a window node
+    adds its columns to what is below it and the projection reads all of them
+    back by name.
+
+    Args:
+        plan: Where the nodes go.
+        at: The node the windows are computed over.
+        walk: The windows the block found.
+
+    Returns:
+        The topmost node, which is `at` when the block has no window in it.
+
+    Raises:
+        Only what the builder raises.
+    """
+    var done = List[Bool](length=len(walk.windows), fill=False)
+    var out = at
+    for i in range(len(walk.windows)):
+        if done[i]:
+            continue
+        var exprs = List[Int]()
+        var names = List[String]()
+        for j in range(i, len(walk.windows)):
+            if not done[j] and walk.window_keys[j] == walk.window_keys[i]:
+                done[j] = True
+                exprs.append(walk.windows[j])
+                names.append(String(walk.window_names[j]))
+        out = plan.window(out, exprs^, names^)
+    return out
 
 
 def _name_of(ast: Ast, at: UInt32, place: Int) raises -> String:
