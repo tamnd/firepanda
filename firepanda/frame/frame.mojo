@@ -77,8 +77,10 @@ from firepanda.kernel.binary import (
     all_null,
     binary_any,
     binary_value_any,
+    filled_block,
 )
 from firepanda.kernel.cast import cast_any
+from firepanda.kernel.concat import concat_two_any
 from firepanda.kernel.chunked import (
     cast_chunked,
     filter_chunked,
@@ -92,7 +94,7 @@ from firepanda.kernel.group import (
     aggregate_group_many,
     aggregate_group_pair_any,
 )
-from firepanda.kernel.nulls import all_valid_mask, coalesce_any
+from firepanda.kernel.nulls import all_valid_mask, coalesce_any, nan_over_nulls
 from firepanda.kernel.reduce import reduce_any
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.sort import (
@@ -967,6 +969,212 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         var answer = widened.select(order)
         answer.index = Index(self.rows)
         return answer^
+
+    def reindex(
+        self, labels: AnyArray, fill_value: Optional[Value] = None
+    ) raises -> Self:
+        """Returns the frame on a set of row labels, whether it has them or not.
+
+        This is the operation the index was built for. `get_indexer` says where
+        each wanted label sits, `take_any` reads a negative position as a null
+        row, and between the two of them a label the frame does not have costs
+        no branch of its own: it is a row that came from nowhere and is missing
+        in every column.
+
+        A missing row is why the result can have a different type from the
+        input. pandas carries a number in a numpy array and has one missing
+        value for it, which is NaN, so an integer column that gains a hole
+        widens to float64 to have somewhere to put it. That widening is
+        `widen_for_missing` and it runs here rather than in the gather, because
+        it is a fact about how pandas reads data and not about what a gather
+        does.
+
+        `fill_value` stops both of those from happening, and it is spelled as a
+        row rather than as a pass. The value is put in a row of its own at the
+        end of each column and every wanted label the frame does not have is
+        pointed at that row, so the gather does the filling on its way past and
+        there is one loop rather than two. Doing it afterwards, as a fill over
+        the result, would also have filled the nulls the frame already had,
+        which pandas does not: a row that was missing before the reindex is
+        still missing after it.
+
+        Args:
+            labels: The row labels the result should have, in order. May repeat
+                a label, which repeats the row, and may hold a label the frame
+                does not have, which is the case this exists for.
+            fill_value: What to put in a row whose label was not found, or
+                nothing to leave it missing.
+
+        Returns:
+            A frame of `len(labels)` rows carrying those labels.
+
+        Raises:
+            Error: If this frame's index holds a duplicate, because a label
+                sitting in two rows has no single row to answer with, which is
+                what pandas refuses here too. Also if the labels cannot be
+                looked up against this index's own, or if the fill value is text
+                and a column is not or the other way round.
+        """
+        var target = Index(AnyArray(copy=labels), self.index.name.copy())
+        if len(labels) == 0:
+            # The lookup is skipped rather than run over nothing, because a list
+            # with no values in it has no type in it either, and asking an int64
+            # index where the labels of an empty float64 column sit is a
+            # question about two dtypes that this does not have to ask.
+            var nothing = self.take(List[Int]())
+            nothing.index = target^
+            return nothing^
+
+        var found = self.index.get_indexer(labels)
+        var absent = 0
+        for i in range(len(found)):
+            if found[i] == NOT_FOUND:
+                absent += 1
+
+        # The fill is only checked against the columns when there is a row for
+        # it to go in, which is pandas' rule as well: a fill that suits none of
+        # the columns passes unremarked when every label was found, because
+        # nothing was ever going to be written with it.
+        if fill_value and absent > 0:
+            self._fill_fits(fill_value.value())
+
+        # Where the lookup found nothing, the gather is sent either to the row
+        # the fill value is about to be put in, which is the one after the last
+        # real row, or to a negative position, which `take_any` reads as a null.
+        var missing_goes_to = self.rows if fill_value else -1
+        var positions = List[Int](capacity=len(found))
+        for i in range(len(found)):
+            positions.append(
+                missing_goes_to if found[i] == NOT_FOUND else Int(found[i])
+            )
+
+        var columns = List[ChunkedArray](capacity=len(self.columns))
+        for i in range(len(self.columns)):
+            if fill_value and absent > 0:
+                var padded = concat_two_any(
+                    self.columns[i].only(),
+                    filled_block(self.schema[i].dtype, 1, fill_value.value()),
+                )
+                columns.append(ChunkedArray(take_any(padded, positions)))
+            else:
+                columns.append(take_chunked(self.columns[i], positions))
+
+        var out = Self(Schema(copy=self.schema), columns^)
+        # A frame of no columns still has rows, because the labels are what the
+        # caller asked for and not something read off a column.
+        out.rows = len(positions)
+        out.index = target^
+        if absent == 0 or fill_value:
+            return out^
+        return out.widen_for_missing()
+
+    def _fill_fits(self, fill: Value) raises:
+        """Refuses a fill value that no column could hold.
+
+        Only one mismatch is worth checking and it is text against everything
+        else, because that is the one the reader downstream cannot catch. A
+        number read as a string raises when it is asked for its bytes, and a
+        string read as a number does not raise at all: it reads the store's
+        integer field, which for a string is a zero, so the frame would come
+        back with a row of zeros that nobody asked for.
+
+        Args:
+            fill: The fill value.
+
+        Raises:
+            Error: If the value is text and a column is not, or the other way
+                round.
+        """
+        for i in range(len(self.schema)):
+            ref field = self.schema[i]
+            if field.dtype.is_variable_width() == fill.type.is_variable_width():
+                continue
+            raise Error(
+                String(
+                    "reindex: fill_value is ",
+                    fill.type,
+                    " and column ",
+                    field.name,
+                    " holds ",
+                    field.dtype,
+                    ", so there is nothing to put in the row",
+                )
+            )
+
+    def reindex_columns(
+        self, names: List[String], fill_value: Optional[Value] = None
+    ) raises -> Self:
+        """Returns the frame under a set of column names, in that order.
+
+        The other axis, and a different piece of work despite the shared name.
+        Rows are looked up in an index and columns are looked up by name in a
+        schema, so there is no gather here and nothing widens: a column that is
+        there arrives whole and a column that is not is made out of nothing.
+
+        What type the made up column has is the only decision in it. With no
+        fill value it is a column of float64 NaN, which is what pandas answers
+        and is the only choice that says nothing about data that does not
+        exist. It is a NaN in the values rather than a cleared bit in a bitmap,
+        for the same reason the row half widens: pandas has one missing value
+        for a number and a column read the pandas way spells it that way. With
+        a fill value the column takes the value's own type, so asking for a
+        column that is not there and filling it with a whole number gives an
+        integer column rather than a float one, which is pandas again.
+
+        Args:
+            names: The column names the result should have, in order.
+            fill_value: What to put in a column that is not there, or nothing
+                to leave it missing.
+
+        Returns:
+            A frame of the same height and labels, under those names.
+
+        Raises:
+            Error: If a name is asked for twice, because the result would have
+                two columns under one name and nothing downstream could address
+                the second.
+        """
+        var wanted = List[Series](capacity=len(names))
+        for i in range(len(names)):
+            for seen in range(i):
+                if names[seen] == names[i]:
+                    raise Error(
+                        String(
+                            "reindex: column ",
+                            names[i],
+                            (
+                                " was asked for twice, and a frame cannot have"
+                                " two columns under one name"
+                            ),
+                        )
+                    )
+            if self.has(names[i]):
+                wanted.append(self.column(names[i]))
+            elif fill_value:
+                wanted.append(
+                    Series(
+                        names[i],
+                        filled_block(
+                            fill_value.value().type,
+                            self.rows,
+                            fill_value.value(),
+                        ),
+                    )
+                )
+            else:
+                # A NaN rather than a null, which is the same rule the row half
+                # applies through `widen_for_missing`: a column that does not
+                # exist is read the way pandas would have read it, and pandas
+                # has one missing value for a number.
+                wanted.append(
+                    Series(
+                        names[i],
+                        nan_over_nulls(
+                            all_null(LogicalType.FLOAT64, self.rows)
+                        ),
+                    )
+                )
+        return self._rebuilt(wanted^, Index(copy=self.index))
 
     def sort_index(self, ascending: Bool = True) raises -> Self:
         """Returns the frame in the order of its row labels.
