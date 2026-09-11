@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.70] - 2026-09-12
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Three releases of SQL front end work, and the three of them build on each other. The semi and the anti join lower and run, an `IN` over a subquery is rewritten into the first of those, and a correlated `EXISTS` is decorrelated into it as well. That last one is the first decorrelation in the front end rather than a refusal, and the shapes that are still refused each say which node would answer them, which is the mark join, the null aware anti join, or the dependent join.
+
 ### Added: a correlated `EXISTS` is decorrelated into a semi join
 
 `WHERE EXISTS (SELECT 1 FROM u WHERE u.b = t.b)` asks a question once per outer row as written, and it runs here as one semi join between the two tables on `b = b`. `NOT EXISTS` is the same join asking the other way, which is the anti join. On anything the size of a benchmark that rewrite is the difference between a query that finishes and one that does not, and it is the first decorrelation in the front end rather than another refusal.
@@ -5845,7 +5851,9 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.68...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.70...HEAD
+[0.6.70]: https://github.com/tamnd/firepanda/releases/tag/v0.6.70
+[0.6.69]: https://github.com/tamnd/firepanda/releases/tag/v0.6.69
 [0.6.68]: https://github.com/tamnd/firepanda/releases/tag/v0.6.68
 [0.6.67]: https://github.com/tamnd/firepanda/releases/tag/v0.6.67
 [0.6.66]: https://github.com/tamnd/firepanda/releases/tag/v0.6.66
