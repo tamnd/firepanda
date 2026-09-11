@@ -140,7 +140,11 @@ def _canon(
             same = False
         grown.append(one)
 
-    var key = _key(exprs, root, grown)
+    var tokens = List[String](capacity=len(grown))
+    for i in range(len(grown)):
+        tokens.append(String(grown[i]))
+
+    var key = key_for(exprs, root, tokens)
     for i in range(len(keys)):
         if keys[i] == key:
             return canon[i]
@@ -151,22 +155,26 @@ def _canon(
     return at
 
 
-def _key(exprs: Expressions, root: Int, kids: List[Int]) raises -> String:
+def key_for(exprs: Expressions, root: Int, kids: List[String]) raises -> String:
     """Writes down everything about a node that decides what it computes.
 
     Not a hash. A key that collides is a wrong answer rather than a slow one,
     and a node has a handful of expressions in it, so comparing the strings is
     cheaper than being sure a hash cannot collide.
 
-    The operands go in as indices rather than as their own keys, because they
-    have already been through this and equal shapes below already share an
-    index. That is what keeps the key a constant amount of work per node rather
-    than growing with the depth of the tree.
+    The operands arrive as tokens rather than as indices because the two callers
+    want two different tokens out of the same fields. This pass unifies within
+    one node, where equal shapes below already share an index, so an index is a
+    shape and passing one keeps the key a constant amount of work per node
+    rather than growing with the depth of the tree. Subplan elimination compares
+    expressions under two different nodes, which have never been unified against
+    each other and so have no index in common, and it passes the operand's own
+    key.
 
     Args:
         exprs: The arena.
         root: The node.
-        kids: The operands, already made canonical.
+        kids: One token per operand, standing for what the operand computes.
 
     Returns:
         The key.

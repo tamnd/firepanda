@@ -225,6 +225,49 @@ def test_a_predicate_that_folds_to_false_empties_the_plan() raises:
     assert_true("SORT" not in printed, "and nothing is sorted to find that out")
 
 
+def _subtrees(plan: Plan, at: Int) -> Int:
+    """Counts the plan nodes reachable from a root."""
+    var seen = List[Int]()
+    var stack = List[Int]()
+    stack.append(at)
+    while len(stack) > 0:
+        var one = stack.pop()
+        var had = False
+        for i in range(len(seen)):
+            if seen[i] == one:
+                had = True
+                break
+        if had:
+            continue
+        seen.append(one)
+        var inputs = plan.nodes[one].inputs.copy()
+        for i in range(len(inputs)):
+            stack.append(inputs[i])
+    return len(seen)
+
+
+def test_two_branches_that_read_the_same_rows_end_up_sharing() raises:
+    var plan = Plan()
+    var left = plan.filter(
+        plan.scan("lineitem", List[String](), 0), _small(plan, "l_quantity", 24)
+    )
+    var right = plan.filter(
+        plan.scan("lineitem", List[String](), 0), _small(plan, "l_quantity", 24)
+    )
+    var root = plan.union(
+        [
+            plan.project(left, [plan.exprs.column("l_orderkey")], ["k"]),
+            plan.project(right, [plan.exprs.column("l_orderkey")], ["k"]),
+        ],
+        True,
+    )
+    var at = optimize(plan, root, [_lineitem(), _lineitem()])
+    # Two adjacent lines of Python that filter the same way. Subplan elimination
+    # runs after the sweeps have settled, so it sees the plan the rest of the
+    # pipeline left rather than the one the caller built.
+    assert_equal(_subtrees(plan, at), 4, "one scan and one filter, read twice")
+
+
 def _reached(plan: Plan, at: Int) raises -> Int:
     """Counts the distinct expression nodes one plan node's expressions reach.
     """
