@@ -1688,25 +1688,48 @@ def emptied(
     )
 
 
-def test_a_join_whose_build_side_filtered_to_nothing_is_refused() raises:
-    # Not the mark join's doing. Building the key table reads the one chunk of
-    # the key column, and a column that no rows reached has no chunks at all,
-    # so every kind that builds a table lands on the same message. Filed as
-    # #611 and pinned on a semi join, which has been here the whole time.
+def test_a_semi_join_whose_build_side_filtered_to_nothing_keeps_no_rows() raises:
+    # A column that no rows reached has no chunks at all rather than one empty
+    # chunk, which is the column's own rule, and building the key table used to
+    # read the one chunk and raise on this. #611.
     var plan = Plan()
     var root = emptied(plan, JoinKind.SEMI)
-    with assert_raises(contains="0 chunks"):
-        _ = run_two(plan, root)
+    assert_equal(len(run_two(plan, root)), 0)
 
 
-def test_a_mark_join_over_a_build_side_with_nothing_in_it_is_refused_too() raises:
-    # What this should answer is false on every row, since there is nothing to
-    # match and no null to be unsure about. It raises instead, for the reason
-    # above and in the same place.
+def test_an_anti_join_over_nothing_keeps_every_left_row() raises:
+    # The other half of the same question. Nothing matched, so nothing is
+    # dropped, and a left row with a null key is kept too.
+    var plan = Plan()
+    var root = emptied(plan, JoinKind.ANTI)
+    assert_equal(len(run_two(plan, root)), 10)
+
+
+def test_a_left_join_over_nothing_keeps_every_left_row_with_nulls() raises:
+    # The one kind that reads the build side's other columns rather than only
+    # its key table, so this is the one that gathers from the empty array.
+    var plan = Plan()
+    var root = emptied(plan, JoinKind.LEFT)
+    var got = run_two(plan, root)
+    assert_equal(len(got), 10)
+    assert_equal(len(got.schema), 4, "both sides end to end")
+    var held = present(got, "rate")
+    for i in range(len(held)):
+        assert_true(not held[i], String("row ", i))
+
+
+def test_a_mark_join_over_a_build_side_with_nothing_in_it_is_all_false() raises:
+    # False rather than null on every row, because there is nothing to match
+    # and no null in the build side to be unsure about.
     var plan = Plan()
     var root = emptied(plan, JoinKind.MARK, "found")
-    with assert_raises(contains="0 chunks"):
-        _ = run_two(plan, root)
+    var got = run_two(plan, root)
+    assert_equal(len(got), 10)
+    same(
+        truths(got, "found"),
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        "nothing to match",
+    )
 
 
 def test_a_mark_join_has_to_be_told_what_to_call_its_column() raises:

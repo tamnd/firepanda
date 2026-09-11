@@ -32,7 +32,7 @@ from firepanda.kernel.concat import concat_any, concat_two_any
 from firepanda.kernel.reduce import distinct_count_any
 from firepanda.kernel.sort import is_sorted_any
 
-from .any import AnyArray
+from .any import AnyArray, empty_any
 from .data import ColumnData
 
 
@@ -365,10 +365,7 @@ struct ChunkedArray(Copyable, Movable, Sized):
         if len(held) == 1:
             return held.pop()
         if len(held) == 0:
-            return AnyArray(
-                ColumnData(Buffer(0), Bitmap(0), 0),
-                self.type,
-            )
+            return empty_any(self.type)
         return concat_any(held)
 
     def into_chunks(deinit self) -> List[AnyArray]:
