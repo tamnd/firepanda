@@ -19,6 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import ModuleType
 
+import pandas as pd
 import pytest
 
 CSV = "region,qty\nnorth,10\nsouth,20\neast,30\n"
@@ -49,6 +50,52 @@ def test_an_index_with_no_name_has_none(firepanda: ModuleType) -> None:
     """
     assert firepanda.Index([1]).name is None
     assert firepanda.Index([1], name="").name == ""
+
+
+def test_an_index_is_built_from_a_series_and_from_another_index(
+    firepanda: ModuleType,
+) -> None:
+    """Neither goes through the reader a list goes through, and both keep their type."""
+    series = firepanda.Series([3, 1, 2], name="a")
+    from_series = firepanda.Index(series)
+    assert from_series.tolist() == [3, 1, 2]
+    assert from_series.dtype == series.dtype == "int64"
+    made = firepanda.Index([5, 6], name="k")
+    assert firepanda.Index(made).tolist() == [5, 6]
+
+
+def test_a_name_that_was_not_written_comes_off_the_data(firepanda: ModuleType) -> None:
+    """pandas' rule, which is that the labels bring their name with them."""
+    assert firepanda.Index(firepanda.Series([1, 2], name="a")).name == "a"
+    assert firepanda.Index(firepanda.Index([1, 2], name="k")).name == "k"
+    theirs = pd.Series([1, 2], name="a")
+    assert pd.Index(theirs).name == "a"
+    assert pd.Index(pd.Index([1, 2], name="k")).name == "k"
+
+
+def test_a_name_in_the_call_wins_over_the_one_the_data_had(firepanda: ModuleType) -> None:
+    assert firepanda.Index(firepanda.Series([1, 2], name="a"), name="z").name == "z"
+    assert pd.Index(pd.Series([1, 2], name="a"), name="z").name == "z"
+
+
+def test_a_series_named_with_the_empty_string_names_nothing(firepanda: ModuleType) -> None:
+    # A series is named by a string and the empty string is what unnamed looks
+    # like on one, so it is read back as no name rather than as a level called
+    # nothing. Both spellings of unnamed arrive here and both mean the same.
+    assert firepanda.Index(firepanda.Series([1, 2])).name is None
+    assert firepanda.Index(firepanda.Series([1, 2], name="")).name is None
+
+
+def test_the_labels_of_an_unnamed_list_still_have_no_name(firepanda: ModuleType) -> None:
+    assert firepanda.Index([1, 2]).name is None
+    assert pd.Index([1, 2]).name is None
+
+
+def test_an_index_of_instants_takes_its_name_off_the_data_too(firepanda: ModuleType) -> None:
+    made = firepanda.DatetimeIndex(firepanda.Series(["2024-01-02", "2024-03-04"], name="s"))
+    assert made.name == "s"
+    assert firepanda.DatetimeIndex(made).name == "s"
+    assert firepanda.DatetimeIndex(made, name="when").name == "when"
 
 
 def test_a_frame_and_its_columns_agree_about_the_labels(
