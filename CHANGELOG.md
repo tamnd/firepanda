@@ -42,6 +42,19 @@ Details in document 38. Part of #156, after #517.
 `duplicated` is what made it visible, because the mask carries the frame's labels and a mask whose labels are missing cannot be handed back to `filter`, which is the whole of what a caller does with it. The fix builds a default index when the index and the height disagree, which can only happen on the first column and cannot overwrite labels somebody set, because a frame with no rows has none to set.
 
 Part of #156, after #517.
+### Added: a plan as JSON, and the same JSON back as a plan
+
+`plan/json.mojo`, with `to_json` and `from_json`. The point of the pair is the round trip, and the reason to want the round trip is that it is what makes an optimizer pass testable. A pass test is an input plan and an expected output plan, and writing both down as text rather than as thirty lines of builder calls is the difference between a test somebody reads and a test somebody skips. `docs/specs/sql/08-plan-and-optimizer.md` asks for this in its section 7 and the reason it asks is its section 9, which wants a unit test per pass whose input and output are both written down.
+
+The form is a tree, because a plan reads as a tree and the arena form it actually is would be two flat arrays of integer indices into each other that nobody can read a diff of. But a plan stops being a tree the moment `cse` or `subplan` runs, since both of those turn two equal things into one, and a plain tree form would quietly copy the shared part and give back a different plan than it was handed. So the sharing is written down: anything reached more than once carries an `id` where it is written out in full and every later reach is a `{"ref": id}` instead. The ids count up in the order things are written rather than being the arena index they already have, which keeps the document from saying anything about how the arena happened to get numbered, and means a plan that goes out and comes back writes the same bytes the second time. A plan with no sharing in it has no `id` and no `ref` anywhere and reads as the plain tree it is.
+
+Reading goes through the same builders a caller would use, so a document describing an impossible plan is refused with the error the builder gives rather than becoming a plan that fails somewhere later. What is not checked is the schema, exactly as in `node.mojo`, because that is binding's job and binding is a pass that runs afterwards. A plan that was bound before it was written comes back bound, because the positions and the types are in the document, and a plan that was not comes back unbound.
+
+Three small things the format had to decide. A float that is nan or one of the two infinities has no JSON syntax, so those three go out quoted and everything else goes out as the number it is, and the text form round trips to the last bit either way. An unsigned integer above the top of int64 is written from its bits rather than through `as_scalar`, which would print it as a negative. And a type whose name does not say all of it, which is the list and the struct, is refused by name rather than written out lossily, since the element type lives on the column and writing `"list"` and reading it back would be inventing one.
+
+`scan_array` is new in `io/jsonscan.mojo` alongside `scan_object`, and works the same way: an element that is itself an object or an array is reported as one span covering the whole of it, so a caller that wants what is inside asks for it with another call rather than getting a flattened list it has to put back together.
+
+Part of #309.
 
 ### Added: three ways of naming a set of labels without writing them down
 

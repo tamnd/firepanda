@@ -367,6 +367,55 @@ def scan_value(bytes: Span[UInt8, _], at: Int) raises -> Value:
     )
 
 
+def scan_array(
+    bytes: Span[UInt8, _], at: Int, mut out: List[Value]
+) raises -> Int:
+    """Scans one array, appending a value per element.
+
+    The counterpart of `scan_object` and it works the same way. An element that
+    is itself an object or an array is appended as one span covering the whole
+    of it, so a caller that wants what is inside asks for it with another call
+    rather than getting a flattened list it has to put back together.
+
+    Args:
+        bytes: The buffer.
+        at: The offset of the opening bracket, whitespace already skipped.
+        out: Where the elements go. Not cleared, so one list can collect a run
+            of arrays.
+
+    Returns:
+        One past the closing bracket.
+
+    Raises:
+        Error: If it is not an array, or is not a well formed one.
+    """
+    var length = len(bytes)
+    var ptr = bytes.unsafe_ptr()
+    if at >= length or ptr.unsafe_offset(at).unsafe_load() != LEFT_BRACKET:
+        raise Error(String("json: an array was expected at byte ", at))
+    var i = skip_space(bytes, at + 1)
+    if i < length and ptr.unsafe_offset(i).unsafe_load() == RIGHT_BRACKET:
+        return i + 1
+    while True:
+        var value = scan_value(bytes, i)
+        out.append(value)
+        i = skip_space(bytes, value.after)
+        if i >= length:
+            break
+        var c = ptr.unsafe_offset(i).unsafe_load()
+        if c == RIGHT_BRACKET:
+            return i + 1
+        if c != COMMA:
+            raise Error(
+                String(
+                    "json: a comma or a closing bracket was expected at byte ",
+                    i,
+                )
+            )
+        i = skip_space(bytes, i + 1)
+    raise Error(String("json: the array at byte ", at, " never closes"))
+
+
 def scan_object(
     bytes: Span[UInt8, _], at: Int, mut out: List[Member]
 ) raises -> Int:
