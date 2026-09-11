@@ -1,9 +1,12 @@
 """Turns DuckDB's vendored PEG grammar into the table firepanda's matcher walks.
 
 Input is firepanda/sql/grammar/, which tools/vendor_grammar.sh writes and nobody
-edits by hand. Output is firepanda/sql/generated/, which is checked in so that a
-contributor with no Python and no network can still build, and which CI
-regenerates and diffs so that nobody hand edits it either.
+edits by hand. Output is rules.mojo and keywords.mojo in firepanda/sql/generated/,
+which are checked in so that a contributor with no Python and no network can still
+build, and which CI regenerates and diffs so that nobody hand edits them either.
+The package's __init__.mojo beside them is not written here, because other
+generators put their tables in that directory too and the file that re-exports
+them all belongs to none of them.
 
 The output is not written inside the vendored directory, even though that reads
 better, because a Mojo subpackage needs an __init__.mojo and putting one there
@@ -1302,39 +1305,16 @@ def build() -> tuple[dict[str, str], Flat, dict[str, Rule], list[int]]:
     flat = flatten(rules, order)
     verify_round_trip(rules, flat)
     first = compute_first(flat, keyword_members(words))
+    # The package's `__init__.mojo` is not written here, although this generator
+    # was once the only thing in the directory and did write it. More than one
+    # generator puts a table in `generated/` now, so the file that re-exports
+    # them all belongs to none of them, and a generator that rewrites it deletes
+    # whatever the others put there. It is checked in and edited by hand, and
+    # the imports in it fail to compile if a name it lists stops existing, which
+    # is the check that matters.
     return {
         "rules.mojo": render_rules(flat, first, vendored_sha()),
         "keywords.mojo": render_keywords(words),
-        "__init__.mojo": (
-            '"""Generated grammar tables. See tools/gen_grammar.py."""\n'
-            "\n"
-            "from .keywords import (\n"
-            "    KEYWORD_CLASS_COUNT,\n"
-            "    KEYWORD_COLUMN_NAME,\n"
-            "    KEYWORD_COUNT,\n"
-            "    KEYWORD_FUNC_NAME,\n"
-            "    KEYWORD_MAX_LENGTH,\n"
-            "    KEYWORD_RESERVED,\n"
-            "    KEYWORD_TYPE_NAME,\n"
-            "    KEYWORD_UNRESERVED,\n"
-            "    KEYWORDS,\n"
-            ")\n"
-            "from .rules import (\n"
-            "    FILTER_BITS,\n"
-            "    FILTER_COUNT,\n"
-            "    MATCHER_COUNT,\n"
-            "    MEMOIZED_COUNT,\n"
-            "    OVERRIDDEN_COUNT,\n"
-            "    NODE_COUNT,\n"
-            "    RULE_COUNT,\n"
-            "    RULE_END_OF_INPUT,\n"
-            "    RULE_PROGRAM,\n"
-            "    RULE_WHITESPACE,\n"
-            "    STRING_COUNT,\n"
-            "    SUGGESTION_COUNT,\n"
-            "    TABLE,\n"
-            ")\n"
-        ),
     }, flat, rules, first
 
 

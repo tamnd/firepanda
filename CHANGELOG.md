@@ -374,6 +374,26 @@ The second thing is smaller. A pooled buffer can still be sharing with a column 
 
 Closes #406.
 
+### Added: the tier one function catalog, read off DuckDB rather than typed in
+
+A query that says `upper(x)` needs somebody to know that `upper` exists, that it is a scalar function, that it takes one `VARCHAR` and gives back one, and what to say when it is handed a boolean instead. `firepanda/sql/registry.mojo` is that, for the 161 names document 07 calls tier one, and `firepanda/sql/generated/functions.mojo` is the table it reads.
+
+The table is generated from `duckdb_functions()` on a live DuckDB by `tools/gen_functions.py`, and the reason is that it holds 802 overloads. Nobody types 802 signatures correctly, and the ones that would be wrong are exactly the ones nobody would think to check. `sum` over a boolean gives back a `HUGEINT`. `min` has a second overload that takes a count and gives back a list. `length` accepts a `BIT`. `round` over a `DECIMAL` stays a decimal instead of going to a double. A registry that was merely sensible would refuse queries DuckDB runs, and refusing a query DuckDB runs is the only kind of defect this front end has.
+
+Three names in the spec's tier one list are in no catalog at all, and each one is written down with what it is instead. `coalesce` and `ifnull` are grammar rules, which is why the wrong number of arguments to either comes back as a parser error rather than a binder error, and `current_timestamp` is a keyword. All three belong to the transformer and none of them is a registry entry.
+
+An alias carries the whole overload list rather than a pointer to the name it aliases, because the candidate list in an error message prints the spelling the query used. Asking about `substr` gets `substr(VARCHAR, BIGINT) -> VARCHAR` and never `substring`'s version of the same line.
+
+There are three refusals and they are three different sentences. An unknown name is a catalog error that says `Scalar Function` whatever the name resembles, so a misspelled aggregate is reported as a missing scalar function, and that is DuckDB's and it is kept. A call that fits no overload is a binder error that lists every candidate for the name. A call to a macro is a third sentence again, listing the macro's parameter names rather than any types, because a macro has none. The suggestion after an unknown name uses the threshold `catalog.mojo` already had, an edit distance below half the shorter name, rather than DuckDB's, which has none at all and will answer `zzzzzzqq` with whichever name sorts nearest.
+
+The ordering was wrong in the first version and the fix is worth recording, because the failure was invisible. Every overload of a name shares one `function_oid`, so ordering the catalog scan by it leaves the order within a name to the sort, and the sort is parallel and does not have to be stable. The table that came out held the right lines and listed them in a scrambled order, which produces error messages that are correct sentence by sentence and do not match DuckDB byte for byte. The generator now runs the scan on one thread with no `ORDER BY`, since the scan is already in catalog order, and then provokes eight calls that match nothing and checks its own output against the candidate list DuckDB printed.
+
+What is here is the table and the questions it can answer alone: whether a name exists, what kind it is, which overloads it has, and what the refusal says. Picking one overload out of several is not here, because that is a scoring problem over the cast lattice and it is the next thing in document 07. Each parameter slot does carry what it is, since the scoring will need it: a concrete type, `ANY`, a single letter template like the `T` in `lag(T, BIGINT, T)`, or a list of one of those.
+
+CI regenerates the table in the differential job, which is the one with DuckDB installed, and fails on any diff. The DuckDB version the table was read off is part of the table rather than a note in a commit message, because a signature that changes between releases changes what firepanda binds.
+
+Part of #308.
+
 ### Added: what a WITH binds, and where each name can be said
 
 A CTE is a name bound to a statement for the length of one statement, and the rules that follow from that are short and are each one somebody gets wrong. `firepanda/sql/cte.mojo` reads a `WITH` into a list of entries, checks the ones that can be checked without types, and records what the planner will need later.

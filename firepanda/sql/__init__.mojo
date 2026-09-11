@@ -70,6 +70,12 @@ reference, a column alias list is a prefix and is half applied when it is the
 wrong length, and one message covers all three ways a recursive CTE can be
 written wrong.
 
+`registry.mojo` is the tier 1 function catalog: what a name is, which overloads
+it has, and what the refusal says when there is no such name or no such call.
+Every signature in it was read off DuckDB rather than written down from what a
+function ought to do, which is why `sum` over a boolean gives back a `HUGEINT`
+and `length` accepts a `BIT`.
+
 `unsupported.mojo` is the line between what the grammar accepts and what
 firepanda runs. Every refusal is an entry in its table rather than a `raise`
 written where the cases ran out, which is what lets `sql_support()` list the
@@ -132,6 +138,12 @@ from .cte import (
     read_ctes,
     reference_count,
 )
+from .generated.functions import (
+    DUCKDB_VERSION,
+    KIND_AGGREGATE,
+    KIND_MACRO,
+    KIND_SCALAR,
+)
 from .matcher import Parse, ParseNode, parse, parse_rule, parse_unfiltered
 from .printer import (
     needs_quoting,
@@ -140,6 +152,16 @@ from .printer import (
     print_stmt,
     quote_name,
     quote_string,
+)
+from .registry import (
+    NO_SLOT,
+    ROLE_ANY,
+    ROLE_EXACT,
+    ROLE_LIST,
+    ROLE_TEMPLATE,
+    ROLE_UNKNOWN,
+    Overload,
+    Registry,
 )
 from .star import (
     NOT_REPLACED,
