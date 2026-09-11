@@ -47,6 +47,7 @@ from firepanda.py.temporal import word as temporal_word
 from firepanda.py.temporal import word_part
 from firepanda.py.transform import transformation, transformed
 from firepanda.py.window import window as window_agg
+from firepanda.py.window import window_settings
 from firepanda.py.values import python_list, python_value
 
 
@@ -764,7 +765,7 @@ struct PySeries(Movable, Writable):
         center: PythonObject,
         closed: PythonObject,
         step: PythonObject,
-        ddof: PythonObject,
+        settings: PythonObject,
     ) raises -> PythonObject:
         """Runs one reduction over every window of the column.
 
@@ -782,8 +783,9 @@ struct PySeries(Movable, Writable):
             center: Whether the window sits around its row.
             closed: Which of the two ends the window keeps.
             step: How many rows apart the answered rows are, or `None`.
-            ddof: Subtracted from the count of values to give the divisor of a
-                variance, read by `std`, `var` and `sem` alone.
+            settings: The parameters the reduction reads and the window does
+                not, as a tuple in the order pandas declares them, and empty for
+                the eight reductions that read none.
 
         Returns:
             A new series of float64.
@@ -804,7 +806,7 @@ struct PySeries(Movable, Writable):
                         flag(center, "center"),
                         words(closed, "closed"),
                         maybe_whole(step, "step"),
-                        whole(ddof, "ddof"),
+                        window_settings(words(kind, "kind"), settings),
                     )
                 )
             )

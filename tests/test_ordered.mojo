@@ -2,13 +2,14 @@
 
 `test_window.mojo` checks where the window sits and `test_spread.mojo` checks
 what the folds make of it. This file checks the structure that makes a window
-ordered and the one reduction reading out of it so far, which is the median.
-Every number asserted against pandas here was read off a running pandas 3.0.5
-and is quoted in the test that asserts it.
+ordered and the three reductions that read out of it, which are the median, the
+quantile and the rank. Every number asserted against pandas here was read off a
+running pandas 3.0.5 and is quoted in the test that asserts it.
 
-The comparisons are exact rather than near. A median is a value out of the
-column or the mean of two of them, so unlike a skewness there is no rounding to
-allow for, and asserting to the bit is what catches a selection that is one off.
+The comparisons are exact rather than near. These answers are a value out of the
+column, a weighting of two of them or a count of ranks, so unlike a skewness
+there is no rounding to allow for, and asserting to the bit is what catches a
+selection that is one off.
 
 The structure is tested directly as well as through the median, because most of
 what can go wrong in a Fenwick tree gives a plausible wrong answer rather than a
@@ -43,6 +44,7 @@ from firepanda.kernel.ordered import (
     TIED_MIN,
     Ordered,
     Ranks,
+    along,
     between_named,
     halved,
     middle,
@@ -51,7 +53,12 @@ from firepanda.kernel.ordered import (
     ranked,
     tied_named,
 )
-from firepanda.kernel.window import WindowEdge, WindowOp, op_named
+from firepanda.kernel.window import (
+    WindowEdge,
+    WindowOp,
+    WindowSettings,
+    op_named,
+)
 
 comptime GONE = Float64(0) / Float64(0)
 """A missing row, written the way a float column writes one."""
@@ -139,6 +146,90 @@ def expanded(series: Series, min_periods: Int = 1) raises -> List[Float64]:
         Error: Whatever the kernel raises.
     """
     return rows(series.expanding(WindowOp.MEDIAN, min_periods))
+
+
+def quantiled(
+    series: Series,
+    width: Int,
+    fraction: Float64,
+    between: Int = BETWEEN_LINEAR,
+    min_periods: Optional[Int] = None,
+) raises -> List[Float64]:
+    """Runs a rolling quantile and hands the answer back as numbers.
+
+    Args:
+        series: The column.
+        width: How many rows wide.
+        fraction: How far through the sorted window to read.
+        between: Which rule to use when the position lands between two values.
+        min_periods: How many values a window needs.
+
+    Returns:
+        The answer.
+
+    Raises:
+        Error: Whatever the kernel raises.
+    """
+    var settings = WindowSettings()
+    settings.fraction = fraction
+    settings.between = between
+    return rows(
+        series.rolling(
+            WindowOp.QUANTILE,
+            width,
+            min_periods,
+            False,
+            WindowEdge.RIGHT,
+            None,
+            settings,
+        )
+    )
+
+
+def ranking(
+    series: Series,
+    width: Int,
+    tied: Int = TIED_AVERAGE,
+    ascending: Bool = True,
+    pct: Bool = False,
+    center: Bool = False,
+    closed: WindowEdge = WindowEdge.RIGHT,
+    step: Optional[Int] = None,
+    min_periods: Optional[Int] = None,
+) raises -> List[Float64]:
+    """Runs a rolling rank and hands the answer back as numbers.
+
+    Carries where the window sits as well as the three rules, because a rank
+    places the value in the window's last row rather than the one in the row
+    being answered, and the two are only different rows once the window has been
+    moved off the row it answers.
+
+    Args:
+        series: The column.
+        width: How many rows wide.
+        tied: What to do with values that are equal.
+        ascending: Whether to count from the smallest value.
+        pct: Whether to divide by how many values the window holds.
+        center: Whether the window sits around its row.
+        closed: Which of its two ends the window keeps.
+        step: How many rows apart the answered rows are.
+        min_periods: How many values a window needs.
+
+    Returns:
+        The answer.
+
+    Raises:
+        Error: Whatever the kernel raises.
+    """
+    var settings = WindowSettings()
+    settings.tied = tied
+    settings.ascending = ascending
+    settings.pct = pct
+    return rows(
+        series.rolling(
+            WindowOp.RANK, width, min_periods, center, closed, step, settings
+        )
+    )
 
 
 def assert_rows(
@@ -429,17 +520,25 @@ def test_a_text_column_has_nothing_to_reduce() raises:
 
 
 def test_the_median_knows_it_is_one_of_the_order_statistics() raises:
-    """The three predicates on a reduction partition the eleven, and the median
-    is the first that answers yes to the third, because it reads a position in
-    a sorted window rather than folding the window into a number.
+    """The three predicates on a reduction partition the thirteen, and three
+    of them answer yes to the third, because they read a position in a sorted
+    window rather than folding the window into a number.
     """
     assert_true(WindowOp.MEDIAN.orders(), "the median is an order statistic")
+    assert_true(WindowOp.QUANTILE.orders(), "so is the quantile")
+    assert_true(WindowOp.RANK.orders(), "and so is the rank")
     assert_false(WindowOp.MEDIAN.spreads(), "and is not a spread")
     assert_false(WindowOp.MEDIAN.shapes(), "and is not a shape")
+    assert_false(WindowOp.QUANTILE.spreads(), "nor is the quantile")
+    assert_false(WindowOp.RANK.shapes(), "nor is the rank")
     assert_false(WindowOp.KURT.orders(), "the kurtosis is still a shape")
     assert_false(WindowOp.SUM.orders(), "and the total is still a fold")
     assert_equal(String(WindowOp.MEDIAN), "median", "writes itself out")
+    assert_equal(String(WindowOp.QUANTILE), "quantile", "and so do these two")
+    assert_equal(String(WindowOp.RANK), "rank", "and so do these two")
     assert_true(op_named("median") == WindowOp.MEDIAN, "and is named")
+    assert_true(op_named("quantile") == WindowOp.QUANTILE, "and is named")
+    assert_true(op_named("rank") == WindowOp.RANK, "and is named")
 
 
 def test_the_ranks_collapse_the_repeats_and_skip_the_missing_rows() raises:
@@ -575,6 +674,216 @@ def test_the_two_words_that_name_a_rule_are_checked() raises:
         _ = between_named("cubic")
     with assert_raises(contains="rank method 'dense' is not one of"):
         _ = tied_named("dense")
+
+
+def test_a_rolling_quantile_matches_what_pandas_answers() raises:
+    """Pandas over `[1, 2, 10, 3, 1, 20, 2]` with `rolling(4).quantile(0.75)`
+    gives `[nan, nan, nan, 4.75, 4.75, 12.5, 7.25]` on the linear rule, and
+    `[3, 3, 10, 3]`, `[10, 10, 20, 20]`, `[6.5, 6.5, 15, 11.5]` and
+    `[3, 3, 10, 3]` in the four answered rows for the other four. `nearest` and
+    `lower` agree here and come apart in the test of the five rules below.
+    """
+    var series = column([1.0, 2.0, 10.0, 3.0, 1.0, 20.0, 2.0])
+    assert_rows(
+        quantiled(series, 4, 0.75),
+        [GONE, GONE, GONE, 4.75, 4.75, 12.5, 7.25],
+        "linear",
+    )
+    assert_rows(
+        quantiled(series, 4, 0.75, BETWEEN_LOWER),
+        [GONE, GONE, GONE, 3.0, 3.0, 10.0, 3.0],
+        "lower",
+    )
+    assert_rows(
+        quantiled(series, 4, 0.75, BETWEEN_HIGHER),
+        [GONE, GONE, GONE, 10.0, 10.0, 20.0, 20.0],
+        "higher",
+    )
+    assert_rows(
+        quantiled(series, 4, 0.75, BETWEEN_MIDPOINT),
+        [GONE, GONE, GONE, 6.5, 6.5, 15.0, 11.5],
+        "midpoint",
+    )
+    assert_rows(
+        quantiled(series, 4, 0.75, BETWEEN_NEAREST),
+        [GONE, GONE, GONE, 3.0, 3.0, 10.0, 3.0],
+        "nearest",
+    )
+
+
+def test_the_two_ends_of_a_quantile_are_the_two_extremes() raises:
+    """Pandas gives `[1, 1, 1, 1]` for `quantile(0)` and `[10, 10, 20, 20]` for
+    `quantile(1)` over the same column, which are the same four rows `min` and
+    `max` answer. Worth asserting because a position of nought and a position of
+    the last rank are where an off by one in the descent shows up.
+    """
+    var series = column([1.0, 2.0, 10.0, 3.0, 1.0, 20.0, 2.0])
+    assert_rows(
+        quantiled(series, 4, 0.0),
+        [GONE, GONE, GONE, 1.0, 1.0, 1.0, 1.0],
+        "the smallest",
+    )
+    assert_rows(
+        quantiled(series, 4, 1.0),
+        [GONE, GONE, GONE, 10.0, 10.0, 20.0, 20.0],
+        "the largest",
+    )
+
+
+def test_a_quantile_of_a_half_is_the_median() raises:
+    """Pandas gives the same column for both, and so does this, by two different
+    routes: the median reads the middle of the count of ranks and the quantile
+    computes a position and reads that. They come apart only where the gap
+    between the two middle values overflows, which the test below owns.
+    """
+    var series = column([1.0, 2.0, 10.0, 3.0, 1.0, 20.0, 2.0])
+    assert_rows(
+        quantiled(series, 4, 0.5),
+        [GONE, GONE, GONE, 2.5, 2.5, 6.5, 2.5],
+        "pandas answers this for both",
+    )
+    assert_rows(quantiled(series, 4, 0.5), rolled(series, 4), "and so do we")
+    var holed = column([1.0, GONE, 3.0, GONE, 5.0, 6.0])
+    assert_rows(
+        quantiled(holed, 3, 0.5, BETWEEN_LINEAR, 1),
+        rolled(holed, 3, 1),
+        "over gaps too",
+    )
+
+
+def test_an_expanding_quantile_walks_up_the_whole_column() raises:
+    """Pandas gives `[1, 1.5, 2, 2.5, 2, 2.5, 2]` for the same column under
+    `expanding().quantile(0.5)`, which is its expanding median, and the last row
+    is the quantile of the whole column.
+    """
+    var series = column([1.0, 2.0, 10.0, 3.0, 1.0, 20.0, 2.0])
+    var settings = WindowSettings()
+    var got = rows(series.expanding(WindowOp.QUANTILE, 1, settings))
+    assert_rows(got, [1.0, 1.5, 2.0, 2.5, 2.0, 2.5, 2.0], "the whole column")
+    settings.fraction = 1.0
+    var largest = rows(series.expanding(WindowOp.QUANTILE, 1, settings))
+    assert_equal(largest[6], 20.0, "and the top of it")
+
+
+def test_a_quantile_between_two_huge_values_does_not_overflow() raises:
+    """Pandas writes the linear rule as the lower value plus the fraction of the
+    gap, so over `[-HUGE, HUGE, HUGE, HUGE]` with `rolling(2).quantile(0.5)` it
+    gives `[nan, inf, HUGE, HUGE]`: the gap between the two infinities of sign
+    overflows and the fraction of an infinity is an infinity. Its median of the
+    same window is nought, so pandas answers the two of them inconsistently, and
+    the same pair the other way round has an exact quantile and an infinite
+    median. Both are the same overflow from two sides and neither happens here.
+    """
+    var series = column([-HUGE, HUGE, HUGE, HUGE])
+    var got = quantiled(series, 2, 0.5)
+    assert_true(isnan(got[0]), "one value is not two")
+    assert_equal(got[1], 0.0, "where pandas answers an infinity")
+    assert_equal(got[2], HUGE, "and the rest agree with pandas")
+    assert_equal(got[3], HUGE)
+    assert_rows(rolled(series, 2), got, "and the median agrees with all of it")
+    assert_equal(along(-HUGE, HUGE, 0.5), 0.0, "the weighting is used here")
+    assert_equal(along(HUGE, HUGE, 0.5), HUGE, "and here")
+    assert_equal(
+        along(1.0, 3.0, 0.5), 2.0, "and the plain rule everywhere else"
+    )
+    assert_equal(along(1.0, 3.0, 0.25), 1.5, "to the bit")
+    assert_equal(middle(-HUGE, HUGE), 0.0, "which is what middle does too")
+
+
+def test_a_rolling_rank_places_the_value_in_the_window_last_row() raises:
+    """Pandas over `[1, 2, 10, 3, 1, 20, 2]` with `rolling(3).rank()` gives
+    `[nan, nan, 3, 2, 1, 3, 2]`, descending gives `[nan, nan, 1, 2, 3, 1, 2]`
+    and a percentage gives `[nan, nan, 1, 2/3, 1/3, 1, 2/3]`. The value being
+    placed is the one in the window's last row, which here is the row being
+    answered, and the test below moves the window so the two come apart.
+    """
+    var series = column([1.0, 2.0, 10.0, 3.0, 1.0, 20.0, 2.0])
+    assert_rows(
+        ranking(series, 3),
+        [GONE, GONE, 3.0, 2.0, 1.0, 3.0, 2.0],
+        "ascending",
+    )
+    assert_rows(
+        ranking(series, 3, TIED_AVERAGE, False),
+        [GONE, GONE, 1.0, 2.0, 3.0, 1.0, 2.0],
+        "descending",
+    )
+    assert_rows(
+        ranking(series, 3, TIED_AVERAGE, True, True),
+        [GONE, GONE, 1.0, 2.0 / 3.0, 1.0 / 3.0, 1.0, 2.0 / 3.0],
+        "as a fraction of the count",
+    )
+
+
+def test_a_rank_reads_the_last_row_and_not_the_answered_row() raises:
+    """Pandas gives `[nan, 3, 2, 1, 3, 2, nan]` for `rolling(3, center=True)`,
+    `[nan, nan, nan, 3, 2, 1, 3]` for `rolling(3, closed='left')` and
+    `[nan, nan, 1, 2]` for `rolling(4, step=2)` over the same column. Each of
+    the three moves the window off the row it answers, and each of the three
+    answers the rank of the value at the window's near end rather than the rank
+    of the value in the row the answer is written to.
+    """
+    var series = column([1.0, 2.0, 10.0, 3.0, 1.0, 20.0, 2.0])
+    assert_rows(
+        ranking(series, 3, TIED_AVERAGE, True, False, True),
+        [GONE, 3.0, 2.0, 1.0, 3.0, 2.0, GONE],
+        "centred",
+    )
+    assert_rows(
+        ranking(series, 3, TIED_AVERAGE, True, False, False, WindowEdge.LEFT),
+        [GONE, GONE, GONE, 3.0, 2.0, 1.0, 3.0],
+        "closed on the left",
+    )
+    assert_rows(
+        ranking(
+            series, 4, TIED_AVERAGE, True, False, False, WindowEdge.RIGHT, 2
+        ),
+        [GONE, GONE, 1.0, 2.0],
+        "stepped",
+    )
+
+
+def test_a_rank_of_a_row_holding_nothing_is_missing() raises:
+    """Pandas gives `[1, nan, 2, 2, nan, 2, 2, 3]` for `rolling(3,
+    min_periods=1).rank()` over `[1, None, 3, 5, None, 7, 9, 11]`. There is no
+    value to place in the rows that hold nothing, so there is no rank there
+    however many values the window holds, and `min_periods` has nothing to say
+    about it.
+    """
+    var series = column([1.0, GONE, 3.0, 5.0, GONE, 7.0, 9.0, 11.0])
+    assert_rows(
+        ranking(
+            series,
+            3,
+            TIED_AVERAGE,
+            True,
+            False,
+            False,
+            WindowEdge.RIGHT,
+            None,
+            1,
+        ),
+        [1.0, GONE, 2.0, 2.0, GONE, 2.0, 2.0, 3.0],
+        "a missing row has nothing to place",
+    )
+
+
+def test_the_settings_default_to_what_pandas_defaults_to() raises:
+    """Five of the thirteen reductions read something out of the settings and
+    the other eight read nothing, which is only safe if every field has a value
+    whichever reduction is running. Five of the six are pandas' own defaults,
+    and the fraction is a half because pandas makes the fraction required and
+    there has to be a number in the field whatever is running.
+    """
+    var settings = WindowSettings()
+    assert_equal(settings.ddof, 1, "pandas' degrees of freedom")
+    assert_equal(
+        settings.fraction, 0.5, "the middle, which pandas has no name for"
+    )
+    assert_equal(settings.between, BETWEEN_LINEAR, "pandas' interpolation")
+    assert_equal(settings.tied, TIED_AVERAGE, "pandas' rank method")
+    assert_true(settings.ascending, "pandas counts up")
+    assert_false(settings.pct, "and does not divide")
 
 
 def main() raises:

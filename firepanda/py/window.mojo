@@ -29,30 +29,40 @@ in on the Python side by a layer that would then own the rule.
 
 ### What is not here
 
-`quantile` and `rank`, which read out of the same ordered window the median
-already reads out of and are waiting on room at this door rather than on
-anything in the kernel. `apply`, `corr` and `cov`. The exponentially weighted
-window, which has no edges and so shares nothing with any of this. And a window
-given as a frequency, which needs a calendar first. None of them resolves rather
-than resolving and refusing, for the reason document 07 gives.
+`apply`, `corr` and `cov`. The exponentially weighted window, which has no edges
+and so shares nothing with any of this. And a window given as a frequency, which
+needs a calendar first. None of them resolves rather than resolving and
+refusing, for the reason document 07 gives.
 
-### Why ddof is the last parameter this door can take
+### Why the reduction's own parameters arrive as one value
 
-`std`, `var` and `sem` read a degrees of freedom, which is a property of the
-reduction rather than of the window, and it arrives here anyway because there is
-one door and not fifty three. With it the bound method on the Python side has
-seven arguments after the object, which document 13 section 4 measured as the
-most a bound method can have. Whatever the next window parameter turns out to be,
-it comes through keyword arguments, which do not count against that. `skew` and
-`kurt` were the next two reductions to land and cost nothing on this door, because
-pandas gives neither of them a degrees of freedom to pass.
+Five of the thirteen reductions read something the window has no opinion about.
+`std`, `var` and `sem` read a degrees of freedom, `quantile` reads a fraction
+and a rule for landing between two values, and `rank` reads a tie rule, a
+direction and whether to divide by the count. All of it arrives here anyway,
+because there is one door and not fifty three.
+
+It cannot arrive as six arguments. The window itself needs six of the seven a
+bound method gets after the object, which document 13 section 4 measured, so the
+seventh slot is the entire budget for every reduction's own parameters put
+together. That worked while there was one of them and stopped working the day
+there were two.
+
+So the seventh slot is a tuple and `window_settings` below reads it apart
+against the reduction's name. A reduction that reads nothing sends an empty one,
+the five that read something send theirs in the order pandas declares them, and
+the door stays at seven however many reductions land on it.
 """
+
+from std.python import PythonObject
 
 from firepanda.dtype.logical import LogicalType
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.index import Index
 from firepanda.frame.series import Series
-from firepanda.kernel.window import edge_named, op_named
+from firepanda.kernel.ordered import between_named, tied_named
+from firepanda.kernel.window import WindowSettings, edge_named, op_named
+from firepanda.py.args import flag, number, whole, words
 from firepanda.py.errors import DTYPE, VALUE, tagged
 
 
@@ -89,6 +99,91 @@ def _reducible(column: Series) raises:
     )
 
 
+def window_settings(
+    kind: String, settings: PythonObject
+) raises -> WindowSettings:
+    """Reads a reduction's own parameters out of the tuple they arrived in.
+
+    The tuple is positional and its length is decided by the reduction, so the
+    length is checked before anything is read out of it. A caller cannot reach
+    this with the wrong length, because the Python layer builds the tuple from
+    the method's own declared parameters, which means a mismatch here is the two
+    halves of the library disagreeing about a reduction and is worth saying so.
+
+    The words and the fraction are checked again here, having already been
+    checked on the Python side where pandas' own sentences for them live. That
+    is the arrangement `closed` already has, and the reason is that this
+    function is also the door the Mojo API comes through.
+
+    Args:
+        kind: The reduction, as pandas spells the method.
+        settings: The tuple, which is empty for the eight that read nothing.
+
+    Returns:
+        The settings, with a default in every field nothing was read into.
+
+    Raises:
+        Error: Tagged `value` if the tuple is the wrong length for the
+            reduction, if the fraction is outside nought to one, or if a word is
+            not one the reduction accepts. Tagged `dtype` if a value is of the
+            wrong type.
+    """
+    var wanted = 0
+    if kind == "var" or kind == "std" or kind == "sem":
+        wanted = 1
+    elif kind == "quantile":
+        wanted = 2
+    elif kind == "rank":
+        wanted = 3
+    var given = Int(len(settings))
+    if given != wanted:
+        raise tagged(
+            VALUE,
+            String(
+                "window: ",
+                kind,
+                " reads ",
+                wanted,
+                " of its own parameters and ",
+                given,
+                " arrived",
+            ),
+        )
+    var out = WindowSettings()
+    if wanted == 0:
+        return out
+    if kind == "quantile":
+        out.fraction = number(settings[0], "q")
+        if not (out.fraction >= 0.0 and out.fraction <= 1.0):
+            # Written as a pair of comparisons rather than as a range so that
+            # a NaN fails it. pandas accepts a NaN here, because its own check
+            # asks whether the fraction is below nought or above one and a NaN
+            # is neither, and then answers a column of NaN. A caller who wrote
+            # that meant a position in the window and did not get one.
+            raise tagged(
+                VALUE,
+                String(
+                    "window: q is a fraction from 0 to 1 and not ",
+                    out.fraction,
+                ),
+            )
+        try:
+            out.between = between_named(words(settings[1], "interpolation"))
+        except e:
+            raise tagged(VALUE, String(e))
+        return out
+    if kind == "rank":
+        try:
+            out.tied = tied_named(words(settings[0], "method"))
+        except e:
+            raise tagged(VALUE, String(e))
+        out.ascending = flag(settings[1], "ascending")
+        out.pct = flag(settings[2], "pct")
+        return out
+    out.ddof = whole(settings[0], "ddof")
+    return out
+
+
 def window(
     column: Series,
     kind: String,
@@ -97,7 +192,7 @@ def window(
     center: Bool,
     closed: String,
     step: Optional[Int],
-    ddof: Int,
+    settings: WindowSettings,
 ) raises -> Series:
     """Runs one reduction over every window of a column.
 
@@ -113,8 +208,8 @@ def window(
             words.
         step: How many rows apart the answered rows are, or nothing for every
             row.
-        ddof: Subtracted from the count of values to give the divisor of a
-            variance, read by `std`, `var` and `sem` and ignored by the rest.
+        settings: The parameters the reduction reads and the window does not,
+            already read apart from the tuple they crossed in.
 
     Returns:
         A float64 column, as tall as the one it read unless a step made it
@@ -136,7 +231,7 @@ def window(
                 center,
                 edge_named(closed),
                 step,
-                ddof,
+                settings,
             )
         if center or step:
             # pandas has no place to put either of these on an expanding
@@ -146,7 +241,7 @@ def window(
                 "window: an expanding window takes neither center nor step"
             )
         return column.expanding(
-            op, min_periods.value() if min_periods else 1, ddof
+            op, min_periods.value() if min_periods else 1, settings
         )
     except e:
         raise tagged(VALUE, String(e))
@@ -160,7 +255,7 @@ def window_frame(
     center: Bool,
     closed: String,
     step: Optional[Int],
-    ddof: Int,
+    settings: WindowSettings,
 ) raises -> DataFrame:
     """Runs one reduction over every window of every column.
 
@@ -189,8 +284,8 @@ def window_frame(
             words.
         step: How many rows apart the answered rows are, or nothing for every
             row.
-        ddof: Subtracted from the count of values to give the divisor of a
-            variance, read by `std`, `var` and `sem` and ignored by the rest.
+        settings: The parameters the reduction reads and the window does not,
+            already read apart from the tuple they crossed in.
 
     Returns:
         A frame of the same column names in the same order, every one of them
@@ -219,7 +314,7 @@ def window_frame(
                 center,
                 closed,
                 step,
-                ddof,
+                settings,
             )
         )
     # Taken off the first answer rather than off the frame, because a step makes

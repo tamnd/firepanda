@@ -1952,6 +1952,15 @@ _CLOSED = ("right", "left", "both", "neither")
 """The four words pandas takes for which ends a window keeps, in the order its
 own error message lists them."""
 
+_BETWEEN = ("linear", "lower", "higher", "midpoint", "nearest")
+"""The five words pandas takes for what a quantile does when its position lands
+between two values."""
+
+_TIED = ("average", "min", "max")
+"""The three words a window rank takes for what to do with values that are equal.
+`Series.rank` takes `dense` and `first` as well and a window does not, which is
+pandas' own difference and is kept."""
+
 
 class WindowMixin:
     """What `Rolling` and `Expanding` share, which is everything after the width.
@@ -2079,13 +2088,98 @@ class WindowMixin:
 
         return isinstance(self._data, DataFrame)
 
+    def _spread_settings(self, ddof: int) -> tuple[Any, ...]:
+        """Checks the one parameter the three spreads read and packs it.
+
+        pandas takes a float here and truncates it, so `ddof=1.5` quietly answers
+        the `ddof=1` column, and a caller who wrote that meant something and did
+        not get it. A whole number is asked for and anything else is a sentence.
+        A negative one is allowed, as it is in pandas, because it is a divisor
+        larger than the count rather than a mistake.
+
+        Args:
+            ddof: Subtracted from the count of values to give the divisor.
+
+        Returns:
+            The one value, as the tuple `_reduce` passes on.
+
+        Raises:
+            InvalidArgumentError: If it is not a whole number.
+        """
+        if not isinstance(ddof, int) or isinstance(ddof, bool):
+            raise InvalidArgumentError("ddof must be an integer")
+        return (ddof,)
+
+    def _quantile_settings(self, q: float, interpolation: str) -> tuple[Any, ...]:
+        """Checks the two parameters a quantile reads and packs them.
+
+        pandas asks whether the fraction is below nought or above one, which a
+        NaN is neither of, so `quantile(float("nan"))` is accepted there and
+        answers a column of NaN. The question here is whether the fraction is
+        between nought and one, which a NaN is not, so it gets the same sentence
+        a fraction of two gets. A caller who wrote that asked for a position in
+        the window and there is no position to give them.
+
+        Both of these are checked again in the kernel, which is the arrangement
+        `closed` already has: the sentences pandas raises for them live on this
+        side, and the kernel checks as well because it is also the door the Mojo
+        API comes through.
+
+        Args:
+            q: How far through the sorted window to read, from nought to one.
+            interpolation: Which rule to use when the position lands between two
+                values.
+
+        Returns:
+            The two values, in the order pandas declares them.
+
+        Raises:
+            InvalidArgumentError: If the fraction is not a number between nought
+                and one, or the rule is not one of the five.
+        """
+        if isinstance(q, bool) or not isinstance(q, (int, float)):
+            raise InvalidArgumentError("must be real number, not " + type(q).__name__)
+        if not 0.0 <= float(q) <= 1.0:
+            raise InvalidArgumentError(f"quantile value {q} not in [0, 1]")
+        if interpolation not in _BETWEEN:
+            raise InvalidArgumentError(f"Interpolation '{interpolation}' is not supported")
+        return (float(q), interpolation)
+
+    def _rank_settings(self, method: str, ascending: bool, pct: bool) -> tuple[Any, ...]:
+        """Checks the three parameters a rank reads and packs them.
+
+        `Series.rank` accepts five tie rules and `Rolling.rank` accepts three of
+        them, which is pandas' own difference and is kept here, because the two
+        that are missing are the two a window cannot answer out of a count of
+        ranks alone. The sentence is pandas' sentence.
+
+        Args:
+            method: What to do with values that are equal.
+            ascending: Whether to count from the smallest value.
+            pct: Whether to divide the rank by how many values the window holds.
+
+        Returns:
+            The three values, in the order pandas declares them.
+
+        Raises:
+            InvalidArgumentError: If the rule is not one of the three, or either
+                flag is not a boolean.
+        """
+        if method not in _TIED:
+            raise InvalidArgumentError(f"Method '{method}' is not supported")
+        if ascending is not True and ascending is not False:
+            raise InvalidArgumentError("ascending must be a boolean")
+        if pct is not True and pct is not False:
+            raise InvalidArgumentError("pct must be a boolean")
+        return (method, ascending, pct)
+
     def _reduce(
         self,
         kind: str,
         numeric_only: bool = False,
         engine: Any = None,
         engine_kwargs: Any = None,
-        ddof: int = 1,
+        settings: tuple[Any, ...] = (),
     ) -> Series | DataFrame:
         """Runs one reduction over every window.
 
@@ -2108,12 +2202,12 @@ class WindowMixin:
                 values over a column, for the reason above.
             engine: Declared and refused, except at `cython`.
             engine_kwargs: Declared and refused. Last of the positional ones, so
-                that `ddof` can sit after it and the five reductions that do not
-                read it keep the call they already had.
-            ddof: Subtracted from the count of values to give the divisor of a
-                variance. Only `var`, `std` and `sem` declare it and only they
-                pass it, and it crosses on every call because there is one door
-                and not eight.
+                that `settings` can sit after it and the eight reductions that
+                send nothing keep the call they already had.
+            settings: The parameters the reduction reads and the window does not,
+                already checked and in the order pandas declares them. Empty for
+                the eight that read none of it. The three helpers above build it
+                and are the only things that should.
 
         Returns:
             Whichever of the two was windowed, of float64, as tall as what it
@@ -2122,8 +2216,6 @@ class WindowMixin:
         Raises:
             NotImplementedError: If a numba engine was asked for, or if a frame
                 was asked to drop the columns it cannot reduce.
-            InvalidArgumentError: If the degrees of freedom are not a whole
-                number.
         """
         from ._frame import DataFrame, Series
 
@@ -2146,13 +2238,6 @@ class WindowMixin:
             engine_kwargs,
             "it configures the numba engine, and there is no numba engine here for it to configure",
         )
-        # pandas takes a float here and truncates it, so `ddof=1.5` quietly
-        # answers the `ddof=1` column, and a caller who wrote that meant
-        # something and did not get it. A whole number is asked for and anything
-        # else is a sentence. A negative one is allowed, as it is in pandas,
-        # because it is a divisor larger than the count rather than a mistake.
-        if not isinstance(ddof, int) or isinstance(ddof, bool):
-            raise InvalidArgumentError("ddof must be an integer")
         # The one default `_hold` did not apply is applied here. `right` is
         # pandas' word for a window that keeps the row it is answering and not
         # the one that fell off the far end. The absent `min_periods` is left
@@ -2166,7 +2251,7 @@ class WindowMixin:
             self._center,
             self._closed or "right",
             self._step,
-            ddof,
+            settings,
         )
         try:
             if isinstance(self._data, DataFrame):

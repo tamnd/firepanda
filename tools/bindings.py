@@ -109,12 +109,49 @@ def _guarded(statement: str, indent: str) -> list[str]:
     Returns:
         The lines to emit.
     """
-    return [
-        f"{indent}try:",
-        f"{indent}    {statement}",
-        f"{indent}except Exception as error:",
-        f"{indent}    raise translate(error) from None",
-    ]
+    return (
+        [f"{indent}try:"]
+        + _python_statement(statement, f"{indent}    ")
+        + [
+            f"{indent}except Exception as error:",
+            f"{indent}    raise translate(error) from None",
+        ]
+    )
+
+
+def _python_statement(statement: str, indent: str) -> list[str]:
+    """Writes one delegating call the way `ruff format` would have written it.
+
+    Same problem as `_python_def` and the same reason for solving it here, which
+    is that the generated files are format checked and a statement that is merely
+    valid is not enough. This one only knows the two layouts these statements
+    ever need, all on one line and the arguments together on one continuation
+    line, because every one of them is a single call with a single set of
+    brackets. A statement that needs the third layout is a body that has grown
+    past what the generator should be laying out, so it says so rather than
+    writing something the formatter will then rewrite.
+
+    Args:
+        statement: The statement, which is one call.
+        indent: The indent it sits at.
+
+    Returns:
+        The lines to emit.
+    """
+    one = f"{indent}{statement}"
+    if len(one) <= PYTHON_COLUMNS:
+        return [one]
+    head, _, rest = statement.partition("(")
+    close = rest.rfind(")")
+    inside = f"{indent}    {rest[:close]}"
+    if close < 0 or len(inside) > PYTHON_COLUMNS:
+        raise SystemExit(
+            f"the generated statement `{statement}` is too long for the"
+            " generator to lay out the way ruff format wants, which needs its"
+            f" arguments to fit on one line at an indent of {len(indent) + 4}."
+            " Shorten the names it calls."
+        )
+    return [f"{indent}{head}(", inside, f"{indent}{rest[close:]}"]
 
 
 @dataclass(frozen=True)
@@ -1043,32 +1080,62 @@ rather than declaring them and ignoring them.
 """
 
 
-WINDOWED: tuple[tuple[str, str], ...] = (
-    ("sum", "The total of the values in the window."),
-    ("mean", "The mean of the values in the window."),
-    ("count", "How many rows of the window hold a value."),
-    ("min", "The smallest value in the window."),
-    ("max", "The largest value in the window."),
-    ("var", "The variance of the values in the window."),
-    ("std", "The standard deviation of the values in the window."),
-    ("sem", "The standard error of the mean of the values in the window."),
-    ("skew", "The skewness of the values in the window."),
-    ("kurt", "The excess kurtosis of the values in the window."),
-    ("median", "The middle value of the window."),
+WINDOWED: tuple[tuple[str, str, str, str], ...] = (
+    ("sum", "The total of the values in the window.", "", ""),
+    ("mean", "The mean of the values in the window.", "", ""),
+    ("count", "How many rows of the window hold a value.", "", ""),
+    ("min", "The smallest value in the window.", "", ""),
+    ("max", "The largest value in the window.", "", ""),
+    (
+        "var",
+        "The variance of the values in the window.",
+        "ddof: int = 1",
+        "self._spread_settings(ddof)",
+    ),
+    (
+        "std",
+        "The standard deviation of the values in the window.",
+        "ddof: int = 1",
+        "self._spread_settings(ddof)",
+    ),
+    (
+        "sem",
+        "The standard error of the mean of the values in the window.",
+        "ddof: int = 1",
+        "self._spread_settings(ddof)",
+    ),
+    ("skew", "The skewness of the values in the window.", "", ""),
+    ("kurt", "The excess kurtosis of the values in the window.", "", ""),
+    ("median", "The middle value of the window.", "", ""),
+    (
+        "quantile",
+        "The value a fraction of the way through the sorted window.",
+        'q: float, interpolation: str = "linear"',
+        "self._quantile_settings(q, interpolation)",
+    ),
+    (
+        "rank",
+        "Where the value in the window's last row sits among the window's values.",
+        'method: str = "average", ascending: bool = True, pct: bool = False',
+        "self._rank_settings(method, ascending, pct)",
+    ),
 )
-"""The eleven reductions a window can be run through, and what each answers.
+"""The thirteen reductions a window can be run through, and what each answers.
 
-Eleven rather than pandas' twenty six. Ten of them are the ones that can be
+Thirteen rather than pandas' twenty six. Ten of them are the ones that can be
 carried from one window to the next as a number or a state rather than
-recomputed, and the eleventh is the median, which is carried as a count of the
-window's values by rank instead. `firepanda/kernel/window.mojo` says which of
-the other fifteen are still waiting and why each of them is its own piece of
-work.
+recomputed, and the other three read a position in the sorted window, which is
+carried as a count of the window's values by rank instead.
+`firepanda/kernel/window.mojo` says which of the other thirteen are still
+waiting and why each of them is its own piece of work.
 
-Three of the eleven read a degrees of freedom and the other eight do not, which
-is one of the two places this table is not uniform, and `_window_members` splits
-on it rather than declaring an argument the other eight would have to ignore.
-The other is the engine arguments, which four of the eleven do not declare.
+The third and fourth columns are the parameters the reduction reads and the
+window does not. Five of the thirteen have some and the other eight have none,
+which is one of the two places this table is not uniform, and `_window_members`
+reads the columns rather than declaring arguments the other eight would have to
+ignore. The other is the engine arguments, which six of the thirteen do not
+declare. Both columns are written in the order pandas declares them, because
+that order is the surface being matched.
 """
 
 
@@ -1153,7 +1220,7 @@ made once rather than per window.
 
 
 def _window_members(py: str) -> tuple[Member, ...]:
-    """Writes the eleven properties and ten reduction members for one window class.
+    """Writes the eleven properties and thirteen reductions for one window class.
 
     Same restriction as `_group_members`, which is that nothing here decides
     what a reduction does. The word crosses the boundary and
@@ -1183,29 +1250,28 @@ def _window_members(py: str) -> tuple[Member, ...]:
                 returns=returns,
             )
         )
-    for name, what in WINDOWED:
-        # Four of the eleven take no engine arguments in pandas and so take
+    for name, what, own, settings in WINDOWED:
+        # Six of the thirteen take no engine arguments in pandas and so take
         # none here. `count` never had a numba path to choose. `sem` is written
         # in pandas as a deviation over a root count rather than as a kernel, so
         # there was never a path there either to offer. `skew` and `kurt` have
         # kernels and still declare nothing, which is pandas' own inconsistency
         # and is copied because the signature is the surface being matched.
-        # `median` does declare both, which is why it is not in that list.
-        counting = name == "count"
-        spread = name in ("var", "std", "sem")
-        engined = not counting and name not in ("sem", "skew", "kurt")
+        # `quantile` and `rank` declare neither either, and `median` declares
+        # both, which is why the three of them do not travel together here.
+        engined = name not in ("count", "sem", "skew", "kurt", "quantile", "rank")
         signature = "numeric_only: bool = False"
-        if spread:
-            signature = f"ddof: int = 1, {signature}"
+        if own:
+            signature = f"{own}, {signature}"
         if engined:
             signature = f"{signature}, {engines}"
         arguments = "numeric_only"
         if engined:
             arguments = f"{arguments}, engine, engine_kwargs"
-            if spread:
-                arguments = f"{arguments}, ddof"
-        elif spread:
-            arguments = f"{arguments}, ddof=ddof"
+            if settings:
+                arguments = f"{arguments}, {settings}"
+        elif settings:
+            arguments = f"{arguments}, settings={settings}"
         out.append(
             Member(
                 name=name,
@@ -1557,7 +1623,7 @@ FRAME = Exposed(
                 ("center", "bool"),
                 ("closed", "str"),
                 ("step", "int | None"),
-                ("ddof", "int"),
+                ("settings", "tuple[object, ...]"),
             ),
             returns="DataFrame",
         ),
@@ -1953,7 +2019,7 @@ SERIES = Exposed(
                 ("center", "bool"),
                 ("closed", "str"),
                 ("step", "int | None"),
-                ("ddof", "int"),
+                ("settings", "tuple[object, ...]"),
             ),
             returns="Series",
         ),

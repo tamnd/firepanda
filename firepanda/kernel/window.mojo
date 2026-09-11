@@ -139,7 +139,16 @@ from firepanda.dtype.logical import LogicalType
 
 from .cast import cast_any
 from .nulls import present_bitmap_any
-from .ordered import Ordered, Ranks, halved, ranked
+from .ordered import (
+    BETWEEN_LINEAR,
+    TIED_AVERAGE,
+    Ordered,
+    Ranks,
+    halved,
+    picked,
+    placed,
+    ranked,
+)
 from .spread import (
     MOMENT_KURT,
     MOMENT_SKEW,
@@ -182,6 +191,12 @@ comptime OP_KURT = 9
 
 comptime OP_MEDIAN = 10
 """Operation code for the middle value of the window."""
+
+comptime OP_QUANTILE = 11
+"""Operation code for the value at a fraction of the way through the window."""
+
+comptime OP_RANK = 12
+"""Operation code for the position of the window's last row among its values."""
 
 comptime EDGE_RIGHT = 0
 """Closed code for a window that drops the first row of its span."""
@@ -241,6 +256,12 @@ struct WindowOp(Equatable, ImplicitlyCopyable, Movable, Writable):
     comptime MEDIAN = Self(OP_MEDIAN)
     """The middle value of the window."""
 
+    comptime QUANTILE = Self(OP_QUANTILE)
+    """The value at a fraction of the way through the window."""
+
+    comptime RANK = Self(OP_RANK)
+    """The position of the window's last row among the window's values."""
+
     def spreads(self) -> Bool:
         """Says whether this reduction measures a spread rather than a level.
 
@@ -265,11 +286,18 @@ struct WindowOp(Equatable, ImplicitlyCopyable, Movable, Writable):
         """Says whether this reduction asks about the order of the values.
 
         Returns:
-            True for the median, which is the first of the three that read a
+            True for the median, the quantile and the rank, which read a
             position in the sorted window rather than folding the window into a
-            number, and so is the first that runs through `ordered.mojo`.
+            number and so run through `ordered.mojo`. Written as three
+            comparisons rather than as one against `OP_MEDIAN`, for the reason
+            `shapes` is: the codes past the last one of a group are the codes
+            that have not been added yet.
         """
-        return self.code == OP_MEDIAN
+        return (
+            self.code == OP_MEDIAN
+            or self.code == OP_QUANTILE
+            or self.code == OP_RANK
+        )
 
     def __eq__(self, other: Self) -> Bool:
         """Compares two operations.
@@ -319,8 +347,12 @@ struct WindowOp(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("skew")
         elif self == Self.KURT:
             writer.write("kurt")
-        else:
+        elif self == Self.MEDIAN:
             writer.write("median")
+        elif self == Self.QUANTILE:
+            writer.write("quantile")
+        else:
+            writer.write("rank")
 
 
 def op_named(name: StringSlice) raises -> WindowOp:
@@ -333,7 +365,7 @@ def op_named(name: StringSlice) raises -> WindowOp:
         The reduction it names.
 
     Raises:
-        Error: If it is not one of the eleven this file answers.
+        Error: If it is not one of the thirteen this file answers.
     """
     if name == "sum":
         return WindowOp.SUM
@@ -357,6 +389,10 @@ def op_named(name: StringSlice) raises -> WindowOp:
         return WindowOp.KURT
     if name == "median":
         return WindowOp.MEDIAN
+    if name == "quantile":
+        return WindowOp.QUANTILE
+    if name == "rank":
+        return WindowOp.RANK
     raise Error("window: no window reduction is called " + String(name))
 
 
@@ -447,6 +483,60 @@ def edge_named(name: StringSlice) raises -> WindowEdge:
         "window: closed is one of right, left, both or neither, and not "
         + String(name)
     )
+
+
+@fieldwise_init
+struct WindowSettings(ImplicitlyCopyable, Movable):
+    """The parameters that belong to a reduction rather than to a window.
+
+    Five of the thirteen reductions read something the window itself has no
+    opinion about. The three spreads read a degrees of freedom, the quantile
+    reads a fraction and a rule for landing between two values, and the rank
+    reads a tie rule, a direction and whether to divide by the count. The other
+    eight read none of it.
+
+    They are one value rather than six arguments because of the Python door. A
+    bound method gets seven real arguments after the object, which document 13
+    section 4 measured, and the window itself already needs six of them, so the
+    seventh is the whole budget for every reduction's own parameters put
+    together. Passing them as separate arguments worked for exactly as long as
+    there was one of them.
+
+    So the seventh slot carries a tuple, `firepanda/py/window.mojo` reads it
+    apart against the reduction's name, and from that point inwards these are
+    ordinary typed fields. Every one of them has a default that is the default
+    pandas documents, which is what lets the eight reductions that read none of
+    them pass nothing at all.
+    """
+
+    var ddof: Int
+    """Subtracted from the count of values to give the divisor of a variance."""
+
+    var fraction: Float64
+    """How far through the sorted window a quantile reads, nought to one."""
+
+    var between: Int
+    """Which of the five rules a quantile uses between two values."""
+
+    var tied: Int
+    """Which of the three rules a rank uses for values that are equal."""
+
+    var ascending: Bool
+    """Whether a rank counts from the smallest value rather than the largest."""
+
+    var pct: Bool
+    """Whether a rank is divided by how many values the window holds."""
+
+    def __init__(out self):
+        """Builds the settings every reduction gets when it asks for nothing.
+
+        The fraction is a half so that a quantile with no fraction given reads
+        the middle, which is not a default pandas has, because pandas makes the
+        fraction required. It is here so that the value is a number rather than
+        whatever was in the field, and nothing reaches `picked` without a
+        fraction having crossed the door.
+        """
+        self = Self(1, 0.5, BETWEEN_LINEAR, TIED_AVERAGE, True, False)
 
 
 @fieldwise_init
@@ -598,7 +688,10 @@ def expanding_shape(min_periods: Int, rows: Int) raises -> Shape:
 
 
 def window_agg(
-    col: AnyArray, op: WindowOp, shape: Shape, ddof: Int = 1
+    col: AnyArray,
+    op: WindowOp,
+    shape: Shape,
+    settings: WindowSettings = WindowSettings(),
 ) raises -> AnyArray:
     """Runs a reduction over every window of a column.
 
@@ -606,9 +699,9 @@ def window_agg(
         col: The column.
         op: Which reduction to run.
         shape: Where the windows sit.
-        ddof: Subtracted from the count of values to give the divisor of a
-            variance. Read by the three spread reductions and ignored by the
-            other seven, which is why it has a default and they do not pass one.
+        settings: The parameters the reduction reads and the window does not.
+            Five of the thirteen read something out of it and the other eight
+            read nothing, which is why it has a default and they pass none.
 
     Returns:
         A float64 column with one row per step, holding a NaN wherever the
@@ -645,12 +738,14 @@ def window_agg(
             form = SPREAD_STD
         elif op == WindowOp.SEM:
             form = SPREAD_SEM
-        return AnyArray(_spread(src, present, seen, rows, shape, ddof, form))
+        return AnyArray(
+            _spread(src, present, seen, rows, shape, settings.ddof, form)
+        )
     if op.shapes():
         var form = MOMENT_SKEW if op == WindowOp.SKEW else MOMENT_KURT
         return AnyArray(_moments(src, present, seen, rows, shape, form))
     if op.orders():
-        return AnyArray(_ordered(src, present, seen, rows, shape))
+        return AnyArray(_ordered(src, present, seen, rows, shape, op, settings))
     return AnyArray(
         _total(src, present, seen, rows, shape, op == WindowOp.MEAN)
     )
@@ -1112,8 +1207,10 @@ def _ordered[
     seen: List[Int],
     rows: Int,
     shape: Shape,
+    op: WindowOp,
+    settings: WindowSettings,
 ) raises -> Array[DType.float64]:
-    """Reads the middle out of every window, carrying the counts between them.
+    """Reads a position out of every window, carrying the counts between them.
 
     The same walk as `_spread` with two differences. What is carried is a count
     of the window's values by rank rather than a number, so there is no bound to
@@ -1125,12 +1222,25 @@ def _ordered[
     the tree, which would be the number of distinct values in the whole column
     every time a stepped window jumped.
 
+    The three reductions differ only in what they ask the tree at the end, which
+    is why they are one loop. The median reads the middle, the quantile reads a
+    fraction of the way through, and the rank asks where one particular value
+    sits. That value is the one in the window's last row and not the one in the
+    row being answered, which is pandas' rule and is a real difference under
+    `center`, under a step and under the two closed rules that drop the
+    answered row: `rolling(3, closed='left').rank()` ranks the row before the
+    window's near end. If that row holds nothing the answer is missing however
+    many values the window holds, because there is no value to place.
+
     Args:
         src: The values, already float64.
         present: Which rows hold a value.
         seen: The running count of rows holding a value.
         rows: How tall the column is.
         shape: Where the windows sit.
+        op: Which of the three order statistics to answer.
+        settings: The fraction, the rule between two values, and the three a
+            rank reads.
 
     Parameters:
         origin: The origin of the values.
@@ -1158,7 +1268,25 @@ def _ordered[
         var found = seen[span.stop] - seen[span.start]
         var value = nan[DType.float64]()
         if found >= shape.min_periods and found > 0:
-            value = halved(carried, ranks, found)
+            if op == WindowOp.MEDIAN:
+                value = halved(carried, ranks, found)
+            elif op == WindowOp.QUANTILE:
+                value = picked(
+                    carried,
+                    ranks,
+                    found,
+                    settings.fraction,
+                    settings.between,
+                )
+            elif present.get(span.stop - 1):
+                value = placed(
+                    carried,
+                    Int(ranks.of_row[span.stop - 1]),
+                    found,
+                    settings.tied,
+                    settings.ascending,
+                    settings.pct,
+                )
         target.unsafe_offset(k).unsafe_store(value)
     return answer^
 

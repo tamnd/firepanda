@@ -1,4 +1,4 @@
-"""The eleven window reductions, checked against a running pandas.
+"""The thirteen window reductions, checked against a running pandas.
 
 The kernel has its own tests in `tests/test_window.mojo`, `tests/
 test_spread.mojo` and `tests/test_ordered.mojo` and they check the arithmetic.
@@ -60,11 +60,13 @@ WINDOWED = [
     "skew",
     "kurt",
     "median",
+    "quantile",
+    "rank",
 ]
-"""The eleven reductions, every one of which has to answer over every placement.
+"""The thirteen reductions, every one of which has to answer over every placement.
 
 Written once because a reduction added to the library and not added here would
-leave four tests passing on ten names and looking complete.
+leave four tests passing on twelve names and looking complete.
 """
 
 CARRIED = ("skew", "kurt")
@@ -134,13 +136,34 @@ def slack(kind: str) -> float:
     return NEAR if kind in CARRIED else 0.0
 
 
+def run(window: Any, kind: str) -> Any:
+    """Asks one window for one reduction, with nothing chosen that has a default.
+
+    Twelve of the thirteen take no argument they have to be given. `quantile`
+    takes a fraction and pandas makes it required, since there is no fraction
+    that is the obvious one to read, so this hands it a half and every test that
+    runs all thirteen reads the middle. That is the same value the median reads
+    and the two are compared against each other where that matters.
+
+    Args:
+        window: The window object, from either library.
+        kind: The reduction.
+
+    Returns:
+        Whatever the reduction answered.
+    """
+    if kind == "quantile":
+        return window.quantile(0.5)
+    return getattr(window, kind)()
+
+
 @needs_pandas
 @pytest.mark.parametrize("kind", WINDOWED)
 def test_every_reduction_matches_over_a_plain_window(firepanda: ModuleType, kind: str) -> None:
-    """The eleven names, over a five wide window with nothing unusual about it."""
+    """The thirteen names, over a five wide window with nothing unusual about it."""
     assert same(
-        getattr(made(firepanda).rolling(5), kind)(),
-        getattr(theirs().rolling(5), kind)(),
+        run(made(firepanda).rolling(5), kind),
+        run(theirs().rolling(5), kind),
         slack(kind),
     )
 
@@ -148,10 +171,10 @@ def test_every_reduction_matches_over_a_plain_window(firepanda: ModuleType, kind
 @needs_pandas
 @pytest.mark.parametrize("kind", WINDOWED)
 def test_every_reduction_matches_over_an_expanding_window(firepanda: ModuleType, kind: str) -> None:
-    """The same eleven with no near end, which is the other half of the surface."""
+    """The same thirteen with no near end, the other half of the surface."""
     assert same(
-        getattr(made(firepanda).expanding(), kind)(),
-        getattr(theirs().expanding(), kind)(),
+        run(made(firepanda).expanding(), kind),
+        run(theirs().expanding(), kind),
         slack(kind),
     )
 
@@ -209,8 +232,8 @@ def test_a_missing_row_is_stepped_over(firepanda: ModuleType, kind: str) -> None
     rolling sum over the presence indicator.
     """
     assert same(
-        getattr(made(firepanda, HOLED).rolling(3, min_periods=1), kind)(),
-        getattr(theirs(HOLED).rolling(3, min_periods=1), kind)(),
+        run(made(firepanda, HOLED).rolling(3, min_periods=1), kind),
+        run(theirs(HOLED).rolling(3, min_periods=1), kind),
         slack(kind),
     )
 
@@ -234,9 +257,9 @@ def test_an_integer_column_comes_back_as_float64(firepanda: ModuleType) -> None:
     mine = firepanda.Series([1, 2, 3, 4], name="v")
     them = pd.Series([1, 2, 3, 4], name="v")
     for kind in WINDOWED:
-        ours = getattr(mine.rolling(2), kind)()
+        ours = run(mine.rolling(2), kind)
         assert str(ours.dtype) == "float64"
-        assert same(ours, getattr(them.rolling(2), kind)(), slack(kind))
+        assert same(ours, run(them.rolling(2), kind), slack(kind))
 
 
 @needs_pandas
@@ -463,8 +486,8 @@ def test_the_standard_error_is_the_one_spread_with_no_engine_to_choose(
     """pandas writes `sem` as `std(ddof) / count ** 0.5` rather than as a kernel,
     so it never had a numba path to offer and its signature has no `engine` on
     it. Declaring one here that pandas does not have would fail the signature
-    parity check, so `sem` is one of the four reductions of the eleven that takes
-    only the two arguments."""
+    parity check, so `sem` is one of the six reductions of the thirteen that
+    declares no engine at all."""
     with pytest.raises(TypeError):
         made(firepanda).rolling(3).sem(engine="cython")
     with pytest.raises(TypeError):
@@ -734,6 +757,192 @@ def test_a_median_takes_an_engine_and_no_degrees_of_freedom(
         theirs().rolling(3).median(ddof=0)
 
 
+UNEVEN = [1.0, 2.0, 10.0, 3.0, 1.0, 20.0, 2.0]
+"""Seven rows with no order to them, which is what a quantile and a rank need.
+
+The counting numbers the rest of this file uses are already sorted, so every
+window of them has its values in the order they arrived and a selection that read
+the rows rather than the ranks would still be right. These rows are not sorted
+and no two windows of them are sorted the same way.
+"""
+
+TIED = [2.0, 2.0, 2.0, 5.0, 2.0, 2.0, 5.0, 5.0]
+"""Eight rows holding two values, so every window has a run of equal values in it
+and the three tie rules give three different answers."""
+
+
+@needs_pandas
+@pytest.mark.parametrize("fraction", [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 1.0])
+@pytest.mark.parametrize("interpolation", ["linear", "lower", "higher", "midpoint", "nearest"])
+def test_every_fraction_and_every_rule_matches(
+    firepanda: ModuleType, fraction: float, interpolation: str
+) -> None:
+    """Forty combinations of the two arguments a quantile reads.
+
+    The fractions are chosen so that the position lands on a value for some of
+    them and between two values for others, since the five rules only differ in
+    the second case and a test that only asked for halves would pass on four of
+    them by accident.
+    """
+    assert same(
+        made(firepanda, UNEVEN).rolling(5).quantile(fraction, interpolation),
+        theirs(UNEVEN).rolling(5).quantile(fraction, interpolation),
+    )
+
+
+@needs_pandas
+def test_a_quantile_of_a_half_is_the_median(firepanda: ModuleType) -> None:
+    """The same number by two routes, which is worth asserting because they are
+    two different pieces of code here: the median reads the middle of the count
+    of ranks and the quantile computes a position and reads that. They agree
+    everywhere except where the gap between the two middle values overflows,
+    which the columns here do not."""
+    assert same(
+        made(firepanda, UNEVEN).rolling(4).quantile(0.5),
+        made(firepanda, UNEVEN).rolling(4).median(),
+    )
+    assert same(
+        made(firepanda, HOLED).expanding(min_periods=1).quantile(0.5),
+        made(firepanda, HOLED).expanding(min_periods=1).median(),
+    )
+
+
+@needs_pandas
+def test_a_quantile_between_two_huge_values_is_not_an_infinity(
+    firepanda: ModuleType,
+) -> None:
+    """pandas writes the linear rule as the lower value plus the fraction of the
+    gap, which overflows for a window holding the largest finite double of each
+    sign and gives an infinity for a fraction that sits between them. That is the
+    same overflow the median has, seen from the other side: pandas' median of that
+    pair is nought and its quantile of a half is an infinity, and pandas' median of
+    two copies of the largest finite double is an infinity where its quantile is
+    exact. Both are answered here without overflowing, so this library agrees with
+    whichever of the two pandas got right and disagrees with the other."""
+    huge = 1.7976931348623157e308
+    rows = [-huge, huge, huge, huge]
+    mine = firepanda.Series(rows, name="v")
+    ours = mine.rolling(2).quantile(0.5).tolist()
+    them = theirs(rows).rolling(2).quantile(0.5).tolist()
+    assert ours[1] == 0.0
+    assert math.isinf(them[1])
+    assert ours[2:] == them[2:] == [huge, huge]
+    assert mine.rolling(2).median().tolist()[1] == 0.0
+
+
+@needs_pandas
+@pytest.mark.parametrize("method", ["average", "min", "max"])
+@pytest.mark.parametrize("ascending", [True, False])
+@pytest.mark.parametrize("pct", [True, False])
+def test_every_rank_rule_matches_over_a_column_full_of_ties(
+    firepanda: ModuleType, method: str, ascending: bool, pct: bool
+) -> None:
+    """The twelve combinations of the three arguments a rank reads, over a column
+    where every window has equal values in it and the rules come apart."""
+    assert same(
+        made(firepanda, TIED).rolling(4).rank(method, ascending, pct),
+        theirs(TIED).rolling(4).rank(method, ascending, pct),
+    )
+
+
+@needs_pandas
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"window": 3},
+        {"window": 3, "center": True},
+        {"window": 4, "center": True},
+        {"window": 3, "closed": "left"},
+        {"window": 3, "closed": "both"},
+        {"window": 3, "closed": "neither"},
+        {"window": 4, "step": 2},
+        {"window": 1},
+    ],
+)
+def test_a_rank_reads_the_window_last_row_wherever_the_window_sits(
+    firepanda: ModuleType, arguments: dict[str, Any]
+) -> None:
+    """A rank places the value in the window's last row and not the value in the
+    row being answered, which is pandas' rule and is only visible where the two
+    are different rows. Centring, a step and the two closed rules that drop the
+    answered row all make them different, so each of them is here."""
+    assert same(
+        made(firepanda, UNEVEN).rolling(**arguments).rank(),
+        theirs(UNEVEN).rolling(**arguments).rank(),
+    )
+
+
+@needs_pandas
+def test_a_rank_of_a_row_holding_nothing_is_missing(firepanda: ModuleType) -> None:
+    """There is no value to place, so there is no rank however many values the
+    window holds and whatever `min_periods` was asked for. pandas answers the
+    same way and for the same reason."""
+    assert same(
+        made(firepanda, HOLED).rolling(3, min_periods=1).rank(),
+        theirs(HOLED).rolling(3, min_periods=1).rank(),
+    )
+
+
+@needs_pandas
+def test_the_two_position_readers_refuse_what_pandas_refuses(
+    firepanda: ModuleType,
+) -> None:
+    """The sentences are pandas' sentences, since a caller's except clause is
+    matching on them. The one difference is the fraction that is not a number,
+    which pandas accepts because it asks whether the fraction is below nought or
+    above one and a NaN is neither, and then answers a column of NaN. A caller
+    who wrote that asked for a position in the window and there is no position to
+    give them, so it is refused here with the sentence a fraction of two gets."""
+    with pytest.raises(ValueError, match=r"quantile value 1.5 not in \[0, 1\]"):
+        made(firepanda).rolling(3).quantile(1.5)
+    with pytest.raises(ValueError, match=r"quantile value -0.5 not in \[0, 1\]"):
+        made(firepanda).rolling(3).quantile(-0.5)
+    with pytest.raises(ValueError, match="Interpolation 'bogus' is not supported"):
+        made(firepanda).rolling(3).quantile(0.5, "bogus")
+    with pytest.raises(ValueError, match="Method 'dense' is not supported"):
+        made(firepanda).rolling(3).rank("dense")
+    with pytest.raises(ValueError, match="Method 'first' is not supported"):
+        made(firepanda).rolling(3).rank("first")
+    for bad in (1.5, -0.5):
+        with pytest.raises(ValueError, match="not in"):
+            theirs().rolling(3).quantile(bad)
+    for name in ("dense", "first"):
+        with pytest.raises(ValueError, match="not supported"):
+            theirs().rolling(3).rank(name)
+    with pytest.raises(ValueError, match="quantile value nan not in"):
+        made(firepanda).rolling(3).quantile(float("nan"))
+    assert all(math.isnan(x) for x in theirs().rolling(3).quantile(float("nan")))
+
+
+@needs_pandas
+def test_a_quantile_wants_its_fraction_and_a_rank_wants_nothing(
+    firepanda: ModuleType,
+) -> None:
+    """pandas makes the fraction required, since there is no fraction that is the
+    obvious one to read, and gives every one of a rank's three arguments a
+    default. Both are part of the signature and both are checked against pandas
+    doing the same thing."""
+    for window in (made(firepanda).rolling(3), theirs().rolling(3)):
+        with pytest.raises(TypeError, match="q"):
+            window.quantile()
+    assert same(made(firepanda).rolling(3).rank(), theirs().rolling(3).rank())
+    assert same(
+        made(firepanda).rolling(3).quantile(q=0.25),
+        theirs().rolling(3).quantile(q=0.25),
+    )
+
+
+@needs_pandas
+def test_neither_position_reader_takes_an_engine(firepanda: ModuleType) -> None:
+    """pandas declares `engine` and `engine_kwargs` on the median and on neither
+    of these two, which is its own inconsistency and is copied, because the
+    signature is the surface being matched."""
+    for name in ("quantile", "rank"):
+        for window in (made(firepanda).rolling(3), theirs().rolling(3)):
+            with pytest.raises(TypeError):
+                getattr(window, name)(engine="cython")
+
+
 COLUMNS: dict[str, list[Any]] = {"a": ROWS, "b": [x * 3 for x in ROWS], "c": HOLED + ROWS[:4]}
 """Three columns of ten rows, one of them holed, so that a frame window has both
 a column where every window fills and one where they do not."""
@@ -762,10 +971,10 @@ def matching(mine: Any, them: Any, tolerance: float = 0.0) -> bool:
 @needs_pandas
 @pytest.mark.parametrize("kind", WINDOWED)
 def test_every_reduction_matches_over_a_frame(firepanda: ModuleType, kind: str) -> None:
-    """The same eleven names over a frame, which answers a frame of the same
+    """The same thirteen names over a frame, which answers a frame of the same
     columns in the same order rather than a column."""
-    mine = getattr(framed(firepanda).rolling(4), kind)()
-    them = getattr(their_frame().rolling(4), kind)()
+    mine = run(framed(firepanda).rolling(4), kind)
+    them = run(their_frame().rolling(4), kind)
     assert type(mine).__name__ == "DataFrame"
     assert matching(mine, them, slack(kind))
 
@@ -773,10 +982,10 @@ def test_every_reduction_matches_over_a_frame(firepanda: ModuleType, kind: str) 
 @needs_pandas
 @pytest.mark.parametrize("kind", WINDOWED)
 def test_every_reduction_matches_over_an_expanding_frame(firepanda: ModuleType, kind: str) -> None:
-    """The eleven again over the window with no near end."""
+    """The thirteen again over the window with no near end."""
     assert matching(
-        getattr(framed(firepanda).expanding(), kind)(),
-        getattr(their_frame().expanding(), kind)(),
+        run(framed(firepanda).expanding(), kind),
+        run(their_frame().expanding(), kind),
         slack(kind),
     )
 

@@ -48,7 +48,7 @@ class DataFrame:
         center: bool,
         closed: str,
         step: int | None,
-        ddof: int,
+        settings: tuple[object, ...],
     ) -> DataFrame:
         """One reduction over every window of every column."""
         ...
@@ -171,7 +171,7 @@ class Series:
         center: bool,
         closed: str,
         step: int | None,
-        ddof: int,
+        settings: tuple[object, ...],
     ) -> Series:
         """One reduction over every window of the column."""
         ...
