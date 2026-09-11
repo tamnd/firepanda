@@ -263,6 +263,173 @@ def test_the_kernel_agrees_with_the_twin() raises:
                 assert_equal(value_of(got, g), values[g], note)
 
 
+def test_the_parallel_route_merges_across_workers() raises:
+    """Seventy thousand rows, which is past the point where the row numbers are
+    accumulated in a table per worker and merged afterwards.
+
+    The two values that are not the filler are planted at opposite ends of the
+    column, so the smallest of group three is found by the first worker and the
+    largest by the last one and neither of them can be right unless the merge
+    reads every table. The first and the last of that same group are the filler,
+    at the first and last row the group has, which is the other half of the
+    merge: an edge is not a comparison, it is whichever table saw the group
+    earliest or latest.
+    """
+    var n = 70000
+    var groups = 8
+    var low = 8 * 10 + 3
+    var high = 8 * 8000 + 3
+    var builder = StringBuilder(capacity=n)
+    var codes = List[Int](capacity=n)
+    for i in range(n):
+        codes.append(i % groups)
+        if i == low:
+            builder.append("aaa".as_bytes())
+        elif i == high:
+            builder.append("zzz".as_bytes())
+        else:
+            builder.append("mmm".as_bytes())
+    var col = builder^.finish()
+
+    var smallest = reduce(StringArray(copy=col), AggKind.MIN, codes, groups)
+    var largest = reduce(StringArray(copy=col), AggKind.MAX, codes, groups)
+    var earliest = reduce(StringArray(copy=col), AggKind.FIRST, codes, groups)
+    var latest = reduce(StringArray(copy=col), AggKind.LAST, codes, groups)
+
+    for g in range(groups):
+        var note = String("group ") + String(g)
+        assert_equal(value_of(smallest, g), "aaa" if g == 3 else "mmm", note)
+        assert_equal(value_of(largest, g), "zzz" if g == 3 else "mmm", note)
+        assert_equal(value_of(earliest, g), "mmm", note)
+        assert_equal(value_of(latest, g), "mmm", note)
+
+
+def test_the_parallel_route_skips_the_workers_that_saw_nothing() raises:
+    """The same shape again with the nulls arranged so that most of the tables
+    have nothing to say about most of the groups.
+
+    Group one is null all the way down and has to come back null, which is the
+    case a merge that treated an untouched slot as a value would get wrong. Group
+    two holds exactly one value, in the middle of the column, so every table but
+    one is empty for it. Group three is null until forty thousand rows in, which
+    puts its first value several workers along and makes the answer to FIRST
+    depend on skipping the tables in front of it rather than on taking the first
+    one.
+    """
+    var n = 70000
+    var groups = 4
+    var solo = 34002
+    var builder = StringBuilder(capacity=n)
+    var codes = List[Int](capacity=n)
+    for i in range(n):
+        var g = i % groups
+        codes.append(g)
+        if g == 0:
+            builder.append("filler".as_bytes())
+        elif g == 1:
+            builder.append_null()
+        elif g == 2:
+            if i == solo:
+                builder.append("solo".as_bytes())
+            else:
+                builder.append_null()
+        elif i < 40000:
+            builder.append_null()
+        elif i == 40003:
+            builder.append("b".as_bytes())
+        else:
+            builder.append("c".as_bytes())
+    var col = builder^.finish()
+
+    var smallest = reduce(StringArray(copy=col), AggKind.MIN, codes, groups)
+    var largest = reduce(StringArray(copy=col), AggKind.MAX, codes, groups)
+    var earliest = reduce(StringArray(copy=col), AggKind.FIRST, codes, groups)
+    var latest = reduce(StringArray(copy=col), AggKind.LAST, codes, groups)
+
+    assert_false(smallest.is_valid(1))
+    assert_false(largest.is_valid(1))
+    assert_false(earliest.is_valid(1))
+    assert_false(latest.is_valid(1))
+
+    assert_equal(value_of(smallest, 2), "solo")
+    assert_equal(value_of(largest, 2), "solo")
+    assert_equal(value_of(earliest, 2), "solo")
+    assert_equal(value_of(latest, 2), "solo")
+
+    assert_equal(value_of(smallest, 3), "b")
+    assert_equal(value_of(largest, 3), "c")
+    assert_equal(value_of(earliest, 3), "b")
+    assert_equal(value_of(latest, 3), "c")
+
+
+def test_the_parallel_route_agrees_with_the_serial_one() raises:
+    """The same column reduced twice, once past the bound and once under it.
+
+    A slice of the first sixty thousand rows takes the serial route because it is
+    short, and the whole seventy thousand take the parallel one, so reducing the
+    slice by hand against the head of the parallel answer is not the same thing.
+    What is compared instead is the parallel answer against a plain loop written
+    here, which is the shape the twin has and the reason it exists: the loop is
+    obviously right and the kernel is not.
+    """
+    var n = 70000
+    var groups = 6
+    var rng = Rng(0x9E3779B9)
+    var builder = StringBuilder(capacity=n)
+    var codes = List[Int](capacity=n)
+    var values = List[String](capacity=n)
+    var present = List[Bool](capacity=n)
+    for _ in range(n):
+        codes.append(Int(rng.next_below(groups)))
+        if rng.next_below(8) == 0:
+            builder.append_null()
+            values.append(String(""))
+            present.append(False)
+            continue
+        var value = String("")
+        for _ in range(Int(rng.next_range(1, 9))):
+            value += chr(Int(rng.next_range(97, 101)))
+        builder.append(value.as_bytes())
+        values.append(value)
+        present.append(True)
+    var col = builder^.finish()
+
+    var kinds = List[AggKind]()
+    kinds.append(AggKind.FIRST)
+    kinds.append(AggKind.LAST)
+    kinds.append(AggKind.MIN)
+    kinds.append(AggKind.MAX)
+    for k in range(len(kinds)):
+        var kind = kinds[k]
+        var want = List[String](length=groups, fill=String(""))
+        var found = List[Bool](length=groups, fill=False)
+        for i in range(n):
+            if not present[i]:
+                continue
+            var g = codes[i]
+            if not found[g]:
+                found[g] = True
+                want[g] = values[i].copy()
+                continue
+            if kind == AggKind.FIRST:
+                continue
+            if kind == AggKind.LAST:
+                want[g] = values[i].copy()
+                continue
+            if kind == AggKind.MIN:
+                if values[i] < want[g]:
+                    want[g] = values[i].copy()
+            elif values[i] > want[g]:
+                want[g] = values[i].copy()
+
+        var got = reduce(StringArray(copy=col), kind, codes, groups)
+        for g in range(groups):
+            var note = String(kind) + " group " + String(g)
+            assert_true(got.is_valid(g) == found[g], note)
+            if found[g]:
+                assert_equal(value_of(got, g), want[g], note)
+
+
 def test_a_frame_aggregates_a_text_column() raises:
     var series = List[Series]()
     series.append(Series("region", text(["west", "east", "west", "east"])))

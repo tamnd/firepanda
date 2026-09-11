@@ -44,6 +44,18 @@ Over a million thirty two byte elements on a ten core laptop, a minimum went fro
 
 Part of #480.
 
+### Changed: the smallest string in each group is found on every core
+
+`MIN`, `MAX`, `FIRST` and `LAST` over a text column with a group by in front of them accumulated a row number per group in one serial pass, while the same four reductions over a column of numbers have been running on every core for a long time. The scan now builds a table of row numbers per worker and merges the tables afterwards, under the same `_private_workers` rule every other grouped reduction is sized by, charged at eight bytes a group because a row number is an int64.
+
+On a million rows over a hundred groups the grouped minimum went from between three and five milliseconds to between one and a half and two, over three runs of the pair on a ten core laptop with enough noise in it that the ratio is worth more than either number. `text/agg_min` is the row.
+
+The merge is two rules rather than one. `MIN` and `MAX` compare two candidate rows, which is the comparison the scan already makes. `FIRST` and `LAST` compare nothing, because a worker takes a contiguous run of rows and the workers are read in row order, so the earliest row a group has is in the first table that saw it and the latest is in the last. A group a worker never reached is a -1, which is the same value that says the group's answer is null, so there is no separate presence table the way the numeric extreme needs one.
+
+What is not here is the partitioned route. Past the point where a table per worker will not fit, the numeric reductions split the rows by group instead; this stays serial. That route would work here and it has not been written because nothing has measured a case that wants it, since the queries this was written for group by a column with a few thousand distinct values and the table is kilobytes.
+
+Part of #480.
+
 ## [0.6.61] - 2026-09-11
 
 Built against Mojo 1.0.0 (ed45d567).
