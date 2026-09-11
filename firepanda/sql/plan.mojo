@@ -345,6 +345,89 @@ def _is_aggregate(name: String) -> Bool:
         return False
 
 
+struct _Scope(Movable):
+    """What the `FROM` put in reach, and which relation each name is.
+
+    A name in here is what the query is allowed to write in front of a column.
+    A table brings its own name, and an alias replaces it rather than adding to
+    it, which is SQL's rule and is why `SELECT t.a FROM t AS l` is an error and
+    not a second way of writing the same thing.
+
+    The relation is the number the scan was built with, which is the number
+    `Expr.table` holds and the offset of that table's schema in `sources`. So a
+    qualified name resolves here, at lowering, and the plan carries the relation
+    rather than the word. A plan holding the word would be a plan holding a name
+    that something later has to resolve against a scope the plan does not have.
+    """
+
+    var names: List[String]
+    """The names, in the order the FROM introduced them."""
+
+    var tables: List[Int]
+    """Which relation each of those is."""
+
+    def __init__(out self):
+        """Starts with nothing in reach, which is what a query with no FROM has.
+        """
+        self.names = List[String]()
+        self.tables = List[Int]()
+
+    def add(mut self, var name: String, table: Int) raises:
+        """Puts one name in reach.
+
+        Args:
+            name: What the query may write in front of a column.
+            table: Which relation it is.
+
+        Raises:
+            If something is already called that.
+        """
+        for i in range(len(self.names)):
+            if self.names[i] == name:
+                raise Error(
+                    String(
+                        "'",
+                        name,
+                        (
+                            "' is the name of more than one table in this FROM,"
+                            " so a column written in front of it would not say"
+                            " which. Give one of them an alias"
+                        ),
+                    )
+                )
+        self.names.append(name^)
+        self.tables.append(table)
+
+    def find(self, name: StringSlice) -> Int:
+        """Which relation a name is, or minus one when nothing is called that.
+
+        Args:
+            name: What was written in front of the column.
+
+        Returns:
+            The relation, or minus one.
+        """
+        for i in range(len(self.names)):
+            if self.names[i] == name:
+                return self.tables[i]
+        return -1
+
+    def written(self) -> String:
+        """The names in reach, for a message that has to list them.
+
+        Returns:
+            The names, comma separated, or a phrase saying there are none.
+        """
+        if len(self.names) == 0:
+            return String("nothing")
+        var out = String()
+        for i in range(len(self.names)):
+            if i != 0:
+                out += ", "
+            out += String("'", self.names[i], "'")
+        return out^
+
+
 struct _Walk(Movable):
     """The aggregates one statement's lowering has found so far.
 
@@ -384,7 +467,12 @@ struct _Walk(Movable):
 
 
 def _lower_expr(
-    ast: Ast, at: UInt32, mut plan: Plan, mut walk: _Walk, grouped: Bool
+    ast: Ast,
+    at: UInt32,
+    mut plan: Plan,
+    mut walk: _Walk,
+    scope: _Scope,
+    grouped: Bool,
 ) raises -> Int:
     """Lowers one SQL expression into the plan's expression arena.
 
@@ -398,6 +486,7 @@ def _lower_expr(
         at: The expression.
         plan: Where the lowered expressions go.
         walk: The aggregates found so far.
+        scope: What the FROM put in reach, for a qualified name.
         grouped: Whether the query aggregates, which decides whether an
             aggregate call is allowed here at all.
 
@@ -425,11 +514,35 @@ def _lower_expr(
         raise Error("a literal whose kind this does not lower yet")
 
     if node.kind == EXPR_COLUMN:
-        return plan.exprs.column(_one_name(ast, node.children, "a column"))
+        var parts = ast.length(node.children)
+        if parts == 0:
+            raise Error("a column with no name")
+        if parts == 1:
+            return plan.exprs.column(String(ast.text(ast.at(node.children, 0))))
+        if parts == 2:
+            var qualifier = ast.text(ast.at(node.children, 0))
+            var found = scope.find(qualifier)
+            if found < 0:
+                raise Error(
+                    String(
+                        "nothing in this query is called '",
+                        qualifier,
+                        "', and the FROM brought ",
+                        scope.written(),
+                    )
+                )
+            return plan.exprs.column_of(
+                found, String(ast.text(ast.at(node.children, 1)))
+            )
+        raise Error(
+            "firepanda reads a column as a name or as a table and a name so"
+            " far, and a third part is either a schema or a struct field and"
+            " telling those two apart needs the catalog"
+        )
 
     if node.kind == EXPR_UNARY:
         var op = ast.text(node.payload)
-        var over = _lower_expr(ast, node.a, plan, walk, grouped)
+        var over = _lower_expr(ast, node.a, plan, walk, scope, grouped)
         if op == "-":
             return plan.exprs.unary(UnaryOp.NEG, over)
         if op == "+":
@@ -442,8 +555,8 @@ def _lower_expr(
 
     if node.kind == EXPR_BINARY:
         var op = ast.text(node.payload)
-        var left = _lower_expr(ast, node.a, plan, walk, grouped)
-        var right = _lower_expr(ast, node.b, plan, walk, grouped)
+        var left = _lower_expr(ast, node.a, plan, walk, scope, grouped)
+        var right = _lower_expr(ast, node.b, plan, walk, scope, grouped)
         if op == "AND":
             return plan.exprs.call("and", [left, right], True)
         if op == "OR":
@@ -462,11 +575,11 @@ def _lower_expr(
                 "firepanda lowers a CASE of one WHEN so far, and this one has"
                 " more"
             )
-        var when = _lower_expr(ast, arms[0], plan, walk, grouped)
-        var then = _lower_expr(ast, arms[1], plan, walk, grouped)
+        var when = _lower_expr(ast, arms[0], plan, walk, scope, grouped)
+        var then = _lower_expr(ast, arms[1], plan, walk, scope, grouped)
         if node.b == NO_NODE:
             raise Error("firepanda lowers a CASE that has an ELSE")
-        var otherwise = _lower_expr(ast, node.b, plan, walk, grouped)
+        var otherwise = _lower_expr(ast, node.b, plan, walk, scope, grouped)
         return plan.exprs.conditional(when, then, otherwise)
 
     if node.kind == EXPR_FUNCTION:
@@ -492,7 +605,7 @@ def _lower_expr(
             if name == "count" and (node.a & CALL_STAR) != 0:
                 over = plan.exprs.literal(Value(Int64(1)))
             elif len(args) == 1:
-                over = _lower_expr(ast, args[0], plan, walk, grouped)
+                over = _lower_expr(ast, args[0], plan, walk, scope, grouped)
             else:
                 raise Error(
                     String(
@@ -507,7 +620,9 @@ def _lower_expr(
             return plan.exprs.column(String(walk.agg_names[place]))
         var lowered = List[Int]()
         for i in range(len(args)):
-            lowered.append(_lower_expr(ast, args[i], plan, walk, grouped))
+            lowered.append(
+                _lower_expr(ast, args[i], plan, walk, scope, grouped)
+            )
         return plan.exprs.call(name, lowered^, True)
 
     if node.kind == EXPR_BETWEEN:
@@ -576,13 +691,17 @@ def _has_aggregate(ast: Ast, at: UInt32) -> Bool:
     return False
 
 
-def _table_of(ast: Ast, clause: UInt32, catalog: Catalog) raises -> String:
-    """The one table a `FROM` names.
+def _table_of(
+    ast: Ast, clause: UInt32, catalog: Catalog, mut called: String
+) raises -> String:
+    """The one table a `FROM` names, and what the query calls it.
 
     Args:
         ast: The arenas.
         clause: The `FROM` clause slot.
         catalog: What the name is resolved against.
+        called: Filled in with the alias, or with the table name when there is
+            no alias, which is the name a qualified column may use.
 
     Returns:
         The table name as the catalog holds it.
@@ -615,6 +734,17 @@ def _table_of(ast: Ast, clause: UInt32, catalog: Catalog) raises -> String:
             " does not build yet"
         )
     var name = _one_name(ast, source.children, "a table")
+    var named = ast.length(source.payload)
+    if named > 1:
+        raise Error(
+            "firepanda does not lower the column aliases on a table reference"
+            " yet, which rename what the table produces rather than what it is"
+            " called"
+        )
+    if named == 1:
+        called = String(ast.text(ast.at(source.payload, 0)))
+    else:
+        called = name
     var found = catalog.find(name)
     if found < 0:
         raise Error(catalog.missing(name))
@@ -665,14 +795,19 @@ def lower(ast: Ast, statement: UInt32, catalog: Catalog) raises -> Lowered:
 
     var plan = Plan()
     var sources = List[Schema]()
-    var at = _combine(ast, top.a, catalog, plan, sources)
+    var scope = _Scope()
+    var at = _combine(ast, top.a, catalog, plan, sources, scope)
 
     # The ORDER BY and the LIMIT written after a set operation apply to the
     # whole of it rather than to its last arm, which is why they are put on
     # here and not inside the block.
     if top.b != NO_NODE:
         var walk = _Walk()
-        at = _modifiers(ast, top.b, plan, walk, at)
+        # The scope is the block's when there was one block, so `ORDER BY t.b`
+        # names the same table the rest of the query named. A set operation
+        # leaves it empty, because the tables were inside the arms and an ORDER
+        # BY written after one sorts what the whole of it produced.
+        at = _modifiers(ast, top.b, plan, walk, scope, at)
 
     return Lowered(plan^, at, sources^)
 
@@ -765,6 +900,7 @@ def _combine(
     catalog: Catalog,
     mut plan: Plan,
     mut sources: List[Schema],
+    mut scope: _Scope,
 ) raises -> Int:
     """Lowers one query body: a block, a `VALUES`, or a set operation over two.
 
@@ -779,6 +915,9 @@ def _combine(
         catalog: What the table names are resolved against.
         plan: Where the nodes go.
         sources: One schema per scan, appended to in scan order.
+        scope: Filled in with what a single block's FROM put in reach, and left
+            empty for a set operation and for a VALUES, since neither of those
+            leaves a table in reach of an ORDER BY written after it.
 
     Returns:
         The node the body produces.
@@ -791,12 +930,16 @@ def _combine(
     var node = ast.stmts[Int(body)]
     if node.kind == STMT_SET_OPERATION:
         var read = _set_operation(ast.text(node.payload))
-        var left = _combine(ast, node.a, catalog, plan, sources)
-        var right = _combine(ast, node.b, catalog, plan, sources)
+        # Each arm brings its own scope and neither survives the set operation,
+        # so the arms get one apiece and the caller's stays empty.
+        var arm = _Scope()
+        var left = _combine(ast, node.a, catalog, plan, sources, arm)
+        arm = _Scope()
+        var right = _combine(ast, node.b, catalog, plan, sources, arm)
         return plan.setop([left, right], read[0], read[1])
     if node.kind == STMT_VALUES:
         return _values(ast, body, plan)
-    return _block(ast, body, catalog, plan, sources)
+    return _block(ast, body, catalog, plan, sources, scope)
 
 
 def _values(ast: Ast, body: UInt32, mut plan: Plan) raises -> Int:
@@ -828,8 +971,10 @@ def _values(ast: Ast, body: UInt32, mut plan: Plan) raises -> Int:
         raise Error("a VALUES with no rows in it")
 
     # Nothing under a VALUES, so nothing can aggregate and the walk collects
-    # nothing. It is here because lowering an expression takes one.
+    # nothing, and no table is in reach so nothing can be qualified either.
+    # Both are here because lowering an expression takes them.
     var walk = _Walk()
+    var scope = _Scope()
     var width = len(ast.items(rows[0]))
     var lowered = List[Int]()
     for i in range(len(rows)):
@@ -846,7 +991,7 @@ def _values(ast: Ast, body: UInt32, mut plan: Plan) raises -> Int:
                 )
             )
         for j in range(len(row)):
-            lowered.append(_lower_expr(ast, row[j], plan, walk, False))
+            lowered.append(_lower_expr(ast, row[j], plan, walk, scope, False))
 
     var names = List[String]()
     for j in range(width):
@@ -860,6 +1005,7 @@ def _block(
     catalog: Catalog,
     mut plan: Plan,
     mut sources: List[Schema],
+    mut scope: _Scope,
 ) raises -> Int:
     """Lowers one `SELECT ... FROM ... WHERE ...` block.
 
@@ -873,6 +1019,9 @@ def _block(
         catalog: What the table names are resolved against.
         plan: Where the nodes go.
         sources: One schema per scan, appended to in scan order.
+        scope: Filled in with what the block's FROM put in reach, so that an
+            ORDER BY written outside the block can qualify a name the same way
+            the block's own clauses can.
 
     Returns:
         The node the block produces.
@@ -906,8 +1055,10 @@ def _block(
 
     var from_clause = ast.slot(clauses, CLAUSE_FROM)
     var schema = Schema()
+    var table = String()
+    var called = String()
     if from_clause != NO_NODE:
-        var table = _table_of(ast, from_clause, catalog)
+        table = _table_of(ast, from_clause, catalog, called)
         schema = Schema(copy=catalog.frame_at(catalog.find(table)).schema)
 
     var group_clause = ast.slot(clauses, CLAUSE_GROUP)
@@ -938,15 +1089,16 @@ def _block(
         # own.
         var table_at = len(sources)
         sources.append(Schema(copy=schema))
-        at = plan.scan(
-            _table_of(ast, from_clause, catalog), List[String](), table_at
-        )
+        scope.add(called.copy(), table_at)
+        at = plan.scan(table, List[String](), table_at)
 
     # Not called `where`, which the formatter reads as the start of a
     # parameter constraint and then cannot parse the rest of the file.
     var restriction = ast.slot(clauses, CLAUSE_WHERE)
     if restriction != NO_NODE:
-        at = plan.filter(at, _lower_expr(ast, restriction, plan, walk, False))
+        at = plan.filter(
+            at, _lower_expr(ast, restriction, plan, walk, scope, False)
+        )
 
     var keys = List[Int]()
     var key_names = List[String]()
@@ -959,7 +1111,7 @@ def _block(
                     " and GROUPING SETS, CUBE, ROLLUP and GROUP BY ALL are"
                     " masks on one aggregate the plan cannot carry yet"
                 )
-            keys.append(_lower_expr(ast, group.a, plan, walk, False))
+            keys.append(_lower_expr(ast, group.a, plan, walk, scope, False))
             key_names.append(_name_of(ast, group.a, len(key_names)))
 
     # The select list is lowered before the aggregate is built, because
@@ -976,7 +1128,7 @@ def _block(
                 )
             _expand(ast, item.a, schema, plan, outputs, names)
             continue
-        outputs.append(_lower_expr(ast, item.a, plan, walk, grouped))
+        outputs.append(_lower_expr(ast, item.a, plan, walk, scope, grouped))
         if item.payload != NO_NODE:
             names.append(ast.text(item.payload))
         else:
@@ -984,7 +1136,7 @@ def _block(
 
     var predicate = -1
     if having != NO_NODE:
-        predicate = _lower_expr(ast, having, plan, walk, True)
+        predicate = _lower_expr(ast, having, plan, walk, scope, True)
 
     if grouped:
         var aggs = walk.aggs.copy()
@@ -1009,7 +1161,9 @@ def _name_of(ast: Ast, at: UInt32, place: Int) raises -> String:
     """What an output column is called when the query did not say.
 
     A bare column keeps its own name, which is what makes `SELECT a FROM t` come
-    back with a column called `a`. Anything else gets a name from its position,
+    back with a column called `a`, and a qualified one keeps the last part of
+    it, so `SELECT t.a FROM t` comes back with a column called `a` too and not
+    one called `t.a`. Anything else gets a name from its position,
     because DuckDB's own default names an expression after the text it was
     written as and reproducing that needs the printer over the original tokens,
     which is a thing to do once rather than here.
@@ -1028,8 +1182,9 @@ def _name_of(ast: Ast, at: UInt32, place: Int) raises -> String:
     if at == NO_NODE:
         raise Error("an expression that is not there")
     var node = ast.exprs[Int(at)]
-    if node.kind == EXPR_COLUMN and ast.length(node.children) == 1:
-        return ast.text(ast.at(node.children, 0))
+    var parts = ast.length(node.children)
+    if node.kind == EXPR_COLUMN and parts != 0:
+        return String(ast.text(ast.at(node.children, parts - 1)))
     return String("__expr_", place)
 
 
@@ -1080,7 +1235,12 @@ def _expand(
 
 
 def _modifiers(
-    ast: Ast, at: UInt32, mut plan: Plan, mut walk: _Walk, input: Int
+    ast: Ast,
+    at: UInt32,
+    mut plan: Plan,
+    mut walk: _Walk,
+    scope: _Scope,
+    input: Int,
 ) raises -> Int:
     """Puts the `ORDER BY`, `LIMIT` and `OFFSET` on top of a plan.
 
@@ -1089,6 +1249,7 @@ def _modifiers(
         at: The `STMT_MODIFIERS`.
         plan: Where the lowered expressions go.
         walk: The aggregates found so far.
+        scope: What the FROM put in reach, for a qualified name.
         input: What they apply to.
 
     Returns:
@@ -1112,7 +1273,7 @@ def _modifiers(
                     "firepanda does not lower ORDER BY ALL yet, which sorts on"
                     " every output column in order"
                 )
-            keys.append(_lower_expr(ast, entry.a, plan, walk, False))
+            keys.append(_lower_expr(ast, entry.a, plan, walk, scope, False))
             descending.append(entry.b == SORT_DESCENDING)
             # DuckDB puts the missing values last when the sort goes up and
             # first when it goes down, so the default follows the direction
