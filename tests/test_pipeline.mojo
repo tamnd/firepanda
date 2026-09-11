@@ -28,6 +28,7 @@ from firepanda.exec import (
     Chunk,
     Collect,
     Compute,
+    Constant,
     Filter,
     Group,
     GroupAgg,
@@ -631,6 +632,79 @@ def test_a_cast_over_a_missing_column_is_caught_when_the_plan_is_built() raises:
     var pipeline = Pipeline(cut_frame())
     with assert_raises(contains="is outside a schema of 2 columns"):
         pipeline.add(Node(Cast(4, LogicalType.FLOAT64)))
+
+
+def test_a_constant_node_appends_one_value_in_every_row() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Constant(Value(Int64(9)), LogicalType.INT64, "nine")))
+    var out = pipeline^.run()
+
+    assert_equal(out.width(), 3, "the constant column was appended")
+    assert_equal(out.schema[2].name, "nine", "the name it was given")
+    assert_true(
+        out.schema[2].dtype == LogicalType.INT64, "the type it was given"
+    )
+    var col = out.column("nine").as_typed[DType.int64]()
+    assert_equal(len(col), 6, "as many rows as the frame")
+    for i in range(6):
+        assert_equal(col[i], Int64(9), "row " + String(i))
+
+
+def test_a_constant_node_takes_the_type_it_was_told_rather_than_the_value_s() raises:
+    """A constant has no width of its own, so the plan decides. Nine as a
+    float64 column is a float64 column and not an integer of the same width."""
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Constant(Value(Int64(9)), LogicalType.FLOAT64, "nine")))
+    var out = pipeline^.run()
+
+    assert_true(out.schema[2].dtype == LogicalType.FLOAT64, "the new type")
+    var col = out.column("nine").as_typed[DType.float64]()
+    for i in range(6):
+        assert_equal(col[i], Float64(9), "row " + String(i))
+
+
+def test_a_constant_node_can_fill_a_text_column() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(
+        Node(Constant(Value(String("hi")), LogicalType.STRING, "greeting"))
+    )
+    var out = pipeline^.run()
+
+    var col = out.column("greeting").as_strings()
+    assert_equal(len(col), 6, "as many rows as the frame")
+    for i in range(6):
+        assert_equal(col[i], "hi", "row " + String(i))
+
+
+def test_a_constant_node_that_is_null_leaves_every_row_missing() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(
+        Node(
+            Constant(
+                Value(null=LogicalType.INT64), LogicalType.INT64, "nothing"
+            )
+        )
+    )
+    var out = pipeline^.run()
+
+    assert_true(out.schema[2].nullable, "the field says it can be missing")
+    var col = out.column("nothing").as_typed[DType.int64]()
+    for i in range(6):
+        assert_false(col.is_valid(i), "row " + String(i))
+
+
+def test_a_constant_node_after_a_filter_fills_what_survived() raises:
+    """The filter cuts six rows to four, and the constant is as long as what
+    reached it rather than as long as what the pipeline started with."""
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Filter(1)))
+    pipeline.add(Node(Constant(Value(Int64(1)), LogicalType.INT64, "one")))
+    var out = pipeline^.run()
+
+    assert_equal(len(out), 4, "four rows survived")
+    var col = out.column("one").as_typed[DType.int64]()
+    for i in range(4):
+        assert_equal(col[i], Int64(1), "row " + String(i))
 
 
 def test_none_of_the_elementwise_nodes_break_a_pipeline() raises:

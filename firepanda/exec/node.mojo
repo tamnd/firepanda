@@ -110,6 +110,7 @@ from firepanda.kernel.binary import (
     binary_any,
     binary_type,
     binary_value_any,
+    filled_block,
     resolve_constant,
 )
 from firepanda.kernel.cast import cast_any
@@ -1011,6 +1012,90 @@ struct Cast(Movable):
         var rows = len(chunk)
         var columns = chunk^.into_columns()
         columns[self.on] = cast_any(columns[self.on], self.to, self.strict)
+        return Chunk(columns^, rows)
+
+
+struct Constant(Movable):
+    """Appends a column holding the same value in every row.
+
+    `Compute` covers an expression over columns and it covers an expression
+    against a constant, but both of those need a column to start from, so
+    neither can answer `SELECT 1`. A query that selects a bare constant asks for
+    a column that nothing in the input decides, and that is what this is.
+
+    Naming it a node rather than a special case of a projection is what keeps
+    the constant where the rest of the plan can see it. Every other expression
+    appends at the end and is read back by position, and a constant that arrived
+    some other way would be a column the plan did not count.
+
+    The value is stored with the type it should take rather than the type it
+    happens to have, because a constant has no width of its own. `1` in a query
+    is an integer of no particular size until the binder decides, and a filled
+    timestamp is a timestamp rather than an integer of the same width, so what
+    the plan worked out is what the column gets.
+    """
+
+    var value: Value
+    """The value every row holds. A null value fills the column with nulls."""
+
+    var type: LogicalType
+    """The type the column takes."""
+
+    var name: String
+    """The name the appended column gets in the output schema."""
+
+    def __init__(
+        out self, var value: Value, type: LogicalType, var name: String
+    ):
+        """Constructs a constant column.
+
+        Args:
+            value: The value every row holds. Consumed.
+            type: The type the column takes.
+            name: The name of the appended column. Consumed.
+        """
+        self.value = value^
+        self.type = type
+        self.name = name^
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Reports the input schema with the constant column appended.
+
+        Args:
+            input: The schema of the chunks that will arrive. Consumed.
+
+        Returns:
+            The input schema with one field on the end.
+
+        Raises:
+            If the type has no physical layout to fill.
+        """
+        var out = input^
+        if self.type.is_nested() or self.type.is_dictionary():
+            raise Error(
+                "constant: a column of "
+                + String(self.type)
+                + " is not filled from one value"
+            )
+        out.append(Field(self.name, self.type, self.value.is_null()))
+        return out^
+
+    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Appends the column and hands the chunk back.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            The chunk with one column on the end.
+
+        Raises:
+            If the value cannot be read as that type.
+        """
+        var rows = len(chunk)
+        var made = filled_block(self.type, rows, self.value)
+        var columns = chunk^.into_columns()
+        columns.append(made^)
         return Chunk(columns^, rows)
 
 
@@ -2662,6 +2747,7 @@ comptime Node = Variant[
     Filter,
     Project,
     Compute,
+    Constant,
     Cast,
     Join,
     Limit,
@@ -2703,6 +2789,8 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
         return node[Reduce].bind(input^)
     if node.isa[Compute]():
         return node[Compute].bind(input^)
+    if node.isa[Constant]():
+        return node[Constant].bind(input^)
     if node.isa[Cast]():
         return node[Cast].bind(input^)
     if node.isa[Join]():
@@ -2818,12 +2906,13 @@ def node_is_row_local(node: Node) -> Bool:
         node: The node.
 
     Returns:
-        True for `Filter`, `Project`, `Compute`, `Cast` and `Join`.
+        True for `Filter`, `Project`, `Compute`, `Constant`, `Cast` and `Join`.
     """
     return (
         node.isa[Filter]()
         or node.isa[Project]()
         or node.isa[Compute]()
+        or node.isa[Constant]()
         or node.isa[Cast]()
         or node.isa[Join]()
     )
@@ -2854,9 +2943,10 @@ def node_computes_per_row(node: Node) -> Bool:
     both do arithmetic once per row and both get faster on more cores. `Join`
     hashes a key and gathers a row per output row, which is more work per row
     than either, and its table is read only once `bind` has run. `Project`
-    only rebuilds a chunk out of columns it already has and `Cast` walks a
-    column through the allocator, so neither has much for a second core to do
-    and both are held up by memory rather than by arithmetic. Measured on the
+    only rebuilds a chunk out of columns it already has, `Cast` walks a
+    column through the allocator and `Constant` writes the same value down a
+    buffer, so none of the three has much for a second core to do and all three
+    are held up by memory rather than by arithmetic. Measured on the
     i9-13900K, a line with a compute and a filter in it ran three times faster
     spread over the cores, while a project on its own ran no faster at all and
     paid for the tasks on top.
@@ -2932,6 +3022,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Project].process(chunk^)
     if node.isa[Compute]():
         return node[Compute].process(chunk^)
+    if node.isa[Constant]():
+        return node[Constant].process(chunk^)
     if node.isa[Cast]():
         return node[Cast].process(chunk^)
     if node.isa[Join]():
@@ -2976,6 +3068,8 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Project].process(chunk^)
     if node.isa[Compute]():
         return node[Compute].process(chunk^)
+    if node.isa[Constant]():
+        return node[Constant].process(chunk^)
     if node.isa[Cast]():
         return node[Cast].process(chunk^)
     if node.isa[Join]():

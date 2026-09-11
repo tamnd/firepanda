@@ -368,5 +368,38 @@ def test_a_subquery_in_a_from_is_still_refused_by_name() raises:
         _ = run("SELECT * FROM (VALUES (1, 2)) AS t", session())
 
 
+def test_a_query_with_no_from_answers_a_constant() raises:
+    # A statement with no FROM lowers to a literal table of one row, and the
+    # projection above it needs a column for the constant to land in.
+    # DuckDB calls this column `1`, after the text it was written as. firepanda
+    # names an expression the query did not name after its position instead,
+    # which is the gap `_name_of` describes and is not this change.
+    same(answer("SELECT 1", "__expr_0"), [1], "the constant")
+
+
+def test_a_constant_query_folds_before_it_is_a_column() raises:
+    same(answer("SELECT 1 + 1 AS two", "two"), [2], "the folded constant")
+
+
+def test_a_constant_is_named_by_the_query_or_by_itself() raises:
+    var out = run("SELECT 7 AS lucky", session())
+    assert_equal(out.schema[0].name, "lucky", "the name the query gave it")
+    same(read_back(out, "lucky"), [7], "the constant")
+
+
+def test_a_constant_beside_a_column_is_as_long_as_the_column() raises:
+    var out = run("SELECT qty, 1 AS one FROM sales", session())
+    same(read_back(out, "qty"), [5, 20, 3, 40, 12, 8, 25, 1, 30, 15], "qty")
+    same(read_back(out, "one"), [1, 1, 1, 1, 1, 1, 1, 1, 1, 1], "the constant")
+
+
+def test_a_constant_after_a_where_is_as_long_as_what_survived() raises:
+    same(
+        answer("SELECT 1 AS one FROM sales WHERE qty > 12", "one"),
+        [1, 1, 1, 1, 1],
+        "one per surviving row",
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
