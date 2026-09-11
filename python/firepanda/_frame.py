@@ -1873,6 +1873,20 @@ class DataFrame(DataFrameMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def get(self, key: Any, default: Any = None) -> Any:
+        """One column, or the default when the frame has no such column."""
+        try:
+            return self._get(key, default)
+        except Exception as error:
+            raise translate(error) from None
+
+    def squeeze(self, axis: Any = None) -> Any:
+        """The frame with an axis of length one dropped."""
+        try:
+            return self._squeeze(axis)
+        except Exception as error:
+            raise translate(error) from None
+
     def select_dtypes(self, include: Any = None, exclude: Any = None) -> DataFrame:
         """The columns whose type is in one set of types and not in another."""
         try:
@@ -2802,6 +2816,20 @@ class Series(SeriesMixin):
         """The series labelled the way another thing is labelled."""
         try:
             return self._reindex_like(other, method, copy, limit, tolerance)
+        except Exception as error:
+            raise translate(error) from None
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        """The value at a label, or the default when there is no such label."""
+        try:
+            return self._get(key, default)
+        except Exception as error:
+            raise translate(error) from None
+
+    def squeeze(self, axis: Any = None) -> Any:
+        """The one value of a series of one row, or the series itself."""
+        try:
+            return self._squeeze(axis)
         except Exception as error:
             raise translate(error) from None
 

@@ -19,6 +19,13 @@ The partition is the frame. A window with no keys is one partition over the whol
 Two things are refused by name rather than answered. A window with an ordering inside it is a running fold over the partition rather than one value broadcast across it, which is a different loop rather than an argument to this one. A node whose windows partition two different ways wants an operator each, and splitting it during lowering would move which column each window lands in, after the node above has already been bound against the order the plan wrote down.
 
 Part of #309.
+### Added: `get` and `squeeze` on a frame and on a series
+
+`get` is square brackets with the lookup failure turned into a value, which is the whole method and the only reason pandas has it, since a caller who already holds a default does not want a traceback on the way to it. The frame's reads a column name and the series' reads a label, exactly as square brackets do on each. It catches one kind of failure more than pandas does, because `df[0]` is a missing column over there and a key of the wrong type here, and both libraries answer the default for it, so the difference is only in an exception neither of them raises.
+
+`squeeze` reads a shape off the data rather than off the call. A frame of one column is that column, a frame of one row and one column is the value in it, a frame that is neither is itself, and the axis parameter names which of the two may go. A series answers its one value when it has one row and itself otherwise, and refuses an axis it does not have in pandas' words, which is worth having because a frame and a series reach the same function often enough that an `axis=1` arriving at a series is a real mistake. A frame with nothing to drop comes back as a new object rather than as itself, which is what pandas does. The one answer refused is the one where the row axis goes and the column axis stays, because that is the row read across the columns, which needs a type covering all of them and a name that is the row label rather than a string. Document 36 section 12 has the rest.
+
+Part of #156, after #8.
 
 ### Added: a series can be indexed by position and by label, the way a frame can
 

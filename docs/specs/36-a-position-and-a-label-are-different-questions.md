@@ -1,6 +1,6 @@
 # 36. A position and a label are different questions
 
-Status: implemented on the frame and on the series, apart from one shape of answer. Four accessors on each, one method, square brackets on a series, and eight new ways across the boundary.
+Status: implemented on the frame and on the series, apart from one shape of answer. Four accessors on each, one method, square brackets on a series, `get` and `squeeze` on both, and eight new ways across the boundary.
 
 ## 1. Why `loc` and `iloc` are one piece of work
 
@@ -43,6 +43,8 @@ That is also what makes `at` worth having at all. `df.loc[label, name]` reaches 
 A frame is stored as columns and each column has its own type. A row read across them is a transpose of one row, and a series has one type, so the answer has to be a type every column fits. pandas computes that type with a rule that is not obvious from the outside: a frame of int64 and float64 gives a float64 row, a frame with any string column gives an object row, and a frame of one type gives that type. Nothing in this library computes a common type over a set of columns, because nothing until now needed one, and inventing it inside an indexing accessor would put a type rule in the last place anybody would look for it.
 
 The cost of leaving it out is two of the fifteen indexing cases in the conformance suite and a message that says what is missing. The cost of guessing at it is a row whose dtype is right for the frames in the test suite and wrong for the first frame a caller brings.
+
+There is a second thing in the way that was found by measuring rather than by reading, and it matters because it does not go away when the type rule is written. The row as a series is named after the row label. pandas carries that label as whatever it is, usually an integer, and a series here is named by a string, so a row built correctly and typed correctly would still come back under a name that is the label spelled out rather than the label. That is why building the type rule is worth doing for its own sake and is not by itself enough to pass the two cases.
 
 ## 7. A negative position, which the core reads as something else
 
@@ -93,3 +95,15 @@ What decides is the slice's own bounds rather than the index's type, which is th
 The two messages about a position past the end are different sentences in pandas and they stay different here. `s.iloc[9]` says there is a single positional indexer out of bounds and `s.iat[9]` names the axis and the size, and since the two reach the same binding, the binding raises the `iat` sentence and the `iloc` path checks the bound itself before it asks. Two callers being told two things about the same mistake is not a design, it is pandas, and the cheapest way to match it is to let each caller raise its own.
 
 `Too many indexers` on a series is `s.loc[a, b]`, where the second key names an axis that does not exist. pandas raises its own `IndexingError` there, which is the divergence section 8 already registered for the frame, and it applies here unchanged.
+
+## 12. `get` and `squeeze`, which are square brackets with the failure removed and a shape read off the data
+
+These two are in this document rather than in one of their own because they are indexing wearing other names, and because both of them answer a shape rather than a value, which is the property everything else here has.
+
+`get` is square brackets with the lookup failure turned into a value. That is the whole method on both objects, and it is the only difference between the two, which is the only reason pandas has it: a caller who already has a default in hand does not want a traceback on the way to it. The frame's reads a column name and the series' reads a label, exactly as square brackets do on each, including the slice rule from section 11, so there is one rule to learn rather than two.
+
+The set of failures it catches is one wider than the set pandas catches, and the difference is invisible from outside. pandas reads `df[0]` as a column it does not have and raises a lookup error, and this reads it as a key of a type square brackets do not take and raises a type error, because square brackets here want a name or a list of names and say so. `get` catches both kinds and answers the default, so a caller of `get` sees the same thing from both libraries and the exception neither of them raises is where they differ. Narrowing the catch to match pandas exactly would mean making square brackets answer a lookup error for a key that is not a name, which is a worse message for the larger number of callers who did not write `get`.
+
+`squeeze` is the one that reads a shape off the data. Three answers come out of one name: a frame of one column is that column, a frame of one row and one column is the value in it, and a frame that is neither is itself. The axis parameter names which of the two may go, and the default of `None` lets either. A series has one axis, so it answers its one value when it has one row and itself otherwise, and an axis that names the column axis is refused in pandas' words, which is worth having because a frame and a series get passed to the same function often enough that an `axis=1` arriving at a series is a real mistake.
+
+Two details are worth writing down. The first is that a frame with nothing to drop comes back as a new object rather than as the frame it was given, which is what pandas does, and a caller who tests that is testing something real, so `squeeze` builds a fresh wrapper around the same columns rather than returning itself. The second is that the answer where the row axis goes and the column axis stays is refused, and that refusal is section 6 arriving through a different door. It covers the one column shape as well as the several column shape, even though a single column has a type the row could have used, because the name is still the row label and a series here is still named by a string.
