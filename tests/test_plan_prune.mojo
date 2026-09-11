@@ -344,6 +344,23 @@ def test_both_arms_of_a_union_are_narrowed_the_same_way() raises:
     assert_equal(_read(plan, second), "o_orderkey", "and the same one")
 
 
+def test_a_union_that_drops_duplicates_reads_the_whole_row() raises:
+    # The same case as the distinct with no keys and it was not the same
+    # answer. Two orders rows that agree on the key and differ on the price are
+    # two rows, and narrowing both arms to the key alone makes them one, so the
+    # pass would have deleted a row rather than a read.
+    var plan = Plan()
+    var first = plan.scan("orders", List[String](), 0)
+    var second = plan.scan("orders", List[String](), 1)
+    var stacked = plan.union([first, second], False)
+    var key = plan.exprs.column("o_orderkey")
+    var root = plan.project(stacked, [key], ["o_orderkey"])
+    _ = prune(plan, root, [_orders(), _orders()])
+    var all_four = "o_orderkey, o_custkey, o_totalprice, o_comment"
+    assert_equal(_read(plan, first), all_four, "one arm whole")
+    assert_equal(_read(plan, second), all_four, "and the other")
+
+
 def test_a_q6_shaped_plan_reads_four_columns_of_sixteen() raises:
     # What the pass is worth, in the shape the spec measured it in. The
     # predicate reads three columns and the sum reads two, one of them shared,

@@ -42,6 +42,12 @@ A filter, a sort, a limit, a distinct, a join and a union hand their input's
 columns through unchanged, so a position above one of them is the same position
 below it and there is nothing on the node itself to narrow.
 
+Two of the nine ask for more than anything above them wants. A distinct with no
+keys compares whole rows, and so does a union that drops duplicates, so a column
+nothing above reads is still a column that decides whether two rows are one. Both
+of them demand every column of their input whatever the node above asked for,
+because narrowing either one deletes rows rather than reads.
+
 ## Why it rebinds
 
 A position only means something against a schema, and this pass changes the
@@ -130,8 +136,19 @@ def _demand(
     if kind == NodeKind.UNION:
         # Stacked, so every input answers the same positions, and asking all of
         # them for the same set is what keeps them the same width.
+        #
+        # A union that drops duplicates is the same case as a distinct with no
+        # keys and needs the same answer. Two rows that differ only in a column
+        # nothing above reads are two rows, and a union narrowed to the columns
+        # above it are one, so narrowing that union deletes a row rather than a
+        # read. It asks for the whole of every input for that reason.
+        var whole = not plan.nodes[at].flags[0]
         for i in range(len(plan.nodes[at].inputs)):
-            _want_all(need[plan.nodes[at].inputs[i]], here)
+            var input = plan.nodes[at].inputs[i]
+            _want_all(need[input], here)
+            if whole:
+                for p in range(len(bound[input].schema)):
+                    _want(need[input], p)
         return
 
     if kind == NodeKind.JOIN:

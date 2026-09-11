@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: projection pushdown narrowed a union that drops duplicates
+
+A union that keeps duplicates and a union that drops them are one node with a flag, and column pruning was treating both the same way. It is only right for the one that keeps them. Two rows that differ in a column nothing above reads are two rows, and once both arms are narrowed to the columns above they are one row, so the pass was deleting a row rather than a read.
+
+The same case with a distinct on it was already handled: a distinct with no keys compares the whole row, so the pass demands every column of its input whatever the node above asked for. A union that drops duplicates is that, with more than one input, and it now demands the same thing.
+
+Nothing in firepanda builds a distinct union yet, which is why this went unnoticed and is also why it is worth fixing now rather than after. It was found reading the pass before extending the node to carry `EXCEPT` and `INTERSECT`, both of which compare whole rows the same way.
+
+Part of #309.
+
 ### Added: two lines of Python that read the same rows now read them once
 
 Common subplan elimination, the ninth planner pass, in `firepanda/plan/subplan.mojo`. It is the other half of the spec section that gave us expression elimination, one level up. Two plan nodes of the same shape over the same inputs become one node, and everything that read the second reads the first.
