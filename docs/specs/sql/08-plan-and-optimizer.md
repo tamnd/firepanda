@@ -1,12 +1,30 @@
 # The plan and the optimizer
 
-The contract between the two halves of firepanda, and the artifact that does not exist today. Document 12 argues that this is the real reason to pull SQL forward. The plan is load bearing for the lazy frame, for the optimizer, for `query()` and for issue #299's TPC-H work, and SQL is the forcing function that gets it written with a real consumer instead of a hypothetical one.
+The contract between the two halves of firepanda. Document 12 argues that this is the real reason to pull SQL forward. The plan is load bearing for the lazy frame, for the optimizer, for `query()` and for issue #299's TPC-H work, and SQL is the forcing function that gets it written with a real consumer instead of a hypothetical one.
 
 ## 1. What exists today, and what does not
 
-`firepanda/frame/frame.mojo` is eager: a method computes and returns. `firepanda/exec/` has `chunk`, `morsel`, `node`, `parallel` and `pipeline`, which together are a push based driver with a three method node interface of `update_state`, `process` and `finish`, plus a morsel queue. `firepanda/join/` and `firepanda/hash/` have the algorithms.
+This section was written when there was no planning layer at all. There is one now, built alongside the binder and specified in `docs/specs/planner/`, so what follows is the state of it rather than the absence of it.
 
-So firepanda has an execution layer and no planning layer. A frame method constructs a pipeline inline and runs it. There is nothing that can be inspected, reordered or shared between two front ends, which means today there is no place for SQL to land and no place for an optimizer to stand.
+`firepanda/plan/` is the arena, the expression tree, the binder, the printer and the pass list: `node.mojo` holds the plan and its builders, `expr.mojo` the expressions, `bind.mojo` turns every name into a position against a list of source schemas, `print.mojo` writes the indented tree, and the rest are the passes. `firepanda/sql/plan.mojo` is what lowers a `SELECT` into it, and `docs/specs/planner/01-what-a-plan-is.md` is the document that describes it.
+
+`firepanda/frame/frame.mojo` is still eager: a method computes and returns. `firepanda/exec/` has `chunk`, `morsel`, `node`, `parallel` and `pipeline`, which together are a push based driver with a three method node interface of `update_state`, `process` and `finish`, plus a morsel queue. `firepanda/join/` and `firepanda/hash/` have the algorithms. So the plan exists and the road from a plan to the morsel engine does not, which is the gap this stage closes rather than the one it opens.
+
+### 1.1 Nine node kinds against the fourteen below
+
+`docs/specs/planner/01-what-a-plan-is.md` names nine node kinds and says every TPC-H query is expressible in them. Section 3 of this document names fourteen. Both are right about their own surface and the difference is exactly the part of the DuckDB dialect that TPC-H does not use.
+
+The nine are scan, filter, project, aggregate, join, sort, limit, distinct and union. The five this document adds are `TableFunction`, `Values`, `Window`, `Unnest` and `RecursiveCTE`, and they are additions rather than disagreements: `read_parquet` and `range` are sources with no frame behind them, `VALUES` is a source with no table at all, a window is the one clause that is neither elementwise nor a fold, `UNNEST` multiplies rows, and a recursive CTE is a fixed point. There is no way to write any of the five with the nine, which is why they are nodes and not lowerings.
+
+Three smaller gaps sit inside the nine rather than beside them. `SetOp` is `union` widened to carry `EXCEPT` and `INTERSECT` and the `BY NAME` variant. The join kinds have to grow semi, anti and mark before decorrelation has anywhere to land. And `DependentJoin` is a node the binder emits and the optimizer must remove, so it is in the plan for one pass and then never again.
+
+The rule stays what section 6 says. Each of these is a gap to close in `firepanda/plan/` where the dataframe front end can reach it too, and not a node `firepanda/sql/` builds on the side.
+
+### 1.2 Two type sets, and which one the plan holds
+
+`firepanda/sql/types.mojo` is DuckDB's type set and `firepanda/dtype/logical.mojo` is the engine's, and they do not line up: DuckDB has `DECIMAL(p, s)` and `HUGEINT` and the engine has neither. That is a real problem for this stage and not a naming one, because section 12 requires constant folding to answer `1.1 + 2.2` with exactly `3.3`, and a plan that can only hold a double cannot.
+
+Until the plan carries an exact decimal, `firepanda/sql/plan.mojo` refuses a decimal literal by name rather than lowering it to a double. A refusal is visible in `pixi run sql-support` and in the conformance harness, and a double that answers `3.3000000000000003` is not visible anywhere. Adding `DECIMAL` and `INT128` to `LogicalType` is the work that removes the refusal, and it is engine work rather than SQL work for the same reason as section 1.1.
 
 ## 2. The shape
 

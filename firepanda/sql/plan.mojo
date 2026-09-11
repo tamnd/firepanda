@@ -1,0 +1,912 @@
+"""Turning a bound `SELECT` into a logical plan.
+
+This is where the SQL front end stops being its own thing and starts being a
+caller of the engine. Everything before it is DuckDB's dialect: the grammar, the
+AST, the type set, the overload table. Everything after it is shared with the
+dataframe API, and the rule from docs/specs/sql/08-plan-and-optimizer.md section
+6 is that no plan node may have only a SQL constructor. A shape SQL can express
+and `firepanda/plan/` cannot is a gap in the plan to close, not a private node
+to add on the side.
+
+### The order the clauses come out in
+
+A `SELECT` is written in one order and evaluated in another, and the plan is
+built in the evaluation order, bottom up:
+
+    SCAN      the table in the FROM
+    FILTER    the WHERE
+    AGGREGATE the GROUP BY and the aggregates in the select list
+    FILTER    the HAVING
+    PROJECT   the select list
+    DISTINCT  the DISTINCT
+    SORT      the ORDER BY
+    LIMIT     the LIMIT and the OFFSET
+
+Nothing about that is a choice this file makes. It is why `WHERE` cannot see an
+alias from the select list and `ORDER BY` can, and why `HAVING` may name an
+aggregate and `WHERE` may not. Writing the lowering in this order is what makes
+those rules fall out rather than be enforced.
+
+### A HAVING is a filter over a column, not over an aggregate
+
+`plan.filter` refuses a predicate that is not elementwise, which is correct and
+is the reason `HAVING sum(x) > 10` cannot lower to a filter holding a `sum`. The
+aggregate has to be computed by the `AGGREGATE` node and named there, and the
+filter then reads the name. So a `HAVING` over an aggregate adds an output to
+the aggregate under a generated name, filters on that name, and the projection
+above it drops the column again. The generated names start with two underscores
+because a query cannot write one, and they are visible in `EXPLAIN`, which is
+the right trade: a reader who sees `__having_0` learns something true about how
+the query runs.
+
+### What is not lowered yet
+
+One table in the `FROM`, and no joins, no subqueries, no CTEs, no set
+operations, no windows and no `QUALIFY`. Each is a refusal by name rather than a
+silence, so `pixi run sql-support` lists them and the conformance harness can
+tell a missing feature from a crash.
+
+A decimal literal is refused too, and that one is not about effort. The engine's
+`LogicalType` has no decimal and no 128 bit integer, which is the whole reason
+`firepanda/sql/types.mojo` exists as a second type set. Lowering `1.1` to a
+double would make `1.1 + 2.2` come back `3.3000000000000003` where DuckDB
+answers exactly `3.3`, and a wrong answer with no error attached is the one
+failure this front end is not allowed to have. A refusal is visible and a double
+is not, so the refusal stands until the plan can carry an exact decimal.
+"""
+
+from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.schema import Schema
+from firepanda.kernel.binary import BinaryOp
+from firepanda.kernel.group import AggKind
+from firepanda.kernel.unary import UnaryOp
+from firepanda.array.value import Value
+from firepanda.plan.node import NO_LIMIT, Plan
+
+from .ast import (
+    Ast,
+    CLAUSE_FROM,
+    CLAUSE_GROUP,
+    CLAUSE_HAVING,
+    CLAUSE_PROJECTION,
+    CLAUSE_QUALIFY,
+    CLAUSE_WHERE,
+    CLAUSE_WINDOW,
+    EXPR_BETWEEN,
+    EXPR_BINARY,
+    EXPR_CASE,
+    EXPR_CAST,
+    EXPR_COLUMN,
+    EXPR_FUNCTION,
+    EXPR_LITERAL,
+    EXPR_STAR,
+    EXPR_UNARY,
+    CALL_STAR,
+    GROUP_EXPRESSION,
+    LIMIT_PERCENT,
+    LITERAL_BOOLEAN,
+    LITERAL_NULL,
+    LITERAL_NUMBER,
+    LITERAL_STRING,
+    NO_NODE,
+    NULLS_LAST,
+    REF_TABLE,
+    SELECT_DISTINCT,
+    SORT_DESCENDING,
+    STMT_QUERY,
+    STMT_SELECT,
+)
+from .catalog import Catalog, KIND_FRAME, fold
+
+
+struct Lowered(Movable):
+    """A plan, its root, and the schemas it was built against.
+
+    The three travel together because none of them means anything without the
+    others. A root is an index into these nodes, and `firepanda.plan.bind` wants
+    the sources in the order the scans' table indices name them, which is the
+    order this file resolved them in.
+    """
+
+    var plan: Plan
+    """The nodes and the expressions they index into."""
+
+    var root: Int
+    """The node the query produces, which is the last one built."""
+
+    var sources: List[Schema]
+    """One schema per scan, in table index order."""
+
+    def __init__(
+        out self, var plan: Plan, root: Int, var sources: List[Schema]
+    ):
+        """Holds the three together.
+
+        Args:
+            plan: The nodes and expressions.
+            root: The node the query produces.
+            sources: One schema per scan.
+        """
+        self.plan = plan^
+        self.root = root
+        self.sources = sources^
+
+
+def _one_name(ast: Ast, run: UInt32, what: StringSlice) raises -> String:
+    """Reads a run of name parts that has to be a single part.
+
+    A qualified name is a real thing to write and this stage resolves nothing
+    against a schema, so the parts that would need resolving are refused here by
+    name rather than silently joined into one string.
+
+    Args:
+        ast: The arenas.
+        run: The run of interned parts.
+        what: What the name names, for the message.
+
+    Returns:
+        The one part.
+
+    Raises:
+        If the run is empty or has more than one part.
+    """
+    var count = ast.length(run)
+    if count == 0:
+        raise Error(String("a ", what, " with no name"))
+    if count != 1:
+        var joined = String()
+        for i in range(count):
+            if i != 0:
+                joined += "."
+            joined += ast.text(ast.at(run, i))
+        raise Error(
+            String(
+                "firepanda lowers ",
+                what,
+                " written as one part, and ",
+                joined,
+                " is ",
+                count,
+            )
+        )
+    return ast.text(ast.at(run, 0))
+
+
+def _number(text: String) raises -> Value:
+    """Turns the text of a number literal into a constant.
+
+    An integer becomes an `Int64` and anything with a point or an exponent in it
+    is refused, for the reason in the module docstring: the plan has no exact
+    decimal and a double in its place is a wrong answer nobody is told about.
+
+    Args:
+        text: The literal as it was written, already decoded.
+
+    Returns:
+        The constant.
+
+    Raises:
+        If the number is not an integer.
+    """
+    for i in range(text.byte_length()):
+        var c = text[byte=i]
+        if c == "." or c == "e" or c == "E":
+            raise Error(
+                String(
+                    "firepanda does not lower the decimal literal ",
+                    text,
+                    (
+                        " yet, because a plan cannot hold an exact decimal and"
+                        " a double in its place would answer 1.1 + 2.2 with"
+                        " 3.3000000000000003"
+                    ),
+                )
+            )
+    return Value(Int64(atol(text)))
+
+
+def _binary_op(text: String) raises -> BinaryOp:
+    """The kernel operator an infix operator's text names.
+
+    The AST keeps an operator as the words it was written with, so this is the
+    one place the text becomes a code. `AND` and `OR` are not here, because the
+    plan holds them as calls rather than as binary operations.
+
+    Args:
+        text: The operator as SQL spells it.
+
+    Returns:
+        The kernel operator.
+
+    Raises:
+        If firepanda has no kernel for it.
+    """
+    if text == "+":
+        return BinaryOp.ADD
+    if text == "-":
+        return BinaryOp.SUB
+    if text == "*":
+        return BinaryOp.MUL
+    if text == "/":
+        return BinaryOp.DIV
+    if text == "//":
+        return BinaryOp.FLOORDIV
+    if text == "%":
+        return BinaryOp.MOD
+    if text == "**" or text == "^":
+        return BinaryOp.POW
+    if text == "=" or text == "==":
+        return BinaryOp.EQ
+    if text == "<>" or text == "!=":
+        return BinaryOp.NE
+    if text == "<":
+        return BinaryOp.LT
+    if text == "<=":
+        return BinaryOp.LE
+    if text == ">":
+        return BinaryOp.GT
+    if text == ">=":
+        return BinaryOp.GE
+    raise Error(
+        String("firepanda has no kernel for the operator ", text, " yet")
+    )
+
+
+def _agg_kind(name: String) raises -> AggKind:
+    """The fold a function name is, or nothing if the name is not an aggregate.
+
+    Only the names the engine has a fold for are here. An aggregate the registry
+    knows about and the engine cannot compute is refused by the caller, which is
+    the same refusal a scalar function with no kernel gets and for the same
+    reason.
+
+    Args:
+        name: The function name, already folded to lower case.
+
+    Returns:
+        The fold.
+
+    Raises:
+        If the name is not one the engine folds.
+    """
+    if name == "sum":
+        return AggKind.SUM
+    if name == "avg" or name == "mean":
+        return AggKind.MEAN
+    if name == "min":
+        return AggKind.MIN
+    if name == "max":
+        return AggKind.MAX
+    if name == "count":
+        return AggKind.COUNT
+    if name == "first" or name == "any_value":
+        return AggKind.FIRST
+    if name == "last":
+        return AggKind.LAST
+    if name == "stddev" or name == "stddev_samp":
+        return AggKind.STD
+    if name == "var_samp" or name == "variance":
+        return AggKind.VAR
+    if name == "median":
+        return AggKind.MEDIAN
+    raise Error(String(name, " is not an aggregate firepanda folds"))
+
+
+def _is_aggregate(name: String) -> Bool:
+    """Whether a name is one of the folds above.
+
+    Separate from `_agg_kind` because the walk has to ask before it decides how
+    to descend, and asking by catching would make a refusal into control flow.
+
+    Args:
+        name: The function name, already folded to lower case.
+
+    Returns:
+        True if the engine has a fold for it.
+    """
+    try:
+        _ = _agg_kind(name)
+        return True
+    except:
+        return False
+
+
+struct _Walk(Movable):
+    """The aggregates one statement's lowering has found so far.
+
+    The plan is not in here. A walk that owned the plan would have to hand it
+    back at the end, and moving one field out of a live struct is not a thing
+    Mojo allows, so the plan is passed alongside instead and this holds only
+    what is genuinely walk state.
+    """
+
+    var aggs: List[Int]
+    """The aggregate expressions found in the select list and the `HAVING`, in
+    the order they were found, which is the order they come out of the
+    `AGGREGATE` node in after the group keys."""
+
+    var agg_names: List[String]
+    """What each of those is called in the aggregate's output."""
+
+    def __init__(out self):
+        """Starts an empty walk."""
+        self.aggs = List[Int]()
+        self.agg_names = List[String]()
+
+    def _record(mut self, at: Int, var name: String) -> Int:
+        """Adds an aggregate to the list the `AGGREGATE` node will compute.
+
+        Args:
+            at: The lowered aggregate expression.
+            name: What to call its output column.
+
+        Returns:
+            Its position among the aggregates.
+        """
+        var place = len(self.aggs)
+        self.aggs.append(at)
+        self.agg_names.append(name^)
+        return place
+
+
+def _lower_expr(
+    ast: Ast, at: UInt32, mut plan: Plan, mut walk: _Walk, grouped: Bool
+) raises -> Int:
+    """Lowers one SQL expression into the plan's expression arena.
+
+    An aggregate call is not lowered in place. It is lowered, handed to
+    `_record`, and replaced by a reference to the column the `AGGREGATE` node
+    will put it in, which is what lets the projection above the aggregate be an
+    ordinary elementwise expression over ordinary columns.
+
+    Args:
+        ast: The arenas the SQL expression lives in.
+        at: The expression.
+        plan: Where the lowered expressions go.
+        walk: The aggregates found so far.
+        grouped: Whether the query aggregates, which decides whether an
+            aggregate call is allowed here at all.
+
+    Returns:
+        The index in the plan's expression arena.
+
+    Raises:
+        If the expression is a shape this does not lower yet.
+    """
+    if at == NO_NODE:
+        raise Error("an expression that is not there")
+    var node = ast.exprs[Int(at)]
+
+    if node.kind == EXPR_LITERAL:
+        var tag = node.b
+        if tag == LITERAL_NULL:
+            return plan.exprs.literal(Value(null=LogicalType.NULL))
+        var text = ast.text(node.payload)
+        if tag == LITERAL_BOOLEAN:
+            return plan.exprs.literal(Value(text == "true"))
+        if tag == LITERAL_NUMBER:
+            return plan.exprs.literal(_number(text))
+        if tag == LITERAL_STRING:
+            return plan.exprs.literal(Value(text))
+        raise Error("a literal whose kind this does not lower yet")
+
+    if node.kind == EXPR_COLUMN:
+        return plan.exprs.column(_one_name(ast, node.children, "a column"))
+
+    if node.kind == EXPR_UNARY:
+        var op = ast.text(node.payload)
+        var over = _lower_expr(ast, node.a, plan, walk, grouped)
+        if op == "-":
+            return plan.exprs.unary(UnaryOp.NEG, over)
+        if op == "+":
+            return plan.exprs.unary(UnaryOp.POS, over)
+        if op == "NOT":
+            return plan.exprs.call("not", [over], True)
+        raise Error(
+            String("firepanda has no kernel for the prefix operator ", op)
+        )
+
+    if node.kind == EXPR_BINARY:
+        var op = ast.text(node.payload)
+        var left = _lower_expr(ast, node.a, plan, walk, grouped)
+        var right = _lower_expr(ast, node.b, plan, walk, grouped)
+        if op == "AND":
+            return plan.exprs.call("and", [left, right], True)
+        if op == "OR":
+            return plan.exprs.call("or", [left, right], True)
+        return plan.exprs.binary(_binary_op(op), left, right)
+
+    if node.kind == EXPR_CASE:
+        if node.a != NO_NODE:
+            raise Error(
+                "firepanda lowers the searched CASE, and CASE x WHEN is the"
+                " simple one"
+            )
+        var arms = ast.items(node.children)
+        if len(arms) != 2:
+            raise Error(
+                "firepanda lowers a CASE of one WHEN so far, and this one has"
+                " more"
+            )
+        var when = _lower_expr(ast, arms[0], plan, walk, grouped)
+        var then = _lower_expr(ast, arms[1], plan, walk, grouped)
+        if node.b == NO_NODE:
+            raise Error("firepanda lowers a CASE that has an ELSE")
+        var otherwise = _lower_expr(ast, node.b, plan, walk, grouped)
+        return plan.exprs.conditional(when, then, otherwise)
+
+    if node.kind == EXPR_FUNCTION:
+        var name = fold(_one_name(ast, node.payload, "a function"))
+        if node.b != NO_NODE:
+            raise Error(
+                "firepanda does not lower a window function yet, since the plan"
+                " has no window node"
+            )
+        var args = ast.items(node.children)
+        if _is_aggregate(name):
+            if not grouped:
+                raise Error(
+                    String(
+                        name,
+                        (
+                            " is an aggregate and this query has no GROUP BY"
+                            " and no other aggregate in it"
+                        ),
+                    )
+                )
+            var over: Int
+            if name == "count" and (node.a & CALL_STAR) != 0:
+                over = plan.exprs.literal(Value(Int64(1)))
+            elif len(args) == 1:
+                over = _lower_expr(ast, args[0], plan, walk, grouped)
+            else:
+                raise Error(
+                    String(
+                        "firepanda folds ",
+                        name,
+                        " over one argument, and this call has ",
+                        len(args),
+                    )
+                )
+            var built = plan.exprs.aggregate(_agg_kind(name), over)
+            var place = walk._record(built, String("__agg_", len(walk.aggs)))
+            return plan.exprs.column(String(walk.agg_names[place]))
+        var lowered = List[Int]()
+        for i in range(len(args)):
+            lowered.append(_lower_expr(ast, args[i], plan, walk, grouped))
+        return plan.exprs.call(name, lowered^, True)
+
+    if node.kind == EXPR_BETWEEN:
+        raise Error(
+            "firepanda does not lower BETWEEN yet, and the same query written"
+            " with two comparisons does lower"
+        )
+    if node.kind == EXPR_CAST:
+        raise Error(
+            "firepanda does not lower a CAST yet, because the type text has to"
+            " be resolved against a type set the plan does not share"
+        )
+    if node.kind == EXPR_STAR:
+        raise Error("a star outside a select list")
+    raise Error("an expression shape firepanda does not lower yet")
+
+
+def _has_aggregate(ast: Ast, at: UInt32) -> Bool:
+    """Whether an expression holds an aggregate call anywhere in it.
+
+    The question the select list asks before anything is lowered, because
+    whether the query aggregates decides what node goes under the projection and
+    that has to be known before the projection is built.
+
+    The walk does not descend into a subquery, since an aggregate written inside
+    one belongs to that query. It does not need to check here, because a
+    subquery is refused by the lowering anyway, and the check is written down so
+    that the day it is not refused this does not quietly become wrong.
+
+    Args:
+        ast: The arenas.
+        at: The expression.
+
+    Returns:
+        True if a fold is written anywhere in it.
+    """
+    if at == NO_NODE:
+        return False
+    var node = ast.exprs[Int(at)]
+    if node.kind == EXPR_FUNCTION:
+        try:
+            if _is_aggregate(fold(_one_name(ast, node.payload, "a function"))):
+                return True
+        except:
+            pass
+        for arg in ast.items(node.children):
+            if _has_aggregate(ast, arg):
+                return True
+        return False
+    if node.kind == EXPR_BINARY:
+        return _has_aggregate(ast, node.a) or _has_aggregate(ast, node.b)
+    if node.kind == EXPR_UNARY or node.kind == EXPR_CAST:
+        return _has_aggregate(ast, node.a)
+    if node.kind == EXPR_CASE:
+        if _has_aggregate(ast, node.a) or _has_aggregate(ast, node.b):
+            return True
+        for arm in ast.items(node.children):
+            if _has_aggregate(ast, arm):
+                return True
+        return False
+    if node.kind == EXPR_BETWEEN:
+        for part in ast.items(node.children):
+            if _has_aggregate(ast, part):
+                return True
+        return _has_aggregate(ast, node.a)
+    return False
+
+
+def _table_of(ast: Ast, clause: UInt32, catalog: Catalog) raises -> String:
+    """The one table a `FROM` names.
+
+    Args:
+        ast: The arenas.
+        clause: The `FROM` clause slot.
+        catalog: What the name is resolved against.
+
+    Returns:
+        The table name as the catalog holds it.
+
+    Raises:
+        If there is no `FROM`, more than one reference in it, or a reference
+        this does not lower.
+    """
+    if clause == NO_NODE:
+        raise Error(
+            "firepanda lowers a SELECT that reads a table, and this one has no"
+            " FROM"
+        )
+    var refs = ast.items(clause)
+    if len(refs) != 1:
+        raise Error(
+            String(
+                (
+                    "firepanda lowers one table in a FROM so far, and this"
+                    " query has "
+                ),
+                len(refs),
+            )
+        )
+    var source = ast.refs[Int(refs[0])]
+    if source.kind != REF_TABLE:
+        raise Error(
+            "firepanda lowers a named table in a FROM so far, and a join, a"
+            " subquery and a table function are each their own node the plan"
+            " does not build yet"
+        )
+    var name = _one_name(ast, source.children, "a table")
+    var found = catalog.find(name)
+    if found < 0:
+        raise Error(catalog.missing(name))
+    if catalog.kind_at(found) != KIND_FRAME:
+        raise Error(
+            String(
+                name,
+                (
+                    " is a view, and firepanda does not lower a view yet"
+                    " because the text it holds has to be parsed and lowered in"
+                    " the place the name was written"
+                ),
+            )
+        )
+    return name
+
+
+def lower(ast: Ast, statement: UInt32, catalog: Catalog) raises -> Lowered:
+    """Lowers a `SELECT` into a logical plan.
+
+    The plan comes back unbound, meaning every column reference in it is a name
+    rather than a position. Binding it is `firepanda.plan.bind` over the sources
+    this returns, which is the same call the dataframe front end makes, and
+    running one binder over both is what stops the two front ends drifting into
+    two answers for the same question.
+
+    Args:
+        ast: The arenas the statement lives in.
+        statement: The `STMT_SELECT` node.
+        catalog: What the table names are resolved against.
+
+    Returns:
+        The plan, its root and the schemas the scans read.
+
+    Raises:
+        If the statement is a shape this does not lower yet.
+    """
+    if statement == NO_NODE:
+        raise Error("a statement that is not there")
+    var top = ast.stmts[Int(statement)]
+    if top.kind != STMT_SELECT:
+        raise Error("firepanda lowers a SELECT, and this statement is not one")
+    if ast.length(top.children) != 0:
+        raise Error(
+            "firepanda does not lower a WITH yet, because a CTE is a name bound"
+            " to a plan and the plan has nowhere to hold one"
+        )
+
+    var query = ast.stmts[Int(top.a)]
+    if query.kind != STMT_QUERY:
+        raise Error(
+            "firepanda lowers one SELECT block so far, and a set operation, a"
+            " VALUES and a TABLE are each a different node"
+        )
+    if ast.length(query.b) != 0:
+        raise Error(
+            "firepanda does not lower DISTINCT ON yet, which is a distinct on a"
+            " key list under an order"
+        )
+
+    var clauses = query.children
+    if ast.slot(clauses, CLAUSE_QUALIFY) != NO_NODE:
+        raise Error(
+            "firepanda does not lower QUALIFY yet, which is a filter above a"
+            " window and the plan has no window node"
+        )
+    if ast.length(ast.slot(clauses, CLAUSE_WINDOW)) != 0:
+        raise Error(
+            "firepanda does not lower a WINDOW clause yet, for the same reason"
+            " it does not lower a window function"
+        )
+
+    var table = _table_of(ast, ast.slot(clauses, CLAUSE_FROM), catalog)
+    var schema = Schema(copy=catalog.frame_at(catalog.find(table)).schema)
+
+    var group_clause = ast.slot(clauses, CLAUSE_GROUP)
+    var having = ast.slot(clauses, CLAUSE_HAVING)
+    var items = ast.items(ast.slot(clauses, CLAUSE_PROJECTION))
+
+    # Whether the query aggregates is decided before anything is lowered,
+    # because it decides what node the projection sits on and a projection
+    # cannot be built against a node that does not exist yet.
+    var grouped = ast.length(group_clause) != 0 or having != NO_NODE
+    if not grouped:
+        for at in items:
+            if _has_aggregate(ast, ast.stmts[Int(at)].a):
+                grouped = True
+                break
+
+    var walk = _Walk()
+    var plan = Plan()
+    var at = plan.scan(String(table), List[String](), 0)
+
+    # Not called `where`, which the formatter reads as the start of a
+    # parameter constraint and then cannot parse the rest of the file.
+    var restriction = ast.slot(clauses, CLAUSE_WHERE)
+    if restriction != NO_NODE:
+        at = plan.filter(at, _lower_expr(ast, restriction, plan, walk, False))
+
+    var keys = List[Int]()
+    var key_names = List[String]()
+    if grouped:
+        for entry in ast.items(group_clause):
+            var group = ast.stmts[Int(entry)]
+            if group.b != GROUP_EXPRESSION:
+                raise Error(
+                    "firepanda lowers a GROUP BY of plain expressions so far,"
+                    " and GROUPING SETS, CUBE, ROLLUP and GROUP BY ALL are"
+                    " masks on one aggregate the plan cannot carry yet"
+                )
+            keys.append(_lower_expr(ast, group.a, plan, walk, False))
+            key_names.append(_name_of(ast, group.a, len(key_names)))
+
+    # The select list is lowered before the aggregate is built, because
+    # lowering it is what finds the aggregates the node has to compute.
+    var outputs = List[Int]()
+    var names = List[String]()
+    for i in range(len(items)):
+        var item = ast.stmts[Int(items[i])]
+        if ast.exprs[Int(item.a)].kind == EXPR_STAR:
+            _expand(ast, item.a, schema, plan, outputs, names)
+            continue
+        outputs.append(_lower_expr(ast, item.a, plan, walk, grouped))
+        if item.payload != NO_NODE:
+            names.append(ast.text(item.payload))
+        else:
+            names.append(_name_of(ast, item.a, i))
+
+    var predicate = -1
+    if having != NO_NODE:
+        predicate = _lower_expr(ast, having, plan, walk, True)
+
+    if grouped:
+        var aggs = walk.aggs.copy()
+        var agg_names = walk.agg_names.copy()
+        var both = key_names.copy()
+        for i in range(len(agg_names)):
+            both.append(String(agg_names[i]))
+        at = plan.aggregate(at, keys^, aggs^, both^)
+
+    if predicate >= 0:
+        at = plan.filter(at, predicate)
+
+    at = plan.project(at, outputs^, names^)
+
+    if (query.a & SELECT_DISTINCT) != 0:
+        at = plan.distinct(at, List[Int]())
+
+    if top.b != NO_NODE:
+        at = _modifiers(ast, top.b, plan, walk, at)
+
+    var sources = List[Schema]()
+    sources.append(schema^)
+    return Lowered(plan^, at, sources^)
+
+
+def _name_of(ast: Ast, at: UInt32, place: Int) raises -> String:
+    """What an output column is called when the query did not say.
+
+    A bare column keeps its own name, which is what makes `SELECT a FROM t` come
+    back with a column called `a`. Anything else gets a name from its position,
+    because DuckDB's own default names an expression after the text it was
+    written as and reproducing that needs the printer over the original tokens,
+    which is a thing to do once rather than here.
+
+    Args:
+        ast: The arenas.
+        at: The expression.
+        place: Where it sits in the list, counting from zero.
+
+    Returns:
+        The name.
+
+    Raises:
+        If the expression is not there.
+    """
+    if at == NO_NODE:
+        raise Error("an expression that is not there")
+    var node = ast.exprs[Int(at)]
+    if node.kind == EXPR_COLUMN and ast.length(node.children) == 1:
+        return ast.text(ast.at(node.children, 0))
+    return String("__expr_", place)
+
+
+def _expand(
+    ast: Ast,
+    at: UInt32,
+    schema: Schema,
+    mut plan: Plan,
+    mut outputs: List[Int],
+    mut names: List[String],
+) raises:
+    """Expands a `*` into one output per column of the scan.
+
+    Only a bare star with no modifiers on it. `firepanda/sql/star.mojo` is the
+    whole of `EXCLUDE`, `REPLACE` and `RENAME` and it works against a bind
+    context rather than a schema, so wiring it in is its own change and not one
+    to do halfway here.
+
+    Args:
+        ast: The arenas.
+        at: The `EXPR_STAR`.
+        schema: What the scan produces.
+        plan: Where the lowered expressions go.
+        outputs: Where the expressions go.
+        names: Where their names go.
+
+    Raises:
+        If the star is qualified or carries a modifier.
+    """
+    var node = ast.exprs[Int(at)]
+    if ast.length(node.children) != 0:
+        raise Error(
+            "firepanda lowers a bare star so far, and a qualified one needs the"
+            " bindings rather than one schema"
+        )
+    if (
+        ast.length(node.a) != 0
+        or ast.length(node.b) != 0
+        or ast.length(node.payload) != 0
+    ):
+        raise Error(
+            "firepanda does not lower EXCLUDE, REPLACE or RENAME on a star yet,"
+            " although firepanda/sql/star.mojo is all three of them"
+        )
+    for i in range(len(schema)):
+        outputs.append(plan.exprs.column(String(schema[i].name)))
+        names.append(String(schema[i].name))
+
+
+def _modifiers(
+    ast: Ast, at: UInt32, mut plan: Plan, mut walk: _Walk, input: Int
+) raises -> Int:
+    """Puts the `ORDER BY`, `LIMIT` and `OFFSET` on top of a plan.
+
+    Args:
+        ast: The arenas.
+        at: The `STMT_MODIFIERS`.
+        plan: Where the lowered expressions go.
+        walk: The aggregates found so far.
+        input: What they apply to.
+
+    Returns:
+        The topmost node built.
+
+    Raises:
+        If a modifier is a shape this does not lower yet.
+    """
+    var node = ast.stmts[Int(at)]
+    var out = input
+
+    var orders = ast.items(node.children)
+    if len(orders) != 0:
+        var keys = List[Int]()
+        var descending = List[Bool]()
+        var nulls_last = List[Bool]()
+        for i in range(len(orders)):
+            var entry = ast.stmts[Int(orders[i])]
+            if entry.a == NO_NODE:
+                raise Error(
+                    "firepanda does not lower ORDER BY ALL yet, which sorts on"
+                    " every output column in order"
+                )
+            keys.append(_lower_expr(ast, entry.a, plan, walk, False))
+            descending.append(entry.b == SORT_DESCENDING)
+            # DuckDB puts the missing values last when the sort goes up and
+            # first when it goes down, so the default follows the direction
+            # rather than being one answer for both.
+            if entry.payload == NULLS_LAST:
+                nulls_last.append(True)
+            elif entry.payload == NO_NODE or entry.payload == 0:
+                nulls_last.append(entry.b != SORT_DESCENDING)
+            else:
+                nulls_last.append(False)
+        out = plan.sort(out, keys^, descending^, nulls_last^)
+
+    if (node.payload & LIMIT_PERCENT) != 0:
+        raise Error(
+            "firepanda does not lower LIMIT n PERCENT yet, which needs the row"
+            " count before it knows how many rows it keeps"
+        )
+
+    var offset = 0
+    if node.b != NO_NODE:
+        offset = _constant_count(ast, node.b, "an OFFSET")
+    var length = NO_LIMIT
+    if node.a != NO_NODE:
+        length = _constant_count(ast, node.a, "a LIMIT")
+    if offset != 0 or length != NO_LIMIT:
+        out = plan.limit(out, offset, length)
+    return out
+
+
+def _constant_count(ast: Ast, at: UInt32, what: StringSlice) raises -> Int:
+    """Reads a `LIMIT` or an `OFFSET` that has to be a constant.
+
+    The plan holds both as integers rather than as expressions, so an expression
+    here is a refusal rather than a lowering. A query writing one is rare and a
+    query writing a number is not.
+
+    Args:
+        ast: The arenas.
+        at: The expression.
+        what: Which clause, for the message.
+
+    Returns:
+        The number.
+
+    Raises:
+        If the expression is not a non negative integer literal.
+    """
+    var node = ast.exprs[Int(at)]
+    if node.kind != EXPR_LITERAL or node.b != LITERAL_NUMBER:
+        raise Error(
+            String(
+                "firepanda lowers ",
+                what,
+                (
+                    " written as a number, and the plan holds it as one rather"
+                    " than as an expression"
+                ),
+            )
+        )
+    var text = ast.text(node.payload)
+    var value = _number(text)
+    var count = Int(value.bits)
+    if count < 0:
+        raise Error(String(what, " of ", text, " is not a count"))
+    return count
