@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: count(DISTINCT x) in SQL no longer answers count(x)
+
+`SELECT count(DISTINCT shop) FROM sales` returned the row count. The parser read the word and set `CALL_DISTINCT` on the call node, and the planner never looked at the flag, so `count` became a plain count whatever was inside the brackets. Nothing raised and nothing warned. The ClickBench driver never hit it because it calls `distinct_count_any` directly rather than going through SQL.
+
+The flag now reaches the plan. `count(DISTINCT x)` is `AggKind.NUNIQUE`, in the grouped form, the ungrouped form and the window form. `count(DISTINCT *)` is refused, because there is no column there to count the distinct values of and counting distinct whole rows is `SELECT DISTINCT` with a count around it.
+
+`DISTINCT` inside any other aggregate is also refused now rather than dropped. `sum(DISTINCT qty)` used to answer `sum(qty)` and now says that firepanda folds `DISTINCT` inside `count` and not inside `sum`.
+
+Being clear about what runs. The window form runs, because a window holds its whole partition and can call the whole frame kernel. The grouped and ungrouped forms plan correctly and then stop at the operator with "nunique cannot be computed a chunk at a time", which is the same refusal `median` and `stddev` already get and is not new behaviour for this engine. A refusal by name is the fix for a silently wrong number. Making those two run is the streaming distinct count, which is its own change.
+
 ### Added: a column remembers how many distinct values it holds
 
 A factorize hands out an ordinal per distinct value, so the number it handed out is the distinct count of the column it read. Every caller threw that away, and a group by on a key followed by a `nunique` on the same key built two hash tables over the same values to arrive at the same number twice.

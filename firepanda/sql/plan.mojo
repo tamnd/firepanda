@@ -277,6 +277,7 @@ from .ast import (
     EXPR_STAR,
     EXPR_SUBQUERY,
     EXPR_UNARY,
+    CALL_DISTINCT,
     CALL_STAR,
     GROUP_EXPRESSION,
     LIMIT_PERCENT,
@@ -457,7 +458,7 @@ def _binary_op(text: String) raises -> BinaryOp:
     )
 
 
-def _agg_kind(name: String) raises -> AggKind:
+def _agg_kind(name: String, distinct: Bool = False) raises -> AggKind:
     """The fold a function name is, or nothing if the name is not an aggregate.
 
     Only the names the engine has a fold for are here. An aggregate the registry
@@ -465,15 +466,36 @@ def _agg_kind(name: String) raises -> AggKind:
     the same refusal a scalar function with no kernel gets and for the same
     reason.
 
+    `DISTINCT` inside the call changes which fold it is rather than decorating
+    the one the name picks. `count(DISTINCT x)` is `NUNIQUE`, which is a
+    different kernel and not a count of anything. Every other aggregate is
+    refused with `DISTINCT` on it rather than folded without it, because
+    ignoring the word answers a question nobody asked and answers it without
+    saying so.
+
     Args:
         name: The function name, already folded to lower case.
+        distinct: Whether the call was written `f(DISTINCT x)`.
 
     Returns:
         The fold.
 
     Raises:
-        If the name is not one the engine folds.
+        If the name is not one the engine folds, or if it is one the engine
+        folds and `DISTINCT` on it has no meaning here.
     """
+    if distinct:
+        if name == "count":
+            return AggKind.NUNIQUE
+        raise Error(
+            String(
+                "firepanda folds DISTINCT inside count and not inside ",
+                name,
+                ", and it refuses rather than answering ",
+                name,
+                " of the values with the duplicates still in",
+            )
+        )
     if name == "sum":
         return AggKind.SUM
     if name == "avg" or name == "mean":
@@ -1083,8 +1105,15 @@ def _lower_expr(
                         ),
                     )
                 )
+            var distinct = (node.a & CALL_DISTINCT) != 0
             var over: Int
             if name == "count" and (node.a & CALL_STAR) != 0:
+                if distinct:
+                    raise Error(
+                        "count(DISTINCT *) has no column to count the distinct"
+                        " values of, and counting distinct whole rows is"
+                        " SELECT DISTINCT with a count around it"
+                    )
                 over = plan.exprs.literal(Value(Int64(1)))
             elif len(args) == 1:
                 over = _lower_expr(ast, args[0], plan, walk, scope, grouped)
@@ -1097,7 +1126,7 @@ def _lower_expr(
                         len(args),
                     )
                 )
-            var built = plan.exprs.aggregate(_agg_kind(name), over)
+            var built = plan.exprs.aggregate(_agg_kind(name, distinct), over)
             var place = walk._record(built, String("__agg_", len(walk.aggs)))
             return plan.exprs.column(String(walk.agg_names[place]))
         var lowered = List[Int]()
@@ -1355,8 +1384,15 @@ def _lower_over(
         )
 
     var args = ast.items(node.children)
+    var distinct = (node.a & CALL_DISTINCT) != 0
     var over: Int
     if name == "count" and (node.a & CALL_STAR) != 0:
+        if distinct:
+            raise Error(
+                "count(DISTINCT *) has no column to count the distinct values"
+                " of, and counting distinct whole rows is SELECT DISTINCT with"
+                " a count around it"
+            )
         over = plan.exprs.literal(Value(Int64(1)))
     elif len(args) == 1:
         over = _lower_expr(ast, args[0], plan, walk, scope, grouped)
@@ -1377,7 +1413,7 @@ def _lower_over(
         key += String(_shape(plan.exprs, partition[len(partition) - 1]), ";")
 
     var built = plan.exprs.window(
-        _agg_kind(name), over, partition^, List[Int]()
+        _agg_kind(name, distinct), over, partition^, List[Int]()
     )
     var place = walk._record_window(
         built, String("__win_", len(walk.windows)), key^
