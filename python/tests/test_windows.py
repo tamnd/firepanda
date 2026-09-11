@@ -605,7 +605,7 @@ def test_a_spread_over_a_window_holding_an_infinity_is_not_a_number(
 def test_a_spread_that_overflowed_recovers_once_the_value_leaves(
     firepanda: ModuleType,
 ) -> None:
-    """pandas answers `[nan, 0, inf, inf, inf]` here and the last two are wrong.
+    """pandas answers `[nan, 0, inf, ...]` here and the last two are wrong.
 
     A window holding ten to the two hundred and a small number has a variance
     too large for a double and genuinely is an infinity. Every window after it
@@ -614,6 +614,12 @@ def test_a_spread_that_overflowed_recovers_once_the_value_leaves(
     back, which is the same failure as the running total and not the same cause
     as the infinities above. The carried state here notices that it has stopped
     being a number and rebuilds the window from its own rows.
+
+    Which wrong answer pandas gives depends on the machine. The same pandas
+    answers the last two windows `inf` on arm64, on both macOS and Linux, and
+    `nan` on x86-64 Linux, and both are it failing to get back to a number
+    rather than two different behaviours. So that is what the assertion says,
+    instead of naming whichever non number the machine at hand produces.
     """
     rows = [1e200, 1e200, 1.0, 2.0, 3.0]
     got = firepanda.Series(rows, name="v").rolling(2).var().tolist()
@@ -623,7 +629,7 @@ def test_a_spread_that_overflowed_recovers_once_the_value_leaves(
     assert got[3] == 0.5
     assert got[4] == 0.5
     them = theirs(rows).rolling(2).var().tolist()
-    assert math.isinf(them[3]) and math.isinf(them[4])
+    assert not math.isfinite(them[3]) and not math.isfinite(them[4])
 
 
 @needs_pandas
