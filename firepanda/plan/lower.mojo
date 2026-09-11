@@ -105,10 +105,23 @@ only has to get the first n rows right is a different operator with a heap in it
 and the limit that wrote the bound down is still sitting above the sort and still
 doing the cutting, so ignoring it is slow rather than wrong.
 
+### A distinct is a group by that reduces nothing
+
+A group by holds one row per group and the rows of a group differ only in what
+was not the key. When the key is every column there is nothing they can differ
+in, so `SELECT DISTINCT` is the group by with every position as a key and no
+folds at all, and there is no operator to write. It streams for the same reason
+the group by does, holding one row per distinct row rather than the input.
+
+Part of the row is `DISTINCT ON` and is refused. It keeps whole rows chosen by
+some of their columns, so the rest would come back through a first over each,
+and a group by carries its keys in front of what it reduced, which moves the
+columns the plan's schema numbered.
+
 ### What it refuses, and why refusing is the design
 
-Distincts and unions are not lowered here yet, and neither is a unary
-expression, a conditional, a window, or a cast over an input column.
+A distinct on part of the row is not lowered here, and neither is a union, a
+unary expression, a conditional, a window, or a cast over an input column.
 Every one of those raises an error that names what it was. It does not fall
 back to `Materialize`, and the reason is that `Materialize` holds a function
 pointer that captures nothing, so there is no way to hand it the expression
@@ -631,6 +644,79 @@ def _lower_aggregate(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     pipe.add(Node(Group(keys^, aggs^)))
 
 
+def _lower_distinct(plan: Plan, at: Int, mut pipe: Pipeline) raises:
+    """Lowers a distinct over the whole row into a group by with no folds.
+
+    A group by holds one row per group, and which row that is does not matter
+    when the key is every column, because every row of a group is the same row.
+    So `SELECT DISTINCT` is `Group` with every position as a key and nothing to
+    reduce, and there is no operator to write. The rows come out in the order
+    the first of each was seen, which is what DuckDB gives back for a distinct
+    with no ordering asked for.
+
+    A key list shorter than the row is `DISTINCT ON`, and it is refused. It
+    keeps whole rows chosen by part of them, so the columns that are not keys
+    would have to come back through a first over each, and a group by puts its
+    keys in front, which moves the columns the plan's schema numbered.
+
+    Args:
+        plan: The plan.
+        at: The distinct node.
+        pipe: The pipeline, added to.
+
+    Raises:
+        Error: If the distinct has a key list that is not the whole row.
+    """
+    var held = plan.nodes[at].exprs.copy()
+    var width = len(pipe.schema)
+    var memo = Memo()
+    var keys = List[Int](capacity=width)
+    if len(held) == 0:
+        for i in range(width):
+            keys.append(i)
+    else:
+        for i in range(len(held)):
+            if plan.exprs.nodes[held[i]].kind != ExprKind.COLUMN:
+                raise Error(
+                    String(
+                        "lower: this distinct decides on a ",
+                        plan.exprs.nodes[held[i]].kind,
+                        (
+                            " expression, and a computed key is a column the"
+                            " row does not have, so the rows kept would not be"
+                            " the rows the plan said"
+                        ),
+                    )
+                )
+            keys.append(_lower_expr(plan.exprs, held[i], pipe, width, "", memo))
+        if len(keys) != width:
+            raise Error(
+                String(
+                    "lower: this distinct decides on ",
+                    len(keys),
+                    " of the row's ",
+                    width,
+                    (
+                        " columns, and keeping a whole row chosen by part of it"
+                        " means a first over every other column, which a group"
+                        " by puts behind its keys rather than where the plan"
+                        " numbered them"
+                    ),
+                )
+            )
+        for i in range(width):
+            if keys[i] != i:
+                raise Error(
+                    String(
+                        "lower: this distinct decides on the row's columns in"
+                        " another order, and a group by carries its keys in the"
+                        " order it was given them, so the answer would not be"
+                        " the columns the plan numbered"
+                    )
+                )
+    pipe.add(Node(Group(keys^, List[GroupAgg]())))
+
+
 def _lower_sort(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     """Lowers a sort into the computes its keys need and one breaker.
 
@@ -963,6 +1049,8 @@ def _lower_from(
             _lower_filter(plan, at, pipe)
         elif kind == NodeKind.SORT:
             _lower_sort(plan, at, pipe)
+        elif kind == NodeKind.DISTINCT:
+            _lower_distinct(plan, at, pipe)
         elif kind == NodeKind.PROJECT:
             _lower_project(plan, at, pipe)
         elif kind == NodeKind.LIMIT:

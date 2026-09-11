@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: SELECT DISTINCT runs, and it needed no operator
+
+A distinct is a group by that reduces nothing. A group by holds one row per group and the rows of a group differ only in what was not the key, so when the key is every column there is nothing they can differ in, and `SELECT DISTINCT a, b` is the existing `Group` with every position as a key and an empty list of folds.
+
+That is worth more than the feature. The streaming group by holds one row per group rather than the input, so a distinct over a billion rows with a thousand distinct values is a table of a thousand rows the whole way through, and it gets the lasting key map, the running table and the merge that were written and measured for the group by. None of that is a distinct's own code, and there is no second implementation of what two rows being the same means.
+
+Rows come out in the order the first of each was seen, which is what DuckDB gives back for a distinct with no ordering asked for.
+
+`DISTINCT ON` is still refused and the front end refuses it before lowering is reached. It keeps whole rows chosen by some of their columns, so the columns that are not keys would have to come back through a first over each, and a group by carries its keys in front of what it reduced, which moves the columns the plan's schema numbered. A key list naming every column of the row in order is not that and runs, because it is the whole row written out.
+
+Part of #309.
+
 ## [0.6.61] - 2026-09-11
 
 Built against Mojo 1.0.0 (ed45d567).
