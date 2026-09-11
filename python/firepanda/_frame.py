@@ -34,11 +34,13 @@ from ._pandas import (
     SeriesGroupByMixin,
     SeriesMixin,
     StringMixin,
+    _Along,
     _Cell,
     _ewm,
     _expanding,
     _grouped,
     _Labelled,
+    _Point,
     _Positional,
     _rolling,
 )
@@ -2736,6 +2738,38 @@ class Series(SeriesMixin):
         """The last n rows."""
         try:
             return Series._wrap(self._inner.tail(n))
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def iloc(self) -> Any:
+        """Selection by position, where a slice excludes the row it stops at."""
+        try:
+            return _Along(self, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def loc(self) -> Any:
+        """Selection by label, where a slice includes the row it stops at."""
+        try:
+            return _Along(self, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def iat(self) -> Any:
+        """One value, by row position."""
+        try:
+            return _Point(self, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def at(self) -> Any:
+        """One value, by row label."""
+        try:
+            return _Point(self, True)
         except Exception as error:
             raise translate(error) from None
 

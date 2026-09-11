@@ -1090,6 +1090,126 @@ def _named_at(names: list[str], positions: list[int]) -> list[str]:
     return out
 
 
+def _counts_rather_than_names(key: slice) -> bool:
+    """Whether `s[key]` reads its slice as positions rather than as labels.
+
+    pandas decides this from the bounds and not from the index, and a bound
+    that is `None` says nothing either way, so an open slice counts. `True` is
+    an integer in Python and is not a position, for the reason `_is_mask`
+    exists.
+
+    Args:
+        key: The slice.
+
+    Returns:
+        True if every bound that is written is a whole number.
+    """
+    written = [one for one in (key.start, key.stop) if one is not None]
+    return all(isinstance(one, int) and not isinstance(one, bool) for one in written)
+
+
+def _by_position(key: Any, height: int) -> tuple[Any, ...]:
+    """Reads a row key as positions, which is what `iloc` does on either type.
+
+    A slice of step one is a range, which the core answers by sharing buffers
+    rather than gathering, and any other step is a gather over the positions
+    the slice walks. Building the walk in Python is right rather than a
+    shortcut: a step is rare, the positions are what the gather takes anyway,
+    and a second kernel for it would be the gather again.
+
+    A boolean key is a mask even here. `iloc` is about positions and a mask is
+    not one, but pandas takes it and reads it as the positions it is true at,
+    which is what it means and is what anybody writing `s.iloc[s > 0]` wants.
+
+    Args:
+        key: Whatever went inside the square brackets, for the row axis.
+        height: How many rows there are.
+
+    Returns:
+        A tag and its arguments, which `_narrowed` applies.
+
+    Raises:
+        OutOfBoundsError: If a boolean key is not as long as the axis.
+    """
+    if key is EVERY:
+        return ("every",)
+    if isinstance(key, SeriesMixin) and key._inner.dtype() == "bool":
+        return ("mask", key._inner)
+    if isinstance(key, slice):
+        start, stop, step = key.indices(height)
+        if step == 1:
+            return ("range", start, max(start, stop))
+        return ("gather", list(range(start, stop, step)))
+    if isinstance(key, (list, tuple)):
+        if _is_mask(key):
+            if len(key) != height:
+                raise OutOfBoundsError(
+                    f"Boolean index has wrong length: {len(key)} instead of {height}"
+                )
+            return ("gather", [i for i, hit in enumerate(key) if hit])
+        return ("gather", [int(one) for one in key])
+    if isinstance(key, SeriesMixin):
+        held: list[Any] = key._inner.to_list()
+        return ("gather", [int(one) for one in held])
+    return ("one", int(key))
+
+
+def _by_label(index: Any, key: Any, height: int) -> tuple[Any, ...]:
+    """Reads a row key as labels, which is what `loc` does on either type.
+
+    A boolean key is the one shape that is not a label at all, and it is
+    checked for first because a column of booleans used as a mask is the most
+    written `loc` there is. A mask that arrived as a column stays a column and
+    crosses as one, and a mask that arrived as a list of Python bools becomes
+    positions here, because it was already objects and building a column out of
+    it to ask the kernel would be a conversion each way to answer a question a
+    comprehension answers.
+
+    Args:
+        index: The labels of the thing being indexed.
+        key: Whatever went inside the square brackets, for the row axis.
+        height: How many rows there are.
+
+    Returns:
+        A tag and its arguments, which `_narrowed` applies.
+
+    Raises:
+        KeyError: If a label is not in the index.
+        OutOfBoundsError: If a boolean key is not as long as the axis.
+    """
+    if key is EVERY:
+        return ("every",)
+    if isinstance(key, SeriesMixin) and key._inner.dtype() == "bool":
+        return ("mask", key._inner)
+    if isinstance(key, slice):
+        walked = index.slice_indexer(key.start, key.stop, key.step)
+        start, stop, step = walked.indices(height)
+        if step == 1:
+            return ("range", start, max(start, stop))
+        return ("gather", list(range(start, stop, step)))
+    if isinstance(key, (list, tuple)):
+        if _is_mask(key):
+            if len(key) != height:
+                raise OutOfBoundsError(
+                    f"Boolean index has wrong length: {len(key)} instead of {height}"
+                )
+            return ("gather", [i for i, hit in enumerate(key) if hit])
+        return ("gather", _row_positions(index, key))
+    if isinstance(key, IndexMixin):
+        return ("gather", _row_positions(index, key._inner.to_list()))
+    try:
+        found = index.get_loc(key)
+    except KeyError:
+        # The label itself and nothing else, which is what pandas raises and
+        # what a person grepping their own traceback is looking for. The
+        # message underneath names the index rather than the label, because it
+        # was written for a caller who already has the label in hand.
+        raise KeyError(key) from None
+    if isinstance(found, int):
+        return ("one", found)
+    return ("gather", _flattened(found))
+
+
 class _Selection:
     """What `loc` and `iloc` have in common, which is everything after the key.
 
@@ -1189,33 +1309,8 @@ class _Positional(_Selection):
     __slots__ = ()
 
     def _rows(self, key: Any, height: int) -> tuple[Any, ...]:
-        """Reads a row key as positions.
-
-        A slice of step one is a range, which the core answers by sharing
-        buffers rather than gathering, and any other step is a gather over the
-        positions the slice walks. Building the walk in Python is right rather
-        than a shortcut: a step is rare, the positions are what the gather
-        takes anyway, and a second kernel for it would be the gather again.
-        """
-        if key is EVERY:
-            return ("every",)
-        if isinstance(key, slice):
-            start, stop, step = key.indices(height)
-            if step == 1:
-                return ("range", start, max(start, stop))
-            return ("gather", list(range(start, stop, step)))
-        if isinstance(key, (list, tuple)):
-            if _is_mask(key):
-                if len(key) != height:
-                    raise OutOfBoundsError(
-                        f"Boolean index has wrong length: {len(key)} instead of {height}"
-                    )
-                return ("gather", [i for i, hit in enumerate(key) if hit])
-            return ("gather", [int(one) for one in key])
-        if isinstance(key, SeriesMixin):
-            held: list[Any] = key._inner.to_list()
-            return ("gather", [int(one) for one in held])
-        return ("one", int(key))
+        """Reads a row key as positions."""
+        return _by_position(key, height)
 
     def _columns(self, key: Any, names: list[str]) -> Any:
         """Reads a column key as positions."""
@@ -1232,47 +1327,8 @@ class _Labelled(_Selection):
     __slots__ = ()
 
     def _rows(self, key: Any, height: int) -> tuple[Any, ...]:
-        """Reads a row key as labels.
-
-        A boolean key is the one shape that is not a label at all, and it is
-        checked for first because a column of booleans used as a mask is the
-        most written `loc` there is. A mask that arrived as a column stays a
-        column and crosses as one, and a mask that arrived as a list of Python
-        bools becomes positions here, because it was already objects and
-        building a column out of it to ask the kernel would be a conversion
-        each way to answer a question a comprehension answers.
-        """
-        if key is EVERY:
-            return ("every",)
-        if isinstance(key, SeriesMixin) and key._inner.dtype() == "bool":
-            return ("mask", key._inner)
-        if isinstance(key, slice):
-            walked = self._owner.index.slice_indexer(key.start, key.stop, key.step)
-            start, stop, step = walked.indices(height)
-            if step == 1:
-                return ("range", start, max(start, stop))
-            return ("gather", list(range(start, stop, step)))
-        if isinstance(key, (list, tuple)):
-            if _is_mask(key):
-                if len(key) != height:
-                    raise OutOfBoundsError(
-                        f"Boolean index has wrong length: {len(key)} instead of {height}"
-                    )
-                return ("gather", [i for i, hit in enumerate(key) if hit])
-            return ("gather", _row_positions(self._owner.index, key))
-        if isinstance(key, IndexMixin):
-            return ("gather", _row_positions(self._owner.index, key._inner.to_list()))
-        try:
-            found = self._owner.index.get_loc(key)
-        except KeyError:
-            # The label itself and nothing else, which is what pandas raises and
-            # what a person grepping their own traceback is looking for. The
-            # message underneath names the index rather than the label, because
-            # it was written for a caller who already has the label in hand.
-            raise KeyError(key) from None
-        if isinstance(found, int):
-            return ("one", found)
-        return ("gather", _flattened(found))
+        """Reads a row key as labels."""
+        return _by_label(self._owner.index, key, height)
 
     def _columns(self, key: Any, names: list[str]) -> Any:
         """Reads a column key as names.
@@ -1355,6 +1411,104 @@ class _Cell:
             )
         try:
             return inner.cell(found, names.index(column))
+        except Exception as error:
+            raise translate(error) from None
+
+
+class _Along:
+    """`s.loc` and `s.iloc`, which are the frame's pair with one axis gone.
+
+    One class rather than two, with a flag, because everything they do after
+    the key has been read is the same and the key reading is two functions
+    they share with the frame. A series has no column axis, so the whole of
+    `_Selection` that decides between a frame, a column and a value collapses
+    to deciding between a series and a value, and that decision is the shape of
+    the key and nothing else: a key that names one row is a value and a key
+    that names a set of them is a series, even a set of one.
+    """
+
+    __slots__ = ("_labelled", "_owner")
+
+    def __init__(self, owner: Any, labelled: bool) -> None:
+        """Holds the series the accessor was reached through.
+
+        Args:
+            owner: The series.
+            labelled: True for `loc`, False for `iloc`.
+        """
+        self._owner = owner
+        self._labelled = labelled
+
+    def __getitem__(self, key: Any) -> Any:
+        """Answers a value or a series, depending on the key's shape."""
+        from ._frame import Series
+
+        if isinstance(key, tuple):
+            # A tuple is how a caller names a second axis, and there is not one
+            # to name. pandas raises its own IndexingError here, which this
+            # cannot be a subclass of without importing pandas, so the sentence
+            # is pandas' and the class is not.
+            raise InvalidArgumentError("Too many indexers")
+        inner = self._owner._inner
+        height = inner.length()
+        if self._labelled:
+            where = _by_label(self._owner.index, key, height)
+        else:
+            where = _by_position(key, height)
+        try:
+            if where[0] == "one":
+                if not self._labelled and not -height <= where[1] < height:
+                    # pandas says this rather than naming the position, and it
+                    # says something else when the same position is handed to
+                    # `iat`, so the two messages are raised by their two
+                    # callers rather than by the one binding underneath.
+                    raise OutOfBoundsError("single positional indexer is out-of-bounds")
+                return inner.cell(where[1])
+            return Series._wrap(_narrowed(inner, where))
+        except Exception as error:
+            raise translate(error) from None
+
+
+class _Point:
+    """`s.at` and `s.iat`, which are one value and one coordinate.
+
+    The frame's pair take two coordinates because a frame has two axes. This
+    takes one for the same reason, and the reason to write it rather than
+    `s.loc[label]` is the same as it is over there: it promises to answer a
+    value, so it can skip the branch that works out what shape the answer is.
+    """
+
+    __slots__ = ("_labelled", "_owner")
+
+    def __init__(self, owner: Any, labelled: bool) -> None:
+        """Holds the series and which of the two this is.
+
+        Args:
+            owner: The series.
+            labelled: True for `at`, False for `iat`.
+        """
+        self._owner = owner
+        self._labelled = labelled
+
+    def __getitem__(self, key: Any) -> Any:
+        """Reads one value, by one label or by one position."""
+        inner = self._owner._inner
+        if not self._labelled:
+            try:
+                return inner.cell(int(key))
+            except Exception as error:
+                raise translate(error) from None
+        try:
+            found = self._owner.index.get_loc(key)
+        except KeyError:
+            raise KeyError(key) from None
+        if not isinstance(found, int):
+            raise NotImplementedError(
+                "at on a repeated label is not supported yet, because pandas"
+                " answers several values there and this answers one"
+            )
+        try:
+            return inner.cell(found)
         except Exception as error:
             raise translate(error) from None
 
@@ -2416,6 +2570,36 @@ class SeriesMixin:
                 self._inner = self._inner.cast(wanted, True)
             except Exception as error:
                 raise translate(error) from None
+
+    def __getitem__(self, key: Any) -> Any:
+        """Reads by label, except for a slice of numbers, which is by position.
+
+        The exception is the whole difficulty of this method and it is pandas'
+        rather than an invention. `s[2]` is the label two even on an index whose
+        labels are strings, where it raises, and `s[2:5]` is the rows two to
+        five counting from the front even on an index whose labels are the
+        numbers in another order. Nobody would design that, and code that
+        relies on it is everywhere, so a library that reads the slice by label
+        is not the library people have.
+
+        What decides is the slice's own bounds rather than the index's type. A
+        bound that is a whole number means positions and anything else means
+        labels, which is how `s["a":"c"]` on a string index stays a closed
+        slice of labels while `s[0:2]` on the same index is the first two rows.
+
+        Everything that is not a slice goes through `loc`, which is exactly
+        what pandas does with it.
+        """
+        from ._frame import Series
+
+        if isinstance(key, slice) and _counts_rather_than_names(key):
+            inner = self._inner
+            where = _by_position(key, inner.length())
+            try:
+                return Series._wrap(_narrowed(inner, where))
+            except Exception as error:
+                raise translate(error) from None
+        return _Along(self, True)[key]
 
     def _operator(self, other: Any, op: str, flip: bool, strict: bool) -> Any:
         """Runs one of the twenty operators, on whichever of three operands it got.

@@ -2436,6 +2436,34 @@ SERIES = Exposed(
             returns="Series",
         ),
         Binding(
+            mojo="PySeries.take",
+            name="take",
+            doc="Rows gathered by position, counting from the end when negative.",
+            params=(("positions", "list[int]"),),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.slice_rows",
+            name="slice_rows",
+            doc="A half open range of rows.",
+            params=(("start", "int"), ("end", "int")),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.filter_rows",
+            name="filter_rows",
+            doc="The rows a boolean column is true at.",
+            params=(("mask", "Series"),),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.cell",
+            name="cell",
+            doc="One value, by position.",
+            params=(("at", "int"),),
+            returns="object",
+        ),
+        Binding(
             mojo="PySeries.reindex",
             name="reindex",
             doc="The series on a set of labels, whether it has them or not.",
@@ -2757,6 +2785,34 @@ SERIES = Exposed(
             doc="The last n rows.",
             returns="Series",
             wraps="Series",
+        ),
+        Member(
+            name="iloc",
+            kind="property",
+            body="_Along(self, False)",
+            doc="Selection by position, where a slice excludes the row it stops at.",
+            returns="Any",
+        ),
+        Member(
+            name="loc",
+            kind="property",
+            body="_Along(self, True)",
+            doc="Selection by label, where a slice includes the row it stops at.",
+            returns="Any",
+        ),
+        Member(
+            name="iat",
+            kind="property",
+            body="_Point(self, False)",
+            doc="One value, by row position.",
+            returns="Any",
+        ),
+        Member(
+            name="at",
+            kind="property",
+            body="_Point(self, True)",
+            doc="One value, by row label.",
+            returns="Any",
         ),
         Member(
             name="reindex",
@@ -3970,7 +4026,7 @@ def wrapper() -> str:
     # time. Each answers a small object that holds the frame and reads a key,
     # and the key is the whole of what they do, so the class is hand written
     # and the member is the one line that builds one.
-    for accessor in ("_Positional", "_Labelled", "_Cell"):
+    for accessor in ("_Positional", "_Labelled", "_Cell", "_Along", "_Point"):
         if any(f"{accessor}(" in m.body for m in every):
             mixins.add(accessor)
     if mixins:

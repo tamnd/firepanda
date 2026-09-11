@@ -1,6 +1,6 @@
 # 36. A position and a label are different questions
 
-Status: implemented, apart from one shape of answer. Two accessors, two more beside them, one method, and four new ways across the boundary.
+Status: implemented on the frame and on the series, apart from one shape of answer. Four accessors on each, one method, square brackets on a series, and eight new ways across the boundary.
 
 ## 1. Why `loc` and `iloc` are one piece of work
 
@@ -79,3 +79,17 @@ Only one of the seven is a missing kernel and it is the same one twice. Assignme
 Thirteen of the conformance suite's fifty six indexing cases arm on this, and they are the largest block in the section: eight `iloc` cases, six `loc` cases and two each of `at`, `iat` and `take`, less the two that are the row as a series. That is more board runs than any single piece of work in the indexing section is going to return again, because `loc` and `iloc` are where the section's weight is.
 
 What it buys beyond the runs is that the frame is now addressable. Until this went in there was no way to ask a frame for a row, and a library that can only hand back a whole frame or a whole column is one a caller cannot walk through. Everything left in the section, which is `reindex`, the `duplicated` family, `nlargest`, `query`, `filter` and `truncate`, is a rule for computing a set of rows, and every one of them ends in the gather that is now written.
+
+## 11. The same two questions about a series
+
+A series has one axis, so everything in section 2 about the shape of the key deciding the shape of the answer collapses to one decision: a key that names one row is a value and a key that names a set of them is a series, a set of one included. That is a smaller problem than the frame's and it is the same problem, which is why `s.loc` and `s.iloc` are one class with a flag rather than two classes, and why the two key readers moved out of the frame's accessors and became functions the four accessors share.
+
+Moving them was the whole of the work. The five descriptions in section 3 are the core's row operations and `Series` has all four of them already, so `slice_rows`, `take`, `filter_rows` and `cell` on the binding are the same four crossings the frame has, written against a column instead of against a table. Nothing new was computed. What was missing was a door.
+
+The part that is not shared is `s[key]`, and it is worth writing down because it is indefensible and it is not ours. Square brackets on a series read one key as a label and a slice of numbers as positions, on the same series, in the same expression. `s[2]` is the label two even on an index whose labels are strings, where it raises. `s[2:5]` is the rows two to five counting from the front even on an index whose labels are those same numbers in a different order, where it answers different rows than `s.loc[2:5]` does. Nobody would design that. Code that depends on it is everywhere, and a library that reads the slice by label is not the library people have, so this reads it the way pandas reads it.
+
+What decides is the slice's own bounds rather than the index's type, which is the detail that makes the rule implementable rather than a special case per index. A bound that is a whole number means positions, anything else means labels, and a bound that is not written says nothing either way, so `s["a":"c"]` on a string index stays a closed slice of labels while `s[0:2]` on the same index is the first two rows. Everything that is not a slice goes to `loc` unchanged, which is exactly what pandas does with it.
+
+The two messages about a position past the end are different sentences in pandas and they stay different here. `s.iloc[9]` says there is a single positional indexer out of bounds and `s.iat[9]` names the axis and the size, and since the two reach the same binding, the binding raises the `iat` sentence and the `iloc` path checks the bound itself before it asks. Two callers being told two things about the same mistake is not a design, it is pandas, and the cheapest way to match it is to let each caller raise its own.
+
+`Too many indexers` on a series is `s.loc[a, b]`, where the second key names an axis that does not exist. pandas raises its own `IndexingError` there, which is the divergence section 8 already registered for the frame, and it applies here unchanged.
