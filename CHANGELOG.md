@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.63] - 2026-09-12
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Most of this release is the SQL engine learning to run queries it could already plan. A `SELECT 1` runs, a `UNION` runs, and a `SELECT * FROM range(5)` runs, and the three of them share a shape: the plan had the node or nearly had it, and what was missing was a physical operator or a frame to start from. Between them they close the gap where a query parsed, lowered, bound, and then refused at the last step.
+
+`SELECT 1` needed a column made out of nothing, which is a new operator that writes one value down a buffer as wide as the chunk. A `UNION` needed its inputs run and stacked, which moves chunks rather than copying rows, since a frame is already a list of chunks per column. A table function needed a plan node of its own, the eleventh, and it is the first source in the engine that has no frame behind it at all: `SELECT count(*) FROM range(7)` answers seven and reads nothing.
+
+Beside that, an `ORDER BY` with a `LIMIT` stopped sorting what it was going to throw away, a date literal in a filter is parsed once rather than once a row, and ten of the seventeen reductions stopped declaring a type the kernel does not produce. `Series.reindex` and `Index.get_indexer` are here too, which are the pandas side rather than the SQL side.
+
 ### Added: SELECT * FROM range(5) runs
 
 The SQL front end builds the table function node now, so a query may write a call where a table goes. `range` and `generate_series` both work, with a stop, a start and a stop, or a start, a stop and a step.
