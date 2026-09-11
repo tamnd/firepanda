@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a filter that cannot keep a row stops costing anything
+
+Empty and constant pruning, the eighth planner pass, in `firepanda/plan/empty.mojo`. It runs second in the pipeline, right after simplification, because simplification is what turns a predicate into the constant this pass needs and because every node it takes out is a node the five passes below it never have to look at.
+
+Three rules. A filter whose predicate folded to false becomes a limit of zero rows over the same input. A filter whose predicate folded to true is spliced out, and everything that read it reads what it read. A filter, sort, distinct or limit sitting over something empty is spliced out too, since all four hand their input's schema on unchanged and so removing one from above an empty input leaves an empty input with the same schema.
+
+The false filter becoming a limit of zero rather than a node kind of its own is the design decision worth recording. A limit of zero already produces no rows and already carries the schema of its input, which is what an empty relation is, so the alternative was a tenth node kind that holds a schema and there is nothing these three rules need it for. What would need it is dropping an arm of a join whose other side is empty, or collapsing an aggregate or a projection over an empty input, and those are left alone here for exactly that reason. A whole frame reduction over no rows answers one row rather than none, so it is not a case of the same answer written shorter.
+
+A null predicate is left alone. It keeps no rows, so it could be folded, but saying so is a rule about what a null means in a predicate rather than a rule about a constant, and the kernel that filters already holds that one.
+
+Unlike predicate pushdown this pass rewrites the node list in place. Pushdown has to rebuild because moving a filter down makes new parents for old children and the arena hands out indices in creation order, so an input is always below the node reading it. Removing a node goes the other way: a reader ends up pointing at what the removed node pointed at, and that is below the removed node which is below the reader, so the order still holds. Splicing is now the fourth of the ways a pass can respect that invariant, after rebuilding, merging upward in place, and swapping the contents of two adjacent nodes.
+
+This is where the generated query pays off rather than the benchmark. A `WHERE` clause assembled out of parameters that were not all supplied is the common way to arrive at a constant predicate, and until now the plan carried the whole subtree underneath it.
+
 ### Fixed: three messages and a class that the conformance board found on loc
 
 Arming the fifteen indexing cases in `firepanda-compat` turned four of its error cases from unimplemented into failing, which is the board working: the names started resolving and the level that asks what happens when they are called wrongly could finally ask. Three of the four were bugs and are fixed here.
