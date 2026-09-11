@@ -112,10 +112,11 @@ A second note, internal rather than user facing: Mojo 1.0 removed negative index
 
 - [ ] `__getitem__` for column, list of columns, boolean mask, slice (M1)
 - [ ] `__setitem__` for column assignment (M1)
-- [ ] `loc`, `iloc`, `at`, `iat` (M6, requires the index work)
+- [x] `loc`, `iloc`, `at`, `iat` (M6), apart from a key that collapses the row axis and leaves the columns, which answers a row as a series and needs one type every column fits
 - [ ] `head`, `tail`, `sample`, `nlargest`, `nsmallest` (M1)
 - [ ] `filter` with `items`, `like`, `regex` (M6)
-- [ ] `take`, `xs`, `get`, `pop`, `insert` (M6)
+- [x] `take` (M6), on either axis and counting a negative position from the end
+- [ ] `xs`, `get`, `pop`, `insert` (M6)
 - [ ] `where`, `mask`, `query` (M6, `query` M4b)
 - [x] `isin` on Series (M1)
 - [ ] `between` on Series (M1)

@@ -741,6 +741,414 @@ def _transforming_axis(axis: Any, owner: str) -> None:
         )
 
 
+class _Every:
+    """The stand in for an axis the caller did not mention.
+
+    `df.iloc[2:5]` names one axis and means every column, and `df.iloc[:, 1]`
+    names both and means every row, so the two cases have to be told apart from
+    `df.iloc[None]`, which is neither. A sentinel does that and `slice(None)`
+    would not, because a caller can write `slice(None)` and mean it.
+    """
+
+    def __repr__(self) -> str:
+        """Reads as what it stands for, since it can reach a message."""
+        return "<every>"
+
+
+EVERY = _Every()
+"""The one instance, compared by identity."""
+
+
+def _two_axes(key: Any) -> tuple[Any, Any]:
+    """Splits a subscript into a row key and a column key.
+
+    Args:
+        key: Whatever went inside the square brackets.
+
+    Returns:
+        The row key, and the column key or `EVERY`.
+
+    Raises:
+        InvalidArgumentError: If more than two axes were named.
+    """
+    if isinstance(key, tuple):
+        if len(key) > 2:
+            raise InvalidArgumentError("Too many indexers")
+        if len(key) == 2:
+            return key[0], key[1]
+        return (key[0] if key else EVERY), EVERY
+    return key, EVERY
+
+
+def _is_mask(key: Any) -> bool:
+    """Whether a key is a run of booleans rather than of positions or labels.
+
+    `True` is an `int` in Python, so a list of booleans is also a list of
+    integers by the loose reading and the two mean completely different rows.
+    The exact check is the only one that tells them apart.
+
+    Args:
+        key: A list or tuple.
+
+    Returns:
+        True if every element is a bool and there is at least one.
+    """
+    return bool(key) and all(isinstance(one, bool) for one in key)
+
+
+def _flattened(found: Any) -> list[int]:
+    """Turns what `Index.get_loc` answers into a list of positions.
+
+    `get_loc` has three return types and which one it uses depends on the
+    labels rather than on the argument, which is pandas' rule. Every caller
+    here wants positions, so this is where the three become one.
+
+    Args:
+        found: An integer, a slice or a boolean mask.
+
+    Returns:
+        The positions, in index order.
+    """
+    if isinstance(found, int):
+        return [found]
+    if isinstance(found, slice):
+        return list(range(found.start, found.stop))
+    return [i for i, hit in enumerate(found) if hit]
+
+
+def _row_positions(index: Any, labels: Any) -> list[int]:
+    """Where each of a list of labels sits, with every hit for a repeated one.
+
+    Args:
+        index: The frame's index.
+        labels: The labels asked for, in the order the caller wrote them.
+
+    Returns:
+        The positions, in the order the labels were asked for.
+
+    Raises:
+        KeyError: If any label is not in the index, naming all of them.
+    """
+    found: list[int] = []
+    missing: list[Any] = []
+    for label in labels:
+        try:
+            found.extend(_flattened(index.get_loc(label)))
+        except KeyError:
+            missing.append(label)
+    if missing:
+        raise KeyError(f"{missing} not in index")
+    return found
+
+
+def _column_positions(names: list[str], key: Any) -> list[int]:
+    """Which columns a key names, by position, for a key that is not one column.
+
+    Args:
+        names: The column names, in order.
+        key: A slice, a list of positions or a list of booleans.
+
+    Returns:
+        The column positions.
+
+    Raises:
+        InvalidArgumentError: If the key is none of those shapes.
+    """
+    if isinstance(key, slice):
+        return list(range(*key.indices(len(names))))
+    if isinstance(key, (list, tuple)):
+        if _is_mask(key):
+            if len(key) != len(names):
+                raise InvalidArgumentError(f"Item wrong length {len(key)} instead of {len(names)}")
+            return [i for i, hit in enumerate(key) if hit]
+        return [int(one) for one in key]
+    raise InvalidArgumentError(f"cannot select columns with a {type(key).__name__}")
+
+
+def _named_at(names: list[str], positions: list[int]) -> list[str]:
+    """Turns column positions into column names, counting from the end.
+
+    Args:
+        names: The column names, in order.
+        positions: The positions.
+
+    Returns:
+        The names.
+
+    Raises:
+        OutOfBoundsError: If a position is off either end.
+    """
+    out = []
+    for one in positions:
+        at = one + len(names) if one < 0 else one
+        if at < 0 or at >= len(names):
+            raise OutOfBoundsError(
+                f"index {one} is out of bounds for axis 0 with size {len(names)}"
+            )
+        out.append(names[at])
+    return out
+
+
+class _Selection:
+    """What `loc` and `iloc` have in common, which is everything after the key.
+
+    The two differ only in how a key becomes a set of rows and a set of
+    columns. Once a key has been read, what is done with the answer is the
+    same on both, and it is this class: narrow to the columns, then narrow to
+    the rows, then decide whether what comes out is a frame, a column or a
+    single value.
+
+    That order is not arbitrary. Narrowing the columns first means the row
+    gather copies only the columns the caller asked for, which on a wide frame
+    is the difference between copying five columns and copying five hundred.
+    """
+
+    __slots__ = ("_owner",)
+
+    def __init__(self, owner: Any) -> None:
+        """Holds the frame the accessor was reached through.
+
+        Args:
+            owner: The frame.
+        """
+        self._owner = owner
+
+    def _rows(self, key: Any, height: int) -> tuple[Any, ...]:
+        """Reads a row key, which is the half the two accessors do differently."""
+        raise NotImplementedError
+
+    def _columns(self, key: Any, names: list[str]) -> Any:
+        """Reads a column key, which is the other half they do differently."""
+        raise NotImplementedError
+
+    def __getitem__(self, key: Any) -> Any:
+        """Answers a frame, a column or a value, depending on the key's shape.
+
+        The rule for which is pandas' and it is about the key rather than
+        about the data: an axis named by one thing collapses and an axis named
+        by a set of things does not. Two collapsed axes are a value, one is a
+        column, and none is a frame.
+
+        A single row with more than one column would be a row as a series, and
+        that is refused rather than approximated. A row read across the columns
+        has to find one type that all of them fit, which is a different
+        operation from anything in this file and is written up in section 6 of
+        document 36.
+        """
+        from ._frame import DataFrame, Series
+
+        rows, columns = _two_axes(key)
+        inner = self._owner._inner
+        names = inner.names()
+        picked = self._columns(columns, names)
+        where = self._rows(rows, inner.length())
+        try:
+            if isinstance(picked, str):
+                if where[0] == "one":
+                    return inner.cell(where[1], names.index(picked))
+                narrowed = _narrowed(inner.select([picked]), where)
+                return Series._wrap(narrowed.column(picked))
+            if where[0] == "one":
+                raise NotImplementedError(
+                    "reading one row across several columns is not supported yet,"
+                    " because a row has to find one type that every column fits"
+                    " and nothing here computes that type"
+                )
+            if picked is not EVERY:
+                inner = inner.select(picked)
+            return DataFrame._wrap(_narrowed(inner, where))
+        except NotImplementedError:
+            raise
+        except Exception as error:
+            raise translate(error) from None
+
+
+def _narrowed(inner: Any, where: tuple[Any, ...]) -> Any:
+    """Applies a row selection that has already been read to a frame.
+
+    Args:
+        inner: The extension frame.
+        where: What `_rows` answered.
+
+    Returns:
+        A new extension frame, or the same one when nothing was selected.
+    """
+    if where[0] == "every":
+        return inner
+    if where[0] == "range":
+        return inner.slice_rows(where[1], where[2])
+    if where[0] == "mask":
+        return inner.filter_rows(where[1])
+    return inner.take(where[1])
+
+
+class _Positional(_Selection):
+    """`df.iloc`, where every key is a position and a slice excludes its end."""
+
+    __slots__ = ()
+
+    def _rows(self, key: Any, height: int) -> tuple[Any, ...]:
+        """Reads a row key as positions.
+
+        A slice of step one is a range, which the core answers by sharing
+        buffers rather than gathering, and any other step is a gather over the
+        positions the slice walks. Building the walk in Python is right rather
+        than a shortcut: a step is rare, the positions are what the gather
+        takes anyway, and a second kernel for it would be the gather again.
+        """
+        if key is EVERY:
+            return ("every",)
+        if isinstance(key, slice):
+            start, stop, step = key.indices(height)
+            if step == 1:
+                return ("range", start, max(start, stop))
+            return ("gather", list(range(start, stop, step)))
+        if isinstance(key, (list, tuple)):
+            if _is_mask(key):
+                if len(key) != height:
+                    raise InvalidArgumentError(
+                        f"Boolean index has wrong length: {len(key)} instead of {height}"
+                    )
+                return ("gather", [i for i, hit in enumerate(key) if hit])
+            return ("gather", [int(one) for one in key])
+        if isinstance(key, SeriesMixin):
+            held: list[Any] = key._inner.to_list()
+            return ("gather", [int(one) for one in held])
+        return ("one", int(key))
+
+    def _columns(self, key: Any, names: list[str]) -> Any:
+        """Reads a column key as positions."""
+        if key is EVERY:
+            return EVERY
+        if isinstance(key, int) and not isinstance(key, bool):
+            return _named_at(names, [int(key)])[0]
+        return _named_at(names, _column_positions(names, key))
+
+
+class _Labelled(_Selection):
+    """`df.loc`, where every key is a label and a slice includes its end."""
+
+    __slots__ = ()
+
+    def _rows(self, key: Any, height: int) -> tuple[Any, ...]:
+        """Reads a row key as labels.
+
+        A boolean key is the one shape that is not a label at all, and it is
+        checked for first because a column of booleans used as a mask is the
+        most written `loc` there is. A mask that arrived as a column stays a
+        column and crosses as one, and a mask that arrived as a list of Python
+        bools becomes positions here, because it was already objects and
+        building a column out of it to ask the kernel would be a conversion
+        each way to answer a question a comprehension answers.
+        """
+        if key is EVERY:
+            return ("every",)
+        if isinstance(key, SeriesMixin) and key._inner.dtype() == "bool":
+            return ("mask", key._inner)
+        if isinstance(key, slice):
+            walked = self._owner.index.slice_indexer(key.start, key.stop, key.step)
+            start, stop, step = walked.indices(height)
+            if step == 1:
+                return ("range", start, max(start, stop))
+            return ("gather", list(range(start, stop, step)))
+        if isinstance(key, (list, tuple)):
+            if _is_mask(key):
+                if len(key) != height:
+                    raise InvalidArgumentError(f"Item wrong length {len(key)} instead of {height}")
+                return ("gather", [i for i, hit in enumerate(key) if hit])
+            return ("gather", _row_positions(self._owner.index, key))
+        if isinstance(key, IndexMixin):
+            return ("gather", _row_positions(self._owner.index, key._inner.to_list()))
+        found = self._owner.index.get_loc(key)
+        if isinstance(found, int):
+            return ("one", found)
+        return ("gather", _flattened(found))
+
+    def _columns(self, key: Any, names: list[str]) -> Any:
+        """Reads a column key as names.
+
+        A slice of names includes the column it stops at, for the same reason
+        a slice of row labels does, and it is resolved here rather than through
+        the index because the column names are a plain list on this side.
+        """
+        if key is EVERY:
+            return EVERY
+        if isinstance(key, str):
+            if key not in names:
+                raise KeyError(key)
+            return key
+        if isinstance(key, slice):
+            first = 0 if key.start is None else names.index(key.start)
+            last = len(names) if key.stop is None else names.index(key.stop) + 1
+            return names[first:last]
+        if isinstance(key, (list, tuple)):
+            if _is_mask(key):
+                return _named_at(names, _column_positions(names, key))
+            missing = [one for one in key if one not in names]
+            if missing:
+                raise KeyError(f"{missing} not in index")
+            return [str(one) for one in key]
+        raise InvalidArgumentError(f"cannot select columns with a {type(key).__name__}")
+
+
+class _Cell:
+    """`df.at` and `df.iat`, which are one value and nothing else.
+
+    They are one class rather than two because the only difference is whether
+    the pair of coordinates are labels or positions, and pandas has two classes
+    for the same reason it has `loc` and `iloc`, which is that a caller has to
+    say which they mean. Saying it once, at the property, is enough.
+
+    What they are for is speed. `df.loc[label, name]` reaches the same value
+    through the same lookup, and the reason to write `df.at[label, name]`
+    instead is that it promises never to answer anything but a value, so it can
+    skip every branch that decides what shape the answer has.
+    """
+
+    __slots__ = ("_labelled", "_owner")
+
+    def __init__(self, owner: Any, labelled: bool) -> None:
+        """Holds the frame and which of the two this is.
+
+        Args:
+            owner: The frame.
+            labelled: True for `at`, False for `iat`.
+        """
+        self._owner = owner
+        self._labelled = labelled
+
+    def __getitem__(self, key: Any) -> Any:
+        """Reads one value, by a pair of coordinates.
+
+        Both coordinates are required, which is pandas' rule and is the whole
+        point: a single coordinate would leave a shape to decide and deciding
+        a shape is what these two exist to avoid.
+        """
+        name = "at" if self._labelled else "iat"
+        if not isinstance(key, tuple) or len(key) != 2:
+            raise InvalidArgumentError(f"{name} takes a row and a column, and got one key")
+        row, column = key
+        inner = self._owner._inner
+        if not self._labelled:
+            try:
+                return inner.cell(int(row), int(column))
+            except Exception as error:
+                raise translate(error) from None
+        names = inner.names()
+        if column not in names:
+            raise KeyError(column)
+        found = self._owner.index.get_loc(row)
+        if not isinstance(found, int):
+            raise NotImplementedError(
+                "at on a repeated label is not supported yet, because pandas"
+                " answers several values there and this answers one"
+            )
+        try:
+            return inner.cell(found, names.index(column))
+        except Exception as error:
+            raise translate(error) from None
+
+
 __all__ = ["NO_DEFAULT", "DataFrameMixin", "IndexMixin", "SeriesMixin"]
 
 
@@ -1095,6 +1503,36 @@ class DataFrameMixin:
             )
         try:
             return DataFrame._wrap(self._inner.sort_index(bool(ascending)))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _take(self, indices: Any, axis: Any, kwargs: dict[str, Any]) -> DataFrame:
+        """Gathers rows or columns by position, in the order asked for.
+
+        `**kwargs` is in the signature because it is in pandas', where it
+        exists only so that `take` can be called with the arguments numpy's
+        `take` has and ignore the ones that do not apply. Passing one here
+        raises, because pandas has nothing left that it accepts through it and
+        a keyword that is quietly dropped is worse than one that is refused.
+
+        A negative position counts from the end, which the binding does rather
+        than this, because the core reads a negative index as a row that was
+        not there and the checking has to happen on the side that knows the
+        height.
+        """
+        from ._frame import DataFrame
+
+        if kwargs:
+            raise NotImplementedError(
+                f"take does not read {sorted(kwargs)}, because pandas accepts them"
+                " only to ignore them and a dropped keyword is worse than a refused one"
+            )
+        wanted = [int(one) for one in indices]
+        try:
+            if _axis_number(axis, "DataFrame", 0, (0, 1)) == 1:
+                names = self._inner.names()
+                return DataFrame._wrap(self._inner.select(_named_at(names, wanted)))
+            return DataFrame._wrap(self._inner.take(wanted))
         except Exception as error:
             raise translate(error) from None
 
