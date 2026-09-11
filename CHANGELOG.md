@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: copying, which costs a wrapper here and a whole frame in pandas
+
+`DataFrame.copy` and `Series.copy` answer now, along with `__copy__` and `__deepcopy__` on the frame, the column and the index, so `copy.copy` and `copy.deepcopy` reach them too. `deep` is accepted and never read, and the reason is that nothing in this library writes into a frame: there is no `__setitem__`, there is no `assign`, and `inplace` is refused on every call that takes it, so there is no later write for a deep copy to protect the original from and no expression a caller can write tells the two kinds of copy apart. That makes the implementation a new wrapper around the extension object the original already holds, where pandas duplicates every column and a defensive copy at the top of a function costs the whole frame in memory a second time.
+
+The index is the exception and it does build a new index underneath, because `Index.is_` asks whether two indexes are the same object and has to answer that a copy is not. `Index.copy` also takes its class from `type(self)` now rather than always answering a plain `Index`, so a copy of an index of instants is still one, which is one instance of the wrapping bug #495 records.
+
+Specified in `docs/specs/44-copying-when-nothing-can-be-written.md`. Part of #156, after #8.
+
 ### Added: a subquery may be written where a table goes
 
 `FROM (SELECT ...) v` was refused and runs now. A derived table is a whole statement whose output becomes a source, so it lowers to that statement's own root and nothing is wrapped around it, and what the query outside gets out of it is the names that root produces.
