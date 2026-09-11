@@ -1,16 +1,17 @@
-"""The five window reductions, checked against a running pandas.
+"""The eight window reductions, checked against a running pandas.
 
-The kernel has its own tests in `tests/test_window.mojo` and they check the
-arithmetic. These check the surface: that the nine arguments `s.rolling(...)`
-takes are spelled the way pandas spells them, that the ones this library has no
-implementation for are refused by name rather than ignored, and that the answers
-still match once the arguments have crossed the boundary.
+The kernel has its own tests in `tests/test_window.mojo` and `tests/
+test_spread.mojo` and they check the arithmetic. These check the surface: that
+the nine arguments `s.rolling(...)` takes are spelled the way pandas spells them,
+that the ones this library has no implementation for are refused by name rather
+than ignored, and that the answers still match once the arguments have crossed
+the boundary.
 
 Every answer is compared against pandas rather than against a written down
 constant, for the reason `test_astype.py` gives, with one exception. The
-infinities are compared against what is true, because pandas carries one running
-total and cannot recover from an infinity passing through it, and the two tests
-at the bottom assert the difference rather than working around it.
+infinities are compared against what is true, because pandas replaces every
+infinity in a window with a missing value before its kernel sees the column, and
+the tests that assert the difference say so.
 
 The last section is the same surface over a frame. It repeats the reductions and
 the placements rather than trusting that a frame window is the columns windowed
@@ -46,6 +47,13 @@ HOLED = [1.0, None, 3.0, None, 5.0, 6.0]
 """Six rows with the gaps arranged so that no three wide window holds three
 values, which is what makes `min_periods` visible."""
 
+WINDOWED = ["sum", "mean", "count", "min", "max", "var", "std", "sem"]
+"""The eight reductions, every one of which has to answer over every placement.
+
+Written once because a reduction added to the library and not added here would
+leave four tests passing on seven names and looking complete.
+"""
+
 
 def made(firepanda: ModuleType, values: list[Any] = ROWS) -> Any:
     """A firepanda float column."""
@@ -76,9 +84,9 @@ def same(mine: Any, them: Any) -> bool:
 
 
 @needs_pandas
-@pytest.mark.parametrize("kind", ["sum", "mean", "count", "min", "max"])
+@pytest.mark.parametrize("kind", WINDOWED)
 def test_every_reduction_matches_over_a_plain_window(firepanda: ModuleType, kind: str) -> None:
-    """The five names, over a five wide window with nothing unusual about it."""
+    """The eight names, over a five wide window with nothing unusual about it."""
     assert same(
         getattr(made(firepanda).rolling(5), kind)(),
         getattr(theirs().rolling(5), kind)(),
@@ -86,9 +94,9 @@ def test_every_reduction_matches_over_a_plain_window(firepanda: ModuleType, kind
 
 
 @needs_pandas
-@pytest.mark.parametrize("kind", ["sum", "mean", "count", "min", "max"])
+@pytest.mark.parametrize("kind", WINDOWED)
 def test_every_reduction_matches_over_an_expanding_window(firepanda: ModuleType, kind: str) -> None:
-    """The same five with no near end, which is the other half of the surface."""
+    """The same eight with no near end, which is the other half of the surface."""
     assert same(
         getattr(made(firepanda).expanding(), kind)(),
         getattr(theirs().expanding(), kind)(),
@@ -138,7 +146,7 @@ def test_how_long_an_expanding_window_waits_matches(firepanda: ModuleType, perio
 
 
 @needs_pandas
-@pytest.mark.parametrize("kind", ["sum", "mean", "count", "min", "max"])
+@pytest.mark.parametrize("kind", WINDOWED)
 def test_a_missing_row_is_stepped_over(firepanda: ModuleType, kind: str) -> None:
     """A column with gaps in it, at the one `min_periods` that answers anything.
 
@@ -171,7 +179,7 @@ def test_an_integer_column_comes_back_as_float64(firepanda: ModuleType) -> None:
 
     mine = firepanda.Series([1, 2, 3, 4], name="v")
     them = pd.Series([1, 2, 3, 4], name="v")
-    for kind in ("sum", "mean", "count", "min", "max"):
+    for kind in WINDOWED:
         ours = getattr(mine.rolling(2), kind)()
         assert str(ours.dtype) == "float64"
         assert same(ours, getattr(them.rolling(2), kind)())
@@ -291,13 +299,16 @@ def test_a_text_column_has_nothing_to_reduce(firepanda: ModuleType) -> None:
 
 
 def test_a_window_holding_one_infinity_sums_to_it(firepanda: ModuleType) -> None:
-    """The first of the two asserted differences, and the reason for both.
+    """The first of the asserted differences, and the reason for all of them.
 
-    pandas carries one running total, so an infinity entering the window makes
-    it infinite and subtracting the infinity again gives a NaN rather than
-    giving the total back. Every window after that reads NaN until the window
-    empties. That is not a rounding difference, it is a wrong answer on real
-    data, and this counts the infinities beside the total instead.
+    pandas cannot get an infinity out of a window, and not because it disagrees
+    about the arithmetic. `BaseWindow._prep_values` replaces every infinity in
+    the column with a NaN before the kernel runs, so an infinity is a missing
+    value to a pandas window and the window is reduced over the rows either side
+    of it. Its `count` is the one reduction that does not see the replacement, so
+    pandas will tell you a window holds two values and then answer the sum of
+    one of them. An infinity in a column is an ordinary value here and this
+    counts the infinities beside the total.
     """
     rows = [1.0, 2.0, math.inf, 3.0, 4.0, 5.0, 6.0]
     got = firepanda.Series(rows, name="v").rolling(3).sum().tolist()
@@ -320,9 +331,9 @@ def test_a_window_holding_both_infinities_is_not_a_number(firepanda: ModuleType)
 def test_an_extreme_over_a_window_holding_an_infinity_answers_it(
     firepanda: ModuleType,
 ) -> None:
-    """pandas answers a NaN here because it seeds its running maximum with
-    negative infinity and reads a result equal to that seed as an empty window.
-    An infinity in a column is an ordinary value and this answers it."""
+    """pandas answers the other row of the window here, for the reason the sum
+    test above gives, which is that the infinity was gone before its kernel
+    started. An infinity in a column is an ordinary value and this answers it."""
     rows = [1.0, math.inf, 2.0, 3.0]
     got = firepanda.Series(rows, name="v").rolling(2).max().tolist()
     assert math.isinf(got[1]) and math.isinf(got[2])
@@ -338,6 +349,139 @@ def test_the_low_bits_survive_a_row_leaving_the_window(firepanda: ModuleType) ->
     assert got[1] == 1e16
     assert got[2] == 2.0
     assert got[3] == 2.0
+
+
+@needs_pandas
+@pytest.mark.parametrize("kind", ["var", "std", "sem"])
+@pytest.mark.parametrize("ddof", [0, 1, 2, 3, -1])
+def test_the_degrees_of_freedom_cross_the_boundary(
+    firepanda: ModuleType, kind: str, ddof: int
+) -> None:
+    """The one argument the three spreads have that the other five do not.
+
+    Five values including a negative one, which pandas accepts and which divides
+    by more than the count rather than less, and a three that leaves a four wide
+    window one degree of freedom and a three wide window none.
+    """
+    assert same(
+        getattr(made(firepanda).rolling(4), kind)(ddof=ddof),
+        getattr(theirs().rolling(4), kind)(ddof=ddof),
+    )
+    assert same(
+        getattr(made(firepanda).expanding(), kind)(ddof=ddof),
+        getattr(theirs().expanding(), kind)(ddof=ddof),
+    )
+
+
+@needs_pandas
+@pytest.mark.parametrize("kind", ["var", "std", "sem"])
+def test_a_window_with_no_degrees_of_freedom_left_is_missing(
+    firepanda: ModuleType, kind: str
+) -> None:
+    """A count equal to the degrees of freedom leaves no divisor, and pandas
+    answers a column of nulls rather than dividing by nought, so a one wide
+    window is missing everywhere at the default."""
+    assert same(
+        getattr(made(firepanda).rolling(1), kind)(),
+        getattr(theirs().rolling(1), kind)(),
+    )
+    assert same(
+        getattr(made(firepanda).rolling(1), kind)(ddof=0),
+        getattr(theirs().rolling(1), kind)(ddof=0),
+    )
+
+
+@needs_pandas
+def test_the_degrees_of_freedom_have_to_be_a_whole_number(firepanda: ModuleType) -> None:
+    """pandas truncates a float here, so `ddof=1.5` quietly answers the `ddof=1`
+    column and a caller who wrote that meant something and did not get it. This
+    refuses it with a sentence about the argument, which is the one place in this
+    file where the difference is on purpose and is not about arithmetic."""
+    with pytest.raises(ValueError, match="ddof must be an integer"):
+        made(firepanda).rolling(3).var(ddof=1.5)
+    assert same(theirs().rolling(3).var(ddof=1.5), theirs().rolling(3).var(ddof=1))
+
+
+@needs_pandas
+def test_the_standard_error_is_the_one_spread_with_no_engine_to_choose(
+    firepanda: ModuleType,
+) -> None:
+    """pandas writes `sem` as `std(ddof) / count ** 0.5` rather than as a kernel,
+    so it never had a numba path to offer and its signature has no `engine` on
+    it. Declaring one here that pandas does not have would fail the signature
+    parity check, so `sem` is the one reduction of the eight that takes only the
+    two arguments."""
+    with pytest.raises(TypeError):
+        made(firepanda).rolling(3).sem(engine="cython")
+    with pytest.raises(TypeError):
+        theirs().rolling(3).sem(engine="cython")
+
+
+@needs_pandas
+def test_a_spread_over_a_window_holding_an_infinity_is_not_a_number(
+    firepanda: ModuleType,
+) -> None:
+    """pandas answers `[0, 0, 0, 0.25, 0.25]` here and the middle three are
+    wrong, for the reason the sum test above gives.
+
+    The mean of a set holding an infinity is an infinity, every deviation from it
+    is an infinity minus an infinity, and there is no number there. pandas had
+    already replaced the infinity with a missing value, so its window over rows
+    nought and one is a window over one value and it answers the variance of one
+    value. Worse, it is not even consistent with itself across the degrees of
+    freedom: the same windows are NaN at the default, because one value leaves no
+    divisor there, and nought at `ddof=0`, because one value leaves a divisor of
+    one.
+    """
+    rows = [1.0, math.inf, 2.0, 3.0, 4.0]
+    got = firepanda.Series(rows, name="v").rolling(2, min_periods=1).var(ddof=0).tolist()
+    assert got[0] == 0.0
+    assert math.isnan(got[1]) and math.isnan(got[2])
+    assert got[3] == 0.25
+    assert got[4] == 0.25
+    them = theirs(rows).rolling(2, min_periods=1).var(ddof=0).tolist()
+    assert them[1] == 0.0 and them[2] == 0.0
+
+
+@needs_pandas
+def test_a_spread_that_overflowed_recovers_once_the_value_leaves(
+    firepanda: ModuleType,
+) -> None:
+    """pandas answers `[nan, 0, inf, inf, inf]` here and the last two are wrong.
+
+    A window holding ten to the two hundred and a small number has a variance
+    too large for a double and genuinely is an infinity. Every window after it
+    holds small numbers only. pandas cannot get back to them because its
+    accumulated deviations went infinite and no later subtraction brings them
+    back, which is the same failure as the running total and not the same cause
+    as the infinities above. The carried state here notices that it has stopped
+    being a number and rebuilds the window from its own rows.
+    """
+    rows = [1e200, 1e200, 1.0, 2.0, 3.0]
+    got = firepanda.Series(rows, name="v").rolling(2).var().tolist()
+    assert math.isnan(got[0])
+    assert got[1] == 0.0
+    assert math.isinf(got[2])
+    assert got[3] == 0.5
+    assert got[4] == 0.5
+    them = theirs(rows).rolling(2).var().tolist()
+    assert math.isinf(them[3]) and math.isinf(them[4])
+
+
+@needs_pandas
+def test_a_large_value_leaving_the_window_does_not_take_the_answer_with_it(
+    firepanda: ModuleType,
+) -> None:
+    """A large value beside small ones, where subtracting it back out of the
+    accumulated deviations leaves the remainder as the difference of two large
+    numbers and every digit of it can be wrong. Carrying the state answers three
+    quarters for the window over one, two and three, so the state is rebuilt from
+    its own rows when its error bound says the digits it is holding are no longer
+    digits of the answer. pandas gets this one right too and the two agree."""
+    rows = [1e8, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    got = firepanda.Series(rows, name="v").rolling(3).var()
+    assert got.tolist()[3:] == [1.0, 1.0, 1.0, 1.0]
+    assert same(got, theirs(rows).rolling(3).var())
 
 
 COLUMNS: dict[str, list[Any]] = {"a": ROWS, "b": [x * 3 for x in ROWS], "c": HOLED + ROWS[:4]}
@@ -366,9 +510,9 @@ def matching(mine: Any, them: Any) -> bool:
 
 
 @needs_pandas
-@pytest.mark.parametrize("kind", ["sum", "mean", "count", "min", "max"])
+@pytest.mark.parametrize("kind", WINDOWED)
 def test_every_reduction_matches_over_a_frame(firepanda: ModuleType, kind: str) -> None:
-    """The same five names over a frame, which answers a frame of the same
+    """The same eight names over a frame, which answers a frame of the same
     columns in the same order rather than a column."""
     mine = getattr(framed(firepanda).rolling(4), kind)()
     them = getattr(their_frame().rolling(4), kind)()
@@ -377,9 +521,9 @@ def test_every_reduction_matches_over_a_frame(firepanda: ModuleType, kind: str) 
 
 
 @needs_pandas
-@pytest.mark.parametrize("kind", ["sum", "mean", "count", "min", "max"])
+@pytest.mark.parametrize("kind", WINDOWED)
 def test_every_reduction_matches_over_an_expanding_frame(firepanda: ModuleType, kind: str) -> None:
-    """The five again over the window with no near end."""
+    """The eight again over the window with no near end."""
     assert matching(
         getattr(framed(firepanda).expanding(), kind)(),
         getattr(their_frame().expanding(), kind)(),

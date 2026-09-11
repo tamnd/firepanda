@@ -2085,6 +2085,7 @@ class WindowMixin:
         numeric_only: bool = False,
         engine: Any = None,
         engine_kwargs: Any = None,
+        ddof: int = 1,
     ) -> Series | DataFrame:
         """Runs one reduction over every window.
 
@@ -2106,7 +2107,13 @@ class WindowMixin:
             numeric_only: Held at False over a frame, and accepted at both
                 values over a column, for the reason above.
             engine: Declared and refused, except at `cython`.
-            engine_kwargs: Declared and refused.
+            engine_kwargs: Declared and refused. Last of the positional ones, so
+                that `ddof` can sit after it and the five reductions that do not
+                read it keep the call they already had.
+            ddof: Subtracted from the count of values to give the divisor of a
+                variance. Only `var`, `std` and `sem` declare it and only they
+                pass it, and it crosses on every call because there is one door
+                and not eight.
 
         Returns:
             Whichever of the two was windowed, of float64, as tall as what it
@@ -2115,6 +2122,8 @@ class WindowMixin:
         Raises:
             NotImplementedError: If a numba engine was asked for, or if a frame
                 was asked to drop the columns it cannot reduce.
+            InvalidArgumentError: If the degrees of freedom are not a whole
+                number.
         """
         from ._frame import DataFrame, Series
 
@@ -2137,6 +2146,13 @@ class WindowMixin:
             engine_kwargs,
             "it configures the numba engine, and there is no numba engine here for it to configure",
         )
+        # pandas takes a float here and truncates it, so `ddof=1.5` quietly
+        # answers the `ddof=1` column, and a caller who wrote that meant
+        # something and did not get it. A whole number is asked for and anything
+        # else is a sentence. A negative one is allowed, as it is in pandas,
+        # because it is a divisor larger than the count rather than a mistake.
+        if not isinstance(ddof, int) or isinstance(ddof, bool):
+            raise InvalidArgumentError("ddof must be an integer")
         # The one default `_hold` did not apply is applied here. `right` is
         # pandas' word for a window that keeps the row it is answering and not
         # the one that fell off the far end. The absent `min_periods` is left
@@ -2150,6 +2166,7 @@ class WindowMixin:
             self._center,
             self._closed or "right",
             self._step,
+            ddof,
         )
         try:
             if isinstance(self._data, DataFrame):

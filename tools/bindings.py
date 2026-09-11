@@ -1049,13 +1049,20 @@ WINDOWED: tuple[tuple[str, str], ...] = (
     ("count", "How many rows of the window hold a value."),
     ("min", "The smallest value in the window."),
     ("max", "The largest value in the window."),
+    ("var", "The variance of the values in the window."),
+    ("std", "The standard deviation of the values in the window."),
+    ("sem", "The standard error of the mean of the values in the window."),
 )
-"""The five reductions a window can be folded through, and what each answers.
+"""The eight reductions a window can be folded through, and what each answers.
 
-Five rather than pandas' twenty six, and the five are the ones that can be
+Eight rather than pandas' twenty six, and the eight are the ones that can be
 carried from one window to the next rather than recomputed. `firepanda/kernel/
-window.mojo` says which of the other twenty one need a different data structure
-and why each of them is its own piece of work.
+window.mojo` says which of the other eighteen need a different data structure and
+why each of them is its own piece of work.
+
+The last three read a degrees of freedom and the first five do not, which is the
+one place this table is not uniform, and `_window_members` splits on it rather
+than declaring an argument the first five would have to ignore.
 """
 
 
@@ -1140,7 +1147,7 @@ made once rather than per window.
 
 
 def _window_members(py: str) -> tuple[Member, ...]:
-    """Writes the eleven properties and five reduction members for one window class.
+    """Writes the eleven properties and eight reduction members for one window class.
 
     Same restriction as `_group_members`, which is that nothing here decides
     what a reduction does. The word crosses the boundary and
@@ -1172,22 +1179,30 @@ def _window_members(py: str) -> tuple[Member, ...]:
         )
     for name, what in WINDOWED:
         # `count` is the one pandas gives no engine arguments, because it never
-        # had a numba path to choose, and copying that is free here.
+        # had a numba path to choose, and copying that is free here. `sem` is the
+        # other one pandas declares without them, because pandas writes it as a
+        # deviation over a root count rather than as a kernel, so there was never
+        # a numba path there either to offer.
         counting = name == "count"
+        spread = name in ("var", "std", "sem")
+        signature = "numeric_only: bool = False"
+        if spread:
+            signature = f"ddof: int = 1, {signature}"
+        if not counting and name != "sem":
+            signature = f"{signature}, {engines}"
+        arguments = "numeric_only"
+        if not counting and name != "sem":
+            arguments = f"{arguments}, engine, engine_kwargs"
+            if spread:
+                arguments = f"{arguments}, ddof"
+        elif spread:
+            arguments = f"{arguments}, ddof=ddof"
         out.append(
             Member(
                 name=name,
                 kind="method",
-                signature=(
-                    "numeric_only: bool = False"
-                    if counting
-                    else f"numeric_only: bool = False, {engines}"
-                ),
-                body=(
-                    f'self._reduce("{name}", numeric_only)'
-                    if counting
-                    else f'self._reduce("{name}", numeric_only, engine, engine_kwargs)'
-                ),
+                signature=signature,
+                body=f'self._reduce("{name}", {arguments})',
                 doc=f"{what} Over every {over} window.",
                 returns="Series | DataFrame",
             )
@@ -1533,6 +1548,7 @@ FRAME = Exposed(
                 ("center", "bool"),
                 ("closed", "str"),
                 ("step", "int | None"),
+                ("ddof", "int"),
             ),
             returns="DataFrame",
         ),
@@ -1928,6 +1944,7 @@ SERIES = Exposed(
                 ("center", "bool"),
                 ("closed", "str"),
                 ("step", "int | None"),
+                ("ddof", "int"),
             ),
             returns="Series",
         ),

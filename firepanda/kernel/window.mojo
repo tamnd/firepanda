@@ -89,16 +89,30 @@ and there is one loop rather than one per dtype. A missing row in the answer is
 a NaN with no validity bit behind it, which is what every float column in this
 package holds and what `nan_over_nulls` exists to say.
 
+## The spread reductions are here and their arithmetic is not
+
+`var`, `std` and `sem` walk the same edges as everything else and are folded
+through the same loop shape, so they are dispatched from here. What they carry is
+not a number, it is a state, and the argument about when that state stops being
+worth carrying is long enough and separate enough to live in `spread.mojo` next
+to its own tests. This file asks it whether it has settled and rebuilds the
+window when it says no, which is the same conversation the running total already
+has, and knows nothing else about how a variance is computed.
+
+They are also where the window parameters run out of room at the Python
+boundary. `ddof` belongs to the reduction rather than to the window, and adding
+it makes seven arguments after the object, which document 13 section 4 measured
+as the ceiling for a bound method. The eighth window parameter, whichever it
+turns out to be, goes through a keyword route.
+
 ## What is not here
 
-The spread reductions, which are `std`, `var`, `sem`, `skew` and `kurt`. They
-carry more state and they square the error, so a carried variance is a different
-argument from a carried sum and it belongs in its own file next to its own
-tests. The order statistics, `median`, `quantile` and `rank`, which need the
-window sorted rather than folded and are a different data structure again. The
-exponentially weighted window, which has no edges at all and so has nothing to
-do with this file. And the windows given as a frequency rather than a count,
-which need a calendar before they need any of this.
+`skew` and `kurt`, which need the third and fourth moments and the same argument
+again about carrying them. The order statistics, `median`, `quantile` and `rank`,
+which need the window sorted rather than folded and are a different data
+structure. The exponentially weighted window, which has no edges at all and so
+has nothing to do with this file. And the windows given as a frequency rather
+than a count, which need a calendar before they need any of this.
 """
 
 from std.math import isinf, isnan, nan
@@ -110,6 +124,7 @@ from firepanda.dtype.logical import LogicalType
 
 from .cast import cast_any
 from .nulls import present_bitmap_any
+from .spread import SPREAD_SEM, SPREAD_STD, SPREAD_VAR, Spread
 
 comptime OP_SUM = 0
 """Operation code for the total over the window."""
@@ -125,6 +140,15 @@ comptime OP_MIN = 3
 
 comptime OP_MAX = 4
 """Operation code for the largest value in the window."""
+
+comptime OP_VAR = 5
+"""Operation code for the variance of the window."""
+
+comptime OP_STD = 6
+"""Operation code for the standard deviation of the window."""
+
+comptime OP_SEM = 7
+"""Operation code for the standard error of the window's mean."""
 
 comptime EDGE_RIGHT = 0
 """Closed code for a window that drops the first row of its span."""
@@ -149,7 +173,7 @@ struct WindowOp(Equatable, ImplicitlyCopyable, Movable, Writable):
     """
 
     var code: Int
-    """The operation, as one of the five values below."""
+    """The operation, as one of the eight values below."""
 
     comptime SUM = Self(OP_SUM)
     """The total over the window."""
@@ -165,6 +189,25 @@ struct WindowOp(Equatable, ImplicitlyCopyable, Movable, Writable):
 
     comptime MAX = Self(OP_MAX)
     """The largest value in the window."""
+
+    comptime VAR = Self(OP_VAR)
+    """The variance of the window."""
+
+    comptime STD = Self(OP_STD)
+    """The standard deviation of the window."""
+
+    comptime SEM = Self(OP_SEM)
+    """The standard error of the window's mean."""
+
+    def spreads(self) -> Bool:
+        """Says whether this reduction measures a spread rather than a level.
+
+        Returns:
+            True for the variance, the deviation and the standard error, which
+            are the three that carry a state rather than a number and are the
+            three that read `ddof`.
+        """
+        return self.code >= OP_VAR
 
     def __eq__(self, other: Self) -> Bool:
         """Compares two operations.
@@ -202,8 +245,14 @@ struct WindowOp(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("count")
         elif self == Self.MIN:
             writer.write("min")
-        else:
+        elif self == Self.MAX:
             writer.write("max")
+        elif self == Self.VAR:
+            writer.write("var")
+        elif self == Self.STD:
+            writer.write("std")
+        else:
+            writer.write("sem")
 
 
 def op_named(name: StringSlice) raises -> WindowOp:
@@ -216,7 +265,7 @@ def op_named(name: StringSlice) raises -> WindowOp:
         The reduction it names.
 
     Raises:
-        Error: If it is not one of the five this file answers.
+        Error: If it is not one of the eight this file answers.
     """
     if name == "sum":
         return WindowOp.SUM
@@ -228,6 +277,12 @@ def op_named(name: StringSlice) raises -> WindowOp:
         return WindowOp.MIN
     if name == "max":
         return WindowOp.MAX
+    if name == "var":
+        return WindowOp.VAR
+    if name == "std":
+        return WindowOp.STD
+    if name == "sem":
+        return WindowOp.SEM
     raise Error("window: no window reduction is called " + String(name))
 
 
@@ -468,13 +523,18 @@ def expanding_shape(min_periods: Int, rows: Int) raises -> Shape:
     )
 
 
-def window_agg(col: AnyArray, op: WindowOp, shape: Shape) raises -> AnyArray:
+def window_agg(
+    col: AnyArray, op: WindowOp, shape: Shape, ddof: Int = 1
+) raises -> AnyArray:
     """Runs a reduction over every window of a column.
 
     Args:
         col: The column.
         op: Which reduction to run.
         shape: Where the windows sit.
+        ddof: Subtracted from the count of values to give the divisor of a
+            variance. Read by the three spread reductions and ignored by the
+            other five, which is why it has a default and they do not pass one.
 
     Returns:
         A float64 column with one row per step, holding a NaN wherever the
@@ -505,6 +565,13 @@ def window_agg(col: AnyArray, op: WindowOp, shape: Shape) raises -> AnyArray:
         return AnyArray(
             _extreme(src, present, seen, rows, shape, op == WindowOp.MAX)
         )
+    if op.spreads():
+        var form = SPREAD_VAR
+        if op == WindowOp.STD:
+            form = SPREAD_STD
+        elif op == WindowOp.SEM:
+            form = SPREAD_SEM
+        return AnyArray(_spread(src, present, seen, rows, shape, ddof, form))
     return AnyArray(
         _total(src, present, seen, rows, shape, op == WindowOp.MEAN)
     )
@@ -766,6 +833,99 @@ def _fold[
         start: The first row.
         stop: One past the last row.
         into: The total to add them to.
+
+    Parameters:
+        origin: The origin of the values.
+    """
+    for j in range(start, stop):
+        if present.get(j):
+            into.add(src.unsafe_offset(j).unsafe_load())
+
+
+def _spread[
+    origin: ImmOrigin
+](
+    src: Pointer[Scalar[DType.float64], origin],
+    present: Bitmap,
+    seen: List[Int],
+    rows: Int,
+    shape: Shape,
+    ddof: Int,
+    form: Int,
+) raises -> Array[DType.float64]:
+    """Measures the spread of every window, carrying the state between them.
+
+    The same loop as `_total` with a different thing carried, and the difference
+    worth noticing is where the rebuild sits. The total rebuilds when it has
+    overflowed, which is rare. The spread rebuilds when its error bound has
+    grown past the eighth digit of its answer, which happens whenever a value
+    much larger than the rest leaves the window, and that is not rare. Both cost
+    the width of the window on the rows where they fire and nothing anywhere
+    else.
+
+    Args:
+        src: The values, already float64.
+        present: Which rows hold a value.
+        seen: The running count of rows holding a value.
+        rows: How tall the column is.
+        shape: Where the windows sit.
+        ddof: Subtracted from the count to give the divisor.
+        form: Which of the three spreads to answer.
+
+    Parameters:
+        origin: The origin of the values.
+
+    Returns:
+        A float64 column with one row per step.
+
+    Raises:
+        Error: Only what allocation raises.
+    """
+    var answer = Array[DType.float64](shape.answered(rows))
+    var target = answer.unsafe_ptr()
+    var carried = Spread()
+    var last = Edges(0, 0)
+    for k in range(len(answer)):
+        var span = shape.edges(k * shape.step, rows)
+        if k == 0 or span.start >= last.stop:
+            carried = Spread()
+            _gather(src, present, span.start, span.stop, carried)
+        else:
+            for j in range(last.start, span.start):
+                if present.get(j):
+                    carried.drop(src.unsafe_offset(j).unsafe_load())
+            for j in range(last.stop, span.stop):
+                if present.get(j):
+                    carried.add(src.unsafe_offset(j).unsafe_load())
+            if not carried.settled():
+                carried = Spread()
+                _gather(src, present, span.start, span.stop, carried)
+        last = span
+        var found = seen[span.stop] - seen[span.start]
+        var value = nan[DType.float64]()
+        if found >= shape.min_periods:
+            value = carried.answer(found, ddof, form)
+        target.unsafe_offset(k).unsafe_store(value)
+    return answer^
+
+
+def _gather[
+    origin: ImmOrigin
+](
+    src: Pointer[Scalar[DType.float64], origin],
+    present: Bitmap,
+    start: Int,
+    stop: Int,
+    mut into: Spread,
+):
+    """Adds a run of rows to a spread that was just started.
+
+    Args:
+        src: The values.
+        present: Which rows hold a value.
+        start: The first row.
+        stop: One past the last row.
+        into: The spread to add them to.
 
     Parameters:
         origin: The origin of the values.
