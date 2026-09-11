@@ -72,11 +72,19 @@ before the first chunk arrives, so only one of the two sides is a stream. That
 side is the left one, the right one is a frame, and the join is an operator on
 the left side's line the same way a filter is.
 
-Being a frame already is the condition, so the right input has to be a scan.
-Anything else is a plan that would have to run to completion before this pipeline
-could start, which is a second pipeline and a thing to schedule rather than an
-operator to add. The scan's column list is applied by selecting columns of the
-frame, for the same reason: there is no chunk to project.
+Being a frame by the time the operator is made is the condition. A scan already
+is one, and its column list is applied by selecting columns of the frame rather
+than by a projection, because there is no chunk to project. Anything else is a
+line of the same plan, so it is lowered to a pipeline of its own and run, and
+what comes back is the frame. That is why lowering a join does work rather than
+only describing it: the operator holds a frame, it holds one because a pipeline
+is what builds pipelines and an operator cannot hold the thing that holds it,
+and the build has to finish before the left side's first chunk is read either
+way.
+
+Almost every join query needs that. A `WHERE` over the build side is what the
+optimizer pushes down there, so the side stops being a scan as soon as the query
+has a condition on it, which is most of the time.
 
 The frame a scan reads is taken out of the list it was given and an empty one is
 left in its place, because the numbers are relation ids rather than positions in
@@ -779,12 +787,18 @@ def _lower_join(
     mut taken: List[Bool],
     mut pipe: Pipeline,
 ) raises:
-    """Lowers a join whose right side is a scan into one probe operator.
+    """Lowers a join into one probe operator, building its right side first.
 
     The physical join holds its build side whole and hashes it once, so the
-    right input has to be something there is already a frame for. Anything else
-    is a plan this pipeline would have to run before it could start, which is a
-    second pipeline and not an operator.
+    right input has to be a frame by the time the operator is made. A scan
+    already is one. Anything else is a line of the same plan, so it is lowered
+    to its own pipeline and run here, and what comes back is the frame.
+
+    Running it here rather than when the outer pipeline starts is what the
+    operator's shape asks for. It holds a frame, and it holds one because a
+    pipeline is what builds pipelines and an operator cannot hold the thing
+    that holds it. The work is the same work in either place and it is work
+    that has to finish before the first chunk of the left side is read.
 
     Args:
         plan: The plan.
@@ -794,9 +808,9 @@ def _lower_join(
         pipe: The pipeline, added to.
 
     Raises:
-        Error: If the join is one the probe operator does not do, if its right
-            input is not a scan, if it has anything other than one key pair of
-            plain columns, or if the two sides share a column name.
+        Error: If the join is one the probe operator does not do, if it has
+            anything other than one key pair of plain columns, if the two sides
+            share a column name, or whatever the build side itself refuses.
     """
     var kind = JoinKind(UInt8(plan.nodes[at].op))
     if kind == JoinKind.RIGHT or kind == JoinKind.OUTER:
@@ -819,18 +833,6 @@ def _lower_join(
         )
 
     var right = plan.nodes[at].inputs[1]
-    if plan.nodes[right].kind != NodeKind.SCAN:
-        raise Error(
-            String(
-                (
-                    "lower: the right side of a join is built into a table"
-                    " before the first chunk arrives, so it has to be a scan,"
-                    " and this one is a "
-                ),
-                plan.nodes[right].kind,
-            )
-        )
-
     var parts = plan.nodes[at].parts
     if parts != 1:
         raise Error(
@@ -858,7 +860,12 @@ def _lower_join(
     var left_on = plan.exprs.nodes[left_key].name.copy()
     var right_on = plan.exprs.nodes[right_key].name.copy()
 
-    var build = _take(frames, taken, plan, right)
+    var build: DataFrame
+    if plan.nodes[right].kind == NodeKind.SCAN:
+        build = _take(frames, taken, plan, right)
+    else:
+        var side = _lower_from(plan, right, frames, taken)
+        build = side^.run()
     if kind.keeps_right_columns():
         # The operator renames a right column whose name the left already has,
         # and drops the right key outright when the two keys are called the
@@ -912,9 +919,37 @@ def lower(
             names a relation there is no frame for. The error names what could
             not be lowered so that a caller can decide what to do instead.
     """
+    var taken = List[Bool](length=len(frames), fill=False)
+    return _lower_from(plan, root, frames, taken)
+
+
+def _lower_from(
+    plan: Plan,
+    root: Int,
+    mut frames: List[DataFrame],
+    mut taken: List[Bool],
+) raises -> Pipeline:
+    """Builds the pipeline for one line of the plan.
+
+    `lower` is this with the bookkeeping set up. It is a separate function
+    because a join calls it for its build side, and a build side is a line of
+    the same plan reading out of the same frames, so it has to see which
+    relations have already gone and leave its own behind it.
+
+    Args:
+        plan: The plan.
+        root: The node whose output this line produces.
+        frames: One frame per relation, taken from.
+        taken: Which relations have already gone, written through.
+
+    Returns:
+        A pipeline whose `run` produces what that line says.
+
+    Raises:
+        Error: Whatever the line refuses. See `lower`.
+    """
     var order = _spine(plan, root)
     var first = order[0]
-    var taken = List[Bool](length=len(frames), fill=False)
     var pipe = Pipeline(_take(frames, taken, plan, first))
 
     for i in range(1, len(order)):
