@@ -199,6 +199,88 @@ def test_the_sql_path_and_the_frame_path_build_the_same_plan() raises:
     assert_equal(_plan("SELECT a FROM t WHERE b > 1"), explain(by_hand, at))
 
 
+def test_a_union_stacks_two_blocks_and_drops_duplicates_by_default() raises:
+    assert_equal(
+        _plan("SELECT a FROM t UNION SELECT b FROM t"),
+        "UNION\n  PROJECT [a]\n    SCAN t []\n  PROJECT [b]\n    SCAN t []\n",
+    )
+    assert_equal(
+        _plan("SELECT a FROM t UNION ALL SELECT b FROM t"),
+        (
+            "UNION all\n  PROJECT [a]\n    SCAN t []\n  PROJECT [b]\n   "
+            " SCAN t []\n"
+        ),
+    )
+
+
+def test_the_other_two_set_operations_lower_to_the_same_node() raises:
+    assert_equal(
+        _plan("SELECT a FROM t EXCEPT SELECT b FROM t"),
+        "EXCEPT\n  PROJECT [a]\n    SCAN t []\n  PROJECT [b]\n    SCAN t []\n",
+    )
+    assert_equal(
+        _plan("SELECT a FROM t INTERSECT ALL SELECT b FROM t"),
+        (
+            "INTERSECT all\n  PROJECT [a]\n    SCAN t []\n  PROJECT [b]\n   "
+            " SCAN t []\n"
+        ),
+    )
+
+
+def test_a_chain_of_set_operations_nests_to_the_left() raises:
+    # Not an argument about style. `a EXCEPT b EXCEPT c` and
+    # `a EXCEPT (b EXCEPT c)` hold different rows, so which way the chain leans
+    # is part of the answer.
+    assert_equal(
+        _plan("SELECT a FROM t EXCEPT SELECT b FROM t EXCEPT SELECT a FROM t"),
+        (
+            "EXCEPT\n  EXCEPT\n    PROJECT [a]\n      SCAN t []\n   "
+            " PROJECT [b]\n      SCAN t []\n  PROJECT [a]\n    SCAN t []\n"
+        ),
+    )
+
+
+def test_an_order_by_after_a_union_sorts_the_union() raises:
+    # Written after the right arm and applying to both of them, which is why the
+    # modifiers are put on outside the block rather than at the end of one.
+    assert_equal(
+        _plan(
+            "SELECT a FROM t UNION ALL SELECT b FROM t ORDER BY a DESC LIMIT 3"
+        ),
+        (
+            "LIMIT 3\n  SORT [a desc]\n    UNION all\n      PROJECT [a]\n     "
+            "   SCAN t []\n      PROJECT [b]\n        SCAN t []\n"
+        ),
+    )
+
+
+def test_the_two_arms_of_a_set_operation_bind_against_their_own_tables() raises:
+    # Two scans and two schemas, so the second scan has to carry relation one.
+    # Carrying zero used to be right when a plan held one table and is a wrong
+    # answer that binds anyway now that it can hold two.
+    var grammar = Grammar()
+    var rules = Transform(grammar)
+    var ast = Ast()
+    var node = rules.parse_statement(
+        "SELECT a FROM t UNION SELECT b FROM t", grammar, ast
+    )
+    var out = lower(ast, node, _catalog())
+    assert_equal(len(out.sources), 2, "one schema for each arm")
+    var schema = bind(out.plan, out.root, out.sources)
+    assert_equal(len(schema), 1, "one column out")
+    assert_equal(schema[0].name, "a", "named by the left arm")
+
+
+def test_a_set_operation_written_by_name_is_refused_by_name() raises:
+    with assert_raises(contains="BY NAME"):
+        _ = _plan("SELECT a FROM t UNION BY NAME SELECT b FROM t")
+
+
+def test_two_arms_of_different_widths_do_not_stack() raises:
+    with assert_raises(contains="2 column input and a 1 column one"):
+        _ = _plan("SELECT a, b FROM t UNION SELECT b FROM t")
+
+
 def test_a_name_the_catalog_does_not_have_suggests_one_it_does() raises:
     with assert_raises(contains="t"):
         _ = _plan("SELECT a FROM tt")
@@ -221,8 +303,6 @@ def test_a_decimal_literal_is_refused_rather_than_made_a_double() raises:
 def test_the_shapes_with_no_node_yet_each_say_which_one() raises:
     with assert_raises(contains="WITH"):
         _ = _plan("WITH x AS (SELECT 1 AS a) SELECT a FROM x")
-    with assert_raises(contains="set operation"):
-        _ = _plan("SELECT a FROM t UNION SELECT b FROM t")
     with assert_raises(contains="window function"):
         _ = _plan("SELECT row_number() OVER () FROM t")
     with assert_raises(contains="QUALIFY"):

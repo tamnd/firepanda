@@ -8,7 +8,9 @@ the second form arrives with the first pass that changes anything.
 
 The shape is a tree, one node a line, indented by depth, children below their
 parent. A `JOIN` prints both of its inputs and a `UNION` prints all of them, so
-the indent is what says which subtree a line belongs to.
+the indent is what says which subtree a line belongs to. A `UNION` prints as the
+set operation it carries, so an `EXCEPT` says `EXCEPT` and not `UNION` with a
+code nobody can see.
 
 An expression prints in the notation it was written in rather than as a tree,
 because a filter over five predicates is one line that way and eleven lines the
@@ -27,7 +29,13 @@ from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.unary import UnaryOp
 from firepanda.plan.expr import ExprKind, Expressions
-from firepanda.plan.node import NO_LIMIT, NodeKind, Plan
+from firepanda.plan.node import (
+    NO_LIMIT,
+    SET_EXCEPT,
+    SET_INTERSECT,
+    NodeKind,
+    Plan,
+)
 
 
 def _compound(tree: Expressions, at: Int) -> Bool:
@@ -239,7 +247,12 @@ def _line(plan: Plan, at: Int) raises -> String:
             "]",
         )
 
-    return String("UNION all" if node.flags[0] else "UNION")
+    var word = "UNION"
+    if node.op == SET_EXCEPT:
+        word = "EXCEPT"
+    elif node.op == SET_INTERSECT:
+        word = "INTERSECT"
+    return String(word, " all") if node.flags[0] else String(word)
 
 
 def explain(plan: Plan, root: Int) raises -> String:
