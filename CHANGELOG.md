@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: an index built out of something that already has a name
+
+`Index(series)` was refused, with a message about a column being built from a sequence of values, because the constructor sent everything it was handed through the reader that wants a sequence. pandas takes a series there and so does firepanda now, through `to_index`, which is the door the library already had between the two. `Index(other_index)` went through before but dropped the name it was given, and now goes through `renamed` instead.
+
+The name, when the call does not write one, comes off the data. A named series or a named index hands its name over as the level name, and a list has nobody to name it so it stays unnamed. A series named with the empty string names nothing, because the empty string is what unnamed looks like on a series, which is the same rule `Index.to_series` follows going the other way. `DatetimeIndex` gets all of this too, which is where it was first noticed: `pd.DatetimeIndex(frame["s"])` is an index called `s` in pandas and was an unnamed one here.
+
+Part of #156, after #8.
+
 ### Added: an index can become a column, and nine members that follow from it
 
 `Index.to_series` hands back a series whose values are the labels and whose own labels are the same labels again, which is what pandas answers and is the bridge the rest of this entry is about. An index and a column hold the same thing in this library, so a door between them means every reduction and every transform already written for a column is a thing an index can do, and none of them has to be written twice.
