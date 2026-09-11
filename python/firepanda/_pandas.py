@@ -1606,6 +1606,73 @@ class DataFrameMixin:
             " name or a list of column names"
         )
 
+    def _get(self, key: Any, default: Any) -> Any:
+        """One column, or a value of the caller's choosing when there is none.
+
+        Square brackets with the failure turned into a value, and that is the
+        whole method. It is the only difference between the two and it is the
+        only reason this one exists, since a caller who already has a default
+        ready does not want a traceback on the way to it.
+
+        The failures caught here are one wider than the set pandas catches.
+        pandas reads `df[0]` as a column it does not have and this reads it as a
+        key of a type square brackets do not take, because square brackets here
+        want a name or a list of names. Both objects answer the default, which
+        is all a caller of this can see, and the class of the exception neither
+        of them raises is where the two differ.
+        """
+        try:
+            return self[key]
+        except (IndexError, KeyError, TypeError, ValueError):
+            return default
+
+    def _squeeze(self, axis: Any) -> Any:
+        """The frame with an axis of length one taken off it.
+
+        Three shapes of answer out of one method, which is why it is here rather
+        than in the table. A frame of one column is that column, a frame of one
+        row and one column is the value in it, and a frame that is neither of
+        those is itself. The axis names which of the two may be dropped, and
+        `None`, the default, lets either go.
+
+        The one answer refused is the one where the row axis goes and the
+        column axis stays, which pandas gives as the frame's one row read
+        across its columns. That row is a set of values of several types coming
+        back as a series, which has one, and pandas' rule for choosing it sends
+        a bool beside a number, or a string beside anything, to the object
+        dtype, which this library does not have. Its name is the row label
+        rather than a column name, which is the second thing in the way, since
+        a series here is named by a string. Saying so is better than answering
+        that row under some other type and some other name.
+        """
+        from ._frame import DataFrame
+
+        names = self._inner.names()
+        rows = self._inner.length()
+        wanted = None if axis is None else _axis_number(axis, "DataFrame", 0, (0, 1))
+        one_row = rows == 1 and wanted in (None, 0)
+        one_column = len(names) == 1 and wanted in (None, 1)
+        if one_row and one_column:
+            try:
+                return self._inner.cell(0, 0)
+            except Exception as error:
+                raise translate(error) from None
+        if one_column:
+            return self[names[0]]
+        if one_row:
+            raise UnsupportedError(
+                "squeeze that drops the row axis and keeps the column axis is"
+                " not written, because the answer is the row read across the"
+                " columns, which is a series of one type where the columns it"
+                " covers need not share one, under the row's label for a name"
+                " where a series here is named by a string"
+            )
+        # A fresh wrapper around the same columns rather than `self`, because
+        # pandas hands back something that is not the frame it was given even
+        # when there was nothing to drop, and a caller who checks that is
+        # checking something real.
+        return DataFrame._wrap(self._inner)
+
     def _operator(self, other: Any, op: str, flip: bool, strict: bool) -> Any:
         """Runs one of the twenty operators, on whichever of three operands it got.
 
@@ -2600,6 +2667,38 @@ class SeriesMixin:
             except Exception as error:
                 raise translate(error) from None
         return _Along(self, True)[key]
+
+    def _get(self, key: Any, default: Any) -> Any:
+        """The value at a label, or a value of the caller's choosing.
+
+        The series' half of the frame's method and the same one line. Square
+        brackets on a series read a label, so a key that is not a label of this
+        series is what brings the default back, and a slice of numbers is read
+        as positions here for the same reason it is read that way there.
+        """
+        try:
+            return self[key]
+        except (IndexError, KeyError, TypeError, ValueError):
+            return default
+
+    def _squeeze(self, axis: Any) -> Any:
+        """The series' one value when it has one row, and otherwise the series.
+
+        A series has one axis, so there is one length that can be one and the
+        parameter can only name the axis the series already has. Naming the
+        other one is refused in pandas' words, which is worth having because a
+        frame and a series are passed to the same function often enough that
+        `axis=1` reaching this is a real mistake rather than a made up one.
+        """
+        from ._frame import Series
+
+        _axis_number(axis, "Series", 0, (0,))
+        if self._inner.length() != 1:
+            return Series._wrap(self._inner)
+        try:
+            return self._inner.cell(0)
+        except Exception as error:
+            raise translate(error) from None
 
     def _operator(self, other: Any, op: str, flip: bool, strict: bool) -> Any:
         """Runs one of the twenty operators, on whichever of three operands it got.
