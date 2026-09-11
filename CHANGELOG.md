@@ -17,6 +17,7 @@ The flag now reaches the plan. `count(DISTINCT x)` is `AggKind.NUNIQUE`, in the 
 `DISTINCT` inside any other aggregate is also refused now rather than dropped. `sum(DISTINCT qty)` used to answer `sum(qty)` and now says that firepanda folds `DISTINCT` inside `count` and not inside `sum`.
 
 Being clear about what runs. The window form runs, because a window holds its whole partition and can call the whole frame kernel. The grouped and ungrouped forms plan correctly and then stop at the operator with "nunique cannot be computed a chunk at a time", which is the same refusal `median` and `stddev` already get and is not new behaviour for this engine. A refusal by name is the fix for a silently wrong number. Making those two run is the streaming distinct count, which is its own change.
+
 ## [0.6.73] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).
