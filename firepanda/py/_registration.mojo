@@ -60,6 +60,9 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = dataframe.def_method[PyDataFrame.names](
         "names", docstring="The column names, in order."
     )
+    _ = dataframe.def_method[PyDataFrame.dtypes](
+        "dtypes", docstring="The column types, in order, as dtype spells them."
+    )
     _ = dataframe.def_method[PyDataFrame.set_index](
         "set_index",
         docstring="The frame with one column moved into the row labels.",

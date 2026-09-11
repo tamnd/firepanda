@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import datetime
 import math
+import re
 import warnings
 from typing import TYPE_CHECKING, Any
 
@@ -621,6 +622,141 @@ def _named_dtype(dtype: Any) -> str:
     raise DTypeError(f"data type {name!r} not understood")
 
 
+# The words that name a set of types rather than one type, which is numpy's type
+# tree with the branches that matter written out. `select_dtypes` is the only
+# caller, and every other place a type is named takes one type and goes through
+# `_named_dtype`, which is why these are not in `_DTYPE_NAMES`: `float` there
+# means float64 and `float` here means every float, and both readings are right
+# for their own caller.
+#
+# Two rows are worth reading twice. `int` and `float` are the concrete names
+# numpy resolves them to and pandas widens them back out by hand, so `int` takes
+# int32 and int64 and not the unsigned ones, while `integer` takes all of them.
+# And `timedelta64` is under `signedinteger`, which is why a column of spans is
+# selected by `number`. That is a numpy fact rather than a pandas one, pandas
+# inherits it without comment, and a compatibility layer that tidied it up would
+# answer a different question from the one the caller's pandas answers.
+_DTYPE_GROUPS: dict[str, tuple[str, ...]] = {
+    "number": ("signed", "unsigned", "floating", "span"),
+    "integer": ("signed", "unsigned", "span"),
+    "signedinteger": ("signed", "span"),
+    "unsignedinteger": ("unsigned",),
+    "inexact": ("floating",),
+    "floating": ("floating",),
+    "datetime": ("naive",),
+    "datetime64": ("naive",),
+    "datetimetz": ("aware",),
+    "datetime64tz": ("aware",),
+    "timedelta": ("span",),
+    "timedelta64": ("span",),
+}
+"""Each word, and the family names a column has to carry to answer to it."""
+
+_DTYPE_WIDENED: dict[str, tuple[str, ...]] = {
+    "int": ("int32", "int64"),
+    "float": ("float32", "float64"),
+}
+"""The two words that become several types rather than a branch of the tree.
+
+numpy resolves a bare `int` to one concrete type whose width depends on the
+platform, and pandas widens it back out to both signed widths by hand so that
+the same code selects the same columns everywhere. `float` is widened the same
+way. They are here rather than in the table above because they become concrete
+names, and that is visible: `include="int"` against `exclude="int64"` is an
+overlap and `include="integer"` against `exclude="int64"` is not."""
+
+_SIGNED: frozenset[str] = frozenset({"int8", "int16", "int32", "int64"})
+"""The four signed widths, which are `signed` and everything above it."""
+
+_UNSIGNED: frozenset[str] = frozenset({"uint8", "uint16", "uint32", "uint64"})
+"""The four unsigned widths, which are not under `int` and are under `integer`."""
+
+_FLOATING: frozenset[str] = frozenset({"float16", "float32", "float64"})
+"""The three float widths."""
+
+
+def _dtype_family(printed: str) -> frozenset[str]:
+    """Every word a column's type answers to, which is its branch of the tree.
+
+    Args:
+        printed: The type as `dtype` spells it, such as `int64` or
+            `datetime64[ns, UTC]`.
+
+    Returns:
+        The type's own name and the family names above it.
+    """
+    if printed in _SIGNED:
+        return frozenset({printed, "signed"})
+    if printed in _UNSIGNED:
+        return frozenset({printed, "unsigned"})
+    if printed in _FLOATING:
+        return frozenset({printed, "floating"})
+    if printed.startswith("datetime64["):
+        # The zone is written into the name after a comma, so a column with one
+        # is `aware` and a column without one is `naive`, and the two are
+        # different branches rather than one branch and a flag. pandas does the
+        # same and that is why `datetime64` does not select a column that has a
+        # zone on it.
+        return frozenset({printed, "aware" if "," in printed else "naive"})
+    if printed.startswith("timedelta64["):
+        return frozenset({printed, "span"})
+    return frozenset({printed})
+
+
+def _dtype_words(spec: Any) -> frozenset[str]:
+    """Reads one side of `select_dtypes` into the words the caller named.
+
+    These are the words and not yet the branches, because the two sides are
+    compared for an overlap before either is expanded and pandas compares them
+    in this form. `number` and `floating` are two words and do not overlap even
+    though every float answers to both.
+
+    Args:
+        spec: What the caller passed, which is a name, a type, or a list of
+            either, or `None` for the side they did not pass.
+
+    Returns:
+        One word per type or family named, empty when the side was not passed.
+
+    Raises:
+        NotImplementedError: If a name is a type pandas has and firepanda does
+            not.
+        DTypeError: If a name is not a type name at all.
+    """
+    if spec is None:
+        return frozenset()
+    given = spec if isinstance(spec, (list, tuple, set, frozenset)) else [spec]
+    out: set[str] = set()
+    for one in given:
+        # A python type and a numpy type class both carry their spelling on
+        # `__name__`, which is how `numpy.number` is read without numpy being
+        # importable here. A string is already the spelling.
+        word = one if isinstance(one, str) else getattr(one, "__name__", "")
+        widened = _DTYPE_WIDENED.get(word)
+        if widened is not None:
+            out.update(widened)
+        elif word in _DTYPE_GROUPS:
+            out.add(word)
+        else:
+            out.add(_named_dtype(one))
+    return frozenset(out)
+
+
+def _dtype_branches(words: frozenset[str]) -> frozenset[str]:
+    """Expands the words one side named into the branches they select.
+
+    Args:
+        words: What `_dtype_words` answered.
+
+    Returns:
+        Every branch name and every concrete type name the side selects.
+    """
+    out: set[str] = set()
+    for word in words:
+        out.update(_DTYPE_GROUPS.get(word, (word,)))
+    return frozenset(out)
+
+
 class _NoDefault:
     """The sentinel pandas puts where a default has to mean "nothing was passed".
 
@@ -1174,6 +1310,19 @@ class DataFrameMixin:
 
     _inner: _firepanda.DataFrame
 
+    if TYPE_CHECKING:
+
+        @property
+        def index(self) -> Index:
+            """The row labels, declared here and defined by the generated class.
+
+            Three members in this file reach the labels, and the property that
+            answers them is in the table rather than here because it is one
+            call. This says so for the type checker and is not compiled, which
+            is why it is a property rather than an annotation: the generated
+            one is read only and an annotation would promise a setter.
+            """
+
     def __init__(
         self,
         data: Any = None,
@@ -1542,6 +1691,144 @@ class DataFrameMixin:
                 names = self._inner.names()
                 return DataFrame._wrap(self._inner.select(_named_at(names, wanted)))
             return DataFrame._wrap(self._inner.take(wanted))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _filter(self, items: Any, like: str | None, regex: str | None, axis: Any) -> DataFrame:
+        """Keeps the labels one of three rules names, on either axis.
+
+        The three rules are exclusive and pandas says so with a `TypeError`
+        rather than by preferring one, which is right: a call that passed two
+        of them meant something the signature cannot express and the caller has
+        to say which.
+
+        `items` keeps the order it was written in and drops what is not there,
+        which is the one rule of the three that is not a filter of the frame.
+        The other two keep the frame's own order, because a substring and a
+        pattern describe a set and not a sequence.
+        """
+        from ._frame import DataFrame
+
+        rules = [
+            name
+            for name, value in (("items", items), ("like", like), ("regex", regex))
+            if value is not None
+        ]
+        if len(rules) > 1:
+            raise TypeError("Keyword arguments `items`, `like`, or `regex` are mutually exclusive")
+        if not rules:
+            raise TypeError("Must pass either `items`, `like`, or `regex`")
+        over_rows = _axis_number(axis, "DataFrame", 1, (0, 1)) == 0
+        labels = [str(one) for one in self.index] if over_rows else self._inner.names()
+        if items is not None:
+            wanted = [str(one) for one in items]
+            held = set(labels)
+            kept = [one for one in wanted if one in held]
+        elif like is not None:
+            kept = [one for one in labels if str(like) in one]
+        else:
+            pattern = re.compile(regex if isinstance(regex, str) else str(regex))
+            kept = [one for one in labels if pattern.search(one) is not None]
+        try:
+            if not over_rows:
+                return DataFrame._wrap(self._inner.select(kept))
+            # The labels were rendered to compare them, so they cannot be looked
+            # up again as labels. The positions come from walking the rendered
+            # list, which also gives every row of a repeated label rather than
+            # the first, and that is what pandas answers here.
+            wherever = {one: i for i, one in enumerate(kept)}
+            found = [i for i, one in enumerate(labels) if one in wherever]
+            if items is not None:
+                found.sort(key=lambda i: (wherever[labels[i]], i))
+            return DataFrame._wrap(self._inner.take(found))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _select_dtypes(self, include: Any, exclude: Any) -> DataFrame:
+        """Keeps the columns whose type is in one set of types and not in another.
+
+        The vocabulary is numpy's type tree, which is why `number` takes a
+        column of spans as well as the integers and the floats: numpy makes
+        `timedelta64` a kind of signed integer, pandas inherits that, and a
+        compatibility layer that tidied it up would be answering a different
+        question from the one the caller's pandas answers. The tree is written
+        out in `_DTYPE_FAMILIES` rather than computed, because firepanda does
+        not import numpy and there is nothing here to ask.
+        """
+        from ._frame import DataFrame
+
+        wanted = _dtype_words(include)
+        unwanted = _dtype_words(exclude)
+        if not wanted and not unwanted:
+            raise InvalidArgumentError("at least one of include or exclude must be nonempty")
+        shared = wanted & unwanted
+        if shared:
+            raise InvalidArgumentError(f"include and exclude overlap on {sorted(shared)}")
+        kept_in = _dtype_branches(wanted)
+        held_out = _dtype_branches(unwanted)
+        names = self._inner.names()
+        try:
+            families = [_dtype_family(one) for one in self._inner.dtypes()]
+        except Exception as error:
+            raise translate(error) from None
+        kept = [
+            name
+            for name, family in zip(names, families, strict=True)
+            if (not kept_in or family & kept_in) and not family & held_out
+        ]
+        try:
+            return DataFrame._wrap(self._inner.select(kept))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _truncate(self, before: Any, after: Any, axis: Any, copy: Any) -> DataFrame:
+        """Keeps everything between two labels, with both of them kept.
+
+        This is `loc[before:after]` with two rules on top. The labels have to be
+        in order, which pandas checks by asking whether the index is sorted and
+        refusing outright when it is not, because a truncation of an unsorted
+        index would answer the rows that happen to lie between two positions
+        and a caller who wrote two labels meant the values between them. And
+        the pair has to be the right way round, which is checked here rather
+        than left to answer nothing, since an empty frame is a plausible answer
+        to a correct call and a useless one to a reversed pair.
+        """
+        from ._frame import DataFrame
+
+        _held_at(
+            "copy",
+            copy,
+            NO_DEFAULT,
+            "an answer is always a new frame over buffers that are shared rather"
+            " than owned, so there is no copy to ask for",
+        )
+        over_columns = _axis_number(axis, "DataFrame", 0, (0, 1)) == 1
+        names = self._inner.names()
+        if over_columns:
+            rising = names == sorted(names)
+            falling = names == sorted(names, reverse=True)
+        else:
+            rising = self.index.is_monotonic_increasing
+            falling = self.index.is_monotonic_decreasing
+        if not rising and not falling:
+            raise InvalidArgumentError("truncate requires a sorted index")
+        if before is not None and after is not None and before > after:
+            raise InvalidArgumentError(f"Truncate: {after} must be after {before}")
+        # A falling axis reads the pair the other way round, because the label
+        # nearer the top of the frame is the larger one. The check above happens
+        # first either way, which is pandas' order and means that on a falling
+        # index the pair is still written smaller first even though the rows come
+        # back in the other direction.
+        if falling and not rising:
+            before, after = after, before
+        try:
+            if over_columns:
+                first = 0 if before is None else names.index(str(before))
+                last = len(names) if after is None else names.index(str(after)) + 1
+                return DataFrame._wrap(self._inner.select(names[first:last]))
+            walked = self.index.slice_indexer(before, after)
+            start, stop, _ = walked.indices(self._inner.length())
+            return DataFrame._wrap(self._inner.slice_rows(start, max(start, stop)))
         except Exception as error:
             raise translate(error) from None
 
