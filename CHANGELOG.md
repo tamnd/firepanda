@@ -21,6 +21,7 @@ The type vocabulary is numpy's tree and it is copied without being tidied. `incl
 `truncate` is `loc[before:after]` with two rules in front. The index has to be sorted, because a label slice on an unsorted index answers the rows that happen to lie between two positions rather than the values between two labels, and pandas refuses rather than answering that. The pair has to be the right way round, and that check happens before the direction is worked out, so a caller writes the smaller label as `before` on a falling index too. Both are pandas' order.
 
 Part of #156, after #510.
+
 ## [0.6.58] - 2026-09-11
 
 Built against Mojo 1.0.0 (ed45d567).
