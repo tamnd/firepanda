@@ -27,11 +27,17 @@ notation they were written in.
 which is what stops execution looking columns up by name and what makes a type
 error a plan error rather than a kernel error.
 
-The passes and the lowering into `exec` follow. Nothing calls any of this yet
-and the eager API does not change when they do.
+`simplify.mojo` is the first pass, and the cheapest. It folds an expression
+that reads no column down to its answer, turns a comparison round so the
+constant is on the right, flattens the connectives and applies the boolean
+identities, all to a fixed point.
+
+The rest of the passes and the lowering into `exec` follow. Nothing calls any
+of this yet and the eager API does not change when they do.
 """
 
 from .bind import Bound, bind, bind_expr
 from .expr import UNBOUND, Expr, ExprKind, Expressions
 from .node import NO_LIMIT, NodeKind, Plan, PlanNode
 from .print import explain, render_expr
+from .simplify import ROUNDS, simplify, simplify_expr
