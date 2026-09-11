@@ -373,11 +373,13 @@ def test_a_values_folds_what_it_can_before_it_is_a_table() raises:
     )
 
 
-def test_a_subquery_in_a_from_is_still_refused_by_name() raises:
-    # A VALUES is a table and a parenthesised one in a FROM is a derived table,
-    # which is a different thing and is not lowered yet.
-    with assert_raises(contains="does not lower a subquery in a FROM yet"):
-        _ = run("SELECT * FROM (VALUES (1, 2)) AS t", session())
+def test_a_values_written_where_a_table_goes_is_a_derived_table() raises:
+    # A VALUES is a table and a parenthesised one in a FROM is a subquery whose
+    # body is that table, so it goes through the derived table and comes back
+    # under the names a VALUES invents.
+    var out = run("SELECT * FROM (VALUES (1, 2), (3, 4)) AS t", session())
+    same(read_back(out, "col0"), [1, 3], "the first column")
+    same(read_back(out, "col1"), [2, 4], "the second")
 
 
 def test_a_query_with_no_from_answers_a_constant() raises:
@@ -795,6 +797,91 @@ def test_a_where_under_a_window_changes_what_the_window_reduces() raises:
 def test_a_running_window_is_refused_by_name() raises:
     with assert_raises(contains="OVER an ORDER BY"):
         _ = run("SELECT SUM(qty) OVER (ORDER BY qty) FROM sales", session())
+
+
+def test_a_query_may_read_a_subquery_where_a_table_goes() raises:
+    same(
+        answer(
+            "SELECT total FROM (SELECT qty * price AS total FROM sales) v",
+            "total",
+        ),
+        [50, 40, 21, 40, 60, 72, 75, 100, 120, 90],
+        "total",
+    )
+
+
+def test_the_outer_query_filters_what_the_subquery_handed_out() raises:
+    # The filter is written over the alias the subquery invented, which is a
+    # name the query inside it produced and the table underneath does not have.
+    same(
+        answer(
+            (
+                "SELECT total FROM (SELECT qty * price AS total FROM sales) v"
+                " WHERE total > 80"
+            ),
+            "total",
+        ),
+        [100, 120, 90],
+        "total",
+    )
+
+
+def test_a_column_of_a_derived_table_may_be_written_with_its_name() raises:
+    same(
+        answer(
+            (
+                "SELECT v.total FROM (SELECT qty * price AS total FROM sales) v"
+                " WHERE v.total > 100"
+            ),
+            "total",
+        ),
+        [120],
+        "total",
+    )
+
+
+def test_an_aggregate_inside_a_subquery_folds_before_the_outer_query() raises:
+    # The group by runs inside and the outer query filters the answers it
+    # produced, which is the shape a HAVING has and the shape a query uses when
+    # it wants to filter on something a HAVING cannot say.
+    var out = run(
+        (
+            "SELECT shop, total FROM (SELECT shop, SUM(qty) AS total FROM sales"
+            " GROUP BY shop) v WHERE total > 80 ORDER BY shop"
+        ),
+        session(),
+    )
+    same(read_back(out, "shop"), [2], "shop")
+    same(read_back(out, "total"), [84], "total")
+
+
+def test_a_subquery_may_be_joined_to_a_table() raises:
+    # The subquery is on the left because a join whose right input arrives in
+    # more than one chunk raises out of the operator, which is #583 and is the
+    # same with two plain tables.
+    var out = run(
+        (
+            "SELECT band, total FROM (SELECT qty, qty * price AS total FROM"
+            " sales) v JOIN tiers ON v.qty = tiers.band ORDER BY band"
+        ),
+        session(),
+    )
+    same(read_back(out, "band"), [3, 20, 40], "band")
+    same(read_back(out, "total"), [21, 40, 40], "total")
+
+
+def test_a_subquery_inside_a_subquery_runs_too() raises:
+    same(
+        answer(
+            (
+                "SELECT total FROM (SELECT total FROM (SELECT qty * price AS"
+                " total FROM sales) inner_v WHERE total > 90) v"
+            ),
+            "total",
+        ),
+        [100, 120],
+        "total",
+    )
 
 
 def main() raises:

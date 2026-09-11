@@ -96,10 +96,27 @@ written in front of it would have nothing to resolve against, and a scope entry
 pointing at a relation that does not exist would resolve to the wrong one rather
 than to none.
 
+### A subquery may be written where a table goes
+
+`FROM (SELECT ...) v` is a whole statement whose output becomes a source, so it
+lowers to that statement's own root and nothing wraps it. What the query around
+it gets is the names that root produces, which are read back off the plan rather
+than threaded out of every function that lowers a body.
+
+Its alias is not a relation. A scan is one because it has a schema in `sources`
+and a number that names it, and a derived table has neither, since its columns
+are computed by the nodes under it. So the alias goes into the scope as a name
+that says which columns are meant, and `v.x` is checked against the columns the
+subquery produces and then lowered as a bare `x`. Two sources in one `FROM` that
+both produce a column of that name come back from binding as an ambiguity, which
+is a refusal rather than a wrong answer.
+
 ### What is not lowered yet
 
-Named tables, the table functions above, and the joins over them, and no
-subqueries, no CTEs, no windows and no `QUALIFY`. `USING`, `NATURAL`, `POSITIONAL`, `ASOF`, `SEMI` and `ANTI` are
+Named tables, the table functions above, the derived tables above, and the joins
+over them. A CTE is refused, and so is a subquery written where an expression
+goes, and so are the column aliases on a derived table and a `LATERAL` one.
+`USING`, `NATURAL`, `POSITIONAL`, `ASOF`, `SEMI` and `ANTI` are
 each refused by name: the first three decide their keys or their output columns
 from something other than the condition, `ASOF` matches on the nearest value
 rather than an equal one, and the last two keep none of the right side, so what
@@ -133,6 +150,7 @@ from firepanda.plan.node import (
     SET_EXCEPT,
     SET_INTERSECT,
     SET_UNION,
+    NodeKind,
     Plan,
 )
 
@@ -397,6 +415,18 @@ def _is_aggregate(name: String) -> Bool:
         return False
 
 
+comptime NOT_IN_REACH = -1
+"""What `_Scope.find` answers for a name the `FROM` did not put in reach."""
+
+comptime DERIVED = -2
+"""What `_Scope` holds for a name that is a subquery rather than a scan.
+
+A relation is a schema in `sources` and a number that names it, and a derived
+table has neither: its columns are computed by the nodes under it. So the alias
+of one is a name that says which columns are meant rather than a number a column
+can carry, and this is the value that says so."""
+
+
 struct _Scope(Movable):
     """What the `FROM` put in reach, and which relation each name is.
 
@@ -416,13 +446,19 @@ struct _Scope(Movable):
     """The names, in the order the FROM introduced them."""
 
     var tables: List[Int]
-    """Which relation each of those is."""
+    """Which relation each of those is, or `DERIVED` for a subquery."""
+
+    var columns: List[List[String]]
+    """What a derived one produces, so that a name written in front of it can be
+    checked against the columns it actually has. Empty for a scan, which is
+    answered by its relation instead."""
 
     def __init__(out self):
         """Starts with nothing in reach, which is what a query with no FROM has.
         """
         self.names = List[String]()
         self.tables = List[Int]()
+        self.columns = List[List[String]]()
 
     def add(mut self, var name: String, table: Int) raises:
         """Puts one name in reach.
@@ -449,6 +485,38 @@ struct _Scope(Movable):
                 )
         self.names.append(name^)
         self.tables.append(table)
+        self.columns.append(List[String]())
+
+    def derive(mut self, var name: String, var columns: List[String]) raises:
+        """Puts the alias of a subquery in reach, with what it produces.
+
+        Args:
+            name: The alias.
+            columns: The columns the subquery hands out, left to right.
+
+        Raises:
+            If something is already called that.
+        """
+        self.add(name^, DERIVED)
+        self.columns[len(self.columns) - 1] = columns^
+
+    def produces(self, name: StringSlice, column: StringSlice) -> Bool:
+        """Whether a derived table hands out a column of a given name.
+
+        Args:
+            name: The alias.
+            column: The column written after it.
+
+        Returns:
+            True when that alias is a derived table that produces that column.
+        """
+        for i in range(len(self.names)):
+            if self.names[i] == name:
+                for j in range(len(self.columns[i])):
+                    if self.columns[i][j] == column:
+                        return True
+                return False
+        return False
 
     def find(self, name: StringSlice) -> Int:
         """Which relation a name is, or minus one when nothing is called that.
@@ -457,12 +525,12 @@ struct _Scope(Movable):
             name: What was written in front of the column.
 
         Returns:
-            The relation, or minus one.
+            The relation, `DERIVED` for a subquery, or `NOT_IN_REACH`.
         """
         for i in range(len(self.names)):
             if self.names[i] == name:
                 return self.tables[i]
-        return -1
+        return NOT_IN_REACH
 
     def written(self) -> String:
         """The names in reach, for a message that has to list them.
@@ -675,7 +743,7 @@ def _lower_expr(
         if parts == 2:
             var qualifier = ast.text(ast.at(node.children, 0))
             var found = scope.find(qualifier)
-            if found < 0:
+            if found == NOT_IN_REACH:
                 raise Error(
                     String(
                         "nothing in this query is called '",
@@ -684,9 +752,26 @@ def _lower_expr(
                         scope.written(),
                     )
                 )
-            return plan.exprs.column_of(
-                found, String(ast.text(ast.at(node.children, 1)))
-            )
+            var column = String(ast.text(ast.at(node.children, 1)))
+            if found == DERIVED:
+                if not scope.produces(qualifier, column):
+                    raise Error(
+                        String(
+                            "'",
+                            qualifier,
+                            "' produces no column called '",
+                            column,
+                            "'",
+                        )
+                    )
+                # There is no relation number for the alias of a subquery to
+                # lower to, so the name goes on unqualified. Checking it
+                # against what the subquery hands out is the work the qualifier
+                # does, and a name that two sources in the same FROM both have
+                # then comes back from binding as an ambiguity rather than as
+                # the wrong column.
+                return plan.exprs.column(column^)
+            return plan.exprs.column_of(found, column^)
         raise Error(
             "firepanda reads a column as a name or as a table and a name so"
             " far, and a third part is either a schema or a struct field and"
@@ -1487,6 +1572,86 @@ def _function(ast: Ast, at: UInt32, mut plan: Plan) raises -> _From:
     return _From(plan.table_function(name^, args^, names^), schema^, origin^)
 
 
+def _subquery(
+    ast: Ast,
+    at: UInt32,
+    catalog: Catalog,
+    mut plan: Plan,
+    mut sources: List[Schema],
+    mut scope: _Scope,
+) raises -> _From:
+    """Lowers a subquery written where a table goes.
+
+    A derived table is a whole statement whose output becomes a source, so the
+    node this returns is that statement's own root and nothing is wrapped around
+    it. What the outer query gets out of it is the names that root produces,
+    which is what `SELECT v.x FROM (SELECT a AS x FROM t) v` resolves against.
+
+    The scans inside it go into the same `sources` as the ones outside, because
+    a relation number is a number in the whole plan rather than in one block.
+    The names do not work that way: a name the outer query put in reach is not
+    in reach inside the subquery, so the statement lowers against a scope of its
+    own and that scope ends here.
+
+    The alias is not a relation. A scan is one because it has a schema in
+    `sources` and a number that names it, and a derived table has neither. So
+    the alias goes into the scope as `DERIVED` and a column written in front of
+    it is checked against the columns the subquery produces and then lowered
+    unqualified. Two sources in the same `FROM` that both produce a column of
+    the same name come back from binding as an ambiguity rather than as the
+    wrong column, which is a refusal rather than a wrong answer.
+
+    Args:
+        ast: The arenas.
+        at: The `REF_SUBQUERY`.
+        catalog: What the table names inside it are resolved against.
+        plan: Where the nodes go.
+        sources: One schema per scan, appended to.
+        scope: What the FROM has put in reach, added to.
+
+    Returns:
+        The statement's root and what it produces.
+
+    Raises:
+        If it is `LATERAL`, if it carries column aliases, or if the statement
+        inside it is one this does not lower.
+    """
+    var source = ast.refs[Int(at)]
+    if source.b == 1:
+        raise Error(
+            "firepanda does not lower a LATERAL subquery yet, which reads the"
+            " columns of the sources written to the left of it and so runs once"
+            " per row of them rather than once for the query"
+        )
+    var named = ast.length(source.payload)
+    if named > 1:
+        raise Error(
+            "firepanda does not lower the column aliases on a subquery in a"
+            " FROM yet, which rename what the subquery produces rather than"
+            " what it is called"
+        )
+
+    var inner = _Scope()
+    var root = _statement(ast, source.a, catalog, plan, sources, inner)
+    var names = _produces(plan, root)
+
+    # The types are the placeholder one. Nothing between here and binding reads
+    # a type off this schema, since what a source has to carry at this stage is
+    # the names and the relation each column came from, and binding is what
+    # works the types out from the nodes underneath.
+    var schema = Schema()
+    for i in range(len(names)):
+        schema.append(Field(String(names[i]), LogicalType.NULL, True))
+
+    # A subquery with no alias on it still produces columns and they are still
+    # in reach, so the only thing the missing name costs is the ability to
+    # qualify one. DuckDB invents a name here and reading a column through the
+    # name it invented is not a thing a query that ports would do.
+    if named == 1:
+        scope.derive(String(ast.text(ast.at(source.payload, 0))), names.copy())
+    return _From(root, schema^, List[Int](length=len(names), fill=UNBOUND))
+
+
 def _joined(
     ast: Ast,
     at: UInt32,
@@ -1637,10 +1802,7 @@ def _source(
             " named columns and then outputs one of each pair rather than both"
         )
     if source.kind == REF_SUBQUERY:
-        raise Error(
-            "firepanda does not lower a subquery in a FROM yet, which is a"
-            " whole query whose output names become a table's"
-        )
+        return _subquery(ast, at, catalog, plan, sources, scope)
     if source.kind == REF_FUNCTION:
         return _function(ast, at, plan)
     raise Error(
@@ -1709,6 +1871,41 @@ def lower(ast: Ast, statement: UInt32, catalog: Catalog) raises -> Lowered:
     Raises:
         If the statement is a shape this does not lower yet.
     """
+    var plan = Plan()
+    var sources = List[Schema]()
+    var scope = _Scope()
+    var at = _statement(ast, statement, catalog, plan, sources, scope)
+    return Lowered(plan^, at, sources^)
+
+
+def _statement(
+    ast: Ast,
+    statement: UInt32,
+    catalog: Catalog,
+    mut plan: Plan,
+    mut sources: List[Schema],
+    mut scope: _Scope,
+) raises -> Int:
+    """Lowers one `STMT_SELECT`: its body, and the `ORDER BY` and `LIMIT` on it.
+
+    Here rather than inside `lower` because a subquery in a `FROM` is a whole
+    statement too, with a body and modifiers of its own, and reading that node
+    in two places would be two readings of it to keep the same.
+
+    Args:
+        ast: The arenas.
+        statement: The `STMT_SELECT`.
+        catalog: What the table names are resolved against.
+        plan: Where the nodes go.
+        sources: One schema per scan, appended to in scan order.
+        scope: Filled in with what the statement's own FROM put in reach.
+
+    Returns:
+        The node the statement produces.
+
+    Raises:
+        If the statement is a shape this does not lower yet.
+    """
     if statement == NO_NODE:
         raise Error("a statement that is not there")
     var top = ast.stmts[Int(statement)]
@@ -1720,9 +1917,6 @@ def lower(ast: Ast, statement: UInt32, catalog: Catalog) raises -> Lowered:
             " to a plan and the plan has nowhere to hold one"
         )
 
-    var plan = Plan()
-    var sources = List[Schema]()
-    var scope = _Scope()
     var at = _combine(ast, top.a, catalog, plan, sources, scope)
 
     # The ORDER BY and the LIMIT written after a set operation apply to the
@@ -1735,8 +1929,52 @@ def lower(ast: Ast, statement: UInt32, catalog: Catalog) raises -> Lowered:
         # leaves it empty, because the tables were inside the arms and an ORDER
         # BY written after one sorts what the whole of it produced.
         at = _modifiers(ast, top.b, plan, walk, scope, at)
+    return at
 
-    return Lowered(plan^, at, sources^)
+
+def _produces(plan: Plan, at: Int) raises -> List[String]:
+    """What a node hands out, by name, read back off the plan.
+
+    A derived table needs the names its statement produced, and the thing that
+    has them is the plan. Reading them back here rather than threading a name
+    list out through every function that lowers a body keeps the one caller that
+    wants them from changing the shape of the several that do not.
+
+    Args:
+        plan: The nodes.
+        at: The node.
+
+    Returns:
+        The names it produces, left to right.
+
+    Raises:
+        If it is a node whose output names are not written down in the plan.
+    """
+    ref node = plan.nodes[at]
+    var kind = node.kind
+    if (
+        kind == NodeKind.PROJECT
+        or kind == NodeKind.AGGREGATE
+        or kind == NodeKind.VALUES
+        or kind == NodeKind.TABLE_FUNCTION
+    ):
+        return node.names.copy()
+    if kind == NodeKind.WINDOW:
+        # A window adds its columns to the ones below it rather than replacing
+        # them, so it is the one node whose output names are its input's and
+        # then its own.
+        var out = _produces(plan, node.inputs[0])
+        for i in range(len(node.names)):
+            out.append(String(node.names[i]))
+        return out^
+    if len(node.inputs) != 0:
+        # A union takes the names of its first arm, and the rest of the ones in
+        # the middle hand out the names they were given.
+        return _produces(plan, node.inputs[0])
+    raise Error(
+        "a subquery whose output names are not in the plan, which is a scan"
+        " with nothing above it saying what it produces"
+    )
 
 
 def _words(text: StringSlice) -> List[String]:
