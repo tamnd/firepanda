@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.62] - 2026-09-11
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Six of these entries come from reading ClickBench queries and finding the same shape underneath four of them: a whole column reduction being answered by the grouped kernel with a single group. A `nunique` with no group by, a `MIN` over a text column with no group by. The grouped kernel is right when there are a million groups and wrong when there is one, because it allocates a code per row and sorts a copy of every value to learn something a single pass already knows. Each of those now has its own route, and the old route stays in the benchmark table beside the new one so the claim never floats free.
+
+The text work also settled what a string column costs. `text_byte_length` reads the length out of the view and never follows a pointer into the payload, at a billion rows a second against 79 million for the character counting kernel, which is bytes against characters and is a real divergence from `Series.str.len` rather than an implementation detail. And the ungrouped text minimum is bound by memory rather than by comparisons: the same reduction over a column whose prefixes differ, where the comparison ends inside the view, is five times faster. The grouped form of it now runs on every core.
+
+The clock entries are about relabelling rather than converting. The hits file stores a timestamp as a plain int64 and a timestamp is laid out as int64, so saying it is a clock is a new type on each chunk and no bytes read. Alongside it, `DATE_TRUNC` is written down as flooring rather than rounding towards zero, and the minute field is pinned to what DuckDB and pandas actually answered over sixteen rows either side of the epoch.
+
+Three entries are not from that line of work. `SELECT DISTINCT` runs and needed no operator, because a distinct is a group by that reduces nothing, so it gets the streaming group by's key map and merge rather than a second implementation of what two rows being the same means. A `VALUES` runs too, which is the other half of a query that names no table, and it is the one place lowering allocates an array. And `DataFrame.reindex` is here with both of its axes and eight of pandas' ten parameters, filling on the way past rather than as a second pass over the answer.
+
 ### Added: a VALUES runs, so a query can read nothing at all
 
 `VALUES (1, 2), (3, 4)` gives back two rows of two columns. A scan says which frame to read and a VALUES says what the rows are, so the one is found and the other is made, and making it is the only place lowering allocates an array. It costs nothing at run time, because the rows were known before the query started.
@@ -50,6 +62,22 @@ Rows come out in the order the first of each was seen, which is what DuckDB give
 `DISTINCT ON` is still refused and the front end refuses it before lowering is reached. It keeps whole rows chosen by some of their columns, so the columns that are not keys would have to come back through a first over each, and a group by carries its keys in front of what it reduced, which moves the columns the plan's schema numbered. A key list naming every column of the row in order is not that and runs, because it is the whole row written out.
 
 Part of #309.
+
+### Changed: a whole column distinct count stopped going through the group by
+
+`nunique` over a column with no grouping was being answered by the grouped kernel with a single group. That meant allocating a code per row, sorting a copy of every value into a slab and walking the runs, which is `_nunique_core` doing exactly the right thing for a question nobody asked. It is built to count distinct values inside each of a million groups and it was being handed one.
+
+`reduce_any` now takes `AggKind.NUNIQUE` before the dispatch and answers it directly, through two new functions in `firepanda/kernel/reduce.mojo`. `distinct_count_any` takes a column and `distinct_count` takes a typed one, and both are exported from the kernel package so a caller who already knows the type can skip the dispatch.
+
+There are two routes underneath. For an integer column whose range is bounded, the count is a bit per possible value and a population count, with no table, no ordinals and no second pass over anything the size of the column. For everything else it is the number of ordinals a factorize handed out, which is a distinct count the hash layer was already computing and throwing away. The string column takes the second route and always will, since there is no range to bound.
+
+The bit set is bounded by a new `DISTINCT_SHARE` of eight slots a row. A slot there is one bit, so that is the same one byte a row that `DIRECT_SHARE` promises for the factorize's direct table, written in different units because a distinct count never needs to name a value it has seen and so needs a bit where the factorize needs four bytes. The same budget covers thirty two times the range.
+
+Over a million rows on a ten core laptop, the packed integer case went from about 23 milliseconds through the group by to about 5 milliseconds, and the ratio held between five and sixteen times across runs on a machine that is too noisy to quote a single number from. `reduce/nunique_grouped` stays in the benchmark table measuring the old route, the way `kernel/sum_twin` does, so the claim always has something beside it.
+
+Nulls are not a value and an empty string is, which is pandas' rule and the rule the grouped form already followed. Those two sentences are one line apart in the code now, and the ClickBench hits table spells its missing text as an empty string, so the difference is a wrong answer rather than a debate. Both have tests.
+
+Part of #479.
 
 ### Added: how long a string is, in bytes
 
@@ -262,21 +290,6 @@ Details in document 39. Part of #156, after #522.
 This was reachable through `group_nlargest` and `group_nsmallest` before `nlargest` existed, and nothing had noticed because nothing had asked. The check now asks the logical type instead, and accepts the types whose values buffer holds one comparable number per row, which is the numeric ones and the temporal ones. A timestamp is an `int64` count of units and ranking it as one is correct, which is why this is two questions rather than one.
 
 Part of #156, after #522.
-### Changed: a whole column distinct count stopped going through the group by
-
-`nunique` over a column with no grouping was being answered by the grouped kernel with a single group. That meant allocating a code per row, sorting a copy of every value into a slab and walking the runs, which is `_nunique_core` doing exactly the right thing for a question nobody asked. It is built to count distinct values inside each of a million groups and it was being handed one.
-
-`reduce_any` now takes `AggKind.NUNIQUE` before the dispatch and answers it directly, through two new functions in `firepanda/kernel/reduce.mojo`. `distinct_count_any` takes a column and `distinct_count` takes a typed one, and both are exported from the kernel package so a caller who already knows the type can skip the dispatch.
-
-There are two routes underneath. For an integer column whose range is bounded, the count is a bit per possible value and a population count, with no table, no ordinals and no second pass over anything the size of the column. For everything else it is the number of ordinals a factorize handed out, which is a distinct count the hash layer was already computing and throwing away. The string column takes the second route and always will, since there is no range to bound.
-
-The bit set is bounded by a new `DISTINCT_SHARE` of eight slots a row. A slot there is one bit, so that is the same one byte a row that `DIRECT_SHARE` promises for the factorize's direct table, written in different units because a distinct count never needs to name a value it has seen and so needs a bit where the factorize needs four bytes. The same budget covers thirty two times the range.
-
-Over a million rows on a ten core laptop, the packed integer case went from about 23 milliseconds through the group by to about 5 milliseconds, and the ratio held between five and sixteen times across runs on a machine that is too noisy to quote a single number from. `reduce/nunique_grouped` stays in the benchmark table measuring the old route, the way `kernel/sum_twin` does, so the claim always has something beside it.
-
-Nulls are not a value and an empty string is, which is pandas' rule and the rule the grouped form already followed. Those two sentences are one line apart in the code now, and the ClickBench hits table spells its missing text as an empty string, so the difference is a wrong answer rather than a debate. Both have tests.
-
-Part of #479.
 
 ## [0.6.59] - 2026-09-11
 
@@ -5319,7 +5332,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.61...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.62...HEAD
+[0.6.62]: https://github.com/tamnd/firepanda/releases/tag/v0.6.62
 [0.6.61]: https://github.com/tamnd/firepanda/releases/tag/v0.6.61
 [0.6.60]: https://github.com/tamnd/firepanda/releases/tag/v0.6.60
 [0.6.59]: https://github.com/tamnd/firepanda/releases/tag/v0.6.59
