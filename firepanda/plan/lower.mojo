@@ -518,15 +518,20 @@ def _lower_filter(plan: Plan, at: Int, mut pipe: Pipeline) raises:
 def _lower_project(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     """Lowers a projection into the computes it needs and one projection.
 
+    The projection carries the output names as well as the positions. A name is
+    free to carry, because a chunk is arrays and the names live on the
+    pipeline's schema, and it is the only place they can come from: an
+    expression that was computed was named by whatever computed it, an
+    aggregate names its answer after itself, and an input column has the name
+    the scan gave it. What the query calls each of them is written here.
+
     Args:
         plan: The plan.
         at: The projection node.
         pipe: The pipeline, added to.
 
     Raises:
-        Error: If an output has a kind no operator computes, or renames a
-            column, which a physical projection cannot do because it selects by
-            position and carries the names it is given.
+        Error: If an output has a kind no operator computes.
     """
     var base = len(pipe.schema)
     var memo = Memo()
@@ -534,24 +539,10 @@ def _lower_project(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     var names = plan.nodes[at].names.copy()
     var keep = List[Int](capacity=len(outputs))
     for i in range(len(outputs)):
-        var made = _lower_expr(
-            plan.exprs, outputs[i], pipe, base, names[i], memo
+        keep.append(
+            _lower_expr(plan.exprs, outputs[i], pipe, base, names[i], memo)
         )
-        if made < base and pipe.schema[made].name != names[i]:
-            raise Error(
-                String(
-                    "lower: the projection calls the column '",
-                    pipe.schema[made].name,
-                    "' by the name '",
-                    names[i],
-                    (
-                        "', and a physical projection selects by position and"
-                        " keeps the names it is handed"
-                    ),
-                )
-            )
-        keep.append(made)
-    pipe.add(Node(Project(keep^)))
+    pipe.add(Node(Project(keep^, names^)))
 
 
 def _lower_aggregate(plan: Plan, at: Int, mut pipe: Pipeline) raises:
@@ -682,28 +673,23 @@ def _lower_sort(plan: Plan, at: Int, mut pipe: Pipeline) raises:
 
 
 def _lower_limit(plan: Plan, at: Int, mut pipe: Pipeline) raises:
-    """Lowers a limit, which has to start at the first row.
+    """Lowers a limit, and the offset it may start at.
+
+    A limit that keeps every row and starts at the first one is nothing at all,
+    and lowers to no operator rather than to one that passes everything
+    through. That is not only a saving: a limit is the one operator that can
+    stop the pipeline early, and the driver feeds a pipeline that has one in it
+    a chunk at a time, so an operator that never stops anything would cost the
+    query its read ahead for nothing.
 
     Args:
         plan: The plan.
         at: The limit node.
         pipe: The pipeline, added to.
-
-    Raises:
-        Error: If the limit skips rows first, which the physical limit has no
-            way to do, or keeps every row, which it has no way to say.
     """
-    if plan.nodes[at].offset != 0:
-        raise Error(
-            String(
-                "lower: the limit skips ",
-                plan.nodes[at].offset,
-                " rows first and the physical limit counts from the first row",
-            )
-        )
-    if plan.nodes[at].length == NO_LIMIT:
+    if plan.nodes[at].length == NO_LIMIT and plan.nodes[at].offset == 0:
         return
-    pipe.add(Node(Limit(plan.nodes[at].length)))
+    pipe.add(Node(Limit(plan.nodes[at].length, plan.nodes[at].offset)))
 
 
 def _take(

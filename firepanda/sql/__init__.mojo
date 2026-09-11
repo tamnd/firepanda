@@ -190,6 +190,7 @@ from .resolve import (
     resolve,
     score,
 )
+from .run import run
 from .star import (
     NOT_REPLACED,
     Renaming,
