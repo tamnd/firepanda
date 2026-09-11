@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.61] - 2026-09-11
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A SQL query runs. That is the whole of this release: text in at one end, rows out at the other, over the plan and the optimizer and the morsel engine that were all already there and had never been connected.
+
+`firepanda.sql.run` is where the connection is written down. It parses, lowers, binds, optimizes, finds the frame each scan named and runs the pipeline, and it decides nothing another stage had not already decided. It is not the front door. `sql()`, `df.sql()` and `query()` are a later stage and they own the prepared statement cache and the latency budget, and this builds a grammar per call, which is the wrong cost for a front door and the right cost for a function whose job is to be obviously correct.
+
+Writing it was the useful part. Every stage of the front end had passed its own tests for weeks and the seam between them had never been asserted, and five gaps showed up the moment one query had to go all the way through. A projection could not rename what it kept, so every alias was refused. A limit could not skip rows, so `OFFSET` was refused. A join had no physical operator and neither did a sort. And a join could only build from a scan, which is a shape almost no real join query has, because a `WHERE` over a join is a filter the optimizer pushes onto the build side.
+
+All five are closed here, along with the two name resolution fixes underneath them. `SELECT`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`, `OFFSET` and an inner, left, semi or anti join all run from SQL text, and `tests/test_sql_run.mojo` asserts it a query at a time rather than a stage at a time.
+
 ### Added: the build side of a join can be a query of its own
 
 `SELECT qty, rate FROM sales JOIN tiers ON qty = band WHERE qty > 10` runs. It did not before, and neither did almost any other join somebody would actually write, because a join with a `WHERE` on it is a join whose build side the optimizer has pushed a filter onto, and lowering only knew how to build from a scan.
@@ -5196,7 +5208,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.60...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.61...HEAD
+[0.6.61]: https://github.com/tamnd/firepanda/releases/tag/v0.6.61
 [0.6.60]: https://github.com/tamnd/firepanda/releases/tag/v0.6.60
 [0.6.59]: https://github.com/tamnd/firepanda/releases/tag/v0.6.59
 [0.6.58]: https://github.com/tamnd/firepanda/releases/tag/v0.6.58
