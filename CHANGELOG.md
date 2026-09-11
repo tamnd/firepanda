@@ -43,6 +43,21 @@ Details in document 39. Part of #156, after #522.
 This was reachable through `group_nlargest` and `group_nsmallest` before `nlargest` existed, and nothing had noticed because nothing had asked. The check now asks the logical type instead, and accepts the types whose values buffer holds one comparable number per row, which is the numeric ones and the temporal ones. A timestamp is an `int64` count of units and ranking it as one is correct, which is why this is two questions rather than one.
 
 Part of #156, after #522.
+### Changed: a whole column distinct count stopped going through the group by
+
+`nunique` over a column with no grouping was being answered by the grouped kernel with a single group. That meant allocating a code per row, sorting a copy of every value into a slab and walking the runs, which is `_nunique_core` doing exactly the right thing for a question nobody asked. It is built to count distinct values inside each of a million groups and it was being handed one.
+
+`reduce_any` now takes `AggKind.NUNIQUE` before the dispatch and answers it directly, through two new functions in `firepanda/kernel/reduce.mojo`. `distinct_count_any` takes a column and `distinct_count` takes a typed one, and both are exported from the kernel package so a caller who already knows the type can skip the dispatch.
+
+There are two routes underneath. For an integer column whose range is bounded, the count is a bit per possible value and a population count, with no table, no ordinals and no second pass over anything the size of the column. For everything else it is the number of ordinals a factorize handed out, which is a distinct count the hash layer was already computing and throwing away. The string column takes the second route and always will, since there is no range to bound.
+
+The bit set is bounded by a new `DISTINCT_SHARE` of eight slots a row. A slot there is one bit, so that is the same one byte a row that `DIRECT_SHARE` promises for the factorize's direct table, written in different units because a distinct count never needs to name a value it has seen and so needs a bit where the factorize needs four bytes. The same budget covers thirty two times the range.
+
+Over a million rows on a ten core laptop, the packed integer case went from about 23 milliseconds through the group by to about 5 milliseconds, and the ratio held between five and sixteen times across runs on a machine that is too noisy to quote a single number from. `reduce/nunique_grouped` stays in the benchmark table measuring the old route, the way `kernel/sum_twin` does, so the claim always has something beside it.
+
+Nulls are not a value and an empty string is, which is pandas' rule and the rule the grouped form already followed. Those two sentences are one line apart in the code now, and the ClickBench hits table spells its missing text as an empty string, so the difference is a wrong answer rather than a debate. Both have tests.
+
+Part of #479.
 
 ## [0.6.59] - 2026-09-11
 
@@ -2241,7 +2256,6 @@ Two Arrow types and a join that had been running on one core.
 The join is the one worth reading. An outer join was the only kind that would not spread across cores, because it has to remember which built side rows paired and it remembered them in a bitmap, whose set is a read modify write of a word that eight rows share. That was a real constraint on the bitmap and not on the remembering, and marking a byte per key code instead takes it away. Reading the byte before writing it is worth as much again, because a store is what takes a cache line off the other cores and a load is not. Together they are just under three times on `join/outer`.
 
 The types are dictionary and duration columns, which the Arrow reader and writer now handle in every unit and every index width. A dictionary is how Arrow spells a categorical, so this is the type a text column with few distinct values arrives as from Polars and pyarrow, and reading it was previously an error that stopped the whole file.
-
 
 ### An outer join runs on every core, three times faster
 
