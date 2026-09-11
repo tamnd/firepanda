@@ -34,9 +34,12 @@ from ._pandas import (
     SeriesGroupByMixin,
     SeriesMixin,
     StringMixin,
+    _Cell,
     _ewm,
     _expanding,
     _grouped,
+    _Labelled,
+    _Positional,
     _rolling,
 )
 from .errors import translate
@@ -1762,6 +1765,45 @@ class DataFrame(DataFrameMixin):
         """The last n rows."""
         try:
             return DataFrame._wrap(self._inner.tail(n))
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def iloc(self) -> Any:
+        """Selection by position, where a slice excludes the row it stops at."""
+        try:
+            return _Positional(self)
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def loc(self) -> Any:
+        """Selection by label, where a slice includes the row it stops at."""
+        try:
+            return _Labelled(self)
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def iat(self) -> Any:
+        """One value, by row position and column position."""
+        try:
+            return _Cell(self, False)
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def at(self) -> Any:
+        """One value, by row label and column name."""
+        try:
+            return _Cell(self, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def take(self, indices: Any, axis: Any = 0, **kwargs: Any) -> DataFrame:
+        """The rows or the columns at a set of positions, in the order given."""
+        try:
+            return self._take(indices, axis, kwargs)
         except Exception as error:
             raise translate(error) from None
 

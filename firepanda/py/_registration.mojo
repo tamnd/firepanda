@@ -80,6 +80,21 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = dataframe.def_method[PyDataFrame.tail](
         "tail", docstring="The last n rows."
     )
+    _ = dataframe.def_method[PyDataFrame.take](
+        "take",
+        docstring=(
+            "Rows gathered by position, counting from the end when negative."
+        ),
+    )
+    _ = dataframe.def_method[PyDataFrame.slice_rows](
+        "slice_rows", docstring="A half open range of rows."
+    )
+    _ = dataframe.def_method[PyDataFrame.filter_rows](
+        "filter_rows", docstring="The rows a boolean column is true at."
+    )
+    _ = dataframe.def_method[PyDataFrame.cell](
+        "cell", docstring="One value, by row and by column position."
+    )
     _ = dataframe.def_method[PyDataFrame.column](
         "column", docstring="One column, as a series."
     )

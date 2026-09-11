@@ -52,7 +52,7 @@ What comes back is a list of bools where pandas gives a numpy array. That is the
 
 ## 7. What each refusal costs to lift
 
-Seven arguments across the three frame methods are declared and not implemented, and they are not all the same kind of missing.
+Twelve arguments across the three frame methods are declared and not implemented, and they are not all the same kind of missing.
 
 | Argument | What it would take |
 | --- | --- |

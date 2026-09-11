@@ -85,7 +85,39 @@ from firepanda.py.reduce import grouped_reduction, reduction
 from firepanda.py.series import PySeries
 from firepanda.py.temporal import iso_calendar
 from firepanda.py.transform import transformation, transformed
+from firepanda.py.values import python_value
 from firepanda.py.window import window_frame, window_settings
+
+
+def _within(at: Int, extent: Int, what: String) raises -> Int:
+    """Turns a position that may count from the end into one that does not.
+
+    Args:
+        at: The position, counting from the end when negative.
+        extent: How many there are.
+        what: The word for one of them, for the message.
+
+    Returns:
+        A position between zero and `extent`, exclusive.
+
+    Raises:
+        Error: Tagged `position`, if it lands outside.
+    """
+    var found = at + extent if at < 0 else at
+    if found < 0 or found >= extent:
+        raise tagged(
+            POSITION,
+            String(
+                "index ",
+                at,
+                " is out of bounds for a frame with ",
+                extent,
+                " ",
+                what,
+                "s",
+            ),
+        )
+    return found
 
 
 @fieldwise_init
@@ -216,6 +248,165 @@ struct PyDataFrame(Movable, Writable):
                 ArcPointer(Self._frame(py_self)[].frame[].tail(whole(n, "n")))
             )
         )
+
+    @staticmethod
+    def take(
+        py_self: PythonObject, positions: PythonObject
+    ) raises -> PythonObject:
+        """Gathers rows by position, in the order asked for.
+
+        A negative position counts from the end, which is pandas' rule and is
+        not the core's: `DataFrame.take` answers a null row for a negative
+        index, because that is what an outer join needs from it. So the
+        counting back happens here, and every position is checked against the
+        height afterwards, which is what stops a null row leaking out of a
+        gather that a caller wrote as a selection.
+
+        Args:
+            py_self: The frame.
+            positions: The rows to gather.
+
+        Returns:
+            A new frame with one row per position.
+
+        Raises:
+            Error: Tagged `position`, if a position is off either end.
+        """
+        ref frame = Self._frame(py_self)[].frame[]
+        var height = len(frame)
+        var picks = List[Int](capacity=Int(len(positions)))
+        for i in range(Int(len(positions))):
+            var at = whole(positions[i], "indices")
+            if at < 0:
+                at += height
+            if at < 0 or at >= height:
+                raise tagged(
+                    POSITION,
+                    String(
+                        "positional indexers are out-of-bounds; index ",
+                        positions[i],
+                        " is not in a frame of ",
+                        height,
+                        " rows",
+                    ),
+                )
+            picks.append(at)
+        return PythonObject(alloc=Self(ArcPointer(frame.take(picks))))
+
+    @staticmethod
+    def slice_rows(
+        py_self: PythonObject, start: PythonObject, end: PythonObject
+    ) raises -> PythonObject:
+        """Takes a half open range of rows.
+
+        The bounds arrive already counted from the front and already clamped,
+        because the Python layer got them from a Python slice and a Python
+        slice has done both by the time it is read.
+
+        Args:
+            py_self: The frame.
+            start: The first row, inclusive.
+            end: The last row, exclusive.
+
+        Returns:
+            A new frame of `end - start` rows.
+
+        Raises:
+            Error: Tagged `position`, if the range runs off either end.
+        """
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        Self._frame(py_self)[]
+                        .frame[]
+                        .slice(whole(start, "start"), whole(end, "end"))
+                    )
+                )
+            )
+        except cause:
+            raise retagged(POSITION, cause)
+
+    @staticmethod
+    def filter_rows(
+        py_self: PythonObject, mask: PythonObject
+    ) raises -> PythonObject:
+        """Keeps the rows a boolean column is true at.
+
+        The mask crosses as a column rather than as a list of Python bools,
+        which is the whole reason this is a method of its own instead of the
+        Python layer turning a mask into positions: a mask that came out of
+        `df["v"] > 0` is already a column on this side, and sending it back out
+        as objects and in again as positions would cost two conversions to ask
+        a question the kernel can answer from the bits it already has.
+
+        Nothing is aligned. pandas matches a boolean series against the frame's
+        labels and refuses an unalignable one, and this checks the length
+        instead, which is the same check for the masks that come out of a
+        comparison against the frame itself and a weaker one for the rest.
+
+        Args:
+            py_self: The frame.
+            mask: A boolean column as tall as the frame.
+
+        Returns:
+            A new frame of the rows the mask kept.
+
+        Raises:
+            Error: Tagged `dtype`, if the column is not boolean, or `position`,
+                if it is not as tall as the frame.
+        """
+        var right = PySeries._other(mask, "key")
+        if right[].values.dtype() != DType.bool:
+            raise tagged(
+                DTYPE,
+                String(
+                    "cannot mask with a column of ",
+                    right[].values.type_name(),
+                    "; a boolean key has to be boolean",
+                ),
+            )
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        Self._frame(py_self)[]
+                        .frame[]
+                        .filter(right[].values.as_typed[DType.bool]())
+                    )
+                )
+            )
+        except cause:
+            raise retagged(POSITION, cause)
+
+    @staticmethod
+    def cell(
+        py_self: PythonObject, row: PythonObject, at: PythonObject
+    ) raises -> PythonObject:
+        """Reads one value out, by row and by column position.
+
+        This is what `at` and `iat` reach, and it exists rather than being
+        `column(name)` followed by a read because `column` copies: asking for
+        one cell of a million row frame through a column would copy the million
+        values to answer with one of them.
+
+        Args:
+            py_self: The frame.
+            row: The row, counting from the end when negative.
+            at: The column position, counting from the end when negative.
+
+        Returns:
+            The value, or `None` if it is missing.
+
+        Raises:
+            Error: Tagged `position`, if either coordinate is off its end.
+        """
+        ref frame = Self._frame(py_self)[].frame[]
+        var down = _within(whole(row, "row"), len(frame), "row")
+        var across = _within(whole(at, "at"), frame.width(), "column")
+        ref chunked = frame.columns[across]
+        var found = chunked.locate(down)
+        return python_value(chunked.chunks[found[0]], found[1])
 
     @staticmethod
     def set_index(

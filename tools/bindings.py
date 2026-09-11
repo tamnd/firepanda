@@ -1829,6 +1829,34 @@ FRAME = Exposed(
             returns="DataFrame",
         ),
         Binding(
+            mojo="PyDataFrame.take",
+            name="take",
+            doc="Rows gathered by position, counting from the end when negative.",
+            params=(("positions", "list[int]"),),
+            returns="DataFrame",
+        ),
+        Binding(
+            mojo="PyDataFrame.slice_rows",
+            name="slice_rows",
+            doc="A half open range of rows.",
+            params=(("start", "int"), ("end", "int")),
+            returns="DataFrame",
+        ),
+        Binding(
+            mojo="PyDataFrame.filter_rows",
+            name="filter_rows",
+            doc="The rows a boolean column is true at.",
+            params=(("mask", "Series"),),
+            returns="DataFrame",
+        ),
+        Binding(
+            mojo="PyDataFrame.cell",
+            name="cell",
+            doc="One value, by row and by column position.",
+            params=(("row", "int"), ("at", "int")),
+            returns="object",
+        ),
+        Binding(
             mojo="PyDataFrame.column",
             name="column",
             doc="One column, as a series.",
@@ -2062,6 +2090,42 @@ FRAME = Exposed(
             doc="The last n rows.",
             returns="DataFrame",
             wraps="DataFrame",
+        ),
+        Member(
+            name="iloc",
+            kind="property",
+            body="_Positional(self)",
+            doc="Selection by position, where a slice excludes the row it stops at.",
+            returns="Any",
+        ),
+        Member(
+            name="loc",
+            kind="property",
+            body="_Labelled(self)",
+            doc="Selection by label, where a slice includes the row it stops at.",
+            returns="Any",
+        ),
+        Member(
+            name="iat",
+            kind="property",
+            body="_Cell(self, False)",
+            doc="One value, by row position and column position.",
+            returns="Any",
+        ),
+        Member(
+            name="at",
+            kind="property",
+            body="_Cell(self, True)",
+            doc="One value, by row label and column name.",
+            returns="Any",
+        ),
+        Member(
+            name="take",
+            kind="method",
+            signature="indices: Any, axis: Any = 0, **kwargs: Any",
+            body="self._take(indices, axis, kwargs)",
+            doc="The rows or the columns at a set of positions, in the order given.",
+            returns="DataFrame",
         ),
         Member(
             name="set_index",
@@ -3479,6 +3543,12 @@ def _import_order(name: str) -> tuple[int, str]:
     against, so writing the names in plain sorted order fails the lint even
     though the import itself is correct.
 
+    Inside a group the comparison ignores case, which is invisible until a name
+    starting with an underscore and carrying a capital arrives. A hand written
+    helper class is exactly that, and `_Cell` sorts before `_ewm` here and after
+    it under a plain sort, because every capital letter is below every lowercase
+    one in ASCII and ruff is not comparing them that way.
+
     Args:
         name: The imported name.
 
@@ -3486,10 +3556,10 @@ def _import_order(name: str) -> tuple[int, str]:
         The key to sort on.
     """
     if name.isupper():
-        return (0, name)
+        return (0, name.lower())
     if name[:1].isupper():
-        return (1, name)
-    return (2, name)
+        return (1, name.lower())
+    return (2, name.lower())
 
 
 def _imported(names: list[str]) -> list[str]:
@@ -3703,6 +3773,13 @@ def wrapper() -> str:
     for builder in ("_rolling", "_expanding", "_ewm"):
         if any(f"{builder}(" in m.body for m in every):
             mixins.add(builder)
+    # `df.iloc` and the three properties beside it are the same case a third
+    # time. Each answers a small object that holds the frame and reads a key,
+    # and the key is the whole of what they do, so the class is hand written
+    # and the member is the one line that builds one.
+    for accessor in ("_Positional", "_Labelled", "_Cell"):
+        if any(f"{accessor}(" in m.body for m in every):
+            mixins.add(accessor)
     if mixins:
         out.extend(_imported(sorted(mixins, key=_import_order)))
     out.append("from .errors import translate")

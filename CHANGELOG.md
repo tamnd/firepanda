@@ -8,6 +8,23 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a position and a label are different questions
+
+`DataFrame.loc`, `DataFrame.iloc`, `DataFrame.at`, `DataFrame.iat` and `DataFrame.take`. A frame is addressable now: until this went in there was no way to ask one for a row, and a library that can only hand back a whole frame or a whole column is not one a caller can walk through.
+
+`loc` and `iloc` are one piece of work with two readers in front of it. Both take a key that names rows and optionally a second that names columns, both decide the shape of the answer from the shape of the key rather than from the data, and both end up asking the core for a range, a gather, or the rows a mask is true at. The only thing they do differently is turn a key into positions. A slice of positions excludes the position it stops at and a slice of labels includes the label it stops at, which is the most common off by one in code written by somebody who came to pandas from numpy, and it is now asserted both ways.
+
+The shape rule is pandas' and it is about the key rather than the data: an axis named by one thing collapses and an axis named by a set of things does not, so two collapsed axes are a value, one is a column and none is a frame. `df.iloc[0:1, 0:1]` is a one by one frame and `df.iloc[0, 0]` is a number.
+
+Columns are narrowed before rows, always. The answer is the same either way round and the work is not, because narrowing the columns first means the row gather copies only the columns that were asked for.
+
+`at` and `iat` read one cell through a crossing of their own rather than through a column and a read, because a `Series` here is one contiguous array and a column in pieces is stacked on the way out, so asking for one cell of a million row frame through a column would copy a million values to answer with one of them. The chunk holding the row is found by the binary search the chunked array already does for its own reasons.
+
+A negative position counts from the end, and the counting happens in the binding rather than in the core. The core reads a negative index as a row that was not there, which is what an outer join needs from it, so every position is resolved and checked against the height before the core sees it, and what that check is really doing is making sure no negative index survives to be read as a null row.
+
+One shape of answer is refused rather than approximated. `df.iloc[0]` and `df.loc[label]` on a unique index collapse the row axis and leave the columns, so both answer a series whose labels are the column names, and a series has one type while a frame has one per column. Nothing here computes a type that every column fits, and inventing that rule inside an indexing accessor would put a type rule in the last place anybody would look for it. `docs/specs/36-a-position-and-a-label-are-different-questions.md` has the whole argument and the table of what else is refused.
+
+Part of #156, after #500.
 ### Added: slice pushdown and top n, so ten rows are not paid for six million times
 
 Four of the twenty two TPC-H queries end in an order by with a limit on it, and the difference between answering one of those by sorting the whole table and answering it by keeping the best ten rows as they go past is most of the query. `limits` is the pass that spots the shape.
