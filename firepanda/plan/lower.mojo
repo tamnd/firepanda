@@ -396,8 +396,41 @@ def _trim(mut pipe: Pipeline, base: Int) raises:
     pipe.add(Node(Project(keep^)))
 
 
+def _reaches(exprs: Expressions, root: Int, of: Int) -> Bool:
+    """Whether an expression contains another one anywhere below it.
+
+    Args:
+        exprs: The arena.
+        root: The expression to look in.
+        of: The expression to look for.
+
+    Returns:
+        True if it is root or is under it.
+    """
+    if root == of:
+        return True
+    ref node = exprs.nodes[root]
+    for i in range(len(node.children)):
+        if _reaches(exprs, node.children[i], of):
+            return True
+    return False
+
+
 def _lower_filter(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     """Lowers a filter into one physical filter per conjunct.
+
+    One filter per conjunct rather than one for the whole predicate, because
+    each one narrows what the next one has to look at, and a predicate of four
+    conditions where the first is selective is three conditions evaluated on
+    almost nothing.
+
+    Each filter is told which columns to write, which is what keeps that from
+    being a bad trade. Filtering a column means writing a new one, and a mask
+    that has just been used is all true and is read by nobody, so a filter that
+    wrote every column would carry every spent mask through every later
+    condition. What survives a conjunct is the node's input columns plus
+    whatever a later conjunct still reads, and everything else is dropped in the
+    same pass that does the filtering rather than by a projection afterwards.
 
     Args:
         plan: The plan.
@@ -412,7 +445,37 @@ def _lower_filter(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     var parts = _conjuncts(plan.exprs, plan.nodes[at].exprs[0])
     for i in range(len(parts)):
         var mask = _lower_expr(plan.exprs, parts[i], pipe, base, "mask", memo)
-        pipe.add(Node(Filter(mask)))
+        if len(pipe.schema) == base:
+            # The predicate was a column of the input, so there is nothing
+            # this conjunct left behind and nothing to drop.
+            pipe.add(Node(Filter(mask)))
+            continue
+        var keep = List[Int](capacity=base)
+        for j in range(base):
+            keep.append(j)
+        var moved = Memo()
+        for j in range(len(memo.at)):
+            if memo.at[j] < base:
+                moved.remember(memo.of[j], memo.at[j])
+                continue
+            var live = False
+            for k in range(i + 1, len(parts)):
+                if _reaches(plan.exprs, parts[k], memo.of[j]):
+                    live = True
+                    break
+            if not live:
+                continue
+            var now = -1
+            for k in range(base, len(keep)):
+                if keep[k] == memo.at[j]:
+                    now = k
+                    break
+            if now < 0:
+                now = len(keep)
+                keep.append(memo.at[j])
+            moved.remember(memo.of[j], now)
+        pipe.add(Node(Filter(mask, keep^)))
+        memo = moved^
     _trim(pipe, base)
 
 

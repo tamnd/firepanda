@@ -252,6 +252,57 @@ def test_a_filter_and_a_projection_agree_with_the_frame_methods() raises:
         assert_equal(got[i], want[i], "row " + String(i))
 
 
+def test_a_filter_told_what_to_keep_does_the_projection_itself() raises:
+    var expected = sample_frame()
+    var mask = expected.column("keep").as_typed[DType.bool]()
+    var by_hand = expected.filter(mask).select(["n"])
+
+    # The same query as the test above, as one operator rather than two. The
+    # mask is never written out, which is the point: filtering by a column
+    # produces a column that is all true and that nobody reads.
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Filter(1, [0])))
+    var out = pipeline^.run()
+
+    assert_equal(out.width(), 1, "only the column that was asked for")
+    assert_equal(out.schema[0].name, "n", "and it is the right one")
+    assert_equal(len(out), len(by_hand), "rows")
+    var got = read_back(out, "n")
+    var want = read_back(by_hand, "n")
+    for i in range(len(want)):
+        assert_equal(got[i], want[i], "row " + String(i))
+
+
+def test_a_narrowing_filter_may_reorder_and_repeat() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Filter(1, [1, 0, 0])))
+    var out = pipeline^.run()
+
+    assert_equal(out.width(), 3, "three columns out of two")
+    assert_equal(out.schema[0].name, "keep", "the mask, kept on purpose")
+    assert_equal(out.schema[1].name, "n", "second")
+    assert_equal(out.schema[2].name, "n", "and again")
+    var first = read_back(out, "n")
+    assert_equal(len(first), 4, "rows kept")
+
+
+def test_a_narrowing_filter_that_keeps_nothing_still_counts() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Filter(1, List[Int]())))
+    var out = pipeline^.run()
+
+    # A filter asked for no columns is a row count, and it still has to know
+    # how many rows survived so that whatever follows it is told the truth.
+    assert_equal(out.width(), 0, "no columns")
+    assert_equal(len(out), 0, "and so no rows to report")
+
+
+def test_a_narrowing_filter_refuses_a_column_it_does_not_have() raises:
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="outside a schema of 2 columns"):
+        pipeline.add(Node(Filter(1, [5])))
+
+
 def test_a_filter_keeps_the_chunk_boundaries() raises:
     var pipeline = Pipeline(cut_frame())
     pipeline.add(Node(Filter(1)))
