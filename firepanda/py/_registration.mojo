@@ -104,6 +104,14 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = dataframe.def_method[PyDataFrame.select](
         "select", docstring="Several columns, as a frame."
     )
+    _ = dataframe.def_method[PyDataFrame.duplicated](
+        "duplicated",
+        docstring="Which rows repeat a key another row already carries.",
+    )
+    _ = dataframe.def_method[PyDataFrame.drop_duplicates](
+        "drop_duplicates",
+        docstring="The frame with the repeated rows removed, by a chosen rule.",
+    )
     _ = dataframe.def_method[PyDataFrame.reduce](
         "reduce",
         docstring="Every column reduced to one value, as a series of them.",

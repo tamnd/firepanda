@@ -1877,6 +1877,20 @@ FRAME = Exposed(
             returns="DataFrame",
         ),
         Binding(
+            mojo="PyDataFrame.duplicated",
+            name="duplicated",
+            doc="Which rows repeat a key another row already carries.",
+            params=(("subset", "list[str]"), ("keep", "str")),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PyDataFrame.drop_duplicates",
+            name="drop_duplicates",
+            doc="The frame with the repeated rows removed, by a chosen rule.",
+            params=(("subset", "list[str]"), ("keep", "str")),
+            returns="DataFrame",
+        ),
+        Binding(
             mojo="PyDataFrame.reduce",
             name="reduce",
             doc="Every column reduced to one value, as a series of them.",
@@ -2203,6 +2217,25 @@ FRAME = Exposed(
             ),
             body="self._truncate(before, after, axis, copy)",
             doc="The rows between two labels, with both of them kept.",
+            returns="DataFrame",
+        ),
+        Member(
+            name="duplicated",
+            kind="method",
+            signature="subset: Any = None, keep: Any = \"first\"",
+            body="self._duplicated(subset, keep)",
+            doc="Which rows repeat a key that another row already carries.",
+            returns="Series",
+        ),
+        Member(
+            name="drop_duplicates",
+            kind="method",
+            signature=(
+                "subset: Any = None, *, keep: Any = \"first\","
+                " inplace: bool = False, ignore_index: bool = False"
+            ),
+            body="self._drop_duplicates(subset, keep, inplace, ignore_index)",
+            doc="The frame with the repeated rows removed, by a chosen rule.",
             returns="DataFrame",
         ),
         Member(

@@ -598,6 +598,72 @@ struct PyDataFrame(Movable, Writable):
             raise retagged(COLUMN, cause)
 
     @staticmethod
+    def duplicated(
+        py_self: PythonObject, subset: PythonObject, keep: PythonObject
+    ) raises -> PythonObject:
+        """Which rows repeat a key another row already carries.
+
+        The rule arrives as a word and not as the value pandas spells it with.
+        pandas writes the third rule as `False`, so two of its three settings are
+        strings and one is a bool, and a boundary that carried that would be
+        carrying a Python type to say which of three branches to take. The
+        mixin turns it into `"none"` before the crossing, so one kind of thing
+        comes across and the core reads one kind of thing.
+
+        Args:
+            py_self: The frame.
+            subset: The column names that decide whether two rows are the same.
+                Resolved from `None` to every column by the caller, because
+                which columns a frame has is a question the mixin can already
+                ask and sending an absence across to be filled in on the other
+                side would put the default in two places.
+            keep: `"first"`, `"last"` or `"none"`.
+
+        Returns:
+            A bool series as tall as the frame, carrying the frame's labels.
+        """
+        var wanted = List[String](capacity=Int(len(subset)))
+        for name in subset:
+            wanted.append(String(name))
+        try:
+            var out = (
+                Self._frame(py_self)[].frame[].duplicated(wanted, String(keep))
+            )
+            return PythonObject(alloc=PySeries(ArcPointer(out^)))
+        except cause:
+            raise retagged(COLUMN, cause)
+
+    @staticmethod
+    def drop_duplicates(
+        py_self: PythonObject, subset: PythonObject, keep: PythonObject
+    ) raises -> PythonObject:
+        """The frame with the repeated rows removed, by a chosen rule.
+
+        Args:
+            py_self: The frame.
+            subset: The column names that decide whether two rows are the same.
+            keep: `"first"`, `"last"` or `"none"`.
+
+        Returns:
+            A new frame holding the rows the rule spares, in input order.
+        """
+        var wanted = List[String](capacity=Int(len(subset)))
+        for name in subset:
+            wanted.append(String(name))
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        Self._frame(py_self)[]
+                        .frame[]
+                        .drop_duplicates(wanted, String(keep))
+                    )
+                )
+            )
+        except cause:
+            raise retagged(COLUMN, cause)
+
+    @staticmethod
     def reduce(
         py_self: PythonObject, kind: PythonObject, param: PythonObject
     ) raises -> PythonObject:

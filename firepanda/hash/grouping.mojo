@@ -945,3 +945,107 @@ def _densify(
             groups += 1
         at.unsafe_offset(i).unsafe_store(UInt32(remap[raw]))
     return groups
+
+
+comptime KEEP_FIRST = 0
+"""A row is a duplicate when an equal row came before it."""
+
+comptime KEEP_LAST = 1
+"""A row is a duplicate when an equal row comes after it."""
+
+comptime KEEP_NONE = 2
+"""Every row of a repeated key is a duplicate, including the only original."""
+
+
+def duplicate_mask(
+    codes: Array[DType.uint32], groups: Int, keep: Int
+) raises -> Array[DType.bool]:
+    """Which rows repeat a key that another row already carries.
+
+    The three rules are the same question asked from three places, so they are
+    one table and two passes over it rather than three kernels. Under
+    `KEEP_FIRST` the table holds the earliest row each ordinal appears at and a
+    row is a duplicate when it is not that row. Under `KEEP_LAST` it holds the
+    latest. Under `KEEP_NONE` it holds how many rows carry the ordinal and a row
+    is a duplicate when that is more than one, which is the rule that marks the
+    original too.
+
+    `KEEP_FIRST` could be done in a single pass, marking each row as it is read,
+    and it is not, because the other two cannot and a shape that is the same
+    three times is worth more here than one saved read of an array that is
+    `groups` wide and was in cache from the pass that filled it.
+
+    The table is built here rather than taken from the `Grouping` that produced
+    the codes, even though `rows_at` already holds exactly what `KEEP_FIRST`
+    wants. Two reasons. Only one of the three rules could use it, so the other
+    two would build a table anyway and the saving would be a special case in the
+    middle of a loop that is otherwise the same three times. And this way the
+    kernel reads the codes and nothing else, which is what makes it testable
+    against a hand written list of ordinals rather than against a factorize.
+
+    Both passes are serial and that is not an oversight. Under `KEEP_FIRST` the
+    answer for a row depends on whether any earlier row had its ordinal, which is
+    a prefix question, and splitting the rows across workers would need each
+    worker's table merged in row order afterwards. The pass is one integer load,
+    one indexed load and one store a row, against a factorize that has already
+    hashed every key, so the merge would cost more than it saved.
+
+    Args:
+        codes: One group ordinal per row, each in `[0, groups)`.
+        groups: How many distinct ordinals there are.
+        keep: `KEEP_FIRST`, `KEEP_LAST` or `KEEP_NONE`.
+
+    Returns:
+        One bool per row, with no nulls of its own. A null in a key column is a
+        value here and not an absence, because two rows that are both missing the
+        same field are two rows that say the same thing, which is pandas' rule
+        and Polars'.
+
+    Raises:
+        Error: If `keep` is not one of the three, or if an ordinal is outside the
+            group count, which would be a bug in whatever produced the codes.
+    """
+    if keep != KEEP_FIRST and keep != KEEP_LAST and keep != KEEP_NONE:
+        raise Error(
+            String("duplicate_mask: keep must be 0, 1 or 2; got ", keep)
+        )
+
+    var rows = len(codes)
+    var out = Array[DType.bool](overwritten=rows)
+    var src = codes.unsafe_ptr()
+    var dst = out.unsafe_mut_ptr()
+
+    var blank = 0 if keep == KEEP_NONE else -1
+    var table = List[Int](capacity=groups)
+    for _ in range(groups):
+        table.append(blank)
+
+    for i in range(rows):
+        var code = Int(src.unsafe_offset(i).unsafe_load())
+        if code >= groups:
+            raise Error(
+                String(
+                    "duplicate_mask: row ",
+                    i,
+                    " carries ordinal ",
+                    code,
+                    " and there are ",
+                    groups,
+                    " groups",
+                )
+            )
+        if keep == KEEP_NONE:
+            table[code] += 1
+        elif keep == KEEP_LAST or table[code] < 0:
+            table[code] = i
+
+    for i in range(rows):
+        var code = Int(src.unsafe_offset(i).unsafe_load())
+        var repeated: Bool
+        if keep == KEEP_NONE:
+            repeated = table[code] > 1
+        else:
+            repeated = table[code] != i
+        dst.unsafe_offset(i).unsafe_write(repeated)
+
+    return out^
