@@ -2311,6 +2311,12 @@ def group_nunique[
 ]:
     """Counts the distinct non-null values in each group.
 
+    Counting is by sorting each group's values in a slab and walking the runs,
+    rather than by a hash set per group. `_nunique_core` has the argument and
+    the memory behaviour, which is the part that matters when the group count
+    is in the millions, as it is for six of the eight ClickBench queries that
+    ask for this.
+
     Args:
         values: The column being aggregated.
         codes: One group ordinal per row.
@@ -2634,6 +2640,27 @@ def _nunique_core[
     unbounded where the slab is exactly the size of the data. A group by that
     counts distinct values on a high cardinality column is the case where the
     set would be biggest and it is also the case where it would collide most.
+
+    What that buys is the memory behaviour, and it is the reason this shape was
+    picked for a group count that runs into the millions. Six of the eight
+    ClickBench queries that count distinct values are the grouped form, and q12
+    counts distinct users inside each `SearchPhrase`, which is millions of
+    groups. The naive shape is a hash set per group, which is millions of
+    allocations, each one sized for a group that on this data holds a handful of
+    rows. Here there are three allocations whatever the group count: the slab,
+    which holds one element per present row and no more, and the counts and the
+    bounds, which hold one entry per group. Nothing is allocated inside the loop
+    over the groups and nothing is allocated per group.
+
+    The rest of it scales the same way. The fill goes through `_fill_slab`,
+    which partitions by the high bits of the ordinal once the group count is
+    past `SLAB_SERIAL_GROUPS`, so a million groups does not turn into a million
+    open write streams. The loop that sorts and counts is split into blocks of
+    groups rather than one task per group, so it is the same handful of workers
+    at a thousand groups and at six million. And each group's sort runs inside
+    its own stretch of the slab, so the sorting gets cheaper as the groups get
+    more numerous, which is what makes a high group count the easy case here
+    rather than the hard one.
     """
     var counts = _count_core(source, validity, has_null, codes, groups)
     var bounds = _slab_bounds(counts, groups)
