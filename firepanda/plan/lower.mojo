@@ -131,6 +131,22 @@ That is the second half of `SELECT 1 + 1`. The literal table under it gives the
 projection a row to be evaluated over, and this gives the projection a column to
 evaluate into.
 
+### A union is its inputs stacked, and the stack is the source
+
+Every input of a union is a line of the same plan, so each one is lowered and
+run the way a join's build side is, and the frames that come back are stacked by
+position into the frame the pipeline reads. By position rather than by name,
+because that is what a union means: the answer takes the first input's names and
+the rest line up under them whatever they call themselves.
+
+Nothing is read to stack them. A frame is a list of chunks per column, and a
+union of two frames is those lists one after the other.
+
+A union without `ALL` is the stack with a distinct above it, which is the group
+by with nothing to reduce from the section before. A difference and an
+intersection are the same node with another code on it and neither is a stack,
+so both are refused by name.
+
 ### A distinct is a group by that reduces nothing
 
 A group by holds one row per group and the rows of a group differ only in what
@@ -146,8 +162,9 @@ columns the plan's schema numbered.
 
 ### What it refuses, and why refusing is the design
 
-A distinct on part of the row is not lowered here, and neither is a union, a
-unary expression, a conditional, a window, or a cast over an input column.
+A distinct on part of the row is not lowered here, and neither is a difference,
+an intersection, a unary expression, a conditional, a window, or a cast over an
+input column.
 Every one of those raises an error that names what it was. It does not fall
 back to `Materialize`, and the reason is that `Materialize` holds a function
 pointer that captures nothing, so there is no way to hand it the expression
@@ -189,7 +206,13 @@ from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
 from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
-from firepanda.plan.node import NO_LIMIT, NodeKind, Plan
+from firepanda.plan.node import (
+    NO_LIMIT,
+    SET_EXCEPT,
+    SET_UNION,
+    NodeKind,
+    Plan,
+)
 
 
 def _spine(plan: Plan, root: Int) raises -> List[Int]:
@@ -219,6 +242,7 @@ def _spine(plan: Plan, root: Int) raises -> List[Int]:
         if (
             plan.nodes[at].kind == NodeKind.SCAN
             or plan.nodes[at].kind == NodeKind.VALUES
+            or plan.nodes[at].kind == NodeKind.UNION
         ):
             break
         if len(plan.nodes[at].inputs) == 0:
@@ -1035,6 +1059,122 @@ def _literals(plan: Plan, at: Int) raises -> DataFrame:
     return DataFrame(Schema(fields^), columns^)
 
 
+def _stacked(
+    plan: Plan,
+    at: Int,
+    mut frames: List[DataFrame],
+    mut taken: List[Bool],
+) raises -> DataFrame:
+    """Turns a UNION node into the frame a pipeline reads.
+
+    Every input is a line of the same plan, so each one is lowered and run the
+    way a join's build side is, and what comes back is stacked by position. By
+    position rather than by name, because that is what SQL says a union means:
+    the answer takes the first input's names and the rest line up under them
+    whatever they call themselves.
+
+    Stacking is moving chunks rather than copying rows. A frame is already a
+    list of chunks per column, and a union of two frames is those lists one
+    after the other, so nothing is read and nothing is allocated beyond the
+    lists themselves.
+
+    Running the inputs here rather than streaming them is the same trade the
+    join's build side makes, and it is worse here in one way: a union streams
+    perfectly well in principle, since a row of the second input needs nothing
+    from the first. What stops it is that a pipeline reads one source, and
+    giving it two is a change to the driver rather than to this file. Until
+    then, everything is in memory at once and it says so here.
+
+    A difference and an intersection are refused. They are the same node with
+    another code on it, but neither is a stack: one drops rows the other side
+    has and the other keeps only those, and both need the right side hashed
+    before a row of the left can be decided.
+
+    Args:
+        plan: The plan, bound.
+        at: The union node.
+        frames: One frame per relation, taken from.
+        taken: Which relations have already gone, written through.
+
+    Returns:
+        The frame the node stands for.
+
+    Raises:
+        Error: If the node is a difference or an intersection, if two inputs
+            disagree on how many columns they have or on a column's type, or if
+            an input is a line this file cannot lower.
+    """
+    if plan.nodes[at].op != SET_UNION:
+        var word = "a difference" if plan.nodes[at].op == SET_EXCEPT else (
+            "an intersection"
+        )
+        raise Error(
+            String(
+                "lower: ",
+                word,
+                (
+                    " is not a stack of its inputs, and deciding a row of the"
+                    " left needs the right hashed first, which is an operator"
+                    " nobody has written"
+                ),
+            )
+        )
+
+    var inputs = plan.nodes[at].inputs.copy()
+    var fields = List[Field]()
+    var columns = List[ChunkedArray]()
+    for i in range(len(inputs)):
+        var side = _lower_from(plan, inputs[i], frames, taken)
+        var out = side^.run()
+        if i == 0:
+            for c in range(len(out.schema)):
+                fields.append(out.schema.fields[c].copy())
+            columns = out^.into_columns()
+            continue
+        if len(out.schema) != len(fields):
+            raise Error(
+                String(
+                    "lower: input 1 of this union has ",
+                    len(fields),
+                    " columns and input ",
+                    i + 1,
+                    " has ",
+                    len(out.schema),
+                    ", and a stack lines its inputs up by position",
+                )
+            )
+        for c in range(len(fields)):
+            if out.schema.fields[c].dtype != fields[c].dtype:
+                raise Error(
+                    String(
+                        "lower: column ",
+                        c + 1,
+                        " of this union is a ",
+                        fields[c].dtype,
+                        " on input 1 and a ",
+                        out.schema.fields[c].dtype,
+                        " on input ",
+                        i + 1,
+                        ", and a column holds one type",
+                    )
+                )
+            if out.schema.fields[c].nullable and not fields[c].nullable:
+                fields[c] = Field(fields[c].name, fields[c].dtype, True)
+        var more = out^.into_columns()
+        for c in range(len(fields) - 1, -1, -1):
+            # Popped onto a second list and popped back off it, which is the
+            # only way to hand the chunks over in their own order without
+            # copying one. Moving out of the middle of a list is what is not
+            # available, and a copy here is the whole cost of the union.
+            var chunks = more.pop()^.into_chunks()
+            var backwards = List[AnyArray](capacity=len(chunks))
+            while len(chunks) > 0:
+                backwards.append(chunks.pop())
+            while len(backwards) > 0:
+                columns[c].append(backwards.pop())
+    return DataFrame(Schema(fields^), columns^)
+
+
 def _lower_join(
     plan: Plan,
     at: Int,
@@ -1208,9 +1348,22 @@ def _lower_from(
     var source: DataFrame
     if plan.nodes[first].kind == NodeKind.VALUES:
         source = _literals(plan, first)
+    elif plan.nodes[first].kind == NodeKind.UNION:
+        source = _stacked(plan, first, frames, taken)
     else:
         source = _take(frames, taken, plan, first)
     var pipe = Pipeline(source^)
+
+    if plan.nodes[first].kind == NodeKind.UNION and not (
+        plan.nodes[first].flags[0]
+    ):
+        # A `UNION` without `ALL` is the stack with the duplicates dropped, and
+        # dropping them is the distinct above, which is the same group by with
+        # nothing to reduce that `SELECT DISTINCT` lowers to.
+        var keys = List[Int](capacity=len(pipe.schema))
+        for i in range(len(pipe.schema)):
+            keys.append(i)
+        pipe.add(Node(Group(keys^, List[GroupAgg]())))
 
     for i in range(1, len(order)):
         var at = order[i]

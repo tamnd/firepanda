@@ -401,5 +401,78 @@ def test_a_constant_after_a_where_is_as_long_as_what_survived() raises:
     )
 
 
+def test_a_union_all_stacks_the_two_sides() raises:
+    same(
+        answer("SELECT qty FROM sales UNION ALL SELECT band FROM tiers", "qty"),
+        [5, 20, 3, 40, 12, 8, 25, 1, 30, 15, 3, 20, 40, 99],
+        "the first side then the second",
+    )
+
+
+def test_a_union_drops_the_rows_both_sides_have() raises:
+    same(
+        answer("SELECT qty FROM sales UNION SELECT band FROM tiers", "qty"),
+        [5, 20, 3, 40, 12, 8, 25, 1, 30, 15, 99],
+        "3, 20 and 40 are in both",
+    )
+
+
+def test_a_union_takes_the_name_the_first_side_uses() raises:
+    var out = run(
+        "SELECT qty FROM sales UNION ALL SELECT band FROM tiers", session()
+    )
+    assert_equal(out.schema[0].name, "qty", "the first side's name")
+
+
+def test_each_side_of_a_union_may_have_its_own_where() raises:
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE qty > 25 UNION ALL SELECT band"
+                " FROM tiers WHERE band < 10"
+            ),
+            "qty",
+        ),
+        [40, 30, 3],
+        "what each side kept",
+    )
+
+
+def test_a_union_of_two_values_reads_nothing_at_all() raises:
+    same(
+        answer("VALUES (1), (2) UNION ALL VALUES (3)", "col0"),
+        [1, 2, 3],
+        "three rows from a query that names no table",
+    )
+
+
+def test_an_order_by_over_a_union_sorts_the_stack() raises:
+    same(
+        answer(
+            (
+                "SELECT band FROM tiers UNION ALL SELECT qty FROM sales WHERE"
+                " qty > 25 ORDER BY band"
+            ),
+            "band",
+        ),
+        [3, 20, 30, 40, 40, 99],
+        "the sort runs over both sides",
+    )
+
+
+def test_an_except_is_refused_by_name() raises:
+    with assert_raises(contains="a difference is not a stack of its inputs"):
+        _ = run(
+            "SELECT qty FROM sales EXCEPT SELECT band FROM tiers", session()
+        )
+
+
+def test_an_intersect_is_refused_by_name() raises:
+    with assert_raises(contains="an intersection is not a stack of its inputs"):
+        _ = run(
+            "SELECT qty FROM sales INTERSECT SELECT band FROM tiers", session()
+        )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

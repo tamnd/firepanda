@@ -1157,8 +1157,7 @@ def test_a_date_literal_is_parsed_once_and_compared_as_a_number() raises:
     assert_true(got[3], "2013-08-01")
 
 
-def test_the_parsed_literal_takes_the_columns_resolution_and_not_seconds(
-) raises:
+def test_the_parsed_literal_takes_the_columns_resolution_and_not_seconds() raises:
     """A microsecond column meets a count of microseconds, so nothing rescales.
 
     The alternative is a literal fixed at seconds, which would drag the whole
@@ -1173,9 +1172,7 @@ def test_the_parsed_literal_takes_the_columns_resolution_and_not_seconds(
     assert_equal(
         Int(resolved.as_scalar[DType.int64]()), 1372636800_000000, "count"
     )
-    assert_true(
-        resolved.type == LogicalType.timestamp(TimeUnit.MICRO), "type"
-    )
+    assert_true(resolved.type == LogicalType.timestamp(TimeUnit.MICRO), "type")
 
 
 def test_resolving_a_date_literal_twice_is_the_same_answer() raises:

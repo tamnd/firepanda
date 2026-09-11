@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a UNION runs, and stacking it reads no rows
+
+`SELECT qty FROM sales UNION ALL SELECT band FROM tiers` gives back one on top of the other, and without `ALL` it gives back one of each row. Every input is a line of the same plan, so each one is lowered and run the way a join's build side is, and the frames that come back become the frame the pipeline reads.
+
+Stacking them moves chunks rather than copying rows. A frame is already a list of chunks per column and a union of two frames is those lists one after the other, so nothing is read and nothing is allocated beyond the lists themselves. Lining them up is by position rather than by name, which is what a union means in SQL: the answer takes the first input's names and the rest line up under them whatever they call themselves.
+
+A union without `ALL` is the stack with a distinct above it, and that is the group by with nothing to reduce that `SELECT DISTINCT` already lowers to. So the second half of the feature is a key list and no new operator.
+
+The inputs are run rather than streamed, which is the same trade the join's build side makes and is worse here, because a union streams perfectly well in principle: a row of the second input needs nothing from the first. What stops it is that a pipeline reads one source, and giving it two is a change to the driver rather than to lowering. Everything is in memory at once for now and the docstring says so.
+
+`EXCEPT` and `INTERSECT` are the same plan node with another code on it and neither is a stack, so both are refused by name. Deciding a row of the left needs the right hashed first, which is an operator nobody has written.
+
+Part of #309.
+
 ### Added: SELECT 1 runs, because a constant can be a column now
 
 `Constant` in `exec/node.mojo`, the operator that appends a column holding the same value in every row. It is `filled_block` over the width of the chunk, and it is what `SELECT 1` and `SELECT 1 + 1 AS two` were waiting for.
