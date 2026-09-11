@@ -29,7 +29,7 @@ from firepanda.kernel.unary import UnaryOp
 from firepanda.plan.bind import bind
 from firepanda.plan.lower import lower
 from firepanda.plan.merge import merge
-from firepanda.plan.node import NO_LIMIT, Plan
+from firepanda.plan.node import NO_LIMIT, SET_EXCEPT, SET_INTERSECT, Plan
 from firepanda.plan.simplify import simplify
 
 
@@ -1514,6 +1514,142 @@ def test_a_literal_table_holds_a_missing_value() raises:
     var pipe = lower(plan, root, List[DataFrame]())
     var out = pipe^.run()
     valid(present(out, "a"), [True, False], "the second row is missing")
+
+
+def test_a_union_all_of_two_scans_is_one_on_top_of_the_other() raises:
+    var plan = Plan()
+    var top = plan.scan("sales", ["qty"], 0)
+    var bottom = plan.scan("tiers", ["band"], 1)
+    var root = plan.union([top, bottom], all=True)
+    var out = run_two(plan, root)
+
+    assert_equal(out.width(), 1, "one column")
+    same(
+        read_back(out, "qty"),
+        [5, 20, 3, 40, 12, 8, 25, 1, 30, 15, 3, 20, 40, 99],
+        "the first input then the second",
+    )
+
+
+def test_a_union_takes_the_first_input_s_names() raises:
+    """The two sides call their column different things, and a union lines its
+    inputs up by position, so the answer is called what the first one calls
+    it."""
+    var plan = Plan()
+    var top = plan.scan("sales", ["qty"], 0)
+    var bottom = plan.scan("tiers", ["band"], 1)
+    var root = plan.union([top, bottom], all=True)
+    var out = run_two(plan, root)
+
+    assert_equal(out.schema[0].name, "qty", "the first input's name")
+
+
+def test_a_union_without_all_keeps_one_of_each_row() raises:
+    var plan = Plan()
+    var top = plan.scan("sales", ["qty"], 0)
+    var bottom = plan.scan("tiers", ["band"], 1)
+    var root = plan.union([top, bottom], all=False)
+    var out = run_two(plan, root)
+
+    # 3, 20 and 40 are in both inputs, and 99 is only in the second.
+    same(
+        read_back(out, "qty"),
+        [5, 20, 3, 40, 12, 8, 25, 1, 30, 15, 99],
+        "one of each, in the order each was first seen",
+    )
+
+
+def test_a_union_of_three_inputs_is_one_node() raises:
+    """Stacking is associative, so a chain of unions is one node with a list of
+    inputs rather than a nest of two input nodes."""
+    var plan = Plan()
+    var a = plan.scan("tiers", ["band"], 1)
+    var b = plan.scan("sales", ["qty"], 0)
+    var c = plan.values(
+        [
+            plan.exprs.literal(Value(Int64(7))),
+            plan.exprs.literal(Value(Int64(8))),
+        ],
+        [String("n")],
+    )
+    var root = plan.union([a, b, c], all=True)
+    var out = run_two(plan, root)
+
+    same(
+        read_back(out, "band"),
+        [3, 20, 40, 99, 5, 20, 3, 40, 12, 8, 25, 1, 30, 15, 7, 8],
+        "all three in order",
+    )
+
+
+def test_each_input_of_a_union_may_be_a_query_of_its_own() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", ["qty"], 0)
+    var qty = plan.exprs.column("qty")
+    var big = plan.exprs.binary(
+        BinaryOp.GT, qty, plan.exprs.literal(Value(Int64(25)))
+    )
+    var top = plan.filter(scan, big)
+    var other = plan.scan("tiers", ["band"], 1)
+    var band = plan.exprs.column("band")
+    var small = plan.exprs.binary(
+        BinaryOp.LT, band, plan.exprs.literal(Value(Int64(10)))
+    )
+    var bottom = plan.filter(other, small)
+    var root = plan.union([top, bottom], all=True)
+    var out = run_two(plan, root)
+
+    same(read_back(out, "qty"), [40, 30, 3], "what each side kept")
+
+
+def test_a_union_is_a_source_the_rest_of_the_line_reads() raises:
+    var plan = Plan()
+    var top = plan.scan("sales", ["qty"], 0)
+    var bottom = plan.scan("tiers", ["band"], 1)
+    var stacked = plan.union([top, bottom], all=True)
+    var qty = plan.exprs.column("qty")
+    var big = plan.exprs.binary(
+        BinaryOp.GT, qty, plan.exprs.literal(Value(Int64(25)))
+    )
+    var root = plan.filter(stacked, big)
+    var out = run_two(plan, root)
+
+    same(read_back(out, "qty"), [40, 30, 40, 99], "the filter over the stack")
+
+
+def test_a_union_whose_inputs_are_different_widths_is_refused_by_name() raises:
+    """Binding refuses this before lowering sees it, which is the earlier and
+    the better place, so the check in lowering is the one that catches a plan
+    that was never bound rather than this."""
+    var plan = Plan()
+    var top = plan.scan("sales", List[String](), 0)
+    var bottom = plan.scan("tiers", ["band"], 1)
+    var root = plan.union([top, bottom], all=True)
+
+    with assert_raises(contains="a union is between a 2 column input"):
+        _ = bind(plan, root, two_schemas())
+
+
+def test_a_difference_is_refused_by_name() raises:
+    var plan = Plan()
+    var top = plan.scan("sales", ["qty"], 0)
+    var bottom = plan.scan("tiers", ["band"], 1)
+    var root = plan.setop([top, bottom], SET_EXCEPT, all=True)
+    _ = bind(plan, root, two_schemas())
+
+    with assert_raises(contains="a difference is not a stack of its inputs"):
+        _ = lower(plan, root, two_frames())
+
+
+def test_an_intersection_is_refused_by_name() raises:
+    var plan = Plan()
+    var top = plan.scan("sales", ["qty"], 0)
+    var bottom = plan.scan("tiers", ["band"], 1)
+    var root = plan.setop([top, bottom], SET_INTERSECT, all=True)
+    _ = bind(plan, root, two_schemas())
+
+    with assert_raises(contains="an intersection is not a stack of its inputs"):
+        _ = lower(plan, root, two_frames())
 
 
 def main() raises:

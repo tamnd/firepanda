@@ -592,9 +592,7 @@ def test_a_clock_reading_against_a_date_column_is_refused() raises:
     nobody checks, so this refuses and says where the clock reading should go
     instead."""
     with assert_raises(contains="nowhere to put it"):
-        _ = parse_instant(
-            "2013-07-01 12:00:00".as_bytes(), LogicalType.DATE32
-        )
+        _ = parse_instant("2013-07-01 12:00:00".as_bytes(), LogicalType.DATE32)
 
 
 def test_a_naive_column_will_not_meet_a_literal_that_names_an_offset() raises:
