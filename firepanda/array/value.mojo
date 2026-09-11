@@ -55,8 +55,14 @@ struct Value(Copyable, Equatable, Movable, Writable):
     no particular width, and numpy 2 and pandas 3 both give it the width of
     whatever array it meets rather than a width of its own. So a value read out
     of a Python scalar is marked here, and `binary_value_any` resolves the width
-    against the column when it is applied. Everything built in Mojo is strongly
-    typed by construction and leaves this false.
+    against the column when it is applied.
+
+    A Mojo `Int` is marked too, and for the same reason rather than by analogy.
+    `Int` is the index sized type, so a caller who writes `Value(100)` has named
+    a number and not a width, and the width they would have named is whatever
+    the column turns out to be. Everything else built in Mojo carries a dtype in
+    its own type and leaves this false, so `Value(Int64(100))` is strong and
+    `Value(100)` is not.
 
     It is a fact about where the value came from and not about what it holds,
     which is why `__eq__` ignores it. A weak 2 and an int64 2 are the same
@@ -86,6 +92,28 @@ struct Value(Copyable, Equatable, Movable, Writable):
         self.type = logical_for(dt)
         self.present = True
         self.weak = False
+
+    def __init__(out self, value: Int):
+        """Constructs a value from a Mojo integer, which carries no width.
+
+        `Int` is the index sized type, and the generic constructor above would
+        keep that, giving a logical type of `int` that no kernel has a case for.
+        The number is held as an int64 and marked weak instead, which is what a
+        Python integer arriving through the bridge becomes, so the same literal
+        meets an int8 column at int8 and an int64 column at int64.
+
+        `Value(Int64(100))` still goes to the generic constructor and is still
+        strong, since a caller who wrote the width meant it.
+
+        Args:
+            value: The number.
+        """
+        self.bits = Int64(value).cast[DType.uint64]()
+        self.real = 0.0
+        self.text = None
+        self.type = LogicalType.INT64
+        self.present = True
+        self.weak = True
 
     def __init__(out self, value: Bool):
         """Constructs a bool value.

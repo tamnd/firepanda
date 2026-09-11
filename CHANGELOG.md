@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a literal written as a Mojo integer had a type no kernel could use
+
+`Value(100)` took the dtype of what it was handed, and a Mojo `Int` is `DType.index`, so the literal came out with a logical type of `int`. Nothing has a case for that. Arithmetic on two of them was refused, which meant constant folding handed the expression back untouched and `l_quantity < (100 - 10)` went into execution with the subtraction still in it, evaluated once a row rather than once a query. The answer was right and the pass that exists to remove that cost could not do it.
+
+It is now held as an int64 and marked weak, which is the flag a Python integer already arrives with. A weak value takes the width of the column it meets, so the same literal runs at int8 against an int8 column and at int64 against an int64 one, and `resolve_constant` already knew how to do that. `Value(Int64(100))` is unchanged and is still strong, since `Int` and `Int64` are different types and a caller who wrote the width meant it.
+
+There is no float half to this. A Mojo `1.5` is already a `Float64` by the time a constructor sees it, so it lands on `float64`, which every kernel handles. It is not marked weak and cannot be, because nothing distinguishes it from a width somebody wrote on purpose.
+
+Closes #503.
+
 ## [0.6.60] - 2026-09-11
 
 Built against Mojo 1.0.0 (ed45d567).

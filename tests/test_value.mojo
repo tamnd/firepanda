@@ -188,5 +188,46 @@ def test_printing() raises:
     assert_equal(String(Value(null=LogicalType.INT64)), "null")
 
 
+def test_a_mojo_int_is_a_weak_int64() raises:
+    """`Value(100)` is a number without a width, not an index sized integer.
+
+    The generic constructor takes the dtype of whatever it was handed, and a
+    Mojo `Int` is `DType.index`, which no kernel has a case for. So it landed on
+    a logical type that arithmetic refused, which is what #503 was.
+    """
+    var v = Value(100)
+    assert_equal(v.type, LogicalType.INT64)
+    assert_equal(v.as_scalar[DType.int64](), 100)
+    assert_true(v.weak)
+    assert_true(v.present)
+
+
+def test_a_negative_mojo_int_keeps_its_sign() raises:
+    """The number goes through the unsigned store like every other integer."""
+    var v = Value(-7)
+    assert_equal(v.as_scalar[DType.int64](), -7)
+    assert_equal(String(v), "-7")
+
+
+def test_writing_the_width_keeps_it_strong() raises:
+    """`Value(Int64(100))` said the width, so it is not the widthless form.
+
+    `Int` and `Int64` are different types in Mojo, which is what makes this
+    distinguishable. A float literal is not: `1.5` is already a `Float64` by the
+    time a constructor sees it, so there is no widthless float to mark and the
+    float side of #503 does not exist.
+    """
+    var written = Value(Int64(100))
+    assert_equal(written.type, LogicalType.INT64)
+    assert_false(written.weak)
+    assert_false(Value(1.5).weak)
+    assert_equal(Value(1.5).type, LogicalType.FLOAT64)
+
+
+def test_a_weak_number_equals_the_written_one() raises:
+    """Where it came from is not part of what it holds."""
+    assert_true(Value(100) == Value(Int64(100)))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
