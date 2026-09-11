@@ -135,16 +135,37 @@ projection over the statement's root, applied as the prefix rule that
 A recursive CTE is refused by name. The fixed point it asks for is a node that
 runs its own input until no new rows come out, and the plan has no such node.
 
+### A `USING` or a `NATURAL` join names its keys by column name
+
+Both are one equality per named column, and `NATURAL` is `USING` over every
+name the two sides share. The node is the join the `ON` spelling builds. What
+differs is afterwards: each pair is handed out as one column rather than two,
+so a star over the join writes the name once, and an unqualified reference to
+it lowers pinned to one side instead of being refused for naming two columns.
+Either side's name may still be written in front of it. Which side the merged
+column comes from is which side the join keeps every row of, so a `RIGHT` join
+hands out the right's and every other kind hands out the left's. A `FULL` one
+is refused, because there the answer is the first of the pair that is not null
+and that is a `coalesce` over the join rather than a column of it.
+
+The node underneath still produces both columns of every pair. Dropping one
+would mean a projection between the join and the query above it, and a
+projection is where a column stops carrying the table it came from, which is
+what `t.b` needs to still work. So the pair's other column is left in the node
+and taken out of the names the query may reach instead.
+
 ### What is not lowered yet
 
 Named tables, the table functions above, the derived tables and the CTEs above,
 and the joins over them. A subquery written where an expression goes is refused,
 and so are the column aliases on a derived table and a `LATERAL` one.
-`USING`, `NATURAL`, `POSITIONAL`, `ASOF`, `SEMI` and `ANTI` are
-each refused by name: the first three decide their keys or their output columns
-from something other than the condition, `ASOF` matches on the nearest value
-rather than an equal one, and the last two keep none of the right side, so what
-the rest of the query may name is not the two schemas end to end. A set
+`POSITIONAL`, `ASOF`, `SEMI` and `ANTI` are each refused by name: the first
+pairs its two sides by row number and so reads no column at all, `ASOF` matches
+on the nearest value rather than an equal one, and the last two keep none of the
+right side, so what the rest of the query may name is not the two schemas end to
+end. A `USING` or `NATURAL` join over a subquery is refused as well, since the
+merged name is on both sides and a column a subquery computed carries no table
+to tell the two apart. A set
 operation written `BY NAME` is refused too, since lining two arms up by column
 name is a projection on each arm rather than a different node, and that needs
 each arm's output names threaded back out of the block. Each is a refusal by
@@ -553,12 +574,22 @@ struct _Scope(Movable):
     checked against the columns it actually has. Empty for a scan, which is
     answered by its relation instead."""
 
+    var merged: List[String]
+    """The column names a `USING` or a `NATURAL` join merged."""
+
+    var pinned: List[Int]
+    """Which relation each merged name means. A merged name is on both sides of
+    the join, so a search for it finds two columns and would be refused, and
+    the join is what decides which of the two the query gets."""
+
     def __init__(out self):
         """Starts with nothing in reach, which is what a query with no FROM has.
         """
         self.names = List[String]()
         self.tables = List[Int]()
         self.columns = List[List[String]]()
+        self.merged = List[String]()
+        self.pinned = List[Int]()
 
     def add(mut self, var name: String, table: Int) raises:
         """Puts one name in reach.
@@ -617,6 +648,38 @@ struct _Scope(Movable):
                         return True
                 return False
         return False
+
+    def merge(mut self, var name: String, table: Int):
+        """Records that a join merged a column name into one column.
+
+        A second join merging the same name replaces the first, because the
+        one that decides is the join a reference is written under and that is
+        the innermost one that merged it.
+
+        Args:
+            name: The column name.
+            table: Which relation the merged column comes from.
+        """
+        for i in range(len(self.merged)):
+            if self.merged[i] == name:
+                self.pinned[i] = table
+                return
+        self.merged.append(name^)
+        self.pinned.append(table)
+
+    def merged_at(self, name: StringSlice) -> Int:
+        """Which relation a merged name means.
+
+        Args:
+            name: The column name, written with nothing in front of it.
+
+        Returns:
+            The relation, or `NOT_IN_REACH` when no join merged that name.
+        """
+        for i in range(len(self.merged)):
+            if self.merged[i] == name:
+                return self.pinned[i]
+        return NOT_IN_REACH
 
     def find(self, name: StringSlice) -> Int:
         """Which relation a name is, or minus one when nothing is called that.
@@ -839,7 +902,15 @@ def _lower_expr(
         if parts == 0:
             raise Error("a column with no name")
         if parts == 1:
-            return plan.exprs.column(String(ast.text(ast.at(node.children, 0))))
+            var bare = String(ast.text(ast.at(node.children, 0)))
+            # A name a USING or a NATURAL join merged is on both sides of that
+            # join, so a search would find two columns and refuse. The join
+            # already decided which of the two it hands out, and this is where
+            # that decision is written into the expression.
+            var whose = scope.merged_at(bare)
+            if whose != NOT_IN_REACH:
+                return plan.exprs.column_of(whose, bare^)
+            return plan.exprs.column(bare^)
         if parts == 2:
             var qualifier = ast.text(ast.at(node.children, 0))
             var found = scope.find(qualifier)
@@ -1356,12 +1427,6 @@ def _join_kind(text: StringSlice) raises -> JoinKind:
         If it is a join this does not lower yet.
     """
     var said = String(text).upper()
-    if said.find("NATURAL") != -1:
-        raise Error(
-            "firepanda does not lower a NATURAL join yet, which takes its keys"
-            " from the column names the two sides happen to share and then"
-            " outputs one of each pair rather than both"
-        )
     if said.find("ASOF") != -1:
         raise Error(
             "firepanda does not lower an ASOF join yet, which matches a row"
@@ -1538,6 +1603,183 @@ def _pair(
         schema.append(right.schema[i].copy())
         origin.append(right.origin[i])
     return _From(at, schema^, origin^)
+
+
+def _only(side: _From, name: StringSlice, word: StringSlice) raises -> Int:
+    """Where a side's one column of a given name is.
+
+    Args:
+        side: The input.
+        name: The column name the join named.
+        word: `USING` or `NATURAL`, for the message.
+
+    Returns:
+        Its position in that side's columns.
+
+    Raises:
+        If the side has no column of that name, or more than one.
+    """
+    var found = -1
+    for i in range(len(side.schema)):
+        if side.schema[i].name == name:
+            if found != -1:
+                raise Error(
+                    String(
+                        "a ",
+                        word,
+                        " join names '",
+                        name,
+                        (
+                            "', and one side of it has two columns called that,"
+                            " so there is no one column for the pair to be"
+                        ),
+                    )
+                )
+            found = i
+    if found == -1:
+        raise Error(
+            String(
+                "a ",
+                word,
+                " join names '",
+                name,
+                "', and one side of it has no column called that",
+            )
+        )
+    return found
+
+
+def _merged(
+    mut plan: Plan,
+    left: _From,
+    right: _From,
+    names: List[String],
+    kind: JoinKind,
+    mut scope: _Scope,
+    word: StringSlice,
+) raises -> _From:
+    """Lowers a join that names its keys by the columns the two sides share.
+
+    `USING` and `NATURAL` are one thing written two ways. Both join on an
+    equality per named column and both hand out one column of each pair rather
+    than two, where a condition written with `ON` hands out both. So the node
+    is the same join the `ON` spelling builds and the difference is all in what
+    the query may write afterwards.
+
+    The node underneath still produces both columns of every pair, because a
+    join is a join and nothing here drops a column. What changes is the two
+    things that decide what a name means. The pair's column on the right comes
+    out of the schema this hands back, so a star over the join writes it once.
+    And the name goes into the scope as merged, so an unqualified reference to
+    it lowers pinned to one side instead of being refused for naming two
+    columns. Either side may still be written in front of it, which is DuckDB's
+    rule and Postgres's.
+
+    Which side the merged column comes from is which side the join keeps every
+    row of. A `RIGHT` join pads the left, so the left's copy is null on a row
+    the left did not match and the right's is the answer. Every other kind
+    works the other way round. A `FULL` join pads both and the answer there is
+    the first of the two that is not null, which is a `coalesce` and not a
+    column, so that one is refused.
+
+    Args:
+        plan: Where the node goes.
+        left: The left input.
+        right: The right input.
+        names: The columns the join pairs, in the order they were written.
+        kind: Which rows the join keeps.
+        scope: What the FROM has put in reach, told about the merged names.
+        word: `USING` or `NATURAL`, for the messages.
+
+    Returns:
+        The join, with one column of each pair rather than both.
+
+    Raises:
+        If a named column is not on both sides exactly once, if it carries no
+        relation to pin it to, or if the join is a FULL one.
+    """
+    if kind == JoinKind.OUTER:
+        raise Error(
+            String(
+                "firepanda does not lower a FULL ",
+                word,
+                (
+                    " join yet. A full join pads both sides, so the merged"
+                    " column is the first of the pair that is not null rather"
+                    " than one side's, and that is a coalesce over the join"
+                    " rather than a column of it"
+                ),
+            )
+        )
+
+    var left_keys = List[Int]()
+    var right_keys = List[Int]()
+    for i in range(len(names)):
+        ref name = names[i]
+        var here = _only(left, name, word)
+        var there = _only(right, name, word)
+        if left.origin[here] == UNBOUND or right.origin[there] == UNBOUND:
+            raise Error(
+                String(
+                    "firepanda does not lower a ",
+                    word,
+                    " join over a subquery yet. '",
+                    name,
+                    (
+                        "' is a column of both sides, and telling the two apart"
+                        " takes the table each came from, which a column a"
+                        " subquery computed does not carry"
+                    ),
+                )
+            )
+        left_keys.append(plan.exprs.column_of(left.origin[here], String(name)))
+        right_keys.append(
+            plan.exprs.column_of(right.origin[there], String(name))
+        )
+        var whose = left.origin[here]
+        if kind == JoinKind.RIGHT:
+            whose = right.origin[there]
+        scope.merge(String(name), whose)
+
+    # No shared column at all is every pairing, which is what a NATURAL join of
+    # two tables with nothing in common means and what DuckDB answers.
+    var built = JoinKind.CROSS if len(names) == 0 else kind
+    var at = plan.join(left.at, right.at, left_keys^, right_keys^, built)
+
+    var schema = Schema(copy=left.schema)
+    var origin = left.origin.copy()
+    for i in range(len(names)):
+        # The pair keeps the left's position, which is where DuckDB leaves it,
+        # and the relation is whichever side the rows are certainly from.
+        origin[_only(left, names[i], word)] = scope.merged_at(names[i])
+    for i in range(len(right.schema)):
+        var paired = False
+        for j in range(len(names)):
+            if names[j] == right.schema[i].name:
+                paired = True
+                break
+        if paired:
+            continue
+        schema.append(right.schema[i].copy())
+        origin.append(right.origin[i])
+    return _From(at, schema^, origin^)
+
+
+def _shared(left: _From, right: _From) raises -> List[String]:
+    """The column names both sides of a join have, which is what NATURAL pairs.
+
+    Args:
+        left: The left input.
+        right: The right input.
+
+    Returns:
+        The names, in the order the left side has them.
+    """
+    var out = List[String]()
+    for i in range(len(left.schema)):
+        if right.has(left.schema[i].name) != 0:
+            out.append(String(left.schema[i].name))
+    return out^
 
 
 def _table(
@@ -1868,9 +2110,12 @@ def _joined(
     would test the padded rows too and answer a different query. A residual on
     one is refused rather than moved.
 
+    A `USING` or a `NATURAL` join has no condition to split. It names its keys
+    by column name instead, and `_merged` is that half.
+
     Args:
         ast: The arenas.
-        at: The `REF_JOIN`.
+        at: The `REF_JOIN` or `REF_JOIN_USING`.
         catalog: What the table names are resolved against.
         plan: Where the nodes go.
         sources: One schema per scan, appended to.
@@ -1887,6 +2132,16 @@ def _joined(
     var kind = _join_kind(ast.text(node.payload))
     var left = _source(ast, node.a, catalog, plan, sources, scope, ctes)
     var right = _source(ast, node.b, catalog, plan, sources, scope, ctes)
+
+    if node.kind == REF_JOIN_USING:
+        var named = List[String]()
+        for i in range(ast.length(node.children)):
+            named.append(String(ast.text(ast.at(node.children, i))))
+        return _merged(plan, left, right, named, kind, scope, "USING")
+    if String(ast.text(node.payload)).upper().find("NATURAL") != -1:
+        return _merged(
+            plan, left, right, _shared(left, right), kind, scope, "NATURAL"
+        )
 
     var written = ast.items(node.children)
     var conjuncts = List[UInt32]()
@@ -1994,10 +2249,7 @@ def _source(
             )
         return _source(ast, source.a, catalog, plan, sources, scope, ctes)
     if source.kind == REF_JOIN_USING:
-        raise Error(
-            "firepanda does not lower a USING join yet, which joins on the"
-            " named columns and then outputs one of each pair rather than both"
-        )
+        return _joined(ast, at, catalog, plan, sources, scope, ctes)
     if source.kind == REF_SUBQUERY:
         return _subquery(ast, at, catalog, plan, sources, scope, ctes)
     if source.kind == REF_FUNCTION:
@@ -2662,17 +2914,17 @@ def _expand(
             " although firepanda/sql/star.mojo is all three of them"
         )
     for i in range(len(schema)):
-        var same = 0
-        for j in range(len(schema)):
-            if schema[j].name == schema[i].name:
-                same += 1
-        if same == 1:
+        # Every column that came from a table says which one. A join of two
+        # tables that share a column name puts both of them in the star and an
+        # unqualified reference to either would be refused, and a USING join
+        # hands out one of a pair while the node below it still produces both,
+        # so in neither case is the name on its own enough. Which position it
+        # is remains binding's to work out, and that is the one thing this
+        # stage cannot know. A column a projection computed has no relation to
+        # name and goes on as it is.
+        if origin[i] == UNBOUND:
             outputs.append(plan.exprs.column(String(schema[i].name)))
         else:
-            # A join of two tables that share a column name puts both of them in
-            # the star, and an unqualified reference to either would be refused,
-            # so each says which input it is. Which position is still binding's
-            # to work out, and it is the one thing this stage cannot know.
             outputs.append(
                 plan.exprs.column_of(origin[i], String(schema[i].name))
             )
