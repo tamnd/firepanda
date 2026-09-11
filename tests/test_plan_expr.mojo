@@ -24,6 +24,7 @@ from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.unary import UnaryOp
 from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
+from firepanda.plan.print import render_expr
 
 
 def bound(mut tree: Expressions, var name: String, at: Int, table: Int) -> Int:
@@ -275,6 +276,45 @@ def test_the_kinds_print_as_the_words_explain_uses() raises:
     assert_equal(String(ExprKind.LITERAL), "literal", "and a constant as one")
     assert_equal(String(ExprKind.BINARY), "binary", "and a binary as one")
     assert_equal(String(ExprKind.WINDOW), "window", "and a window as one")
+
+
+def test_a_graft_puts_an_expression_where_a_name_was() raises:
+    var tree = Expressions()
+    var doubled = tree.binary(
+        BinaryOp.MUL, tree.column("x"), tree.literal(Value(Int64(2)))
+    )
+    var bumped = tree.binary(
+        BinaryOp.ADD, tree.column("a"), tree.literal(Value(Int64(1)))
+    )
+    var out = tree.graft(bumped, ["a"], [doubled])
+    assert_equal(render_expr(tree, out), "(x * 2) + 1", "substituted in")
+    assert_equal(
+        render_expr(tree, bumped),
+        "a + 1",
+        "and the expression that went in is untouched",
+    )
+
+
+def test_a_graft_reaches_every_mention_of_a_name() raises:
+    var tree = Expressions()
+    var x = tree.column("x")
+    var twice = tree.binary(BinaryOp.ADD, tree.column("a"), tree.column("a"))
+    var out = tree.graft(twice, ["a"], [x])
+    assert_equal(render_expr(tree, out), "x + x", "both of them")
+
+
+def test_a_graft_of_a_bare_column_is_the_replacement() raises:
+    var tree = Expressions()
+    var a = tree.column("a")
+    var one = tree.literal(Value(Int64(1)))
+    assert_equal(tree.graft(a, ["a"], [one]), one, "nothing left of the column")
+
+
+def test_a_graft_with_more_names_than_expressions_is_refused() raises:
+    var tree = Expressions()
+    var a = tree.column("a")
+    with assert_raises(contains="expressions to put in their place"):
+        _ = tree.graft(a, ["a", "b"], [a])
 
 
 def main() raises:

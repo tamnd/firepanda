@@ -25,6 +25,21 @@ A negative position counts from the end, and the counting happens in the binding
 One shape of answer is refused rather than approximated. `df.iloc[0]` and `df.loc[label]` on a unique index collapse the row axis and leave the columns, so both answer a series whose labels are the column names, and a series has one type while a frame has one per column. Nothing here computes a type that every column fits, and inventing that rule inside an indexing accessor would put a type rule in the last place anybody would look for it. `docs/specs/36-a-position-and-a-label-are-different-questions.md` has the whole argument and the table of what else is refused.
 
 Part of #156, after #500.
+### Added: slice pushdown and top n, so ten rows are not paid for six million times
+
+Four of the twenty two TPC-H queries end in an order by with a limit on it, and the difference between answering one of those by sorting the whole table and answering it by keeping the best ten rows as they go past is most of the query. `limits` is the pass that spots the shape.
+
+Three rules. A limit above a sort puts a bound on the sort, which is a sort that only has to get the first n rows right, which is what a heap of size n does in one pass instead of what a full sort does in several. A limit above a limit becomes one limit, because two slices of a row sequence compose into one slice and working out which one is arithmetic that is easier to get right once here than at every place that builds a pair. And a limit above a projection swaps with it, so the projection evaluates n rows rather than all of them.
+
+The bound on a sort is deliberately advisory. The limit that produced it is still sitting above the sort and still doing the cutting, so an operator that has not learned to read the bound is slower than one that has and is not wrong. That is what lets the rule land now, before anything lowers a sort at all. A sort node comes out of the builder with its length set to `NO_LIMIT` rather than to zero, since zero would mean a sort that owes nobody any rows and the absence of a bound has to be written as an absence.
+
+The swap is worth describing because it is the way around the thing that made predicate pushdown rebuild the entire node list. Pushing a node down makes a new parent for an old child, which the arena's creation order forbids. But when both nodes have exactly one input, nothing has to move: the two nodes trade contents and keep their indices and their inputs. The upper index goes on being the upper index and simply holds the projection now. Same plan, same order, no rebuild, and the root index a caller is holding still means the root. The trick works for any two adjacent unary nodes and nothing about it is specific to limits.
+
+A projection is only swapped with when every expression in it is elementwise. A window function reads its whole partition, so cutting the rows down before it runs gives a different answer rather than the same answer sooner. A filter is never swapped with, because a limit below a filter counts rows the filter was going to throw away, and the same goes for a distinct and an aggregate. A union is not pushed into either, since capping each arm means a new node above each arm and a new node comes out above the union rather than below it, which wants the rebuild machinery and belongs with a pass that already has it. Every rule declines when the node below has more than one reader.
+
+Twenty three tests, and the composition cases read as a table, since a slice of a slice has four different answers depending on which of the two lengths is absent. An outer limit that runs off the end of an inner one keeps what is left rather than what was asked for, and an offset past the end of an inner limit keeps nothing.
+
+Part of #377.
 
 ### Added: a column that is also the labels
 
@@ -39,6 +54,24 @@ The round trip is the specification. `df.set_index("k").reset_index()` has to gi
 Twelve arguments across the three frame methods are declared and refused by name rather than being left out, and six of the twelve are waiting on the same missing thing, which is the MultiIndex. `docs/specs/35-a-column-that-is-also-the-labels.md` has the table and the argument it makes.
 
 Part of #156, after #498.
+
+### Added: projection merging, so the rows are walked once and not once a node
+
+Two projections in a row are now one projection. The upper one reads the lower one's outputs by name, so merging them means putting the lower one's expression where the name was, and `b = a + 1` over `a = x * 2` becomes `b = x * 2 + 1` reading `x` directly. The node that computed `a` stops being reachable and the walk it was doing stops happening.
+
+This is the pass that pays for the two before it. Projection pushdown narrows a node to the columns above it by putting a projection there, predicate pushdown leaves projections behind when a filter moves past one, and a frame API answers `df.assign(a = ...).assign(b = ...)` with one node per call whatever the planner does. So plans arrive here with a line of projections in them, each one walking every row of the chunk below it to hand most of the columns straight back. The q1 shape in the spec has two additions stacked, and folding them into one node takes it from 93 ms to 37 ms. That is not the arithmetic getting faster, it is the second walk not happening.
+
+Unlike predicate pushdown, this one rewrites in place. Moving a filter down makes new parents for old children, which is what the arena's creation order forbids, so that pass has to rebuild the node list. Merging goes the other way: the upper node keeps its index, takes over the lower node's input, and since the upper index was already above the lower one and the lower one was already above its own input, the order still holds. Nothing moves and the indices a caller holds still mean what they did.
+
+The merged out node is left in the arena rather than compacted away. Nothing reaches it from the root, so it costs one struct and no work, and paying for a rebuild to reclaim it would give up the in place property that makes the pass cheap in the first place.
+
+There are three refusals. The lower node has to have exactly one reader, because substituting into two readers turns one evaluation into two, which is the opposite of the point. The lower node's output names have to be distinct, since a name that appears twice resolves to the first and substituting by name would be guessing which was meant, the same refusal projection pushdown makes for the same reason. And an output the upper node reads more than once may only be substituted when it is a plain column or a literal, so `b = a + a` over `a = expensive(x)` is declined rather than merged into computing the expensive thing twice. Common subexpression elimination is the pass that makes that shape safe and until it exists this one keeps its hands off.
+
+The substitution itself is `Expressions.graft`, added next to the three analyses rather than hidden inside the pass, because folding one node's outputs into the node above it is something more than one pass is going to want. It copies only the nodes on the path to a replaced column, so an expression with nothing to replace in it comes back as the index that went in, and an expression handed to it is never rewritten under a node that shares it.
+
+Seventeen tests on the pass and four on the graft. Nothing calls any of this yet and the eager API does not change when it does.
+
+Part of #377.
 
 ### Added: the two ends of a row
 

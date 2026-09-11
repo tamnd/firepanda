@@ -584,6 +584,13 @@ struct Plan(Movable, Sized):
         One input, one expression per key, and two flags per key held as one
         list with the descending flags first.
 
+        The length comes out `NO_LIMIT` and stays there unless `limits` puts a
+        bound on it, which is how a top n is written down: a sort that only has
+        to get the first n rows right. Nothing is obliged to honour the bound,
+        because the limit that produced it is still sitting above the sort and
+        still doing the cutting, so an operator that ignores it is slow rather
+        than wrong.
+
         Args:
             input: The node sorted.
             keys: The sort keys, most significant first.
@@ -626,7 +633,7 @@ struct Plan(Movable, Sized):
                 flags^,
                 0,
                 0,
-                0,
+                NO_LIMIT,
                 UNBOUND,
                 String(),
             )
