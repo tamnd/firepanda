@@ -42,6 +42,20 @@ it might swap past have stopped being rearranged underneath it.
 The passes the spec lists that are not written yet slot into this function and
 nowhere else, which is the point of having it.
 
+## The one pass outside the loop
+
+Common subplan elimination runs once, after the loop has settled, and no pass in
+the loop ever sees what it did. It is the only pass that leaves the plan a graph
+rather than a tree and the rest are written for a tree. Two of them would be
+wrong on a node with two parents: projection pushdown narrows a node to the
+columns the node above it asked for, and a node with two parents has two answers
+to that, and slice pushdown swaps the contents of two adjacent nodes, which
+rewrites the lower one under whoever else was reading it.
+
+That is also where the saving is. Nothing is saved by the plan being smaller
+while it is being rewritten. The saving is one scan and one filter at run time
+instead of two, and that is cashed when the plan is lowered.
+
 ## Why it runs more than once
 
 Because a pass can make work for a pass that has already run. Predicate pushdown
@@ -83,6 +97,7 @@ from firepanda.plan.print import explain
 from firepanda.plan.prune import prune
 from firepanda.plan.push import push
 from firepanda.plan.simplify import simplify
+from firepanda.plan.subplan import subplan
 
 comptime SWEEPS = 4
 """How many times the whole pipeline may run before it stops looking.
@@ -119,6 +134,9 @@ def optimize(mut plan: Plan, root: Int, sources: List[Schema]) raises -> Int:
         if after == before:
             break
         before = after^
+    # Once and at the end, because it is the only pass that leaves the plan a
+    # graph and every pass in the sweep is written for a tree.
+    _ = subplan(plan, at, sources)
     return at
 
 

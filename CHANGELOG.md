@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: two lines of Python that read the same rows now read them once
+
+Common subplan elimination, the ninth planner pass, in `firepanda/plan/subplan.mojo`. It is the other half of the spec section that gave us expression elimination, one level up. Two plan nodes of the same shape over the same inputs become one node, and everything that read the second reads the first.
+
+This is worth more to a dataframe library than it is to SQL, because a person writing Python repeats themselves in a way nobody writing SQL does. `df.filter(cond).select(a)` and `df.filter(cond).select(b)` on two adjacent lines is a common subplan, and until now it was two scans and two filters.
+
+The shape is a key over every field of the node: kind, join kind, offset and length, table and source, names and sort directions, the shapes of its expressions, and the nodes its inputs settled on. The expression part reuses the key that expression elimination already writes, now called `cse.key_for`, with one change. Within a node an operand can go into the key as its arena index, because equal shapes below have already been unified and so an index is a shape. Across two nodes that has never happened and they share no indices at all, so each operand goes in as its own key instead.
+
+The pass runs once, after the sweep loop has settled, rather than inside a sweep. It is the only pass that leaves the plan a graph rather than a tree, and the rest are written for a tree. Two of them would be wrong on a node with two parents: projection pushdown narrows a node to the columns the node above it asked for, and a node with two parents has two answers to that, and slice pushdown swaps the contents of two adjacent nodes, which rewrites the lower one under whoever else was reading it. Running it at the end also matches where the saving is, since nothing is saved by the plan being smaller and the saving is one scan and one filter at run time instead of two.
+
+The executor cannot spend that yet. Lowering walks a line of operators and a shared node is a fork, so a plan this pass turned into a graph lowers as though the sharing were not there. The pass is still right and still worth having now, because the day lowering grows an operator that can hand one chunk stream to two readers, the plans arriving at it already say where to put one.
+
+Unlike the passes that take a node out, this one hands back a schema rather than a root, because the root cannot be the node that goes. A node the root could be unified with would have to be one the root reaches, a node the root reaches is strictly shallower, and two nodes with equal keys have equal structure and so equal depth.
+
 ### Added: a filter that cannot keep a row stops costing anything
 
 Empty and constant pruning, the eighth planner pass, in `firepanda/plan/empty.mojo`. It runs second in the pipeline, right after simplification, because simplification is what turns a predicate into the constant this pass needs and because every node it takes out is a node the five passes below it never have to look at.

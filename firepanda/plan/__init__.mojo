@@ -66,6 +66,13 @@ it had, and a filter that folded to true is spliced out, as is any filter, sort,
 distinct or limit sitting over something empty. It is the only pass that makes
 the plan smaller rather than different.
 
+`subplan.mojo` is common subplan elimination, the other half of the section that
+gave us the expression one and a level up from it. Two plan nodes of the same
+shape over the same inputs become one node, so `df.filter(cond).select(a)` and
+`df.filter(cond).select(b)` on two adjacent lines share their filter. It is the
+only pass that leaves the plan a graph rather than a tree, which is why it runs
+once at the end rather than inside the loop.
+
 `optimize.mojo` is the pipeline: every pass above, in the order the spec fixes,
 run again if a run changed anything and up to a small bound. It is the one entry
 point, and the passes that are not written yet slot into it and nowhere else.
@@ -93,3 +100,4 @@ from .print import explain, render_expr
 from .prune import prune
 from .push import push
 from .simplify import ROUNDS, simplify, simplify_expr
+from .subplan import subplan
