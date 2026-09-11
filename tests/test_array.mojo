@@ -426,6 +426,86 @@ def test_chunked_combine_of_nothing_is_an_empty_column() raises:
     assert_equal(flat.dtype(), DType.int64)
 
 
+def test_a_column_counts_its_distinct_values_once() raises:
+    """The count, the cache and what the cache leaves out.
+
+    Nulls are not values, so a column of five rows holding three numbers and
+    two nulls has three. Asking twice is one count, and there is no way to see
+    that from the outside beyond the field saying so, which is what is checked.
+    """
+    var values = Array[DType.int64](5)
+    values[0] = Int64(7)
+    values[1] = Int64(7)
+    values[2] = Int64(3)
+    values[3] = Int64(9)
+    values[4] = Int64(0)
+    values.set_null(4)
+
+    var column = ChunkedArray(AnyArray(values^))
+    assert_equal(column.distinct, -1)
+    assert_equal(column.prove_distinct(), 3)
+    assert_equal(column.distinct, 3)
+    assert_equal(column.prove_distinct(), 3)
+
+
+def test_a_column_counts_across_its_chunks() raises:
+    """Two chunks holding a value between them, which is one value.
+
+    A count per chunk added up would say two, because each chunk holds the 4
+    on its own. The column has to flatten a copy to get this right and the
+    answer is what says it did.
+    """
+    var first = Array[DType.int64](2)
+    first[0] = Int64(4)
+    first[1] = Int64(5)
+    var second = Array[DType.int64](2)
+    second[0] = Int64(4)
+    second[1] = Int64(6)
+
+    var column = ChunkedArray(AnyArray(first^))
+    column.append(AnyArray(second^))
+    assert_equal(column.prove_distinct(), 3)
+
+
+def test_a_column_forgets_its_count_when_a_chunk_arrives() raises:
+    """The invalidation, which is the whole reason the field is safe.
+
+    An appended chunk can hold values the column already had or values it did
+    not, so a count taken before it says nothing afterwards. Unknown is always
+    safe and a stale number never is, so the field goes back rather than being
+    kept current.
+    """
+    var first = Array[DType.int64](2)
+    first[0] = Int64(1)
+    first[1] = Int64(2)
+    var column = ChunkedArray(AnyArray(first^))
+    assert_equal(column.prove_distinct(), 2)
+
+    var second = Array[DType.int64](1)
+    second[0] = Int64(2)
+    column.append(AnyArray(second^))
+    assert_equal(column.distinct, -1)
+    assert_equal(column.prove_distinct(), 2)
+
+
+def test_a_column_takes_a_count_the_caller_already_knows() raises:
+    """`mark_distinct`, which is unchecked, and the way back to unknown.
+
+    A caller that has just factorized the column knows the answer and this is
+    where it says so, the way `mark_sorted` is where it says what order a sort
+    left behind. A negative number is how it says it no longer knows.
+    """
+    var values = Array[DType.int64](3)
+    for i in range(3):
+        values[i] = Int64(i)
+    var column = ChunkedArray(AnyArray(values^))
+
+    column.mark_distinct(3)
+    assert_equal(column.distinct, 3)
+    column.mark_distinct(-1)
+    assert_equal(column.distinct, -1)
+
+
 def test_a_typed_array_has_the_layout_of_the_storage_it_holds() raises:
     """The assumption `AnyArray.as_typed_view` reinterprets a pointer under.
 

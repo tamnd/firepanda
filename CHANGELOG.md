@@ -8,6 +8,24 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a column remembers how many distinct values it holds
+
+A factorize hands out an ordinal per distinct value, so the number it handed out is the distinct count of the column it read. Every caller threw that away, and a group by on a key followed by a `nunique` on the same key built two hash tables over the same values to arrive at the same number twice.
+
+`ChunkedArray` now carries a distinct count beside the sortedness flag, under the same discipline. Unknown is always safe, the answer is never guessed, and an `append` puts it back to unknown rather than trying to keep it current. Nulls are not counted, which is `nunique`'s rule.
+
+A group by on one key writes it, because its output holds one row per group and that height less any null row is the count. A group by on more than one key writes nothing, since a value in one key column can come back several times beside a different second key, and the number of groups says nothing about either column on its own.
+
+Two new methods and one new frame method:
+
+- `ChunkedArray.prove_distinct` counts and remembers, the way `prove_sorted` does.
+- `ChunkedArray.mark_distinct` records a count the caller already knows, without checking it.
+- `DataFrame.nunique(name)` is the frame spelling of `prove_distinct`.
+
+`agg` reads the same field, so a `NUNIQUE` spec over a column that already knows skips `reduce_any` and its hash table.
+
+Part of #479 and of the column metadata in #375.
+
 ### Added: a cross join onto one row runs
 
 A cross join was refused at lowering because pairing every left row with every right row is a whole frame operation rather than anything a chunk at a time operator can do. One right row is the exception and it runs now. Pairing every left row with one right row adds a column to each row and moves nothing, so it lowers to one constant column per right column and the left side streams past untouched.
