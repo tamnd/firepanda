@@ -1864,6 +1864,24 @@ class DataFrame(DataFrameMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def sort_values(
+        self,
+        by: Any,
+        *,
+        axis: Any = 0,
+        ascending: Any = True,
+        inplace: bool = False,
+        kind: str = "quicksort",
+        na_position: str = "last",
+        ignore_index: bool = False,
+        key: Any = None,
+    ) -> DataFrame:
+        """The frame with its rows in the order of some of its columns."""
+        try:
+            return self._sort_values(by, axis, ascending, inplace, na_position, ignore_index, key)
+        except Exception as error:
+            raise translate(error) from None
+
     def filter(
         self, items: Any = None, like: str | None = None, regex: str | None = None, axis: Any = None
     ) -> DataFrame:

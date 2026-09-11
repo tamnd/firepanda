@@ -299,6 +299,79 @@ struct PySeries(Movable, Writable):
         return Self._wrapped(series.take(picks))
 
     @staticmethod
+    def sort_values(
+        py_self: PythonObject,
+        descending: PythonObject,
+        nulls_first: PythonObject,
+    ) raises -> PythonObject:
+        """Puts the rows in the order of their own values.
+
+        Two scalars rather than the frame's two lists, because a column is one
+        key and there is nothing for a second direction to describe.
+
+        Args:
+            py_self: The series.
+            descending: Largest first.
+            nulls_first: Put the missing values at the front rather than the
+                back.
+
+        Returns:
+            A new series of the same height, carrying its own labels in the new
+            order.
+
+        Raises:
+            Error: Tagged `dtype`, if the values cannot be ordered.
+        """
+        try:
+            return Self._wrapped(
+                Self._held(py_self)[]
+                .series[]
+                .sort_values(
+                    flag(descending, "descending"),
+                    flag(nulls_first, "nulls_first"),
+                )
+            )
+        except cause:
+            raise retagged(DTYPE, cause)
+
+    @staticmethod
+    def argsort(
+        py_self: PythonObject,
+        descending: PythonObject,
+        nulls_first: PythonObject,
+    ) raises -> PythonObject:
+        """The row order a sort would put the values in.
+
+        A series rather than a bare list of numbers, because that is what pandas
+        answers and because the answer keeps the labels it was asked about. The
+        positions are int64 already, widened by the core method for the reason
+        its docstring gives, so nothing here converts anything.
+
+        Args:
+            py_self: The series.
+            descending: Largest first.
+            nulls_first: Put the missing values at the front rather than the
+                back.
+
+        Returns:
+            A new series of positions under the same name and the same labels.
+
+        Raises:
+            Error: Tagged `dtype`, if the values cannot be ordered.
+        """
+        ref series = Self._held(py_self)[].series[]
+        try:
+            var order = series.argsort(
+                flag(descending, "descending"),
+                flag(nulls_first, "nulls_first"),
+            )
+            var out = Series(series.name, AnyArray(order^))
+            out.index = Index(copy=series.index)
+            return Self._wrapped(out^)
+        except cause:
+            raise retagged(DTYPE, cause)
+
+    @staticmethod
     def slice_rows(
         py_self: PythonObject, start: PythonObject, end: PythonObject
     ) raises -> PythonObject:
