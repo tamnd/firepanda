@@ -15,6 +15,12 @@ The binary tests are the other half of the same table. Every text column in the
 hits file is a bare `BYTE_ARRAY` with no string logical type on it, so the honest
 Arrow reading of all of them is binary, and a suite that measured `LIKE` over
 binary would be measuring nothing.
+
+The clock tests are the third of the same. `EventTime` is an int64 count of
+seconds with nothing in the file saying it is a time, so it arrives as a number
+and every query that reads a minute or truncates to one needs it labelled. That
+relabel has to be free, which is what one of these tests measures by address
+rather than by argument.
 """
 
 from std.testing import (
@@ -29,6 +35,7 @@ from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.array.strings import strings_from_list
 from firepanda.dtype.logical import LogicalType
+from firepanda.dtype.temporal import TimeUnit
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.series import Series
 
@@ -220,6 +227,116 @@ def test_an_empty_string_is_still_an_empty_string_after_the_relabel() raises:
     var column = frame.column("url")
     assert_equal(column.values.null_count(), 0)
     assert_equal(column.values.strings().byte_length(3), 0)
+
+
+def clock_column(name: String, values: List[Int64]) raises -> Series:
+    """Builds an int64 column, which is how a clock arrives out of the file."""
+    var out = Array[DType.int64](len(values))
+    for i in range(len(values)):
+        out.set_valid(i, values[i])
+    return Series(name, out^)
+
+
+def seconds() -> List[Int64]:
+    """Four instants in July 2013, a leap day, and one before the epoch."""
+    return [
+        Int64(1372636800),
+        Int64(1372636859),
+        Int64(1372636860),
+        Int64(1375228799),
+        Int64(1078012800),
+        Int64(-1),
+    ]
+
+
+def test_an_integer_column_is_relabelled_as_a_clock() raises:
+    var columns = List[Series]()
+    columns.append(clock_column("EventTime", seconds()))
+    var counter = Array[DType.int64](6)
+    for i in range(6):
+        counter.set_valid(i, Int64(i))
+    columns.append(Series("counter", counter^))
+    var frame = DataFrame.from_series(columns^)
+
+    assert_equal(frame.schema[0].dtype, LogicalType.INT64)
+    var clocked = frame.timestamps_from_integers(["EventTime"], TimeUnit.SECOND)
+    assert_equal(
+        clocked.schema[0].dtype, LogicalType.timestamp(TimeUnit.SECOND)
+    )
+    assert_equal(clocked.schema[0].name, "EventTime")
+    # The column nobody named keeps the type it had, which is the same type the
+    # relabelled one is laid out as, so a loop that relabelled by layout rather
+    # than by name would turn a row counter into a clock and nothing would say
+    # so until the answers came out in 1970.
+    assert_equal(clocked.schema[1].dtype, LogicalType.INT64)
+    assert_equal(len(clocked), 6)
+
+
+def test_the_relabel_reads_none_of_the_values() raises:
+    """The whole reason this exists rather than `numbers_to_timestamps`.
+
+    `EventTime` at a hundred million rows is eight hundred megabytes, and a
+    conversion that copied it would cost more than most of the queries that read
+    it. The evidence is the address of the values buffer, since a copy cannot
+    give back the one it was handed.
+    """
+    var columns = List[Series]()
+    columns.append(clock_column("EventTime", seconds()))
+    var frame = DataFrame.from_series(columns^)
+    var before = Int(frame.column("EventTime").values.data.values.unsafe_ptr())
+
+    var clocked = frame.timestamps_from_integers(["EventTime"], TimeUnit.SECOND)
+    var after = Int(clocked.column("EventTime").values.data.values.unsafe_ptr())
+    assert_equal(after, before)
+
+
+def test_the_instants_read_back_as_the_counts_they_were() raises:
+    var columns = List[Series]()
+    columns.append(clock_column("EventTime", seconds()))
+    var frame = DataFrame.from_series(columns^).timestamps_from_integers(
+        ["EventTime"], TimeUnit.SECOND
+    )
+    var out = frame.column("EventTime").values.as_typed[DType.int64]()
+    var expected = seconds()
+    for i in range(len(expected)):
+        assert_equal(out[i], expected[i])
+
+
+def test_a_narrow_integer_is_refused_rather_than_widened() raises:
+    """`EventDate` in the same file is a uint16 count of days.
+
+    Widening it is a pass over the data, and a method whose whole claim is that
+    it is free has no business doing one quietly. The message says to cast.
+    """
+    var days = Array[DType.uint16](4)
+    for i in range(4):
+        days.set_valid(i, UInt16(15887 + i))
+    var columns = List[Series]()
+    columns.append(Series("EventDate", days^))
+    var frame = DataFrame.from_series(columns^)
+
+    with assert_raises(contains="laid out as int64"):
+        _ = frame.timestamps_from_integers(["EventDate"], TimeUnit.SECOND)
+
+
+def test_a_name_the_frame_does_not_have_is_refused() raises:
+    var frame = wide_frame(4, 2)
+    with assert_raises():
+        _ = frame.timestamps_from_integers(["EventTime"], TimeUnit.SECOND)
+
+
+def test_two_columns_are_relabelled_in_one_call() raises:
+    var columns = List[Series]()
+    columns.append(clock_column("EventTime", seconds()))
+    columns.append(clock_column("ClientEventTime", seconds()))
+    columns.append(clock_column("plain", seconds()))
+    var frame = DataFrame.from_series(columns^).timestamps_from_integers(
+        ["EventTime", "ClientEventTime"], TimeUnit.SECOND
+    )
+    var clock = LogicalType.timestamp(TimeUnit.SECOND)
+    assert_equal(frame.schema[0].dtype, clock)
+    assert_equal(frame.schema[1].dtype, clock)
+    assert_equal(frame.schema[2].dtype, LogicalType.INT64)
 
 
 def main() raises:

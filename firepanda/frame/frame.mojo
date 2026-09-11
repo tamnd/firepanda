@@ -60,6 +60,7 @@ from firepanda.array.value import Value
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
+from firepanda.dtype.temporal import TimeUnit
 from firepanda.frame.display import DisplayOptions, render_table
 from firepanda.frame.index import NOT_FOUND, Index
 from firepanda.hash.grouping import (
@@ -767,6 +768,68 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             var name = out.schema[i].name
             out.columns[i] = out.columns[i].copy().retyped(LogicalType.STRING)
             out.schema.fields[i] = Field(name, LogicalType.STRING)
+        return out^
+
+    def timestamps_from_integers(
+        self, names: List[String], unit: TimeUnit
+    ) raises -> Self:
+        """Returns the frame with the named integer columns relabelled as instants.
+
+        The sibling of `text_from_binary`, for the other thing a file can store
+        without saying what it means. A column of whole numbers counting seconds
+        since the epoch is a timestamp that lost its label somewhere between the
+        producer and here, and putting the label back is not a conversion: the
+        integers are already the counts and the unit says what they are counts
+        of, which is what `numbers_to_timestamps` says about the same operation
+        on one column.
+
+        The difference is that `numbers_to_timestamps` copies the buffer, because
+        it is `pandas.to_datetime` and a pandas caller still holds the column
+        they passed in. This one relabels in place, over as many columns as are
+        named, which on the ClickBench hits table is the difference between
+        touching eight hundred megabytes at load and touching none. That is the
+        case this exists for: `EventTime` arrives as an int64 count of seconds
+        because that is how the Parquet file stores it, and every query that
+        reads a clock out of it wants a timestamp.
+
+        Only int64 columns can be relabelled this way, since that is the layout
+        a timestamp has. A narrower integer is refused rather than widened, and
+        the message says to cast, because widening is a pass over the data and a
+        method whose whole point is that it is free should not quietly do one.
+        `EventDate` in the same file is a uint16 count of days and is exactly
+        that case.
+
+        Nothing checks the values. An integer that is not a sensible count of
+        seconds becomes a timestamp far away from now, which is the same promise
+        `numbers_to_timestamps` makes and the same one `retyped` makes.
+
+        Args:
+            names: The columns to relabel. A name written twice is harmless,
+                since a timestamp is laid out as an int64 and relabelling one a
+                second time writes the same type over the same buffer.
+            unit: The resolution the integers are counts of.
+
+        Returns:
+            The frame with those columns carrying a timestamp type.
+
+        Raises:
+            Error: If a name is not in the frame, or if a named column is not
+                laid out as an int64.
+        """
+        var wanted = LogicalType.timestamp(unit)
+        var out = Self(copy=self)
+        for n in range(len(names)):
+            var at = out.schema.index_of(names[n])
+            if out.schema[at].dtype.physical != DType.int64:
+                raise Error(
+                    "timestamps_from_integers: '"
+                    + names[n]
+                    + "' is "
+                    + String(out.schema[at].dtype)
+                    + " and a timestamp is laid out as int64. Cast it first."
+                )
+            out.columns[at] = out.columns[at].copy().retyped(wanted)
+            out.schema.fields[at] = Field(names[n], wanted)
         return out^
 
     def widen_for_missing(self) raises -> Self:

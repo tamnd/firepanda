@@ -177,6 +177,38 @@ def test_flooring_moves_an_instant_back_and_never_forward() raises:
         assert_equal(got[i], want[i], String("row ", i))
 
 
+def test_truncating_to_the_minute_is_what_duckdb_calls_date_trunc() raises:
+    """The twelve rows through `date_trunc('minute', ...)`, as DuckDB answers them.
+
+    ClickBench q18 and q42 group by the minute of a visit, and the SQL they are
+    written in spells that `date_trunc`. There is no ROUND_TO_MINUTE mode and
+    there does not need to be one: `date_trunc` floors, so it is `dt.floor('min')`
+    under a different name, and this test is here to hold that claim down rather
+    than to exercise a new path.
+
+    Where it could have gone wrong is below the epoch, and that is the first four
+    rows. DuckDB floors there too, so -1, the last second of 1969, goes back to
+    -60 and not forward to 0, and -5401 goes to -5460 and not to -5400. All
+    twelve were put through DuckDB and the list below is what came back."""
+    var got = seconds(temporal_round(hours(TimeUnit.SECOND), "min", ROUND_DOWN))
+    var want = [
+        Int64(-5460),
+        -3600,
+        -1800,
+        -60,
+        0,
+        0,
+        1800,
+        3600,
+        5400,
+        5400,
+        7200,
+        9000,
+    ]
+    for i in range(len(want)):
+        assert_equal(got[i], want[i], String("row ", i))
+
+
 def test_ceiling_leaves_a_row_that_is_already_whole_alone() raises:
     """The same rows through `dt.ceil('h')`.
 

@@ -586,5 +586,44 @@ def test_a_series_looks_a_field_up_by_its_pandas_name() raises:
         _ = s.dt("day_of_week")
 
 
+def test_the_minute_field_agrees_with_duckdb_either_side_of_the_epoch() raises:
+    """ClickBench q18 groups by `extract(minute FROM EventTime)`.
+
+    Sixteen rows read off a running DuckDB, chosen around the three places the
+    arithmetic could go wrong: the minute boundary, the hour boundary, and the
+    epoch, where a division that truncated towards zero instead of flooring
+    would put the last minute of 1969 into 1970. pandas answers all sixteen the
+    same way and was checked against the same list.
+
+    There is no leap second row and there cannot be one. A Unix timestamp is a
+    count of seconds that pretends every day has 86,400 of them, so 23:59:60 has
+    no integer to be, and neither DuckDB nor pandas nor this library can hold the
+    instant the question would be about. The boundary a leap second row would be
+    testing is the minute boundary, which is the first four rows here.
+    """
+    var rows: List[Int64] = [
+        Int64(-5401),
+        -3600,
+        -1800,
+        -61,
+        -60,
+        -59,
+        -1,
+        0,
+        1,
+        59,
+        60,
+        61,
+        1800,
+        3600,
+        5401,
+        1372636859,
+    ]
+    var want = [29, 0, 30, 58, 59, 59, 59, 0, 0, 0, 1, 1, 30, 0, 30, 0]
+    var got = numbers(stamps(rows, TimeUnit.SECOND), TemporalField.MINUTE)
+    for i in range(len(want)):
+        assert_equal(got[i], want[i], "row " + String(i))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
