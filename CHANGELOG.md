@@ -8,6 +8,32 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.69] - 2026-09-12
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Renaming, which is two different operations that pandas spells with one word. Renaming a column or an index level name edits a field of a schema and reads no values. Renaming a row label maps every label through a dictionary or a callable, which is a pass over the index. The first is here and the second refuses with a message saying what it would cost and what to write instead.
+
+### Added: the metadata half of rename
+
+`DataFrame.rename` through `columns=` with a mapping or a callable, and through the positional `mapper` with `axis=1` or `axis="columns"`. `Series.rename` with a scalar, which names the column. `DataFrame.rename_axis` and `Series.rename_axis`, which name the index level and take `None` as a name to clear rather than as a missing argument, which is why they default to a sentinel. `Index.set_names` taking a name or a one element sequence, and the `Index.names` property it is the setter for.
+
+`errors` is honoured on both its values, because the default is the surprising one: a mapping key that is not a column is skipped in silence, and `errors="raise"` is the only way a caller finds out. The `KeyError` collects every missing name rather than stopping at the first. `level` accepts only `None` and refuses `level=0` with pandas' own message, which is not obvious since zero is the only level a flat index has, but matching it is free.
+
+In the core, `DataFrame.renamed_columns` renames several columns in one pass, which is what makes a swap expressible, since each half of a swap collides with a name the frame still has. `DataFrame.rename_axis` and `Series.rename_axis` set the index level name.
+
+### Changed: inplace is honoured on set_names as well as on rename
+
+`Index.set_names(inplace=True)` and `DatetimeIndex.set_names(inplace=True)` write the name and answer `None`, which is the decision `Index.rename` already made and follows it for the same reason: a level name is not data, changing one moves no labels, and pandas treats an index as mutable in that one respect on exactly that argument. Those four are now the only places in the library where `inplace` is honoured rather than refused.
+
+`Index.rename` answers the class it was given rather than a plain `Index`, so renaming a level of an index of instants leaves an index of instants. That is one more instance of #495 closed.
+
+### Not done: the label half
+
+`DataFrame.rename(index=...)`, the bare `df.rename(mapper)` form that means `axis=0`, and the mapping or callable form of `Series.rename` all raise. They want a kernel that can apply a dictionary or a Python callable across a column without the interpreter owning the loop, which is the same kernel `Series.map`, `Index.map` and `factorize` want and should be written once for all of them. `rename_axis(axis=1)` raises too, because a frame's columns are its schema here rather than an index, so there is no name field to write into.
+
+A rename that would give a frame two columns of one name is refused rather than made, because a schema holds one column per name. pandas allows the duplicate and then answers a frame where a column was asked for.
+
 ## [0.6.68] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).
