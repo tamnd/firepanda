@@ -32,6 +32,19 @@ Part of #156, after #8.
 `Series.loc`, `Series.iloc`, `Series.at`, `Series.iat` and square brackets. A series has one axis, so the whole of the frame's rule about the shape of the key deciding the shape of the answer collapses to deciding between a value and a series, and the two key readers that made that decision moved out of the frame's accessor classes and became functions all four accessors share. Nothing new is computed: the core's `Series` already had the four row operations the frame's accessors reach, so the work was four bindings and a door. Square brackets are the part that is not shared and not defensible: `s[2]` is the label two even on an index of strings, and `s[2:5]` is the rows two to five counting from the front even on an index whose labels are those numbers in another order. What decides is the slice's own bounds rather than the index's type, so `s["a":"c"]` stays a closed slice of labels while `s[0:2]` on the same index is the first two rows, which is pandas' reading and is written down in enough code that reading it any other way would be a different library. The two sentences pandas raises about a position past the end stay two sentences, since `iloc` and `iat` are told different things about the same mistake. Document 36 section 11 has the rest.
 
 Part of #156, after #8.
+### Added: the hostname out of a URL, which is q28's group key without the regex
+
+`text_hostname` in `firepanda/kernel/url.mojo`. ClickBench q28 groups by `REGEXP_REPLACE(Referer, '^https?://(?:www\.)?([^/]+)/.*$', '\1')`, which is a hostname extractor written as a regular expression, and it is the only query in the suite whose group by key is computed rather than read. There is no regex engine here and RE2 is the largest single item in M6, so this is the extractor by hand and the rest of q28 is built and tested against it. The day the engine lands, q28 is one substitution rather than a new query.
+
+The rule is the regex read byte by byte rather than something simpler that is usually the same. Two places where those differ, both of which have tests. A regex prefers to take an optional group and backtracks only when what follows fails, so `http://www./x` reads its host as `www.` where stripping the prefix unconditionally answers the empty string. And `.` does not match a newline in RE2 while `$` is the end of the text, so a URL whose path holds a newline does not match at all and comes back whole, while a newline inside the host is fine because a negated class is not a `.`.
+
+A string the pattern cannot read comes back unchanged, which is what `regexp_replace` does with a subject it cannot match, and that is the answer for an empty element, for a scheme that is not http or https, for an uppercase scheme, and for a URL with no path. On the hits table that is most of what is left after q28's `WHERE Referer <> ''`, and each of those rows becomes its own group.
+
+The build is the two pass shape `substr.mojo` uses, so a morsel knows where its payload starts before any bytes move and writes views and bytes with nothing shared. The difference is that sizing here has to follow the pointer into the payload to find the slash, so the cut is worked out twice on the rows that need the payload. Keeping it instead would be a scratch entry per row, which at a hundred million rows is eight hundred megabytes to save one scan.
+
+`text/hostname` is the new benchmark row, next to the two substring rows that share its build. On a column of URLs with a `www.` on three rows in four and a non URL on one in five, it runs at about 58 million rows a second, against 114 million for a substring that also writes a payload. The gap is the scan for the slash and the newline.
+
+Part of #480.
 
 ## [0.6.64] - 2026-09-12
 

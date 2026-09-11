@@ -177,6 +177,7 @@ from firepanda.kernel import (
     text_substring,
 )
 from firepanda.kernel.chars import text_character_length
+from firepanda.kernel.url import text_hostname
 from firepanda.kernel.arith import OP_ADD
 from firepanda.kernel.compare import CMP_EQ, CMP_LT
 from firepanda.kernel.binary import BinaryOp, binary_value_any
@@ -2553,6 +2554,36 @@ def _string_column(
     return builder^.finish()
 
 
+def _url_column(count: Int) raises -> StringArray:
+    """Builds a column of URLs for the hostname benchmark.
+
+    Four rows in five are a URL with a path, and of those three in four carry a
+    `www.` the extractor has to look at and then step over. The fifth row is not
+    a URL, which is the case that reads the whole element and copies it back out,
+    and it is there because a fifth of `Referer` looks like that.
+
+    Args:
+        count: How many elements.
+
+    Returns:
+        The column.
+
+    Raises:
+        If the builder raises.
+    """
+    var builder = StringBuilder(capacity=count)
+    for i in range(count):
+        if i % 5 == 4:
+            builder.append(String("android-app://com.example.app").as_bytes())
+        else:
+            var host = String("host") + String(i % 1000) + ".example.com"
+            var front = "http://www." if i % 4 else "https://"
+            builder.append(
+                (front + host + "/page/" + String(i % 97)).as_bytes()
+            )
+    return builder^.finish()
+
+
 def _string_set(count: Int, width: Int, present: Int) raises -> StringArray:
     """Builds a set of members for the set lookup benchmarks.
 
@@ -3041,6 +3072,20 @@ def bench_text(mut harness: Harness) raises:
         keep(out)
 
     harness.record("text/substring_payload", "rows", rows, substring_payload)
+
+    # q28's group key, which is a hostname pulled out of a URL. The column is
+    # built the way the hits table's `Referer` reads: most rows are a real URL
+    # with a `www.` in front of a host of a dozen or so bytes, and one row in
+    # five is not a URL at all and comes back whole. The two rows above are the
+    # comparison to make, since this is the same two pass build with a scan for
+    # the slash in front of it: what the scan costs is the gap.
+    var urls = _url_column(rows)
+
+    def hostname() raises {imm urls}:
+        var out = text_hostname(urls)
+        keep(out)
+
+    harness.record("text/hostname", "rows", rows, hostname)
 
     # The set lookup, swept across the threshold between its two routes. Sets at
     # or under the threshold are compared against one member at a time with
