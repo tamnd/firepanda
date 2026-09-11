@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.58] - 2026-09-11
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Four more planner passes, and SQL now arrives at the same plan the dataframe API builds.
+
+The passes are empty and constant pruning, common subplan elimination, transitive predicates, and the union fix that fell out of reading the pruning pass again. That is ten of the thirteen the planner spec lists, and the three that are left are type coercion as explicit cast nodes, `IN` against a large constant list rewritten as a join, and a semi join on a distinct right side rewritten as an inner join.
+
+Two of the four are about a query saying the same thing twice. Subplan elimination is the one that matters most to a dataframe library, because a person writing Python repeats themselves in a way nobody writing SQL does, and `df.filter(cond).select(a)` followed by `df.filter(cond).select(b)` was two scans and two filters until now. Transitive predicates is the opposite case, a query saying something once that is true twice: a filter on one side of `a.k = b.k` is a filter on the other side too, for every row an inner join is going to produce.
+
+The recurring theme across all four is the arena's creation order. Node indices are handed out so that an input sits below the node reading it, which means there is no index between a node and its parent and so no pass can insert a filter above an existing node in place. Every pass that wants to change the shape of the plan has had to find its own way around that, and there are now five: rebuilding the node list bottom up, merging a node upward into its parent, swapping the contents of two adjacent nodes, splicing a node out so the reader points at what it pointed at, and redirecting a reader to an earlier node. Transitive predicates does not get one of its own, which is exactly why it lives inside predicate pushdown rather than in a pass of its own.
+
+`firepanda/sql/plan.mojo` takes a parsed `SELECT` and gives back the same `Plan` the builder methods produce, bound by the same binder. The rule it works under is the one the spec has had from the start, that no plan node may have only a SQL constructor, and there is a test that compares the plan for `SELECT a FROM t WHERE b > 1` against the plan the three builder calls produce. If those ever stop matching then one of the front ends has quietly become a second engine.
+
+None of this moves a benchmark number yet, and it is worth being plain about why. The eager API does not call the optimizer, which is #376, and the executor cannot spend what subplan elimination found, because lowering walks a line of operators and a shared node is a fork. Both passes are still right and still worth having now: the day lowering grows an operator that can hand one chunk stream to two readers, the plans arriving at it already say where to put one.
+
 ### Fixed: projection pushdown narrowed a union that drops duplicates
 
 A union that keeps duplicates and a union that drops them are one node with a flag, and column pruning was treating both the same way. It is only right for the one that keeps them. Two rows that differ in a column nothing above reads are two rows, and once both arms are narrowed to the columns above they are one row, so the pass was deleting a row rather than a read.
@@ -4900,7 +4916,32 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.33...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.58...HEAD
+[0.6.58]: https://github.com/tamnd/firepanda/releases/tag/v0.6.58
+[0.6.57]: https://github.com/tamnd/firepanda/releases/tag/v0.6.57
+[0.6.56]: https://github.com/tamnd/firepanda/releases/tag/v0.6.56
+[0.6.55]: https://github.com/tamnd/firepanda/releases/tag/v0.6.55
+[0.6.54]: https://github.com/tamnd/firepanda/releases/tag/v0.6.54
+[0.6.53]: https://github.com/tamnd/firepanda/releases/tag/v0.6.53
+[0.6.52]: https://github.com/tamnd/firepanda/releases/tag/v0.6.52
+[0.6.51]: https://github.com/tamnd/firepanda/releases/tag/v0.6.51
+[0.6.50]: https://github.com/tamnd/firepanda/releases/tag/v0.6.50
+[0.6.49]: https://github.com/tamnd/firepanda/releases/tag/v0.6.49
+[0.6.48]: https://github.com/tamnd/firepanda/releases/tag/v0.6.48
+[0.6.47]: https://github.com/tamnd/firepanda/releases/tag/v0.6.47
+[0.6.46]: https://github.com/tamnd/firepanda/releases/tag/v0.6.46
+[0.6.45]: https://github.com/tamnd/firepanda/releases/tag/v0.6.45
+[0.6.44]: https://github.com/tamnd/firepanda/releases/tag/v0.6.44
+[0.6.43]: https://github.com/tamnd/firepanda/releases/tag/v0.6.43
+[0.6.42]: https://github.com/tamnd/firepanda/releases/tag/v0.6.42
+[0.6.41]: https://github.com/tamnd/firepanda/releases/tag/v0.6.41
+[0.6.40]: https://github.com/tamnd/firepanda/releases/tag/v0.6.40
+[0.6.39]: https://github.com/tamnd/firepanda/releases/tag/v0.6.39
+[0.6.38]: https://github.com/tamnd/firepanda/releases/tag/v0.6.38
+[0.6.37]: https://github.com/tamnd/firepanda/releases/tag/v0.6.37
+[0.6.36]: https://github.com/tamnd/firepanda/releases/tag/v0.6.36
+[0.6.35]: https://github.com/tamnd/firepanda/releases/tag/v0.6.35
+[0.6.34]: https://github.com/tamnd/firepanda/releases/tag/v0.6.34
 [0.6.33]: https://github.com/tamnd/firepanda/releases/tag/v0.6.33
 [0.6.32]: https://github.com/tamnd/firepanda/releases/tag/v0.6.32
 [0.6.31]: https://github.com/tamnd/firepanda/releases/tag/v0.6.31
