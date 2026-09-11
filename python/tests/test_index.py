@@ -312,3 +312,88 @@ def test_get_indexer_refuses_the_filling_arguments(firepanda: ModuleType) -> Non
     """`method=` is how pandas fills a missing label from a neighbour, and it is not written."""
     with pytest.raises(NotImplementedError, match="method="):
         firepanda.Index([1, 2]).get_indexer([1], method="pad")
+
+
+def test_taking_positions_counts_back_from_the_end_by_default(firepanda: ModuleType) -> None:
+    """`take` with the default arguments does no filling, so -1 is the last row.
+
+    This is the pandas reading of a pair of arguments that looks like one
+    question. Filling only happens when `allow_fill` is on and a `fill_value`
+    was actually passed, and the default pair passes no fill value, so a
+    negative position counts back from the end the way it does everywhere else
+    in Python.
+    """
+    index = firepanda.Index(["a", "b", "c"])
+    assert index.take([0, -1]).tolist() == ["a", "c"]
+    assert index.take([0, -1], allow_fill=False).tolist() == ["a", "c"]
+    assert index.take([2, 0]).tolist() == ["c", "a"]
+
+
+def test_taking_positions_with_a_fill_value_makes_a_gap(firepanda: ModuleType) -> None:
+    """With filling on, -1 is a row that is not there rather than the last one.
+
+    The fill value is read for whether it is there and not for what it is, which
+    is pandas' own behaviour and is the surprising half: the label that lands in
+    the gap is a missing label whatever value was named.
+    """
+    index = firepanda.Index(["a", "b", "c"])
+    assert index.take([0, -1], fill_value="z").tolist() == ["a", None]
+    with pytest.raises(ValueError, match="all indices must be"):
+        index.take([0, -2], fill_value="z")
+
+
+def test_taking_a_position_that_is_not_there_is_an_index_error(firepanda: ModuleType) -> None:
+    """Past the end is past the end either way round."""
+    with pytest.raises(IndexError):
+        firepanda.Index(["a", "b"]).take([5])
+    with pytest.raises(IndexError):
+        firepanda.Index(["a", "b"]).take([-5], allow_fill=False)
+
+
+def test_a_backward_slice_bound_is_a_different_question(firepanda: ModuleType) -> None:
+    """A negative step means the caller names the labels in reading order.
+
+    So the pair that comes back is the pair a backward Python slice wants, which
+    is not the forward pair reversed. Every number here was read off a running
+    pandas.
+    """
+    index = firepanda.Index(["a", "b", "c", "d", "e"])
+    assert index.slice_locs("b", "d") == (1, 4)
+    assert index.slice_locs("b", "d", step=1) == (1, 4)
+    assert index.slice_locs("b", "d", step=2) == (1, 4)
+    assert index.slice_locs("b", "d", step=-1) == (1, 2)
+    assert index.slice_locs(step=-1) == (4, -6)
+
+
+def test_the_one_level_a_flat_index_has(firepanda: ModuleType) -> None:
+    """`unique` takes a level because a MultiIndex has levels, and this has one.
+
+    `None`, `0` and `-1` all name it, and so does the index's own name. Anything
+    else is an error and not a refusal, because the caller asked for a level
+    that does not exist rather than for a feature that is not written.
+    """
+    index = firepanda.Index(["a", "b", "a"], name="k")
+    assert index.unique().tolist() == ["a", "b"]
+    assert index.unique(level=0).tolist() == ["a", "b"]
+    assert index.unique(level=-1).tolist() == ["a", "b"]
+    assert index.unique(level="k").tolist() == ["a", "b"]
+    with pytest.raises(IndexError, match="only 1 level, not 2"):
+        index.unique(level=1)
+    with pytest.raises(IndexError, match="not a valid level number"):
+        index.unique(level=-2)
+    with pytest.raises(KeyError, match="does not match index name"):
+        index.unique(level="nope")
+
+
+def test_renaming_in_place_changes_the_index_you_are_holding(firepanda: ModuleType) -> None:
+    """The one place an index is mutable, and it is mutable in pandas too.
+
+    A level name is not a label, so changing it does not change what the index
+    holds, and `inplace=True` answers None the way every pandas `inplace` does.
+    """
+    index = firepanda.Index([1, 2], name="k")
+    assert index.rename("z", inplace=True) is None
+    assert index.name == "z"
+    assert index.tolist() == [1, 2]
+    with pytest.raises(TypeError):
+        index.rename("y", True)  # type: ignore[misc]
