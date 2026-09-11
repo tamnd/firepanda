@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a chunk can carry a selection, which nothing produces yet
+
+A chunk now has a `picks` list saying where each of its rows lives in its arrays, and a `dense` flag per column saying whether that column is already at the chunk's rows or has to be read through the positions. A chunk with no selection has every column dense, which is what every chunk in the engine is today and what most of them will stay.
+
+The point of this is that filtering a column means writing a new one. A filter that writes a list of positions instead has moved one number per surviving row rather than one value per surviving row per column, and a chain of filters composes those lists rather than rewriting the columns once per link. Counting data movement, TPC-H q6's predicate chain writes about seventy megabytes over six million rows today to produce an answer of a hundred and twelve thousand rows, and it should be about twenty three.
+
+This release is the plumbing and nothing else. Nothing produces a selection, so nothing consumes one, and no answer and no number anywhere changes. `node_reads_selection` reports which operators have been taught to handle a selected chunk, it currently reports none, and the two dispatchers call `Chunk.flatten` on the way in for everything it reports false for. That is what lets the operators be converted one at a time in the releases after this one rather than in a single change that touches every kernel signature at once, which is the ordering `docs/specs/engine/02-execution-model.md` argues for.
+
+`Chunk.into_columns` flattens before handing the arrays over, so every existing caller keeps getting one array per column at the chunk's rows and none of them had to change. `Chunk.column` gets one column at the chunk's rows without flattening the others, which is what an operator reading two columns of a wide chunk wants.
+
+The positions are `Int` rather than `UInt32` because `take_any` takes a `List[Int]` and converting on every gather would cost more than the four bytes a position saves. That is worth revisiting once something reads a selection without gathering through it, which is the next step.
+
 ### Changed: a filter writes only the columns something downstream reads
 
 The physical filter can now be told which positions to write, in the order to write them, which makes it a filter and a projection in one pass. `Filter(on)` still keeps every column, which is what a caller assembling a pipeline by hand wants. `Filter(on, keep)` writes those positions and nothing else.
@@ -16,7 +28,7 @@ Filtering a column means writing a new one, so a column nobody reads afterwards 
 
 Lowering now works out what each conjunct leaves behind that a later conjunct still reads, and tells the filter to write that and the input columns and nothing else. The projection that used to sit after the line of filters to put the schema back is gone, because the last filter already did it.
 
-TPC-H q6's predicate over six million rows, which is five conditions and the part of that query where the time goes, measured with the new `tools/probes/q6plan.mojo`: 9.45 milliseconds to 7.93 on a thirty two thread desktop, 78.3 to 61.0 on an eight core server, and 19.2 to 15.0 on an M series laptop. That is between sixteen and twenty two percent, and the spread is what you would expect, since the work removed is memory bandwidth and the machine with the most of it gains the least.
+TPC-H q6's predicate over six million rows, which is five conditions and the part of that query where the time goes, timed by lowering it and running the pipeline over a generated lineitem: 9.45 milliseconds to 7.93 on a thirty two thread desktop, 78.3 to 61.0 on an eight core server, and 19.2 to 15.0 on an M series laptop. That is between sixteen and twenty two percent, and the spread is what you would expect, since the work removed is memory bandwidth and the machine with the most of it gains the least.
 
 This is a step toward what the engine actually needs, which is a selection vector, and not a substitute for it. Not writing a dead column is worth less than not writing a live one that the next operator is going to filter again, and that is the larger change.
 

@@ -11,6 +11,13 @@ chunks goes through the `Materialize` fallback, which collects, calls today's
 whole frame function and hands the answer back in chunks, so the engine can be
 filled in one operator at a time rather than all at once.
 
+A chunk may also carry a selection, which is a list of positions saying where
+each of its rows lives in its arrays. That is how a filter avoids rewriting
+every column to keep a tenth of the rows. `node_reads_selection` says which
+operators have been taught to read one, and the two dispatchers flatten the
+chunk for everything else, so the operators can learn about it one at a time as
+well.
+
 Underneath that are two ways of using the machine, and the difference between
 them is when the work is divided up.
 
@@ -37,6 +44,7 @@ from .node import Cast, Compute, Filter, Group, GroupAgg, Join, Limit
 from .node import Materialize, Node, NodeStatus, Project, Reduce
 from .node import node_apply, node_bind, node_computes_per_row
 from .node import node_ends_early, node_finish, node_is_breaker
-from .node import node_is_row_local, node_process, node_status
+from .node import node_is_row_local, node_process, node_reads_selection
+from .node import node_status
 from .parallel import parallel_for, worker_count
 from .pipeline import Collect, Pipeline, Scan
