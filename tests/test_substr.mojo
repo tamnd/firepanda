@@ -24,7 +24,8 @@ from firepanda.kernel.concat import concat_strings
 from firepanda.kernel.agg import sum_of
 from firepanda.kernel.compare import CMP_EQ
 from firepanda.kernel.scalar import text_substring_scalar
-from firepanda.kernel.substr import TO_END, text_substring
+from firepanda.kernel.chars import text_character_length
+from firepanda.kernel.substr import TO_END, text_byte_length, text_substring
 from firepanda.kernel.text import compare_text
 
 
@@ -212,6 +213,69 @@ def test_a_column_either_side_of_the_morsel_split_matches_the_twin() raises:
     assert_equal(got[1], " my box with five dozen liquor")
     assert_equal(got[2], "t")
     assert_equal(got[3], "")
+
+
+def test_a_byte_length_reads_the_view() raises:
+    var got = text_byte_length(sample())
+    assert_equal(got[0], 0)
+    assert_equal(got[1], 1)
+    assert_equal(got[2], 12)
+    assert_equal(got[4], 13)
+    assert_equal(got[5], 43)
+    assert_equal(got[7], 20)
+
+
+def test_a_byte_length_is_null_where_the_input_is() raises:
+    """`byte_length` answers zero for a null, which is right for a caller sizing
+    a buffer and wrong for a column. An empty string is also zero and is present,
+    and those two rows are next to each other here on purpose."""
+    var got = text_byte_length(sample())
+    assert_true(got.is_valid(0))
+    assert_equal(got[0], 0)
+    assert_false(got.is_valid(3))
+    assert_false(got.is_valid(6))
+
+
+def test_a_byte_length_is_not_a_character_length() raises:
+    """The divergence from pandas, asserted rather than described. A two byte
+    letter is one character, and this is the kernel that says two."""
+    var rows = List[String]()
+    rows.append("café")
+    rows.append("naive")
+    var col = strings_from_list(rows)
+    var bytes = text_byte_length(StringArray(copy=col))
+    var chars = text_character_length(col^)
+    assert_equal(bytes[0], 5)
+    assert_equal(chars[0], 4)
+    assert_equal(bytes[1], 5)
+    assert_equal(chars[1], 5)
+
+
+def test_a_byte_length_of_nothing_is_nothing() raises:
+    var got = text_byte_length(strings_from_list(List[String]()))
+    assert_equal(len(got), 0)
+
+
+def test_a_byte_length_crosses_a_morsel() raises:
+    var n = MORSEL_ROWS + 1000
+    var short = String("ab")
+    var long = String("a byte length longer than a view holds")
+    var builder = StringBuilder(capacity=n)
+    for i in range(n):
+        if i % 3 == 0:
+            builder.append_null()
+        elif i % 3 == 1:
+            builder.append(short.as_bytes())
+        else:
+            builder.append(long.as_bytes())
+    var got = text_byte_length(builder^.finish())
+    for i in range(n - 6, n):
+        if i % 3 == 0:
+            assert_false(got.is_valid(i))
+        elif i % 3 == 1:
+            assert_equal(got[i], 2)
+        else:
+            assert_equal(got[i], 38)
 
 
 def main() raises:

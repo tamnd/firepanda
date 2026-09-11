@@ -55,6 +55,14 @@ whichever order the workers finished, so the answer is at least the same on ever
 run for the same input. It is not bit identical to what a single scalar loop
 would produce, and neither was the vectorized version.
 
+The extremes come in a text spelling as well, and it is the same reduction with a
+different accumulator. A number is its own accumulator and a string is not, so
+`text_extreme_row` carries the row number of the best element seen rather than
+the element, which keeps the accumulator eight bytes wide and moves no bytes at
+all until the caller gathers the answer. Everything else about the loop, the
+morsel per slot and the serial merge over the slots, is what the numeric one
+does.
+
 Every function here has a twin in `scalar.mojo` and the fuzz harness runs them
 against each other. See the note on the null-is-zero invariant in `__init__.mojo`.
 """
@@ -63,6 +71,7 @@ from std.math import isnan
 from std.sys.info import simd_width_of
 
 from firepanda.array.array import Array
+from firepanda.array.strings import StringArray
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.exec import MORSEL_ROWS, parallel_morsels
 
@@ -579,6 +588,130 @@ def _better[
     comptime if want_min:
         return a if a < b else b
     return a if a > b else b
+
+
+def text_extreme_row[want_min: Bool](col: StringArray) raises -> Int:
+    """Finds the row holding the smallest or largest element of a text column.
+
+    A row number and not a value, which is the whole trick. The numeric extremes
+    above carry a `Scalar[dt]` through the loop because a number is its own
+    accumulator. A string is not: keeping the smallest seen so far as a `String`
+    means copying bytes every time a smaller one turns up, and on a sorted column
+    that is a copy per row. A row number is eight bytes whatever the element is,
+    nothing moves while the scan runs, and the caller gathers once at the end.
+
+    That is the same choice `aggregate_group_strings` makes for the grouped form,
+    and the two agree by construction because both settle a comparison with
+    `StringArray.compare_elements`, which is unsigned byte order with the shorter
+    prefix first. Where the two differ is only in how many accumulators there are.
+
+    Past one morsel this runs on every core, in the shape `extreme_over` uses.
+    Each morsel reduces its rows to one row number of its own, a morsel that saw
+    nothing but nulls writes -1, and a serial loop then compares the survivors.
+    The merge is one comparison per morsel, which is seventy six of them on ten
+    million rows, so it costs nothing beside the pass it replaces.
+
+    A null is not a candidate. That is the same rule the numeric extremes follow
+    and the same rule the grouped form follows, and it means a column that is
+    entirely null has no answer rather than a sentinel one.
+
+    Args:
+        col: The column.
+
+    Parameters:
+        want_min: True for the smallest element, False for the largest.
+
+    Returns:
+        The row, or -1 if every row is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    var n = len(col)
+    if n <= MORSEL_ROWS:
+        return _text_extreme_range[want_min=want_min](col, 0, n)
+
+    var count = (n + MORSEL_ROWS - 1) // MORSEL_ROWS
+    var rows = Array[DType.int64](count)
+
+    def reduce_one(start: Int, stop: Int) {mut rows, imm}:
+        var found = _text_extreme_range[want_min=want_min](col, start, stop)
+        rows.unsafe_mut_ptr().unsafe_offset(start // MORSEL_ROWS).unsafe_write(
+            Int64(found)
+        )
+
+    parallel_morsels(reduce_one, n)
+
+    var slots = rows.unsafe_ptr()
+    var best = -1
+    for i in range(count):
+        var here = Int(slots.unsafe_offset(i).unsafe_load())
+        if here < 0:
+            continue
+        if best < 0:
+            best = here
+            continue
+        var order = col.compare_elements(here, best)
+        if order < 0 if want_min else order > 0:
+            best = here
+    return best
+
+
+def _text_extreme_range[
+    want_min: Bool
+](col: StringArray, start: Int, stop: Int) -> Int:
+    """Finds the extreme row inside one range of a text column.
+
+    Args:
+        col: The column.
+        start: The first row.
+        stop: The row to stop before.
+
+    Parameters:
+        want_min: True for the smallest element, False for the largest.
+
+    Returns:
+        The row, or -1 if every row in the range is null.
+    """
+    var best = -1
+    for i in range(start, stop):
+        if not col.is_valid(i):
+            continue
+        if best < 0:
+            best = i
+            continue
+        var order = col.compare_elements(i, best)
+        if order < 0 if want_min else order > 0:
+            best = i
+    return best
+
+
+def text_edge_row(col: StringArray, first: Bool) -> Int:
+    """Finds the first or the last row of a text column that holds a value.
+
+    Serial, and it stays serial because it stops as soon as it finds one. On a
+    column with no nulls that is one row read, and a parallel split would have
+    cost more to set up than the answer costs to find. The worst case is a column
+    that is entirely null, which is one pass over the validity bitmap and nothing
+    else.
+
+    Args:
+        col: The column.
+        first: True for the earliest row, False for the latest.
+
+    Returns:
+        The row, or -1 if every row is null.
+    """
+    var n = len(col)
+    if first:
+        for i in range(n):
+            if col.is_valid(i):
+                return i
+        return -1
+    for i in range(n - 1, -1, -1):
+        if col.is_valid(i):
+            return i
+    return -1
 
 
 def mean_of[dt: DType](col: Array[dt]) raises -> AggResult[DType.float64]:

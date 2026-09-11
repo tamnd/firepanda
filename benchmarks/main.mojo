@@ -166,9 +166,12 @@ from firepanda.kernel import (
     text_contains_in_order,
     text_ends_with,
     text_is_in,
+    text_byte_length,
+    text_extreme_row,
     text_starts_with,
     text_substring,
 )
+from firepanda.kernel.chars import text_character_length
 from firepanda.kernel.arith import OP_ADD
 from firepanda.kernel.compare import CMP_EQ, CMP_LT
 from firepanda.kernel.binary import BinaryOp
@@ -3240,6 +3243,60 @@ def bench_text(mut harness: Harness) raises:
         keep(out)
 
     harness.record("text/agg_nunique", "rows", rows, agg_nunique)
+
+    # The whole column extreme and the route it replaced, on the same column, the
+    # way `kernel/sum_twin` sits beside `kernel/sum`. `text_min` finds a row
+    # number per morsel and merges the slots. `text_min_grouped` allocates a code
+    # per row that is always zero and scatters into a table of one entry, which is
+    # what `reduce_any` used to do for a text column and is what ClickBench q21
+    # and q22 ask for at a hundred million rows.
+    #
+    # `flat` is the hard case and it is the one `text/min` runs on. Its elements
+    # agree on their first four bytes, so no comparison can be settled by the
+    # prefix inside the view and every one of them has to read the payload. That
+    # is what a column of URLs looks like. `text/min_varied_prefix` is the same
+    # reduction over `long_left`, whose prefixes differ, so almost every
+    # comparison ends in the view and never touches a byte of payload. The gap
+    # between those two rows is what the prefix in the view is worth.
+    var one_group = Array[DType.uint32](rows)
+
+    def text_min() raises {imm flat}:
+        keep(text_extreme_row[want_min=True](flat))
+
+    harness.record("text/min", "rows", rows, text_min)
+
+    def text_max() raises {imm flat}:
+        keep(text_extreme_row[want_min=False](flat))
+
+    harness.record("text/max", "rows", rows, text_max)
+
+    def text_min_varied() raises {imm long_left}:
+        keep(text_extreme_row[want_min=True](long_left))
+
+    harness.record("text/min_varied_prefix", "rows", rows, text_min_varied)
+
+    def text_min_grouped() raises {imm flat, imm one_group}:
+        var out = aggregate_group_strings(flat, AggKind.MIN, one_group, 1)
+        keep(out)
+
+    harness.record("text/min_grouped", "rows", rows, text_min_grouped)
+
+    # The byte length against the character length, on the same column. The first
+    # reads four bytes out of every view and follows nothing. The second walks
+    # every byte of every element looking for continuation bytes. They answer
+    # different questions and the gap between these two rows is what asking the
+    # harder one costs.
+    def byte_length() raises {imm flat}:
+        var out = text_byte_length(flat)
+        keep(out)
+
+    harness.record("text/byte_length", "rows", rows, byte_length)
+
+    def character_length() raises {imm flat}:
+        var out = text_character_length(flat)
+        keep(out)
+
+    harness.record("text/character_length", "rows", rows, character_length)
 
 
 def bench_dispatch(mut harness: Harness) raises:

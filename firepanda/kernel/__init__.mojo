@@ -38,6 +38,8 @@ from .agg import (
     min_of,
     sum_of,
     sum_over,
+    text_edge_row,
+    text_extreme_row,
 )
 from .arith import (
     add,
@@ -168,7 +170,7 @@ from .sort import (
     sort_key,
     sort_rows,
 )
-from .substr import TO_END, text_substring
+from .substr import TO_END, text_byte_length, text_substring
 from .temporal import (
     ROUND_DOWN,
     ROUND_HALF_EVEN,

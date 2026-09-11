@@ -42,6 +42,7 @@ from firepanda.frame.frame import DataFrame
 from firepanda.frame.groupby import AggSpec
 from firepanda.frame.series import Series
 from firepanda.kernel.group import AggKind, aggregate_group_any
+from firepanda.kernel.reduce import reduce_any
 from firepanda.kernel.scalar import group_text_scalar
 from firepanda.testing.rng import Rng
 
@@ -308,6 +309,97 @@ def test_a_frame_aggregates_text_beside_a_number() raises:
     var sums = out.column("v_sum").as_typed[DType.int64]()
     assert_equal(sums[0], 4)
     assert_equal(sums[1], 2)
+
+
+def whole(var col: StringArray, kind: AggKind) raises -> AnyArray:
+    """Reduces a whole text column, with no grouping in the way."""
+    return reduce_any(AnyArray(col^), kind)
+
+
+def test_the_whole_column_extreme_matches_the_grouped_one() raises:
+    """The two routes have to agree, because the grouped one with a single group
+    is what the whole column one replaced and there is no third opinion."""
+    var kinds = List[AggKind]()
+    kinds.append(AggKind.MIN)
+    kinds.append(AggKind.MAX)
+    kinds.append(AggKind.FIRST)
+    kinds.append(AggKind.LAST)
+
+    var rng = Rng(0x5EED)
+    var values = List[String]()
+    var present = List[Bool]()
+    for _ in range(5000):
+        # A long shared prefix, so most comparisons have to leave the view and
+        # read the payload, which is what a column of URLs looks like.
+        values.append(
+            "https://example.invalid/path/" + String(rng.next_below(9973))
+        )
+        present.append(rng.next_below(8) != 0)
+
+    for k in range(len(kinds)):
+        var direct = whole(with_nulls(values, present), kinds[k])
+        var codes = List[Int]()
+        for _ in range(len(values)):
+            codes.append(0)
+        var grouped = reduce(with_nulls(values, present), kinds[k], codes, 1)
+        assert_equal(value_of(direct, 0), value_of(grouped, 0))
+
+
+def test_a_whole_column_of_nulls_has_no_extreme() raises:
+    var kinds = List[AggKind]()
+    kinds.append(AggKind.MIN)
+    kinds.append(AggKind.MAX)
+    kinds.append(AggKind.FIRST)
+    kinds.append(AggKind.LAST)
+    for k in range(len(kinds)):
+        var col = with_nulls(["a", "b", "c"], [False, False, False])
+        var out = whole(col^, kinds[k])
+        assert_equal(len(out), 1)
+        assert_false(out.is_valid(0))
+
+
+def test_an_empty_string_is_the_smallest_value_and_a_null_is_not() raises:
+    """Two rules one line apart. The empty string is a value and sorts first, so
+    it is the minimum. A null is not a value, so it is not the minimum even
+    though it is the row a comparison would reach for."""
+    var col = with_nulls(["b", "", "a"], [True, True, True])
+    assert_equal(value_of(whole(col^, AggKind.MIN), 0), "")
+
+    var holey = with_nulls(["b", "x", "a"], [True, False, True])
+    assert_equal(value_of(whole(holey^, AggKind.MIN), 0), "a")
+
+
+def test_the_whole_column_extreme_crosses_a_morsel() raises:
+    """Past one morsel the scan is a row number per morsel and a merge over the
+    slots, and a merge that kept the wrong side would still be right inside every
+    morsel. The answer is put where only the merge can find it."""
+    # A morsel is 128k rows, so this is two of them, the second one short. Every
+    # row but two holds the same bytes, which keeps the column cheap to build and
+    # leaves the answer somewhere only the merge over the slots can find it.
+    var n = 128 * 1024 + 1000
+    var filler = String("middling_row")
+    var low = String("aaa_the_smallest")
+    var high = String("zzz_the_largest")
+    var builder = StringBuilder(capacity=n)
+    for i in range(n):
+        if i == 3:
+            builder.append(high.as_bytes())
+        elif i == n - 100:
+            builder.append(low.as_bytes())
+        else:
+            builder.append(filler.as_bytes())
+    var col = builder^.finish()
+    assert_equal(
+        value_of(whole(StringArray(copy=col), AggKind.MIN), 0),
+        "aaa_the_smallest",
+    )
+    assert_equal(value_of(whole(col^, AggKind.MAX), 0), "zzz_the_largest")
+
+
+def test_the_edges_of_a_whole_column_skip_the_nulls() raises:
+    var col = with_nulls(["a", "b", "c", "d"], [False, True, True, False])
+    assert_equal(value_of(whole(StringArray(copy=col), AggKind.FIRST), 0), "b")
+    assert_equal(value_of(whole(col^, AggKind.LAST), 0), "c")
 
 
 def main() raises:
