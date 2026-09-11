@@ -21,6 +21,7 @@ The round trip is the specification. `df.set_index("k").reset_index()` has to gi
 Twelve arguments across the three frame methods are declared and refused by name rather than being left out, and six of the twelve are waiting on the same missing thing, which is the MultiIndex. `docs/specs/35-a-column-that-is-also-the-labels.md` has the table and the argument it makes.
 
 Part of #156, after #498.
+
 ### Added: projection merging, so the rows are walked once and not once a node
 
 Two projections in a row are now one projection. The upper one reads the lower one's outputs by name, so merging them means putting the lower one's expression where the name was, and `b = a + 1` over `a = x * 2` becomes `b = x * 2 + 1` reading `x` directly. The node that computed `a` stops being reachable and the walk it was doing stops happening.
