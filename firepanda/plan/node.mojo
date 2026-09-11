@@ -276,8 +276,12 @@ struct Plan(Movable, Sized):
         self.nodes.append(node^)
         return at
 
-    def _input(self, at: Int) raises:
-        """Refuses an input that is not in the plan.
+    def check(self, at: Int) raises:
+        """Refuses an index that names no node in the plan.
+
+        Named the same as `Expressions.check` and public for the same reason:
+        a pass over a plan takes indices from somewhere and has to be able to
+        say so when one of them is not a node.
 
         Args:
             at: The index.
@@ -371,7 +375,7 @@ struct Plan(Movable, Sized):
             If the input is not in the plan, or the predicate is not in the
             arena or is not elementwise.
         """
-        self._input(input)
+        self.check(input)
         self._rowwise(predicate, "a filter predicate")
         return self._add(
             PlanNode(
@@ -408,7 +412,7 @@ struct Plan(Movable, Sized):
             If the input is not in the plan, an output is not in the arena, or
             the two lists are different lengths.
         """
-        self._input(input)
+        self.check(input)
         if len(outputs) != len(names):
             raise Error(
                 String(
@@ -469,7 +473,7 @@ struct Plan(Movable, Sized):
             a group key is not elementwise, or the names do not cover the
             output.
         """
-        self._input(input)
+        self.check(input)
         if len(names) != len(keys) + len(aggs):
             raise Error(
                 String(
@@ -532,8 +536,8 @@ struct Plan(Movable, Sized):
             If either input is not in the plan, a key is not in the arena or is
             not elementwise, or the two key lists are different lengths.
         """
-        self._input(left)
-        self._input(right)
+        self.check(left)
+        self.check(right)
         if len(left_keys) != len(right_keys):
             raise Error(
                 String(
@@ -594,7 +598,7 @@ struct Plan(Movable, Sized):
             elementwise, or either flag list is a different length from the
             keys.
         """
-        self._input(input)
+        self.check(input)
         if len(descending) != len(keys) or len(nulls_last) != len(keys):
             raise Error(
                 String(
@@ -645,7 +649,7 @@ struct Plan(Movable, Sized):
             If the input is not in the plan, or either number is negative and
             is not `NO_LIMIT`.
         """
-        self._input(input)
+        self.check(input)
         if offset < 0:
             raise Error(String("a limit cannot skip ", offset, " rows"))
         if length < 0 and length != NO_LIMIT:
@@ -682,7 +686,7 @@ struct Plan(Movable, Sized):
             If the input is not in the plan, or a key is not in the arena or is
             not elementwise.
         """
-        self._input(input)
+        self.check(input)
         for i in range(len(keys)):
             self._rowwise(keys[i], "a distinct key")
         return self._add(
@@ -721,7 +725,7 @@ struct Plan(Movable, Sized):
         if len(inputs) == 0:
             raise Error("a union needs something to stack")
         for i in range(len(inputs)):
-            self._input(inputs[i])
+            self.check(inputs[i])
         return self._add(
             PlanNode(
                 NodeKind.UNION,

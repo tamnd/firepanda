@@ -31,6 +31,22 @@ It was found by AddressSanitizer rather than by a failing assertion, as a use af
 The second thing is smaller. A pooled buffer can still be sharing with a column that outlived it, which is safe because the pool zeroes on the way out and zeroing un-shares first, so it hands back a private allocation and loses the recycling rather than writing over somebody's bytes.
 
 Closes #406.
+### Added: binding a plan, so names become positions and every expression has a type
+
+A plan comes out of the builders holding names. `col("l_discount")` is a string, and finding out which column that is means asking a schema. `firepanda/plan/bind.mojo` is the pass that asks, once, and writes the answer onto the tree: a position, a relation, and the logical type the expression produces.
+
+The first thing that falls out is that execution stops looking names up. `DataFrame.column(name)` copies and flattens the column it finds, which is ninety six megabytes on a text column of six million rows, and every hand written query in the TPC-H driver has a helper whose only job is to turn a name into an index so that the borrowing accessor can be used instead. A bound plan holds the index already, so the question stops existing rather than getting a faster answer.
+
+The second is that a type error becomes a plan error. Subtracting a float column from a text one is refused before a row moves, and so is a filter whose predicate is a number rather than a question, a join key pair with no type that holds both sides, and a union of two arms that are different widths. The types come from `binary_type`, `unary_type` and `agg_type`, which are the same functions the kernels use to decide what they produce, so the type on the node is the type the kernel will really answer rather than a second opinion about it.
+
+An unresolved name gets a suggestion. `c_acctbl` against a customer schema comes back with `Did you mean 'c_acctbal'?`, and a name that is close to nothing in the schema gets no line at all, which is better than a suggestion that is obviously not what was meant.
+
+Binding also records where each output column came from, as one relation id per column, which is what a column reference copies into its table field and what the table set analysis reads. A column that no single relation produced gets no relation, and there are two ways to be one: a constant reads none, and an expression over two tables reads two. Neither is a bit index. A reference to such a column still binds for position and type, and the table set analysis then refuses it, which is the honest answer, because pushdown cannot decide where that predicate can go by looking at the reference alone. It has to substitute the projection's expression first and ask again about what comes out.
+
+`_agg_type` moved from `firepanda/exec/node.mojo` to `firepanda/kernel/group.mojo` and is `agg_type` now. Binding needs the same answer the group node needs, the two have to agree, and the way to be sure of that is for there to be one of it, next to the tag it reads.
+
+Nothing calls any of this yet. The passes and the lowering into the existing `exec` nodes follow.
+
 ### Added: the nine logical plan nodes, and a plan that prints as a tree
 
 `firepanda/plan/node.mojo` has the nine kinds the plan spec names, which are scan, filter, project, aggregate, join, sort, limit, distinct and union, and `Plan` is the arena they live in. It holds the expression arena inside it, because a node holds expressions by index and an index only means something against an arena, so a plan is one value to pass around rather than a pair a caller has to keep together. Node indices come out in creation order like expression indices do, so an input always sits below the node that reads it.
