@@ -8,7 +8,6 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
-### Added: a position and a label are different questions
 ### Added: the pass pipeline, so the planner is one call rather than five
 
 `optimize` runs simplification, projection pushdown, predicate pushdown, projection merging and slice pushdown, in that order, and runs the whole thing again if a run changed anything, up to four times. Until now every pass was a thing a caller could run on its own and nothing ran any of them. This is the first code in the planner that a query could go through end to end.
@@ -25,7 +24,7 @@ The passes the spec lists that are not written yet slot into this one function a
 
 Part of #377.
 
-### Added: slice pushdown and top n, so ten rows are not paid for six million times
+### Added: a position and a label are different questions
 
 `DataFrame.loc`, `DataFrame.iloc`, `DataFrame.at`, `DataFrame.iat` and `DataFrame.take`. A frame is addressable now: until this went in there was no way to ask one for a row, and a library that can only hand back a whole frame or a whole column is not one a caller can walk through.
 
