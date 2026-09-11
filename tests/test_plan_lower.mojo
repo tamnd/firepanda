@@ -115,6 +115,63 @@ def shift_schemas() raises -> List[Schema]:
     return out^
 
 
+def gauges() raises -> DataFrame:
+    """Five rows over two columns that hold nulls, for the three valued rule.
+
+    The pairs cover every combination that makes a connective differ from what
+    two valued logic would say: a null against a false, a null against a true,
+    a false against a null, a null against a null, and a pair with no null in it
+    at all to hold the ordinary case down.
+    """
+    var a = ChunkedArray(LogicalType.INT64)
+    a.append(gappy([0, 0, 0, 0, 1], [0, 1, 3]))
+    var b = ChunkedArray(LogicalType.INT64)
+    b.append(gappy([0, 1, 0, 0, 1], [2, 3]))
+    var columns = List[ChunkedArray]()
+    columns.append(a^)
+    columns.append(b^)
+    var fields = List[Field]()
+    fields.append(Field("a", LogicalType.INT64))
+    fields.append(Field("b", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def gappy(values: List[Int64], nulls: List[Int]) raises -> AnyArray:
+    """Builds an int64 array with nulls at the positions given."""
+    var col = Array[DType.int64](len(values))
+    for i in range(len(values)):
+        col.set_valid(i, values[i])
+    for i in range(len(nulls)):
+        col.set_null(nulls[i])
+    return AnyArray(col^)
+
+
+def gauge_frame() raises -> List[DataFrame]:
+    """The gauges frame as the single relation a plan can scan."""
+    var frames = List[DataFrame]()
+    frames.append(gauges())
+    return frames^
+
+
+def gauge_schemas() raises -> List[Schema]:
+    """The schema of that one relation, for binding."""
+    var out = List[Schema]()
+    out.append(Schema(copy=gauges().schema))
+    return out^
+
+
+def truths(df: DataFrame, name: String) raises -> List[Int64]:
+    """Reads a bool column out as ones and zeroes, and a null as a minus one."""
+    var col = df.column(name).as_typed[DType.bool]()
+    var out = List[Int64](capacity=len(col))
+    for i in range(len(col)):
+        if not col.is_valid(i):
+            out.append(-1)
+        else:
+            out.append(Int64(1) if col[i] else Int64(0))
+    return out^
+
+
 def read_back(df: DataFrame, name: String) raises -> List[Int64]:
     """Reads an int64 column out as a plain list."""
     var col = df.column(name).as_typed[DType.int64]()
@@ -396,6 +453,171 @@ def test_a_conjunction_the_simplify_pass_flattened_lowers_the_same() raises:
     assert_equal(len(pipe.operators), 2, "operators")
     var out = pipe^.run()
     assert_equal(len(out), 6, "rows kept")
+
+
+def test_a_disjunction_computes_a_mask_and_filters_on_it() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var three = plan.exprs.binary(
+        BinaryOp.EQ, qty, plan.exprs.literal(Value(Int64(3)))
+    )
+    var lots = plan.exprs.binary(
+        BinaryOp.EQ, qty, plan.exprs.literal(Value(Int64(25)))
+    )
+    var either = plan.exprs.call(String("or"), [three, lots], rowwise=True)
+    var root = plan.filter(scan, either)
+    var out = run(plan, root)
+
+    # The other half of the conjunction test above. This one cannot become a
+    # line of filters, because each arm keeps rows the other one drops, so both
+    # comparisons run on all ten rows and something has to join them.
+    same(read_back(out, "qty"), [3, 25], "the two rows named")
+
+
+def test_a_negation_in_a_filter_keeps_what_the_predicate_dropped() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var lots = plan.exprs.binary(
+        BinaryOp.GT, qty, plan.exprs.literal(Value(Int64(10)))
+    )
+    var root = plan.filter(
+        scan, plan.exprs.call(String("not"), [lots], rowwise=True)
+    )
+    var out = run(plan, root)
+
+    same(read_back(out, "qty"), [5, 3, 8, 1], "the rows at ten or under")
+
+
+def test_a_chain_of_three_ors_is_two_operators_folded_left() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var a = plan.exprs.binary(
+        BinaryOp.EQ, qty, plan.exprs.literal(Value(Int64(3)))
+    )
+    var b = plan.exprs.binary(
+        BinaryOp.EQ, qty, plan.exprs.literal(Value(Int64(25)))
+    )
+    var c = plan.exprs.binary(
+        BinaryOp.GT, qty, plan.exprs.literal(Value(Int64(29)))
+    )
+    var any = plan.exprs.call(String("or"), [a, b, c], rowwise=True)
+    var root = plan.filter(scan, any)
+
+    _ = bind(plan, root, schemas())
+    var pipe = lower(plan, root, one_frame())
+
+    # A call with three arguments is not a node that takes three columns. Three
+    # comparisons, two connectives over the pairs, and the filter, which drops
+    # all five intermediates as it writes the way it drops one.
+    assert_equal(len(pipe.operators), 6, "operators")
+
+    var out = pipe^.run()
+    same(read_back(out, "qty"), [3, 40, 25, 30], "the rows any arm names")
+
+
+def test_a_conjunction_below_a_disjunction_reaches_the_operator() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var price = plan.exprs.column("price")
+    var one = plan.exprs.binary(
+        BinaryOp.EQ, qty, plan.exprs.literal(Value(Int64(1)))
+    )
+    var lots = plan.exprs.binary(
+        BinaryOp.GT, qty, plan.exprs.literal(Value(Int64(10)))
+    )
+    var cheap = plan.exprs.binary(
+        BinaryOp.LT, price, plan.exprs.literal(Value(Int64(5)))
+    )
+    var both = plan.exprs.call(String("and"), [lots, cheap], rowwise=True)
+    var either = plan.exprs.call(String("or"), [one, both], rowwise=True)
+    var root = plan.filter(scan, either)
+    var out = run(plan, root)
+
+    # The and is not at the top of the filter, so it is not a line of filters
+    # and it is computed as a column like the or above it. Of the six rows over
+    # ten, the prices are 2, 1, 5, 3, 4 and 6, so four are under five, and the
+    # single row the other arm names is on top of those.
+    same(
+        read_back(out, "qty"), [20, 40, 25, 1, 30], "the rows either arm names"
+    )
+
+
+def test_a_disjunction_over_nulls_follows_the_three_valued_rule() raises:
+    var plan = Plan()
+    var scan = plan.scan("gauges", List[String](), 0)
+    var zero = plan.exprs.literal(Value(Int64(0)))
+    var a = plan.exprs.binary(BinaryOp.GT, plan.exprs.column("a"), zero)
+    var b = plan.exprs.binary(BinaryOp.GT, plan.exprs.column("b"), zero)
+    var either = plan.exprs.call(String("or"), [a, b], rowwise=True)
+    var both = plan.exprs.call(String("and"), [a, b], rowwise=True)
+    var root = plan.project(scan, [either, both], ["either", "both"])
+
+    _ = bind(plan, root, gauge_schemas())
+    var pipe = lower(plan, root, gauge_frame())
+    var out = pipe^.run()
+
+    # A true settles the or and a false settles the and, and the rows where
+    # neither operand settles anything stay null.
+    same(truths(out, "either"), [-1, 1, -1, -1, 1], "either")
+    same(truths(out, "both"), [0, -1, 0, -1, 1], "both")
+
+
+def test_a_filter_drops_the_rows_a_connective_could_not_decide() raises:
+    var plan = Plan()
+    var scan = plan.scan("gauges", List[String](), 0)
+    var zero = plan.exprs.literal(Value(Int64(0)))
+    var a = plan.exprs.binary(BinaryOp.GT, plan.exprs.column("a"), zero)
+    var b = plan.exprs.binary(BinaryOp.GT, plan.exprs.column("b"), zero)
+    var either = plan.exprs.call(String("or"), [a, b], rowwise=True)
+    var root = plan.filter(scan, either)
+
+    _ = bind(plan, root, gauge_schemas())
+    var pipe = lower(plan, root, gauge_frame())
+    var out = pipe^.run()
+
+    # A predicate has to be true to keep a row, and the three null rows are not
+    # true, so two rows come out of five.
+    assert_equal(len(out), 2, "rows kept")
+    same(read_back(out, "b"), [1, 1], "the two rows that were true")
+
+
+def test_a_connective_over_a_column_that_is_not_boolean_never_lowers() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var either = plan.exprs.call(
+        String("or"),
+        [plan.exprs.column("qty"), plan.exprs.column("price")],
+        rowwise=True,
+    )
+    var root = plan.project(scan, [either], ["either"])
+
+    # Binding refuses it, so lowering never sees it. The operator checks the
+    # same thing again in `bind` and so does the kernel, because a plan that
+    # was built by hand rather than by the binder can still reach either one.
+    with assert_raises(contains="reads yes or no"):
+        _ = bind(plan, root, schemas())
+
+
+def test_a_negation_of_more_than_one_thing_never_lowers() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var a = plan.exprs.binary(
+        BinaryOp.GT, qty, plan.exprs.literal(Value(Int64(10)))
+    )
+    var b = plan.exprs.binary(
+        BinaryOp.LT, qty, plan.exprs.literal(Value(Int64(30)))
+    )
+    var root = plan.filter(
+        scan, plan.exprs.call(String("not"), [a, b], rowwise=True)
+    )
+
+    with assert_raises(contains="takes 1 argument and was given 2"):
+        _ = bind(plan, root, schemas())
 
 
 def test_a_projection_selects_by_position() raises:
