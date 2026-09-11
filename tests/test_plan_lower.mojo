@@ -28,6 +28,7 @@ from firepanda.kernel.group import AggKind
 from firepanda.kernel.unary import UnaryOp
 from firepanda.plan.bind import bind
 from firepanda.plan.lower import lower
+from firepanda.plan.merge import merge
 from firepanda.plan.node import NO_LIMIT, Plan
 from firepanda.plan.simplify import simplify
 
@@ -750,6 +751,32 @@ def test_a_cast_of_a_shared_column_does_not_convert_it_twice() raises:
     assert_true(out.schema[0].dtype == LogicalType.FLOAT64, "converted")
     assert_true(out.schema[1].dtype == LogicalType.INT64, "and not converted")
     assert_equal(read_back(out, "narrow")[0], 50, "with the product in it")
+
+
+def test_a_merged_projection_computes_the_shared_expression_once() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var price = plan.exprs.column("price")
+    var lower_node = plan.project(
+        scan, [plan.exprs.binary(BinaryOp.MUL, qty, price)], ["total"]
+    )
+    var total = plan.exprs.column("total")
+    var root = plan.project(
+        lower_node,
+        [plan.exprs.binary(BinaryOp.ADD, total, total)],
+        ["doubled"],
+    )
+    _ = merge(plan, root, schemas())
+    var pipe = lower(plan, root, one_frame())
+
+    # This is the reason the merging pass is allowed to substitute an
+    # expression an upper projection reads twice. The graft put one index in
+    # two places and the memo is what keeps that from being two multiplies.
+    assert_equal(len(pipe.operators), 3, "a multiply, an add and a projection")
+
+    var out = pipe^.run()
+    assert_equal(read_back(out, "doubled")[0], 100, "twice five times ten")
 
 
 def main() raises:
