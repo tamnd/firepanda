@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a VALUES runs, so a query can read nothing at all
+
+`VALUES (1, 2), (3, 4)` gives back two rows of two columns. A scan says which frame to read and a VALUES says what the rows are, so the one is found and the other is made, and making it is the only place lowering allocates an array. It costs nothing at run time, because the rows were known before the query started.
+
+Every value has to be a literal by the time lowering sees it. Constant folding has already run, so `VALUES (1 + 1)` is one, and anything still computed is refused by name rather than evaluated, because there is no chunk under a VALUES to evaluate it over. A column whose rows disagree about their type is refused for the same kind of reason, since a column holds one type.
+
+A missing value is a row like any other, and a temporal value keeps the type binding gave it rather than the int64 its array is made of.
+
+`SELECT 1 + 1` is still refused, and it is refused above the VALUES rather than at it. A query with no `FROM` is already a literal table of one row in the plan, and what does not run is the projection over it, because a projection of a bare constant has no operator that makes a column out of one. That is the next change.
+
+Part of #309.
+
 ### Added: a frame on a set of labels it may not have
 
 `DataFrame.reindex`, with both of its halves and eight of pandas' ten parameters. On the rows it is `get_indexer` and then a gather, and a label the frame does not have costs no branch of its own, since the lookup answers a not found label with a negative position and the gather already reads a negative position as a null row. On the columns it is a lookup in the schema instead, and a name the frame does not have becomes a column of missing values as tall as the frame. The boundary applies the columns first and then the rows, because narrowing the frame before gathering it means the gather moves less.
@@ -27,7 +39,6 @@ Part of #156, after #8.
 `filled_block` in `kernel/binary.mojo`, next to the `all_null` it is the filled half of. It was `_gap_block` in `shift.mojo` and it moved because `reindex` wanted the same thing, which is a column of one value in a type the value did not arrive with. The two other copies of it, in `frame/align.mojo` and `plan/simplify.mojo`, were left where they are: the first refuses text for a reason that belongs to alignment and not to block building, and folding that in would have moved a domain rule into a place that has no domain.
 
 Part of #156, after #8.
-
 ### Added: SELECT DISTINCT runs, and it needed no operator
 
 A distinct is a group by that reduces nothing. A group by holds one row per group and the rows of a group differ only in what was not the key, so when the key is every column there is nothing they can differ in, and `SELECT DISTINCT a, b` is the existing `Group` with every position as a key and an empty list of folds.
