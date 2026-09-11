@@ -22,6 +22,9 @@ class DataFrame:
     def names(self) -> list[str]:
         """The column names, in order."""
         ...
+    def dtypes(self) -> list[str]:
+        """The column types, in order, as dtype spells them."""
+        ...
     def set_index(self, name: str, drop: bool) -> DataFrame:
         """The frame with one column moved into the row labels."""
         ...

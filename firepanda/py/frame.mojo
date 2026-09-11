@@ -216,6 +216,29 @@ struct PyDataFrame(Movable, Writable):
         return out
 
     @staticmethod
+    def dtypes(py_self: PythonObject) raises -> PythonObject:
+        """Reports the column types, in order, as `dtype` spells them.
+
+        This reads the schema and not the columns. Asking a frame what its
+        types are through `column` would copy every column in order to look at
+        the name of each one's type, which on a frame of five hundred columns
+        is the whole frame copied to answer a question the schema already
+        holds. The schema is the frame's shape and knowing the shape should
+        not cost the contents.
+
+        Args:
+            py_self: The frame.
+
+        Returns:
+            A list of strings, one per column, in column order.
+        """
+        ref schema = Self._frame(py_self)[].frame[].schema
+        var out = Python.list()
+        for i in range(len(schema)):
+            out.append(PythonObject(String(schema[i].dtype)))
+        return out
+
+    @staticmethod
     def head(py_self: PythonObject, n: PythonObject) raises -> PythonObject:
         """Takes the first `n` rows.
 

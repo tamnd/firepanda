@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: three ways of naming a set of labels without writing them down
+
+`DataFrame.filter`, `DataFrame.select_dtypes` and `DataFrame.truncate`. They look like three unrelated methods and they are the same method three times: each computes a set of labels from a rule the caller described, and each then hands that set to the narrowing document 36 already built. None of the three has a kernel, and that is what having `loc` looks like from the far side.
+
+`select_dtypes` needed one new thing, which is a way to ask a frame what its types are without reading its contents. The only way to get a column's type until now was `column(name).dtype`, and `column` copies and flattens, so asking a frame of five hundred columns which of them held numbers would have copied the whole frame to look at five hundred strings. `PyDataFrame.dtypes` reads the schema instead, which is the frame's shape and is already in memory, and knowing the shape should not cost the contents. `infer_objects`, `convert_dtypes` and `info` are the same read and now have somewhere to make it.
+
+The type vocabulary is numpy's tree and it is copied without being tidied. `include="number"` takes a column of spans as well as the integers and the floats, because numpy makes `timedelta64` a subclass of `signedinteger` and pandas asks the question with `issubclass` against that hierarchy. `include="int"` takes int32 and int64 and not the unsigned widths, because numpy resolves a bare `int` to one platform dependent type and pandas widens it back out by hand, while `include="integer"` is the abstract class and does take them. So `int` is narrower than `integer`, which reads backwards and is what a caller's pandas does. The tree is a thirteen row table in the pandas layer rather than a computation, because firepanda does not import numpy and there is nothing here to ask.
+
+`include="object"` is refused with the message `astype("object")` already gives, rather than being softened into selecting the string columns the way pandas 3 still does under a deprecation warning. A caller who learns that firepanda has an object dtype from one method and that it has not from another has been told the same thing twice and believed it once.
+
+`truncate` is `loc[before:after]` with two rules in front. The index has to be sorted, because a label slice on an unsorted index answers the rows that happen to lie between two positions rather than the values between two labels, and pandas refuses rather than answering that. The pair has to be the right way round, and that check happens before the direction is worked out, so a caller writes the smaller label as `before` on a falling index too. Both are pandas' order.
+
+Part of #156, after #510.
+
 ### Fixed: three messages and a class that the conformance board found on loc
 
 Arming the fifteen indexing cases in `firepanda-compat` turned four of its error cases from unimplemented into failing, which is the board working: the names started resolving and the level that asks what happens when they are called wrongly could finally ask. Three of the four were bugs and are fixed here.

@@ -1862,6 +1862,31 @@ class DataFrame(DataFrameMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def filter(
+        self, items: Any = None, like: str | None = None, regex: str | None = None, axis: Any = None
+    ) -> DataFrame:
+        """The columns named by one of three rules, in the frame's own order."""
+        try:
+            return self._filter(items, like, regex, axis)
+        except Exception as error:
+            raise translate(error) from None
+
+    def select_dtypes(self, include: Any = None, exclude: Any = None) -> DataFrame:
+        """The columns whose type is in one set of types and not in another."""
+        try:
+            return self._select_dtypes(include, exclude)
+        except Exception as error:
+            raise translate(error) from None
+
+    def truncate(
+        self, before: Any = None, after: Any = None, axis: Any = None, copy: Any = NO_DEFAULT
+    ) -> DataFrame:
+        """The rows between two labels, with both of them kept."""
+        try:
+            return self._truncate(before, after, axis, copy)
+        except Exception as error:
+            raise translate(error) from None
+
     def __arrow_c_schema__(self) -> object:
         """The frame's Arrow schema, as an arrow_schema PyCapsule."""
         try:
