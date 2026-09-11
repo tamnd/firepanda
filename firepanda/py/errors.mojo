@@ -125,3 +125,34 @@ def retagged(kind: String, cause: Error) -> Error:
     if message.startswith("firepanda:"):
         return Error(message)
     return Error(kind + message)
+
+
+def reindex_refusal(cause: Error) -> Error:
+    """Classifies whatever a reindex refused, for the three that can refuse.
+
+    `reindex` is the one operation in the surface whose message is replaced
+    rather than passed along, and it is replaced for exactly one refusal. An
+    index whose labels repeat has no single row to answer a label with, and the
+    core says so in a sentence about `get_indexer` needing a unique index that
+    names the function to call instead. That is the right thing to say to
+    whoever called `get_indexer` and it is not what happened, so a caller who
+    made pandas' mistake gets pandas' sentence.
+
+    Everything else a reindex refuses is about a type, which is a label that
+    cannot be compared with the index's own or a fill value no column could
+    hold, so the rest land on `dtype`.
+
+    Telling the two apart by looking for the word unique is not a lovely rule.
+    It is the one the tagging design leaves available, since a kind is a prefix
+    and the core does not apply one, and it is load bearing in three bindings
+    rather than one, which is why it lives here.
+
+    Args:
+        cause: What the core raised.
+
+    Returns:
+        The error to raise, tagged.
+    """
+    if "unique" in String(cause):
+        return tagged(VALUE, "cannot reindex on an axis with duplicate labels")
+    return retagged(DTYPE, cause)

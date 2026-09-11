@@ -11,6 +11,13 @@ The widening is the part worth writing down. An integer column that gains a
 missing row comes back as a float column, which is a surprising answer until you
 remember that it is the answer pandas gives and for the same reason. Every test
 here that checks a dtype is checking that rule and not the gather.
+
+`Series.reindex` and `Index.reindex` are at the bottom of the file. The first is
+the row half with one column in it and the tests for it are the same tests, run
+again because a second copy of a rule is a second place to get it wrong. The
+second is a stranger thing: an index carries no data, so reindexing one moves
+nothing and the answer is the target plus the lookup, and every test for it is
+about the lookup or about whose name the result ends up under.
 """
 
 from std.math import isnan
@@ -27,6 +34,7 @@ from firepanda.array.array import Array, from_list
 from firepanda.array.strings import strings_from_list
 from firepanda.array.value import Value
 from firepanda.frame.frame import DataFrame
+from firepanda.frame.index import Index
 from firepanda.frame.series import Series
 
 
@@ -338,6 +346,164 @@ def test_a_column_asked_for_twice_is_refused() raises:
 def test_the_row_labels_survive_a_reindex_of_the_columns() raises:
     var got = _keyed().reindex_columns(["size"])
     assert_equal(_label_list(got), [10, 20, 30], "the labels are untouched")
+
+
+def _counted(hole: Bool = False) raises -> Series:
+    """A series of three whole numbers labelled ten, twenty and thirty.
+
+    Args:
+        hole: Whether to leave the middle row missing, which is how the fill
+            value tests tell a hole the series arrived with from one the lookup
+            made.
+
+    Returns:
+        The series.
+    """
+    var values = Array[DType.int64](3)
+    for i in range(3):
+        values.set_valid(i, Int64(i + 1))
+    if hole:
+        values.set_null(1)
+    var out = Series("count", values^)
+    out.index = Index(_labels([Int64(10), 20, 30]), String("key"))
+    return out^
+
+
+def _numbers_of(series: Series) raises -> List[Int]:
+    """Reads a series as whole numbers, with a missing row written as minus one.
+
+    The same two readings `_counts_of` does above, for the same reason: the
+    column comes back integer or float depending on whether the lookup missed,
+    and a widened one carries its holes as NaN rather than in a bitmap.
+    """
+    var out = List[Int](capacity=len(series))
+    for i in range(len(series)):
+        if not series.is_valid(i):
+            out.append(-1)
+        elif series.dtype() == DType.float64:
+            var number = series.values.as_typed_view[DType.float64]()[i]
+            out.append(-1 if isnan(number) else Int(number))
+        else:
+            out.append(Int(series.values.as_typed_view[DType.int64]()[i]))
+    return out^
+
+
+def _labels_of(index: Index) raises -> List[Int]:
+    """Reads an index as a list of whole numbers."""
+    var found = index.materialize().as_typed[DType.int64]()
+    var out = List[Int](capacity=len(found))
+    for i in range(len(found)):
+        out.append(Int(found[i]))
+    return out^
+
+
+def test_a_series_comes_back_on_the_labels_it_was_given() raises:
+    var got = _counted().reindex(_labels([Int64(30), 10]))
+    assert_equal(_numbers_of(got), [3, 1], "the rows those labels sit in")
+    assert_equal(_labels_of(got.index), [30, 10], "in the order asked for")
+    assert_equal(got.name, "count", "and under the name it already had")
+
+
+def test_a_label_the_series_does_not_have_is_a_missing_row() raises:
+    var got = _counted().reindex(_labels([Int64(10), 99]))
+    assert_equal(_numbers_of(got), [1, -1], "the second row came from nowhere")
+    assert_equal(
+        got.dtype(), DType.float64, "and the column widened to hold it"
+    )
+
+
+def test_a_series_that_loses_nothing_keeps_its_type() raises:
+    var got = _counted().reindex(_labels([Int64(30), 30, 10]))
+    assert_equal(got.dtype(), DType.int64, "no hole, so no widening")
+    assert_equal(_numbers_of(got), [3, 3, 1], "and a label may repeat")
+
+
+def test_a_fill_value_stops_a_series_widening() raises:
+    var got = _counted().reindex(_labels([Int64(10), 99]), Value(Int64(0)))
+    assert_equal(got.dtype(), DType.int64, "there is nothing to widen for")
+    assert_equal(_numbers_of(got), [1, 0], "and the value is in the row")
+
+
+def test_a_fill_value_leaves_a_hole_the_series_already_had() raises:
+    # The same rule the frame half is tested for, and the reason the fill is a
+    # row rather than a pass over the answer. A null that was in the series
+    # before the lookup is still a null after it.
+    var got = _counted(hole=True).reindex(
+        _labels([Int64(20), 99]), Value(Int64(7))
+    )
+    assert_equal(_numbers_of(got), [-1, 7], "only the row nobody found")
+
+
+def test_a_series_on_no_labels_at_all_is_empty() raises:
+    var got = _counted().reindex(_labels(List[Int64]()))
+    assert_equal(len(got), 0, "no rows")
+    assert_equal(got.dtype(), DType.int64, "and nothing widened on the way")
+
+
+def test_a_word_cannot_fill_a_series_of_numbers() raises:
+    with assert_raises(contains="nothing to put in the row"):
+        _ = _counted().reindex(_labels([Int64(99)]), Value(String("nothing")))
+
+
+def test_a_series_whose_labels_repeat_is_refused() raises:
+    var series = Series("count", _labels([Int64(1), 2]))
+    series.index = Index(_labels([Int64(10), 10]), String("key"))
+    with assert_raises(contains="unique"):
+        _ = series.reindex(_labels([Int64(10)]))
+
+
+def test_reindexing_an_index_answers_the_labels_and_the_lookup() raises:
+    var index = Index(_labels([Int64(10), 20, 30]), String("key"))
+    var got = index.reindex(_labels([Int64(30), 99]))
+    assert_equal(_labels_of(got.index), [30, 99], "the labels asked for")
+    assert_true(got.positions, "and where to find each of them")
+    ref found = got.positions.value()
+    assert_equal(Int(found[0]), 2, "thirty is the third row")
+    assert_equal(Int(found[1]), -1, "and ninety nine is nowhere")
+
+
+def test_an_index_reindexed_onto_itself_has_nothing_to_move() raises:
+    # pandas answers the second half with nothing rather than with the range a
+    # gather would have been, which is how a caller learns it can skip the move.
+    var index = Index(_labels([Int64(10), 20, 30]), String("key"))
+    var got = index.reindex(_labels([Int64(10), 20, 30]))
+    assert_false(got.positions, "there is nothing to gather")
+    assert_equal(
+        _labels_of(got.index), [10, 20, 30], "and the labels are those"
+    )
+
+
+def test_an_index_reindexed_onto_nothing_answers_an_empty_lookup() raises:
+    var index = Index(_labels([Int64(10), 20]), String("key"))
+    var got = index.reindex(_labels(List[Int64]()))
+    assert_equal(len(got.index), 0, "no labels")
+    assert_true(got.positions, "and an answer of no positions, not no answer")
+    assert_equal(len(got.positions.value()), 0, "which is empty")
+
+
+def test_a_list_of_labels_takes_the_name_the_index_had() raises:
+    var index = Index(_labels([Int64(10), 20]), String("key"))
+    var got = index.reindex(_labels([Int64(20)]))
+    assert_true(got.index.name, "the result is named")
+    assert_equal(
+        got.index.name.value(), "key", "after the index that was asked"
+    )
+
+
+def test_an_index_of_labels_keeps_its_own_name() raises:
+    # The rule that reads backwards until you notice it is the same rule twice:
+    # the name belongs to whoever was in a position to say what it was, and a
+    # target that is an index was.
+    var index = Index(_labels([Int64(10), 20]), String("key"))
+    var wanted = Index(_labels([Int64(20)]), String("other"))
+    var got = index.reindex(wanted)
+    assert_equal(got.index.name.value(), "other", "the target's own name")
+
+
+def test_an_index_that_repeats_a_label_cannot_be_reindexed() raises:
+    var index = Index(_labels([Int64(10), 10]), String("key"))
+    with assert_raises(contains="unique"):
+        _ = index.reindex(_labels([Int64(10)]))
 
 
 def main() raises:

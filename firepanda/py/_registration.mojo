@@ -210,6 +210,10 @@ def register(mut module: PythonModuleBuilder) raises:
     )
     _ = series.def_method[PySeries.head]("head", docstring="The first n rows.")
     _ = series.def_method[PySeries.tail]("tail", docstring="The last n rows.")
+    _ = series.def_method[PySeries.reindex](
+        "reindex",
+        docstring="The series on a set of labels, whether it has them or not.",
+    )
     _ = series.def_method[PySeries.to_list](
         "to_list", docstring="Every value, copied into a Python list."
     )
@@ -383,6 +387,12 @@ def register(mut module: PythonModuleBuilder) raises:
         "get_indexer",
         docstring=(
             "Where each of a set of labels sits, with -1 for the missing."
+        ),
+    )
+    _ = index.def_method[PyIndex.reindex](
+        "reindex",
+        docstring=(
+            "The labels asked for and where each of them sits, as a pair."
         ),
     )
     _ = index.def_method[PyIndex.contains](

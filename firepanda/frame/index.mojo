@@ -205,6 +205,50 @@ struct Matches(Movable):
         self.missing = missing^
 
 
+struct Reindexed(Movable):
+    """A set of labels and where each of them sits in the index that was asked.
+
+    What `reindex` returns, and a pair because pandas returns a pair. An index
+    carries no data of its own, so reindexing one produces the target and
+    nothing else, and the half a caller actually wanted is the second one: the
+    positions to gather whatever the index was labelling.
+    """
+
+    var index: Index
+    """The labels the caller asked for, under the level name pandas would have
+    given them."""
+
+    var positions: Optional[Array[DType.int64]]
+    """One position per label, `NOT_FOUND` where there is no such label, or
+    nothing at all when the target is the index already and a gather would have
+    moved every row to where it was."""
+
+    def __init__(
+        out self, var index: Index, var positions: Optional[Array[DType.int64]]
+    ):
+        """Constructs a result.
+
+        Args:
+            index: The labels asked for.
+            positions: Where to find each of them, or nothing.
+        """
+        self.index = index^
+        self.positions = positions^
+
+    def into_index(deinit self) -> Index:
+        """Gives up the labels without copying them, dropping the positions.
+
+        Mojo will not let a caller move one field out of a struct that still
+        owns the other, and a caller who has already read the positions has no
+        use for the rest of the pair. `deinit` says the pair is being torn down,
+        which is what makes the move legal.
+
+        Returns:
+            The labels asked for.
+        """
+        return self.index^
+
+
 def _same_label(a: AnyArray, i: Int, b: AnyArray, j: Int) raises -> Bool:
     """Reports whether two rows hold the same label.
 
@@ -1155,6 +1199,68 @@ struct Index(Copyable, Movable, Sized, Writable):
             return self.get_indexer(target)
         var found = self.get_indexer_non_unique(target)
         return found^.take_positions()
+
+    def reindex(self, target: AnyArray) raises -> Reindexed:
+        """The labels a caller asked for, and where to find each of them here.
+
+        pandas' `Index.reindex`, which is a stranger method than its name
+        suggests: an index has no data to move, so the new index is the target
+        and nothing else, and the only work done is the lookup. The pair is
+        there because the caller is usually about to gather something else with
+        it, which is what `DataFrame.reindex` does with the same two pieces.
+
+        The level name comes from this index rather than from the target, since
+        a bare list of labels has no name to offer. The overload below is the
+        other case.
+
+        Args:
+            target: The labels the result should carry, in order.
+
+        Returns:
+            The target as an index, and the positions, or nothing where the
+            target is this index and there is nothing to move.
+
+        Raises:
+            Error: If this index holds a duplicate, because a label sitting in
+                two rows has no single position to report, or if the labels
+                cannot be compared with this index's own.
+        """
+        return self.reindex(Self(AnyArray(copy=target), self.name.copy()))
+
+    def reindex(self, target: Self) raises -> Reindexed:
+        """The same, for a target that is an index and brought its own name.
+
+        The name rule is pandas' and it is worth stating on its own: a target
+        that is an index keeps its own level name, and a target that is a list
+        of labels takes this index's. That reads backwards until you notice it
+        is the same rule both times, which is that the name belongs to whoever
+        was in a position to say what it was.
+
+        Args:
+            target: The labels the result should carry, in order.
+
+        Returns:
+            The target and the positions, or the target and nothing where the
+            two indexes already hold the same labels.
+
+        Raises:
+            Error: If this index holds a duplicate, or if the labels cannot be
+                compared with this index's own.
+        """
+        if self.equals(target):
+            # Nothing to gather, and pandas says so with a `None` rather than
+            # with the range the gather would have been. A caller that meant to
+            # move rows can skip the move, and one that wanted the positions
+            # anyway knows they are zero to n minus one.
+            return Reindexed(Self(copy=target), None)
+        if len(target) == 0:
+            # Short circuited for the reason `DataFrame.reindex` gives, which is
+            # that an empty label set has no dtype in it to compare against
+            # this index's.
+            return Reindexed(Self(copy=target), Array[DType.int64](0))
+        return Reindexed(
+            Self(copy=target), self.get_indexer(target.materialize())
+        )
 
     def unique(self) raises -> Self:
         """The labels, each kept once, in the order they first appear.

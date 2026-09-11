@@ -27,6 +27,7 @@ and the surface has to be built again later on top of the real type. The list is
 `tolist`, which is one member on this.
 """
 
+from std.collections import Optional
 from std.os import abort
 from std.memory import ArcPointer, Pointer
 from std.python import Python, PythonObject
@@ -37,7 +38,7 @@ from firepanda.array.array import Array
 from firepanda.array.strings import StringBuilder
 from firepanda.dtype.lists import ALL
 from firepanda.dtype.logical import LogicalType, TypeKind
-from firepanda.frame.index import Index
+from firepanda.frame.index import Index, Reindexed
 from firepanda.frame.series import Series
 from firepanda.io.arrow_export import export_array_borrowed, export_schema
 from firepanda.py.args import flag, whole, words
@@ -49,6 +50,7 @@ from firepanda.py.errors import (
     POSITION,
     UNSUPPORTED,
     VALUE,
+    reindex_refusal,
     retagged,
     tagged,
 )
@@ -669,6 +671,74 @@ struct PyIndex(Movable, Writable):
             return out
         except cause:
             raise retagged(VALUE, cause)
+
+    @staticmethod
+    def _reindexed(index: Index, target: PythonObject) raises -> Reindexed:
+        """Runs the lookup, taking the target as an index when it is one.
+
+        The name of the answer depends on which of the two it was, which is
+        pandas' rule: a target that is an index brought a level name of its own
+        and keeps it, and a target that is a list of labels has none to offer
+        and takes the name of the index it was looked up in.
+
+        The downcast is done on its own rather than inside the `try` around the
+        lookup, so that a refusal from the lookup is not mistaken for the target
+        not being an index and retried as a list of labels, which would report
+        the wrong problem.
+
+        Args:
+            index: The index being reindexed.
+            target: What Python passed.
+
+        Returns:
+            The labels and the lookup.
+
+        Raises:
+            Error: Whatever the lookup refuses, untagged.
+        """
+        var held = Optional[ArcPointer[Index]]()
+        try:
+            held = target.downcast_value_ptr[Self]()[].index
+        except:
+            held = Optional[ArcPointer[Index]]()
+        if held:
+            return index.reindex(held.value()[])
+        return index.reindex(_labels(target, "target"))
+
+    @staticmethod
+    def reindex(
+        py_self: PythonObject, target: PythonObject
+    ) raises -> PythonObject:
+        """Reports the labels asked for and where each of them sits here.
+
+        A pair, because pandas answers a pair. The second half is `None` when
+        the target is this index already, which is how a caller learns there is
+        nothing to gather, and the Python layer hands both halves along as they
+        arrive.
+
+        Args:
+            py_self: The index.
+            target: The labels the result should carry, either as an index or as
+                a sequence of them.
+
+        Returns:
+            A list of two, the new index and the positions or `None`.
+        """
+        try:
+            var answer = Self._reindexed(Self._held(py_self)[].index[], target)
+            var sits = Python.none()
+            if answer.positions:
+                var listed = Python.list()
+                ref positions = answer.positions.value()
+                for i in range(len(positions)):
+                    listed.append(PythonObject(Int(positions[i])))
+                sits = listed
+            var out = Python.list()
+            out.append(Self._wrap(answer^.into_index()))
+            out.append(sits)
+            return out
+        except cause:
+            raise reindex_refusal(cause)
 
     @staticmethod
     def contains(
