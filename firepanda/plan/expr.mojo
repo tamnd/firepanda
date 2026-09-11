@@ -915,6 +915,30 @@ struct Expressions(Movable, Sized):
             )
         )
 
+    def conjuncts(self, root: Int, mut out: List[Int]) raises:
+        """Splits a predicate at its `and` nodes into the pieces under them.
+
+        A filter holds one expression and that expression is usually an `and` of
+        conditions that want to end up in different places, so every pass that
+        moves a predicate around starts by taking it apart. Only at `and`: an
+        `or` cannot be split, because neither side of it has to hold for the row
+        to survive.
+
+        Args:
+            root: The predicate.
+            out: The pieces, appended to in the order they were written.
+
+        Raises:
+            If the expression is not in the arena.
+        """
+        self.check(root)
+        ref node = self.nodes[root]
+        if node.kind == ExprKind.CALL and node.name == "and":
+            for i in range(len(node.children)):
+                self.conjuncts(node.children[i], out)
+            return
+        out.append(root)
+
     def names(self, root: Int) raises -> List[String]:
         """Which columns the expression reads, by name.
 

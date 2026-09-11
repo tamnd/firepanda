@@ -21,6 +21,85 @@ The type vocabulary is numpy's tree and it is copied without being tidied. `incl
 `truncate` is `loc[before:after]` with two rules in front. The index has to be sorted, because a label slice on an unsorted index answers the rows that happen to lie between two positions rather than the values between two labels, and pandas refuses rather than answering that. The pair has to be the right way round, and that check happens before the direction is worked out, so a caller writes the smaller label as `before` on a falling index too. Both are pandas' order.
 
 Part of #156, after #510.
+## [0.6.58] - 2026-09-11
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Four more planner passes, and SQL now arrives at the same plan the dataframe API builds.
+
+The passes are empty and constant pruning, common subplan elimination, transitive predicates, and the union fix that fell out of reading the pruning pass again. That is ten of the thirteen the planner spec lists, and the three that are left are type coercion as explicit cast nodes, `IN` against a large constant list rewritten as a join, and a semi join on a distinct right side rewritten as an inner join.
+
+Two of the four are about a query saying the same thing twice. Subplan elimination is the one that matters most to a dataframe library, because a person writing Python repeats themselves in a way nobody writing SQL does, and `df.filter(cond).select(a)` followed by `df.filter(cond).select(b)` was two scans and two filters until now. Transitive predicates is the opposite case, a query saying something once that is true twice: a filter on one side of `a.k = b.k` is a filter on the other side too, for every row an inner join is going to produce.
+
+The recurring theme across all four is the arena's creation order. Node indices are handed out so that an input sits below the node reading it, which means there is no index between a node and its parent and so no pass can insert a filter above an existing node in place. Every pass that wants to change the shape of the plan has had to find its own way around that, and there are now five: rebuilding the node list bottom up, merging a node upward into its parent, swapping the contents of two adjacent nodes, splicing a node out so the reader points at what it pointed at, and redirecting a reader to an earlier node. Transitive predicates does not get one of its own, which is exactly why it lives inside predicate pushdown rather than in a pass of its own.
+
+`firepanda/sql/plan.mojo` takes a parsed `SELECT` and gives back the same `Plan` the builder methods produce, bound by the same binder. The rule it works under is the one the spec has had from the start, that no plan node may have only a SQL constructor, and there is a test that compares the plan for `SELECT a FROM t WHERE b > 1` against the plan the three builder calls produce. If those ever stop matching then one of the front ends has quietly become a second engine.
+
+None of this moves a benchmark number yet, and it is worth being plain about why. The eager API does not call the optimizer, which is #376, and the executor cannot spend what subplan elimination found, because lowering walks a line of operators and a shared node is a fork. Both passes are still right and still worth having now: the day lowering grows an operator that can hand one chunk stream to two readers, the plans arriving at it already say where to put one.
+
+### Fixed: projection pushdown narrowed a union that drops duplicates
+
+A union that keeps duplicates and a union that drops them are one node with a flag, and column pruning was treating both the same way. It is only right for the one that keeps them. Two rows that differ in a column nothing above reads are two rows, and once both arms are narrowed to the columns above they are one row, so the pass was deleting a row rather than a read.
+
+The same case with a distinct on it was already handled: a distinct with no keys compares the whole row, so the pass demands every column of its input whatever the node above asked for. A union that drops duplicates is that, with more than one input, and it now demands the same thing.
+
+Nothing in firepanda builds a distinct union yet, which is why this went unnoticed and is also why it is worth fixing now rather than after. It was found reading the pass before extending the node to carry `EXCEPT` and `INTERSECT`, both of which compare whole rows the same way.
+
+Part of #309.
+
+### Added: a filter on one side of a join now reaches the other side
+
+Transitive predicates, in `firepanda/plan/transit.mojo`. A query that joins on `l_orderkey = o_orderkey` and also asks for `l_orderkey < 100` is saying the same thing about `o_orderkey`, for every row the join is going to produce, so the planner now copies the predicate across the equality and pushes the copy down to the other scan. The orders side stops reading rows that had nothing to pair with.
+
+What makes it sound is that an inner join only produces a row when the two keys are equal and present, so a predicate that is a function of one key alone has the same answer on the other. A row the copy throws away could only have paired with rows the original predicate had already thrown away. Nulls are not an exception, because a predicate that answers null drops its row and it answers null on both sides or neither. Inner joins only: an outer join invents rows where one side had none, and filtering the side that was going to be invented changes which rows get invented.
+
+It is a module called from predicate pushdown rather than a pass of its own, and the reason is the arena. Node indices are handed out in creation order so that an input sits below the node reading it, which means there is no index between a node and its parent and so no way to insert a filter above an existing arm in place. Pushdown already rebuilds the node list for exactly that reason and already knows how to route a predicate to a side, so the derivation adds its copies to the list pushdown is carrying when it reaches the join and pushdown places them without knowing they are new. That gets the ordering right for free, since a copy is pushed to its new scan in the same run that created it.
+
+The predicates come from two places: what pushdown is carrying down from above, and what is already sitting in a filter inside either arm. The second matters because after the first sweep everything has already been pushed to the scans, so by the second sweep there is nothing left above the join to carry. The walk into an arm stops at a projection or an aggregate, since below one of those the names are the input's rather than the arm's.
+
+A predicate is copied only if the receiving side does not already ask something that prints the same. Without that check the rule would copy left to right on one sweep and right to left on the next, forever.
+
+### Added: two lines of Python that read the same rows now read them once
+
+Common subplan elimination, the ninth planner pass, in `firepanda/plan/subplan.mojo`. It is the other half of the spec section that gave us expression elimination, one level up. Two plan nodes of the same shape over the same inputs become one node, and everything that read the second reads the first.
+
+This is worth more to a dataframe library than it is to SQL, because a person writing Python repeats themselves in a way nobody writing SQL does. `df.filter(cond).select(a)` and `df.filter(cond).select(b)` on two adjacent lines is a common subplan, and until now it was two scans and two filters.
+
+The shape is a key over every field of the node: kind, join kind, offset and length, table and source, names and sort directions, the shapes of its expressions, and the nodes its inputs settled on. The expression part reuses the key that expression elimination already writes, now called `cse.key_for`, with one change. Within a node an operand can go into the key as its arena index, because equal shapes below have already been unified and so an index is a shape. Across two nodes that has never happened and they share no indices at all, so each operand goes in as its own key instead.
+
+The pass runs once, after the sweep loop has settled, rather than inside a sweep. It is the only pass that leaves the plan a graph rather than a tree, and the rest are written for a tree. Two of them would be wrong on a node with two parents: projection pushdown narrows a node to the columns the node above it asked for, and a node with two parents has two answers to that, and slice pushdown swaps the contents of two adjacent nodes, which rewrites the lower one under whoever else was reading it. Running it at the end also matches where the saving is, since nothing is saved by the plan being smaller and the saving is one scan and one filter at run time instead of two.
+
+The executor cannot spend that yet. Lowering walks a line of operators and a shared node is a fork, so a plan this pass turned into a graph lowers as though the sharing were not there. The pass is still right and still worth having now, because the day lowering grows an operator that can hand one chunk stream to two readers, the plans arriving at it already say where to put one.
+
+Unlike the passes that take a node out, this one hands back a schema rather than a root, because the root cannot be the node that goes. A node the root could be unified with would have to be one the root reaches, a node the root reaches is strictly shallower, and two nodes with equal keys have equal structure and so equal depth.
+
+### Added: a filter that cannot keep a row stops costing anything
+
+Empty and constant pruning, the eighth planner pass, in `firepanda/plan/empty.mojo`. It runs second in the pipeline, right after simplification, because simplification is what turns a predicate into the constant this pass needs and because every node it takes out is a node the five passes below it never have to look at.
+
+Three rules. A filter whose predicate folded to false becomes a limit of zero rows over the same input. A filter whose predicate folded to true is spliced out, and everything that read it reads what it read. A filter, sort, distinct or limit sitting over something empty is spliced out too, since all four hand their input's schema on unchanged and so removing one from above an empty input leaves an empty input with the same schema.
+
+The false filter becoming a limit of zero rather than a node kind of its own is the design decision worth recording. A limit of zero already produces no rows and already carries the schema of its input, which is what an empty relation is, so the alternative was a tenth node kind that holds a schema and there is nothing these three rules need it for. What would need it is dropping an arm of a join whose other side is empty, or collapsing an aggregate or a projection over an empty input, and those are left alone here for exactly that reason. A whole frame reduction over no rows answers one row rather than none, so it is not a case of the same answer written shorter.
+
+A null predicate is left alone. It keeps no rows, so it could be folded, but saying so is a rule about what a null means in a predicate rather than a rule about a constant, and the kernel that filters already holds that one.
+
+Unlike predicate pushdown this pass rewrites the node list in place. Pushdown has to rebuild because moving a filter down makes new parents for old children and the arena hands out indices in creation order, so an input is always below the node reading it. Removing a node goes the other way: a reader ends up pointing at what the removed node pointed at, and that is below the removed node which is below the reader, so the order still holds. Splicing is now the fourth of the ways a pass can respect that invariant, after rebuilding, merging upward in place, and swapping the contents of two adjacent nodes.
+
+This is where the generated query pays off rather than the benchmark. A `WHERE` clause assembled out of parameters that were not all supplied is the common way to arrive at a constant predicate, and until now the plan carried the whole subtree underneath it.
+
+### Added: SQL lowers into the plan the dataframe API already builds
+
+`firepanda/sql/plan.mojo` takes a parsed `SELECT` and a catalog and gives back a `firepanda.plan.Plan`, which is the same plan `df.filter(...).group_by(...)` builds and is bound by the same binder. The rule it works under is the one the spec has had all along, that no plan node may have only a SQL constructor, and the test that says so compares the plan for `SELECT a FROM t WHERE b > 1` against the plan the three builder calls produce. If those two ever stop matching then one of the front ends has become a second engine, which is the thing a shared plan exists to stop.
+
+The lowering is written in the order a `SELECT` runs in rather than the order it is written in: scan, the `WHERE` filter, the aggregate, the `HAVING` filter, the projection, `DISTINCT`, the sort, then the limit. Writing it that way is what makes the clause rules fall out instead of being enforced, since a `WHERE` built below the projection has no way to see an alias the select list invented and an `ORDER BY` built above it does.
+
+`HAVING` is the part that needed a decision. `plan.filter` refuses a predicate that is not elementwise, correctly, so `HAVING sum(a) > 10` cannot lower to a filter holding a `sum`. The fold is added to the aggregate under a generated name instead and the filter reads that name, so the aggregate is computed once and the projection above drops the column again. The generated names start with two underscores because a query cannot write one, and they show up in `EXPLAIN`, which is the right trade: a reader who sees `__agg_0` learns something true about how the query runs.
+
+A decimal literal is refused rather than lowered. The engine's `LogicalType` has no decimal and no 128 bit integer, which is the whole reason `firepanda/sql/types.mojo` exists as a second type set, and lowering `1.1` to a double would answer `1.1 + 2.2` with `3.3000000000000003` where DuckDB gives exactly `3.3`. A refusal is visible and a wrong answer is not. Joins, subqueries, CTEs, set operations, windows and `QUALIFY` are refused by name for the ordinary reason, which is that the nodes are not built yet.
+
+`docs/specs/sql/08-plan-and-optimizer.md` said there was no planning layer, which stopped being true when the planner milestone landed one. It now records what exists, and reconciles its own fourteen node kinds with the nine in `docs/specs/planner/01-what-a-plan-is.md`: the five that are missing are the ones TPC-H does not use, and each is a gap to close in the plan rather than a node for SQL to add on the side.
+
+Part of #309.
 
 ### Fixed: three messages and a class that the conformance board found on loc
 
@@ -33,6 +112,7 @@ A missing single label now raises `KeyError(label)` and nothing else. The index 
 The fourth is not a bug and is not fixed. `Too many indexers` is a `pandas.errors.IndexingError`, firepanda does not import pandas, and so no firepanda exception can be a subclass of a class pandas defines. It is recorded as a divergence in the compat registry rather than left on the board as a failure, because it is the same fact about every pandas defined exception class and not a thing about indexing.
 
 Part of #156, after #504.
+
 ## [0.6.57] - 2026-09-11
 
 Built against Mojo 1.0.0 (ed45d567).
@@ -4849,7 +4929,32 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.33...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.58...HEAD
+[0.6.58]: https://github.com/tamnd/firepanda/releases/tag/v0.6.58
+[0.6.57]: https://github.com/tamnd/firepanda/releases/tag/v0.6.57
+[0.6.56]: https://github.com/tamnd/firepanda/releases/tag/v0.6.56
+[0.6.55]: https://github.com/tamnd/firepanda/releases/tag/v0.6.55
+[0.6.54]: https://github.com/tamnd/firepanda/releases/tag/v0.6.54
+[0.6.53]: https://github.com/tamnd/firepanda/releases/tag/v0.6.53
+[0.6.52]: https://github.com/tamnd/firepanda/releases/tag/v0.6.52
+[0.6.51]: https://github.com/tamnd/firepanda/releases/tag/v0.6.51
+[0.6.50]: https://github.com/tamnd/firepanda/releases/tag/v0.6.50
+[0.6.49]: https://github.com/tamnd/firepanda/releases/tag/v0.6.49
+[0.6.48]: https://github.com/tamnd/firepanda/releases/tag/v0.6.48
+[0.6.47]: https://github.com/tamnd/firepanda/releases/tag/v0.6.47
+[0.6.46]: https://github.com/tamnd/firepanda/releases/tag/v0.6.46
+[0.6.45]: https://github.com/tamnd/firepanda/releases/tag/v0.6.45
+[0.6.44]: https://github.com/tamnd/firepanda/releases/tag/v0.6.44
+[0.6.43]: https://github.com/tamnd/firepanda/releases/tag/v0.6.43
+[0.6.42]: https://github.com/tamnd/firepanda/releases/tag/v0.6.42
+[0.6.41]: https://github.com/tamnd/firepanda/releases/tag/v0.6.41
+[0.6.40]: https://github.com/tamnd/firepanda/releases/tag/v0.6.40
+[0.6.39]: https://github.com/tamnd/firepanda/releases/tag/v0.6.39
+[0.6.38]: https://github.com/tamnd/firepanda/releases/tag/v0.6.38
+[0.6.37]: https://github.com/tamnd/firepanda/releases/tag/v0.6.37
+[0.6.36]: https://github.com/tamnd/firepanda/releases/tag/v0.6.36
+[0.6.35]: https://github.com/tamnd/firepanda/releases/tag/v0.6.35
+[0.6.34]: https://github.com/tamnd/firepanda/releases/tag/v0.6.34
 [0.6.33]: https://github.com/tamnd/firepanda/releases/tag/v0.6.33
 [0.6.32]: https://github.com/tamnd/firepanda/releases/tag/v0.6.32
 [0.6.31]: https://github.com/tamnd/firepanda/releases/tag/v0.6.31

@@ -7,13 +7,19 @@ planner that a query could go through end to end.
 
 ## The order
 
-Simplification, then projection pushdown, then predicate pushdown, then common
-subexpression elimination, then projection merging, then slice pushdown and top
-n. The spec gives the reason for each adjacency and none of them is arbitrary.
+Simplification, then empty and constant pruning, then projection pushdown, then
+predicate pushdown, then common subexpression elimination, then projection
+merging, then slice pushdown and top n. The spec gives the reason for each
+adjacency and none of them is arbitrary.
 
 Simplification runs first so that every later pass sees the simplest form of
 every expression. A predicate that folds to a constant is cheaper to move and a
 conjunction that has been flattened is one that predicate pushdown can split.
+
+Empty and constant pruning runs second because simplification is what turns a
+predicate into the constant it needs, and because every node it takes out is a
+node none of the five passes below it has to look at. It is the only pass here
+that makes the plan smaller rather than different.
 
 Projection pushdown runs before predicate pushdown so that a predicate arriving
 at a scan finds a column list that already exists rather than one that is about
@@ -30,11 +36,25 @@ behind. Narrowing a node to the columns above it is done by putting a projection
 there, and a filter that moves past a projection leaves that projection where it
 was.
 
-Slice pushdown runs last of the six, since a limit is happiest once the nodes
+Slice pushdown runs last of the seven, since a limit is happiest once the nodes
 it might swap past have stopped being rearranged underneath it.
 
 The passes the spec lists that are not written yet slot into this function and
 nowhere else, which is the point of having it.
+
+## The one pass outside the loop
+
+Common subplan elimination runs once, after the loop has settled, and no pass in
+the loop ever sees what it did. It is the only pass that leaves the plan a graph
+rather than a tree and the rest are written for a tree. Two of them would be
+wrong on a node with two parents: projection pushdown narrows a node to the
+columns the node above it asked for, and a node with two parents has two answers
+to that, and slice pushdown swaps the contents of two adjacent nodes, which
+rewrites the lower one under whoever else was reading it.
+
+That is also where the saving is. Nothing is saved by the plan being smaller
+while it is being rewritten. The saving is one scan and one filter at run time
+instead of two, and that is cashed when the plan is lowered.
 
 ## Why it runs more than once
 
@@ -69,6 +89,7 @@ output schema can ask for it without paying for another bind.
 
 from firepanda.dtype.schema import Schema
 from firepanda.plan.cse import cse
+from firepanda.plan.empty import empty
 from firepanda.plan.limits import limits
 from firepanda.plan.merge import merge
 from firepanda.plan.node import Plan
@@ -76,6 +97,7 @@ from firepanda.plan.print import explain
 from firepanda.plan.prune import prune
 from firepanda.plan.push import push
 from firepanda.plan.simplify import simplify
+from firepanda.plan.subplan import subplan
 
 comptime SWEEPS = 4
 """How many times the whole pipeline may run before it stops looking.
@@ -98,7 +120,7 @@ def optimize(mut plan: Plan, root: Int, sources: List[Schema]) raises -> Int:
 
     Returns:
         The new root, which is not the old one when predicate pushdown has
-        rebuilt the node list.
+        rebuilt the node list or pruning has taken the root itself out.
 
     Raises:
         Whatever any of the passes raises, which for a plan that binds is
@@ -112,6 +134,9 @@ def optimize(mut plan: Plan, root: Int, sources: List[Schema]) raises -> Int:
         if after == before:
             break
         before = after^
+    # Once and at the end, because it is the only pass that leaves the plan a
+    # graph and every pass in the sweep is written for a tree.
+    _ = subplan(plan, at, sources)
     return at
 
 
@@ -130,8 +155,9 @@ def _sweep(mut plan: Plan, root: Int, sources: List[Schema]) raises -> Int:
         Whatever any of the passes raises.
     """
     simplify(plan, root)
-    _ = prune(plan, root, sources)
-    var at = push(plan, root, sources)
+    var at = empty(plan, root, sources)
+    _ = prune(plan, at, sources)
+    at = push(plan, at, sources)
     _ = cse(plan, at, sources)
     _ = merge(plan, at, sources)
     _ = limits(plan, at, sources)

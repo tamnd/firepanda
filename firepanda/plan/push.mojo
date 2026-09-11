@@ -52,6 +52,19 @@ join invents null rows and a semi join is already a filter, so what is safe
 there is a longer argument than what is safe here, and the pass would rather do
 nothing than do it on a guess.
 
+## The join also gains predicates here
+
+Reaching an inner join, the pass calls `transit.derive`, which reads the join's
+equality conditions and adds to the list being carried the copy across the
+equality of every predicate that has one. That happens before the routing below,
+so a copy is placed the way a predicate the caller wrote above the join would
+have been placed, and nothing in the routing knows or cares that it is new.
+
+It lives there rather than in a pass of its own for the reason the next section
+gives. A new filter above a join arm needs an index between a node and its
+parent and there is no such index, so the pass that already rebuilds the node
+list is the only one that can place one.
+
 ## Why it rebuilds rather than moves
 
 Node indices are handed out in creation order, so an input always sits below the
@@ -85,6 +98,7 @@ from firepanda.join.pairs import JoinKind
 from firepanda.plan.bind import Bound, bind, bind_all
 from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
 from firepanda.plan.node import NodeKind, Plan, PlanNode
+from firepanda.plan.transit import derive
 
 
 def push(mut plan: Plan, root: Int, sources: List[Schema]) raises -> Int:
@@ -142,7 +156,7 @@ def _rebuild(
         # The node itself disappears here and is rebuilt wherever its pieces
         # come to rest, which for a filter that cannot move at all is directly
         # above the same input it was above before.
-        _conjuncts(plan.exprs, plan.nodes[old].exprs[0], carried)
+        plan.exprs.conjuncts(plan.nodes[old].exprs[0], carried)
         return _rebuild(plan, inputs[0], bound, carried^, into)
 
     if kind == NodeKind.SCAN:
@@ -314,6 +328,11 @@ def _join(
     var left = plan.nodes[old].inputs[0]
     var right = plan.nodes[old].inputs[1]
     var inner = plan.nodes[old].op == Int(JoinKind.INNER.code)
+    if inner:
+        # Transitive predicates. A filter on one side of an equality reaches
+        # the other, and it arrives here as though it had been written above
+        # the join, so the routing below places it without knowing it is new.
+        derive(plan, old, bound, carried)
 
     var to_left = List[Int]()
     var to_right = List[Int]()
@@ -483,26 +502,6 @@ def _apply(
         )
     )
     return at
-
-
-def _conjuncts(exprs: Expressions, root: Int, mut out: List[Int]) raises:
-    """Splits one predicate at its `and` nodes and adds the pieces to a list.
-
-    Args:
-        exprs: The arena.
-        root: The predicate.
-        out: The pieces, appended to in the order they were written.
-
-    Raises:
-        If the expression is not in the arena.
-    """
-    exprs.check(root)
-    ref node = exprs.nodes[root]
-    if node.kind == ExprKind.CALL and node.name == "and":
-        for i in range(len(node.children)):
-            _conjuncts(exprs, node.children[i], out)
-        return
-    out.append(root)
 
 
 def _shared(plan: Plan, root: Int) raises -> Bool:

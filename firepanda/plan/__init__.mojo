@@ -43,6 +43,14 @@ end up in different places. It is the one pass that rebuilds the node list rathe
 than rewriting it, because moving a filter down makes new parents for old
 children and the arena's order forbids that in place.
 
+`transit.mojo` is transitive predicates, which pushdown calls when it reaches an
+inner join. A query that says `a.k = b.k` and also says something about `a.k` is
+saying the same thing about `b.k` for every row the join will produce, so the
+predicate is copied onto the other side and pushdown places the copy the way it
+places everything else. It is a module rather than a pass because there is no
+index between a node and its parent, so only the pass that already rebuilds the
+node list can put a new filter above an arm.
+
 `merge.mojo` folds a line of projections down to one, substituting the lower
 one's expressions into the upper one's so that the rows are walked once instead
 of once per node. It is the pass that pays for the two before it, since narrowing
@@ -60,6 +68,19 @@ computes once because it remembers where it put an index it has already met. It
 works a node at a time because binding writes a position onto a column and the
 same name under two nodes can bind to two different positions.
 
+`empty.mojo` is empty and constant pruning. A filter whose predicate folded to
+false becomes a limit of zero rows, which is an empty relation with the schema
+it had, and a filter that folded to true is spliced out, as is any filter, sort,
+distinct or limit sitting over something empty. It is the only pass that makes
+the plan smaller rather than different.
+
+`subplan.mojo` is common subplan elimination, the other half of the section that
+gave us the expression one and a level up from it. Two plan nodes of the same
+shape over the same inputs become one node, so `df.filter(cond).select(a)` and
+`df.filter(cond).select(b)` on two adjacent lines share their filter. It is the
+only pass that leaves the plan a graph rather than a tree, which is why it runs
+once at the end rather than inside the loop.
+
 `optimize.mojo` is the pipeline: every pass above, in the order the spec fixes,
 run again if a run changed anything and up to a small bound. It is the one entry
 point, and the passes that are not written yet slot into it and nowhere else.
@@ -76,6 +97,7 @@ does not change when they do.
 
 from .bind import Bound, bind, bind_all, bind_expr
 from .cse import cse
+from .empty import empty
 from .expr import UNBOUND, Expr, ExprKind, Expressions
 from .limits import limits
 from .lower import lower
@@ -86,3 +108,5 @@ from .print import explain, render_expr
 from .prune import prune
 from .push import push
 from .simplify import ROUNDS, simplify, simplify_expr
+from .subplan import subplan
+from .transit import derive

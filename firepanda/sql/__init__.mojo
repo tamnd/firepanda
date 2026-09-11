@@ -85,6 +85,13 @@ of thousand calls and checks it by replaying every one of them.
 already of the right type is free, and a call with no cheapest candidate is
 refused in DuckDB's own words rather than decided.
 
+`plan.mojo` is where the SQL front end stops being its own thing and becomes a
+caller of the engine. It lowers a bound `SELECT` into the same
+`firepanda.plan.Plan` the dataframe API builds, bottom up in the order the
+clauses run in, and the rule it works under is that no plan node may have only a
+SQL constructor. A shape SQL can express and the plan cannot is a gap to close
+in the plan rather than a private node to add here.
+
 `unsupported.mojo` is the line between what the grammar accepts and what
 firepanda runs. Every refusal is an entry in its table rather than a `raise`
 written where the cases ran out, which is what lets `sql_support()` list the
@@ -156,6 +163,7 @@ from .generated.functions import (
     KIND_SCALAR,
 )
 from .matcher import Parse, ParseNode, parse, parse_rule, parse_unfiltered
+from .plan import Lowered, lower
 from .printer import (
     needs_quoting,
     print_expr,
