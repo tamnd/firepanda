@@ -2721,5 +2721,81 @@ def test_the_four_that_report_an_element_keep_the_column_type() raises:
         )
 
 
+def test_a_million_groups_each_count_their_own_distinct_values() raises:
+    """Counts distinct values inside a million groups.
+
+    This is q12's shape, which counts distinct users inside each `SearchPhrase`
+    and has millions of phrases. It is here because the obvious way to answer a
+    grouped distinct count is a hash set per group, and a million of those is
+    the allocation pattern the slab was chosen to avoid. What the test asserts
+    is the answer, and what it demonstrates is that a million groups runs on one
+    slab and two arrays the size of the group count rather than on a million
+    small tables.
+
+    Every group holds exactly two rows and what it should count is decided by
+    its ordinal, so the expected answers are arithmetic rather than a million
+    lists built beside the kernel.
+
+    Raises:
+        AssertionError: On the first group counted wrong.
+    """
+    comptime GROUPS = 1_000_000
+    comptime ROWS = 2 * GROUPS
+
+    var values = Array[DType.int64](ROWS)
+    var codes = Array[DType.uint32](ROWS)
+    for r in range(2):
+        for g in range(GROUPS):
+            var i = r * GROUPS + g
+            codes[i] = UInt32(g)
+            var kind = g & 3
+            if kind == 0:
+                # The same value twice.
+                values[i] = 7
+            elif kind == 1:
+                # Two values that differ.
+                values[i] = Int64(r)
+            elif kind == 2:
+                # A null and a value. The null is not one and does not make the
+                # group empty either.
+                if r == 0:
+                    values.set_null(i)
+                else:
+                    values[i] = 11
+            else:
+                # Nothing present at all, which counts zero rather than
+                # reporting null, the same as `group_count` does.
+                values.set_null(i)
+
+    var distinct = group_nunique(values, codes, GROUPS)
+    assert_equal(len(distinct), GROUPS)
+
+    var want = List[Int64]()
+    want.append(1)
+    want.append(2)
+    want.append(1)
+    want.append(0)
+    var wrong = 0
+    var first = 0
+    for g in range(GROUPS):
+        if distinct[g] != want[g & 3]:
+            if wrong == 0:
+                first = g
+            wrong += 1
+    # The message is built once rather than a million times, since a million of
+    # them costs more than the kernel under test.
+    assert_equal(
+        wrong,
+        0,
+        String(
+            wrong,
+            " groups counted wrong, the first of them group ",
+            first,
+            ", which counted ",
+            distinct[first],
+        ),
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

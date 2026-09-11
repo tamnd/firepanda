@@ -3890,6 +3890,32 @@ def bench_group(mut harness: Harness) raises:
 
     harness.record("group/nunique", "rows", rows, nunique_grouped)
 
+    # Six of the eight ClickBench queries that count distinct values are the
+    # grouped form, and q12 counts distinct users inside each `SearchPhrase`,
+    # which is millions of groups. These two rows are that axis: a hundred
+    # thousand groups and then two thirds of the rows, against the thousand
+    # groups above. The thing to watch is that the cost does not climb across
+    # the three, because the shape underneath allocates one slab the size of
+    # the column and two arrays the size of the group count rather than a hash
+    # set per group. A cost that rose with the group count would mean it does.
+    def nunique_many_groups() raises {imm values, imm many, imm wide}:
+        keep(values)
+        var out = group_nunique(values, many, wide)
+        keep(out[0])
+
+    harness.record(
+        "group/nunique_cardinality_100k", "rows", rows, nunique_many_groups
+    )
+
+    def nunique_own_group() raises {imm values, imm own, imm nearly}:
+        keep(values)
+        var out = group_nunique(values, own, nearly)
+        keep(out[0])
+
+    harness.record(
+        "group/nunique_cardinality_rows", "rows", rows, nunique_own_group
+    )
+
     var erased = AnyArray(Array(copy=values))
 
     def sum_erased_group() raises {imm erased, imm codes}:

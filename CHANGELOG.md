@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the grouped distinct count measured where it is asked for, at a million groups
+
+`group_nunique` was written for a high group count and until now nothing said so. There is a test that gives a million groups two rows each and checks every one of the million answers, and there are two benchmark rows beside the existing one that hold the row count still and move the group count instead, since the group count is the axis the naive shape falls over on.
+
+At four million rows the three rows read 6.9 ms with a handful of groups, 11.5 ms at a hundred thousand groups and 25.1 ms when nearly every row is a group of its own. That is the shape the kernel was picked for. A hash set per group would be a million allocations on the last of those, each one sized for a group holding a couple of rows, and the cost would be the allocator rather than the counting. Here there are three allocations whatever the group count: the slab, which is one element per present row, and the counts and the bounds, which are one entry per group. Nothing is allocated inside the loop over the groups.
+
+The reason the last row is not much worse than the first is that each group sorts inside its own stretch of the slab, so more groups means shorter sorts. The argument and the memory behaviour are now in `_nunique_core`'s docstring, where the next person to look at this will be.
+
+Part of #479.
+
 ## [0.6.65] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).
