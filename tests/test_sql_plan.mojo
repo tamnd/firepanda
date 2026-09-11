@@ -886,6 +886,84 @@ def test_a_recursive_cte_is_refused_by_name() raises:
         )
 
 
+def test_a_using_join_is_the_join_the_on_spelling_builds() raises:
+    # The node is the same node. Everything a USING does that an ON does not is
+    # about what the query may write afterwards.
+    assert_equal(
+        _plan("SELECT a FROM t JOIN u USING (b)"),
+        _plan("SELECT a FROM t JOIN u ON t.b = u.b"),
+    )
+
+
+def test_a_star_over_a_using_join_writes_the_pair_once() raises:
+    # The ON spelling of the same join answers seven columns with `b` twice.
+    assert_equal(
+        _plan("SELECT * FROM t JOIN u USING (b)"),
+        (
+            "PROJECT [a, b, g, f, k, z]\n"
+            "  JOIN inner [b = b]\n"
+            "    SCAN t []\n"
+            "    SCAN u []\n"
+        ),
+    )
+
+
+def test_the_name_a_using_join_merged_may_be_written_bare() raises:
+    # The node below still produces both columns called `b`, so without the
+    # merge this is the ambiguity binding refuses. The join is what decides,
+    # and the decision is written into the expression here.
+    assert_equal(
+        _plan("SELECT b FROM t JOIN u USING (b)"),
+        "PROJECT [b]\n  JOIN inner [b = b]\n    SCAN t []\n    SCAN u []\n",
+    )
+
+
+def test_either_side_may_still_be_written_in_front_of_a_merged_name() raises:
+    # DuckDB's rule and Postgres's. Merging the pair does not take the two
+    # columns out of reach, it only gives the bare name a meaning.
+    assert_equal(
+        _plan("SELECT t.b FROM t JOIN u USING (b)"),
+        _plan("SELECT u.b FROM t JOIN u USING (b)"),
+    )
+
+
+def test_a_natural_join_pairs_every_name_the_two_sides_share() raises:
+    assert_equal(
+        _plan("SELECT * FROM t NATURAL JOIN u"),
+        _plan("SELECT * FROM t JOIN u USING (b)"),
+    )
+
+
+def test_a_natural_join_with_nothing_in_common_is_a_cross_join() raises:
+    assert_equal(
+        _plan("SELECT * FROM u NATURAL JOIN (SELECT a FROM t) v"),
+        (
+            "PROJECT [b, k, z, a]\n"
+            "  JOIN cross []\n"
+            "    SCAN u []\n"
+            "    PROJECT [a]\n"
+            "      SCAN t []\n"
+        ),
+    )
+
+
+def test_a_using_join_that_names_a_column_one_side_lacks_says_so() raises:
+    with assert_raises(contains="has no column called that"):
+        _ = _plan("SELECT a FROM t JOIN u USING (a)")
+
+
+def test_a_full_join_with_a_using_is_refused_by_name() raises:
+    # The merged column of a full join is the first of the pair that is not
+    # null, and that is a coalesce over the join rather than a column of it.
+    with assert_raises(contains="FULL USING join"):
+        _ = _plan("SELECT b FROM t FULL JOIN u USING (b)")
+
+
+def test_a_using_join_over_a_subquery_is_refused_by_name() raises:
+    with assert_raises(contains="USING join over a subquery"):
+        _ = _plan("SELECT b FROM t JOIN (SELECT b FROM u) v USING (b)")
+
+
 def test_a_condition_may_reach_only_the_two_tables_it_joins() raises:
     # The comma binds looser than the JOIN word, so `u` and `t s` are the join
     # and `t` is beside it, and a condition naming `t` there is reaching out of
@@ -895,10 +973,6 @@ def test_a_condition_may_reach_only_the_two_tables_it_joins() raises:
 
 
 def test_the_joins_with_no_node_yet_each_say_which_one() raises:
-    with assert_raises(contains="USING join"):
-        _ = _plan("SELECT a FROM t JOIN u USING (b)")
-    with assert_raises(contains="NATURAL join"):
-        _ = _plan("SELECT a FROM t NATURAL JOIN u")
     with assert_raises(contains="POSITIONAL join"):
         _ = _plan("SELECT a FROM t POSITIONAL JOIN u")
     with assert_raises(contains="ASOF join"):

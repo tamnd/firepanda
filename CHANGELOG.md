@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a `USING` or a `NATURAL` join lowers to a plan
+
+Both were refused by name and both lower now. They are one thing written two ways: a join with one equality per named column, where `NATURAL` takes the names from every column the two sides share. The node is the same join the `ON` spelling builds, and everything that differs is about what the query may write afterwards.
+
+Each pair is handed out as one column rather than two, so a star over the join writes the name once, and an unqualified reference to it lowers pinned to one side instead of being refused for naming two columns. Either side's name may still be written in front of it, which is DuckDB's rule and Postgres's. Which side the merged column comes from is which side the join keeps every row of, so a `RIGHT` join hands out the right's and every other kind hands out the left's. A `FULL` one is refused, because there the answer is the first of the pair that is not null, and that is a `coalesce` over the join rather than a column of it.
+
+The node underneath still produces both columns of every pair. Dropping one would put a projection between the join and the query above it, and a projection is where a column stops carrying the table it came from, which is what `t.b` needs to keep working. So the other column is left in the node and taken out of the names the query can reach.
+
+A `USING` or `NATURAL` join over a subquery is refused, because the merged name is on both sides and a column a subquery computed carries no table to tell the two apart.
+
+None of these run end to end yet, and the reason is not in the front end. The probe operator renames a right column whose name the left already has, which moves the columns the plan numbered, so physical lowering refuses any join of two tables that share a column name. A `USING` join names a column both sides have by definition, so all of them meet it. That is #590, and it has a small fix: the operator already drops the right key when the two keys are called the same, which is what `USING` means, so what is missing is a plan node that says the pair is merged.
+
+Part of #309.
+
 ## [0.6.67] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).
