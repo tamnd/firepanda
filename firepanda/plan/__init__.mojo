@@ -54,6 +54,10 @@ rows rather than all of them, and turns a limit above a sort into a bound on
 the sort, which is what lets a sort keep the best n rows as they go past
 instead of ordering the whole thing.
 
+`optimize.mojo` is the pipeline: every pass above, in the order the spec fixes,
+run again if a run changed anything and up to a small bound. It is the one entry
+point, and the passes that are not written yet slot into it and nowhere else.
+
 `lower.mojo` turns a bound plan into a `Pipeline` of physical operators, which
 is what makes any of the rest of it reachable from a running query. It lowers a
 line of scan, filter, projection and limit, and it raises by name on everything
@@ -70,7 +74,8 @@ from .limits import limits
 from .lower import lower
 from .merge import merge
 from .node import NO_LIMIT, NodeKind, Plan, PlanNode
+from .optimize import SWEEPS, optimize
 from .print import explain, render_expr
-from .push import push
 from .prune import prune
+from .push import push
 from .simplify import ROUNDS, simplify, simplify_expr
