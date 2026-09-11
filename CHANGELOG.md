@@ -72,6 +72,27 @@ The substitution itself is `Expressions.graft`, added next to the three analyses
 Seventeen tests on the pass and four on the graft. Nothing calls any of this yet and the eager API does not change when it does.
 
 Part of #377.
+## [0.6.56] - 2026-09-11
+
+Built against Mojo 1.0.0 (ed45d567).
+
+The query planner becomes something that runs, and the two passes that matter most are in it.
+
+Three weeks ago `firepanda/plan/` was a tree nothing looked at. It now binds, simplifies, prunes columns, pushes predicates and lowers into the chunked engine, which is five of the pieces the planner milestone asks for and the first point at which a plan can answer a question rather than describe one.
+
+Projection pushdown is the largest single pass in the design and it does what the name says: a column nothing reads is never read. It works out, for every node, which of its outputs anything above it uses, and narrows every scan, project and aggregate to that. A q6 shaped plan comes out of it reading four columns of lineitem's sixteen. The decision worth recording is that it rebinds rather than remaps. A position only means something against a schema and the pass changes the schemas, so instead of shifting every bound position by hand it hands the plan back to `bind`, which resolves by name and gets the new positions right for free.
+
+Predicate pushdown is the second largest and it moves every filter toward the scans until it cannot go further, splitting the filter at its `and` nodes first so the halves can end up in different places. The rules are about whether the rows below still answer a predicate and whether the answer still means the same thing, and two of them are worth naming: an aggregate passes through its group keys and never its aggregate outputs, which is where the difference between `where` and `having` comes from, and a distinct with keys passes through only a predicate on those keys, because a keyed distinct does not promise which row of a group it keeps.
+
+Lowering connects the plan to the engine. A bound plan turns into a pipeline of the physical operators `exec` already had, and anything nobody has written an operator for is refused by name rather than silently materialised, so a caller can try the plan path and fall back at no cost.
+
+The measurement that came with all of this is not the one that was expected and it is worth stating plainly. TPC-H q6 at scale factor one on an idle thirty two thread machine: written by hand against the eager API, 19.6 ms, and the same query as a lowered plan, 19.2 ms. The same number. The plan's fourteen operators are strictly less work than the five full width masks the hand written route computes and none of it shows, because the pipeline runs one chunk per worker and the frame arrives in one chunk. One chunk is one core.
+
+So the read learned to come back in morsels, and the same plan over the same rows in chunks of sixteen thousand takes 7.9 ms, which is 2.5x. There is deliberately no default height. On thirty two threads the best band is sixteen to thirty two thousand rows, on an eight core machine the same sweep points the other way and a quarter of a million wins, so a number baked into the reader would be wrong on one of the two machines whatever it was set to.
+
+On the pandas side the exponentially weighted window arrives, which is the third and last of pandas' window types and the one that is a weight rather than a pair of rows. `rolling` and `expanding` gain a quantile, a rank and a median, and the order statistic structure the three of them share. `Index` gains the four arguments it was declaring without, an index whose labels are instants, and the two ends of a row.
+
+Patch rather than minor, since the planner milestone is not finished. Two of its thirteen passes are.
 
 ### Added: the two ends of a row
 
