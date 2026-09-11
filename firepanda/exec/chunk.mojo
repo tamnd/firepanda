@@ -221,6 +221,59 @@ struct Chunk(Movable, Sized):
             return AnyArray(copy=self.columns[at])
         return take_any(self.columns[at], self.picks, spread)
 
+    def append(mut self, var column: AnyArray, dense: Bool):
+        """Puts a column on the end, saying whether it is at the chunk's rows.
+
+        What `Compute` does, and the reason it is a method here rather than a
+        rebuild there: an operator that only adds a column should not have to
+        take the selection apart and put it back to do it.
+
+        Args:
+            column: The array. Consumed.
+            dense: Whether its element i is row i. Ignored when the chunk has no
+                selection, since then every column is.
+        """
+        self.columns.append(column^)
+        if self.selected():
+            self.dense.append(dense)
+
+    def replace(mut self, at: Int, var column: AnyArray, dense: Bool) raises:
+        """Puts a column in the place of another, which `Cast` does.
+
+        Args:
+            at: The position to replace.
+            column: The array. Consumed.
+            dense: Whether its element i is row i.
+
+        Raises:
+            If the position is outside the chunk.
+        """
+        if at < 0 or at >= len(self.columns):
+            raise Error(
+                "chunk: column "
+                + String(at)
+                + " is outside a chunk of "
+                + String(len(self.columns))
+                + " columns"
+            )
+        self.columns[at] = column^
+        if self.selected():
+            self.dense[at] = dense
+
+    def into_raw_columns(deinit self) -> List[AnyArray]:
+        """Gives up the arrays as they are, without flattening, consuming the
+        chunk.
+
+        For an operator that reads selections and has already read `picks` and
+        `dense`. Anything else wants `into_columns`, since what comes back here
+        is not one array per column at the chunk's rows and is only meaningful
+        beside the selection it was under.
+
+        Returns:
+            The columns, in order, dense and not.
+        """
+        return self.columns^
+
     def into_columns(deinit self) raises -> List[AnyArray]:
         """Gives up the arrays, consuming the chunk.
 

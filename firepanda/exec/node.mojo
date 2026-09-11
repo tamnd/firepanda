@@ -122,7 +122,7 @@ from firepanda.kernel.running import (
     state_capacity,
     widen_any,
 )
-from firepanda.kernel.select import filter_any, take_any
+from firepanda.kernel.select import select_positions, take_any
 
 from .chunk import Chunk
 from .morsel import MORSEL_ROWS
@@ -213,6 +213,30 @@ struct Filter(Movable):
     wants. `Filter(on, keep)` keeps those positions and writes nothing else,
     which is what lowering asks for, and it is why a predicate of four
     conditions over a wide chunk no longer leaves four dead masks behind it.
+
+    ## Writing a selection rather than the columns
+
+    Not writing the dead columns is worth less than not writing the live ones,
+    and this node does not write those either. What it produces is a chunk under
+    a selection: the positions the mask kept, and the input's own arrays beside
+    them. That is eight bytes per surviving row rather than a value per
+    surviving row per column, and the columns it did not touch are still the
+    arrays the scan handed over.
+
+    Given a chunk that already has a selection, the two compose. The positions
+    are read through the old ones, so the answer is still in terms of the arrays
+    at the bottom and a chain of filters never goes through a chain of
+    indirections. A column of that chunk which is dense, meaning it was
+    computed since the last filter and is at the chunk's rows rather than at its
+    arrays' positions, cannot be left alone under the new selection and is
+    gathered. That is the one copy this makes, and the columns it applies to are
+    the masks and intermediates the expression left behind, which are few and
+    are short.
+
+    A position asked for twice is the other copy. The last use of a position
+    takes the array and any earlier use is gathered down to the rows, which
+    makes the duplicate small rather than making it a second copy of a whole
+    column.
     """
 
     var on: Int
@@ -252,59 +276,114 @@ struct Filter(Movable):
         self.keep = keep^
         self.narrows = True
 
-    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
-        """Keeps the rows the mask is true on.
+    def process(
+        self, var chunk: Chunk, spread: Bool = True
+    ) raises -> Optional[Chunk]:
+        """Keeps the rows the mask is true on, by writing a selection.
 
         Args:
             chunk: The chunk. Consumed.
+            spread: Whether a gather may use more than one core. False when the
+                caller is already running on a worker.
 
         Returns:
-            The surviving rows, or None if none survived, since a chunk of no
-            rows is work for everything downstream and no information.
+            The surviving rows under a selection, or None if none survived,
+            since a chunk of no rows is work for everything downstream and no
+            information.
 
         Raises:
             If a position is out of range or the mask column is not boolean.
         """
-        if self.on < 0 or self.on >= chunk.width():
+        var width = chunk.width()
+        if self.on < 0 or self.on >= width:
             raise Error(
                 "filter: column "
                 + String(self.on)
                 + " is outside a chunk of "
-                + String(chunk.width())
+                + String(width)
                 + " columns"
             )
-        ref mask = chunk.columns[self.on].as_typed_view[DType.bool]()
-        if not self.narrows:
-            var all = List[AnyArray](capacity=chunk.width())
-            for i in range(chunk.width()):
-                all.append(filter_any(chunk.columns[i], mask))
-            var every = 0 if len(all) == 0 else len(all[0])
-            if every == 0:
-                return None
-            return Chunk(all^, every)
-        var kept = List[AnyArray](capacity=len(self.keep))
-        for i in range(len(self.keep)):
-            if self.keep[i] < 0 or self.keep[i] >= chunk.width():
-                raise Error(
-                    "filter: column "
-                    + String(self.keep[i])
-                    + " is outside a chunk of "
-                    + String(chunk.width())
-                    + " columns"
-                )
-            kept.append(filter_any(chunk.columns[self.keep[i]], mask))
-        # A filter asked for no columns at all still knows how many rows
-        # survived, and the only thing that knows what a null in the mask means
-        # is the kernel, so the count comes from filtering the mask by itself
-        # rather than from reading it here.
-        var rows: Int
-        if len(kept) > 0:
-            rows = len(kept[0])
+        var want = List[Int](capacity=width)
+        if self.narrows:
+            for i in range(len(self.keep)):
+                if self.keep[i] < 0 or self.keep[i] >= width:
+                    raise Error(
+                        "filter: column "
+                        + String(self.keep[i])
+                        + " is outside a chunk of "
+                        + String(width)
+                        + " columns"
+                    )
+                want.append(self.keep[i])
         else:
-            rows = len(filter_any(chunk.columns[self.on], mask))
-        if rows == 0:
+            for i in range(width):
+                want.append(i)
+
+        # The positions within this chunk's rows that the mask keeps. Reading
+        # the mask needs it at the rows, so a mask that is under the selection
+        # rather than dense is gathered first, which only happens when a caller
+        # filters by a column of the input rather than by one a compute wrote.
+        var local: List[Int]
+        if chunk.selected() and not chunk.dense[self.on]:
+            var at_rows = chunk.column(self.on, spread)
+            local = select_positions(at_rows.as_typed_view[DType.bool]())
+        else:
+            local = select_positions(
+                chunk.columns[self.on].as_typed_view[DType.bool]()
+            )
+        if len(local) == 0:
             return None
-        return Chunk(kept^, rows)
+
+        # Composed with the selection already there, so the positions stay in
+        # terms of the arrays at the bottom however long the chain of filters
+        # gets.
+        var picks = List[Int](capacity=len(local))
+        if chunk.selected():
+            for i in range(len(local)):
+                picks.append(chunk.picks[local[i]])
+        else:
+            for i in range(len(local)):
+                picks.append(local[i])
+
+        var was_selected = chunk.selected()
+        var dense_in = chunk.dense.copy()
+        # The last use of a position may take the array; an earlier one is
+        # gathered down to the rows rather than copying a whole column.
+        var last = List[Bool](length=len(want), fill=True)
+        var seen = List[Bool](length=width, fill=False)
+        for i in range(len(want) - 1, -1, -1):
+            last[i] = not seen[want[i]]
+            seen[want[i]] = True
+
+        var held = List[Optional[AnyArray]](capacity=width)
+        var columns = chunk^.into_raw_columns()
+        var flipped = List[AnyArray](capacity=width)
+        while len(columns) > 0:
+            flipped.append(columns.pop())
+        while len(flipped) > 0:
+            held.append(Optional[AnyArray](flipped.pop()))
+
+        var out = List[AnyArray](capacity=len(want))
+        var dense = List[Bool](capacity=len(want))
+        for i in range(len(want)):
+            var at = want[i]
+            var already = was_selected and dense_in[at]
+            if not last[i]:
+                # A repeat. Gathering it produces the column at the rows, which
+                # is short, and leaves the array itself for the last use.
+                if already:
+                    out.append(take_any(held[at].value(), local, spread))
+                else:
+                    out.append(take_any(held[at].value(), picks, spread))
+                dense.append(True)
+                continue
+            if already:
+                out.append(take_any(held[at].take(), local, spread))
+                dense.append(True)
+            else:
+                out.append(held[at].take())
+                dense.append(False)
+        return Chunk(out^, picks^, dense^)
 
 
 struct Project(Movable):
@@ -330,11 +409,19 @@ struct Project(Movable):
         """
         self.keep = keep^
 
-    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+    def process(
+        self, var chunk: Chunk, spread: Bool = True
+    ) raises -> Optional[Chunk]:
         """Rearranges the chunk's columns.
+
+        A selection passes straight through, since reordering columns moves
+        no rows. The dense flags are reordered with the columns they describe,
+        which is the whole of what this has to do about them.
 
         Args:
             chunk: The chunk. Consumed.
+            spread: Whether a gather may use more than one core. False when the
+                caller is already running on a worker.
 
         Returns:
             A chunk of the kept columns, with the same number of rows.
@@ -354,7 +441,9 @@ struct Project(Movable):
                     + " columns"
                 )
         var held = List[Optional[AnyArray]](capacity=width)
-        var backwards = chunk^.into_columns()
+        var picks = chunk.picks.copy()
+        var dense_in = chunk.dense.copy()
+        var backwards = chunk^.into_raw_columns()
         var flipped = List[AnyArray](capacity=width)
         while len(backwards) > 0:
             flipped.append(backwards.pop())
@@ -366,12 +455,31 @@ struct Project(Movable):
             last[i] = not seen[self.keep[i]]
             seen[self.keep[i]] = True
         var out = List[AnyArray](capacity=len(self.keep))
+        var dense = List[Bool](capacity=len(self.keep))
         for i in range(len(self.keep)):
+            var at = self.keep[i]
+            if len(picks) == 0:
+                if last[i]:
+                    out.append(held[at].take())
+                else:
+                    out.append(AnyArray(copy=held[at].value()))
+                continue
             if last[i]:
-                out.append(held[self.keep[i]].take())
+                out.append(held[at].take())
+                dense.append(dense_in[at])
+            elif dense_in[at]:
+                # Already at the rows, so a copy of it is short.
+                out.append(AnyArray(copy=held[at].value()))
+                dense.append(True)
             else:
-                out.append(AnyArray(copy=held[self.keep[i]].value()))
-        return Chunk(out^, rows)
+                # Gathered rather than copied, for the reason `Filter` gives:
+                # copying would be a second copy of a whole column to name one
+                # that is already there.
+                out.append(take_any(held[at].value(), picks, spread))
+                dense.append(True)
+        if len(picks) == 0:
+            return Chunk(out^, rows)
+        return Chunk(out^, picks^, dense^)
 
 
 struct Limit(Movable):
@@ -575,11 +683,15 @@ struct Compute(Movable):
         out.append(Field(self.name, binary_type(self.op, a, b)))
         return out^
 
-    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+    def process(
+        self, var chunk: Chunk, spread: Bool = True
+    ) raises -> Optional[Chunk]:
         """Computes the column and puts it on the end of the chunk.
 
         Args:
             chunk: The chunk. Consumed.
+            spread: Whether a gather may use more than one core. False when the
+                caller is already running on a worker.
 
         Returns:
             The chunk with one more column and the same number of rows.
@@ -605,22 +717,24 @@ struct Compute(Movable):
                 + String(width)
                 + " columns"
             )
+        # The operands at the chunk's rows, which gathers the ones that are
+        # under the selection rather than dense. That gather is the whole reason
+        # a selection pays: it moves the rows that survived, once, instead of
+        # the filter above having moved every column it kept.
         var made: AnyArray
         if self.constant:
+            var a = chunk.column(self.left, spread)
             made = binary_value_any(
-                chunk.columns[self.left],
-                self.constant.value(),
-                self.op,
-                self.value_on_left,
+                a, self.constant.value(), self.op, self.value_on_left
             )
         else:
-            made = binary_any(
-                chunk.columns[self.left], chunk.columns[self.right], self.op
-            )
-        var rows = len(chunk)
-        var columns = chunk^.into_columns()
-        columns.append(made^)
-        return Chunk(columns^, rows)
+            var a = chunk.column(self.left, spread)
+            var b = chunk.column(self.right, spread)
+            made = binary_any(a, b, self.op)
+        # The answer has a value per row of the chunk, so it is dense whatever
+        # its operands were.
+        chunk.append(made^, True)
+        return chunk^
 
 
 struct Cast(Movable):
@@ -686,11 +800,15 @@ struct Cast(Movable):
                 fields.append(out[i].copy())
         return Schema(fields^)
 
-    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+    def process(
+        self, var chunk: Chunk, spread: Bool = True
+    ) raises -> Optional[Chunk]:
         """Converts the column and hands the chunk back.
 
         Args:
             chunk: The chunk. Consumed.
+            spread: Whether a gather may use more than one core. False when the
+                caller is already running on a worker.
 
         Returns:
             The chunk with one column converted.
@@ -707,10 +825,13 @@ struct Cast(Movable):
                 + String(width)
                 + " columns"
             )
-        var rows = len(chunk)
-        var columns = chunk^.into_columns()
-        columns[self.on] = cast_any(columns[self.on], self.to, self.strict)
-        return Chunk(columns^, rows)
+        # Under a selection the column is converted at the chunk's rows rather
+        # than at the array's, so a cast behind a filter converts what survived
+        # and not what arrived. That makes the result dense, which is the same
+        # thing `Compute` does and for the same reason.
+        var at_rows = chunk.column(self.on, spread)
+        chunk.replace(self.on, cast_any(at_rows, self.to, self.strict), True)
+        return chunk^
 
 
 struct Join(Movable):
@@ -2542,7 +2663,15 @@ def node_reads_selection(node: Node) -> Bool:
     it. That is what lets the selection be turned on one operator at a time
     without any answer changing in between.
 
-    Nothing reads one yet. Issue #521 turns them on.
+    `Filter` is the one that produces a selection and the other three are what
+    have to read one for it to be worth producing. A filter that hands on a
+    selection which the next node immediately flattens has moved the copy rather
+    than removed it, so these four go together.
+
+    `Join` and the three breakers still flatten. A join gathers per output row
+    from a table rather than from the chunk, and a breaker is where a pipeline
+    ends, so both want contiguous columns and neither would save anything by
+    reading through positions first. Issue #521 has the remaining ones.
 
     Args:
         node: The node.
@@ -2550,7 +2679,12 @@ def node_reads_selection(node: Node) -> Bool:
     Returns:
         True if the node handles a selected chunk itself.
     """
-    return False
+    return (
+        node.isa[Filter]()
+        or node.isa[Project]()
+        or node.isa[Compute]()
+        or node.isa[Cast]()
+    )
 
 
 def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
@@ -2613,14 +2747,15 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         # False, for the reason the join below gives: this already runs on a
         # worker, so a gather here must not hand itself out to workers again.
         chunk.flatten(False)
+    # And False everywhere below, for the same reason.
     if node.isa[Filter]():
-        return node[Filter].process(chunk^)
+        return node[Filter].process(chunk^, False)
     if node.isa[Project]():
-        return node[Project].process(chunk^)
+        return node[Project].process(chunk^, False)
     if node.isa[Compute]():
-        return node[Compute].process(chunk^)
+        return node[Compute].process(chunk^, False)
     if node.isa[Cast]():
-        return node[Cast].process(chunk^)
+        return node[Cast].process(chunk^, False)
     if node.isa[Join]():
         # False, because this is the entry point several workers share and a
         # join's own kernels would each hand themselves out to workers again.

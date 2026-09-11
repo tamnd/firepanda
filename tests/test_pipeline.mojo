@@ -45,6 +45,7 @@ from firepanda.exec import (
     node_ends_early,
     node_is_breaker,
     node_is_row_local,
+    node_process,
     node_status,
 )
 from firepanda.frame.frame import DataFrame
@@ -1399,6 +1400,13 @@ def ints_of(col: AnyArray, rows: Int) raises -> List[Int64]:
     return out^
 
 
+def emitted(var out: Optional[Chunk]) raises -> Chunk:
+    """Unwraps a chunk a node emitted, for a test that knows there was one."""
+    if not out:
+        raise Error("the node emitted nothing")
+    return out.take()
+
+
 def selected_chunk() raises -> Chunk:
     """Six rows of values with a selection keeping the second and the fourth.
 
@@ -1523,23 +1531,153 @@ def test_giving_up_the_columns_flattens_first() raises:
 
 
 def test_a_node_that_does_not_read_a_selection_is_given_a_flat_chunk() raises:
-    """The safety property the whole step rests on. Nothing has been taught to
-    read a selection yet, so a node handed a selected chunk sees it flattened
-    and gives the answer it would have given anyway."""
-    var keep = List[Int]()
-    keep.append(1)
-    keep.append(0)
-    var node = Node(Project(keep^))
-    var out = node_apply(node, selected_chunk())
+    """The safety property the whole thing rests on. A limit has not been taught
+    about selections, so it is handed a flattened chunk and gives the answer it
+    would have given anyway rather than slicing positions it cannot read."""
+    var node = Node(Limit(1))
+    var out = node_process(node, selected_chunk())
     assert_true(out.__bool__(), "a chunk came back")
     var got = out.take()
     assert_false(got.selected(), "and it is not selected")
+    assert_equal(len(got), 1, "one row, which is the limit")
+    var first = ints_of(got.columns[0], 1)
+    assert_equal(first[0], 2, "position 1 of 1 through 6, not the value there")
+    var second = ints_of(got.columns[1], 1)
+    assert_equal(second[0], 70, "and the dense column's own first row")
+
+
+def test_a_projection_passes_a_selection_through() raises:
+    """Reordering columns moves no rows, so there is nothing for a projection to
+    gather. The dense flags follow the columns they describe, which is the whole
+    of what it has to do about them."""
+    var keep = List[Int]()
+    keep.append(1)
+    keep.append(0)
+    var out = node_apply(Node(Project(keep^)), selected_chunk())
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_true(got.selected(), "the selection survived")
     assert_equal(len(got), 2, "two rows")
-    var swapped = ints_of(got.columns[0], 2)
+    assert_true(got.dense[0], "what was the dense column is still dense")
+    assert_false(got.dense[1], "and what was under the selection still is")
+    var swapped = ints_of(got.column(0), 2)
     assert_equal(swapped[0], 70, "what was column 1")
-    var under = ints_of(got.columns[1], 2)
-    assert_equal(under[0], 2, "and what was column 0, gathered")
+    var under = ints_of(got.column(1), 2)
+    assert_equal(under[0], 2, "and what was column 0, read through")
     assert_equal(under[1], 4, "and its second row")
+
+
+def test_a_filter_writes_a_selection_rather_than_the_columns() raises:
+    """Six rows and a mask keeping four of them. What comes back has four rows
+    and column 0 is still the array that went in, which is the point: nothing
+    was copied to drop two rows."""
+    var columns = List[AnyArray]()
+    columns.append(numbers([1, 2, 3, 4, 5, 6]))
+    columns.append(flags([True, False, True, True, False, True]))
+    var out = node_apply(Node(Filter(1)), Chunk(columns^))
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_true(got.selected(), "a selection came out")
+    assert_equal(len(got), 4, "four rows")
+    assert_equal(len(got.columns[0]), 6, "the column was not rewritten")
+    var kept = ints_of(got.column(0), 4)
+    assert_equal(kept[0], 1, "the first row the mask kept")
+    assert_equal(kept[1], 3, "the second")
+    assert_equal(kept[2], 4, "the third")
+    assert_equal(kept[3], 6, "the fourth")
+
+
+def test_two_filters_compose_into_one_selection() raises:
+    """The positions stay in terms of the arrays at the bottom rather than in
+    terms of the chunk above, so a chain of filters is never a chain of
+    indirections."""
+    var columns = List[AnyArray]()
+    columns.append(numbers([1, 2, 3, 4, 5, 6]))
+    columns.append(flags([True, False, True, True, False, True]))
+    columns.append(flags([True, True, True, False, True, True]))
+    var once = emitted(node_apply(Node(Filter(1)), Chunk(columns^)))
+    var twice = emitted(node_apply(Node(Filter(2)), once^))
+    assert_true(twice.selected(), "still a selection")
+    assert_equal(len(twice), 3, "the first mask kept four and the second three")
+    assert_equal(len(twice.columns[0]), 6, "and still nothing was rewritten")
+    var kept = ints_of(twice.column(0), 3)
+    assert_equal(kept[0], 1, "row 0, kept by both")
+    assert_equal(kept[1], 3, "row 2, kept by both")
+    assert_equal(kept[2], 6, "row 5, kept by both, and row 3 dropped by the")
+
+
+def test_a_filter_that_keeps_nothing_still_says_so() raises:
+    """A chunk of no rows is work for everything downstream and no information,
+    so it is None rather than an empty selection."""
+    var columns = List[AnyArray]()
+    columns.append(numbers([1, 2, 3]))
+    columns.append(flags([False, False, False]))
+    var out = node_apply(Node(Filter(1)), Chunk(columns^))
+    assert_false(out.__bool__(), "nothing came back")
+
+
+def test_a_compute_behind_a_filter_computes_the_rows_that_survived() raises:
+    """The reason a selection pays. The compute gathers its operand down to the
+    rows once, instead of the filter above having moved every column it kept,
+    and what it appends is dense because it has a value per row."""
+    var columns = List[AnyArray]()
+    columns.append(numbers([1, 2, 3, 4, 5, 6]))
+    columns.append(flags([True, False, True, True, False, True]))
+    var kept = emitted(node_apply(Node(Filter(1)), Chunk(columns^)))
+    var node = Node(Compute(0, Value(Int64(10)), BinaryOp.MUL, "ten"))
+    var got = emitted(node_apply(node, kept^))
+    assert_true(got.selected(), "the selection came through")
+    assert_equal(len(got), 4, "four rows")
+    assert_equal(got.width(), 3, "one more column")
+    assert_true(got.dense[2], "the answer is at the rows")
+    assert_false(got.dense[0], "and the operand still is not")
+    assert_equal(len(got.columns[2]), 4, "four values, not six")
+    var tens = ints_of(got.columns[2], 4)
+    assert_equal(tens[0], 10, "ten times the first row the mask kept")
+    assert_equal(tens[3], 60, "and ten times the last")
+
+
+def test_a_cast_behind_a_filter_converts_only_what_survived() raises:
+    """Same argument as the compute. Converting the array rather than the rows
+    would convert six values to answer about four."""
+    var columns = List[AnyArray]()
+    columns.append(numbers([1, 2, 3, 4, 5, 6]))
+    columns.append(flags([True, False, True, True, False, True]))
+    var kept = emitted(node_apply(Node(Filter(1)), Chunk(columns^)))
+    var got = emitted(node_apply(Node(Cast(0, LogicalType.FLOAT64)), kept^))
+    assert_true(got.selected(), "the selection came through")
+    assert_equal(len(got), 4, "four rows")
+    assert_true(got.dense[0], "the converted column is at the rows now")
+    assert_equal(len(got.columns[0]), 4, "four values, not six")
+    ref view = got.columns[0].as_typed_view[DType.float64]()
+    assert_equal(view[0], 1.0, "the first row the mask kept")
+    assert_equal(view[3], 6.0, "and the last")
+
+
+def test_a_filter_over_a_dense_column_gathers_it_and_leaves_the_rest() raises:
+    """A column computed since the last filter is at the chunk's rows, so it
+    cannot be left alone under a new selection and is the one thing a filter
+    copies. The columns it did not touch are still the arrays it was given."""
+    var chunk = selected_chunk()
+    var keep = List[Int]()
+    keep.append(0)
+    keep.append(1)
+    var mask = List[AnyArray]()
+    mask.append(flags([True, False]))
+    chunk.append(mask.pop(), True)
+    var got = emitted(node_apply(Node(Filter(2, keep^)), chunk^))
+    assert_true(got.selected(), "a selection")
+    assert_equal(len(got), 1, "one of the two rows")
+    assert_equal(
+        len(got.columns[0]), 6, "the column under it was not rewritten"
+    )
+    assert_false(got.dense[0], "and is still read through")
+    assert_true(got.dense[1], "while the dense one was gathered")
+    assert_equal(len(got.columns[1]), 1, "down to the surviving row")
+    var under = ints_of(got.column(0), 1)
+    assert_equal(under[0], 2, "position 1 of 1 through 6")
+    var above = ints_of(got.columns[1], 1)
+    assert_equal(above[0], 70, "and the dense column's first row")
 
 
 def main() raises:

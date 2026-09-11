@@ -1038,6 +1038,60 @@ def take_range(start: Int, indices: List[Int]) raises -> Array[DType.int64]:
     return out^
 
 
+def select_positions(mask: Array[DType.bool]) -> List[Int]:
+    """Returns the positions a mask keeps, which is a selection over it.
+
+    What `Filter` builds instead of copying its columns. The output is one
+    number per surviving row rather than one value per surviving row per column,
+    so on a chunk of any width at all this is the cheap half of what filtering
+    used to cost.
+
+    A null in the mask drops the row, which is the rule `filter_rows` and
+    `filter_range` both follow, so a chunk filtered into a selection keeps the
+    same rows as the same chunk filtered by copying.
+
+    One pass, and room for every row reserved in front of it rather than a
+    counting pass to find out how many there will be. A count would be a second
+    read of the mask and, worse, it makes the output exactly as long as the
+    answer, which means the write pass has to zero it first. Reserving the input
+    length instead costs address space that is never touched past the last
+    position written, and the pages behind the rows that were dropped are never
+    faulted in at all.
+
+    Serial, and on purpose. The cursor only the writing thread can advance is
+    the whole loop. Spreading it means a count per morsel, a prefix sum over the
+    counts and a write per morsel at an offset, which is worth doing when the
+    output is a column and is not worth doing when the output is the index of
+    one, and the caller here is already running on a worker of its own.
+
+    Args:
+        mask: The mask.
+
+    Returns:
+        The positions where the mask is true and valid, in order.
+    """
+    var n = len(mask)
+    var values = mask.unsafe_ptr()
+    var out = List[Int](capacity=n)
+
+    # The validity probe is a bit load and a shift on every row and a mask with
+    # no nulls in it does not need either. A mask is what a comparison just
+    # produced and a comparison over columns that have no nulls produces one
+    # that has none, which is the common case and is the case q6 is.
+    if mask.null_count() == 0:
+        for i in range(n):
+            if Bool(values.unsafe_offset(i).unsafe_load()):
+                out.append(i)
+        return out^
+
+    for i in range(n):
+        if not mask.data.validity.get(i):
+            continue
+        if Bool(values.unsafe_offset(i).unsafe_load()):
+            out.append(i)
+    return out^
+
+
 def filter_range(start: Int, mask: Array[DType.bool]) -> Array[DType.int64]:
     """Keeps the labels of the rows a mask keeps, out of an arithmetic range.
 
