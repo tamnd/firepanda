@@ -20,7 +20,17 @@ Nothing is gathered. Every probe row produces exactly one output row and that ro
 
 One case is refused that should answer false on every row, and it is refused for every join kind rather than for this one. A build side that a filter emptied has no chunks at all rather than one empty chunk, and building the key table wants exactly one, so a join against nothing raises. That is filed as #611 and pinned on a semi join as well as on a mark join, since it has been there the whole time.
 
-The SQL front end does not put one there yet. That is the next change.
+The SQL front end that puts one there is the entry below.
+
+Part of #309.
+
+### Added: an IN over a subquery written as a value, and NOT IN anywhere
+
+`WHERE x IN (SELECT k FROM u) AND price > 4` was already a semi join, and that is still what it lowers to, because there the question is which rows to keep and a semi join is the cheaper way to ask it. Written anywhere else the `IN` is a value: under an `OR`, in a `CASE`, in the select list. Those now lower to a mark join above the `FROM` and a read of the column it wrote, which is the same place and the same shape as the cross join a subquery answering one value gets.
+
+`NOT IN` goes there too, wherever it is written, and it was refused before. The anti join it looks like is the classic wrong answer, silent, and load bearing in TPC-H q16 and q21: one null anywhere in the subquery makes `NOT IN` null for every row rather than true, and an anti join keeps those rows rather than dropping them. Nothing was written to fix that. The mark join marks such a row null rather than false, the `NOT` over the column is null in turn, and a `WHERE` keeps a row on true, so `SELECT qty FROM sales WHERE qty NOT IN (SELECT band FROM gaps)` answers no rows when any band is null. The null aware anti join turns out to be a mark join and a `NOT`.
+
+The negation stays in the expression rather than turning into a second join kind, which is why `NOT (x IN (SELECT ...))` and `x NOT IN (SELECT ...)` lower to the same two nodes. `EXISTS` written as a value is still refused and says so: it answers the same boolean per row, but a mark join is handed a pair of keys and an `EXISTS` is not written with one. It will get there through `count(*) > 0` and the cross join instead.
 
 Part of #309.
 
