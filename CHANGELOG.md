@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.66] - 2026-09-12
+
+Built against Mojo 1.0.0 (ed45d567).
+
+The Python front door and the SQL front end both moved, and the one row that came from the benchmark rather than from a checklist is at the top. ClickBench q23 filters a million rows down to ninety five and asks for ten of them with all 105 columns attached, and the frame in the middle of that was the whole cost of the query. `filter_sort_limit` carries positions instead, and the query went from 0.053 s to 0.008 s in the bench repository, which is level with Polars and four times ahead of DuckDB.
+
+On the SQL side `CAST`, `AND`, `OR`, `NOT`, `BETWEEN` and `IN` all lower and run now, which between them are most of what a `WHERE` clause in somebody else's query is made of. On the pandas side an index can become a column and a column can become a frame, each bringing the members that follow from it, and `sort_values` reaches the core sort that was already finished underneath it.
+
 ### Added: a filter, a sort and a limit over a wide frame, without the frame in the middle
 
 `DataFrame.filter_sort_limit`. `filter` then `sort_limit` already gave the right answer and the cost was all in the frame between them. ClickBench q23 is the shape: a pattern match over `URL` keeps ninety five rows out of a million and ten of those come back ordered by `EventTime`, and filtering first gathers a hundred and five columns a million rows at a time so that ten rows can be read out of the result.
@@ -5699,7 +5707,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.65...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.66...HEAD
+[0.6.66]: https://github.com/tamnd/firepanda/releases/tag/v0.6.66
 [0.6.65]: https://github.com/tamnd/firepanda/releases/tag/v0.6.65
 [0.6.64]: https://github.com/tamnd/firepanda/releases/tag/v0.6.64
 [0.6.63]: https://github.com/tamnd/firepanda/releases/tag/v0.6.63
