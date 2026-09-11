@@ -868,15 +868,72 @@ def test_a_unary_expression_is_refused() raises:
         _ = lower(plan, root, one_frame())
 
 
-def test_a_projection_of_a_bare_constant_is_refused() raises:
+def test_a_projection_of_a_bare_constant_is_a_column_of_it() raises:
     var plan = Plan()
     var scan = plan.scan("sales", List[String](), 0)
     var one = plan.exprs.literal(Value(Int64(1)))
     var root = plan.project(scan, [one], ["one"])
-    _ = bind(plan, root, schemas())
+    var out = run(plan, root)
 
-    with assert_raises(contains="makes a column out of a constant"):
+    assert_equal(len(out.schema), 1, "only the constant comes out")
+    same(read_back(out, "one"), [1, 1, 1, 1, 1, 1, 1, 1, 1, 1], "every row")
+
+
+def test_a_constant_column_keeps_the_name_the_query_gave_it() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var tag = plan.exprs.literal(Value(Int64(7)))
+    var root = plan.project(scan, [qty, tag], ["qty", "tag"])
+    var out = run(plan, root)
+
+    same(
+        read_back(out, "qty"), [5, 20, 3, 40, 12, 8, 25, 1, 30, 15], "the input"
+    )
+    same(read_back(out, "tag"), [7, 7, 7, 7, 7, 7, 7, 7, 7, 7], "the constant")
+
+
+def test_a_constant_can_be_an_operand_of_what_comes_after_it() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var one = plan.exprs.literal(Value(Int64(1)))
+    var two = plan.exprs.literal(Value(Int64(2)))
+    var sum = plan.exprs.binary(BinaryOp.ADD, one, two)
+    var root = plan.project(scan, [sum], ["three"])
+    _ = bind(plan, root, schemas())
+    # Simplify has not run here, so both operands are still constants and the
+    # binary branch refuses them rather than building a column for each.
+    with assert_raises(contains="both operands of an operation are constants"):
         _ = lower(plan, root, one_frame())
+
+
+def test_a_constant_is_an_operand_in_one_output_and_a_column_in_another() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var one = plan.exprs.literal(Value(Int64(1)))
+    var up = plan.exprs.binary(BinaryOp.ADD, qty, one)
+    var root = plan.project(scan, [up, one], ["up", "one"])
+    var out = run(plan, root)
+
+    same(read_back(out, "up"), [6, 21, 4, 41, 13, 9, 26, 2, 31, 16], "the sum")
+    same(read_back(out, "one"), [1, 1, 1, 1, 1, 1, 1, 1, 1, 1], "the constant")
+
+
+def test_a_constant_that_is_null_fills_the_column_with_nothing() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var nothing = plan.exprs.literal(Value(null=LogicalType.INT64))
+    var root = plan.project(scan, [nothing], ["nothing"])
+    _ = bind(plan, root, schemas())
+    var pipe = lower(plan, root, one_frame())
+    var out = pipe^.run()
+
+    valid(
+        present(out, "nothing"),
+        [False, False, False, False, False, False, False, False, False, False],
+        "no row has a value",
+    )
 
 
 def test_a_cast_of_an_input_column_is_refused() raises:

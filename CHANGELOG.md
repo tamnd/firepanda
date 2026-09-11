@@ -52,6 +52,17 @@ The text work also settled what a string column costs. `text_byte_length` reads 
 The clock entries are about relabelling rather than converting. The hits file stores a timestamp as a plain int64 and a timestamp is laid out as int64, so saying it is a clock is a new type on each chunk and no bytes read. Alongside it, `DATE_TRUNC` is written down as flooring rather than rounding towards zero, and the minute field is pinned to what DuckDB and pandas actually answered over sixteen rows either side of the epoch.
 
 Three entries are not from that line of work. `SELECT DISTINCT` runs and needed no operator, because a distinct is a group by that reduces nothing, so it gets the streaming group by's key map and merge rather than a second implementation of what two rows being the same means. A `VALUES` runs too, which is the other half of a query that names no table, and it is the one place lowering allocates an array. And `DataFrame.reindex` is here with both of its axes and eight of pandas' ten parameters, filling on the way past rather than as a second pass over the answer.
+### Added: SELECT 1 runs, because a constant can be a column now
+
+`Constant` in `exec/node.mojo`, the operator that appends a column holding the same value in every row. It is `filled_block` over the width of the chunk, and it is what `SELECT 1` and `SELECT 1 + 1 AS two` were waiting for.
+
+A constant is nearly always an operand, and the operation it feeds reads it off the expression tree and hands it straight to the kernel, so nothing is ever built for it. What was left over is a constant that is an output on its own, and that has to land in a column a projection can read back by position like everything else. Before this it was refused by name, which is why the VALUES entry below got a query with no `FROM` as far as the projection and no further.
+
+The value is stored with the type the plan worked out rather than the type it happens to have, because a constant has no width of its own. A filled timestamp is a timestamp and not an integer of the same width, and a null constant fills the column with nulls and says so in the field.
+
+`SELECT 1` comes back with a column called `__expr_0`. DuckDB calls it `1`, after the text it was written as, and matching that needs a printer over the original tokens, which is a change of its own.
+
+Part of #309.
 
 ### Added: a VALUES runs, so a query can read nothing at all
 

@@ -118,6 +118,19 @@ Every value has to be a literal by then. Constant folding has already run, so
 `VALUES (1 + 1)` is one, and anything left computed is refused by name rather
 than evaluated, because there is no chunk under a VALUES to evaluate it over.
 
+### A constant that is an output gets a column of its own
+
+A constant is nearly always an operand, and the operation it feeds reads it off
+the expression tree and hands it to the kernel, so nothing is ever built for it.
+What is left over is a constant that is an output on its own, which is the `1`
+in `SELECT 1`, and that has to land somewhere a projection can read it back by
+position like everything else. `Constant` is the node that puts it there, and it
+writes one value down a buffer as wide as the chunk.
+
+That is the second half of `SELECT 1 + 1`. The literal table under it gives the
+projection a row to be evaluated over, and this gives the projection a column to
+evaluate into.
+
 ### A distinct is a group by that reduces nothing
 
 A group by holds one row per group and the rows of a group differ only in what
@@ -159,6 +172,7 @@ from firepanda.dtype.schema import Field, Schema
 from firepanda.exec.node import (
     Cast,
     Compute,
+    Constant,
     Filter,
     Group,
     GroupAgg,
@@ -363,18 +377,16 @@ def _lower_expr(
         return at
 
     if kind == ExprKind.LITERAL:
-        # A constant reaches an operator as an operand of a `Compute` and never
-        # on its own, because no node makes a column out of thin air.
-        raise Error(
-            String(
-                "lower: the constant ",
-                exprs.nodes[root].value,
-                (
-                    " is not an operand of anything, and there is no operator"
-                    " that makes a column out of a constant"
-                ),
-            )
+        # A constant is usually an operand of a `Compute` and the binary branch
+        # below reads it off the tree without ever coming through here. What
+        # reaches here is a constant that is an output on its own, which is
+        # `SELECT 1`, and that needs a column of its own to land in.
+        var type = exprs.nodes[root].type
+        pipe.add(
+            Node(Constant(Value(copy=exprs.nodes[root].value), type, name))
         )
+        memo.remember(root, len(pipe.schema) - 1)
+        return len(pipe.schema) - 1
 
     if kind == ExprKind.CAST:
         var over = exprs.nodes[root].children[0]
