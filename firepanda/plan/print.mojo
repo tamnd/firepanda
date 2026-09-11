@@ -218,7 +218,10 @@ def _line(plan: Plan, at: Int) raises -> String:
             written += " desc" if node.flags[i] else " asc"
             if node.flags[len(node.exprs) + i]:
                 written += " nulls last"
-        return written + "]"
+        written += "]"
+        if node.length != NO_LIMIT:
+            written += String(" top ", node.length)
+        return written
 
     if node.kind == NodeKind.LIMIT:
         var written = String("LIMIT ")
