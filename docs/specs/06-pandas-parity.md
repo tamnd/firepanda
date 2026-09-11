@@ -163,7 +163,7 @@ A second note, internal rather than user facing: Mojo 1.0 removed negative index
 - [ ] `apply`, `map`, `pipe`, `agg`, `transform` (M6, and see document 04 section 7 on Python callables)
 - [ ] `applymap` — `adapted`, `map` in pandas 3.0
 - [ ] `groupby` (M1 for the basic aggregations, M6 for the rest)
-- [ ] `rolling`, `expanding`, `ewm` (M6)
+- [x] `rolling`, `expanding`, `ewm` (M6)
 - [ ] `resample` (M7)
 - [ ] `dot`, `add`, `sub`, `mul`, `div`, `mod`, `pow` and the `r`-prefixed reflected forms (M1)
 - [ ] `add` with `fill_value=` (M6)
@@ -281,8 +281,9 @@ pandas 3.0 covers nested data thinly and Polars covers it well. We follow Polars
 - [x] `rolling` on a column, with all five of `window`, `min_periods`, `center`, `closed` and `step`, and with the answer stepped and relabelled (M6)
 - [ ] `rolling` with a time based window, meaning an offset string on a datetime index (M7)
 - [x] `expanding` on a column, with `min_periods` (M6)
-- [ ] `ewm` with `com`, `span`, `halflife`, `alpha`, `adjust`, `ignore_na` (M6)
-- [ ] All of `sum`, `mean`, `median`, `min`, `max`, `std`, `var`, `count`, `quantile`, `skew`, `kurt`, `sem`, `corr`, `cov`, `rank` on each of the three (M6), of which all but `corr` and `cov` are written on `rolling` and `expanding`
+- [x] `ewm` with `com`, `span`, `halflife`, `alpha`, `adjust`, `ignore_na` and `min_periods`, on a column and on a frame (M6)
+- [ ] `ewm` with `times`, `method="table"` and `online` (M7)
+- [ ] All of `sum`, `mean`, `median`, `min`, `max`, `std`, `var`, `count`, `quantile`, `skew`, `kurt`, `sem`, `corr`, `cov`, `rank` on each of the three (M6), of which all but `corr` and `cov` are written on `rolling` and `expanding`, and `mean`, `sum`, `var` and `std` are written on `ewm`, which is every reduction pandas puts on it apart from those same two
 - [ ] `rolling.apply` with a callable (M6)
 - [ ] `win_type` weighted windows: triang, gaussian, boxcar, and the rest (M6)
 - [x] `over` with an aggregate and no ordering, which is the Polars spelling of `group_broadcast` (M6)

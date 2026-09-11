@@ -52,6 +52,17 @@ class DataFrame:
     ) -> DataFrame:
         """One reduction over every window of every column."""
         ...
+    def ewm_agg(
+        self,
+        kind: str,
+        alpha: float,
+        min_periods: int,
+        adjust: bool,
+        ignore_na: bool,
+        settings: tuple[object, ...],
+    ) -> DataFrame:
+        """One exponentially weighted reduction down every column."""
+        ...
     def dropna(self, subset: list[str]) -> DataFrame:
         """The rows with no missing value in them."""
         ...
@@ -174,6 +185,17 @@ class Series:
         settings: tuple[object, ...],
     ) -> Series:
         """One reduction over every window of the column."""
+        ...
+    def ewm_agg(
+        self,
+        kind: str,
+        alpha: float,
+        min_periods: int,
+        adjust: bool,
+        ignore_na: bool,
+        settings: tuple[object, ...],
+    ) -> Series:
+        """One exponentially weighted reduction down the column."""
         ...
     def string_flag(self, kind: str, arg: str) -> Series:
         """One str accessor method that answers a mask, as a column."""

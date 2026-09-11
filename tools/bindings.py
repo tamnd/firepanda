@@ -1285,6 +1285,150 @@ def _window_members(py: str) -> tuple[Member, ...]:
     return tuple(out)
 
 
+EWM_REDUCED: tuple[tuple[str, str, str, str], ...] = (
+    ("sum", "The weighted total of every row up to and including this one.", "", ""),
+    ("mean", "The weighted mean of every row up to and including this one.", "", ""),
+    (
+        "var",
+        "The weighted variance of every row up to and including this one.",
+        "bias: bool = False",
+        "self._bias_settings(bias)",
+    ),
+    (
+        "std",
+        "The weighted deviation of every row up to and including this one.",
+        "bias: bool = False",
+        "self._bias_settings(bias)",
+    ),
+)
+"""The four reductions an exponentially weighted window can be run through.
+
+Four of pandas' nine. `corr` and `cov` need a second column and are the same
+piece of work as `Rolling.corr` and `Rolling.cov`, so all four of those should
+land together. `agg` and `aggregate` take a caller's own function and belong with
+the rolling ones. `online` is a streaming object pandas implements only in numba.
+`firepanda/kernel/ewm.mojo` says the rest.
+
+The third and fourth columns are read the way `WINDOWED`'s are, and here the
+split is two and two rather than five and eight: `var` and `std` read a `bias`
+flag and `mean` and `sum` read nothing. The engine arguments split the same two
+and two and the other way round, which is pandas' own arrangement and not a
+tidier one this table imposed.
+"""
+
+
+EWM_STATE: tuple[tuple[str, str, str, str], ...] = (
+    ("com", "self._com", "float | None", "The centre of mass, if that is how the decay arrived."),
+    ("span", "self._span", "float | None", "The span, if that is how the decay arrived."),
+    (
+        "halflife",
+        "self._halflife",
+        "float | None",
+        "The half life in rows, if that is how the decay arrived.",
+    ),
+    (
+        "alpha",
+        "self._alpha",
+        "float | None",
+        "The smoothing factor, if that is how the decay arrived.",
+    ),
+    (
+        "min_periods",
+        "self._min_periods",
+        "int",
+        "How many values a row needs before it is answered, which is never below one.",
+    ),
+    ("adjust", "self._adjust", "bool", "Whether every row weighs one rather than the factor."),
+    (
+        "ignore_na",
+        "self._ignore_na",
+        "bool",
+        "Whether a missing row is skipped rather than taking up a slot in the decay.",
+    ),
+    ("obj", "self._data", "Series | DataFrame", "The column or the frame the decay runs down."),
+    ("ndim", "2 if self._over_frame() else 1", "int", "The number of dimensions of what is decaying."),
+    (
+        "method",
+        '"single"',
+        "str",
+        "Whether the columns decay together, which here they do not.",
+    ),
+    ("times", "None", "object", "The instants the decay is measured against, which here is none."),
+    ("window", "None", "int | None", "The width, which an exponentially weighted window has none of."),
+    ("center", "False", "bool", "Whether the window sits around its row, which here it cannot."),
+    ("closed", "None", "str | None", "Which ends the window keeps, of which it has none."),
+    ("step", "None", "int | None", "How many rows apart the answers are, which here is every row."),
+    ("win_type", "None", "str | None", "The weighting over the window, which here is the decay."),
+    ("on", "None", "str | None", "The column the window is ordered by, which here is the rows."),
+    (
+        "exclusions",
+        "frozenset()",
+        "frozenset[str]",
+        "The columns held out of the reduction, which here is none of them.",
+    ),
+)
+"""The eighteen things an exponentially weighted window reports about itself.
+
+The first seven are the arguments back, and the four spellings of the decay are
+reported the way they arrived rather than collapsed, because `ewm(span=5).com` is
+None in pandas and answering 2.0 here would be reporting a conversion rather than
+an argument. `min_periods` is the exception and is reported resolved, because
+pandas resolves it in the constructor: `ewm(span=5, min_periods=0).min_periods`
+is 1 there.
+
+The last eleven are constant, and seven of those are the rolling window's
+vocabulary answered with nothing. That is not padding. A caller handed a window
+object reads `w.window` to find out how wide it is, and an exponentially weighted
+window has no width, so None is the true answer and an absent attribute is not.
+"""
+
+
+def _ewm_members() -> tuple[Member, ...]:
+    """Writes the eighteen properties and four reductions for the EWM class.
+
+    One function rather than a parameterised pair, because there is one class
+    here. `Rolling` and `Expanding` are two classes over one kernel and this is
+    one class over another, which is the shape `firepanda/kernel/ewm.mojo`
+    argues for.
+
+    Returns:
+        The members, in the order they should be written out.
+    """
+    engines = "engine: Any = None, engine_kwargs: Any = None"
+    out: list[Member] = []
+    for name, body, returns, what in EWM_STATE:
+        out.append(
+            Member(name=name, kind="property", body=body, doc=what, returns=returns)
+        )
+    for name, what, own, settings in EWM_REDUCED:
+        # `mean` and `sum` have a numba path in pandas to choose between and so
+        # declare the two engine arguments. `var` and `std` have none and
+        # declare neither, which is pandas' own split and is copied because the
+        # signature is the surface being matched.
+        engined = name in ("mean", "sum")
+        signature = "numeric_only: bool = False"
+        if own:
+            signature = f"{own}, {signature}"
+        if engined:
+            signature = f"{signature}, {engines}"
+        arguments = "numeric_only"
+        if engined:
+            arguments = f"{arguments}, engine, engine_kwargs"
+        elif settings:
+            arguments = f"{arguments}, settings={settings}"
+        out.append(
+            Member(
+                name=name,
+                kind="method",
+                signature=signature,
+                body=f'self._reduce("{name}", {arguments})',
+                doc=f"{what} Under an exponentially weighted window.",
+                returns="Series | DataFrame",
+            )
+        )
+    return tuple(out)
+
+
 def _group_members(py: str) -> tuple[Member, ...]:
     """Writes the fifteen reduction members for one group by class.
 
@@ -1628,6 +1772,20 @@ FRAME = Exposed(
             returns="DataFrame",
         ),
         Binding(
+            mojo="PyDataFrame.ewm_agg",
+            name="ewm_agg",
+            doc="One exponentially weighted reduction down every column.",
+            params=(
+                ("kind", "str"),
+                ("alpha", "float"),
+                ("min_periods", "int"),
+                ("adjust", "bool"),
+                ("ignore_na", "bool"),
+                ("settings", "tuple[object, ...]"),
+            ),
+            returns="DataFrame",
+        ),
+        Binding(
             mojo="PyDataFrame.dropna",
             name="dropna",
             doc="The rows with no missing value in them.",
@@ -1848,6 +2006,22 @@ FRAME = Exposed(
             doc="A window over every column that starts at the first row and grows.",
             returns="Expanding",
         ),
+        Member(
+            name="ewm",
+            kind="method",
+            signature=(
+                "com: float | None = None, span: float | None = None,"
+                " halflife: float | None = None, alpha: float | None = None,"
+                " min_periods: int | None = 0, adjust: bool = True,"
+                ' ignore_na: bool = False, times: Any = None, method: str = "single"'
+            ),
+            body=(
+                "_ewm(self, com, span, halflife, alpha, min_periods, adjust,"
+                " ignore_na, times, method)"
+            ),
+            doc="A decay over every row of every column, computing nothing until reduced.",
+            returns="ExponentialMovingWindow",
+        ),
         *_reductions("DataFrame"),
         *_transformations("DataFrame"),
         *_operators("DataFrame"),
@@ -2019,6 +2193,20 @@ SERIES = Exposed(
                 ("center", "bool"),
                 ("closed", "str"),
                 ("step", "int | None"),
+                ("settings", "tuple[object, ...]"),
+            ),
+            returns="Series",
+        ),
+        Binding(
+            mojo="PySeries.ewm_agg",
+            name="ewm_agg",
+            doc="One exponentially weighted reduction down the column.",
+            params=(
+                ("kind", "str"),
+                ("alpha", "float"),
+                ("min_periods", "int"),
+                ("adjust", "bool"),
+                ("ignore_na", "bool"),
                 ("settings", "tuple[object, ...]"),
             ),
             returns="Series",
@@ -2255,6 +2443,22 @@ SERIES = Exposed(
             body="_expanding(self, min_periods, method)",
             doc="A window that starts at the first row and grows, reduced the same way.",
             returns="Expanding",
+        ),
+        Member(
+            name="ewm",
+            kind="method",
+            signature=(
+                "com: float | None = None, span: float | None = None,"
+                " halflife: float | None = None, alpha: float | None = None,"
+                " min_periods: int | None = 0, adjust: bool = True,"
+                ' ignore_na: bool = False, times: Any = None, method: str = "single"'
+            ),
+            body=(
+                "_ewm(self, com, span, halflife, alpha, min_periods, adjust,"
+                " ignore_na, times, method)"
+            ),
+            doc="A decay over every row of the column, computing nothing until reduced.",
+            returns="ExponentialMovingWindow",
         ),
         Member(
             name="dt",
@@ -2941,6 +3145,33 @@ ACCESSORS: tuple[Accessor, ...] = (
         members=_window_members("Expanding"),
     ),
     Accessor(
+        py="ExponentialMovingWindow",
+        owner="Series and DataFrame",
+        doc=(
+            "A decay over every row so far, waiting for a reduction.\n\n"
+            "Reached from `s.ewm(...)` and from `df.ewm(...)`. It is not a"
+            " narrower `Rolling`, and the difference is worth stating before"
+            " anybody goes looking for the shared base class: every other window"
+            " in this library is a pair of row numbers, and this one has no"
+            " edges at all. Every row is inside every window and what changes"
+            " from row to row is how much each earlier row counts, which falls"
+            " off geometrically with distance. So there is no width here, no"
+            " centring, no closed rule and no step, and the seven properties"
+            " that answer those questions answer them with nothing."
+            " `firepanda/kernel/ewm.mojo` argues the whole of that.\n\n"
+            "One class for both owners, for the reason `Rolling` gives. The"
+            " decay runs down a column and every column of a frame has the same"
+            " rows, so a frame decays a column at a time. That is pandas'"
+            " `method=\"single\"`, which is its default.\n\n"
+            "Four of pandas' nine reductions so far. The decay arrives as one of"
+            " four numbers that mean the same thing and is collapsed to one"
+            " before it crosses the boundary, which is checked here because this"
+            " is where a caller's spelling of the question lives."
+        ),
+        mixin="EwmMixin",
+        members=_ewm_members(),
+    ),
+    Accessor(
         py="DataFrameGroupBy",
         owner="DataFrame",
         doc=(
@@ -3326,7 +3557,7 @@ def wrapper() -> str:
         mixins.add("_grouped")
     # `s.rolling(...)` and `s.expanding(...)` are the same case as `groupby`
     # above, for the same reason, so they are hand written functions too.
-    for builder in ("_rolling", "_expanding"):
+    for builder in ("_rolling", "_expanding", "_ewm"):
         if any(f"{builder}(" in m.body for m in every):
             mixins.add(builder)
     if mixins:

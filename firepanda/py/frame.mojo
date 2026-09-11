@@ -80,6 +80,7 @@ from firepanda.py.ops import (
     unary_op,
 )
 from firepanda.kernel.group import AggKind
+from firepanda.py.ewm import ewm_frame
 from firepanda.py.reduce import grouped_reduction, reduction
 from firepanda.py.series import PySeries
 from firepanda.py.temporal import iso_calendar
@@ -492,6 +493,61 @@ struct PyDataFrame(Movable, Writable):
                         words(closed, "closed"),
                         maybe_whole(step, "step"),
                         window_settings(words(kind, "kind"), settings),
+                    )
+                )
+            )
+        )
+
+    @staticmethod
+    def ewm_agg(
+        py_self: PythonObject,
+        kind: PythonObject,
+        alpha: PythonObject,
+        min_periods: PythonObject,
+        adjust: PythonObject,
+        ignore_na: PythonObject,
+        settings: PythonObject,
+    ) raises -> PythonObject:
+        """Runs one exponentially weighted reduction down every column.
+
+        The frame half of the door behind `ewm`. It takes the same six arguments
+        the column one takes and means the same thing by all six, because the
+        decay runs down a column and every column of a frame has the same rows.
+        That is pandas' `method="single"`, which is its default and the only
+        reading this library answers.
+
+        Args:
+            py_self: The frame.
+            kind: The reduction, as pandas spells the method.
+            alpha: The smoothing factor, above nought and at most one.
+            min_periods: How many values a row needs before it is answered.
+            adjust: Whether every row weighs one rather than the factor.
+            ignore_na: Whether a missing row is skipped rather than taking up a
+                slot in the decay.
+            settings: The parameters the reduction reads and the decay does not,
+                as a tuple, which is `bias` for the two spreads and empty for
+                the mean and the total.
+
+        Returns:
+            A new frame of the same column names in the same order, every one of
+            them float64.
+
+        Raises:
+            Error: Tagged `dtype` if any column holds nothing a reduction can
+                read, and tagged `value` if a parameter is out of range or the
+                combination has no pandas answer.
+        """
+        return PythonObject(
+            alloc=Self(
+                ArcPointer(
+                    ewm_frame(
+                        Self._frame(py_self)[].frame[],
+                        words(kind, "kind"),
+                        number(alpha, "alpha"),
+                        whole(min_periods, "min_periods"),
+                        flag(adjust, "adjust"),
+                        flag(ignore_na, "ignore_na"),
+                        settings,
                     )
                 )
             )

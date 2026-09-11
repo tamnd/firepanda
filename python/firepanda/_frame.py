@@ -27,6 +27,7 @@ from ._pandas import (
     DataFrameGroupByMixin,
     DataFrameMixin,
     DatetimeMixin,
+    EwmMixin,
     ExpandingMixin,
     IndexMixin,
     Namespace,
@@ -34,6 +35,7 @@ from ._pandas import (
     SeriesGroupByMixin,
     SeriesMixin,
     StringMixin,
+    _ewm,
     _expanding,
     _grouped,
     _rolling,
@@ -46,6 +48,7 @@ __all__ = [
     "DataFrameGroupBy",
     "DatetimeProperties",
     "Expanding",
+    "ExponentialMovingWindow",
     "Index",
     "Rolling",
     "Series",
@@ -1053,6 +1056,215 @@ class Expanding(ExpandingMixin):
             raise translate(error) from None
 
 
+class ExponentialMovingWindow(EwmMixin):
+    """A decay over every row so far, waiting for a reduction.
+
+    Reached from `s.ewm(...)` and from `df.ewm(...)`. It is not a narrower `Rolling`,
+    and the difference is worth stating before anybody goes looking for the shared base
+    class: every other window in this library is a pair of row numbers, and this one has
+    no edges at all. Every row is inside every window and what changes from row to row
+    is how much each earlier row counts, which falls off geometrically with distance. So
+    there is no width here, no centring, no closed rule and no step, and the seven
+    properties that answer those questions answer them with nothing.
+    `firepanda/kernel/ewm.mojo` argues the whole of that.
+
+    One class for both owners, for the reason `Rolling` gives. The decay runs down a
+    column and every column of a frame has the same rows, so a frame decays a column at
+    a time. That is pandas' `method="single"`, which is its default.
+
+    Four of pandas' nine reductions so far. The decay arrives as one of four numbers
+    that mean the same thing and is collapsed to one before it crosses the boundary,
+    which is checked here because this is where a caller's spelling of the question
+    lives.
+    """
+
+    __slots__ = ()
+
+    @property
+    def com(self) -> float | None:
+        """The centre of mass, if that is how the decay arrived."""
+        try:
+            return self._com
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def span(self) -> float | None:
+        """The span, if that is how the decay arrived."""
+        try:
+            return self._span
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def halflife(self) -> float | None:
+        """The half life in rows, if that is how the decay arrived."""
+        try:
+            return self._halflife
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def alpha(self) -> float | None:
+        """The smoothing factor, if that is how the decay arrived."""
+        try:
+            return self._alpha
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def min_periods(self) -> int:
+        """How many values a row needs before it is answered, which is never below one."""
+        try:
+            return self._min_periods
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def adjust(self) -> bool:
+        """Whether every row weighs one rather than the factor."""
+        try:
+            return self._adjust
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def ignore_na(self) -> bool:
+        """Whether a missing row is skipped rather than taking up a slot in the decay."""
+        try:
+            return self._ignore_na
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def obj(self) -> Series | DataFrame:
+        """The column or the frame the decay runs down."""
+        try:
+            return self._data
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def ndim(self) -> int:
+        """The number of dimensions of what is decaying."""
+        try:
+            return 2 if self._over_frame() else 1
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def method(self) -> str:
+        """Whether the columns decay together, which here they do not."""
+        try:
+            return "single"
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def times(self) -> object:
+        """The instants the decay is measured against, which here is none."""
+        try:
+            return None
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def window(self) -> int | None:
+        """The width, which an exponentially weighted window has none of."""
+        try:
+            return None
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def center(self) -> bool:
+        """Whether the window sits around its row, which here it cannot."""
+        try:
+            return False
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def closed(self) -> str | None:
+        """Which ends the window keeps, of which it has none."""
+        try:
+            return None
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def step(self) -> int | None:
+        """How many rows apart the answers are, which here is every row."""
+        try:
+            return None
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def win_type(self) -> str | None:
+        """The weighting over the window, which here is the decay."""
+        try:
+            return None
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def on(self) -> str | None:
+        """The column the window is ordered by, which here is the rows."""
+        try:
+            return None
+        except Exception as error:
+            raise translate(error) from None
+
+    @property
+    def exclusions(self) -> frozenset[str]:
+        """The columns held out of the reduction, which here is none of them."""
+        try:
+            return frozenset()
+        except Exception as error:
+            raise translate(error) from None
+
+    def sum(
+        self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
+    ) -> Series | DataFrame:
+        """The weighted total of every row up to and including this one. Under an
+        exponentially weighted window.
+        """
+        try:
+            return self._reduce("sum", numeric_only, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def mean(
+        self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
+    ) -> Series | DataFrame:
+        """The weighted mean of every row up to and including this one. Under an
+        exponentially weighted window.
+        """
+        try:
+            return self._reduce("mean", numeric_only, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def var(self, bias: bool = False, numeric_only: bool = False) -> Series | DataFrame:
+        """The weighted variance of every row up to and including this one. Under an
+        exponentially weighted window.
+        """
+        try:
+            return self._reduce("var", numeric_only, settings=self._bias_settings(bias))
+        except Exception as error:
+            raise translate(error) from None
+
+    def std(self, bias: bool = False, numeric_only: bool = False) -> Series | DataFrame:
+        """The weighted deviation of every row up to and including this one. Under an
+        exponentially weighted window.
+        """
+        try:
+            return self._reduce("std", numeric_only, settings=self._bias_settings(bias))
+        except Exception as error:
+            raise translate(error) from None
+
+
 class DataFrameGroupBy(DataFrameGroupByMixin):
     """A frame with a grouping over it, waiting for a reduction.
 
@@ -1533,6 +1745,26 @@ class DataFrame(DataFrameMixin):
         """A window over every column that starts at the first row and grows."""
         try:
             return _expanding(self, min_periods, method)
+        except Exception as error:
+            raise translate(error) from None
+
+    def ewm(
+        self,
+        com: float | None = None,
+        span: float | None = None,
+        halflife: float | None = None,
+        alpha: float | None = None,
+        min_periods: int | None = 0,
+        adjust: bool = True,
+        ignore_na: bool = False,
+        times: Any = None,
+        method: str = "single",
+    ) -> ExponentialMovingWindow:
+        """A decay over every row of every column, computing nothing until reduced."""
+        try:
+            return _ewm(
+                self, com, span, halflife, alpha, min_periods, adjust, ignore_na, times, method
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -2552,6 +2784,26 @@ class Series(SeriesMixin):
         """A window that starts at the first row and grows, reduced the same way."""
         try:
             return _expanding(self, min_periods, method)
+        except Exception as error:
+            raise translate(error) from None
+
+    def ewm(
+        self,
+        com: float | None = None,
+        span: float | None = None,
+        halflife: float | None = None,
+        alpha: float | None = None,
+        min_periods: int | None = 0,
+        adjust: bool = True,
+        ignore_na: bool = False,
+        times: Any = None,
+        method: str = "single",
+    ) -> ExponentialMovingWindow:
+        """A decay over every row of the column, computing nothing until reduced."""
+        try:
+            return _ewm(
+                self, com, span, halflife, alpha, min_periods, adjust, ignore_na, times, method
+            )
         except Exception as error:
             raise translate(error) from None
 

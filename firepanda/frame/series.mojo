@@ -106,6 +106,7 @@ from firepanda.kernel.temporal import (
     unit_named,
 )
 from firepanda.kernel.unary import UnaryOp, unary_any
+from firepanda.kernel.ewm import EwmOp, EwmSpec, ewm_agg
 from firepanda.kernel.window import (
     Shape,
     WindowEdge,
@@ -1441,6 +1442,30 @@ struct Series(Copyable, Movable, Sized, Writable):
         return self._windowed(
             op, expanding_shape(min_periods, len(self.values)), settings
         )
+
+    def ewm(self, op: EwmOp, spec: EwmSpec) raises -> Self:
+        """Returns one reduction run under an exponentially weighted window.
+
+        There is no shape here and no step, because every row is inside every
+        window and what changes is the weight. So the answer is always as tall
+        as the column and the labels always carry over, which is why this one
+        does not go through `_windowed`.
+
+        Args:
+            op: Which of the four reductions to run.
+            spec: The smoothing factor, how many values a row needs, whether
+                every row weighs one, whether a missing row takes up a slot in
+                the decay, and whether the variance is corrected.
+
+        Returns:
+            A float64 series of the same height.
+
+        Raises:
+            Error: If the column is not a number or a bool, if the smoothing
+                factor is out of range, or if a total was asked for with
+                `adjust` off, which pandas also refuses.
+        """
+        return self._relabelled(self.name, ewm_agg(self.values, op, spec))
 
     def _windowed(
         self, op: WindowOp, shape: Shape, settings: WindowSettings

@@ -27,6 +27,7 @@ exactly the shape the generator cannot write and exactly the shape `_refuse` and
 from __future__ import annotations
 
 import datetime
+import math
 import warnings
 from typing import TYPE_CHECKING, Any
 
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
         DataFrame,
         DataFrameGroupBy,
         Expanding,
+        ExponentialMovingWindow,
         Index,
         Rolling,
         Series,
@@ -2404,6 +2406,369 @@ def _expanding(data: Series | DataFrame, min_periods: int, method: str) -> Expan
         " numbers can do without holding the whole frame at once",
     )
     return Expanding(data, min_periods)
+
+
+class EwmMixin:
+    """The hand written half of `ExponentialMovingWindow`.
+
+    A window object that holds what it was told and computes nothing until a
+    reduction is asked for, which is the arrangement `WindowMixin` has and is
+    pandas' arrangement for both. It is a separate mixin rather than a third
+    subclass of that one because it shares none of the state: there is no width,
+    no centring, no closed rule and no step, and in their place there are four
+    spellings of one decay and two flags that change the recurrence.
+    `firepanda/kernel/ewm.mojo` argues why that is a different window and not a
+    narrower one.
+
+    The decay is checked here and collapsed to one number here, and it is checked
+    again at the kernel's door. That is not duplication worth removing, for the
+    reason `WindowMixin` gives about the five numbers: one of the two checks
+    exists to be reached from Python with pandas' own sentence, and the other
+    exists because the Mojo API is a public entry point of its own.
+
+    The four are reported back uncollapsed. `ewm(span=5).com` is None in pandas
+    and answering 2.0 here would be reporting a conversion rather than an
+    argument, which is the same rule that keeps `closed` at None on a rolling
+    window.
+    """
+
+    __slots__ = (
+        "_adjust",
+        "_alpha",
+        "_com",
+        "_data",
+        "_factor",
+        "_halflife",
+        "_ignore_na",
+        "_min_periods",
+        "_span",
+    )
+    """The data, the four spellings, the one number they collapsed to, and the
+    three things that change the answer. Slotted for the reason `DataFrameMixin`
+    gives. There is no `_inner`, because a window object has no extension object
+    of its own."""
+
+    _data: Series | DataFrame
+    _com: float | None
+    _span: float | None
+    _halflife: float | None
+    _alpha: float | None
+    _factor: float
+    _min_periods: int
+    _adjust: bool
+    _ignore_na: bool
+
+    def __init__(
+        self,
+        data: Series | DataFrame,
+        com: float | None,
+        span: float | None,
+        halflife: float | None,
+        alpha: float | None,
+        min_periods: int | None,
+        adjust: bool,
+        ignore_na: bool,
+    ) -> None:
+        """Checks the decay, collapses it, and keeps the rest. Not a public entry
+        point.
+
+        `min_periods` is the one argument that is not kept as it arrived, because
+        pandas does not keep it either: it resolves the default of nought to one
+        in its own constructor, so `ewm(span=5, min_periods=0).min_periods` is 1
+        there. A negative one also resolves to one rather than being refused,
+        which is pandas' behaviour and is kept, because a count of values that
+        cannot be below one is not a range a caller can be wrong about.
+
+        Args:
+            data: The column or the frame.
+            com: The centre of mass, or None.
+            span: The span, or None.
+            halflife: The half life in rows, or None.
+            alpha: The smoothing factor, or None.
+            min_periods: How many values a row needs, and None or nought for one.
+            adjust: Whether every row weighs one rather than the factor.
+            ignore_na: Whether a missing row is skipped.
+
+        Raises:
+            InvalidArgumentError: If none of the four spellings arrived, if more
+                than one did, if the one that did is outside the range pandas
+                allows for it, or if either flag is not a boolean. A
+                `ValueError`, which is what pandas raises for the decay.
+        """
+        if adjust is not True and adjust is not False:
+            raise InvalidArgumentError("adjust must be a boolean")
+        if ignore_na is not True and ignore_na is not False:
+            raise InvalidArgumentError("ignore_na must be a boolean")
+        if min_periods is not None and (
+            not isinstance(min_periods, int) or isinstance(min_periods, bool)
+        ):
+            raise InvalidArgumentError("min_periods must be an integer")
+        self._data = data
+        self._com = com
+        self._span = span
+        self._halflife = halflife
+        self._alpha = alpha
+        self._factor = _smoothing(com, span, halflife, alpha)
+        self._min_periods = max(int(min_periods), 1) if min_periods else 1
+        self._adjust = adjust
+        self._ignore_na = ignore_na
+
+    def _over_frame(self) -> bool:
+        """Whether this decay is over a frame rather than a column.
+
+        Written again rather than shared with `WindowMixin`, because the two
+        classes share no state and inheriting one method from a base that holds
+        five numbers none of these objects has would be the wrong shape for one
+        line.
+
+        Returns:
+            True for a frame.
+        """
+        from ._frame import DataFrame
+
+        return isinstance(self._data, DataFrame)
+
+    def _bias_settings(self, bias: bool) -> tuple[Any, ...]:
+        """Checks the one parameter the two spreads read and packs it.
+
+        pandas takes anything here and reads it for truth, so `bias="no"` quietly
+        answers the biased column, which is the opposite of what the caller who
+        wrote it meant. A boolean is asked for and anything else is a sentence,
+        which is what `_spread_settings` does with `ddof` and for the same
+        reason.
+
+        Args:
+            bias: Whether to answer the second moment itself, uncorrected.
+
+        Returns:
+            The one value, as the tuple `_reduce` passes on.
+
+        Raises:
+            InvalidArgumentError: If it is not a boolean.
+        """
+        if bias is not True and bias is not False:
+            raise InvalidArgumentError("bias must be a boolean")
+        return (bias,)
+
+    def _reduce(
+        self,
+        kind: str,
+        numeric_only: bool = False,
+        engine: Any = None,
+        engine_kwargs: Any = None,
+        settings: tuple[Any, ...] = (),
+    ) -> Series | DataFrame:
+        """Runs one reduction under the decay.
+
+        `numeric_only`, `engine` and `engine_kwargs` are read exactly the way
+        `WindowMixin._reduce` reads them and the arguments there are the same
+        arguments here, so they are not made again.
+
+        The one thing this does that the window one does not is refuse a total
+        under the unadjusted recurrence. pandas raises `NotImplementedError` with
+        the sentence below rather than choosing one of the two things such a
+        total could mean, and the refusal is made here rather than left to the
+        kernel so that the class of the exception is the class pandas raises. The
+        kernel refuses it as well, because the Mojo API does not come through
+        here.
+
+        Args:
+            kind: The reduction, as pandas spells the method.
+            numeric_only: Held at False over a frame and accepted at both values
+                over a column.
+            engine: Declared and refused, except at `cython`.
+            engine_kwargs: Declared and refused.
+            settings: The parameters the reduction reads and the decay does not,
+                already checked. Empty for the mean and the total, and `bias` for
+                the two spreads.
+
+        Returns:
+            Whichever of the two was decayed, of float64, as tall as what it
+            read.
+
+        Raises:
+            NotImplementedError: If a numba engine was asked for, if a frame was
+                asked to drop the columns it cannot reduce, or if a total was
+                asked for with `adjust` off, which pandas also refuses.
+        """
+        from ._frame import DataFrame, Series
+
+        if isinstance(self._data, DataFrame):
+            _held_at(
+                "numeric_only",
+                numeric_only,
+                False,
+                "dropping the columns a decay cannot read is a decision about"
+                " which columns come back, and firepanda decays the ones it was"
+                " given or says which one it could not",
+            )
+        if engine is not None and engine != "cython":
+            raise NotImplementedError(
+                f"engine={engine!r} is not supported yet, because there is one"
+                " implementation here and it is the one cython names"
+            )
+        _refuse(
+            "engine_kwargs",
+            engine_kwargs,
+            "it configures the numba engine, and there is no numba engine here for it to configure",
+        )
+        if kind == "sum" and not self._adjust:
+            raise NotImplementedError("sum is not implemented with adjust=False")
+        plan = (
+            kind,
+            self._factor,
+            self._min_periods,
+            self._adjust,
+            self._ignore_na,
+            settings,
+        )
+        try:
+            if isinstance(self._data, DataFrame):
+                return DataFrame._wrap(self._data._inner.ewm_agg(*plan))
+            return Series._wrap(self._data._inner.ewm_agg(*plan))
+        except Exception as error:
+            raise translate(error) from None
+
+
+def _smoothing(
+    com: float | None,
+    span: float | None,
+    halflife: float | None,
+    alpha: float | None,
+) -> float:
+    """Turns whichever spelling of the decay arrived into one smoothing factor.
+
+    The four are four ways of writing one number and pandas takes exactly one of
+    them, which is the right rule: a caller who gives two has said something
+    contradictory rather than something redundant. The sentences are pandas'
+    sentences, including its spelling of the centre of mass as `comass`, which is
+    what its own message says whatever the argument is called.
+
+    Args:
+        com: The centre of mass, or None.
+        span: The span, or None.
+        halflife: The half life in rows, or None.
+        alpha: The smoothing factor, or None.
+
+    Returns:
+        The factor, above nought and at most one.
+
+    Raises:
+        InvalidArgumentError: If none of the four arrived, if more than one did,
+            or if the one that did is outside the range pandas allows for it. A
+            `ValueError`, which is what pandas raises for all three.
+    """
+    given = [
+        (name, value)
+        for name, value in (
+            ("com", com),
+            ("span", span),
+            ("halflife", halflife),
+            ("alpha", alpha),
+        )
+        if value is not None
+    ]
+    if not given:
+        raise InvalidArgumentError("Must pass one of comass, span, halflife, or alpha")
+    if len(given) > 1:
+        raise InvalidArgumentError("comass, span, halflife, and alpha are mutually exclusive")
+    # The one that arrived is carried out of the list rather than tested for
+    # again, because the four branches below are four conversions of one number
+    # and asking which of the four is present twice is how the two halves get
+    # out of step.
+    name, arrived = given[0]
+    _real(name, arrived)
+    number = float(arrived)
+    if name == "span":
+        if number < 1.0:
+            raise InvalidArgumentError("span must satisfy: span >= 1")
+        return 2.0 / (number + 1.0)
+    if name == "com":
+        if number < 0.0:
+            raise InvalidArgumentError("comass must satisfy: comass >= 0")
+        return 1.0 / (1.0 + number)
+    if name == "halflife":
+        if number <= 0.0:
+            raise InvalidArgumentError("halflife must satisfy: halflife > 0")
+        return 1.0 - math.exp(-math.log(2.0) / number)
+    if not 0.0 < number <= 1.0:
+        raise InvalidArgumentError("alpha must satisfy: 0 < alpha <= 1")
+    return number
+
+
+def _real(name: str, value: Any) -> None:
+    """Refuses a decay that is not a number at all.
+
+    pandas lets a half life arrive as a duration, which is the one of the four
+    that has a second reading, and that reading needs a calendar first. So
+    anything that is not a plain number is refused here rather than being
+    converted to one and quietly counted as rows.
+
+    Args:
+        name: The argument, for the sentence.
+        value: What arrived.
+
+    Raises:
+        InvalidArgumentError: If it is not a real number.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise InvalidArgumentError(f"{name} must be a real number, not {type(value).__name__}")
+
+
+def _ewm(
+    data: Series | DataFrame,
+    com: float | None,
+    span: float | None,
+    halflife: float | None,
+    alpha: float | None,
+    min_periods: int | None,
+    adjust: bool,
+    ignore_na: bool,
+    times: Any,
+    method: str,
+) -> ExponentialMovingWindow:
+    """Builds the object `s.ewm(...)` and `df.ewm(...)` hand back.
+
+    Written rather than generated for the reason `_rolling` gives. Two of the
+    nine arguments are declared and refused. `times` says to measure the decay
+    against real instants rather than against row positions, so a half life of
+    two days means two days however many rows fell in them, and that needs a
+    calendar first. `method` chooses between decaying down the columns and
+    decaying across them, and across them is a different computation rather than
+    a different arrangement of this one.
+
+    Args:
+        data: The column or the frame.
+        com: The centre of mass.
+        span: The span.
+        halflife: The half life in rows.
+        alpha: The smoothing factor.
+        min_periods: How many values a row needs before it is answered.
+        adjust: Whether every row weighs one rather than the factor.
+        ignore_na: Whether a missing row is skipped.
+        times: Declared and refused.
+        method: Declared and held at `single`.
+
+    Returns:
+        An `ExponentialMovingWindow`.
+    """
+    from ._frame import ExponentialMovingWindow
+
+    _refuse(
+        "times",
+        times,
+        "it says to measure the decay against real instants rather than against"
+        " row positions, which means a half life given as a duration, and that"
+        " needs a calendar first",
+    )
+    _held_at(
+        "method",
+        method,
+        "single",
+        "it says whether the columns decay together, and here they decay one at a"
+        " time, which is the reading pandas calls single and defaults to",
+    )
+    return ExponentialMovingWindow(data, com, span, halflife, alpha, min_periods, adjust, ignore_na)
 
 
 class StringMixin:

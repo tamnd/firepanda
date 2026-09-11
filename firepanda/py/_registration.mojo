@@ -84,6 +84,10 @@ def register(mut module: PythonModuleBuilder) raises:
         "window_agg",
         docstring="One reduction over every window of every column.",
     )
+    _ = dataframe.def_method[PyDataFrame.ewm_agg](
+        "ewm_agg",
+        docstring="One exponentially weighted reduction down every column.",
+    )
     _ = dataframe.def_method[PyDataFrame.dropna](
         "dropna", docstring="The rows with no missing value in them."
     )
@@ -202,6 +206,10 @@ def register(mut module: PythonModuleBuilder) raises:
     )
     _ = series.def_method[PySeries.window_agg](
         "window_agg", docstring="One reduction over every window of the column."
+    )
+    _ = series.def_method[PySeries.ewm_agg](
+        "ewm_agg",
+        docstring="One exponentially weighted reduction down the column.",
     )
     _ = series.def_method[PySeries.string_flag](
         "string_flag",
