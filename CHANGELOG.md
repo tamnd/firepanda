@@ -105,6 +105,8 @@ What it will not lower, it refuses by name. Joins, sorts, distincts and unions h
 
 Thirty eight tests. Most of them build a plan, bind it, lower it, run it over a ten row frame cut into three chunks, and check the rows that come out, because the rows are the thing a later pass is not allowed to change and the operator count is. The two that do count operators are the conjunction tests, where the count is the point.
 
+TPC-H q6 at scale factor one, on an i9-13900K, six million rows of lineitem, all three routes agreeing on revenue 123141078.2283. Written by hand against the eager API, which is five masks over every row anded together and one filter, 21.11 ms. The same query as a plan, bound, simplified, lowered and run, 11.09 ms. That is 1.9x, and all of it comes from the pipeline rather than from the plan: a lowered plan over a frame in one chunk takes 21.86 ms, because the driver runs its elementwise prefix one chunk per worker and one chunk is one core. Cut the same frame into forty six chunks of a hundred and thirty one thousand rows and the same fourteen operators take half the time. What this does not yet reach is the fused single pass at 1.25 ms or DuckDB 1.5.5 at 2.64 ms, and the gap is the per operator materialisation that a selection vector and operator fusion are there to remove.
+
 ### Fixed: a conjunction of three arguments would not bind
 
 Binding required `and` and `or` to have exactly two arguments, and the simplify pass flattens `a AND (b AND c)` into one call with three. A plan that had been through a pass therefore would not bind again afterwards, which is the ordinary order of events rather than an unusual one. Both connectives now take two or more. `not` still takes exactly one.
