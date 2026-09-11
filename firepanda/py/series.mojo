@@ -552,6 +552,28 @@ struct PySeries(Movable, Writable):
             raise reindex_refusal(cause)
 
     @staticmethod
+    def renamed_axis(
+        py_self: PythonObject, name: PythonObject
+    ) raises -> PythonObject:
+        """Returns the same values with the row labels under a different name.
+
+        Args:
+            py_self: The series.
+            name: The new level name, or `None` to clear it.
+
+        Returns:
+            A new series carrying the same values and a renamed index.
+        """
+        var wanted = Optional[String]()
+        if name is not Python.none():
+            wanted = Optional[String](words(name, "mapper"))
+        return PythonObject(
+            alloc=Self(
+                ArcPointer(Self._held(py_self)[].series[].rename_axis(wanted^))
+            )
+        )
+
+    @staticmethod
     def labels(py_self: PythonObject) raises -> PythonObject:
         """Hands out the row labels, as an index.
 

@@ -626,6 +626,67 @@ struct PyDataFrame(Movable, Writable):
         )
 
     @staticmethod
+    def renamed_columns(
+        py_self: PythonObject, olds: PythonObject, news: PythonObject
+    ) raises -> PythonObject:
+        """Renames several columns in one pass.
+
+        Two lists rather than a mapping, because a dictionary of Python strings
+        would have to be walked on this side to be read at all and the order of
+        that walk would decide what a swap did. The mixin already knows which
+        names it is changing and what to, so it sends them in the order it wants
+        them applied.
+
+        Args:
+            py_self: The frame.
+            olds: The names being changed.
+            news: What to change them to, one for each of `olds`.
+
+        Returns:
+            A new frame of the same data under a different schema.
+        """
+        var from_ = List[String](capacity=Int(len(olds)))
+        for name in olds:
+            from_.append(String(name))
+        var to = List[String](capacity=Int(len(news)))
+        for name in news:
+            to.append(String(name))
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        Self._frame(py_self)[]
+                        .frame[]
+                        .renamed_columns(from_, to)
+                    )
+                )
+            )
+        except cause:
+            raise retagged(COLUMN, cause)
+
+    @staticmethod
+    def renamed_axis(
+        py_self: PythonObject, name: PythonObject
+    ) raises -> PythonObject:
+        """Returns the frame with its row labels under a different level name.
+
+        Args:
+            py_self: The frame.
+            name: The new level name, or `None` to clear it.
+
+        Returns:
+            A new frame carrying the same rows and a renamed index.
+        """
+        var wanted = Optional[String]()
+        if name is not Python.none():
+            wanted = Optional[String](words(name, "mapper"))
+        return PythonObject(
+            alloc=Self(
+                ArcPointer(Self._frame(py_self)[].frame[].rename_axis(wanted^))
+            )
+        )
+
+    @staticmethod
     def select(
         py_self: PythonObject, names: PythonObject
     ) raises -> PythonObject:

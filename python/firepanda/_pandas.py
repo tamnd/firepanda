@@ -101,6 +101,141 @@ def _no_level(level: Any) -> None:
         )
 
 
+_NO_LABEL_MAP = (
+    "mapping row labels is a pass over the index rather than a change to a"
+    " schema, and doing it from Python would be a dictionary lookup or a call"
+    " per row with the interpreter holding the loop. set_index on a column"
+    " computed the way you want does the same work with the loop in the right"
+    " place"
+)
+
+_NO_INPLACE = (
+    "every operation here answers a new frame and the Arrow buffers underneath"
+    " are shared rather than owned"
+)
+
+
+def _renaming(mapper: Any, axis: Any, index: Any, columns: Any) -> tuple[str, Any]:
+    """Works out which of the two things pandas spells rename was asked for.
+
+    Document 45 is the long version. The short one is that renaming a column is
+    an edit to a schema and renaming a row label is a pass over the index, and
+    pandas decides which was meant from which keyword arrived. This answers the
+    same question the same way, so that the refusal for the label half comes out
+    of one place rather than four.
+
+    Args:
+        mapper: The positional argument, whose axis is decided by `axis`.
+        axis: Which axis `mapper` is about. `None` means the rows.
+        index: A mapping for the row labels.
+        columns: A mapping for the column names.
+
+    Returns:
+        The word `"index"` or `"columns"`, and the mapping for it.
+
+    Raises:
+        InvalidArgumentError: If the axis is not one pandas knows.
+        TypeError: If both doors were used at once, or neither.
+    """
+    if mapper is not None:
+        if index is not None or columns is not None:
+            raise TypeError("Cannot specify both 'mapper' and any of 'index' or 'columns'")
+        if axis in (1, "columns"):
+            return "columns", mapper
+        if axis in (0, "index", None):
+            return "index", mapper
+        raise InvalidArgumentError(f"No axis named {axis} for object type DataFrame")
+    if index is not None and columns is not None:
+        raise NotImplementedError(
+            f"renaming both axes in one call is not supported yet, because {_NO_LABEL_MAP}"
+        )
+    if columns is not None:
+        return "columns", columns
+    if index is not None:
+        return "index", index
+    raise TypeError("must pass an index to rename")
+
+
+def _renamings(names: Any, mapping: Any, errors: str) -> tuple[list[str], list[str]]:
+    """Turns a mapping or a callable into the two lists the core takes.
+
+    Args:
+        names: The column names the frame has, in position order.
+        mapping: A dict like thing or a callable.
+        errors: `"ignore"` to skip a key that is not a column, `"raise"` to
+            collect them and complain.
+
+    Returns:
+        The names being changed and what to change them to, in the order the
+        caller wrote them for a mapping and in position order for a callable.
+
+    Raises:
+        InvalidArgumentError: If `errors` is neither word, which document 23
+            argues is a typo worth catching rather than a value to guess at.
+        KeyError: If `errors` is `"raise"` and a key names nothing.
+    """
+    if errors not in ("ignore", "raise"):
+        raise InvalidArgumentError(f"expected 'ignore' or 'raise', got {errors!r} for errors")
+    if callable(mapping):
+        changed = [name for name in names if str(mapping(name)) != name]
+        return changed, [str(mapping(name)) for name in changed]
+    try:
+        items = list(mapping.items())
+    except AttributeError:
+        raise InvalidArgumentError(
+            f"columns= takes a mapping or a callable, and {type(mapping).__name__} is neither"
+        ) from None
+    held = set(names)
+    missing = [str(old) for old, _ in items if str(old) not in held]
+    if missing and errors == "raise":
+        raise KeyError(f"{missing} not found in axis")
+    return (
+        [str(old) for old, _ in items if str(old) in held],
+        [str(new) for old, new in items if str(old) in held],
+    )
+
+
+def _one_name(value: Any) -> str | None:
+    """The single level name a rename was given, out of the shapes it comes in.
+
+    pandas takes either a name or a sequence of names everywhere a level name is
+    set, because the sequence form is the one that generalises to a multi level
+    index and the scalar form is the one people write. A flat index has one
+    level, so a sequence of any other length is an error and the message says
+    how many arrived.
+
+    Any hashable is a level name in pandas and only a string is one here, so a
+    name that is not a string is turned into one rather than refused. That is a
+    divergence and it is the same one `Series.name` already has, which is the
+    core holding a `String` where pandas holds an object.
+
+    Args:
+        value: A name, or a one element sequence of names, or `None`.
+
+    Returns:
+        The name, or None for an index with no level name.
+
+    Raises:
+        InvalidArgumentError: If a sequence of any length but one arrived, or if
+            a mapping did, which pandas reads as renaming levels by name.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes, bytearray)):
+        return str(value)
+    if hasattr(value, "items"):
+        raise NotImplementedError(
+            "a mapping renames one level of a MultiIndex by name, and there is"
+            " not one yet, so there is nothing for the keys to select"
+        )
+    if not hasattr(value, "__iter__"):
+        return str(value)
+    names = list(value)
+    if len(names) != 1:
+        raise InvalidArgumentError(f"Length of new names must be 1, got {len(names)}")
+    return None if names[0] is None else str(names[0])
+
+
 def _reindex_filling(kind: str, method: Any, limit: Any, tolerance: Any) -> None:
     """Refuses the three parameters of reindex that are about filling.
 
@@ -1607,6 +1742,14 @@ class DataFrameMixin:
             one is read only and an annotation would promise a setter.
             """
 
+        @property
+        def columns(self) -> list[str]:
+            """The column names in position order, declared for the same reason.
+
+            A list and not an index, which is the difference `rename_axis` runs
+            into when it is asked to name the column axis.
+            """
+
     def __init__(
         self,
         data: Any = None,
@@ -1707,6 +1850,115 @@ class DataFrameMixin:
         so there is nothing to record in it.
         """
         return self.copy()
+
+    def rename(
+        self,
+        mapper: Any = None,
+        *,
+        index: Any = None,
+        columns: Any = None,
+        axis: Any = None,
+        copy: Any = NO_DEFAULT,
+        inplace: bool = False,
+        level: Any = None,
+        errors: str = "ignore",
+    ) -> DataFrame:
+        """The same rows under different column names.
+
+        The column door is here and the row label door is not, and document 45
+        is about why those are two operations rather than one. Renaming a column
+        edits a schema and reads nothing, and renaming a row label is a lookup
+        or a call for every row in the frame. pandas spells both of them
+        `rename` and decides from the keyword.
+
+        A dictionary names the columns it wants changed and leaves the rest, a
+        callable is applied to every name, and both go to the core in one call
+        so that the frame is copied once rather than once per name. Renaming `a`
+        to `b` and `b` to `a` in one mapping works for that reason, and doing it
+        in two calls would not.
+
+        `errors` is the one parameter here that changes an answer.
+        `rename(columns={"colour": "color"})` on a frame that is already spelled
+        `color` does nothing at all and says nothing about it, which is the
+        pandas default, and `errors="raise"` is how a caller finds out. The
+        `KeyError` collects every name that was not found rather than stopping
+        at the first.
+
+        `copy` is accepted and not read, for document 44's reasons. `level` is
+        refused for anything but `None`, which is a shade stricter than pandas,
+        since pandas quietly accepts `level=0` on a flat index where it means
+        nothing. There is no level to name until there is a MultiIndex and
+        saying so is better than accepting a number and ignoring it.
+        """
+        from ._frame import DataFrame
+
+        _held_at("inplace", inplace, False, _NO_INPLACE)
+        _no_level(level)
+        where, mapping = _renaming(mapper, axis, index, columns)
+        if where == "index":
+            raise NotImplementedError(f"index= is not supported yet, because {_NO_LABEL_MAP}")
+        held = list(self.columns)
+        olds, news = _renamings(held, mapping, errors)
+        changed = dict(zip(olds, news, strict=True))
+        after = [changed.get(name, name) for name in held]
+        if len(set(after)) != len(after):
+            taken = sorted({name for name in after if after.count(name) > 1})
+            raise InvalidArgumentError(
+                f"this rename would give the frame two columns called {taken}."
+                " pandas allows that and then answers a frame where a column is"
+                " asked for, and a schema here holds one column per name, so"
+                " the collision is refused rather than made"
+            )
+        try:
+            return DataFrame._wrap(self._inner.renamed_columns(olds, news))
+        except Exception as error:
+            raise translate(error) from None
+
+    def rename_axis(
+        self,
+        mapper: Any = NO_DEFAULT,
+        *,
+        index: Any = NO_DEFAULT,
+        columns: Any = NO_DEFAULT,
+        axis: Any = 0,
+        copy: Any = NO_DEFAULT,
+        inplace: bool = False,
+    ) -> DataFrame:
+        """The same frame with the row labels under a different level name.
+
+        Not one label moves. The level name is what the index is called rather
+        than one of the things in it, so this is the schema edit `rename` is for
+        the columns, and it is the method to reach for when `rename(index=...)`
+        refuses and what the caller actually wanted was the name of the axis.
+
+        `rename_axis(None)` clears the name, which is a real operation and not
+        the same as passing nothing, so the default here is the no default
+        sentinel rather than `None`.
+
+        `columns=` and `axis=1` raise. In pandas they name the column axis, and
+        a pandas frame's `columns` is an `Index` with a name field to put it in.
+        Here `columns` is a list of strings, because a frame's columns are its
+        schema and a schema is not a column of data, so there is nowhere for the
+        name to go.
+        """
+        from ._frame import DataFrame
+
+        _held_at("inplace", inplace, False, _NO_INPLACE)
+        if columns is not NO_DEFAULT or axis in (1, "columns"):
+            raise NotImplementedError(
+                "naming the column axis is not supported yet, because a frame's"
+                " columns are its schema here rather than an index, so there is"
+                " no name field to write into"
+            )
+        if axis not in (0, "index"):
+            raise InvalidArgumentError(f"No axis named {axis} for object type DataFrame")
+        wanted = mapper if mapper is not NO_DEFAULT else index
+        if wanted is NO_DEFAULT:
+            return self.copy()
+        try:
+            return DataFrame._wrap(self._inner.renamed_axis(_one_name(wanted)))
+        except Exception as error:
+            raise translate(error) from None
 
     def _get(self, key: Any, default: Any) -> Any:
         """One column, or a value of the caller's choosing when there is none.
@@ -3039,6 +3291,82 @@ class SeriesMixin:
     def __deepcopy__(self, memo: Any = None) -> Series:
         """`copy.deepcopy(s)`, the same answer and `memo` unused."""
         return self.copy()
+
+    def rename(
+        self,
+        index: Any = None,
+        *,
+        axis: Any = None,
+        copy: Any = NO_DEFAULT,
+        inplace: bool = False,
+        level: Any = None,
+        errors: str = "ignore",
+    ) -> Series:
+        """The same values under a different column name.
+
+        The parameter is called `index` and it usually is not one, which is the
+        strangest signature pandas has in this area and is worth reading twice.
+        A scalar renames the column, because a column's name is the only name a
+        series has of its own. A dictionary or a callable renames the row labels
+        instead, and pandas decides between them by asking whether what arrived
+        is callable or has keys.
+
+        Those two doors land on opposite sides of the line document 45 draws.
+        The scalar one is a field on a column and is here. The mapping one is a
+        lookup for every row and raises, with the same message
+        `DataFrame.rename(index=...)` gives, because it is the same operation.
+
+        `rename(None)` clears the name, which here means setting it to the empty
+        string, because the core holds a name as a `String` and empty is how it
+        spells having none. That is the same state a column built without a name
+        is in, so this is not a new difference, but it is the reason `name`
+        answers `""` here where pandas answers `None`.
+
+        `errors` is declared and does nothing, because the only thing it
+        describes in pandas is what happens to a key of the mapping that is not
+        a label, and the mapping form is the one that raises.
+        """
+        from ._frame import Series
+
+        _held_at("inplace", inplace, False, _NO_INPLACE.replace("frame", "column"))
+        _no_level(level)
+        if axis not in (0, "index", None):
+            raise InvalidArgumentError(f"No axis named {axis} for object type Series")
+        if callable(index) or hasattr(index, "items"):
+            raise NotImplementedError(f"a mapping is not supported yet, because {_NO_LABEL_MAP}")
+        try:
+            return Series._wrap(self._inner.relabel("" if index is None else str(index)))
+        except Exception as error:
+            raise translate(error) from None
+
+    def rename_axis(
+        self,
+        mapper: Any = NO_DEFAULT,
+        *,
+        index: Any = NO_DEFAULT,
+        axis: Any = 0,
+        copy: Any = NO_DEFAULT,
+        inplace: bool = False,
+    ) -> Series:
+        """The same values with the row labels under a different level name.
+
+        The frame's method with one axis instead of two, and the same point: the
+        column's own name is not touched, which is the whole difference between
+        this and `rename`. One of them says what the values are called and the
+        other says what the rows are called.
+        """
+        from ._frame import Series
+
+        _held_at("inplace", inplace, False, _NO_INPLACE.replace("frame", "column"))
+        if axis not in (0, "index"):
+            raise InvalidArgumentError(f"No axis named {axis} for object type Series")
+        wanted = mapper if mapper is not NO_DEFAULT else index
+        if wanted is NO_DEFAULT:
+            return self.copy()
+        try:
+            return Series._wrap(self._inner.renamed_axis(_one_name(wanted)))
+        except Exception as error:
+            raise translate(error) from None
 
     def _get(self, key: Any, default: Any) -> Any:
         """The value at a label, or a value of the caller's choosing.
@@ -5450,6 +5778,17 @@ class IndexMixin:
 
     _inner: _firepanda.Index
 
+    if TYPE_CHECKING:
+
+        @property
+        def name(self) -> Any:
+            """The level name, declared here and defined by the generated class.
+
+            `names` reads it and is the only member in this file that does, and
+            it is declared the way the frame declares `index`, for the reason
+            given there.
+            """
+
     def __init__(
         self,
         data: Any = None,
@@ -6208,17 +6547,54 @@ class IndexMixin:
         not change what the index holds. The index underneath is still rebuilt
         rather than edited, since a name lives in Mojo beside the labels, and
         what `inplace` changes is which object the caller is left holding.
-        """
-        from ._frame import Index
 
+        The class comes from `type(self)` so that a renamed index of instants is
+        still one, which is the same fix `copy` took and another instance of
+        #495.
+        """
+        made: Any = type(self)
         try:
             renamed = self._inner.renamed(None if name is None else str(name))
         except Exception as error:
             raise translate(error) from None
         if not inplace:
-            return Index._wrap(renamed)
+            answered: Index = made._wrap(renamed)
+            return answered
         self._inner = renamed
         return None
+
+    @property
+    def names(self) -> list[Any]:
+        """The level names, which for a flat index is one of them.
+
+        pandas answers a `FrozenList` here and this answers a list, because the
+        only thing the frozen one adds is a refusal to be written into and a
+        list that is built fresh on every read has nothing to protect. A caller
+        who mutates what comes back is mutating something nobody else holds.
+
+        It is a list rather than the name itself because this is the shape that
+        generalises to a multi level index, which is the whole reason pandas has
+        both this and `name`.
+        """
+        return [self.name]
+
+    def set_names(self, names: Any, *, level: Any = None, inplace: bool = False) -> Index | None:
+        """The index under a different level name, given the way `names` reads it.
+
+        `rename` with the sequence form accepted, and that is nearly the whole
+        difference between the two in pandas as well. A flat index has one
+        level, so a sequence of any other length is an error that says how many
+        arrived.
+
+        `level` has to be `None`, which is what pandas requires on a flat index
+        too, and pandas refuses `level=0` as well even though zero is the only
+        level there is. That refusal is matched rather than improved on, because
+        a caller passing a level is asking about a multi level index either way
+        and there is not one yet.
+        """
+        if level is not None:
+            raise InvalidArgumentError("Level must be None for non-MultiIndex")
+        return self.rename(_one_name(names), inplace=inplace)
 
     def slice_indexer(self, start: Any = None, end: Any = None, step: Any = None) -> slice:
         """The slice a pair of labels describes, with both ends included.

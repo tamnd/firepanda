@@ -1888,6 +1888,20 @@ FRAME = Exposed(
             returns="DataFrame",
         ),
         Binding(
+            mojo="PyDataFrame.renamed_columns",
+            name="renamed_columns",
+            doc="The same data under a different schema.",
+            params=(("olds", "list[str]"), ("news", "list[str]")),
+            returns="DataFrame",
+        ),
+        Binding(
+            mojo="PyDataFrame.renamed_axis",
+            name="renamed_axis",
+            doc="The frame with its row labels under a different level name.",
+            params=(("name", "str | None"),),
+            returns="DataFrame",
+        ),
+        Binding(
             mojo="PyDataFrame.duplicated",
             name="duplicated",
             doc="Which rows repeat a key another row already carries.",
@@ -2519,6 +2533,13 @@ SERIES = Exposed(
             doc="One value, by position.",
             params=(("at", "int"),),
             returns="object",
+        ),
+        Binding(
+            mojo="PySeries.renamed_axis",
+            name="renamed_axis",
+            doc="The series with its row labels under a different level name.",
+            params=(("name", "str | None"),),
+            returns="Series",
         ),
         Binding(
             mojo="PySeries.reindex",
