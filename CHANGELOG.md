@@ -23,6 +23,23 @@ One deliberate divergence from DuckDB. `DATE '2013-07-01' >= '2013-07-01 12:00:0
 `temporal/range_literal` and `temporal/range_integer` are the new benchmark pair. They are the same comparison over the same numbers and the only difference is that one of them arrives as eight characters, so if they are not within noise of each other the parse is still inside the loop.
 
 Part of #483.
+### Changed: the null and the empty string in a text reduction are pinned to pandas and DuckDB
+
+No behaviour changed. What changed is that the rule is now written down against something rather than argued from first principles, because the ClickBench hits table has empty strings and no nulls, and the next dataset will have both.
+
+Both rivals were asked. `min` over `b`, a null, an empty string and `a` is the empty string in pandas 3.0.5 and in DuckDB 1.5.5, and `max` is `b` in both, so an empty string is a value that sorts before every other value and a null is passed over. That is what this kernel already did and there are now two tests holding it there, one over a whole column and one over a group that holds nothing but nulls beside a group whose only element is the empty string.
+
+DuckDB is not an authority on `first` and `last` here and the test says so. Those two over a group with no `ORDER BY` are not defined to follow row order, and DuckDB's `last` answered NULL for a group whose rows are a value and a null, which is allowed rather than wrong. pandas' `first` and `last` skip nulls and follow row order, and that is the rule this kernel follows.
+
+pandas has a second answer this library does not offer. `min(skipna=False)` is NaN as soon as any element is null, which is a different question rather than a different result, and nothing in SQL or in the ClickBench queries asks it.
+
+### Changed: the parity document says which of the two length kernels answers `str.len`
+
+`str.len` counts characters, and there are two kernels underneath that name. `Series.chars_length` runs `text_character_length` and answers `café` with 4 the way pandas does. `text_byte_length` is SQL's `STRLEN`, answers 5, and is thirteen times cheaper because it reads the length field in each view rather than walking the payload. DuckDB spells the two apart as well, `length` against `strlen`, so this is two questions rather than two libraries disagreeing.
+
+The accessor never reaches the byte counting one, and the note in the string section of document 06 says so, so a caller who wants it asks for it by its own name rather than by a flag on `len`. The `len` box stays unticked, because the rule at the bottom of that document is that a tick means a differential test in firepanda-bench and there is not one yet.
+
+Part of #480.
 
 ## [0.6.62] - 2026-09-11
 
