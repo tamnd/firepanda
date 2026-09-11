@@ -8,6 +8,24 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the first optimizer pass, which makes every expression smaller before any row is read
+
+A predicate like `l_discount between 0.05 - 0.01 and 0.05 + 0.01` contains two subtractions of two constants, and without a pass that notices, both are evaluated once per row. On TPC-H q6 at scale factor one that is twelve million additions that all answer the same thing. `firepanda/plan/simplify.mojo` is the pass that notices, and it is the first of the thirteen in `docs/specs/planner/02-the-pass-pipeline.md`.
+
+It does four things and runs them to a fixed point. It folds an expression that reads no column down to its answer. It turns a comparison round so the constant is on the right, because every later pass that asks whether a predicate compares a column against a constant should have to ask once rather than twice. It flattens nested conjunctions and disjunctions into one call with a list of arguments, which is the shape predicate pushdown needs in order to decide which part of a conjunction can go where. And it applies the boolean identities, which look too small to write down and are exactly what a fold leaves behind.
+
+The fold does not contain any arithmetic. It builds a one row column holding the left operand, hands it to the same `binary_value_any` or `unary_any` the executor would have called, and reads row zero back out. That costs one allocation per fold, once, at plan time, and it buys the only property that matters here: the folded constant is the value the kernel would really have produced on every row. A second implementation that agreed with the kernel almost always would be worse than no folding at all, because the disagreement would surface as a wrong answer in precisely the queries the pass was added to speed up.
+
+Two consequences of that are worth stating because they look like defects and are not. `0.05 + 0.01` folds to 0.060000000000000005, which is what the sum is in float64 and therefore what every row would have carried. And `1 / 0` folds to an infinity rather than refusing, because division promotes to float64 in this library and an infinity is what a column of ones divided by a column of zeros holds. Tidying either of them would mean the optimized plan computes something different from the plan it replaced.
+
+An expression the kernel refuses is handed back untouched rather than failing the plan. Comparing text against an integer has no common type, the kernel raises, and the pass returns what it was given, because a type error is binding's to report and binding has already run by then.
+
+A null is not a truth value and does not drop out of a conjunction, since `a and null` is null on the rows where `a` is true. A `sum` of a constant is not folded either, because `sum(1)` is the row count. Both of those follow the answers `input_independent` already gives and the pass does not second guess them.
+
+Twenty seven tests, each written as an expression in and a printed expression out compared as text, which is how an optimizer is tested everywhere and is the only form of the test that says anything useful when it fails. The last one is the whole q6 predicate, which comes out with both bounds folded and three nested conjunctions collapsed into one.
+
+Nothing calls this yet. The lowering into the existing chunked engine is what connects the plan layer to execution and it is still ahead.
+
 ### Changed: a projection stopped copying the columns it keeps
 
 `select` clones every column it keeps, and until now a clone was a memcpy of the whole thing. The TPC-H queries project `lineitem` before they join it, which is how anybody would write them, so on the four slowest queries that copy ran over the largest table in the query and computed nothing.
