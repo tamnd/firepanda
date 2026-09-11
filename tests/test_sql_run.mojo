@@ -538,5 +538,72 @@ def test_an_alias_on_a_table_function_is_refused_by_name() raises:
         _ = run("SELECT * FROM range(5) AS r(i)", session())
 
 
+def test_a_window_over_the_whole_table_is_on_every_row() raises:
+    # The same 159 the aggregate test asks for, except that here it arrives
+    # beside the ten rows rather than instead of them.
+    same(
+        answer("SELECT qty, SUM(qty) OVER () AS total FROM sales", "total"),
+        [159, 159, 159, 159, 159, 159, 159, 159, 159, 159],
+        "total",
+    )
+
+
+def test_a_window_partitions_and_each_row_reads_its_own() raises:
+    # The shops alternate, so the two totals alternate with them, and the rows
+    # stay in the order they were read in rather than being gathered by shop.
+    var out = run(
+        "SELECT shop, SUM(qty) OVER (PARTITION BY shop) AS total FROM sales",
+        session(),
+    )
+    same(read_back(out, "shop"), [1, 2, 1, 2, 1, 2, 1, 2, 1, 2], "shop")
+    same(
+        read_back(out, "total"),
+        [75, 84, 75, 84, 75, 84, 75, 84, 75, 84],
+        "total",
+    )
+
+
+def test_a_window_counts_the_rows_it_partitions_over() raises:
+    same(
+        answer("SELECT COUNT(*) OVER (PARTITION BY shop) AS n FROM sales", "n"),
+        [5, 5, 5, 5, 5, 5, 5, 5, 5, 5],
+        "n",
+    )
+
+
+def test_a_qualify_keeps_the_rows_the_window_says_to() raises:
+    # Shop 2 totals 84 and shop 1 totals 75, so the bound keeps one shop, and
+    # it keeps every row of it rather than one row standing for the group.
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales QUALIFY SUM(qty) OVER (PARTITION BY"
+                " shop) > 80"
+            ),
+            "qty",
+        ),
+        [20, 40, 8, 1, 15],
+        "qty",
+    )
+
+
+def test_a_where_under_a_window_changes_what_the_window_reduces() raises:
+    # The filter runs first, so the total is over what survived it and not over
+    # the table, which is the difference between a WHERE and a QUALIFY.
+    same(
+        answer(
+            "SELECT qty, SUM(qty) OVER () AS total FROM sales WHERE qty > 20",
+            "total",
+        ),
+        [95, 95, 95],
+        "total",
+    )
+
+
+def test_a_running_window_is_refused_by_name() raises:
+    with assert_raises(contains="OVER an ORDER BY"):
+        _ = run("SELECT SUM(qty) OVER (ORDER BY qty) FROM sales", session())
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

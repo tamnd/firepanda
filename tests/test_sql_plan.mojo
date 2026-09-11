@@ -366,10 +366,6 @@ def test_a_decimal_literal_is_refused_rather_than_made_a_double() raises:
 def test_the_shapes_with_no_node_yet_each_say_which_one() raises:
     with assert_raises(contains="WITH"):
         _ = _plan("WITH x AS (SELECT 1 AS a) SELECT a FROM x")
-    with assert_raises(contains="window function"):
-        _ = _plan("SELECT row_number() OVER () FROM t")
-    with assert_raises(contains="QUALIFY"):
-        _ = _plan("SELECT a FROM t QUALIFY row_number() OVER () = 1")
     with assert_raises(contains="GROUPING SETS"):
         _ = _plan("SELECT g FROM t GROUP BY CUBE (g)")
     with assert_raises(contains="BETWEEN"):
@@ -639,6 +635,136 @@ def test_the_joins_with_no_node_yet_each_say_which_one() raises:
         _ = _plan("SELECT a FROM range(10) r")
     with assert_raises(contains="parenthesised table reference"):
         _ = _plan("SELECT a FROM (t JOIN u ON t.a = u.k) v")
+
+
+def test_a_window_is_a_node_of_its_own_under_the_projection() raises:
+    # The node comes out wider than it went in, so the projection above it is
+    # what narrows the answer back to the two columns that were asked for.
+    assert_equal(
+        _plan("SELECT a, sum(b) OVER () FROM t"),
+        (
+            "PROJECT [a, __win_0 as __expr_1]\n"
+            "  WINDOW [sum(b) over () as __win_0]\n"
+            "    SCAN t []\n"
+        ),
+    )
+
+
+def test_a_window_partitions_by_what_the_over_was_given() raises:
+    assert_equal(
+        _plan("SELECT a, sum(b) OVER (PARTITION BY g) FROM t"),
+        (
+            "PROJECT [a, __win_0 as __expr_1]\n"
+            "  WINDOW [sum(b) over (partition g) as __win_0]\n"
+            "    SCAN t []\n"
+        ),
+    )
+
+
+def test_two_windows_over_the_same_keys_are_one_node() raises:
+    # One pass over the rows answers both, and the partitioning is what decides
+    # that, so the windows are grouped by the keys they were written with.
+    assert_equal(
+        _plan(
+            "SELECT sum(b) OVER (PARTITION BY g), count(*) OVER (PARTITION BY"
+            " g) FROM t"
+        ),
+        (
+            "PROJECT [__win_0 as __expr_0, __win_1 as __expr_1]\n"
+            "  WINDOW [sum(b) over (partition g) as __win_0, count(1) over"
+            " (partition g) as __win_1]\n"
+            "    SCAN t []\n"
+        ),
+    )
+
+
+def test_two_windows_over_different_keys_are_a_node_each() raises:
+    # Stacked, and the order they stack in does not matter, because a window
+    # adds columns rather than replacing them and the projection above reads
+    # each one by name.
+    assert_equal(
+        _plan("SELECT sum(b) OVER (PARTITION BY g), sum(b) OVER () FROM t"),
+        (
+            "PROJECT [__win_0 as __expr_0, __win_1 as __expr_1]\n"
+            "  WINDOW [sum(b) over () as __win_1]\n"
+            "    WINDOW [sum(b) over (partition g) as __win_0]\n"
+            "      SCAN t []\n"
+        ),
+    )
+
+
+def test_a_window_sits_above_the_aggregate_whose_answer_it_reads() raises:
+    # `sum(sum(b))` is a fold of a fold, and the inner one is the GROUP BY's, so
+    # the window has to be the node above it rather than beside it.
+    assert_equal(
+        _plan("SELECT g, sum(b), sum(sum(b)) OVER () FROM t GROUP BY g"),
+        (
+            "PROJECT [g, __agg_0 as __expr_1, __win_0 as __expr_2]\n"
+            "  WINDOW [sum(__agg_1) over () as __win_0]\n"
+            "    AGGREGATE [g] -> [sum(b), sum(b)]\n"
+            "      SCAN t []\n"
+        ),
+    )
+
+
+def test_a_window_is_not_what_makes_a_query_aggregate() raises:
+    # A call to `sum` with an OVER on it is not a fold over the whole query, so
+    # the plain column beside it is not an error and no aggregate is built. The
+    # count is the one that would have gone wrong quietly: without this the
+    # query would have come back with one row.
+    assert_equal(
+        _plan("SELECT a, count(*) OVER () FROM t"),
+        (
+            "PROJECT [a, __win_0 as __expr_1]\n"
+            "  WINDOW [count(1) over () as __win_0]\n"
+            "    SCAN t []\n"
+        ),
+    )
+
+
+def test_a_qualify_is_a_filter_above_the_window_it_reads() raises:
+    # Which is the whole reason QUALIFY exists. A WHERE runs under the window
+    # and so cannot see what the window computed.
+    assert_equal(
+        _plan("SELECT a FROM t QUALIFY sum(b) OVER (PARTITION BY g) > 1"),
+        (
+            "PROJECT [a]\n"
+            "  FILTER __win_0 > 1\n"
+            "    WINDOW [sum(b) over (partition g) as __win_0]\n"
+            "      SCAN t []\n"
+        ),
+    )
+
+
+def test_a_where_still_runs_under_the_window() raises:
+    assert_equal(
+        _plan("SELECT sum(b) OVER () FROM t WHERE a > 1"),
+        (
+            "PROJECT [__win_0 as __expr_0]\n"
+            "  WINDOW [sum(b) over () as __win_0]\n"
+            "    FILTER a > 1\n"
+            "      SCAN t []\n"
+        ),
+    )
+
+
+def test_a_qualify_with_no_window_in_it_is_a_where_written_wrong() raises:
+    with assert_raises(contains="no window function in it"):
+        _ = _plan("SELECT a FROM t QUALIFY b > 1")
+
+
+def test_the_windows_with_no_operator_yet_each_say_which_one() raises:
+    with assert_raises(contains="OVER an ORDER BY"):
+        _ = _plan("SELECT sum(b) OVER (ORDER BY a) FROM t")
+    with assert_raises(contains="OVER a frame"):
+        _ = _plan(
+            "SELECT sum(b) OVER (ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)"
+            " FROM t"
+        )
+    with assert_raises(contains="WINDOW clause"):
+        _ = _plan("SELECT sum(b) OVER w FROM t WINDOW w AS (PARTITION BY g)")
+    with assert_raises(contains="rather than a fold"):
+        _ = _plan("SELECT row_number() OVER () FROM t")
 
 
 def main() raises:
