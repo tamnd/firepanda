@@ -91,6 +91,7 @@ Two answers differ from pandas and both are the difference this section already 
 Twenty tests in `tests/test_ordered.mojo`, which check the tree on its own before any median is taken, because a Fenwick tree whose descent starts from the wrong power of two gives a plausible wrong answer for some widths rather than crashing. Four more at the Python boundary, and `median` joins the shared parametrization in `python/tests/test_windows.py`, which is now eleven names over four placements.
 
 `quantile` and `rank` are written against the same structure and are not on the surface yet. What is stopping them is the door rather than the arithmetic: `quantile` adds a required fraction and an interpolation word, `rank` adds a method word, a direction and a percentage flag, and the seventh argument slot after the object is the last one a bound method has. Section 16 of the window document says what has to change and records the two facts about `rank` that are already settled, including that it ranks the value at the window's last row rather than the value at the answered row.
+
 ### Added: the plan layer can now be run, by lowering it into the chunked engine
 
 Everything written in `firepanda/plan/` so far said what a query wants and none of it could produce a row. `firepanda/plan/lower.mojo` is the piece that closes that: it takes a bound plan and returns a `Pipeline` of the physical operators that already exist, so a plan can be run and a pass can be measured against real data rather than against the text of a printed plan.
