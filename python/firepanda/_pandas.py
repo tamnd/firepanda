@@ -1671,6 +1671,43 @@ class DataFrameMixin:
             " name or a list of column names"
         )
 
+    def copy(self, deep: bool = True) -> DataFrame:
+        """Another handle on the same rows, which costs nothing here.
+
+        `deep` is accepted and never read, and the reason is stronger than the
+        one `Index.copy` gives for the same parameter. Nothing in this library
+        writes into a frame. There is no `__setitem__`, there is no `assign`,
+        and every call pandas would let run `inplace` answers a new frame here
+        instead. So there is no later write for a deep copy to protect the
+        original from, and no expression a caller can write tells the two kinds
+        of copy apart.
+
+        This is the one member where the difference in cost is worth saying out
+        loud rather than leaving in the benchmarks. `df.copy()` in pandas
+        duplicates every column, which is the whole frame in memory a second
+        time, and callers write it defensively all over their code because they
+        have to. Here it allocates a wrapper and shares the Arrow buffers, the
+        same way every other operation in this library already does, so the
+        defensive copy a pandas user brings with them is free rather than the
+        most expensive line in the function.
+        """
+        from ._frame import DataFrame
+
+        return DataFrame._wrap(self._inner)
+
+    def __copy__(self) -> DataFrame:
+        """`copy.copy(df)`, which pandas answers with `copy()` and so does this."""
+        return self.copy()
+
+    def __deepcopy__(self, memo: Any = None) -> DataFrame:
+        """`copy.deepcopy(df)`, which is the same answer for the same reason.
+
+        `memo` is the dictionary `copy.deepcopy` threads through a graph so that
+        an object reached twice is copied once. Nothing is recursed into here,
+        so there is nothing to record in it.
+        """
+        return self.copy()
+
     def _get(self, key: Any, default: Any) -> Any:
         """One column, or a value of the caller's choosing when there is none.
 
@@ -2982,6 +3019,26 @@ class SeriesMixin:
             return Series._wrap(answered._inner.column(label))
         except Exception as error:
             raise translate(error) from None
+
+    def copy(self, deep: bool = True) -> Series:
+        """Another handle on the same values, for the frame method's reasons.
+
+        `deep` is accepted and never read, and both arguments `DataFrame.copy`
+        makes apply here word for word: a column cannot be written into either,
+        and a copy that shares the Arrow buffer costs a wrapper rather than the
+        column a second time.
+        """
+        from ._frame import Series
+
+        return Series._wrap(self._inner)
+
+    def __copy__(self) -> Series:
+        """`copy.copy(s)`, answered with `copy()` the way pandas answers it."""
+        return self.copy()
+
+    def __deepcopy__(self, memo: Any = None) -> Series:
+        """`copy.deepcopy(s)`, the same answer and `memo` unused."""
+        return self.copy()
 
     def _get(self, key: Any, default: Any) -> Any:
         """The value at a label, or a value of the caller's choosing.
@@ -5540,19 +5597,38 @@ class IndexMixin:
     def copy(self, name: Any = None, deep: bool = False) -> Index:
         """The index again, under a new name if one is given.
 
-        `deep` is accepted and ignored, which is the one place in the library
-        that happens. An index is immutable once built and a copy of it can only
-        be observed through `is_`, so the deep copy and the shallow one are the
+        `deep` is accepted and ignored, which the frame and the series now do
+        too. An index is immutable once built and a copy of it can only be
+        observed through `is_`, so the deep copy and the shallow one are the
         same object as far as anything a caller can write is concerned. pandas
         documents `deep` as having no effect on an index for the same reason.
-        """
-        from ._frame import Index
 
+        Unlike the frame and the series this does build a new index underneath,
+        because `is_` is the one question in the library that asks whether a
+        copy was taken and it has to answer that one was. The class comes from
+        `type(self)` so that a copy of an index of instants is still one.
+        """
+        made: Any = type(self)
         try:
             wanted = self._inner.label() if name is None else str(name)
-            return Index._wrap(self._inner.renamed(wanted))
+            copied: Index = made._wrap(self._inner.renamed(wanted))
         except Exception as error:
             raise translate(error) from None
+        return copied
+
+    def __copy__(self) -> Index:
+        """`copy.copy(index)`, which pandas answers with `copy()`.
+
+        The frame and the series answer their own with a wrapper around the
+        index they already hold. This one goes through `copy()` and builds a new
+        index underneath, because an index is the one thing here that can be
+        asked whether a copy was taken, with `is_`, and the answer has to be no.
+        """
+        return self.copy()
+
+    def __deepcopy__(self, memo: Any = None) -> Index:
+        """`copy.deepcopy(index)`, the same answer and `memo` unused."""
+        return self.copy()
 
     def get_loc(self, key: Any) -> Any:
         """Where a label is, as an integer, a slice or a mask.
