@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.65] - 2026-09-12
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Most of this release is the window, which arrived in two halves and is only worth having with both of them. Last release a window was a plan node that bound, printed and round tripped, and that nothing could run. Now there is an operator under it and a front end above it, so `SELECT qty, sum(qty) OVER (PARTITION BY shop) FROM sales` is a query that answers rather than one that is refused by name, and `QUALIFY` is the filter above the window that a `WHERE` underneath it cannot be.
+
+The operator is a breaker for the same reason a sort is one, and it does the one thing no other operator does, which is come back wider than it went in. The input's columns are handed through at the positions they had and the windows are appended after them. The partition is the frame, chunk boundaries survive, and each output chunk holds the rows that arrived in it.
+
+The front end groups windows by what they partition by, one node per distinct partitioning, and the folds it takes are the ones the aggregate kinds already hold. Four shapes still say so by name: an ordered window, which is a running fold, a frame, the ranking functions, which have nothing to reduce, and a `WINDOW` clause naming a window the calls then refer to.
+
+Beside that are two pandas side additions and one kernel. `get` and `squeeze` are on a frame and on a series, and a series can now be indexed by position and by label the way a frame can, which is `loc`, `iloc`, `at`, `iat` and square brackets. `text_hostname` is ClickBench q28's group by key written by hand, byte for byte against the regular expression it stands in for, because there is no regex engine here yet and q28 is the only query in the suite whose key is computed rather than read.
+
 ### Added: `OVER` and `QUALIFY` are query text now, not just a plan node
 
 The SQL front end lowers a call with an `OVER` on it to a window node, so `SELECT qty, sum(qty) OVER (PARTITION BY shop) FROM sales` runs from the text and comes back with a total on every row. `sum`, `min`, `max`, `count`, `avg`, `first` and `last` are the folds that work, which is the same list a `GROUP BY` gets, since a window here reduces a partition and those are the reductions that exist.
@@ -33,6 +45,7 @@ The partition is the frame. A window with no keys is one partition over the whol
 Two things are refused by name rather than answered. A window with an ordering inside it is a running fold over the partition rather than one value broadcast across it, which is a different loop rather than an argument to this one. A node whose windows partition two different ways wants an operator each, and splitting it during lowering would move which column each window lands in, after the node above has already been bound against the order the plan wrote down.
 
 Part of #309.
+
 ### Added: `get` and `squeeze` on a frame and on a series
 
 `get` is square brackets with the lookup failure turned into a value, which is the whole method and the only reason pandas has it, since a caller who already holds a default does not want a traceback on the way to it. The frame's reads a column name and the series' reads a label, exactly as square brackets do on each. It catches one kind of failure more than pandas does, because `df[0]` is a missing column over there and a key of the wrong type here, and both libraries answer the default for it, so the difference is only in an exception neither of them raises.
@@ -5575,7 +5588,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.64...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.65...HEAD
+[0.6.65]: https://github.com/tamnd/firepanda/releases/tag/v0.6.65
 [0.6.64]: https://github.com/tamnd/firepanda/releases/tag/v0.6.64
 [0.6.63]: https://github.com/tamnd/firepanda/releases/tag/v0.6.63
 [0.6.62]: https://github.com/tamnd/firepanda/releases/tag/v0.6.62
