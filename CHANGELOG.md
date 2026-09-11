@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the two ends of a row
+
+Nine more of pandas' fifty seven `str` methods: `strip`, `lstrip`, `rstrip`, `pad`, `center`, `ljust`, `rjust`, `zfill` and `repeat`. They are one piece of work rather than nine because none of them reads the middle of a row. They take characters off the ends or they put characters on the ends, and everything in between passes through untouched, which is a small enough thing to know that four kernel functions in `firepanda/kernel/edges.mojo` cover all nine.
+
+Three of the rules being copied are written down nowhere useful. A strip set is a set of characters and not a prefix, so `"abXba".strip("ab")` is `"X"` and not `"Xba"`. A width is a count of characters, so a column of accented letters centred in twelve comes out twelve characters wide and not twelve bytes wide. And an odd amount of padding on both sides leaves one character over whose side is decided by one line in CPython's `unicode_center`, which is reproduced rather than approximated because `"a".center(4, ".")` is `".a.."` and `"ab".center(5, ".")` is `"..ab."` and the two disagree.
+
+`strip` with nothing to strip removes whitespace, and Python's whitespace is the Unicode White_Space property plus four C1 separators, twenty nine code points that are written out by hand and checked one at a time in the tests. An empty strip set and an absent one are two different requests, since `strip("")` removes nothing at all, so the absence picks the word that crosses the boundary rather than being filled in with a default on the way.
+
+Nothing new crosses the boundary for any of this. The side folds into the method word, so `pad_left`, `pad_right` and `pad_both` are three values of an argument that already existed, and the width and the repeat count ride in the slot that already carried a position. That keeps the `str` accessor's text door at the six arguments it had, well under the arity ceiling document 13 sets, and it is what `docs/specs/34-the-two-ends-of-a-row.md` spends its fifth section on.
+
+All four things pandas refuses here are refused in Python with pandas' own messages and in pandas' own order: a fill that is not a string, a fill that is not one character, a width that is not a whole number, and a side that is not one of three words. `repeat` with one count per row is a second method wearing the same name and it says that it is not written yet rather than repeating by whichever count it found first.
+
+Part of #157, after #497.
+
 ### Added: the four arguments `Index` was declaring without
 
 `rename`, `slice_locs`, `take` and `unique` each had the signature the core needed rather than the signature pandas declares, and each of the four missing arguments changes what the call means rather than decorating it. They were the only four signature failures on the board for the flat index, and because `DatetimeIndex` inherits all four they were failing twice.

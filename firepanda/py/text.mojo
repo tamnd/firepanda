@@ -43,7 +43,8 @@ is a lie about a method nobody has written yet.
 """
 
 from firepanda.frame.series import Series
-from firepanda.py.errors import VALUE, tagged
+from firepanda.kernel.chars import character_count
+from firepanda.py.errors import DTYPE, VALUE, tagged
 
 
 def _text_name(name: String) raises -> String:
@@ -64,6 +65,17 @@ def _text_name(name: String) raises -> String:
         or name == "get"
         or name == "removeprefix"
         or name == "removesuffix"
+        or name == "strip"
+        or name == "lstrip"
+        or name == "rstrip"
+        or name == "strip_chars"
+        or name == "lstrip_chars"
+        or name == "rstrip_chars"
+        or name == "pad_left"
+        or name == "pad_right"
+        or name == "pad_both"
+        or name == "zfill"
+        or name == "repeat"
     ):
         return name
     raise tagged(VALUE, String("str: ", name, " does not answer a text column"))
@@ -131,6 +143,56 @@ def _text_column(column: Series) raises:
     )
 
 
+def _whole(value: Optional[Int], name: String) raises -> Int:
+    """Reads a count that the method cannot do without.
+
+    Six of the names in the text door need a number rather than a position, and
+    they borrow the `start` slot to carry it so that the door keeps the six
+    arguments it already had. A slot that is allowed to be absent is the wrong
+    shape for a count, so the absence is refused here instead of being read as a
+    zero, which would have made `s.str.zfill()` quietly answer the column back.
+
+    Args:
+        value: What came across in the position slot.
+        name: The word to put in the message, as pandas spells the argument.
+
+    Returns:
+        The number.
+
+    Raises:
+        Error: Tagged `value` if it is absent.
+    """
+    if value:
+        return value.value()
+    raise tagged(VALUE, String("str: ", name, " is required"))
+
+
+def _one_character(fill: String) raises -> String:
+    """Checks that a fill character is one character and not several.
+
+    Args:
+        fill: What the caller passed.
+
+    Returns:
+        The same string.
+
+    Raises:
+        Error: Tagged `dtype`, which reaches Python as the `TypeError` pandas
+            raises here, if it is not exactly one character. pandas counts
+            characters and not bytes, so a single accented letter is fine and
+            two ASCII ones are not.
+    """
+    if character_count(fill.as_bytes()) == 1:
+        return fill
+    raise tagged(
+        DTYPE,
+        String(
+            "str: fillchar must be a character, not a string of ",
+            character_count(fill.as_bytes()),
+        ),
+    )
+
+
 def text(
     column: Series,
     kind: String,
@@ -144,10 +206,12 @@ def text(
     Args:
         column: The column to read.
         kind: The method, as pandas spells it.
-        arg: The prefix, suffix or replacement, and the empty string for the
-            ones that take none.
-        start: The first position, where the method has one, and the index for
-            `get`.
+        arg: The prefix, suffix or replacement, the characters to strip, or the
+            character to pad with, and the empty string for the ones that take
+            none.
+        start: The first position, where the method has one, the index for
+            `get`, and the width or the repeat count for the ones that take a
+            number rather than a position.
         stop: The position to stop before, where the method has one.
         step: How far to move between characters, for `slice` alone.
 
@@ -174,7 +238,35 @@ def text(
         return column.chars_get(start.value() if start else 0)
     if wanted == "removeprefix":
         return column.chars_remove_prefix(arg)
-    return column.chars_remove_suffix(arg)
+    if wanted == "removesuffix":
+        return column.chars_remove_suffix(arg)
+    if wanted == "strip":
+        return column.chars_strip("", False, True, True)
+    if wanted == "lstrip":
+        return column.chars_strip("", False, True, False)
+    if wanted == "rstrip":
+        return column.chars_strip("", False, False, True)
+    if wanted == "strip_chars":
+        return column.chars_strip(arg, True, True, True)
+    if wanted == "lstrip_chars":
+        return column.chars_strip(arg, True, True, False)
+    if wanted == "rstrip_chars":
+        return column.chars_strip(arg, True, False, True)
+    if wanted == "pad_left":
+        return column.chars_pad(
+            _whole(start, "width"), _one_character(arg), True, False
+        )
+    if wanted == "pad_right":
+        return column.chars_pad(
+            _whole(start, "width"), _one_character(arg), False, True
+        )
+    if wanted == "pad_both":
+        return column.chars_pad(
+            _whole(start, "width"), _one_character(arg), True, True
+        )
+    if wanted == "zfill":
+        return column.chars_zfill(_whole(start, "width"))
+    return column.chars_repeat(_whole(start, "repeats"))
 
 
 def flag(column: Series, kind: String, arg: String) raises -> Series:

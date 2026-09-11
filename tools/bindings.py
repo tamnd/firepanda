@@ -825,11 +825,18 @@ def _datetime_members() -> tuple[Member, ...]:
 def _string_members() -> tuple[Member, ...]:
     """Writes the members of the `str` accessor.
 
-    Twelve of pandas' fifty seven, and they are the twelve whose only idea is
-    that a position in a string is a character rather than a byte. The rest of
-    the accessor is case conversion, the predicates, splitting and the regex
-    methods, and each of those groups has an idea of its own that is worth
-    landing on its own.
+    Twenty one of pandas' fifty seven, in two groups. Twelve of them have one
+    idea between them, which is that a position in a string is a character
+    rather than a byte, and the other nine have a second, which is that the two
+    ends of a row can be trimmed or padded without anything looking at the
+    middle. The rest of the accessor is case conversion, the predicates,
+    splitting and the regex methods, and each of those groups has an idea of its
+    own that is worth landing on its own.
+
+    `center`, `ljust` and `rjust` are `pad` with the side already chosen, and
+    they are written out rather than being left to the caller because pandas
+    writes them out. They cost a line each here and they are three names on the
+    board.
 
     `index` and `rindex` are here without being in the extension, because they
     are `find` and `rfind` that raise rather than answering -1, and where that
@@ -933,6 +940,78 @@ def _string_members() -> tuple[Member, ...]:
             signature="suffix: Any",
             body='self._text("removesuffix", suffix)',
             doc="Every row with a trailing string taken off, if it has one.",
+            returns="Series",
+        ),
+        Member(
+            name="strip",
+            kind="method",
+            signature="to_strip: Any = None",
+            body='self._trimmed("strip", to_strip)',
+            doc="Every row with characters taken off both ends, whitespace by default.",
+            returns="Series",
+        ),
+        Member(
+            name="lstrip",
+            kind="method",
+            signature="to_strip: Any = None",
+            body='self._trimmed("lstrip", to_strip)',
+            doc="Every row with characters taken off the near end.",
+            returns="Series",
+        ),
+        Member(
+            name="rstrip",
+            kind="method",
+            signature="to_strip: Any = None",
+            body='self._trimmed("rstrip", to_strip)',
+            doc="Every row with characters taken off the far end.",
+            returns="Series",
+        ),
+        Member(
+            name="pad",
+            kind="method",
+            signature='width: Any, side: Any = "left", fillchar: Any = " "',
+            body="self._padded(width, side, fillchar)",
+            doc="Every row filled out to a width with a character, on the side named.",
+            returns="Series",
+        ),
+        Member(
+            name="center",
+            kind="method",
+            signature='width: Any, fillchar: Any = " "',
+            body='self._padded(width, "both", fillchar)',
+            doc="Every row filled out to a width from both ends at once.",
+            returns="Series",
+        ),
+        Member(
+            name="ljust",
+            kind="method",
+            signature='width: Any, fillchar: Any = " "',
+            body='self._padded(width, "right", fillchar)',
+            doc="Every row filled out to a width on the far end.",
+            returns="Series",
+        ),
+        Member(
+            name="rjust",
+            kind="method",
+            signature='width: Any, fillchar: Any = " "',
+            body='self._padded(width, "left", fillchar)',
+            doc="Every row filled out to a width on the near end.",
+            returns="Series",
+        ),
+        Member(
+            name="zfill",
+            kind="method",
+            signature="width: Any",
+            body="self._filled(width)",
+            doc="Every row filled out to a width with zeros, after any leading sign.",
+            returns="Series",
+        ),
+        Member(
+            name="repeat",
+            kind="method",
+            signature="repeats: Any",
+            body="self._repeated(repeats)",
+            doc="Every row written out several times, end to end.",
             returns="Series",
         ),
     )

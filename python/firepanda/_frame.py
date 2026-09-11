@@ -471,6 +471,69 @@ class StringAccessor(StringMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def strip(self, to_strip: Any = None) -> Series:
+        """Every row with characters taken off both ends, whitespace by default."""
+        try:
+            return self._trimmed("strip", to_strip)
+        except Exception as error:
+            raise translate(error) from None
+
+    def lstrip(self, to_strip: Any = None) -> Series:
+        """Every row with characters taken off the near end."""
+        try:
+            return self._trimmed("lstrip", to_strip)
+        except Exception as error:
+            raise translate(error) from None
+
+    def rstrip(self, to_strip: Any = None) -> Series:
+        """Every row with characters taken off the far end."""
+        try:
+            return self._trimmed("rstrip", to_strip)
+        except Exception as error:
+            raise translate(error) from None
+
+    def pad(self, width: Any, side: Any = "left", fillchar: Any = " ") -> Series:
+        """Every row filled out to a width with a character, on the side named."""
+        try:
+            return self._padded(width, side, fillchar)
+        except Exception as error:
+            raise translate(error) from None
+
+    def center(self, width: Any, fillchar: Any = " ") -> Series:
+        """Every row filled out to a width from both ends at once."""
+        try:
+            return self._padded(width, "both", fillchar)
+        except Exception as error:
+            raise translate(error) from None
+
+    def ljust(self, width: Any, fillchar: Any = " ") -> Series:
+        """Every row filled out to a width on the far end."""
+        try:
+            return self._padded(width, "right", fillchar)
+        except Exception as error:
+            raise translate(error) from None
+
+    def rjust(self, width: Any, fillchar: Any = " ") -> Series:
+        """Every row filled out to a width on the near end."""
+        try:
+            return self._padded(width, "left", fillchar)
+        except Exception as error:
+            raise translate(error) from None
+
+    def zfill(self, width: Any) -> Series:
+        """Every row filled out to a width with zeros, after any leading sign."""
+        try:
+            return self._filled(width)
+        except Exception as error:
+            raise translate(error) from None
+
+    def repeat(self, repeats: Any) -> Series:
+        """Every row written out several times, end to end."""
+        try:
+            return self._repeated(repeats)
+        except Exception as error:
+            raise translate(error) from None
+
 
 class CategoricalAccessor(CategoricalMixin):
     """The `cat` accessor, which is where a category column's categories live.
