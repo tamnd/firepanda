@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Changed: a filter writes only the columns something downstream reads
+
+The physical filter can now be told which positions to write, in the order to write them, which makes it a filter and a projection in one pass. `Filter(on)` still keeps every column, which is what a caller assembling a pipeline by hand wants. `Filter(on, keep)` writes those positions and nothing else.
+
+Filtering a column means writing a new one, so a column nobody reads afterwards is a whole array written for nothing, and lowering was leaving a trail of them. A predicate of five conditions lowers to five compares and five filters, each compare appending a mask column, and every filter was writing out every mask before it as well as the input columns. The last one carried four spent masks through, and a spent mask is a column that is all true by construction.
+
+Lowering now works out what each conjunct leaves behind that a later conjunct still reads, and tells the filter to write that and the input columns and nothing else. The projection that used to sit after the line of filters to put the schema back is gone, because the last filter already did it.
+
+TPC-H q6's predicate over six million rows, which is five conditions and the part of that query where the time goes, measured with the new `tools/probes/q6plan.mojo`: 9.45 milliseconds to 7.93 on a thirty two thread desktop, 78.3 to 61.0 on an eight core server, and 19.2 to 15.0 on an M series laptop. That is between sixteen and twenty two percent, and the spread is what you would expect, since the work removed is memory bandwidth and the machine with the most of it gains the least.
+
+This is a step toward what the engine actually needs, which is a selection vector, and not a substitute for it. Not writing a dead column is worth less than not writing a live one that the next operator is going to filter again, and that is the larger change.
+
 ## [0.6.58] - 2026-09-11
 
 Built against Mojo 1.0.0 (ed45d567).

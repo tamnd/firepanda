@@ -198,20 +198,59 @@ struct Filter(Movable):
     which is what makes this an operator rather than a call. Whatever produced
     the mask, a comparison or an and of several, is another node earlier in the
     pipeline that wrote its answer into a column, and this one reads it by
-    position. The mask column is filtered along with the rest and comes out all
-    true, so a `Project` after this is what drops it.
+    position.
+
+    ## Filtering only what is wanted
+
+    Filtering a column means writing a new one, so a column nobody downstream
+    reads is a whole array written for nothing. The mask itself is always such a
+    column, since filtering by it produces a column that is all true, and so is
+    every intermediate the expression that built it left behind.
+
+    So the node can be told which positions to write, in the order to write
+    them, which makes it a filter and a projection in one pass. `Filter(on)`
+    keeps everything, which is what a caller assembling a pipeline by hand
+    wants. `Filter(on, keep)` keeps those positions and writes nothing else,
+    which is what lowering asks for, and it is why a predicate of four
+    conditions over a wide chunk no longer leaves four dead masks behind it.
     """
 
     var on: Int
     """The position of the boolean column to filter by."""
 
+    var keep: List[Int]
+    """The input positions to write, in output order. Empty when narrows is
+    False."""
+
+    var narrows: Bool
+    """Whether keep is what comes out, rather than the whole chunk.
+
+    A flag rather than an empty keep meaning everything, because a filter that
+    is asked for no columns at all is a row count and is a thing a caller may
+    reasonably want.
+    """
+
     def __init__(out self, on: Int):
-        """Constructs a filter over one column of its input.
+        """Constructs a filter that keeps every column of its input.
 
         Args:
             on: The position of the boolean column.
         """
         self.on = on
+        self.keep = List[Int]()
+        self.narrows = False
+
+    def __init__(out self, on: Int, var keep: List[Int]):
+        """Constructs a filter that writes only some columns.
+
+        Args:
+            on: The position of the boolean column.
+            keep: The input positions to write, in output order. May repeat,
+                and need not include the mask.
+        """
+        self.on = on
+        self.keep = keep^
+        self.narrows = True
 
     def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
         """Keeps the rows the mask is true on.
@@ -224,7 +263,7 @@ struct Filter(Movable):
             rows is work for everything downstream and no information.
 
         Raises:
-            If the position is out of range or the column is not boolean.
+            If a position is out of range or the mask column is not boolean.
         """
         if self.on < 0 or self.on >= chunk.width():
             raise Error(
@@ -235,10 +274,34 @@ struct Filter(Movable):
                 + " columns"
             )
         ref mask = chunk.columns[self.on].as_typed_view[DType.bool]()
-        var kept = List[AnyArray](capacity=chunk.width())
-        for i in range(chunk.width()):
-            kept.append(filter_any(chunk.columns[i], mask))
-        var rows = 0 if len(kept) == 0 else len(kept[0])
+        if not self.narrows:
+            var all = List[AnyArray](capacity=chunk.width())
+            for i in range(chunk.width()):
+                all.append(filter_any(chunk.columns[i], mask))
+            var every = 0 if len(all) == 0 else len(all[0])
+            if every == 0:
+                return None
+            return Chunk(all^, every)
+        var kept = List[AnyArray](capacity=len(self.keep))
+        for i in range(len(self.keep)):
+            if self.keep[i] < 0 or self.keep[i] >= chunk.width():
+                raise Error(
+                    "filter: column "
+                    + String(self.keep[i])
+                    + " is outside a chunk of "
+                    + String(chunk.width())
+                    + " columns"
+                )
+            kept.append(filter_any(chunk.columns[self.keep[i]], mask))
+        # A filter asked for no columns at all still knows how many rows
+        # survived, and the only thing that knows what a null in the mask means
+        # is the kernel, so the count comes from filtering the mask by itself
+        # rather than from reading it here.
+        var rows: Int
+        if len(kept) > 0:
+            rows = len(kept[0])
+        else:
+            rows = len(filter_any(chunk.columns[self.on], mask))
         if rows == 0:
             return None
         return Chunk(kept^, rows)
@@ -2335,20 +2398,39 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
     if node.isa[Join]():
         return node[Join].bind(input^)
     if node.isa[Project]():
-        ref keep = node[Project].keep
-        var fields = List[Field](capacity=len(keep))
-        for i in range(len(keep)):
-            if keep[i] < 0 or keep[i] >= len(input):
-                raise Error(
-                    "project: column "
-                    + String(keep[i])
-                    + " is outside a schema of "
-                    + String(len(input))
-                    + " columns"
-                )
-            fields.append(input[keep[i]].copy())
-        return Schema(fields^)
+        return _narrow(node[Project].keep, input, "project")
+    if node.isa[Filter]() and node[Filter].narrows:
+        return _narrow(node[Filter].keep, input, "filter")
     return input^
+
+
+def _narrow(keep: List[Int], input: Schema, who: String) raises -> Schema:
+    """Returns the schema of the kept positions, in the order given.
+
+    Args:
+        keep: The input positions.
+        input: The schema they are positions into.
+        who: The operator, for the message when one is out of range.
+
+    Returns:
+        The schema that comes out.
+
+    Raises:
+        If a position is outside the input.
+    """
+    var fields = List[Field](capacity=len(keep))
+    for i in range(len(keep)):
+        if keep[i] < 0 or keep[i] >= len(input):
+            raise Error(
+                who
+                + ": column "
+                + String(keep[i])
+                + " is outside a schema of "
+                + String(len(input))
+                + " columns"
+            )
+        fields.append(input[keep[i]].copy())
+    return Schema(fields^)
 
 
 def node_status(node: Node) -> NodeStatus:

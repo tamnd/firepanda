@@ -206,10 +206,11 @@ def test_a_conjunction_becomes_one_filter_per_part() raises:
     _ = bind(plan, root, schemas())
     var pipe = lower(plan, root, one_frame())
 
-    # A compare and a filter for each half, then one projection to put the
-    # schema back. Computing an and mask would have been four operators too,
-    # but both comparisons would have run on all ten rows.
-    assert_equal(len(pipe.operators), 5, "operators")
+    # A compare and a filter for each half, and no projection afterwards,
+    # because each filter drops the mask it just spent as it writes. Computing
+    # an and mask would have been four operators too, but both comparisons
+    # would have run on all ten rows.
+    assert_equal(len(pipe.operators), 4, "operators")
 
     var out = pipe^.run()
     var got = read_back(out, "qty")
@@ -238,7 +239,7 @@ def test_a_nested_conjunction_flattens_into_the_same_line() raises:
 
     _ = bind(plan, root, schemas())
     var pipe = lower(plan, root, one_frame())
-    assert_equal(len(pipe.operators), 7, "three compares, three filters, a cut")
+    assert_equal(len(pipe.operators), 6, "three compares and three filters")
 
     var out = pipe^.run()
     # Of 20, 12, 25 and 15, the prices are 2, 5, 3 and 6, so two survive.
@@ -264,8 +265,8 @@ def test_a_conjunction_the_simplify_pass_flattened_lowers_the_same() raises:
     var pipe = lower(plan, root, one_frame())
 
     # The literal true dropped out in the pass, so what is left is one
-    # comparison, one filter and the cut back to the input schema.
-    assert_equal(len(pipe.operators), 3, "operators")
+    # comparison and one filter, which puts the schema back itself.
+    assert_equal(len(pipe.operators), 2, "operators")
     var out = pipe^.run()
     assert_equal(len(out), 6, "rows kept")
 
