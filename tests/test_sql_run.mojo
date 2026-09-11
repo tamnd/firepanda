@@ -884,5 +884,102 @@ def test_a_subquery_inside_a_subquery_runs_too() raises:
     )
 
 
+def test_a_with_hands_its_rows_to_the_query_that_names_it() raises:
+    same(
+        answer(
+            (
+                "WITH big AS (SELECT qty FROM sales WHERE qty > 20)"
+                " SELECT qty FROM big"
+            ),
+            "qty",
+        ),
+        [40, 25, 30],
+        "qty",
+    )
+
+
+def test_a_cte_read_twice_answers_the_same_both_times() raises:
+    same(
+        answer(
+            (
+                "WITH big AS (SELECT qty FROM sales WHERE qty > 20)"
+                " SELECT qty FROM big UNION ALL SELECT qty FROM big"
+            ),
+            "qty",
+        ),
+        [40, 25, 30, 40, 25, 30],
+        "qty",
+    )
+
+
+def test_a_cte_may_read_the_one_bound_before_it() raises:
+    same(
+        answer(
+            (
+                "WITH bigger AS (SELECT qty FROM sales WHERE qty > 10),"
+                " fewer AS (SELECT qty FROM bigger WHERE qty < 30)"
+                " SELECT qty FROM fewer"
+            ),
+            "qty",
+        ),
+        [20, 12, 25, 15],
+        "qty",
+    )
+
+
+def test_the_alias_list_on_a_cte_renames_what_it_hands_out() raises:
+    same(
+        answer(
+            (
+                "WITH v(n) AS (SELECT qty, price FROM sales WHERE qty > 25)"
+                " SELECT n FROM v"
+            ),
+            "n",
+        ),
+        [40, 30],
+        "n",
+    )
+
+
+def test_a_cte_may_fold_and_the_query_reads_the_answer() raises:
+    same(
+        answer(
+            (
+                "WITH per AS (SELECT shop, sum(qty) AS total FROM sales"
+                " GROUP BY shop) SELECT total FROM per ORDER BY total"
+            ),
+            "total",
+        ),
+        [75, 84],
+        "total",
+    )
+
+
+def test_a_cte_may_be_joined_to_a_table() raises:
+    # The CTE is on the left for the reason the subquery above it is, which is
+    # #583.
+    var out = run(
+        (
+            "WITH v AS (SELECT qty, qty * price AS total FROM sales)"
+            " SELECT band, total FROM v JOIN tiers ON v.qty = tiers.band"
+            " ORDER BY band"
+        ),
+        session(),
+    )
+    same(read_back(out, "band"), [3, 20, 40], "band")
+    same(read_back(out, "total"), [21, 40, 40], "total")
+
+
+def test_a_recursive_cte_is_refused_by_name() raises:
+    with assert_raises(contains="recursive CTE"):
+        _ = run(
+            (
+                "WITH RECURSIVE n(i) AS (SELECT 1 AS i UNION ALL"
+                " SELECT i + 1 FROM n WHERE i < 5) SELECT i FROM n"
+            ),
+            session(),
+        )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

@@ -364,8 +364,6 @@ def test_a_decimal_literal_is_refused_rather_than_made_a_double() raises:
 
 
 def test_the_shapes_with_no_node_yet_each_say_which_one() raises:
-    with assert_raises(contains="WITH"):
-        _ = _plan("WITH x AS (SELECT 1 AS a) SELECT a FROM x")
     with assert_raises(contains="GROUPING SETS"):
         _ = _plan("SELECT g FROM t GROUP BY CUBE (g)")
     with assert_raises(contains="subquery in an expression"):
@@ -769,6 +767,123 @@ def test_a_lateral_subquery_is_refused_by_name() raises:
 def test_the_column_aliases_on_a_derived_table_are_refused_by_name() raises:
     with assert_raises(contains="column aliases on a subquery"):
         _ = _plan("SELECT n FROM (SELECT a FROM t) v(n)")
+
+
+def test_a_cte_is_the_plan_its_statement_lowers_to() raises:
+    # A CTE reference is a derived table under a name that was written further
+    # up the query, so the plan is the one the subquery spelling gives.
+    assert_equal(
+        _plan("WITH v AS (SELECT a AS x FROM t) SELECT x FROM v"),
+        _plan("SELECT x FROM (SELECT a AS x FROM t) v"),
+    )
+
+
+def test_a_cte_may_be_given_a_name_where_it_is_read() raises:
+    assert_equal(
+        _plan("WITH v AS (SELECT a AS x FROM t) SELECT w.x FROM v AS w"),
+        "PROJECT [x]\n  PROJECT [a as x]\n    SCAN t []\n",
+    )
+
+
+def test_a_cte_read_twice_is_lowered_twice() raises:
+    # The alternative is one node with two parents, which would make the plan a
+    # graph, and every pass over it walks a tree.
+    assert_equal(
+        _plan(
+            "WITH v AS (SELECT k FROM u) SELECT k FROM v UNION ALL SELECT k"
+            " FROM v"
+        ),
+        (
+            "UNION all\n"
+            "  PROJECT [k]\n"
+            "    PROJECT [k]\n"
+            "      SCAN u []\n"
+            "  PROJECT [k]\n"
+            "    PROJECT [k]\n"
+            "      SCAN u []\n"
+        ),
+    )
+
+
+def test_a_cte_may_read_the_one_bound_before_it() raises:
+    assert_equal(
+        _plan(
+            "WITH x AS (SELECT a FROM t), y AS (SELECT a FROM x) SELECT a"
+            " FROM y"
+        ),
+        "PROJECT [a]\n  PROJECT [a]\n    PROJECT [a]\n      SCAN t []\n",
+    )
+
+
+def test_a_cte_reading_a_later_one_is_a_missing_table() raises:
+    # Not a forward reference. The names bind in the order they were written
+    # and an entry sees only the ones before it, which is what makes this the
+    # catalog's answer rather than a plan that reads a name from further down.
+    with assert_raises(contains="Table with name later does not exist"):
+        _ = _plan(
+            "WITH first AS (SELECT a FROM later),"
+            " later AS (SELECT a FROM t) SELECT a FROM first"
+        )
+
+
+def test_a_cte_hides_a_table_of_the_same_name() raises:
+    # The CTE names are looked in before the catalog, so `u` here is the one
+    # the WITH bound. The star is what says so: the registered `u` has three
+    # columns and none of them is `g`.
+    assert_equal(
+        _plan("WITH u AS (SELECT g FROM t) SELECT * FROM u"),
+        "PROJECT [g]\n  PROJECT [g]\n    SCAN t []\n",
+    )
+
+
+def test_a_cte_that_names_a_table_it_hides_is_circular() raises:
+    # The inner `t` is the CTE rather than the frame, because the name is bound
+    # by the time its own body is read, and a name that stands for itself with
+    # no anchor under it is the recursion the word RECURSIVE asks for. DuckDB
+    # refuses it in the same words.
+    with assert_raises(contains="Circular reference to CTE"):
+        _ = _plan("WITH t AS (SELECT b FROM t) SELECT b FROM t")
+
+
+def test_the_column_aliases_on_a_cte_rename_by_prefix() raises:
+    # A name past the end of the column list is dropped and a column past the
+    # end of the name list keeps the name it had, which is DuckDB's rule and
+    # not the count match a derived table's alias list asks for.
+    assert_equal(
+        _plan("WITH v(p) AS (SELECT a, b FROM t) SELECT p, b FROM v"),
+        (
+            "PROJECT [p, b]\n"
+            "  PROJECT [a as p, b]\n"
+            "    PROJECT [a, b]\n"
+            "      SCAN t []\n"
+        ),
+    )
+
+
+def test_a_name_a_cte_does_not_produce_is_not_reachable_through_it() raises:
+    with assert_raises(contains="'v' produces no column called 'b'"):
+        _ = _plan("WITH v AS (SELECT a AS x FROM t) SELECT v.b FROM v")
+
+
+def test_a_with_inside_a_subquery_shadows_the_one_outside_it() raises:
+    # Both are called `v` and the inner one is bound later, and a lookup runs
+    # from the end, so the subquery reads its own.
+    assert_equal(
+        _plan(
+            "WITH v AS (SELECT a FROM t)"
+            " SELECT z FROM (WITH v AS (SELECT z FROM u) SELECT z FROM v) w"
+        ),
+        "PROJECT [z]\n  PROJECT [z]\n    PROJECT [z]\n      SCAN u []\n",
+    )
+
+
+def test_a_recursive_cte_is_refused_by_name() raises:
+    with assert_raises(contains="recursive CTE"):
+        _ = _plan(
+            "WITH RECURSIVE n(i) AS"
+            " (SELECT 1 AS i UNION ALL SELECT i + 1 FROM n WHERE i < 5)"
+            " SELECT i FROM n"
+        )
 
 
 def test_a_condition_may_reach_only_the_two_tables_it_joins() raises:
