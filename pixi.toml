@@ -62,6 +62,7 @@ pandas = { version = ">=3.0", channel = "conda-forge" }
 pyarrow = { version = ">=24", channel = "conda-forge" }
 duckdb = { version = "*", channel = "conda-forge" }
 polars = { version = ">=1.43", channel = "conda-forge" }
+numpy = { version = ">=2", channel = "conda-forge" }
 scipy = { version = ">=1.14", channel = "conda-forge" }
 
 [environments]

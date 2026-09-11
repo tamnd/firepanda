@@ -350,6 +350,7 @@ Twenty seven tests, each written as an expression in and a printed expression ou
 
 Nothing calls this yet. The lowering into the existing chunked engine is what connects the plan layer to execution, and it arrives in the entry above.
 Nothing calls this yet. The lowering into the existing chunked engine is what connects the plan layer to execution and it is still ahead.
+
 ### Added: what an implicit cast costs, and which overload that picks
 
 A query that says `abs(x)` has to become one of eight signatures, and which one it becomes decides what type comes back out. DuckDB picks by price: every candidate that can take the arguments at all is charged for the casts it would need, and the cheapest one wins. `firepanda/sql/resolve.mojo` is that rule, and `firepanda/sql/generated/casts.mojo` is the price list it reads.
