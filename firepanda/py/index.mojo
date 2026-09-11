@@ -1052,6 +1052,54 @@ struct PyIndex(Movable, Writable):
             raise retagged(COLUMN, cause)
 
     @staticmethod
+    def searchsorted(
+        py_self: PythonObject, label: PythonObject, side: PythonObject
+    ) raises -> PythonObject:
+        """Reports where a label would have to go for the order to hold.
+
+        Args:
+            py_self: The index.
+            label: The label.
+            side: `"left"` or `"right"`, which is which end of a run of equal
+                labels the answer sits at.
+
+        Returns:
+            A position between zero and the length of the index.
+        """
+        var built = _one_label(label, "value", _type(py_self))
+        try:
+            return PythonObject(
+                Self._held(py_self)[]
+                .index[]
+                .searchsorted(built, words(side, "side"))
+            )
+        except cause:
+            raise retagged(VALUE, cause)
+
+    @staticmethod
+    def isin(
+        py_self: PythonObject, values: PythonObject
+    ) raises -> PythonObject:
+        """Reports which labels are among a set of values.
+
+        Args:
+            py_self: The index.
+            values: The values to look for.
+
+        Returns:
+            One answer per row, in order.
+        """
+        var built = _labels(values, "values")
+        try:
+            var found = Self._held(py_self)[].index[].isin(built)
+            var out = Python.list()
+            for i in range(len(found)):
+                out.append(PythonObject(found[i]))
+            return out
+        except cause:
+            raise retagged(VALUE, cause)
+
+    @staticmethod
     def slice_locs(
         py_self: PythonObject, start: PythonObject, end: PythonObject
     ) raises -> PythonObject:

@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a column that is also the labels
+
+`DataFrame.set_index`, `DataFrame.reset_index` and `DataFrame.sort_index`, plus `Index.searchsorted` and `Index.isin`. A column and an index hold the same thing in this library, so `set_index` moves rather than converts: the values are copied across, the column is taken out unless `drop=False` says to leave it, and the level takes the column's name.
+
+The round trip is the specification. `df.set_index("k").reset_index()` has to give back the frame that went in, which is why the labels come back as a column rather than being thrown away, why they come back under the index's name, and why they come back in the first position rather than the last. An index with no name gives a column called `index`, which is pandas' rule, and a frame that already has a column of that name gets a refusal rather than two columns under one name.
+
+`sort_index` is an argsort over the labels followed by a take, with one fast path in front of it: an ascending sort of a range index hands the frame straight back, because a range does not exist as an array until something materializes it and sorting one would mean building a column of `0, 1, 2` in order to discover it is in order. `kind` is accepted and never looked at, which makes it the only declared argument in the library that is ignored rather than refused, and the reason is that the sort underneath is stable whichever of numpy's four algorithm names is asked for.
+
+`Index.searchsorted` does not check that the index is sorted, which is copied from numpy and from pandas rather than being an oversight: checking would cost a pass over the labels on every call and would refuse a call that pandas answers. `Index.isin` tries the kernel first and falls back to comparing in Python when the kernel refuses, because pandas compares by value and `pd.Index([1, 2]).isin([1.0])` finds the one while the kernel will only look up one type in a set of one type.
+
+Twelve arguments across the three frame methods are declared and refused by name rather than being left out, and six of the twelve are waiting on the same missing thing, which is the MultiIndex. `docs/specs/35-a-column-that-is-also-the-labels.md` has the table and the argument it makes.
+
+Part of #156, after #498.
+
 ### Added: the two ends of a row
 
 Nine more of pandas' fifty seven `str` methods: `strip`, `lstrip`, `rstrip`, `pad`, `center`, `ljust`, `rjust`, `zfill` and `repeat`. They are one piece of work rather than nine because none of them reads the middle of a row. They take characters off the ends or they put characters on the ends, and everything in between passes through untouched, which is a small enough thing to know that four kernel functions in `firepanda/kernel/edges.mojo` cover all nine.

@@ -1765,6 +1765,61 @@ class DataFrame(DataFrameMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def set_index(
+        self,
+        keys: Any,
+        *,
+        drop: bool = True,
+        append: bool = False,
+        inplace: bool = False,
+        verify_integrity: Any = NO_DEFAULT,
+    ) -> DataFrame:
+        """The frame with one of its columns moved into the row labels."""
+        try:
+            return self._set_index(keys, drop, append, inplace, verify_integrity)
+        except Exception as error:
+            raise translate(error) from None
+
+    def reset_index(
+        self,
+        level: Any = None,
+        *,
+        drop: bool = False,
+        inplace: bool = False,
+        col_level: Any = 0,
+        col_fill: Any = "",
+        allow_duplicates: Any = NO_DEFAULT,
+        names: Any = None,
+    ) -> DataFrame:
+        """The frame with its row labels put back to a count from zero."""
+        try:
+            return self._reset_index(
+                level, drop, inplace, col_level, col_fill, allow_duplicates, names
+            )
+        except Exception as error:
+            raise translate(error) from None
+
+    def sort_index(
+        self,
+        *,
+        axis: Any = 0,
+        level: Any = None,
+        ascending: Any = True,
+        inplace: bool = False,
+        kind: str = "quicksort",
+        na_position: str = "last",
+        sort_remaining: bool = True,
+        ignore_index: bool = False,
+        key: Any = None,
+    ) -> DataFrame:
+        """The frame with its rows in the order of their labels."""
+        try:
+            return self._sort_index(
+                axis, level, ascending, inplace, na_position, sort_remaining, ignore_index, key
+            )
+        except Exception as error:
+            raise translate(error) from None
+
     def __arrow_c_schema__(self) -> object:
         """The frame's Arrow schema, as an arrow_schema PyCapsule."""
         try:
