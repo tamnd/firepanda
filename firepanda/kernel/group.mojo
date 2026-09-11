@@ -4135,40 +4135,184 @@ def aggregate_group_strings(
             "group by: " + String(kind) + " is not defined for a string column"
         )
 
-    var at = List[Int](capacity=groups)
-    for _ in range(groups):
-        at.append(-1)
-
+    var at = _text_rows_per_group(col, kind, codes, groups)
     var at_ptr = at.unsafe_ptr()
-    var group_of = codes.unsafe_ptr()
-    if wants_edge:
-        var first = kind == AggKind.FIRST
-        for i in range(len(codes)):
-            if not col.is_valid(i):
-                continue
-            var g = Int(group_of.unsafe_offset(i).unsafe_load())
-            if first and at_ptr.unsafe_offset(g).unsafe_load() >= 0:
-                continue
-            at_ptr.unsafe_offset(g).unsafe_store(i)
-    else:
-        var want_min = kind == AggKind.MIN
-        for i in range(len(codes)):
-            if not col.is_valid(i):
-                continue
-            var g = Int(group_of.unsafe_offset(i).unsafe_load())
-            var held = at_ptr.unsafe_offset(g).unsafe_load()
-            if held < 0:
-                at_ptr.unsafe_offset(g).unsafe_store(i)
-                continue
-            var order = col.compare_elements(i, held)
-            if order < 0 if want_min else order > 0:
-                at_ptr.unsafe_offset(g).unsafe_store(i)
 
     var builder = StringBuilder(capacity=groups)
     for g in range(groups):
-        var row = at_ptr.unsafe_offset(g).unsafe_load()
+        var row = Int(at_ptr.unsafe_offset(g).unsafe_load())
         if row < 0:
             builder.append_null()
         else:
             builder.append(col.unsafe_bytes(row))
     return AnyArray(builder^.finish())
+
+
+def _text_rows_per_group(
+    col: StringArray, kind: AggKind, codes: Array[DType.uint32], groups: Int
+) raises -> Array[DType.int64]:
+    """Finds the row each group reports, for the four reductions that report one.
+
+    An accumulator per group holding a row number, which is the choice
+    `aggregate_group_strings` explains: a string is not its own accumulator, so
+    keeping the winner as a `String` would copy bytes every time a smaller one
+    turned up and on a sorted column that is a copy per row. -1 means the group
+    has seen nothing, which is also what says the answer is null, so there is no
+    separate presence array the way the numeric extreme needs one.
+
+    Past `PRIVATE_ROWS` this builds a table per worker and merges them, sized by
+    the same `_private_workers` rule every other grouped reduction uses, charged
+    at eight bytes a group because a row number is an int64. When the table will
+    not fit the answer is to stay serial rather than to partition the rows. The
+    partitioned route exists for the numeric reductions and it would work here,
+    and it has not been written because nothing has measured a case that needs
+    it: the queries this was written for group by a column with a few thousand
+    distinct values and the table is kilobytes.
+
+    The merge is where the two kinds differ. For MIN and MAX it is a comparison
+    between two candidate rows, which is the same comparison the scan makes. For
+    FIRST and LAST it is neither, because a worker's rows are a contiguous run
+    and the workers are in row order, so the earliest row a group has is in the
+    first worker that saw it and the latest is in the last. Comparing row numbers
+    there would give the same answer and reading the tables in order is what says
+    why it is the same answer.
+
+    Args:
+        col: The text column.
+        kind: MIN, MAX, FIRST or LAST.
+        codes: One group ordinal per row.
+        groups: How many ordinals there are.
+
+    Returns:
+        One row number per group, or -1 for a group that saw no value.
+
+    Raises:
+        If one of the workers cannot be run.
+    """
+    var n = len(codes)
+    var out = Array[DType.int64](overwritten=groups)
+    _fill_rows(out.unsafe_mut_ptr(), groups)
+
+    var wants_first = kind == AggKind.FIRST
+    var wants_min = kind == AggKind.MIN
+    var wants_edge = kind == AggKind.FIRST or kind == AggKind.LAST
+
+    var workers = _private_workers[DType.int64](n, groups)
+    if workers <= 1:
+        _text_rows_into(
+            out.unsafe_mut_ptr(),
+            col,
+            codes,
+            0,
+            n,
+            wants_edge,
+            wants_first,
+            wants_min,
+        )
+        return out^
+
+    var bounds = _row_bounds(n, workers)
+    var partials = Array[DType.int64](overwritten=groups * workers)
+    _fill_rows(partials.unsafe_mut_ptr(), groups * workers)
+
+    def one(w: Int) raises {mut partials, imm}:
+        _text_rows_into(
+            partials.unsafe_mut_ptr().unsafe_offset(w * groups),
+            col,
+            codes,
+            bounds[w],
+            bounds[w + 1],
+            wants_edge,
+            wants_first,
+            wants_min,
+        )
+
+    parallel_for(one, workers)
+
+    var best = out.unsafe_mut_ptr()
+    var tables = partials.unsafe_ptr()
+    for w in range(workers):
+        var table = tables.unsafe_offset(w * groups)
+        for g in range(groups):
+            var found = Int(table.unsafe_offset(g).unsafe_load())
+            if found < 0:
+                continue
+            var held = Int(best.unsafe_offset(g).unsafe_load())
+            if held < 0:
+                best.unsafe_offset(g).unsafe_write(Int64(found))
+                continue
+            if wants_edge:
+                # The workers are read in row order, so the first table with a
+                # hit holds the earliest row and the last one holds the latest.
+                if not wants_first:
+                    best.unsafe_offset(g).unsafe_write(Int64(found))
+                continue
+            var order = col.compare_elements(found, held)
+            if order < 0 if wants_min else order > 0:
+                best.unsafe_offset(g).unsafe_write(Int64(found))
+    return out^
+
+
+def _fill_rows[origin: MutOrigin](at: Pointer[Int64, origin], count: Int):
+    """Marks every slot of a row number table as having seen nothing.
+
+    Args:
+        at: The table.
+        count: How many slots it has.
+
+    Parameters:
+        origin: Where the table lives.
+    """
+    for i in range(count):
+        at.unsafe_offset(i).unsafe_write(Int64(-1))
+
+
+def _text_rows_into[
+    origin: MutOrigin
+](
+    at: Pointer[Int64, origin],
+    col: StringArray,
+    codes: Array[DType.uint32],
+    start: Int,
+    stop: Int,
+    wants_edge: Bool,
+    wants_first: Bool,
+    wants_min: Bool,
+):
+    """Scatters one run of rows into a table of row numbers.
+
+    The three flags are arguments rather than parameters, unlike `want_min` on
+    the numeric extreme, because this loop is bound by the comparison and the
+    indirection into the payload and not by the branch. Making them parameters
+    would instantiate the body four times to remove a predictable branch from a
+    loop that is already waiting on memory.
+
+    Args:
+        at: The table to scatter into, one row number per group.
+        col: The text column.
+        codes: One group ordinal per row.
+        start: The first row of the run.
+        stop: The row to stop before.
+        wants_edge: Whether this is FIRST or LAST rather than MIN or MAX.
+        wants_first: Whether this is FIRST, read only when `wants_edge`.
+        wants_min: Whether this is MIN, read only when not `wants_edge`.
+
+    Parameters:
+        origin: Where the table lives.
+    """
+    var group_of = codes.unsafe_ptr()
+    for i in range(start, stop):
+        if not col.is_valid(i):
+            continue
+        var g = Int(group_of.unsafe_offset(i).unsafe_load())
+        var held = Int(at.unsafe_offset(g).unsafe_load())
+        if held < 0:
+            at.unsafe_offset(g).unsafe_write(Int64(i))
+            continue
+        if wants_edge:
+            if not wants_first:
+                at.unsafe_offset(g).unsafe_write(Int64(i))
+            continue
+        var order = col.compare_elements(i, held)
+        if order < 0 if wants_min else order > 0:
+            at.unsafe_offset(g).unsafe_write(Int64(i))
