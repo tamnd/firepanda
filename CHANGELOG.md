@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.60] - 2026-09-11
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A correction and two additions. The correction is the larger item: the selection vector that 0.6.59 laid the plumbing for was turned on, measured badly, and turned off again, and this release is where the filter goes back to the route it had.
+
+The measurement is the part worth keeping. Reading a column through a list of positions costs about three times what copying it through a mask costs, so a filter that writes positions instead of columns is six times slower on a predicate that keeps most of its input and only breaks even on one that keeps about one row in fifty. The first timing looked only at the second kind, which is why it merged. Nothing was released with it in.
+
+Beside that, `nlargest` and `nsmallest` arrive on `DataFrame`, and a column of words can no longer be ranked as if it were a buffer of bytes.
+
 ### Changed: a filter goes back to writing its columns, and the selection vector is parked
 
 `Filter` was taught to write a selection rather than its columns, and it is taken back out again before it ever reached a release. It was measured wrong the first time and it is a large slowdown, so this entry is what the measurement actually says rather than a description of a feature.
@@ -99,6 +109,7 @@ Details in document 38. Part of #156, after #517.
 `duplicated` is what made it visible, because the mask carries the frame's labels and a mask whose labels are missing cannot be handed back to `filter`, which is the whole of what a caller does with it. The fix builds a default index when the index and the height disagree, which can only happen on the first column and cannot overwrite labels somebody set, because a frame with no rows has none to set.
 
 Part of #156, after #517.
+
 ### Changed: a projection of a wide frame resolves its names once instead of twice
 
 The widest frame anything here had been pointed at was TPC-H's `lineitem`, at sixteen columns. The ClickBench hits table has a hundred and five, and most of its queries read three of them, so a projection that copies almost nothing is the operation the suite does most.
@@ -5083,7 +5094,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.59...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.60...HEAD
+[0.6.60]: https://github.com/tamnd/firepanda/releases/tag/v0.6.60
 [0.6.59]: https://github.com/tamnd/firepanda/releases/tag/v0.6.59
 [0.6.58]: https://github.com/tamnd/firepanda/releases/tag/v0.6.58
 [0.6.57]: https://github.com/tamnd/firepanda/releases/tag/v0.6.57
