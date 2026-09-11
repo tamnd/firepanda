@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the pass pipeline, so the planner is one call rather than five
+
+`optimize` runs simplification, projection pushdown, predicate pushdown, projection merging and slice pushdown, in that order, and runs the whole thing again if a run changed anything, up to four times. Until now every pass was a thing a caller could run on its own and nothing ran any of them. This is the first code in the planner that a query could go through end to end.
+
+The order is the one the spec fixes and each adjacency has a reason. Simplification first, so every later pass sees the simplest form of every expression: a predicate that folds to a constant is cheaper to move and a conjunction that has been flattened is one that predicate pushdown can split. Projection pushdown before predicate pushdown, so that a predicate arriving at a scan finds a column list that already exists rather than one that is about to be written. Projection merging after both, because both leave projections behind. Slice pushdown last of the five, since a limit is happiest once the nodes it might swap past have stopped being rearranged underneath it.
+
+It runs more than once because a pass can make work for a pass that has already run. Whether anything changed is decided by printing the plan and comparing the text, which is a string compare on a few hundred bytes against a pipeline that has just walked every node several times. It also has the property that matters, which is that it is the same notion of changed a reader has. A structural comparison would need a definition of equal that every pass added later would have to keep honest, and there is no version of that which is cheaper than being obviously right.
+
+The function returns the new root rather than the schema, because predicate pushdown rebuilds the node list and the index a caller went in with means nothing afterwards. The plan comes back bound, since every pass in the list binds before it finishes.
+
+Eight tests, on plans shaped like real TPC-H queries rather than like the smallest thing that would exercise one rule, because what a pipeline test is for is what several passes do to one plan between them. The q6 shape comes out reading two columns of six with the filter on the scan. Two stacked projections come out as one with the name between them gone. An order by with a limit over a projection comes out as a bounded sort. And running the whole thing a second time changes nothing, which is the test that would notice a pass added in the wrong place.
+
+The passes the spec lists that are not written yet slot into this one function and nowhere else, which is most of the reason to have it.
+
+Part of #377.
+
 ### Added: a position and a label are different questions
 
 `DataFrame.loc`, `DataFrame.iloc`, `DataFrame.at`, `DataFrame.iat` and `DataFrame.take`. A frame is addressable now: until this went in there was no way to ask one for a row, and a library that can only hand back a whole frame or a whole column is not one a caller can walk through.
