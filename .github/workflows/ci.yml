@@ -404,6 +404,14 @@ jobs:
       - run: pixi run differential
         timeout-minutes: 8
 
+      # The function catalog is read off a live DuckDB, so it belongs in the one
+      # job that has DuckDB installed. It is checked in for the same reason the
+      # grammar tables are, and it goes stale the same way: a DuckDB bump that
+      # changes a signature changes what firepanda binds.
+      - name: Generated function table is current
+        run: pixi run check-functions
+        timeout-minutes: 2
+
       # DuckDB's test corpus is 33 MB and is fetched rather than vendored, so it
       # is cached on the commit the grammar is pinned to. A grammar bump changes
       # the key and the next run fetches the corpus that belongs to it.

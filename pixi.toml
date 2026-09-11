@@ -167,6 +167,12 @@ vendor-grammar = "bash tools/vendor_grammar.sh"
 gen-grammar = "python tools/gen_grammar.py"
 check-grammar = "python tools/gen_grammar.py --check"
 
+# The tier 1 function catalog, read off a live DuckDB rather than typed in.
+# These two need the differential environment, because that is the one with
+# DuckDB in it. docs/specs/sql/07-functions.md.
+gen-functions = { cmd = "python tools/gen_functions.py", default-environment = "differential" }
+check-functions = { cmd = "python tools/gen_functions.py --check", default-environment = "differential" }
+
 # The README's list of what the SQL front end refuses, written out of
 # `sql_support()` rather than kept beside it. `--check` is the same run with the
 # file compared rather than written. There is no CI step for it, because

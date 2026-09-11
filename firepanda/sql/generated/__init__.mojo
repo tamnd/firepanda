@@ -1,5 +1,17 @@
-"""Generated grammar tables. See tools/gen_grammar.py."""
+"""Generated tables: the grammar from tools/gen_grammar.py, and the tier 1
+function catalog from tools/gen_functions.py."""
 
+from .functions import (
+    DUCKDB_VERSION,
+    KIND_AGGREGATE,
+    KIND_MACRO,
+    KIND_SCALAR,
+    NAME_COUNT,
+    NO_TYPE,
+    OVERLOAD_COUNT,
+    TYPE_COUNT,
+)
+from .functions import TABLE as FUNCTION_TABLE
 from .keywords import (
     KEYWORD_CLASS_COUNT,
     KEYWORD_COLUMN_NAME,
