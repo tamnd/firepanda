@@ -1,16 +1,18 @@
-"""The nine logical nodes a query is, and the arena they live in.
+"""The ten logical nodes a query is, and the arena they live in.
 
 The same collision as `exec/node.mojo` and the right one, because these are the
 same concept at two levels. A node here says what the query wants. A node there
 says how one chunk of it is computed. The list here is shorter than the list
 there, since several physical nodes are alternative implementations of one
-logical node, and it is shorter than it looks: nine kinds cover every TPC-H
-query.
+logical node, and it is shorter than it looks: nine of the ten cover every TPC-H
+query and the tenth is how a query with no `FROM` is written down.
 
 Scan, Filter, Project, Aggregate, Join, Sort, Limit, Distinct and Union. That is
 the list in `docs/specs/planner/01-what-a-plan-is.md` and the spec says to refuse
 to add to it without an argument, so it is written down in `NodeKind` and
-nowhere else.
+nowhere else. Values is the tenth and the argument for it is that `SELECT 1` and
+`VALUES (1), (2)` have no node at all otherwise, and the alternative is a
+projection over a node that is not there.
 
 Union is the one that carries more than its name says. `EXCEPT` and `INTERSECT`
 are the same node with a different code in `op`, because all three line their
@@ -54,10 +56,10 @@ from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
 
 @fieldwise_init
 struct NodeKind(Equatable, ImplicitlyCopyable, Movable, Writable):
-    """Which of the nine kinds a logical node is."""
+    """Which of the ten kinds a logical node is."""
 
     var code: Int
-    """The kind, as one of the nine values below."""
+    """The kind, as one of the ten values below."""
 
     comptime SCAN = Self(0)
     """A table, a file or an in memory frame. The only node with no input, and
@@ -94,6 +96,11 @@ struct NodeKind(Equatable, ImplicitlyCopyable, Movable, Writable):
     difference. Covers concat as well, since the difference is whether
     duplicates survive and that is a flag rather than a node. Which of the three
     is in `op` and the kind keeps the name the common case has."""
+
+    comptime VALUES = Self(9)
+    """Rows written out rather than read from anywhere. The second node with no
+    input, and the one that makes a query with no `FROM` a plan rather than a
+    special case."""
 
     def __eq__(self, other: Self) -> Bool:
         """Compares two kinds.
@@ -139,6 +146,8 @@ struct NodeKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("LIMIT")
         elif self == Self.DISTINCT:
             writer.write("DISTINCT")
+        elif self == Self.VALUES:
+            writer.write("VALUES")
         else:
             writer.write("UNION")
 
@@ -162,17 +171,18 @@ comptime SET_INTERSECT = 2
 struct PlanNode(Copyable, Movable):
     """One node of a logical plan.
 
-    One struct for all nine kinds, on the same grounds as `Expr`: the arena
+    One struct for all ten kinds, on the same grounds as `Expr`: the arena
     holds them in one list and a list has one element type. Which fields a kind
     uses is documented on the builder that makes it.
     """
 
     var kind: NodeKind
-    """Which of the nine this is."""
+    """Which of the ten this is."""
 
     var inputs: List[Int]
-    """The nodes this one reads, as plan arena indices. Empty on a `SCAN`, one
-    on the four in the middle, two on a `JOIN`, and any number on a `UNION`."""
+    """The nodes this one reads, as plan arena indices. Empty on a `SCAN` and on
+    a `VALUES`, one on the four in the middle, two on a `JOIN`, and any number on
+    a `UNION`."""
 
     var exprs: List[Int]
     """The expressions, as expression arena indices, in the order the builder
@@ -181,11 +191,13 @@ struct PlanNode(Copyable, Movable):
 
     var parts: Int
     """How many of `exprs` belong to the first of two lists. The group key count
-    on an `AGGREGATE` and the left key count on a `JOIN`, and zero elsewhere."""
+    on an `AGGREGATE` and the left key count on a `JOIN`. On a `VALUES` it is the
+    width instead, since the expressions there are rows rather than two lists.
+    Zero elsewhere."""
 
     var names: List[String]
-    """The output names on a `PROJECT` and an `AGGREGATE`, and the column names
-    read on a `SCAN`. Empty elsewhere."""
+    """The output names on a `PROJECT`, an `AGGREGATE` and a `VALUES`, and the
+    column names read on a `SCAN`. Empty elsewhere."""
 
     var flags: List[Bool]
     """The directions on a `SORT`, descending first and nulls last after, each
@@ -227,7 +239,7 @@ struct PlanNode(Copyable, Movable):
         """Builds a node.
 
         Args:
-            kind: Which of the nine.
+            kind: Which of the ten.
             inputs: The nodes this one reads.
             exprs: The expressions.
             parts: Where the first expression list ends.
@@ -807,6 +819,79 @@ struct Plan(Movable, Sized):
                 List[String](),
                 [all],
                 op,
+                0,
+                0,
+                UNBOUND,
+                String(),
+            )
+        )
+
+    def values(
+        mut self, var rows: List[Int], var names: List[String]
+    ) raises -> Int:
+        """Builds a literal table, written out rather than read from anywhere.
+
+        The rows are one flat list in row order, which is how the expressions
+        come off a `VALUES` and is the only layout where adding a row is
+        appending. How wide the table is comes from `names`, and `parts` carries
+        it so that a pass can find the row boundaries without the schema.
+
+        Every expression has to read nothing at all, which is a stronger rule
+        than the one a filter predicate or a sort key gets. There is no input
+        here, so a column reference has nothing to resolve against and an
+        aggregate has no rows to fold. Saying so with the row and the column in
+        the message beats binding against an empty schema and reporting a name
+        that is not there.
+
+        Args:
+            rows: The expressions, row by row, each row as wide as `names`.
+            names: What the columns are called.
+
+        Returns:
+            The index of the new node.
+
+        Raises:
+            If there are no columns, if the expressions do not divide into whole
+            rows, if there are no rows, or if an expression reads anything.
+        """
+        if len(names) == 0:
+            raise Error("a table of no columns is not a table")
+        if len(rows) % len(names) != 0:
+            raise Error(
+                String(
+                    "a table ",
+                    len(names),
+                    " columns wide cannot be made of ",
+                    len(rows),
+                    " values",
+                )
+            )
+        if len(rows) == 0:
+            raise Error("a table of no rows still has to say it has none")
+        for i in range(len(rows)):
+            if not self.exprs.input_independent(rows[i]):
+                raise Error(
+                    String(
+                        (
+                            "a VALUES is written out rather than read from"
+                            " anywhere, and column "
+                        ),
+                        i % len(names),
+                        " of row ",
+                        i // len(names),
+                        " reads something",
+                    )
+                )
+        var parts = len(names)
+        return self._add(
+            PlanNode(
+                NodeKind.VALUES,
+                List[Int](),
+                rows^,
+                parts,
+                names^,
+                List[Bool](),
+                0,
                 0,
                 0,
                 UNBOUND,

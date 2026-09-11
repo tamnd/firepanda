@@ -37,6 +37,22 @@ The recurring theme across all four is the arena's creation order. Node indices 
 `firepanda/sql/plan.mojo` takes a parsed `SELECT` and gives back the same `Plan` the builder methods produce, bound by the same binder. The rule it works under is the one the spec has had from the start, that no plan node may have only a SQL constructor, and there is a test that compares the plan for `SELECT a FROM t WHERE b > 1` against the plan the three builder calls produce. If those ever stop matching then one of the front ends has quietly become a second engine.
 
 None of this moves a benchmark number yet, and it is worth being plain about why. The eager API does not call the optimizer, which is #376, and the executor cannot spend what subplan elimination found, because lowering walks a line of operators and a shared node is a fork. Both passes are still right and still worth having now: the day lowering grows an operator that can hand one chunk stream to two readers, the plans arriving at it already say where to put one.
+### Added: a query can now write its own rows out
+
+`Values`, the tenth logical node, and the one that makes `SELECT 1` a plan rather than a special case. A plan had nothing that produces a row out of nothing, so a query with no `FROM` had no node to sit on and was refused by name at the lowering.
+
+The node holds its rows as one flat list in row order, with the width in the field an aggregate uses for its group key count, since a `VALUES` has rows rather than two lists of expressions. Every expression in one has to read nothing at all, which is stricter than the rule a filter predicate gets: there is no input here, so a column reference has nothing to resolve against and an aggregate has no rows to fold, and saying so with the row and the column named beats binding against an empty schema and reporting a name that is not there.
+
+Binding a literal table is typing rather than resolving. A column's type is the one that holds every row's value in that position, worked out the same way a union works out the type that holds both its arms, and a column can be missing if any row's value in it can be. No column belongs to a relation, because there is no relation, so a qualified name over a `VALUES` does not resolve rather than resolving to whatever relation zero happens to be.
+
+Projection pushdown leaves a `VALUES` alone. It is the one node that costs nothing to read, since its rows are already in the plan, and narrowing it would mean rewriting a row major list around the columns that went. Filter pushdown treats it as the second node with no input, so a predicate that reaches it is written back above it.
+
+On the SQL side `VALUES (1, 'a'), (2, 'b')` lowers to it directly, with the columns called `col0` and `col1` the way DuckDB names them, because a name the engine invents is a name a query can write. A `SELECT` with no `FROM` lowers to a projection over one row of one constant, and the projection drops the constant again, so the only thing that row does is exist. A star with no `FROM` is refused, since there is nothing for it to stand for.
+
+Physical lowering still refuses a `VALUES` by name, so a plan holding one says which node has no operator rather than running the wrong thing.
+
+Part of #309.
+
 ### Added: UNION, EXCEPT and INTERSECT lower into the plan
 
 The plan had a union node and nothing else, so a query with `EXCEPT` or `INTERSECT` in it was refused by name at the lowering. All three are the same node now, carrying which operation it is next to the flag that says whether duplicates survive, and `EXPLAIN` prints the word that was written rather than `UNION` with a code nobody can see.

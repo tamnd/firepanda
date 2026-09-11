@@ -439,5 +439,23 @@ def test_a_q19_shaped_plan_filters_both_tables_before_the_join() raises:
     )
 
 
+def test_a_filter_over_a_values_stays_where_it_was() raises:
+    # The other node with no input, so a predicate that gets down to it has
+    # nowhere further to go and is written back above.
+    var plan = Plan()
+    var one = plan.exprs.literal(Value(Int64(1)))
+    var two = plan.exprs.literal(Value(Int64(2)))
+    var table = plan.values([one, two], ["n"])
+    var n = plan.exprs.column("n")
+    var big = plan.exprs.binary(BinaryOp.GT, n, one)
+    var kept = plan.filter(table, big)
+    var at = push(plan, kept, List[Schema]())
+    assert_equal(
+        explain(plan, at),
+        "FILTER n > 1\n  VALUES [n] (1), (2)\n",
+        "one filter, still above the rows",
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

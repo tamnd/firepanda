@@ -250,6 +250,44 @@ def test_a_set_operation_is_one_of_three() raises:
         _ = plan.setop([a, b], 7, all=False)
 
 
+def test_a_values_holds_the_rows_it_was_given() raises:
+    var plan = Plan()
+    var rows = List[Int]()
+    for i in range(1, 5):
+        rows.append(plan.exprs.literal(Value(Int64(i))))
+    var table = plan.values(rows^, ["a", "b"])
+    assert_equal(
+        explain(plan, table),
+        "VALUES [a, b] (1, 2), (3, 4)\n",
+        "two columns and two rows",
+    )
+
+
+def test_a_values_has_to_divide_into_whole_rows() raises:
+    var plan = Plan()
+    var one = plan.exprs.literal(Value(Int64(1)))
+    with assert_raises(contains="2 columns wide cannot be made of 3 values"):
+        _ = plan.values([one, one, one], ["a", "b"])
+    with assert_raises(contains="a table of no columns"):
+        _ = plan.values([one], List[String]())
+    with assert_raises(contains="still has to say it has none"):
+        _ = plan.values(List[Int](), ["a"])
+
+
+def test_a_values_cannot_read_anything() raises:
+    # There is nothing under it to read, so a column reference in one is a
+    # query the caller has not written rather than a name that will resolve
+    # later.
+    var plan = Plan()
+    var one = plan.exprs.literal(Value(Int64(1)))
+    var k = plan.exprs.column("k")
+    with assert_raises(contains="column 1 of row 0 reads something"):
+        _ = plan.values([one, k], ["a", "b"])
+    var total = plan.exprs.aggregate(AggKind.SUM, one)
+    with assert_raises(contains="column 0 of row 1 reads something"):
+        _ = plan.values([one, one, total, one], ["a", "b"])
+
+
 def test_an_input_outside_the_plan_is_refused() raises:
     var plan = Plan()
     _ = plan.scan("lineitem", ["l_quantity"], 0)

@@ -12,6 +12,11 @@ the indent is what says which subtree a line belongs to. A `UNION` prints as the
 set operation it carries, so an `EXCEPT` says `EXCEPT` and not `UNION` with a
 code nobody can see.
 
+A `VALUES` prints its names first and its rows after, which is the opposite of
+how SQL writes it and is the right way round here. A reader scanning an explain
+output wants to know what the columns are called, and a literal table of a
+hundred rows would bury that at the end of the line.
+
 An expression prints in the notation it was written in rather than as a tree,
 because a filter over five predicates is one line that way and eleven lines the
 other, and the point of an explain output is to be read. Parentheses go around
@@ -246,6 +251,21 @@ def _line(plan: Plan, at: Int) raises -> String:
             _list(plan.exprs, node.exprs, 0, len(node.exprs)),
             "]",
         )
+
+    if node.kind == NodeKind.VALUES:
+        # The names first, because they are the thing a reader needs to know and
+        # a hundred row literal table would bury them otherwise.
+        var written = String("VALUES [")
+        for i in range(len(node.names)):
+            if i != 0:
+                written += ", "
+            written += node.names[i]
+        written += "]"
+        for i in range(0, len(node.exprs), node.parts):
+            written += " (" if i == 0 else ", ("
+            written += _list(plan.exprs, node.exprs, i, i + node.parts)
+            written += ")"
+        return written
 
     var word = "UNION"
     if node.op == SET_EXCEPT:

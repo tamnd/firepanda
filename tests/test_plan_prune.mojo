@@ -361,6 +361,23 @@ def test_a_union_that_drops_duplicates_reads_the_whole_row() raises:
     assert_equal(_read(plan, second), all_four, "and the other")
 
 
+def test_a_values_is_left_alone_and_the_pass_walks_past_it() raises:
+    # It has no input, so a pass that reached for one would be reaching into an
+    # empty list. Leaving it whole is also the right answer: its rows are
+    # already in the plan and reading them costs nothing.
+    var plan = Plan()
+    var one = plan.exprs.literal(Value(Int64(1)))
+    var table = plan.values([one, one, one, one], ["a", "b"])
+    var key = plan.exprs.column("a")
+    var root = plan.project(table, [key], ["a"])
+    _ = prune(plan, root, List[Schema]())
+    assert_equal(
+        explain(plan, root),
+        "PROJECT [a]\n  VALUES [a, b] (1, 1), (1, 1)\n",
+        "both columns still there",
+    )
+
+
 def test_a_difference_that_keeps_duplicates_reads_the_whole_row_too() raises:
     # The duplicate flag decides nothing here. Whether an orders row is in the
     # right arm is a question about the whole row whatever happens to the
