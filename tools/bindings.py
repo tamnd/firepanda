@@ -3494,6 +3494,18 @@ FUNCTIONS = (
         params=(("index", "object"), ("labels", "object"), ("name", "object")),
         returns="Series",
     ),
+    # The door going the other way, and here for the same reason: it reads a
+    # series and answers a frame, and the import graph will not let a function
+    # of a series that gives a frame live on the series. `SeriesMixin.to_frame`
+    # is what calls it, and so does every series method that is a frame method
+    # underneath.
+    Binding(
+        mojo="series_to_frame",
+        name="_series_to_frame",
+        doc="A column, as a frame of one column under a chosen name.",
+        params=(("column", "object"), ("name", "object")),
+        returns="DataFrame",
+    ),
     # Not a user entry point. Every row of the error table in
     # `python/firepanda/errors.py` has to be exercised from Python, and five
     # bound methods cannot reach most of them, so the Mojo side offers a way to

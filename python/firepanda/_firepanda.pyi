@@ -447,6 +447,10 @@ def _index_to_series(index: object, labels: object, name: object) -> Series:
     """The labels of an index, as a column that carries them twice."""
     ...
 
+def _series_to_frame(column: object, name: object) -> DataFrame:
+    """A column, as a frame of one column under a chosen name."""
+    ...
+
 def _raise_for_test(kind: str) -> object:
     """Raises one classified error of the given kind. For tests only."""
     ...

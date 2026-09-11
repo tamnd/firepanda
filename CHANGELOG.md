@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a column can become a frame, and thirteen members that follow from it
+
+`Series.to_frame` hands back a frame of one column, carrying the column's own labels rather than a fresh range, and that is the door the rest of this entry goes through. The count that found it is one subtraction: the public members the frame has minus the ones the column has is thirteen names, three of which are a frame's business and ten of which are members of the pandas series that were missing here. They were not ten oversights. They were one missing thing, which is that a column could not be handed to a frame.
+
+The ten are `duplicated`, `drop_duplicates`, `take`, `sort_index`, `truncate`, `nlargest`, `nsmallest` and `reset_index`, and each is three lines: put the column in a frame under the name it already has, run the frame's method, take the column back out. `duplicated` is four rather than three, because what a frame answers there is a mask rather than a frame, so it is relabelled instead of unpacked. None of the ten has a line about the index anywhere, because every one of them either removes rows or reorders them and the frame does the same thing to the labels that it does to the values.
+
+The index then gets three more out of two doors end to end, `to_frame`, `duplicated` and `drop_duplicates`, and those three score twice because `DatetimeIndex` subclasses `Index`. `drop_duplicates` hands back the class the index already was, so dropping a repeated instant leaves an index of instants, and that rule now lives in one place rather than being written again each time.
+
+One divergence is worth saying out loud. pandas calls the column of an unnamed series `0`, the integer, and a column name here is a string, so it is the text of it. The same is true of a caller who writes `name=None`. Both close at once whenever a column name can hold something that is not a string, which is the same change a series name is waiting for.
+
+Part of #156, after #8.
+
 ### Fixed: an index built out of something that already has a name
 
 `Index(series)` was refused, with a message about a column being built from a sequence of values, because the constructor sent everything it was handed through the reader that wants a sequence. pandas takes a series there and so does firepanda now, through `to_index`, which is the door the library already had between the two. `Index(other_index)` went through before but dropped the name it was given, and now goes through `renamed` instead.
