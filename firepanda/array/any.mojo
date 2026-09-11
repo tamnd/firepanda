@@ -904,6 +904,40 @@ struct AnyArray(Copyable, Movable, Sized):
         ]()
 
 
+def empty_any(type: LogicalType) raises -> AnyArray:
+    """Builds a column of that type with no rows in it.
+
+    A column no rows reached is not the same thing as a column that does not
+    exist, and the difference matters wherever a kernel asks a column what it
+    holds rather than how many rows it has. A join builds its key table from the
+    build side's key column, and a build side a filter emptied still has to
+    answer what dtype that column is.
+
+    A text column takes the text route rather than the plain one, because
+    `is_string` reads whether the string half is there and not what the logical
+    type says. An empty column built the plain way would answer no to that and
+    then be read as a column of bytes.
+
+    A dictionary, a list and a struct get the plain form, which is the form they
+    had before this was a function. None of them is a join key and nothing yet
+    asks one of them for an empty column.
+
+    Args:
+        type: What the column would hold.
+
+    Returns:
+        The column, of length zero.
+
+    Raises:
+        If the type is text and is not laid out the way text is, which nothing
+        can arrange and which is checked because relabelling is what checks it.
+    """
+    if type.kind == TypeKind.STRING or type.kind == TypeKind.BINARY:
+        var text = AnyArray(StringArray(Buffer(0), Buffer(0), Bitmap(0), 0))
+        return text^.retyped(type)
+    return AnyArray(ColumnData(Buffer(0), Bitmap(0), 0), type)
+
+
 def borrow_columns[o: ImmOrigin](ref[o] cols: List[AnyArray]) -> ColumnRefs[o]:
     """Borrows every column in a list.
 

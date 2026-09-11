@@ -80,7 +80,7 @@ and `InMemoryJoin` for the same reason and still has them.
 
 from std.utils import Variant
 
-from firepanda.array.any import AnyArray, borrow_columns
+from firepanda.array.any import AnyArray, borrow_columns, empty_any
 from firepanda.array.array import Array
 from firepanda.array.chunked import ChunkedArray
 from firepanda.array.value import Value
@@ -1724,6 +1724,17 @@ struct Join(Movable):
     var _source: List[Int]
     """Per wanted column, its position in the frame it comes from."""
 
+    var _build: List[AnyArray]
+    """One chunk per right column, settled by `bind`.
+
+    The right frame's columns are chunked and everything here reads them as one
+    array, so this is where the two meet. A column of one chunk lends it, which
+    shares the bytes and copies nothing. A column of no chunks, which is what a
+    build side a filter emptied has, gets an empty array of its own type made
+    here, so that a join against nothing joins against nothing rather than
+    raising on a column shape.
+    """
+
     def __init__(
         out self,
         var right: DataFrame,
@@ -1775,6 +1786,7 @@ struct Join(Movable):
         self._absent = List[Bool]()
         self._from_right = List[Bool]()
         self._source = List[Int]()
+        self._build = List[AnyArray]()
 
     def bind(mut self, var input: Schema) raises -> Schema:
         """Builds the table from the right frame and plans the output.
@@ -1829,9 +1841,16 @@ struct Join(Movable):
             )
 
         var rows = self.right.rows
+        self._build = List[AnyArray](capacity=len(self.right.columns))
+        for j in range(len(self.right.columns)):
+            if self.right.columns[j].num_chunks() == 0:
+                self._build.append(empty_any(self.right.schema[j].dtype))
+            else:
+                self._build.append(AnyArray(copy=self.right.columns[j].only()))
+
         var codes = Array[DType.uint32](overwritten=rows)
-        var side = _build_key(self.right.columns[there].only(), codes)
-        var absent = _key_nulls(self.right.columns[there].only(), rows)
+        var side = _build_key(self._build[there], codes)
+        var absent = _key_nulls(self._build[there], rows)
         self._side = side^
         self._absent = absent^
         self._left_at = here
@@ -2036,7 +2055,7 @@ struct Join(Movable):
         var codes = Array[DType.uint32](overwritten=rows)
         _probe_key(
             self._side,
-            self.right.columns[self._right_at].only(),
+            self._build[self._right_at],
             key,
             codes,
             spread,
@@ -2084,7 +2103,7 @@ struct Join(Movable):
             if self._from_right[w]:
                 out.append(
                     take_any(
-                        self.right.columns[self._source[w]].only(),
+                        self._build[self._source[w]],
                         pairs.right_at,
                         spread,
                     )

@@ -1288,6 +1288,56 @@ def test_an_in_under_an_or_keeps_what_either_side_keeps() raises:
     )
 
 
+def test_an_in_over_a_subquery_that_kept_no_rows_keeps_no_rows() raises:
+    # The build side is a column no rows reached, which has no chunks at all
+    # rather than one empty chunk, and the join used to raise on that. #611.
+    assert_equal(
+        len(
+            run(
+                (
+                    "SELECT qty FROM sales WHERE qty IN"
+                    " (SELECT band FROM tiers WHERE band > 1000)"
+                ),
+                session(),
+            )
+        ),
+        0,
+    )
+
+
+def test_an_in_over_a_subquery_that_kept_no_rows_is_false_as_a_value() raises:
+    # False rather than null, since there is nothing to match and no null in
+    # what was not matched against.
+    same(
+        truths(
+            run(
+                (
+                    "SELECT qty IN (SELECT band FROM tiers WHERE band > 1000)"
+                    " AS hit FROM sales"
+                ),
+                session(),
+            ),
+            "hit",
+        ),
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        "hit",
+    )
+
+
+def test_a_not_in_over_a_subquery_that_kept_no_rows_keeps_them_all() raises:
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE qty NOT IN"
+                " (SELECT band FROM tiers WHERE band > 1000) ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [1, 3, 5, 8, 12, 15, 20, 25, 30, 40],
+        "qty",
+    )
+
+
 def test_a_correlated_exists_runs_as_a_semi_join() raises:
     same(
         answer(
