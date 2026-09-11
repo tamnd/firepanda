@@ -40,6 +40,7 @@ from firepanda.exec import (
     Project,
     Reduce,
     Scan,
+    Sort,
     node_apply,
     node_computes_per_row,
     node_ends_early,
@@ -163,6 +164,40 @@ def read_back(df: DataFrame, name: String) raises -> List[Int64]:
     var out = List[Int64](capacity=len(col))
     for i in range(len(col)):
         out.append(col[i])
+    return out^
+
+
+def gappy_frame() raises -> DataFrame:
+    """Six rows in two chunks, with a null in each of them.
+
+    The nulls sit in different chunks on purpose, since a sort flattens the
+    column before it orders it and a null in the second chunk is the one whose
+    validity bit has to travel the furthest.
+    """
+    var n = ChunkedArray(LogicalType.INT64)
+    var first = Array[DType.int64](3)
+    first.set_valid(0, Int64(4))
+    first.set_null(1)
+    first.set_valid(2, Int64(1))
+    n.append(AnyArray(first^))
+    var second = Array[DType.int64](3)
+    second.set_valid(0, Int64(6))
+    second.set_valid(1, Int64(2))
+    second.set_null(2)
+    n.append(AnyArray(second^))
+    var columns = List[ChunkedArray]()
+    columns.append(n^)
+    var fields = List[Field]()
+    fields.append(Field("n", LogicalType.INT64, True))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def present(df: DataFrame, name: String) raises -> List[Bool]:
+    """Which rows of an int64 column have a value in them."""
+    var col = df.column(name).as_typed[DType.int64]()
+    var out = List[Bool](capacity=len(col))
+    for i in range(len(col)):
+        out.append(col.is_valid(i))
     return out^
 
 
@@ -1540,6 +1575,133 @@ def test_a_node_that_does_not_read_a_selection_is_given_a_flat_chunk() raises:
     var under = ints_of(got.columns[1], 2)
     assert_equal(under[0], 2, "and what was column 0, gathered")
     assert_equal(under[1], 4, "and its second row")
+
+
+def test_a_sort_orders_rows_that_arrived_in_different_chunks() raises:
+    # The whole of what a sort is for in a pipeline. Six rows arrive in three
+    # chunks and the answer interleaves all three, which no per chunk operator
+    # could produce.
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Sort([0], [True], [False])))
+    var out = pipeline^.run()
+    var got = read_back(out, "n")
+    assert_equal(len(got), 6, "rows")
+    for i in range(6):
+        assert_equal(got[i], Int64(6 - i), "row " + String(i))
+
+
+def test_a_sort_is_a_breaker_and_cuts_the_pipeline() raises:
+    assert_true(node_is_breaker(Node(Sort([0], [False], [False]))), "it is one")
+
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Filter(1)))
+    pipeline.add(Node(Sort([0], [False], [False])))
+    pipeline.add(Node(Limit(2)))
+    var cuts = pipeline.cut_points()
+    assert_equal(len(cuts), 1, "one breaker")
+    assert_equal(cuts[0], 1, "at the second operator")
+    assert_equal(pipeline.stages(), 2, "stages")
+
+
+def test_a_sort_hands_back_the_chunks_it_was_given() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Sort([0], [False], [False])))
+    var out = pipeline^.run()
+    assert_equal(out.columns[0].num_chunks(), 3, "two, three and one again")
+
+
+def test_a_sort_leaves_the_schema_alone() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Sort([0], [True], [False])))
+    var out = pipeline^.run()
+    assert_equal(out.width(), 2, "columns")
+    assert_equal(out.schema[0].name, "n", "the first")
+    assert_equal(out.schema[1].name, "keep", "the second")
+
+
+def test_a_sort_after_a_filter_orders_what_survived() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Filter(1)))
+    pipeline.add(Node(Sort([0], [True], [False])))
+    var out = pipeline^.run()
+    var got = read_back(out, "n")
+    assert_equal(len(got), 4, "the rows the mask kept")
+    assert_equal(got[0], 6, "largest first")
+    assert_equal(got[3], 1, "smallest last")
+
+
+def test_a_sort_before_a_limit_is_the_top_of_the_frame() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Sort([0], [True], [False])))
+    pipeline.add(Node(Limit(2)))
+    var out = pipeline^.run()
+    var got = read_back(out, "n")
+    assert_equal(len(got), 2, "rows")
+    assert_equal(got[0], 6, "first")
+    assert_equal(got[1], 5, "second")
+
+
+def test_a_sort_puts_the_nulls_where_it_was_told_to() raises:
+    var pipeline = Pipeline(gappy_frame())
+    pipeline.add(Node(Sort([0], [False], [True])))
+    var out = pipeline^.run()
+    var there = present(out, "n")
+    assert_equal(len(there), 6, "rows")
+    assert_false(there[0], "the first is missing")
+    assert_false(there[1], "and so is the second")
+    for i in range(2, 6):
+        assert_true(there[i], "row " + String(i) + " has a value")
+    var got = read_back(out, "n")
+    assert_equal(got[2], 1, "then the values, upwards")
+    assert_equal(got[5], 6, "to the largest")
+
+
+def test_a_sort_can_put_the_nulls_at_the_other_end() raises:
+    var pipeline = Pipeline(gappy_frame())
+    pipeline.add(Node(Sort([0], [False], [False])))
+    var out = pipeline^.run()
+    var there = present(out, "n")
+    assert_true(there[0], "a value first")
+    assert_false(there[4], "and the two missing ones at the end")
+    assert_false(there[5], "both of them")
+
+
+def test_a_sort_on_two_keys_breaks_the_first_key_ties() raises:
+    # The mask is the dominant key and the number refines it, so the rows the
+    # mask kept come last and each run is ordered by the number inside it.
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Sort([1, 0], [False, True], [False, False])))
+    var out = pipeline^.run()
+    var got = read_back(out, "n")
+    assert_equal(got[0], 5, "the largest of the two it dropped")
+    assert_equal(got[1], 2, "then the other")
+    assert_equal(got[2], 6, "then the largest it kept")
+    assert_equal(got[5], 1, "down to the smallest")
+
+
+def test_a_sort_with_no_key_is_refused() raises:
+    with assert_raises(contains="does not order anything"):
+        _ = Sort(List[Int](), List[Bool](), List[Bool]())
+
+
+def test_a_sort_whose_flags_do_not_match_its_keys_is_refused() raises:
+    with assert_raises(contains="null placements"):
+        _ = Sort([0, 1], [True], [False, False])
+
+
+def test_a_sort_on_a_column_the_chunk_does_not_have_is_refused() raises:
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="outside a schema of 2 columns"):
+        pipeline.add(Node(Sort([7], [False], [False])))
+
+
+def test_a_sort_over_nothing_gives_nothing_back() raises:
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Limit(0)))
+    pipeline.add(Node(Sort([0], [False], [False])))
+    var out = pipeline^.run()
+    assert_equal(len(out), 0, "rows")
+    assert_equal(out.width(), 2, "and the schema still describes the result")
 
 
 def main() raises:

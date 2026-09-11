@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a plan with an ORDER BY runs
+
+There is a physical sort now, so a plan with a sort in it lowers instead of being refused. It is a breaker, and the one kind of breaker that cannot be anything else: a group by holds one row per group because two rows with the same key are one answer, and a sort has no such reduction, so the first row of the answer is not known until the last row of the input has arrived and there is nothing shorter than the input to hold in the meantime.
+
+What it does instead of getting smaller is get cheaper per row. The sort is the least significant digit pass that was already there, run once per key from the last key to the first, each pass refining the permutation the one after it produced rather than starting again. Every pass is stable so the earlier key stays dominant, and none of them compares a tuple. Then the permutation is applied to every column once, which is the only place the rows move.
+
+Chunk boundaries survive it. The input's row counts are recorded on the way in and the output is cut at the same places, so a sort in the middle of a pipeline does not turn ten million rows into one chunk for whatever is above it.
+
+A sort key is an expression rather than a column, so `ORDER BY a + b` appends the sum and sorts on that. The appended column is dropped by a projection above the sort rather than below it, which is the one place that happens, because a sort hands its input schema back unchanged and a position below it is the same position above it.
+
+A limit above a sort is not read by the sort. A sort that only has to get the first n rows right is a different operator with a heap in it, and the limit is still sitting above the sort and still doing the cutting, so ignoring the bound is slow rather than wrong.
+
+Part of #309.
+
 ### Added: a plan with a join runs
 
 Lowering turns a join into the probe operator rather than refusing it, so a plan that reads two tables produces rows. A pipeline is a line and a join has two inputs, which sounds like it cannot be one of these and is not: the operator holds its build side whole and hashes it once before the first chunk arrives, so only the left side is a stream and the join sits on that side's line the same way a filter does.

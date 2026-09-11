@@ -633,15 +633,138 @@ def test_a_reduction_that_cannot_fold_a_chunk_at_a_time_is_refused() raises:
         _ = lower(plan, root, one_frame())
 
 
-def test_a_sort_is_refused_by_name() raises:
+def test_a_sort_puts_the_rows_in_order() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var root = plan.sort(scan, [qty], [False], [True])
+    var out = run(plan, root)
+
+    same(
+        read_back(out, "qty"),
+        [1, 3, 5, 8, 12, 15, 20, 25, 30, 40],
+        "ascending",
+    )
+
+
+def test_a_sort_carries_the_other_columns_with_the_row() raises:
+    # The point of sorting a frame rather than a column. A price that stayed
+    # where it was would be a wrong answer that reads like a right one.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var root = plan.sort(scan, [qty], [False], [True])
+    var out = run(plan, root)
+
+    same(
+        read_back(out, "price"),
+        [100, 7, 10, 9, 5, 6, 2, 3, 4, 1],
+        "the price of each row",
+    )
+
+
+def test_a_sort_descending_reverses_it() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var root = plan.sort(scan, [qty], [True], [True])
+    var out = run(plan, root)
+
+    same(
+        read_back(out, "qty"),
+        [40, 30, 25, 20, 15, 12, 8, 5, 3, 1],
+        "descending",
+    )
+
+
+def test_a_sort_keeps_the_chunks_it_was_given() raises:
+    # Ten rows arrive as three, four and three, and a breaker that handed the
+    # ten back as one chunk would make every operator above it pay for the
+    # sort's memory rather than its own.
     var plan = Plan()
     var scan = plan.scan("sales", List[String](), 0)
     var qty = plan.exprs.column("qty")
     var root = plan.sort(scan, [qty], [False], [True])
     _ = bind(plan, root, schemas())
+    var out = lower(plan, root, one_frame())^.run()
 
-    with assert_raises(contains="no operator for a SORT node"):
-        _ = lower(plan, root, one_frame())
+    assert_equal(out.columns[0].num_chunks(), 3, "three chunks back")
+
+
+def test_a_second_key_orders_what_the_first_one_tied() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var ten = plan.exprs.literal(Value(Int64(10)))
+    var band = plan.exprs.binary(BinaryOp.GT, plan.exprs.column("qty"), ten)
+    var over = plan.project(
+        scan,
+        [band, plan.exprs.column("qty")],
+        ["over", "qty"],
+    )
+    var root = plan.sort(
+        over,
+        [plan.exprs.column("over"), plan.exprs.column("qty")],
+        [False, True],
+        [True, True],
+    )
+    var out = run(plan, root)
+
+    # Everything at or under ten first, and inside each of those two runs the
+    # quantity downwards, which only the second key decides.
+    same(
+        read_back(out, "qty"),
+        [8, 5, 3, 1, 40, 30, 25, 20, 15, 12],
+        "the second key inside the first",
+    )
+
+
+def test_a_key_may_be_computed_rather_than_a_column() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var total = plan.exprs.binary(
+        BinaryOp.MUL, plan.exprs.column("qty"), plan.exprs.column("price")
+    )
+    var root = plan.sort(scan, [total], [True], [True])
+    var out = run(plan, root)
+
+    # The computed key is read and never emitted, so the two input columns are
+    # what comes out and the products are in order behind them.
+    assert_equal(out.width(), 2, "the input columns and nothing else")
+    same(
+        read_back(out, "qty"),
+        [30, 1, 15, 25, 8, 12, 5, 20, 40, 3],
+        "by quantity times price",
+    )
+
+
+def test_a_sort_under_a_limit_is_the_top_of_it() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var sorted = plan.sort(scan, [qty], [True], [True])
+    var root = plan.limit(sorted, 0, 3)
+    var out = run(plan, root)
+
+    same(read_back(out, "qty"), [40, 30, 25], "the three largest")
+
+
+def test_a_sort_over_an_aggregate_orders_the_groups() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var ten = plan.exprs.literal(Value(Int64(10)))
+    var band = plan.exprs.binary(BinaryOp.GT, plan.exprs.column("qty"), ten)
+    var over = plan.project(
+        scan, [band, plan.exprs.column("qty")], ["over", "qty"]
+    )
+    var total = plan.exprs.aggregate(AggKind.SUM, plan.exprs.column("qty"))
+    var grouped = plan.aggregate(
+        over, [plan.exprs.column("over")], [total], ["over", "total"]
+    )
+    var root = plan.sort(grouped, [plan.exprs.column("total")], [False], [True])
+    var out = run(plan, root)
+
+    # Seventeen at or under ten, a hundred and forty two over it.
+    same(read_back(out, "total"), [17, 142], "the group totals in order")
 
 
 def test_a_distinct_is_refused_by_name() raises:
