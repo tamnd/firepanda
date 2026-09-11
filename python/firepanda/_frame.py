@@ -772,6 +772,15 @@ class Rolling(RollingMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def median(
+        self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
+    ) -> Series | DataFrame:
+        """The middle value of the window. Over every rolling window."""
+        try:
+            return self._reduce("median", numeric_only, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
 
 class Expanding(ExpandingMixin):
     """A window that starts at the first row and grows, waiting for a reduction.
@@ -963,6 +972,15 @@ class Expanding(ExpandingMixin):
         """The excess kurtosis of the values in the window. Over every expanding window."""
         try:
             return self._reduce("kurt", numeric_only)
+        except Exception as error:
+            raise translate(error) from None
+
+    def median(
+        self, numeric_only: bool = False, engine: Any = None, engine_kwargs: Any = None
+    ) -> Series | DataFrame:
+        """The middle value of the window. Over every expanding window."""
+        try:
+            return self._reduce("median", numeric_only, engine, engine_kwargs)
         except Exception as error:
             raise translate(error) from None
 

@@ -1054,18 +1054,21 @@ WINDOWED: tuple[tuple[str, str], ...] = (
     ("sem", "The standard error of the mean of the values in the window."),
     ("skew", "The skewness of the values in the window."),
     ("kurt", "The excess kurtosis of the values in the window."),
+    ("median", "The middle value of the window."),
 )
-"""The ten reductions a window can be folded through, and what each answers.
+"""The eleven reductions a window can be run through, and what each answers.
 
-Ten rather than pandas' twenty six, and the ten are the ones that can be carried
-from one window to the next rather than recomputed. `firepanda/kernel/window.mojo`
-says which of the other sixteen need a different data structure and why each of
-them is its own piece of work.
+Eleven rather than pandas' twenty six. Ten of them are the ones that can be
+carried from one window to the next as a number or a state rather than
+recomputed, and the eleventh is the median, which is carried as a count of the
+window's values by rank instead. `firepanda/kernel/window.mojo` says which of
+the other fifteen are still waiting and why each of them is its own piece of
+work.
 
-Three of the ten read a degrees of freedom and the other seven do not, which is
-one of the two places this table is not uniform, and `_window_members` splits on
-it rather than declaring an argument the other seven would have to ignore. The
-other is the engine arguments, which four of the ten do not declare.
+Three of the eleven read a degrees of freedom and the other eight do not, which
+is one of the two places this table is not uniform, and `_window_members` splits
+on it rather than declaring an argument the other eight would have to ignore.
+The other is the engine arguments, which four of the eleven do not declare.
 """
 
 
@@ -1181,12 +1184,13 @@ def _window_members(py: str) -> tuple[Member, ...]:
             )
         )
     for name, what in WINDOWED:
-        # Four of the ten take no engine arguments in pandas and so take none
-        # here. `count` never had a numba path to choose. `sem` is written in
-        # pandas as a deviation over a root count rather than as a kernel, so
+        # Four of the eleven take no engine arguments in pandas and so take
+        # none here. `count` never had a numba path to choose. `sem` is written
+        # in pandas as a deviation over a root count rather than as a kernel, so
         # there was never a path there either to offer. `skew` and `kurt` have
         # kernels and still declare nothing, which is pandas' own inconsistency
         # and is copied because the signature is the surface being matched.
+        # `median` does declare both, which is why it is not in that list.
         counting = name == "count"
         spread = name in ("var", "std", "sem")
         engined = not counting and name not in ("sem", "skew", "kurt")

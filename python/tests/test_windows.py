@@ -1,7 +1,8 @@
-"""The ten window reductions, checked against a running pandas.
+"""The eleven window reductions, checked against a running pandas.
 
-The kernel has its own tests in `tests/test_window.mojo` and `tests/
-test_spread.mojo` and they check the arithmetic. These check the surface: that
+The kernel has its own tests in `tests/test_window.mojo`, `tests/
+test_spread.mojo` and `tests/test_ordered.mojo` and they check the arithmetic.
+These check the surface: that
 the nine arguments `s.rolling(...)` takes are spelled the way pandas spells them,
 that the ones this library has no implementation for are refused by name rather
 than ignored, and that the answers still match once the arguments have crossed
@@ -47,11 +48,23 @@ HOLED = [1.0, None, 3.0, None, 5.0, 6.0]
 """Six rows with the gaps arranged so that no three wide window holds three
 values, which is what makes `min_periods` visible."""
 
-WINDOWED = ["sum", "mean", "count", "min", "max", "var", "std", "sem", "skew", "kurt"]
-"""The ten reductions, every one of which has to answer over every placement.
+WINDOWED = [
+    "sum",
+    "mean",
+    "count",
+    "min",
+    "max",
+    "var",
+    "std",
+    "sem",
+    "skew",
+    "kurt",
+    "median",
+]
+"""The eleven reductions, every one of which has to answer over every placement.
 
 Written once because a reduction added to the library and not added here would
-leave four tests passing on nine names and looking complete.
+leave four tests passing on ten names and looking complete.
 """
 
 CARRIED = ("skew", "kurt")
@@ -124,7 +137,7 @@ def slack(kind: str) -> float:
 @needs_pandas
 @pytest.mark.parametrize("kind", WINDOWED)
 def test_every_reduction_matches_over_a_plain_window(firepanda: ModuleType, kind: str) -> None:
-    """The ten names, over a five wide window with nothing unusual about it."""
+    """The eleven names, over a five wide window with nothing unusual about it."""
     assert same(
         getattr(made(firepanda).rolling(5), kind)(),
         getattr(theirs().rolling(5), kind)(),
@@ -135,7 +148,7 @@ def test_every_reduction_matches_over_a_plain_window(firepanda: ModuleType, kind
 @needs_pandas
 @pytest.mark.parametrize("kind", WINDOWED)
 def test_every_reduction_matches_over_an_expanding_window(firepanda: ModuleType, kind: str) -> None:
-    """The same ten with no near end, which is the other half of the surface."""
+    """The same eleven with no near end, which is the other half of the surface."""
     assert same(
         getattr(made(firepanda).expanding(), kind)(),
         getattr(theirs().expanding(), kind)(),
@@ -450,7 +463,7 @@ def test_the_standard_error_is_the_one_spread_with_no_engine_to_choose(
     """pandas writes `sem` as `std(ddof) / count ** 0.5` rather than as a kernel,
     so it never had a numba path to offer and its signature has no `engine` on
     it. Declaring one here that pandas does not have would fail the signature
-    parity check, so `sem` is one of the four reductions of the ten that takes
+    parity check, so `sem` is one of the four reductions of the eleven that takes
     only the two arguments."""
     with pytest.raises(TypeError):
         made(firepanda).rolling(3).sem(engine="cython")
@@ -629,6 +642,92 @@ def test_a_large_value_leaving_the_window_does_not_take_the_answer_with_it(
     assert same(got, theirs(rows).rolling(3).var())
 
 
+@needs_pandas
+def test_a_median_is_a_value_out_of_the_window_and_not_an_average_of_it(
+    firepanda: ModuleType,
+) -> None:
+    """A column where the mean and the middle are nothing like each other, so a
+    median that had been folded rather than selected would be visibly wrong. Both
+    the odd width, where the answer is one of the values, and the even width,
+    where it is the mean of two of them, are checked, because those are two
+    different paths through the selection."""
+    rows = [1.0, 2.0, 10.0, 3.0, 1.0, 20.0, 2.0]
+    assert firepanda.Series(rows, name="v").rolling(3).median().tolist()[2:] == [
+        2.0,
+        3.0,
+        3.0,
+        3.0,
+        2.0,
+    ]
+    assert same(
+        firepanda.Series(rows, name="v").rolling(4).median(),
+        theirs(rows).rolling(4).median(),
+    )
+    assert same(
+        firepanda.Series(rows, name="v").expanding().median(),
+        theirs(rows).expanding().median(),
+    )
+
+
+@needs_pandas
+def test_a_median_over_a_window_holding_an_infinity_is_a_value(
+    firepanda: ModuleType,
+) -> None:
+    """pandas replaces every infinity in the column with a missing row before it
+    forms a window, so a three wide window over one, an infinity and two holds
+    two values to pandas and answers one and a half. Here the infinity is a value
+    that sorts above every finite one, so the window holds three and the middle
+    of them is two. The last row is the first window the infinity has left and the
+    two agree there, which is the point: this is a disagreement about what the
+    window holds and not one that outlives it."""
+    rows = [1.0, math.inf, 2.0, 3.0, 4.0]
+    got = firepanda.Series(rows, name="v").rolling(3, min_periods=1).median().tolist()
+    them = theirs(rows).rolling(3, min_periods=1).median().tolist()
+    assert got[2] == 2.0
+    assert them[2] == 1.5
+    assert math.isinf(got[1])
+    assert them[1] == 1.0
+    assert got[3] == 3.0
+    assert them[3] == 2.5
+    assert got[4] == them[4] == 3.0
+
+
+@needs_pandas
+def test_a_median_of_two_huge_values_does_not_overflow_where_pandas_does(
+    firepanda: ModuleType,
+) -> None:
+    """The mean of the largest finite double and itself is that double, and
+    pandas answers an infinity because it adds the two before halving the sum.
+    This halves each value instead, but only in the window where the sum came out
+    infinite, so the rows either side still agree with pandas to the bit."""
+    huge = 1.7976931348623157e308
+    rows = [huge, huge, 1.0, 2.0]
+    got = firepanda.Series(rows, name="v").rolling(2).median().tolist()
+    them = theirs(rows).rolling(2).median().tolist()
+    assert got[1] == huge
+    assert math.isinf(them[1])
+    assert got[2:] == them[2:] == [8.988465674311579e307, 1.5]
+
+
+@needs_pandas
+def test_a_median_takes_an_engine_and_no_degrees_of_freedom(
+    firepanda: ModuleType,
+) -> None:
+    """pandas declares `engine` and `engine_kwargs` on `median` and no `ddof`,
+    which is a different pair of choices from every other reduction that carries
+    a state, so both halves are checked against pandas refusing the same way."""
+    assert same(
+        made(firepanda).rolling(3).median(engine="cython"),
+        theirs().rolling(3).median(engine="cython"),
+    )
+    with pytest.raises(NotImplementedError, match="engine"):
+        made(firepanda).rolling(3).median(engine="numba")
+    with pytest.raises(TypeError):
+        made(firepanda).rolling(3).median(ddof=0)
+    with pytest.raises(TypeError):
+        theirs().rolling(3).median(ddof=0)
+
+
 COLUMNS: dict[str, list[Any]] = {"a": ROWS, "b": [x * 3 for x in ROWS], "c": HOLED + ROWS[:4]}
 """Three columns of ten rows, one of them holed, so that a frame window has both
 a column where every window fills and one where they do not."""
@@ -657,7 +756,7 @@ def matching(mine: Any, them: Any, tolerance: float = 0.0) -> bool:
 @needs_pandas
 @pytest.mark.parametrize("kind", WINDOWED)
 def test_every_reduction_matches_over_a_frame(firepanda: ModuleType, kind: str) -> None:
-    """The same ten names over a frame, which answers a frame of the same
+    """The same eleven names over a frame, which answers a frame of the same
     columns in the same order rather than a column."""
     mine = getattr(framed(firepanda).rolling(4), kind)()
     them = getattr(their_frame().rolling(4), kind)()
@@ -668,7 +767,7 @@ def test_every_reduction_matches_over_a_frame(firepanda: ModuleType, kind: str) 
 @needs_pandas
 @pytest.mark.parametrize("kind", WINDOWED)
 def test_every_reduction_matches_over_an_expanding_frame(firepanda: ModuleType, kind: str) -> None:
-    """The ten again over the window with no near end."""
+    """The eleven again over the window with no near end."""
     assert matching(
         getattr(framed(firepanda).expanding(), kind)(),
         getattr(their_frame().expanding(), kind)(),

@@ -452,7 +452,7 @@ def test_the_parameters_that_do_not_describe_a_window_are_refused() raises:
     with assert_raises(contains="closed is one of"):
         _ = edge_named("outer")
     with assert_raises(contains="no window reduction is called"):
-        _ = op_named("median")
+        _ = op_named("mode")
 
 
 def test_where_the_window_sits_is_one_function() raises:
