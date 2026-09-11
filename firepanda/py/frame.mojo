@@ -664,6 +664,54 @@ struct PyDataFrame(Movable, Writable):
             raise retagged(COLUMN, cause)
 
     @staticmethod
+    def top_rows(
+        py_self: PythonObject,
+        column: PythonObject,
+        n: PythonObject,
+        largest: PythonObject,
+        keep: PythonObject,
+    ) raises -> PythonObject:
+        """The `n` best rows of a frame, by one column.
+
+        One entry point for `nlargest` and `nsmallest` rather than two, because
+        the two differ by a flag the whole way down and a second binding would
+        be the same six lines with one word changed.
+
+        Two things can go wrong under here and they are different kinds of
+        wrong. A name that is not a column is pandas' `KeyError` and a column
+        that cannot be ranked is its `TypeError`, and the core says both with a
+        plain error. They are told apart by the message, the same way the
+        import path does it above, so the rule is written down here: the only
+        refusal in this path that is about a type uses the word numeric.
+
+        Args:
+            py_self: The frame.
+            column: The name of the column to rank by.
+            n: How many rows to keep.
+            largest: True for the top of the column, False for the bottom.
+            keep: `"first"` or `"last"`, checked by the caller.
+
+        Returns:
+            A new frame of the kept rows, best first.
+        """
+        var wanted = whole(n, "n")
+        var high = flag(largest, "largest")
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        Self._frame(py_self)[]
+                        .frame[]
+                        ._top_rows(String(column), wanted, high, String(keep))
+                    )
+                )
+            )
+        except cause:
+            if "numeric" in String(cause):
+                raise retagged(DTYPE, cause)
+            raise retagged(COLUMN, cause)
+
+    @staticmethod
     def reduce(
         py_self: PythonObject, kind: PythonObject, param: PythonObject
     ) raises -> PythonObject:

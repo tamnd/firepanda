@@ -64,6 +64,9 @@ class DataFrame:
     def drop_duplicates(self, subset: list[str], keep: str) -> DataFrame:
         """The frame with the repeated rows removed, by a chosen rule."""
         ...
+    def top_rows(self, column: str, n: int, largest: bool, keep: str) -> DataFrame:
+        """The n best rows of the frame, by one column."""
+        ...
     def reduce(self, kind: str, param: float) -> Series:
         """Every column reduced to one value, as a series of them."""
         ...

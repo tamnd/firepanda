@@ -612,6 +612,16 @@ def group_top_rows_any(
         Error: As `group_top_rows` does, and if the column is not numeric.
     """
     _check(len(col), len(codes), n)
+
+    # The physical dtype is not enough to decide this. A string column is laid
+    # out as `uint8` and a dictionary column as whatever its codes are, so the
+    # loop below would match both and would then rank a buffer of bytes or a
+    # buffer of ordinals as if it were the column. The question is about the
+    # logical type, so it is asked of the logical type, and the answer is the
+    # types whose values buffer holds one comparable number per row.
+    if not (col.type.is_numeric() or col.type.is_temporal()):
+        raise Error("group top: the ranked column must be a numeric one")
+
     comptime for candidate in NUMERIC:
         if col.dtype() == candidate:
             if largest:

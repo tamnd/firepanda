@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import datetime
 import math
+import operator
 import re
 import warnings
 from typing import TYPE_CHECKING, Any
@@ -1948,6 +1949,73 @@ class DataFrameMixin:
             if ignore_index:
                 kept = kept.reset_index(True)
             return DataFrame._wrap(kept)
+        except Exception as error:
+            raise translate(error) from None
+
+    def _top_rows(self, n: Any, columns: Any, keep: Any, largest: bool) -> DataFrame:
+        """The `n` rows holding the best values in one column.
+
+        Four of pandas' rules are settled here rather than under the boundary,
+        and each of them is a rule about what a caller is allowed to write
+        rather than about which rows come back.
+
+        A count that is not a whole number is refused by asking Python to make
+        an index out of it, which is what pandas does and which gives the same
+        sentence back for free. A negative count is not refused, because
+        pandas answers an empty frame for it and a count of zero and a count of
+        minus one are the same request.
+
+        A bare name is one column and a list is a list of them, and a name
+        written twice is read once, all as `duplicated` does it. An empty list
+        is an empty frame with the columns kept, which is pandas' answer and
+        is not obviously right but is not ours to change. More than one name
+        is a refusal: pandas ranks by the first column and breaks its ties with
+        the second, and the kernel here holds one value per slot and has no
+        second value to break anything with.
+
+        `keep="all"` is the other refusal. It answers more than `n` rows when
+        the `n`th value is tied, and a fixed table of `n` slots per group
+        cannot hold an answer whose height depends on the data in it. It needs
+        a second pass that finds the cut value and then takes every row equal
+        to it, which is a different piece of work rather than a flag.
+
+        Args:
+            n: How many rows to keep.
+            columns: The column to rank by, or a one item list holding it.
+            keep: Which row of a tie survives.
+            largest: True for the top of the column, False for the bottom.
+
+        Returns:
+            A new frame of the kept rows, best first.
+        """
+        from ._frame import DataFrame
+
+        wanted = operator.index(n)
+        if keep not in ("first", "last", "all"):
+            raise InvalidArgumentError('keep must be either "first", "last" or "all"')
+        who = "nlargest" if largest else "nsmallest"
+        if keep == "all":
+            raise UnsupportedError(
+                f"{who} with keep='all' answers more than n rows when the last"
+                " value is tied, which the kernel underneath cannot express"
+            )
+
+        if isinstance(columns, str) or not hasattr(columns, "__iter__"):
+            written = [columns]
+        else:
+            written = list(columns)
+        names = list(dict.fromkeys(str(one) for one in written))
+
+        try:
+            if not names:
+                return DataFrame._wrap(self._inner.slice_rows(0, 0))
+            if len(names) > 1:
+                raise UnsupportedError(
+                    f"{who} ranks by one column here, and {len(names)} were"
+                    " given, because breaking a tie with a second column is"
+                    " work the kernel underneath does not do"
+                )
+            return DataFrame._wrap(self._inner.top_rows(names[0], wanted, largest, keep))
         except Exception as error:
             raise translate(error) from None
 

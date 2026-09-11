@@ -112,6 +112,9 @@ def register(mut module: PythonModuleBuilder) raises:
         "drop_duplicates",
         docstring="The frame with the repeated rows removed, by a chosen rule.",
     )
+    _ = dataframe.def_method[PyDataFrame.top_rows](
+        "top_rows", docstring="The n best rows of the frame, by one column."
+    )
     _ = dataframe.def_method[PyDataFrame.reduce](
         "reduce",
         docstring="Every column reduced to one value, as a series of them.",
