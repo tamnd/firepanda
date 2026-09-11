@@ -489,7 +489,7 @@ def _join_of(word: String) raises -> JoinKind:
     Raises:
         Error: If nothing is called that.
     """
-    for code in range(Int(JoinKind.CROSS.code) + 1):
+    for code in range(Int(JoinKind.MARK.code) + 1):
         var kind = JoinKind(UInt8(code))
         if String(kind) == word:
             return kind
@@ -831,11 +831,11 @@ def _node_json(
             "}",
         )
     if node.kind == NodeKind.JOIN:
-        out += String(
-            '"kind": "join", "how": ',
-            _quoted(String(JoinKind(UInt8(node.op)))),
-            ', "on": [',
-        )
+        var how = JoinKind(UInt8(node.op))
+        out += String('"kind": "join", "how": ', _quoted(String(how)))
+        if how == JoinKind.MARK:
+            out += String(', "mark": ', _quoted(node.names[0]))
+        out += ', "on": ['
         for i in range(node.parts):
             if i != 0:
                 out += ", "
@@ -1634,7 +1634,12 @@ def _join_node_of(
         ids,
         expr_ids,
     )
-    return plan.join(left, right, left_keys^, right_keys^, how)
+    var mark = String()
+    if how == JoinKind.MARK:
+        mark = text_of(
+            bytes, members[_need(bytes, members, "mark", "a mark join")].value
+        )
+    return plan.join(left, right, left_keys^, right_keys^, how, mark^)
 
 
 def _over_one_of(

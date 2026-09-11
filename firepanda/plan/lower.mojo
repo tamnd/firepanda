@@ -1722,6 +1722,9 @@ def _lower_join(
     if kind.keeps_right_columns():
         for i in range(len(build.schema)):
             wanted.append(width + i)
+    var mark = String()
+    if kind == JoinKind.MARK:
+        mark = plan.nodes[at].names[0].copy()
     pipe.add(
         Node(
             Join(
@@ -1734,6 +1737,7 @@ def _lower_join(
                 wanted^,
                 plan.exprs.nodes[left_key].at,
                 plan.exprs.nodes[right_key].at,
+                mark^,
             )
         )
     )

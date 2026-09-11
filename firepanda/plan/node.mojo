@@ -649,6 +649,7 @@ struct Plan(Movable, Sized):
         var left_keys: List[Int],
         var right_keys: List[Int],
         kind: JoinKind,
+        var mark: String = String(),
     ) raises -> Int:
         """Builds a join.
 
@@ -656,22 +657,47 @@ struct Plan(Movable, Sized):
         the right keys, with `parts` at the left key count, so the pair at
         position `i` is `exprs[i]` against `exprs[parts + i]`.
 
+        A mark join adds a column to the left side rather than taking rows away
+        from it, so it is the one kind that has an output name to settle, and
+        that name is `mark`. It goes in `names`, which every other kind leaves
+        empty.
+
         Args:
             left: The left input.
             right: The right input.
             left_keys: The keys on the left.
             right_keys: The keys on the right.
             kind: Which rows to keep.
+            mark: What the mark join's boolean column is called. Consumed.
+                Required for a mark join and refused for every other kind.
 
         Returns:
             The index of the new node.
 
         Raises:
             If either input is not in the plan, a key is not in the arena or is
-            not elementwise, or the two key lists are different lengths.
+            not elementwise, the two key lists are different lengths, or the
+            mark name is missing on a mark join or given on anything else.
         """
         self.check(left)
         self.check(right)
+        if kind == JoinKind.MARK:
+            if mark.byte_length() == 0:
+                raise Error(
+                    "a mark join hands out a boolean column and the column has"
+                    " to be called something, so the name is not optional"
+                )
+        elif mark.byte_length() != 0:
+            raise Error(
+                String(
+                    "a ",
+                    kind,
+                    (
+                        " join was given the name of a mark column, and the"
+                        " mark column is the mark join's"
+                    ),
+                )
+            )
         if len(left_keys) != len(right_keys):
             raise Error(
                 String(
@@ -690,13 +716,16 @@ struct Plan(Movable, Sized):
         var exprs = left_keys^
         for i in range(len(right_keys)):
             exprs.append(right_keys[i])
+        var names = List[String]()
+        if kind == JoinKind.MARK:
+            names.append(mark^)
         return self._add(
             PlanNode(
                 NodeKind.JOIN,
                 [left, right],
                 exprs^,
                 parts,
-                List[String](),
+                names^,
                 List[Bool](),
                 Int(kind.code),
                 0,

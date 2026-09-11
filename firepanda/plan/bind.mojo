@@ -778,6 +778,27 @@ def _bind_join(mut plan: Plan, at: Int, done: List[Bound]) raises -> Bound:
         # Both ask a question about the right side and keep none of it, so the
         # output is the left input unchanged.
         return Bound(Schema(copy=left.schema), left.origin.copy())
+    if kind == JoinKind.MARK:
+        # The same question kept as an answer instead of acted on, so the output
+        # is the left input with one boolean on the end of it. It is nullable
+        # whatever the keys are, since a row that matched nothing against a side
+        # holding a null does not know whether it matched.
+        var name = plan.nodes[at].names[0].copy()
+        if left.schema.has(name):
+            raise Error(
+                String(
+                    "a mark join was told to call its column '",
+                    name,
+                    "', and the left side already has a column of that name",
+                )
+            )
+        var fields = List[Field]()
+        for i in range(len(left.schema)):
+            fields.append(left.schema[i].copy())
+        fields.append(Field(name^, LogicalType.BOOL))
+        var origin = left.origin.copy()
+        origin.append(UNBOUND)
+        return Bound(Schema(fields^), origin^)
     return _widen(
         left,
         right,
