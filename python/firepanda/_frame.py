@@ -1908,6 +1908,20 @@ class DataFrame(DataFrameMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def nlargest(self, n: int, columns: Any, keep: Any = "first") -> DataFrame:
+        """The n rows holding the largest values in one column."""
+        try:
+            return self._top_rows(n, columns, keep, True)
+        except Exception as error:
+            raise translate(error) from None
+
+    def nsmallest(self, n: int, columns: Any, keep: Any = "first") -> DataFrame:
+        """The n rows holding the smallest values in one column."""
+        try:
+            return self._top_rows(n, columns, keep, False)
+        except Exception as error:
+            raise translate(error) from None
+
     def __arrow_c_schema__(self) -> object:
         """The frame's Arrow schema, as an arrow_schema PyCapsule."""
         try:

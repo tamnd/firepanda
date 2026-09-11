@@ -11,12 +11,18 @@ definition of a top-n: no row outside a group's kept set beats the worst row
 inside it, and exactly `kept - 1` rows beat that worst row. Both halves are one
 pass over the column and neither of them knows how the kernel works. It is sized
 past `TOP_PRIVATE_ROWS` so the parallel route and the fold are what get checked.
+
+The last group of tests is the ungrouped frame spelling, `nlargest` and
+`nsmallest`, which is the same kernel with one group in it. Those answers are
+written down from what pandas gives for the same eight rows, because the
+ordering of a tie is the part that is easy to get almost right.
 """
 
-from std.testing import TestSuite, assert_equal
+from std.testing import TestSuite, assert_equal, assert_raises
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
+from firepanda.array.strings import strings_from_list
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.series import Series
 from firepanda.kernel.topn import group_top_rows, group_top_rows_any
@@ -288,6 +294,182 @@ def test_the_frame_spelling_keeps_the_rows_the_kernel_picked() raises:
     var least = bottom.column("v").as_typed[DType.float64]()
     assert_equal(least[0], 10.0, "the first group's smallest")
     assert_equal(least[1], 20.0, "the second group's smallest")
+
+
+def _ranked() raises -> DataFrame:
+    """A frame with a tied ranking column and a row number beside it.
+
+    The keys repeat on purpose, so that every answer below turns on the tie
+    rule rather than on the ordering of distinct values. The `row` column is
+    there because asserting on which rows came back is the whole question and
+    reading them out of a column is plainer than reading them off the labels.
+
+    Returns:
+        The frame, eight rows of it.
+    """
+    var row = Array[DType.int64](8)
+    var key = Array[DType.int64](8)
+    var keys = [3, 1, 3, 2, 1, 3, 2, 1]
+    for i in range(8):
+        row.set_valid(i, Int64(i))
+        key.set_valid(i, Int64(keys[i]))
+    var series = List[Series]()
+    series.append(Series("row", row^))
+    series.append(Series("key", key^))
+    return DataFrame.from_series(series^)
+
+
+def _rows_of(df: DataFrame) raises -> List[Int]:
+    """Reads the row numbers a result came back with.
+
+    Args:
+        df: A frame that came out of one of the top n methods.
+
+    Returns:
+        The `row` column as a list, in the order the frame holds it.
+    """
+    var column = df.column("row").as_typed[DType.int64]()
+    var out = List[Int](capacity=len(column))
+    for i in range(len(column)):
+        out.append(Int(column[i]))
+    return out^
+
+
+def test_the_largest_rows_of_a_whole_frame_come_back_best_first() raises:
+    var got = _rows_of(_ranked().nlargest("key", 4))
+    assert_equal(len(got), 4, "four rows kept")
+    assert_equal(got[0], 0, "the first three in the tie at the top")
+    assert_equal(got[1], 2, "then the second of them")
+    assert_equal(got[2], 5, "then the third")
+    assert_equal(got[3], 3, "then the only two")
+
+
+def test_the_smallest_rows_are_the_largest_read_the_other_way() raises:
+    var got = _rows_of(_ranked().nsmallest("key", 3))
+    assert_equal(len(got), 3, "three rows kept")
+    assert_equal(got[0], 1, "the first one")
+    assert_equal(got[1], 4, "the second one")
+    assert_equal(got[2], 7, "the third one")
+
+
+def test_keeping_the_last_of_a_tie_hands_them_back_reversed() raises:
+    # pandas answers 5, 2, 0, 6 here, and the order matters as much as the
+    # membership does. Keeping the last of a tie means reading the column back
+    # to front, so the tied rows arrive in reverse order of appearance.
+    var got = _rows_of(_ranked().nlargest("key", 4, "last"))
+    assert_equal(len(got), 4, "four rows kept")
+    assert_equal(got[0], 5, "the last of the tie at the top comes first")
+    assert_equal(got[1], 2, "then the one before it")
+    assert_equal(got[2], 0, "then the first of them")
+    assert_equal(got[3], 6, "then the later of the two")
+
+
+def test_keeping_the_last_reads_the_small_end_the_same_way() raises:
+    var got = _rows_of(_ranked().nsmallest("key", 3, "last"))
+    assert_equal(len(got), 3, "three rows kept")
+    assert_equal(got[0], 7, "the last of the ones")
+    assert_equal(got[1], 4, "then the middle one")
+    assert_equal(got[2], 1, "then the first")
+
+
+def test_asking_for_more_rows_than_there_are_gives_all_of_them() raises:
+    # The interesting half of this is that the slot table is `n` wide, so a
+    # number written far past the end of the frame has to be cut down before
+    # it is spent rather than after.
+    var got = _rows_of(_ranked().nlargest("key", 1000))
+    assert_equal(len(got), 8, "every row came back")
+    assert_equal(got[0], 0, "still sorted best first")
+    assert_equal(got[7], 7, "and the last of the smallest is last")
+
+
+def test_asking_for_no_rows_gives_an_empty_frame() raises:
+    var got = _ranked().nlargest("key", 0)
+    assert_equal(len(got), 0, "nothing kept")
+    assert_equal(got.width(), 2, "the columns are still there")
+
+
+def _with_nulls() raises -> DataFrame:
+    """A frame whose ranking column is missing half its values.
+
+    Returns:
+        Four rows, two of them present.
+    """
+    var row = Array[DType.int64](4)
+    var value = Array[DType.float64](4)
+    for i in range(4):
+        row.set_valid(i, Int64(i))
+    value.set_valid(0, 1.0)
+    value.set_null(1)
+    value.set_valid(2, 9.0)
+    value.set_null(3)
+    var series = List[Series]()
+    series.append(Series("row", row^))
+    series.append(Series("value", value^))
+    return DataFrame.from_series(series^)
+
+
+def test_a_missing_value_ranks_last_rather_than_dropping_out() raises:
+    # pandas answers rows 2, 0, 1 here. The present values come first in order
+    # and then the answer is padded with the missing ones, because a null sorts
+    # to the end of a ranking and is still a row. The grouped spelling does not
+    # do this, and the difference is on purpose.
+    var got = _rows_of(_with_nulls().nlargest("value", 3))
+    assert_equal(len(got), 3, "the answer is as tall as it was asked for")
+    assert_equal(got[0], 2, "the larger present value")
+    assert_equal(got[1], 0, "then the smaller one")
+    assert_equal(got[2], 1, "then the first of the missing ones")
+
+
+def test_the_padding_walks_forwards_under_both_tie_rules() raises:
+    # pandas pads in row order whichever way round the ranking was read, so the
+    # missing rows do not reverse with everything else.
+    var got = _rows_of(_with_nulls().nlargest("value", 4, "last"))
+    assert_equal(len(got), 4, "every row came back")
+    assert_equal(got[0], 2, "the larger present value still leads")
+    assert_equal(got[1], 0, "then the smaller one")
+    assert_equal(got[2], 1, "then the earlier missing row")
+    assert_equal(got[3], 3, "then the later one")
+
+
+def test_asking_for_fewer_rows_than_are_present_pads_nothing() raises:
+    var got = _rows_of(_with_nulls().nsmallest("value", 2))
+    assert_equal(len(got), 2, "two rows kept")
+    assert_equal(got[0], 0, "the smaller present value")
+    assert_equal(got[1], 2, "then the larger one")
+
+
+def test_the_kept_rows_carry_the_labels_they_had() raises:
+    var got = _ranked().nsmallest("key", 3)
+    assert_equal(len(got.index), 3, "one label per kept row")
+
+
+def test_the_frame_spelling_refuses_a_rule_it_does_not_know() raises:
+    with assert_raises(contains="keep must be"):
+        _ = _ranked().nlargest("key", 2, "all")
+
+
+def test_the_frame_spelling_refuses_a_column_that_is_not_there() raises:
+    with assert_raises():
+        _ = _ranked().nlargest("nope", 2)
+
+
+def test_a_column_of_words_is_refused_rather_than_read_as_bytes() raises:
+    # A string column is laid out as uint8, so a check written against the
+    # physical dtype passes it through and then ranks the bytes of the values
+    # buffer as if they were the column, which answers rows rather than
+    # failing. The check is written against the logical type for that reason.
+    var value = Array[DType.int64](3)
+    for i in range(3):
+        value.set_valid(i, Int64(i))
+    var series = List[Series]()
+    series.append(Series("row", value^))
+    series.append(
+        Series("word", AnyArray(strings_from_list(["pear", "apple", "fig"])))
+    )
+    var df = DataFrame.from_series(series^)
+
+    with assert_raises(contains="numeric"):
+        _ = df.nlargest("word", 2)
 
 
 def main() raises:

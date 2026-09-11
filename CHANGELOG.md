@@ -8,6 +8,30 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the n best rows of a column, without sorting the frame
+
+`DataFrame.nlargest` and `DataFrame.nsmallest`, which are the ungrouped form of the `group_nlargest` and `group_nsmallest` that have been here since the top n kernel was written. There is no new kernel: the ungrouped question is the grouped question asked about a frame with one group in it, so `_top_rows` builds a codes array of zeros as tall as the frame, says there is one group, and hands both to the same erased entry point the grouped methods use.
+
+The zeros are the one allocation this form pays that the grouped form does not, four bytes a row. They could be avoided by teaching the kernel that an absent codes array means one group, which would put a branch inside the loop that reads every row of the column, and paying the four bytes to keep the branch out of that loop is the right way round.
+
+`keep="last"` is implemented by reading the ranked column back to front rather than by teaching the kernel a second tie rule. The rule lives in `_beats`, which is called by two functions, which are called by two more, which are called by the core, so a comptime flag there would double the instantiations of six functions for every dtype the kernel is used with, and what it would buy is one comparison that goes the other way. Reversing the column makes the last row of a tie the first row the kernel sees, and the kept positions are mapped back on the way out. It also reproduces pandas' ordering for that rule, where the tied rows come back in reverse order of appearance, because the reversal does to the output what it did to the input.
+
+The count is cut down to the height of the frame before the slot table is built, since the table is `n` wide per group and a caller who writes a million on a frame of six rows means all six. A count of zero or less is an empty frame rather than a refusal, which is what pandas answers.
+
+A missing value is ranked last and is still a row, which is pandas' answer and is not the kernel's. The kernel never keeps a null or a NaN, so asking for four rows out of a column with three present values gets three back, and pandas pads that to four with the missing ones in row order, under both tie rules. The padding is worked out by elimination, since the kernel keeps every present value it can and so a short answer means every row missing from it is a row whose value is missing. That avoids writing down a second copy of the kernel's rule for what counts as missing, which covers a NaN as well as a null. This is the one place where the ungrouped pair differ from the grouped pair, and the reason is that these two carry pandas' names.
+
+Two things are refused rather than guessed at. `keep="all"` answers more than `n` rows when the last value is tied, and an answer whose height depends on the data cannot come out of a fixed table of slots, so it raises rather than quietly behaving like `keep="first"` and looking correct until there is a tie. Ranking by more than one column is refused for the same kind of reason, since pandas breaks the first column's ties with the second and the kernel holds one value per slot. A one item list is one column and a name written twice is read once, because pandas accepts both.
+
+Details in document 39. Part of #156, after #522.
+
+### Fixed: a column of words could be ranked as a buffer of bytes
+
+`group_top_rows_any` decided whether a column could be ranked by comparing its physical dtype against the numeric ones. A string column is laid out as `uint8` and so it matched, and the kernel then ranked the first few bytes of the values buffer as if they were the column, answering rows about the spelling of the strings rather than refusing. A dictionary column had the same problem through its codes.
+
+This was reachable through `group_nlargest` and `group_nsmallest` before `nlargest` existed, and nothing had noticed because nothing had asked. The check now asks the logical type instead, and accepts the types whose values buffer holds one comparable number per row, which is the numeric ones and the temporal ones. A timestamp is an `int64` count of units and ranking it as one is correct, which is why this is two questions rather than one.
+
+Part of #156, after #522.
+
 ## [0.6.59] - 2026-09-11
 
 Built against Mojo 1.0.0 (ed45d567).
@@ -41,7 +65,6 @@ Lowering now works out what each conjunct leaves behind that a later conjunct st
 TPC-H q6's predicate over six million rows, which is five conditions and the part of that query where the time goes, timed by lowering it and running the pipeline over a generated lineitem: 9.45 milliseconds to 7.93 on a thirty two thread desktop, 78.3 to 61.0 on an eight core server, and 19.2 to 15.0 on an M series laptop. That is between sixteen and twenty two percent, and the spread is what you would expect, since the work removed is memory bandwidth and the machine with the most of it gains the least.
 
 This is a step toward what the engine actually needs, which is a selection vector, and not a substitute for it. Not writing a dead column is worth less than not writing a live one that the next operator is going to filter again, and that is the larger change.
-
 ### Added: which row of a repeat is the one that stays
 
 `DataFrame.duplicated`, and a `keep` parameter on `DataFrame.drop_duplicates`, which had only ever kept the first appearance. The two are one question asked twice: the mask says which rows repeat a key another row already carries, and the drop is that mask inverted and applied. A caller who wants the repeats rather than the survivors could not get them out of `drop_duplicates` before, because the rows that went were gone and their positions with them, and rebuilding them by comparing the frame before against the frame after is a join written by hand.
