@@ -22,6 +22,24 @@ Twelve arguments across the three frame methods are declared and refused by name
 
 Part of #156, after #498.
 
+### Added: projection merging, so the rows are walked once and not once a node
+
+Two projections in a row are now one projection. The upper one reads the lower one's outputs by name, so merging them means putting the lower one's expression where the name was, and `b = a + 1` over `a = x * 2` becomes `b = x * 2 + 1` reading `x` directly. The node that computed `a` stops being reachable and the walk it was doing stops happening.
+
+This is the pass that pays for the two before it. Projection pushdown narrows a node to the columns above it by putting a projection there, predicate pushdown leaves projections behind when a filter moves past one, and a frame API answers `df.assign(a = ...).assign(b = ...)` with one node per call whatever the planner does. So plans arrive here with a line of projections in them, each one walking every row of the chunk below it to hand most of the columns straight back. The q1 shape in the spec has two additions stacked, and folding them into one node takes it from 93 ms to 37 ms. That is not the arithmetic getting faster, it is the second walk not happening.
+
+Unlike predicate pushdown, this one rewrites in place. Moving a filter down makes new parents for old children, which is what the arena's creation order forbids, so that pass has to rebuild the node list. Merging goes the other way: the upper node keeps its index, takes over the lower node's input, and since the upper index was already above the lower one and the lower one was already above its own input, the order still holds. Nothing moves and the indices a caller holds still mean what they did.
+
+The merged out node is left in the arena rather than compacted away. Nothing reaches it from the root, so it costs one struct and no work, and paying for a rebuild to reclaim it would give up the in place property that makes the pass cheap in the first place.
+
+There are three refusals. The lower node has to have exactly one reader, because substituting into two readers turns one evaluation into two, which is the opposite of the point. The lower node's output names have to be distinct, since a name that appears twice resolves to the first and substituting by name would be guessing which was meant, the same refusal projection pushdown makes for the same reason. And an output the upper node reads more than once may only be substituted when it is a plain column or a literal, so `b = a + a` over `a = expensive(x)` is declined rather than merged into computing the expensive thing twice. Common subexpression elimination is the pass that makes that shape safe and until it exists this one keeps its hands off.
+
+The substitution itself is `Expressions.graft`, added next to the three analyses rather than hidden inside the pass, because folding one node's outputs into the node above it is something more than one pass is going to want. It copies only the nodes on the path to a replaced column, so an expression with nothing to replace in it comes back as the index that went in, and an expression handed to it is never rewritten under a node that shares it.
+
+Seventeen tests on the pass and four on the graft. Nothing calls any of this yet and the eager API does not change when it does.
+
+Part of #377.
+
 ### Added: the two ends of a row
 
 Nine more of pandas' fifty seven `str` methods: `strip`, `lstrip`, `rstrip`, `pad`, `center`, `ljust`, `rjust`, `zfill` and `repeat`. They are one piece of work rather than nine because none of them reads the middle of a row. They take characters off the ends or they put characters on the ends, and everything in between passes through untouched, which is a small enough thing to know that four kernel functions in `firepanda/kernel/edges.mojo` cover all nine.

@@ -797,6 +797,102 @@ struct Expressions(Movable, Sized):
         for i in range(len(node.children)):
             self._positions(node.children[i], found)
 
+    def graft(
+        mut self, root: Int, names: List[String], onto: List[Int]
+    ) raises -> Int:
+        """Returns the expression with named columns replaced by expressions.
+
+        What projection merging needs and what any pass that folds one node's
+        outputs into the node above it will need. A project over a project reads
+        the lower one's outputs by name, so collapsing the two into one means
+        putting the lower one's expression where the name was.
+
+        Nothing is rewritten in place, because an expression index may be read
+        by more than one node and an arena that let a caller change one out from
+        under another would be a different data structure. Only the nodes on the
+        path from the root to a replaced column are copied, so an expression
+        with nothing to replace in it comes back as the index that went in.
+
+        Args:
+            root: The expression.
+            names: The column names to replace.
+            onto: The expression to put in place of each, in the same order.
+
+        Returns:
+            The new expression, or `root` when nothing matched.
+
+        Raises:
+            If an expression is not in the arena, or the two lists are different
+            lengths.
+        """
+        self.check(root)
+        if len(names) != len(onto):
+            raise Error(
+                String(
+                    "a graft has ",
+                    len(names),
+                    " names and ",
+                    len(onto),
+                    " expressions to put in their place",
+                )
+            )
+        for i in range(len(onto)):
+            self.check(onto[i])
+        return self._graft(root, names, onto)
+
+    def _graft(
+        mut self, root: Int, names: List[String], onto: List[Int]
+    ) raises -> Int:
+        """Copies one node if anything under it was replaced, and not if not.
+
+        Args:
+            root: The expression.
+            names: The column names to replace.
+            onto: The expression to put in place of each.
+
+        Returns:
+            The new expression, or `root` when nothing under it matched.
+
+        Raises:
+            If an expression is not in the arena.
+        """
+        var kind = self.nodes[root].kind
+        if kind == ExprKind.COLUMN:
+            for i in range(len(names)):
+                if names[i] == self.nodes[root].name:
+                    return onto[i]
+            return root
+
+        var kids = self.nodes[root].children.copy()
+        var grown = List[Int]()
+        var same = True
+        for i in range(len(kids)):
+            var at = self._graft(kids[i], names, onto)
+            if at != kids[i]:
+                same = False
+            grown.append(at)
+        if same:
+            return root
+
+        # The type is not carried over. A grafted node produces whatever its new
+        # children produce and the only honest answer here is to let binding say
+        # so, which is what every caller does next anyway.
+        var name = self.nodes[root].name.copy()
+        var value = self.nodes[root].value.copy()
+        return self._add(
+            Expr(
+                kind,
+                name^,
+                self.nodes[root].at,
+                self.nodes[root].table,
+                value^,
+                self.nodes[root].op,
+                self.nodes[root].rowwise,
+                self.nodes[root].parts,
+                grown^,
+            )
+        )
+
     def names(self, root: Int) raises -> List[String]:
         """Which columns the expression reads, by name.
 
