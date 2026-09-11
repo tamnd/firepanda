@@ -28,7 +28,8 @@ A refusal is one sentence and one argument.
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array
 from firepanda.array.strings import StringArray
-from firepanda.dtype.logical import LogicalType
+from firepanda.array.value import Value
+from firepanda.dtype.logical import LogicalType, TypeKind
 from firepanda.dtype.temporal import TimeUnit, TimeZone
 from firepanda.kernel.temporal import STEP_BYTE, STEP_SLICE, Step, parse_format
 
@@ -906,6 +907,119 @@ def parse_timestamps(
     elif zoned:
         zone = TimeZone(_offset_name(offset))
     return AnyArray(out^.into_data(), LogicalType.timestamp(unit, zone))
+
+
+def parse_instant(bytes: Span[UInt8, _], type: LogicalType) raises -> Value:
+    """Reads one date or timestamp literal into a constant of a column's type.
+
+    This is the one row form of `parse_timestamps` and it exists for the loop it
+    keeps text out of. Nine of the ClickBench queries filter a day range, which
+    in SQL is a column against `'2013-07-01'`, and there are two ways to answer
+    that. One is to parse the literal once, out here, and then run a comparison
+    of two integers over ninety million rows. The other is to compare text and
+    parse it again on every row. The first is the only one worth writing, and the
+    way to make sure it is the one that happens is to turn the literal into a
+    typed constant before anything sees the column.
+
+    The answer comes back at the column's own resolution, so a second column
+    meets a count of seconds and a microsecond column meets a count of
+    microseconds, and the comparison that follows is an integer against an
+    integer with no rescaling of the column in the middle.
+
+    Args:
+        bytes: The literal, in the ISO 8601 that `guess_format` recognises.
+        type: The column's type, which decides the resolution and the clock.
+
+    Returns:
+        A constant of `type` holding the instant the literal names.
+
+    Raises:
+        Error: If the type is not a date or a timestamp, if the literal is not
+            ISO 8601, if it names a date that does not exist, if it carries a
+            clock reading a date column has nowhere to put, if it carries an
+            offset from UTC and the column is naive, or if the column's clock is
+            a rule rather than a fixed offset.
+    """
+    var text = String(StringSlice(unsafe_from_utf8=bytes))
+    if type.kind != TypeKind.DATE and type.kind != TypeKind.TIMESTAMP:
+        raise Error(
+            "temporal: '"
+            + text
+            + "' can be read as an instant, but "
+            + String(type)
+            + " is not a column of instants"
+        )
+
+    var chosen = guess_format(bytes)
+    var fields = read_row(bytes, parse_format(chosen), chosen)
+
+    if type.kind == TypeKind.DATE:
+        # A date column holds whole days, so a literal carrying a clock reading
+        # has part of itself with nowhere to go. Truncating it quietly is the
+        # wrong answer for exactly the case this function was written for: a
+        # filter boundary written as `>= '2013-07-01 12:00:00'` would silently
+        # start keeping the rows from midnight onwards.
+        if (
+            fields.hour != 0
+            or fields.minute != 0
+            or fields.second != 0
+            or fields.nanosecond != 0
+        ):
+            raise Error(
+                "temporal: '"
+                + text
+                + "' carries a time of day and a date column holds whole days,"
+                " so there is nowhere to put it. Compare against a timestamp"
+                " column, or drop the clock reading from the literal."
+            )
+        if fields.has_offset:
+            raise Error(
+                "temporal: '"
+                + text
+                + "' carries an offset from UTC and a date column is not on any"
+                " clock, so the two cannot be compared"
+            )
+        var days = fields.seconds() // SECONDS_PER_DAY
+        return Value.date(Int32(days))
+
+    # A naive column read against a literal that names its own offset has no
+    # answer, because the column's numbers are readings on a clock nobody has
+    # named and the literal's are an instant. pandas refuses the same pair.
+    if fields.has_offset and type.zone.is_naive():
+        raise Error(
+            "temporal: '"
+            + text
+            + "' carries an offset from UTC and the column is naive, so there"
+            " is no one clock to read them both against"
+        )
+
+    # A literal with no offset against a zoned column is a wall clock reading in
+    # that column's zone, which is the reading somebody writing the query has in
+    # front of them. The stored numbers are UTC, so the zone's own offset comes
+    # off before the comparison. A zone whose offset is a rule has no one number
+    # to take off and is refused rather than guessed at, which is the same line
+    # the rest of this library draws.
+    var shift = Int64(0)
+    if not fields.has_offset and not type.zone.is_naive():
+        var known = type.zone.fixed_offset()
+        if not known:
+            raise Error(
+                "temporal: '"
+                + text
+                + "' has no offset in it and the column is on "
+                + String(type.zone)
+                + ", whose offset is a rule rather than a number, so there is"
+                " no one reading to compare against. Write the offset into the"
+                " literal."
+            )
+        shift = known.value()
+
+    var count = fields.scaled(type.unit)
+    return Value.timestamp(
+        count - shift * type.unit.per_second(),
+        type.unit,
+        TimeZone(copy=type.zone),
+    )
 
 
 def numbers_to_timestamps(a: AnyArray, unit: TimeUnit) raises -> AnyArray:

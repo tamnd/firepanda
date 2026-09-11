@@ -179,7 +179,7 @@ from firepanda.kernel import (
 from firepanda.kernel.chars import text_character_length
 from firepanda.kernel.arith import OP_ADD
 from firepanda.kernel.compare import CMP_EQ, CMP_LT
-from firepanda.kernel.binary import BinaryOp
+from firepanda.kernel.binary import BinaryOp, binary_value_any
 from firepanda.sql import Ast, Grammar, Transform, parse, tokenize
 from firepanda.testing.rng import Rng
 from firepanda.kernel.scalar import (
@@ -3418,6 +3418,33 @@ def bench_temporal(mut harness: Harness) raises:
         keep(len(out))
 
     harness.record("temporal/field_minute", "rows", rows, minute_field)
+
+    # Nine ClickBench queries filter a day range, which in SQL is a column
+    # against `'2013-07-01'`. These two rows are the check that the literal is
+    # parsed once rather than once per row: the pair is the same comparison over
+    # the same numbers, and the only difference is that one of them arrives as
+    # eight characters. If they are not within noise of each other, the parse is
+    # inside the loop.
+    var plain = Array[DType.int64](rows)
+    for i in range(rows):
+        plain[i] = Int64(1372636800 + i % 86400)
+    var numbers = AnyArray(plain^)
+    var literal = Value(String("2013-07-01T12:00:00"))
+    var count = Value(Int64(1372680000))
+
+    def filter_literal() raises {imm clock, imm literal}:
+        keep(clock)
+        var out = binary_value_any(clock, literal, BinaryOp.GE)
+        keep(len(out))
+
+    harness.record("temporal/range_literal", "rows", rows, filter_literal)
+
+    def filter_number() raises {imm numbers, imm count}:
+        keep(numbers)
+        var out = binary_value_any(numbers, count, BinaryOp.GE)
+        keep(len(out))
+
+    harness.record("temporal/range_integer", "rows", rows, filter_number)
 
 
 def bench_group(mut harness: Harness) raises:
