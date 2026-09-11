@@ -192,6 +192,37 @@ def _held_at(name: str, value: Any, default: Any, why: str) -> None:
         raise NotImplementedError(f"{name}={value!r} is not supported yet, because {why}")
 
 
+def _keep_word(keep: Any) -> str:
+    """Turns pandas' `keep` into the word the boundary carries.
+
+    pandas writes two of the three rules as strings and the third as the bool
+    `False`, which is a spelling and not a distinction: all three are answers to
+    the same question about which row of a repeated key is the one that is not a
+    repeat. The boundary carries a word for all three so that one kind of thing
+    crosses it, and this is where the spelling is undone.
+
+    The check is membership in a tuple, which is what pandas does, and copying
+    the form rather than the intent matters here. `0 == False` in Python, so a
+    zero is in that tuple, so pandas takes `keep=0` and reads it as the third
+    rule. A layer that checked with `is False` would be tidier and would refuse
+    a call that the library it is copying accepts.
+
+    Args:
+        keep: What the caller wrote.
+
+    Returns:
+        `"first"`, `"last"` or `"none"`.
+
+    Raises:
+        InvalidArgumentError: If it is none of the three. The message is pandas'
+            own, since a caller reading it is reading it out of a traceback and
+            has no way to tell which library wrote it.
+    """
+    if keep not in ("first", "last", False):
+        raise InvalidArgumentError("keep must be either 'first', 'last' or False")
+    return keep if isinstance(keep, str) else "none"
+
+
 # The thirteen interpolations pandas takes, in the order numpy lists them, since
 # pandas hands the name straight to `numpy.quantile` and the message it raises
 # prints numpy's own dictionary. firepanda has written `linear`. The other twelve
@@ -1829,6 +1860,94 @@ class DataFrameMixin:
             walked = self.index.slice_indexer(before, after)
             start, stop, _ = walked.indices(self._inner.length())
             return DataFrame._wrap(self._inner.slice_rows(start, max(start, stop)))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _duplicate_subset(self, subset: Any) -> list[str]:
+        """Works out which columns decide whether two rows are the same.
+
+        `None` means every column, and it is resolved here rather than sent
+        across as an absence to be filled in on the other side, because which
+        columns a frame has is a question this side can already ask and a
+        default that lives in two places is a default that will disagree with
+        itself.
+
+        A bare name rather than a list of names is one column, which is pandas'
+        rule and comes from `is_list_like` answering False for a string. It is
+        worth having, because `subset="key"` is what a caller writes first and
+        iterating the string would ask for a column per letter.
+
+        A name written twice is dropped to one. The core refuses a repeat, on
+        the grounds that a caller who wrote it meant something else, and that is
+        the right answer for a Mojo caller writing the subset out by hand. It is
+        the wrong answer here, because pandas accepts the repeat and answers as
+        if it were written once, and this layer exists to answer what pandas
+        answers. Nothing is lost either way: a key column compared against
+        itself twice tells the same rows apart as a key column compared once.
+
+        Args:
+            subset: What the caller wrote.
+
+        Returns:
+            Column names, in the order given, with no repeats.
+        """
+        if subset is None:
+            return self._inner.names()
+        if isinstance(subset, str) or not hasattr(subset, "__iter__"):
+            written = [subset]
+        else:
+            written = list(subset)
+        seen: dict[str, None] = {}
+        for one in written:
+            seen[str(one)] = None
+        return list(seen)
+
+    def _duplicated(self, subset: Any, keep: Any) -> Series:
+        """Marks the rows that repeat a key another row already carries.
+
+        A frame with no columns has no rows to tell apart and the core says so
+        rather than answering. pandas answers an empty mask, which is the same
+        statement made quietly, and that is what comes back here: the alternative
+        is an error raised on a frame where nothing went wrong.
+        """
+        from ._frame import Series
+
+        word = _keep_word(keep)
+        names = self._duplicate_subset(subset)
+        if not names:
+            return Series([], dtype="bool")
+        try:
+            return Series._wrap(self._inner.duplicated(names, word))
+        except Exception as error:
+            raise translate(error) from None
+
+    def _drop_duplicates(
+        self, subset: Any, keep: Any, inplace: bool, ignore_index: bool
+    ) -> DataFrame:
+        """Removes the rows that repeat a key another row already carries.
+
+        `ignore_index` is honoured rather than refused, because the labels of the
+        rows that survived are the one thing a drop leaves behind that a caller
+        may not want: they are the positions the rows held in the frame before
+        the drop, so they have gaps in them wherever a row went. Numbering them
+        again is `reset_index` and there is nothing to write.
+        """
+        from ._frame import DataFrame
+
+        _held_at(
+            "inplace",
+            inplace,
+            False,
+            "every operation here answers a new frame and the Arrow buffers"
+            " underneath are shared rather than owned",
+        )
+        word = _keep_word(keep)
+        names = self._duplicate_subset(subset)
+        try:
+            kept = self._inner if not names else self._inner.drop_duplicates(names, word)
+            if ignore_index:
+                kept = kept.reset_index(True)
+            return DataFrame._wrap(kept)
         except Exception as error:
             raise translate(error) from None
 

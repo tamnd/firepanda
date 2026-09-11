@@ -1887,6 +1887,27 @@ class DataFrame(DataFrameMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def duplicated(self, subset: Any = None, keep: Any = "first") -> Series:
+        """Which rows repeat a key that another row already carries."""
+        try:
+            return self._duplicated(subset, keep)
+        except Exception as error:
+            raise translate(error) from None
+
+    def drop_duplicates(
+        self,
+        subset: Any = None,
+        *,
+        keep: Any = "first",
+        inplace: bool = False,
+        ignore_index: bool = False,
+    ) -> DataFrame:
+        """The frame with the repeated rows removed, by a chosen rule."""
+        try:
+            return self._drop_duplicates(subset, keep, inplace, ignore_index)
+        except Exception as error:
+            raise translate(error) from None
+
     def __arrow_c_schema__(self) -> object:
         """The frame's Arrow schema, as an arrow_schema PyCapsule."""
         try:

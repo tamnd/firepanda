@@ -62,7 +62,14 @@ from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.frame.display import DisplayOptions, render_table
 from firepanda.frame.index import NOT_FOUND, Index
-from firepanda.hash.grouping import Grouping, group_ordinals
+from firepanda.hash.grouping import (
+    KEEP_FIRST,
+    KEEP_LAST,
+    KEEP_NONE,
+    Grouping,
+    duplicate_mask,
+    group_ordinals,
+)
 from firepanda.hash.sorted import sorted_ordinals
 from firepanda.join.pairs import JoinKind, join_indices, take_pair
 from firepanda.kernel.binary import (
@@ -577,6 +584,17 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         self.schema.append(field^)
         self.columns.append(ChunkedArray(column^.into_values()))
         self.rows = len(self.columns[0])
+        if len(self.index) != self.rows:
+            # The height only ever changes here by going from nothing to
+            # something, since the check above refuses a column of the wrong
+            # length once there is one to compare against. So this fires exactly
+            # once, on the first column of a frame built up rather than read in,
+            # and it cannot overwrite labels somebody set, because a frame with
+            # no rows has none to set. Without it a frame grown this way carries
+            # a height and an index that disagree, and every method that hands
+            # the labels on, which is `column` and now `duplicated`, hands on an
+            # index of nothing.
+            self.index = Index(self.rows)
 
     def cast(self, name: String, to: DType, strict: Bool = True) raises -> Self:
         """Returns a frame with one column converted to another dtype.
@@ -1213,23 +1231,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             If a name is missing or repeated, or if a dtype involved has no
             physical layout.
         """
-        var at = List[Int](capacity=len(subset))
-        for i in range(len(subset)):
-            var idx = self.schema.index_of(subset[i])
-            for j in range(len(at)):
-                if at[j] == idx:
-                    raise Error(
-                        "drop_duplicates: column "
-                        + subset[i]
-                        + " was given twice"
-                    )
-            at.append(idx)
-        if len(at) == 0:
-            raise Error(
-                "drop_duplicates: at least one column is required, and a frame"
-                " with no columns has no rows to tell apart"
-            )
-
+        var at = self._dedup_at(subset, "drop_duplicates")
         var grouping = self._grouping(at)
 
         var ascending = True
@@ -1246,6 +1248,152 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         # columns are in chunks works and so that the row labels follow the rows
         # they belong to, which is what pandas keeps across a `drop_duplicates`.
         return self.take(keep)
+
+    def _dedup_at(self, subset: List[String], who: String) raises -> List[Int]:
+        """Turns the names a caller gave into column positions.
+
+        Shared by `duplicated` and `drop_duplicates` because the two are the same
+        question with different answers, and a rule about which columns decide
+        that two rows are the same should not be written down twice.
+
+        Args:
+            subset: The column names. At least one, no repeats.
+            who: The method name, for the message.
+
+        Returns:
+            One position per name, in the order the names were given.
+
+        Raises:
+            Error: If a name is missing or repeated, or if no names were given.
+        """
+        var at = List[Int](capacity=len(subset))
+        for i in range(len(subset)):
+            var idx = self.schema.index_of(subset[i])
+            for j in range(len(at)):
+                if at[j] == idx:
+                    raise Error(
+                        who + ": column " + subset[i] + " was given twice"
+                    )
+            at.append(idx)
+        if len(at) == 0:
+            raise Error(
+                who
+                + ": at least one column is required, and a frame with no"
+                " columns has no rows to tell apart"
+            )
+        return at^
+
+    def _keep_code(self, keep: String, who: String) raises -> Int:
+        """Turns the word a caller gave into the kernel's rule.
+
+        Args:
+            keep: `"first"`, `"last"` or `"none"`.
+            who: The method name, for the message.
+
+        Returns:
+            One of `KEEP_FIRST`, `KEEP_LAST` or `KEEP_NONE`.
+
+        Raises:
+            Error: If the word is none of the three.
+        """
+        if keep == "first":
+            return KEEP_FIRST
+        if keep == "last":
+            return KEEP_LAST
+        if keep == "none":
+            return KEEP_NONE
+        raise Error(
+            who + ": keep must be 'first', 'last' or 'none'; got '" + keep + "'"
+        )
+
+    def duplicated(
+        self, subset: List[String], keep: String = "first"
+    ) raises -> Series:
+        """Which rows repeat a key that another row already carries.
+
+        The mask `drop_duplicates` throws away, handed back instead. A caller
+        who wants the repeats rather than the survivors has no way to get them
+        from the frame that comes out of a drop, because the rows that went are
+        gone and their positions with them, and inverting a `drop_duplicates`
+        by comparing two frames row by row is a join written by hand.
+
+        The answer is as tall as the frame and carries the frame's labels, so it
+        lines up with the frame it came from and can be handed straight back to
+        `filter`. That is the whole of what pandas does with it.
+
+        Args:
+            subset: The columns that decide whether two rows are the same. At
+                least one, no repeats.
+            keep: `"first"` to mark every repeat after the first appearance,
+                `"last"` to mark every repeat before the last one, or `"none"`
+                to mark every row of a repeated key including the one the other
+                two rules would have spared.
+
+        Returns:
+            A bool column with no nulls and no name. The mask is an answer about
+            the rows and not a column of the frame, so there is no name it could
+            carry that would not read like one of the frame's own. pandas leaves
+            it unnamed for the same reason.
+
+        Raises:
+            Error: If a name is missing or repeated, if `keep` is none of the
+                three words, or if a dtype involved has no physical layout.
+        """
+        var mask = self._duplicate_mask(subset, keep, "duplicated")
+        var out = Series("", mask^)
+        out.index = Index(copy=self.index)
+        return out^
+
+    def _duplicate_mask(
+        self, subset: List[String], keep: String, who: String
+    ) raises -> Array[DType.bool]:
+        """Groups by the subset and asks the kernel which rows repeat.
+
+        Args:
+            subset: The columns that decide whether two rows are the same.
+            keep: `"first"`, `"last"` or `"none"`.
+            who: The method name, for the message.
+
+        Returns:
+            One bool per row, true where the row is a repeat under the rule.
+
+        Raises:
+            Error: If a name is missing or repeated, if `keep` is none of the
+                three words, or if a dtype involved has no physical layout.
+        """
+        var at = self._dedup_at(subset, who)
+        var rule = self._keep_code(keep, who)
+        var grouping = self._grouping(at)
+        return duplicate_mask(grouping.codes, grouping.groups, rule)
+
+    def drop_duplicates(
+        self, subset: List[String], keep: String
+    ) raises -> Self:
+        """Returns the frame with the repeated rows removed, by a chosen rule.
+
+        `keep="first"` is the two argument overload above and goes through it,
+        because that path reads the representative row of each group straight
+        off the `Grouping` and never builds a mask at all. The other two rules
+        have no such shortcut: which row of a group survives under `"last"` is
+        not something a factorize records, and under `"none"` no row of a
+        repeated group survives, so both go through `duplicated` and a filter.
+
+        Args:
+            subset: The columns that decide whether two rows are the same.
+            keep: `"first"`, `"last"` or `"none"`.
+
+        Returns:
+            A frame holding the rows the rule spares, in input order.
+
+        Raises:
+            Error: If a name is missing or repeated, if `keep` is none of the
+                three words, or if a dtype involved has no physical layout.
+        """
+        if self._keep_code(keep, "drop_duplicates") == KEEP_FIRST:
+            return self.drop_duplicates(subset)
+        var repeated = self._duplicate_mask(subset, keep, "drop_duplicates")
+        var wanted = unary_any(AnyArray(repeated^), UnaryOp.NEG)
+        return self.filter(wanted.as_typed[DType.bool]())
 
     def group_broadcast(
         self, by: List[String], specs: List[AggSpec]

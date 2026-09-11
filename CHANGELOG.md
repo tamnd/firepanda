@@ -19,6 +19,29 @@ Lowering now works out what each conjunct leaves behind that a later conjunct st
 TPC-H q6's predicate over six million rows, which is five conditions and the part of that query where the time goes, measured with the new `tools/probes/q6plan.mojo`: 9.45 milliseconds to 7.93 on a thirty two thread desktop, 78.3 to 61.0 on an eight core server, and 19.2 to 15.0 on an M series laptop. That is between sixteen and twenty two percent, and the spread is what you would expect, since the work removed is memory bandwidth and the machine with the most of it gains the least.
 
 This is a step toward what the engine actually needs, which is a selection vector, and not a substitute for it. Not writing a dead column is worth less than not writing a live one that the next operator is going to filter again, and that is the larger change.
+### Added: which row of a repeat is the one that stays
+
+`DataFrame.duplicated`, and a `keep` parameter on `DataFrame.drop_duplicates`, which had only ever kept the first appearance. The two are one question asked twice: the mask says which rows repeat a key another row already carries, and the drop is that mask inverted and applied. A caller who wants the repeats rather than the survivors could not get them out of `drop_duplicates` before, because the rows that went were gone and their positions with them, and rebuilding them by comparing the frame before against the frame after is a join written by hand.
+
+The three rules `keep` takes are one table read twice rather than three kernels. Under `"first"` the table holds the earliest row each group ordinal appears at, under `"last"` the latest, and under `False` how many rows carry it, and the second pass then asks one question per row. `"first"` could have been a single pass marking each row as it is read and it is not, because the other two cannot be and what the extra pass costs is one read of an array that is as wide as the group count and was in cache from the pass that filled it.
+
+The kernel takes the group ordinals and nothing else, even though the `Grouping` that produced them already holds the first row of each ordinal, which is exactly what `"first"` wants. Only one of the three rules could have used it, so the other two would build a table anyway, and taking the codes alone is what lets the test write the ordinals out by hand instead of testing the duplicate rule through the factorize.
+
+A missing value repeats another missing value here, which is the opposite of what `group_by` does and is pandas' rule in both places. Two rows that are both missing the same field are two rows that say the same thing, so one of them goes. It contradicts the rule everywhere else in the library, which is why it has a test on both sides of the boundary rather than being left to fall out of the factorize.
+
+`keep=False` crosses the boundary as the word `"none"`. pandas writes two of its three rules as strings and the third as a bool, which is a spelling and not a distinction, and a boundary that carried it would be sending a Python type across to say which of three branches to take. The refusal for anything else carries pandas' own message, and the check is membership in a tuple because that is the form pandas uses. `0 == False` in Python, so pandas reads `keep=0` as the third rule, and a tidier check written with `is False` would refuse a call that a caller's pandas accepts.
+
+`subset=None` resolves to every column on the Python side, since which columns a frame has is a question that side can already ask and a default in two places is a default that will disagree with itself. A name written twice is dropped to one there as well, because pandas accepts the repeat and answers as if it were written once, while the core refuses it and keeps refusing it for a Mojo caller writing the subset out by hand. `ignore_index=True` is implemented rather than refused, since the labels a drop leaves behind have gaps wherever a row went and numbering them again is `reset_index`.
+
+Details in document 38. Part of #156, after #517.
+
+### Fixed: a frame built up column by column carried an index of nothing
+
+`DataFrame.add_column` updated the frame's height and never its index, so a frame grown by calling `with_column` on an empty frame ended up with three rows and no labels, and `DataFrame.column` handed that empty index on to every series it produced. A frame read in from Arrow gets its labels when it is read, which is why nothing had noticed.
+
+`duplicated` is what made it visible, because the mask carries the frame's labels and a mask whose labels are missing cannot be handed back to `filter`, which is the whole of what a caller does with it. The fix builds a default index when the index and the height disagree, which can only happen on the first column and cannot overwrite labels somebody set, because a frame with no rows has none to set.
+
+Part of #156, after #517.
 
 ### Added: three ways of naming a set of labels without writing them down
 
