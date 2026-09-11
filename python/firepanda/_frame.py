@@ -2725,6 +2725,24 @@ class Series(SeriesMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def reindex(
+        self,
+        index: Any = None,
+        *,
+        axis: Any = None,
+        method: Any = None,
+        copy: Any = NO_DEFAULT,
+        level: Any = None,
+        fill_value: Any = None,
+        limit: Any = None,
+        tolerance: Any = None,
+    ) -> Series:
+        """The series on a set of labels, whether it has them or not."""
+        try:
+            return self._reindex(index, axis, method, copy, level, fill_value, limit, tolerance)
+        except Exception as error:
+            raise translate(error) from None
+
     def tolist(self) -> list[object]:
         """The values as a Python list, with None where a value is missing."""
         try:

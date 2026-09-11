@@ -23,13 +23,20 @@ from firepanda.frame.index import Index
 from firepanda.frame.series import Series
 from firepanda.kernel.reduce import reduce_any
 from firepanda.py.args import flag, maybe_whole, number, whole, words
-from firepanda.py.build import column_from, empty_column
+from firepanda.py.build import array_from, column_from, empty_column
 from firepanda.py.cast import refuse_if_not_finite
 from firepanda.io.arrow_export import export_array_borrowed, export_schema
 from firepanda.py.convert import array_capsule, schema_capsule
 from firepanda.py.ewm import ewm as ewm_agg
 from firepanda.py.index import PyIndex
-from firepanda.py.errors import DTYPE, UNSUPPORTED, VALUE, retagged, tagged
+from firepanda.py.errors import (
+    DTYPE,
+    UNSUPPORTED,
+    VALUE,
+    reindex_refusal,
+    retagged,
+    tagged,
+)
 from firepanda.py.ops import (
     binary_failure,
     binary_op,
@@ -246,6 +253,41 @@ struct PySeries(Movable, Writable):
                 ArcPointer(Self._held(py_self)[].series[].tail(whole(n, "n")))
             )
         )
+
+    @staticmethod
+    def reindex(
+        py_self: PythonObject,
+        labels: PythonObject,
+        fill_value: PythonObject,
+    ) raises -> PythonObject:
+        """Puts the series on a set of labels, whether it has them or not.
+
+        The row half of `DataFrame.reindex` with one column under it. The labels
+        arrive as a Python sequence and go through the same builder that makes a
+        column out of one, so an index of words is asked for with words here and
+        everywhere else.
+
+        Args:
+            py_self: The series.
+            labels: The labels the result should have, in order.
+            fill_value: What to put in a row whose label was not found, or
+                `None` to leave it missing.
+
+        Returns:
+            A new series of one row per label.
+        """
+        var wanted = array_from("labels", labels)
+        var value = fill(fill_value)
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        Self._held(py_self)[].series[].reindex(wanted, value)
+                    )
+                )
+            )
+        except cause:
+            raise reindex_refusal(cause)
 
     @staticmethod
     def labels(py_self: PythonObject) raises -> PythonObject:

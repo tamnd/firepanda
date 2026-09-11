@@ -1,6 +1,6 @@
 # 40. A label the frame does not have
 
-Status: implemented. One frame method with ten parameters, of which two do the work, one new kernel function that three older private helpers should have been, and one rule about types that is pandas' rather than the gather's.
+Status: implemented. Three methods under one name, on the frame, on the series and on the index, of which the last is the lookup the other two are built on, handed back in the open. One new kernel function that three older private helpers should have been, and one rule about types that is pandas' rather than the gather's.
 
 ## 1. Two operations under one name
 
@@ -81,3 +81,23 @@ A frame whose own labels repeat is a `ValueError` in pandas, and it is also the 
 The fill value check itself only runs when there is a row for the fill to go in, which is pandas' rule and was measured rather than assumed. `df.reindex([10, 20], fill_value=0)` on a frame with a text column in it succeeds in pandas, and `df.reindex([10, 99], fill_value=0)` on the same frame raises. The check is therefore after the count of missing labels and not before it, which is one line and one of the more surprising things in this document.
 
 Only one mismatch is checked, and it is text against everything else. A number read as a string raises on its own when it is asked for its bytes, and a string read as a number does not raise at all: it reads the store's integer field, which for a string is a zero. A silent zero is the failure worth spending a check on.
+
+## 9. The same thing on a series, written twice on purpose
+
+A series is the frame's row half with one column under it, so `Series.reindex` is the same four lines with the loop over columns taken out. It was written out rather than routed through the frame, because routing it means building a frame, reindexing it, and taking the column back, and each of those three steps has a name to carry and lose. The series keeps its own name, the index keeps its own name, and the shortest way to be sure of that is for the method to hold both of them the whole time.
+
+Writing it out means the two rules from sections 2 and 3 are now implemented twice, and that is the part that pays for itself. A fill value belonging to the rows the lookup did not find, and an integer column widening when a row goes missing, are the two places where the plausible implementation and the correct one differ. A second copy of a rule is a second place for it to be wrong, so the tests ask the series both questions again rather than trusting that the frame's answer carries across.
+
+The parameter list is the one real difference and it is smaller in a way that is not obvious. There is no `columns` and no `labels`, so section 6's surprise about the axis nobody named does not arise, and `axis` goes from deciding something to deciding nothing: pandas takes it, does not look at it, and accepts `axis=1` on a thing with one axis. The other difference is the default. `DataFrame.reindex` defaults `fill_value` to NaN and `Series.reindex` defaults it to `None`, which are two spellings of leave the row missing, and both of them arrive at the boundary as no fill at all.
+
+## 10. The index hands the lookup back
+
+`Index.reindex` is not a smaller version of either of the above. It is the lookup itself, returned to the caller instead of consumed, and it answers a pair: the labels asked for, and where each of them sits. A caller who has their own rows to move is the audience, and pandas' own internals are the first of them.
+
+The interesting part is when the second half of the pair is missing rather than empty. pandas leaves the lookup out entirely, as `None`, when the target is the index that was asked, because then nothing has to move and a caller who checks for that skips the gather. An empty target is a different answer, a lookup of no positions, which says move nothing rather than move everything to where it already is. Those two are easy to collapse into one and the distinction is the whole value of the return, so `Reindexed` carries an `Optional` and the three cases are three branches with nothing else in them.
+
+The name rule was measured rather than reasoned about, and it is not what the rest of the library would suggest. A target handed in as an index keeps its own name, and a target handed in as a bare list of labels takes the name the source index had. So the same set of labels gives a differently named result depending on how it was spelled, which is pandas' rule and now ours.
+
+This is the one method here that the binding generator could not write. It returns a pair, and the generator's return vocabulary has no way to say a tuple of an index and an optional list, so the extension hands back a Python list of two and the Python layer turns it into a tuple. That is the same shape `get_indexer` already has, where the extension answers a list and pandas answers a numpy array, and it keeps the awkwardness on the Python side of the boundary where it is cheap to read.
+
+`limit` and `tolerance` are refused here rather than given pandas' sentence about pad and backfill, which is a deliberate difference from section 6. On the frame those two are pandas' own error for a real mistake the caller made. Here there is no filling written at all, so the honest answer is that the parameter is not implemented, and saying it is only valid with a method the library does not have would be answering a question about a feature that does not exist.

@@ -96,6 +96,17 @@ pandas has a second answer this library does not offer. `min(skipna=False)` is N
 The accessor never reaches the byte counting one, and the note in the string section of document 06 says so, so a caller who wants it asks for it by its own name rather than by a flag on `len`. The `len` box stays unticked, because the rule at the bottom of that document is that a tick means a differential test in firepanda-bench and there is not one yet.
 
 Part of #480.
+### Added: a series on a set of labels it may not have
+
+`Series.reindex` answers the series on whatever labels the caller asks for, bringing a row for each label it has and a missing row for each label it does not. A `fill_value` puts a value in the rows that were not found and leaves alone any hole the series already had, and without one an integer series widens to float64 because that is where pandas keeps a missing number. The parameter list is the frame's minus the two that name an axis, so there is no `columns` and no `labels`, `axis` is taken and ignored the way pandas takes and ignores it, `method` is refused as a different operation, and `limit` or `tolerance` without a `method` gets pandas' own sentence back. Document 40 section 9 says why this is written out rather than routed through the frame.
+
+Part of #156, after #8.
+
+### Added: an index reports the labels asked for and where each of them sits
+
+`Index.reindex` hands back the lookup that the frame and the series consume, as the pair pandas hands back: the labels asked for, and one position per label with a negative position where there is no such label. The positions are left out entirely when the target is the index already, because then nothing has to move, which is a different answer from an empty target and is the whole reason the return is a pair. A target given as an index keeps its own name and a target given as a bare list of labels takes the name the index had, which is pandas' rule and was measured rather than read. Document 40 section 10 is the rest of it.
+
+Part of #156, after #8.
 
 ## [0.6.62] - 2026-09-11
 
@@ -139,6 +150,7 @@ Part of #156, after #8.
 `filled_block` in `kernel/binary.mojo`, next to the `all_null` it is the filled half of. It was `_gap_block` in `shift.mojo` and it moved because `reindex` wanted the same thing, which is a column of one value in a type the value did not arrive with. The two other copies of it, in `frame/align.mojo` and `plan/simplify.mojo`, were left where they are: the first refuses text for a reason that belongs to alignment and not to block building, and folding that in would have moved a domain rule into a place that has no domain.
 
 Part of #156, after #8.
+
 ### Added: SELECT DISTINCT runs, and it needed no operator
 
 A distinct is a group by that reduces nothing. A group by holds one row per group and the rows of a group differ only in what was not the key, so when the key is every column there is nothing they can differ in, and `SELECT DISTINCT a, b` is the existing `Group` with every position as a key and an empty list of folds.

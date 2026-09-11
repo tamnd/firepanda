@@ -2418,6 +2418,13 @@ SERIES = Exposed(
             returns="Series",
         ),
         Binding(
+            mojo="PySeries.reindex",
+            name="reindex",
+            doc="The series on a set of labels, whether it has them or not.",
+            params=(("labels", "object"), ("fill_value", "object")),
+            returns="Series",
+        ),
+        Binding(
             mojo="PySeries.to_list",
             name="to_list",
             doc="Every value, copied into a Python list.",
@@ -2727,6 +2734,22 @@ SERIES = Exposed(
             wraps="Series",
         ),
         Member(
+            name="reindex",
+            kind="method",
+            signature=(
+                "index: Any = None, *, axis: Any = None, method: Any = None,"
+                " copy: Any = NO_DEFAULT, level: Any = None,"
+                " fill_value: Any = None, limit: Any = None,"
+                " tolerance: Any = None"
+            ),
+            body=(
+                "self._reindex(index, axis, method, copy, level, fill_value,"
+                " limit, tolerance)"
+            ),
+            doc="The series on a set of labels, whether it has them or not.",
+            returns="Series",
+        ),
+        Member(
             name="tolist",
             kind="method",
             body="list(self._inner.to_list())",
@@ -2966,6 +2989,13 @@ INDEX = Exposed(
             doc="Where each of a set of labels sits, with -1 for the missing.",
             params=(("target", "object"),),
             returns="list[int]",
+        ),
+        Binding(
+            mojo="PyIndex.reindex",
+            name="reindex",
+            doc="The labels asked for and where each of them sits, as a pair.",
+            params=(("target", "object"),),
+            returns="list[object]",
         ),
         Binding(
             mojo="PyIndex.contains",

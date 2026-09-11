@@ -169,6 +169,9 @@ class Series:
     def tail(self, n: int) -> Series:
         """The last n rows."""
         ...
+    def reindex(self, labels: object, fill_value: object) -> Series:
+        """The series on a set of labels, whether it has them or not."""
+        ...
     def to_list(self) -> list[object]:
         """Every value, copied into a Python list."""
         ...
@@ -339,6 +342,9 @@ class Index:
         ...
     def get_indexer(self, target: object) -> list[int]:
         """Where each of a set of labels sits, with -1 for the missing."""
+        ...
+    def reindex(self, target: object) -> list[object]:
+        """The labels asked for and where each of them sits, as a pair."""
         ...
     def contains(self, label: object) -> bool:
         """Whether a label is in the index."""

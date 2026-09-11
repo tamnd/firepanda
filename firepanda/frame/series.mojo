@@ -37,8 +37,13 @@ from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.logical import LogicalType, TypeKind
 from firepanda.frame.align import align_pair, fill_one_sided, keep_rows
 from firepanda.frame.display import DisplayOptions, render_column
-from firepanda.frame.index import Index
-from firepanda.kernel.binary import BinaryOp, binary_any, binary_value_any
+from firepanda.frame.index import Index, NOT_FOUND
+from firepanda.kernel.binary import (
+    BinaryOp,
+    binary_any,
+    binary_value_any,
+    filled_block,
+)
 from firepanda.kernel.cast import cast_any
 from firepanda.kernel.chars import (
     text_character_get,
@@ -49,6 +54,7 @@ from firepanda.kernel.chars import (
     text_remove_suffix,
     text_slice_replace,
 )
+from firepanda.kernel.concat import concat_two_any
 from firepanda.kernel.cumulative import CumulativeOp, cumulative_any
 from firepanda.kernel.edges import (
     text_pad,
@@ -402,6 +408,120 @@ struct Series(Copyable, Movable, Sized, Writable):
         var out = Self(self.name, take_any(self.values, indices))
         out.index = self.index.take(indices)
         return out^
+
+    def reindex(
+        self, labels: AnyArray, fill_value: Optional[Value] = None
+    ) raises -> Self:
+        """Returns the series on a set of labels, whether it has them or not.
+
+        The one column version of `DataFrame.reindex`, and the same three rules
+        run here for the same reasons. `get_indexer` says where each wanted
+        label sits, a label that is not there comes back as a missing value
+        because a negative position is a null to `take_any`, and an integer
+        column that loses a row widens to float64 because pandas has one missing
+        value for a number and it is a NaN.
+
+        `fill_value` is a row appended to the end of the column that every not
+        found label is pointed at, rather than a fill over the answer, which
+        would also have covered the nulls the series already held. That is the
+        rule pandas follows and it is the one that is easy to get wrong.
+
+        The name is the series' own and the labels are the caller's, which is
+        what the two halves of the answer mean: the column did not change and
+        the rows did.
+
+        Args:
+            labels: The labels the result should have, in order. May repeat a
+                label, which repeats the row, and may hold a label the series
+                does not have, which is the case this exists for.
+            fill_value: What to put in a row whose label was not found, or
+                nothing to leave it missing.
+
+        Returns:
+            A series of `len(labels)` rows carrying those labels.
+
+        Raises:
+            Error: If this series' index holds a duplicate, since a label in two
+                rows has no single row to answer with. Also if the labels cannot
+                be looked up against the index's own, or if the fill value is
+                text and the column is not or the other way round.
+        """
+        var target = Index(AnyArray(copy=labels), self.index.name.copy())
+        if len(labels) == 0:
+            # Short circuited for the reason `DataFrame.reindex` gives: a list
+            # with no values in it has no type in it either, and the lookup
+            # would be asked to compare two dtypes on a question whose answer
+            # does not depend on either of them.
+            var nothing = self.take(List[Int]())
+            nothing.index = target^
+            return nothing^
+
+        var found = self.index.get_indexer(labels)
+        var absent = 0
+        for i in range(len(found)):
+            if found[i] == NOT_FOUND:
+                absent += 1
+
+        if fill_value and absent > 0:
+            self._fill_fits(fill_value.value())
+
+        var missing_goes_to = len(self) if fill_value else -1
+        var positions = List[Int](capacity=len(found))
+        for i in range(len(found)):
+            positions.append(
+                missing_goes_to if found[i] == NOT_FOUND else Int(found[i])
+            )
+
+        var gathered: AnyArray
+        if fill_value and absent > 0:
+            gathered = take_any(
+                concat_two_any(
+                    self.values,
+                    filled_block(self.values.type, 1, fill_value.value()),
+                ),
+                positions,
+            )
+        elif absent > 0:
+            gathered = widen_for_missing(take_any(self.values, positions))
+        else:
+            gathered = take_any(self.values, positions)
+
+        var out = Self(self.name, gathered^)
+        out.index = target^
+        return out^
+
+    def _fill_fits(self, fill: Value) raises:
+        """Refuses a fill value the column could not hold.
+
+        The same one check `DataFrame.reindex` makes and for the same reason:
+        text against everything else is the mismatch the reader downstream
+        cannot catch, because a string read as a number reads the store's
+        integer field and a string holds a zero there, so the answer would come
+        back with a row of zeros that nobody asked for.
+
+        Args:
+            fill: The fill value.
+
+        Raises:
+            Error: If the value is text and the column is not, or the other way
+                round.
+        """
+        if (
+            self.values.type.is_variable_width()
+            == fill.type.is_variable_width()
+        ):
+            return
+        raise Error(
+            String(
+                "reindex: fill_value is ",
+                fill.type,
+                " and ",
+                self.name,
+                " holds ",
+                self.values.type,
+                ", so there is nothing to put in the row",
+            )
+        )
 
     def filter(self, mask: Array[DType.bool]) raises -> Self:
         """Returns the rows where the mask is true.

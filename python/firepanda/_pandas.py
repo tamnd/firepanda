@@ -2584,6 +2584,67 @@ class SeriesMixin:
                 raise translate(error) from None
             return Series._wrap(self._inner)
 
+    def _reindex(
+        self,
+        index: Any,
+        axis: Any,
+        method: Any,
+        copy: Any,
+        level: Any,
+        fill_value: Any,
+        limit: Any,
+        tolerance: Any,
+    ) -> Series:
+        """The series on a set of labels, whether it has them or not.
+
+        The row half of the frame's method with one column under it, and the
+        same four answers to the parameters that do no work. `method` is
+        refused, `limit` and `tolerance` give pandas' own sentence when they
+        arrive without it, and `copy` and `level` are taken and ignored.
+
+        `axis` is the one that differs from the frame, and it is taken and
+        ignored too. A series has one axis, so naming it is not a choice, and
+        pandas accepts any value here rather than checking it, including values
+        there is no axis for.
+
+        A `fill_value` of NaN is read as no fill value at all, which is the same
+        rule the frame uses. pandas' default for the parameter here is `None`
+        rather than NaN, and both of them mean leave the row missing.
+
+        Args:
+            index: The labels the result should have, in order.
+            axis: Ignored.
+            method: Refused.
+            copy: Ignored.
+            level: Ignored.
+            fill_value: What to put in a row whose label was not found.
+            limit: Refused, since it only means something with `method`.
+            tolerance: Refused, for the same reason.
+
+        Returns:
+            A new series on the labels asked for.
+        """
+        from ._frame import Series
+
+        if method is not None:
+            raise UnsupportedError(
+                "reindex with method= fills a label the series does not have"
+                " from the label beside it, which needs the labels in order and"
+                " is a different operation from putting a value in the row"
+            )
+        if limit is not None or tolerance is not None:
+            raise InvalidArgumentError(
+                "limit argument only valid if doing pad, backfill or nearest reindexing"
+            )
+        if index is None:
+            return Series._wrap(self._inner)
+
+        value = None if isinstance(fill_value, float) and math.isnan(fill_value) else fill_value
+        try:
+            return Series._wrap(self._inner.reindex(index, value))
+        except Exception as error:
+            raise translate(error) from None
+
 
 class Namespace:
     """One accessor, reached through an attribute the way pandas reaches one.
@@ -4823,6 +4884,61 @@ class IndexMixin:
             return list(self._inner.get_indexer(target))
         except Exception as error:
             raise translate(error) from None
+
+    def reindex(
+        self,
+        target: Any,
+        method: Any = None,
+        level: Any = None,
+        limit: Any = None,
+        tolerance: Any = None,
+    ) -> tuple[Index, list[int] | None]:
+        """The labels asked for, and where each of them sits in this index.
+
+        The strangest member on the type, because an index carries no values of
+        its own: reindexing one moves nothing and the new index is the target,
+        so the half a caller wanted is the second one, which is the lookup it
+        can gather something else with.
+
+        The second half is `None` when the target holds the labels this index
+        already holds. pandas says so that way rather than with the range the
+        gather would have been, and it means the caller can skip the gather.
+
+        The level name follows the target when the target is an index and this
+        index's own when it is a list of labels, which reads backwards until you
+        notice it is one rule: the name belongs to whoever was in a position to
+        say what it was.
+
+        Written by hand rather than generated because the answer is a pair, and
+        pandas hands the positions back as a numpy array where this hands back a
+        list, which is the same difference `get_indexer` above already has.
+
+        Args:
+            target: The labels the result should carry, as an index or as a
+                sequence of them.
+            method: Refused, for the reason `get_indexer` gives.
+            level: Ignored, since a flat index has exactly the one level.
+            limit: Refused, since it only means something with `method`.
+            tolerance: Refused, for the same reason.
+
+        Returns:
+            The new index and the positions, or the new index and `None`.
+
+        Raises:
+            ValueError: If this index holds a label more than once.
+        """
+        from ._frame import Index
+
+        _refuse("method", method, "filling a missing label from a neighbour is not written")
+        _refuse("limit", limit, "there is no filling for it to limit")
+        _refuse("tolerance", tolerance, "there is no filling for it to bound")
+        wanted = target._inner if isinstance(target, IndexMixin) else target
+        try:
+            answer: Any = self._inner.reindex(wanted)
+        except Exception as error:
+            raise translate(error) from None
+        made, positions = answer
+        return Index._wrap(made), None if positions is None else list(positions)
 
     def searchsorted(self, value: Any, side: str = "left", sorter: Any = None) -> Any:
         """Where a label would have to go for the labels to stay in order.

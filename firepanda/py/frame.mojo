@@ -67,6 +67,7 @@ from firepanda.py.errors import (
     POSITION,
     UNSUPPORTED,
     VALUE,
+    reindex_refusal,
     retagged,
     tagged,
 )
@@ -724,17 +725,8 @@ struct PyDataFrame(Movable, Writable):
         the same way everywhere and an index of words is asked for with words.
 
         One thing can go wrong under here that pandas has a class for, which is
-        a frame whose own labels repeat: there is then no single row to answer
-        a label with and pandas raises `ValueError`. Anything else the core
-        refuses here is about a type, so the rule is that the message with the
-        word unique in it is the value error and the rest are type errors.
-
-        That one is also the only refusal here whose message is replaced rather
-        than passed along. The core's sentence is about `get_indexer` needing a
-        unique index and names the function to call instead, which is the right
-        thing to say to whoever called `get_indexer` and is not what happened
-        here. The caller made pandas' mistake, so the caller gets pandas'
-        sentence.
+        a frame whose own labels repeat, and `reindex_refusal` is where that is
+        told apart from the type errors and given pandas' own sentence.
 
         Args:
             py_self: The frame.
@@ -756,11 +748,7 @@ struct PyDataFrame(Movable, Writable):
                 )
             )
         except cause:
-            if "unique" in String(cause):
-                raise tagged(
-                    VALUE, "cannot reindex on an axis with duplicate labels"
-                )
-            raise retagged(DTYPE, cause)
+            raise reindex_refusal(cause)
 
     @staticmethod
     def reindex_columns(
