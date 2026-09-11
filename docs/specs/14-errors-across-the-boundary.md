@@ -128,7 +128,9 @@ There is a smaller trap that the same test file ran into and now documents. The 
 
 ## 8. What is not done
 
-Three things are known to be missing and are better written down than rediscovered.
+Four things are known to be missing and are better written down than rediscovered.
+
+A class pandas defines cannot be caught as itself. Section 4's table is builtins all the way down, and that is not an accident: a builtin is a class both libraries already have, so `except IndexError` fires whichever library raised it. pandas also defines about forty six classes of its own in `pandas.errors`, and there are two places a caller meets one today. `IntCastingNaNError` is a name firepanda has as well, and matching the name is as far as it goes, because `firepanda.errors.IntCastingNaNError` and `pandas.errors.IntCastingNaNError` are unrelated classes. `IndexingError`, which is what `Too many indexers` is in pandas, firepanda does not have at all and raises as an `InvalidArgumentError` instead. Both are the same fact: inheriting from a pandas class means importing pandas, which is the one dependency a replacement for pandas cannot have. The conformance suite measures this at L4 and it is registered there as the divergence `engine/pandas-exception-classes`, which is the honest place for it. A caller who catches the builtin underneath is unaffected, and a caller who catches a pandas class by name has to add ours beside it.
 
 `_firepanda.DataFrame()` still raises `ValueError: firepanda:unsupported: ...` with the prefix showing. That is the raw extension type rather than the public `firepanda.DataFrame`, nothing wraps its constructor path, and a user reaching it has gone around the front door. It is acceptable and it is not correct.
 
