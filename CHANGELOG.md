@@ -25,21 +25,6 @@ A negative position counts from the end, and the counting happens in the binding
 One shape of answer is refused rather than approximated. `df.iloc[0]` and `df.loc[label]` on a unique index collapse the row axis and leave the columns, so both answer a series whose labels are the column names, and a series has one type while a frame has one per column. Nothing here computes a type that every column fits, and inventing that rule inside an indexing accessor would put a type rule in the last place anybody would look for it. `docs/specs/36-a-position-and-a-label-are-different-questions.md` has the whole argument and the table of what else is refused.
 
 Part of #156, after #500.
-### Added: slice pushdown and top n, so ten rows are not paid for six million times
-
-Four of the twenty two TPC-H queries end in an order by with a limit on it, and the difference between answering one of those by sorting the whole table and answering it by keeping the best ten rows as they go past is most of the query. `limits` is the pass that spots the shape.
-
-Three rules. A limit above a sort puts a bound on the sort, which is a sort that only has to get the first n rows right, which is what a heap of size n does in one pass instead of what a full sort does in several. A limit above a limit becomes one limit, because two slices of a row sequence compose into one slice and working out which one is arithmetic that is easier to get right once here than at every place that builds a pair. And a limit above a projection swaps with it, so the projection evaluates n rows rather than all of them.
-
-The bound on a sort is deliberately advisory. The limit that produced it is still sitting above the sort and still doing the cutting, so an operator that has not learned to read the bound is slower than one that has and is not wrong. That is what lets the rule land now, before anything lowers a sort at all. A sort node comes out of the builder with its length set to `NO_LIMIT` rather than to zero, since zero would mean a sort that owes nobody any rows and the absence of a bound has to be written as an absence.
-
-The swap is worth describing because it is the way around the thing that made predicate pushdown rebuild the entire node list. Pushing a node down makes a new parent for an old child, which the arena's creation order forbids. But when both nodes have exactly one input, nothing has to move: the two nodes trade contents and keep their indices and their inputs. The upper index goes on being the upper index and simply holds the projection now. Same plan, same order, no rebuild, and the root index a caller is holding still means the root. The trick works for any two adjacent unary nodes and nothing about it is specific to limits.
-
-A projection is only swapped with when every expression in it is elementwise. A window function reads its whole partition, so cutting the rows down before it runs gives a different answer rather than the same answer sooner. A filter is never swapped with, because a limit below a filter counts rows the filter was going to throw away, and the same goes for a distinct and an aggregate. A union is not pushed into either, since capping each arm means a new node above each arm and a new node comes out above the union rather than below it, which wants the rebuild machinery and belongs with a pass that already has it. Every rule declines when the node below has more than one reader.
-
-Twenty three tests, and the composition cases read as a table, since a slice of a slice has four different answers depending on which of the two lengths is absent. An outer limit that runs off the end of an inner one keeps what is left rather than what was asked for, and an offset past the end of an inner limit keeps nothing.
-
-Part of #377.
 
 ### Added: a column that is also the labels
 
@@ -54,6 +39,32 @@ The round trip is the specification. `df.set_index("k").reset_index()` has to gi
 Twelve arguments across the three frame methods are declared and refused by name rather than being left out, and six of the twelve are waiting on the same missing thing, which is the MultiIndex. `docs/specs/35-a-column-that-is-also-the-labels.md` has the table and the argument it makes.
 
 Part of #156, after #498.
+
+## [0.6.56] - 2026-09-11
+
+Built against Mojo 1.0.0 (ed45d567).
+
+The query planner becomes something that runs, and five of its passes are in it.
+
+Three weeks ago `firepanda/plan/` was a tree nothing looked at. It now binds, simplifies, prunes columns, pushes predicates and lowers into the chunked engine, which is five of the pieces the planner milestone asks for and the first point at which a plan can answer a question rather than describe one.
+
+Projection pushdown is the largest single pass in the design and it does what the name says: a column nothing reads is never read. It works out, for every node, which of its outputs anything above it uses, and narrows every scan, project and aggregate to that. A q6 shaped plan comes out of it reading four columns of lineitem's sixteen. The decision worth recording is that it rebinds rather than remaps. A position only means something against a schema and the pass changes the schemas, so instead of shifting every bound position by hand it hands the plan back to `bind`, which resolves by name and gets the new positions right for free.
+
+Predicate pushdown is the second largest and it moves every filter toward the scans until it cannot go further, splitting the filter at its `and` nodes first so the halves can end up in different places. The rules are about whether the rows below still answer a predicate and whether the answer still means the same thing, and two of them are worth naming: an aggregate passes through its group keys and never its aggregate outputs, which is where the difference between `where` and `having` comes from, and a distinct with keys passes through only a predicate on those keys, because a keyed distinct does not promise which row of a group it keeps.
+
+Lowering connects the plan to the engine. A bound plan turns into a pipeline of the physical operators `exec` already had, and anything nobody has written an operator for is refused by name rather than silently materialised, so a caller can try the plan path and fall back at no cost.
+
+The measurement that came with all of this is not the one that was expected and it is worth stating plainly. TPC-H q6 at scale factor one on an idle thirty two thread machine: written by hand against the eager API, 19.6 ms, and the same query as a lowered plan, 19.2 ms. The same number. The plan's fourteen operators are strictly less work than the five full width masks the hand written route computes and none of it shows, because the pipeline runs one chunk per worker and the frame arrives in one chunk. One chunk is one core.
+
+So the read learned to come back in morsels, and the same plan over the same rows in chunks of sixteen thousand takes 7.9 ms, which is 2.5x. There is deliberately no default height. On thirty two threads the best band is sixteen to thirty two thousand rows, on an eight core machine the same sweep points the other way and a quarter of a million wins, so a number baked into the reader would be wrong on one of the two machines whatever it was set to.
+
+On the pandas side the exponentially weighted window arrives, which is the third and last of pandas' window types and the one that is a weight rather than a pair of rows. `rolling` and `expanding` gain a quantile, a rank and a median, and the order statistic structure the three of them share. `Index` gains the four arguments it was declaring without, an index whose labels are instants, and the two ends of a row.
+
+Projection merging and slice pushdown came in behind those two. Merging folds a line of projections down to one by substituting the lower one's expressions into the upper one's, which is what stops the rows being walked once per node when a caller chains two assigns or when pushdown leaves a projection behind. Slice pushdown combines a limit with the limit below it, swaps a limit past an elementwise projection, and turns a limit above a sort into a bound on the sort, which is the top n shape that four of the twenty two TPC-H queries have.
+
+Both of those rewrite in place, which predicate pushdown could not, and the reason is worth recording because it generalises. When two adjacent nodes each have one input they can trade contents and keep their indices, so the upper index goes on being the upper index and simply holds the other node now. No rebuild, and the root index a caller is holding still means the root.
+
+Patch rather than minor, since the planner milestone is not finished. Five of its thirteen passes are.
 
 ### Added: projection merging, so the rows are walked once and not once a node
 
@@ -70,6 +81,22 @@ There are three refusals. The lower node has to have exactly one reader, because
 The substitution itself is `Expressions.graft`, added next to the three analyses rather than hidden inside the pass, because folding one node's outputs into the node above it is something more than one pass is going to want. It copies only the nodes on the path to a replaced column, so an expression with nothing to replace in it comes back as the index that went in, and an expression handed to it is never rewritten under a node that shares it.
 
 Seventeen tests on the pass and four on the graft. Nothing calls any of this yet and the eager API does not change when it does.
+
+Part of #377.
+
+### Added: slice pushdown and top n, so ten rows are not paid for six million times
+
+Four of the twenty two TPC-H queries end in an order by with a limit on it, and the difference between answering one of those by sorting the whole table and answering it by keeping the best ten rows as they go past is most of the query. `limits` is the pass that spots the shape.
+
+Three rules. A limit above a sort puts a bound on the sort, which is a sort that only has to get the first n rows right, which is what a heap of size n does in one pass instead of what a full sort does in several. A limit above a limit becomes one limit, because two slices of a row sequence compose into one slice and working out which one is arithmetic that is easier to get right once here than at every place that builds a pair. And a limit above a projection swaps with it, so the projection evaluates n rows rather than all of them.
+
+The bound on a sort is deliberately advisory. The limit that produced it is still sitting above the sort and still doing the cutting, so an operator that has not learned to read the bound is slower than one that has and is not wrong. That is what lets the rule land now, before anything lowers a sort at all. A sort node comes out of the builder with its length set to `NO_LIMIT` rather than to zero, since zero would mean a sort that owes nobody any rows and the absence of a bound has to be written as an absence.
+
+The swap is worth describing because it is the way around the thing that made predicate pushdown rebuild the entire node list. Pushing a node down makes a new parent for an old child, which the arena's creation order forbids. But when both nodes have exactly one input, nothing has to move: the two nodes trade contents and keep their indices and their inputs. The upper index goes on being the upper index and simply holds the projection now. Same plan, same order, no rebuild, and the root index a caller is holding still means the root. The trick works for any two adjacent unary nodes and nothing about it is specific to limits.
+
+A projection is only swapped with when every expression in it is elementwise. A window function reads its whole partition, so cutting the rows down before it runs gives a different answer rather than the same answer sooner. A filter is never swapped with, because a limit below a filter counts rows the filter was going to throw away, and the same goes for a distinct and an aggregate. A union is not pushed into either, since capping each arm means a new node above each arm and a new node comes out above the union rather than below it, which wants the rebuild machinery and belongs with a pass that already has it. Every rule declines when the node below has more than one reader.
+
+Twenty three tests, and the composition cases read as a table, since a slice of a slice has four different answers depending on which of the two lengths is absent. An outer limit that runs off the end of an inner one keeps what is left rather than what was asked for, and an offset past the end of an inner limit keeps nothing.
 
 Part of #377.
 
@@ -302,6 +329,7 @@ It was found by AddressSanitizer rather than by a failing assertion, as a use af
 The second thing is smaller. A pooled buffer can still be sharing with a column that outlived it, which is safe because the pool zeroes on the way out and zeroing un-shares first, so it hands back a private allocation and loses the recycling rather than writing over somebody's bytes.
 
 Closes #406.
+
 ## [0.6.55] - 2026-09-11
 
 Built against Mojo 1.0.0 (ed45d567).
