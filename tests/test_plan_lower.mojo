@@ -1194,16 +1194,40 @@ def test_a_constant_that_is_null_fills_the_column_with_nothing() raises:
     )
 
 
-def test_a_cast_of_an_input_column_is_refused() raises:
+def test_a_cast_of_an_input_column_lands_in_a_column_of_its_own() raises:
+    # Converting position zero where it lies would change what that position
+    # means for every expression already bound against it, so the converted
+    # column is appended and the input keeps the type it arrived with.
     var plan = Plan()
     var scan = plan.scan("sales", List[String](), 0)
     var qty = plan.exprs.column("qty")
     var wider = plan.exprs.cast(LogicalType.FLOAT64, qty)
-    var root = plan.project(scan, [wider], ["qty"])
-    _ = bind(plan, root, schemas())
+    var root = plan.project(scan, [qty, wider], ["qty", "wide"])
+    var out = run(plan, root)
 
-    with assert_raises(contains="where it lies"):
-        _ = lower(plan, root, one_frame())
+    assert_equal(out.width(), 2, "both columns")
+    assert_true(out.schema[0].dtype == LogicalType.INT64, "the input as it was")
+    assert_true(out.schema[1].dtype == LogicalType.FLOAT64, "and the cast")
+    same(
+        read_back(out, "qty"),
+        [5, 20, 3, 40, 12, 8, 25, 1, 30, 15],
+        "the input column is untouched",
+    )
+
+
+def test_a_cast_of_an_input_column_converts_the_values() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var narrow = plan.exprs.cast(LogicalType.INT32, qty)
+    var root = plan.project(scan, [narrow], ["small"])
+    var out = run(plan, root)
+
+    assert_equal(out.width(), 1, "one column")
+    var col = out.column("small").as_typed[DType.int32]()
+    assert_equal(len(col), 10, "every row")
+    assert_equal(col[0], 5, "the first")
+    assert_equal(col[6], 25, "and one from the middle chunk")
 
 
 def test_a_cast_of_a_computed_column_is_allowed() raises:

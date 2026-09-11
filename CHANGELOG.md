@@ -21,6 +21,31 @@ A null in the mask drops the row, which is what `filter` does and what every com
 Tested against the long way round rather than against a written answer wherever the answer is longer than a line, since `filter` then `sort_limit` is the definition of what this returns and both are already tested. The tie rule is written out by hand as well, because a comparison against the long way round cannot catch the case where both of them have it wrong.
 
 Part of #481 and #478.
+### Added: sorting by value, which the core had finished and Python could not reach
+
+`DataFrame.sort_values`, `Series.sort_values`, `Series.argsort`, `Index.sort_values` and `Index.argsort` all answer now. None of them needed a kernel. The multi key sort, the single key sort and the erased pair underneath both of them were already written, tested and fast in `firepanda/kernel/sort.mojo` and on the two core types, and there was simply no way to call any of it from Python, so `df.sort_values("a")` was an `AttributeError` sitting on top of a finished sort.
+
+What the change is instead is translation. pandas names the direction it sorts in and the core names the other one. pandas takes one direction for all the keys or one per key, and the core takes a list either way. pandas says where the missing values sit with a word and the core says it with a flag. pandas takes one key name or a list of them, and a string is one key even though a string is also a sequence. All of that is undone above the boundary, because the side that knows how many keys there are is the side that read `by`, and the binding takes three lists of the same length and interprets nothing.
+
+`ignore_index` numbers the rows again afterwards, which is `reset_index(drop=True)` on the answer and is written as exactly that. It is implemented here and refused on `sort_index`, which is not inconsistency: sorting rows by their labels and then throwing the labels away discards the thing that was just sorted, and sorting rows by a column and then renumbering them is an ordinary thing to want.
+
+`kind` is accepted and never read, because the four names it takes are numpy's sort algorithms and the sort underneath is stable whichever one is asked for. `Series.argsort` accepts `stable` and does not read that either, which is the same fact stated twice rather than a second gap. Everything else is read or refused: `key` is refused, `inplace` is refused, `axis=1` is refused, and `order` on `argsort` names the fields of a numpy record array that does not exist here.
+
+One divergence, and it is the core's rather than this layer's. pandas puts a negative position in the row a missing value sat in, because numpy has a sentinel going spare there. firepanda places a null instead of removing it, so a null gets a real position like every other row and nothing comes back negative.
+
+Part of #156, after #8.
+
+### Added: a column can become a frame, and thirteen members that follow from it
+
+`Series.to_frame` hands back a frame of one column, carrying the column's own labels rather than a fresh range, and that is the door the rest of this entry goes through. The count that found it is one subtraction: the public members the frame has minus the ones the column has is thirteen names, three of which are a frame's business and ten of which are members of the pandas series that were missing here. They were not ten oversights. They were one missing thing, which is that a column could not be handed to a frame.
+
+The ten are `duplicated`, `drop_duplicates`, `take`, `sort_index`, `truncate`, `nlargest`, `nsmallest` and `reset_index`, and each is three lines: put the column in a frame under the name it already has, run the frame's method, take the column back out. `duplicated` is four rather than three, because what a frame answers there is a mask rather than a frame, so it is relabelled instead of unpacked. None of the ten has a line about the index anywhere, because every one of them either removes rows or reorders them and the frame does the same thing to the labels that it does to the values.
+
+The index then gets three more out of two doors end to end, `to_frame`, `duplicated` and `drop_duplicates`, and those three score twice because `DatetimeIndex` subclasses `Index`. `drop_duplicates` hands back the class the index already was, so dropping a repeated instant leaves an index of instants, and that rule now lives in one place rather than being written again each time.
+
+One divergence is worth saying out loud. pandas calls the column of an unnamed series `0`, the integer, and a column name here is a string, so it is the text of it. The same is true of a caller who writes `name=None`. Both close at once whenever a column name can hold something that is not a string, which is the same change a series name is waiting for.
+
+Part of #156, after #8.
 
 ### Fixed: an index built out of something that already has a name
 
@@ -75,6 +100,22 @@ The kernel is three valued and that is the point of it being a kernel rather tha
 It is read off them cheaply. The values come out of a morsel loop over the bytes with no branch in it, and the validity starts as the intersection. When neither column holds a null, which is most predicates over most tables, that is the answer and nothing else runs. When one does, only the validity words the intersection marks are walked, and in those words only the rows a null reaches. A column with a thousand nulls in ten million rows pays for a thousand rows.
 
 A call with more than two arguments folds left to right into one operator per pair, in the order the query was written, because that is the order a reader of the plan expects and reordering something later is easier than recovering what was written.
+
+Part of #309.
+
+### Added: `CAST` runs, over the twelve types a query can name and the engine can hold
+
+`CAST(x AS t)` was refused because the type text had to be resolved against a type set the plan does not share. It resolves now. The name goes through the dialect's spelling table first, which is where `int8` is `BIGINT` and `int1` is `TINYINT`, and then across to the engine's `LogicalType`. Twelve types make it over with nothing lost: `BOOLEAN`, the eight fixed width integers, `FLOAT`, `DOUBLE` and `VARCHAR`.
+
+The rest are refused by name, and the refusals split into two kinds that end at different times. `HUGEINT`, `UHUGEINT` and `DECIMAL` have no engine type at all, since there is no 128 bit integer and no exact decimal to name on the other side. `DATE`, the timestamps and the times do have engine types, and what is missing is the conversion: the cast converts a column to the physical layout its target sits on, so a cast to `DATE` would hand back the int32 underneath holding the source numbers rather than the days they stand for, and a column that answers to a date's name while holding something else is worse than a refusal.
+
+The decimal refusal is the one that is a decision rather than a gap, and it is the same decision the decimal literal already rests on. `1.1` read as a double answers `3.3000000000000003` where DuckDB answers `3.3`, so both of them stay refused until the plan can carry an exact decimal. That, and not the type mapping, is what TPC-H q6 waits on, since its `l_discount BETWEEN 0.05 AND 0.07` is decimal literals rather than a cast.
+
+A cast of an input column now lands in a column of its own instead of being refused. Converting it where it lies is what `astype` on a frame means and it is wrong inside an expression, because `SELECT a, CAST(a AS BIGINT)` still wants `a` at the type it arrived with, and changing position zero would change what that position means for every expression already bound against it. A cast of a column the expression just built still converts in place, since that column is what the cast is for.
+
+Two defects turned up on the way and are fixed here. A type written in a query reaches the parser with its tokens joined by single spaces, so `DECIMAL(9,2)` arrives as `DECIMAL ( 9 , 2 )`, and the lookup was reading `DECIMAL ` with the space on it and reporting that no type is spelled that way. And a pass that rebuilds an expression over new operands was dropping the cast's target type, which is written on the node and nowhere else, so a cast that a projection merge had copied became a cast to the null type.
+
+`TRY_CAST` is refused by name, because the plan's cast has no way to say that a value it cannot convert is a null rather than an error.
 
 Part of #309.
 

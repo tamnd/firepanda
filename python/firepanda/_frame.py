@@ -1864,6 +1864,24 @@ class DataFrame(DataFrameMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def sort_values(
+        self,
+        by: Any,
+        *,
+        axis: Any = 0,
+        ascending: Any = True,
+        inplace: bool = False,
+        kind: str = "quicksort",
+        na_position: str = "last",
+        ignore_index: bool = False,
+        key: Any = None,
+    ) -> DataFrame:
+        """The frame with its rows in the order of some of its columns."""
+        try:
+            return self._sort_values(by, axis, ascending, inplace, na_position, ignore_index, key)
+        except Exception as error:
+            raise translate(error) from None
+
     def filter(
         self, items: Any = None, like: str | None = None, regex: str | None = None, axis: Any = None
     ) -> DataFrame:
@@ -3744,6 +3762,14 @@ def _index_to_series(index: object, labels: object, name: object) -> Series:
     """The labels of an index, as a column that carries them twice."""
     try:
         return Series._wrap(_firepanda._index_to_series(index, labels, name))
+    except Exception as error:
+        raise translate(error) from None
+
+
+def _series_to_frame(column: object, name: object) -> DataFrame:
+    """A column, as a frame of one column under a chosen name."""
+    try:
+        return DataFrame._wrap(_firepanda._series_to_frame(column, name))
     except Exception as error:
         raise translate(error) from None
 

@@ -34,6 +34,11 @@ class DataFrame:
     def sort_index(self, ascending: bool) -> DataFrame:
         """The frame with its rows in the order of their labels."""
         ...
+    def sort_values(
+        self, by: list[str], descending: list[bool], nulls_first: list[bool]
+    ) -> DataFrame:
+        """The frame with its rows in the order of some of its columns."""
+        ...
     def head(self, n: int) -> DataFrame:
         """The first n rows."""
         ...
@@ -174,6 +179,12 @@ class Series:
         ...
     def take(self, positions: list[int]) -> Series:
         """Rows gathered by position, counting from the end when negative."""
+        ...
+    def sort_values(self, descending: bool, nulls_first: bool) -> Series:
+        """The column with its rows in the order of their own values."""
+        ...
+    def argsort(self, descending: bool, nulls_first: bool) -> Series:
+        """The row order a sort would put the values in, as a column."""
         ...
     def slice_rows(self, start: int, end: int) -> Series:
         """A half open range of rows."""
@@ -445,6 +456,10 @@ def _isocalendar(column: object) -> DataFrame:
 
 def _index_to_series(index: object, labels: object, name: object) -> Series:
     """The labels of an index, as a column that carries them twice."""
+    ...
+
+def _series_to_frame(column: object, name: object) -> DataFrame:
+    """A column, as a frame of one column under a chosen name."""
     ...
 
 def _raise_for_test(kind: str) -> object:

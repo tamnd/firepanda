@@ -468,17 +468,14 @@ def _lower_expr(
         var over = exprs.nodes[root].children[0]
         var at = _lower_expr(exprs, over, pipe, base, name, memo, reuse=True)
         if at < base:
-            raise Error(
-                String(
-                    "lower: a cast of the input column at position ",
-                    at,
-                    (
-                        " would convert it where it lies and change what that"
-                        " position means for every expression already bound"
-                        " against it"
-                    ),
-                )
-            )
+            # Converting an input column where it lies would change what that
+            # position means for every expression already bound against it, so
+            # a cast of one lands in a column of its own, the way every other
+            # expression does. A cast of a column this expression just built
+            # converts in place, because that column is what the cast is for.
+            pipe.add(Node(Cast(at, exprs.nodes[root].type, name)))
+            memo.remember(root, len(pipe.schema) - 1)
+            return len(pipe.schema) - 1
         pipe.add(Node(Cast(at, exprs.nodes[root].type)))
         # The position holds the converted column now, so whatever the memo
         # says is there is no longer there, and the cast itself is not recorded

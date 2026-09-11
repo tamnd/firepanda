@@ -257,6 +257,71 @@ def _keep_word(keep: Any) -> str:
     return keep if isinstance(keep, str) else "none"
 
 
+def _as_keys(by: Any) -> list[Any]:
+    """Turns pandas' `by` into a list of key names, however it was written.
+
+    One name or several, and pandas takes both without saying which it got. A
+    string is one key even though it is also a sequence of characters, which is
+    the trap in writing this and is why the check is for a string first.
+
+    Args:
+        by: What the caller wrote.
+
+    Returns:
+        The key names, most significant first.
+    """
+    if isinstance(by, str) or not isinstance(by, (list, tuple)):
+        return [by]
+    return list(by)
+
+
+def _directions(ascending: Any, keys: int) -> list[bool]:
+    """Turns pandas' `ascending` into one descending flag per key.
+
+    pandas takes a bool for all of the keys or a sequence with one for each, and
+    the core takes a list either way, so a single flag is spread over the keys
+    here rather than in the binding. The flag is inverted on the way through
+    because pandas names the direction it sorts in and the core names the other
+    one.
+
+    Args:
+        ascending: What the caller wrote.
+        keys: How many keys the sort has.
+
+    Returns:
+        One flag per key, true for largest first.
+
+    Raises:
+        InvalidArgumentError: If a sequence was given and it is the wrong
+            length. The sentence is pandas' own.
+    """
+    if not isinstance(ascending, (list, tuple)):
+        return [not bool(ascending)] * keys
+    if len(ascending) != keys:
+        raise InvalidArgumentError(
+            f"Length of ascending ({len(ascending)}) != length of by ({keys})"
+        )
+    return [not bool(one) for one in ascending]
+
+
+def _na_first(na_position: str) -> bool:
+    """Turns pandas' `na_position` into the flag the sort kernel reads.
+
+    Args:
+        na_position: What the caller wrote.
+
+    Returns:
+        True if the missing values go at the front.
+
+    Raises:
+        InvalidArgumentError: If it is neither word. The sentence is pandas'
+            own.
+    """
+    if na_position not in ("first", "last"):
+        raise InvalidArgumentError(f"invalid na_position: {na_position}")
+    return na_position == "first"
+
+
 # The thirteen interpolations pandas takes, in the order numpy lists them, since
 # pandas hands the name straight to `numpy.quantile` and the message it raises
 # prints numpy's own dictionary. firepanda has written `linear`. The other twelve
@@ -1950,6 +2015,47 @@ class DataFrameMixin:
         except Exception as error:
             raise translate(error) from None
 
+    def _sort_values(
+        self,
+        by: Any,
+        axis: Any,
+        ascending: Any,
+        inplace: bool,
+        na_position: str,
+        ignore_index: bool,
+        key: Any,
+    ) -> DataFrame:
+        """Puts the rows in the order of one or more of their columns.
+
+        `kind` is accepted and never looked at, for the reason `_sort_index`
+        above gives, and does not reach here. Everything else pandas declares is
+        read: several keys, a direction per key, where the missing values sit,
+        and whether the rows are numbered again afterwards.
+
+        `ignore_index` is a `reset_index` on the answer rather than something
+        the sort knows about, which is what it means and is why it is one line
+        here and nothing at all in the core.
+        """
+        from ._frame import DataFrame
+
+        _refuse("key", key, "running a function over the values before sorting is not written")
+        _axis_number(axis, "DataFrame", 0, (0,))
+        _held_at(
+            "inplace",
+            inplace,
+            False,
+            "every operation here answers a new frame and the Arrow buffers"
+            " underneath are shared rather than owned",
+        )
+        keys = [str(one) for one in _as_keys(by)]
+        directions = _directions(ascending, len(keys))
+        front = [_na_first(na_position)] * len(keys)
+        try:
+            sorted_frame = DataFrame._wrap(self._inner.sort_values(keys, directions, front))
+        except Exception as error:
+            raise translate(error) from None
+        return sorted_frame.reset_index(drop=True) if ignore_index else sorted_frame
+
     def _take(self, indices: Any, axis: Any, kwargs: dict[str, Any]) -> DataFrame:
         """Gathers rows or columns by position, in the order asked for.
 
@@ -2667,6 +2773,215 @@ class SeriesMixin:
             except Exception as error:
                 raise translate(error) from None
         return _Along(self, True)[key]
+
+    def to_frame(self, name: Any = NO_DEFAULT) -> DataFrame:
+        """The column as a frame of one column, keeping its labels.
+
+        This is the door the eight methods below go through, and the reason it
+        is worth having on its own is that a frame in this library already
+        knows how to do things a column does not. Every one of them is a line
+        once the column can be handed to a frame and taken back out.
+
+        pandas calls the column of an unnamed series `0`, which is the integer
+        rather than the text of it, and a column name here is a string. So it
+        is the text of it, and a caller who writes `name=None` gets the empty
+        string for the same reason: there is no name that is not a string to
+        put there.
+
+        Args:
+            name: The column name, or left out for the series' own.
+
+        Returns:
+            A frame of one column.
+        """
+        wanted = self._inner.label() if name is NO_DEFAULT else name
+        return self._framed("0" if not wanted else str(wanted))
+
+    def duplicated(self, keep: Any = "first") -> Series:
+        """Which values repeat one that another row already carries.
+
+        The only one of these that does not take its own column back, because
+        what a frame answers here is a mask rather than a frame, and the mask
+        arrives unnamed where a series' own answer carries the series' name.
+        """
+        from ._frame import Series
+
+        label = self._inner.label()
+        mask = self._framed(label).duplicated(keep=keep)
+        try:
+            return Series._wrap(mask._inner.relabel(label))
+        except Exception as error:
+            raise translate(error) from None
+
+    def drop_duplicates(
+        self, *, keep: Any = "first", inplace: bool = False, ignore_index: bool = False
+    ) -> Series:
+        """The values with the repeated ones removed, by a chosen rule."""
+        return self._through(
+            lambda frame: frame.drop_duplicates(
+                keep=keep, inplace=inplace, ignore_index=ignore_index
+            )
+        )
+
+    def take(self, indices: Any, axis: Any = 0, **kwargs: Any) -> Series:
+        """The rows at a list of positions, in the order they are given in."""
+        return self._through(lambda frame: frame.take(indices, axis, **kwargs))
+
+    def sort_index(
+        self,
+        *,
+        axis: Any = 0,
+        level: Any = None,
+        ascending: Any = True,
+        inplace: bool = False,
+        kind: str = "quicksort",
+        na_position: str = "last",
+        sort_remaining: bool = True,
+        ignore_index: bool = False,
+        key: Any = None,
+    ) -> Series:
+        """The column with its rows in the order of their labels."""
+        return self._through(
+            lambda frame: frame.sort_index(
+                axis=axis,
+                level=level,
+                ascending=ascending,
+                inplace=inplace,
+                kind=kind,
+                na_position=na_position,
+                sort_remaining=sort_remaining,
+                ignore_index=ignore_index,
+                key=key,
+            )
+        )
+
+    def sort_values(
+        self,
+        *,
+        axis: Any = 0,
+        ascending: Any = True,
+        inplace: bool = False,
+        kind: str = "quicksort",
+        na_position: str = "last",
+        ignore_index: bool = False,
+        key: Any = None,
+    ) -> Series:
+        """The column with its rows in the order of their own values.
+
+        Not through the frame, unlike the rest of this group. A column is one
+        sort key and the core has a one key sort that does not build a list to
+        hold it, so this is the binding straight through and the labels come
+        along because the core gathers them with the values.
+        """
+        from ._frame import Series
+
+        _refuse("key", key, "running a function over the values before sorting is not written")
+        _axis_number(axis, "Series", 0, (0,))
+        _held_at(
+            "inplace",
+            inplace,
+            False,
+            "every operation here answers a new column and the Arrow buffers"
+            " underneath are shared rather than owned",
+        )
+        try:
+            sorted_column: Series = Series._wrap(
+                self._inner.sort_values(_directions(ascending, 1)[0], _na_first(na_position))
+            )
+        except Exception as error:
+            raise translate(error) from None
+        return sorted_column.reset_index(drop=True) if ignore_index else sorted_column
+
+    def argsort(
+        self, axis: Any = 0, kind: str = "quicksort", order: Any = None, stable: Any = None
+    ) -> Series:
+        """The positions that would put the values in order, as a column.
+
+        `kind` and `stable` are both accepted and neither is looked at, which is
+        one argument rather than two: they are numpy's two ways of asking for a
+        sort algorithm, the sort underneath is stable however it is asked, and a
+        stable order answers every spelling of the question.
+
+        A null is where this differs from pandas, and the difference is the
+        core's rather than this layer's. pandas marks the row a missing value
+        sat in with a negative position, because numpy has a sentinel to spare
+        there. firepanda places a null instead of removing it, so a null gets a
+        real position like everything else and nothing comes back negative.
+        """
+        from ._frame import Series
+
+        _axis_number(axis, "Series", 0, (0,))
+        _refuse("order", order, "a key made of several fields is a numpy record array")
+        try:
+            return Series._wrap(self._inner.argsort(False, False))
+        except Exception as error:
+            raise translate(error) from None
+
+    def truncate(
+        self, before: Any = None, after: Any = None, axis: Any = None, copy: Any = NO_DEFAULT
+    ) -> Series:
+        """The rows between two labels, with both of them kept."""
+        return self._through(lambda frame: frame.truncate(before, after, axis, copy))
+
+    def nlargest(self, n: int = 5, keep: Any = "first") -> Series:
+        """The largest values, in order, with ties settled by a rule."""
+        return self._through(lambda frame: frame.nlargest(n, self._inner.label(), keep))
+
+    def nsmallest(self, n: int = 5, keep: Any = "first") -> Series:
+        """The smallest values, in order, with ties settled by a rule."""
+        return self._through(lambda frame: frame.nsmallest(n, self._inner.label(), keep))
+
+    def reset_index(
+        self,
+        level: Any = None,
+        *,
+        drop: bool = False,
+        name: Any = NO_DEFAULT,
+        inplace: bool = False,
+        allow_duplicates: bool = False,
+    ) -> Any:
+        """The labels numbered again, or moved into a column beside the values.
+
+        The two answers are different types, which is pandas and not an
+        invention here. Dropping the labels leaves a column and keeping them
+        makes a frame of two, because the labels have become values and values
+        in a second column are what a frame is.
+        """
+        if drop:
+            return self._through(
+                lambda frame: frame.reset_index(
+                    level, drop=True, inplace=inplace, allow_duplicates=allow_duplicates
+                )
+            )
+        wanted = self._inner.label() if name is NO_DEFAULT else name
+        made = self._framed("0" if not wanted else str(wanted))
+        return made.reset_index(
+            level, drop=False, inplace=inplace, allow_duplicates=allow_duplicates
+        )
+
+    def _framed(self, name: str) -> DataFrame:
+        """This column in a frame of one column, under a name of the caller's."""
+        from ._frame import _series_to_frame
+
+        return _series_to_frame(self._inner, name)
+
+    def _through(self, run: Any) -> Series:
+        """Runs a frame method on this one column and takes the column back.
+
+        The eight public methods above are all the same three steps, and the
+        column goes in and comes out under the name it already had so that the
+        answer is this series rather than a differently named one. A frame
+        method that removes rows or reorders them does the same thing to the
+        labels, which is why none of these has to touch the index at all.
+        """
+        from ._frame import Series
+
+        label = self._inner.label()
+        answered = run(self._framed(label))
+        try:
+            return Series._wrap(answered._inner.column(label))
+        except Exception as error:
+            raise translate(error) from None
 
     def _get(self, key: Any, default: Any) -> Any:
         """The value at a label, or a value of the caller's choosing.
@@ -5655,17 +5970,7 @@ class IndexMixin:
         """
         if how not in ("any", "all"):
             raise InvalidArgumentError(f"firepanda:value: invalid how option: {how}")
-        column = self.to_series().dropna()
-        # The class the index already was rather than `Index`, because a
-        # `DatetimeIndex` with a missing instant dropped is still a set of
-        # instants. The mixin cannot see `_wrap`, which the generated half
-        # writes, so the class goes through a name the checker leaves alone.
-        made: Any = type(self)
-        try:
-            kept: Index = made._wrap(column._inner.to_index(self._inner.label()))
-        except Exception as error:
-            raise translate(error) from None
-        return kept
+        return self._like(self.to_series().dropna())
 
     def min(self, axis: Any = None, skipna: bool = True, *args: Any, **kwargs: Any) -> Any:
         """The smallest label.
@@ -5718,6 +6023,83 @@ class IndexMixin:
         if dropna or self._inner.null_count() == 0:
             return answer
         return answer + 1
+
+    def to_frame(self, index: bool = True, name: Any = NO_DEFAULT) -> DataFrame:
+        """The labels as a frame of one column, under a name.
+
+        Two doors end to end. The labels become a column and the column becomes
+        a frame, and what the caller chooses is whether the labels stay on as
+        the row labels as well or the frame is numbered from nothing.
+        """
+        wanted = self._inner.label() if name is NO_DEFAULT else name
+        made = self.to_series().to_frame(wanted)
+        return made if index else made.reset_index(drop=True)
+
+    def duplicated(self, keep: Any = "first") -> Any:
+        """Which labels repeat one that an earlier label already carries."""
+        return self.to_series().duplicated(keep=keep).tolist()
+
+    def drop_duplicates(self, *, keep: Any = "first") -> Index:
+        """The labels with the repeated ones removed, by a chosen rule."""
+        return self._like(self.to_series().drop_duplicates(keep=keep))
+
+    def sort_values(
+        self,
+        *,
+        return_indexer: bool = False,
+        ascending: bool = True,
+        na_position: str = "last",
+        key: Any = None,
+    ) -> Any:
+        """The labels in order, and optionally the order that put them there.
+
+        Two answers of two different shapes, which is pandas and not an
+        invention here: `return_indexer` decides whether the caller gets the
+        sorted index or a pair of it and the permutation that made it.
+
+        The permutation is a list of numbers where pandas gives a numpy array,
+        which is the shape `duplicated` and the `isna` family already answer in
+        and is document 41 section 5's note rather than a new one.
+        """
+        from ._frame import Series
+
+        _refuse("key", key, "running a function over the labels before sorting is not written")
+        column = self.to_series()
+        front = _na_first(na_position)
+        down = _directions(ascending, 1)[0]
+        try:
+            ordered: Series = Series._wrap(column._inner.sort_values(down, front))
+            if not return_indexer:
+                return self._like(ordered)
+            found: Series = Series._wrap(column._inner.argsort(down, front))
+        except Exception as error:
+            raise translate(error) from None
+        return self._like(ordered), found.tolist()
+
+    def argsort(self, *args: Any, **kwargs: Any) -> Any:
+        """The positions that would put the labels in order.
+
+        `*args, **kwargs` is pandas' own signature here and it is not a
+        shorthand for anything. The index method takes what the column method
+        takes and hands it straight down, so this does the same, and a caller
+        who passes something the column refuses gets the column's refusal.
+        """
+        return self.to_series().argsort(*args, **kwargs).tolist()
+
+    def _like(self, column: Any) -> Index:
+        """The class this index already is, over the values of a column.
+
+        `dropna` wrote this rule first and the comment there is the argument:
+        an index of instants with rows taken out of it is still an index of
+        instants, and the mixin cannot see `_wrap`, which the generated half
+        writes, so the class goes through a name the checker leaves alone.
+        """
+        made: Any = type(self)
+        try:
+            kept: Index = made._wrap(column._inner.to_index(self._inner.label()))
+        except Exception as error:
+            raise translate(error) from None
+        return kept
 
     def _only_level(self, level: Any) -> None:
         """Holds that `level` names the one level a flat index has.

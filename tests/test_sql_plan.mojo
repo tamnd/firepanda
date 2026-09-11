@@ -372,8 +372,42 @@ def test_the_shapes_with_no_node_yet_each_say_which_one() raises:
         _ = _plan("SELECT a FROM t WHERE b IN (SELECT b FROM u)")
     with assert_raises(contains="subquery in an expression"):
         _ = _plan("SELECT a FROM t WHERE EXISTS (SELECT b FROM u)")
-    with assert_raises(contains="CAST"):
-        _ = _plan("SELECT CAST(a AS BIGINT) FROM t")
+    with assert_raises(contains="TRY_CAST"):
+        _ = _plan("SELECT TRY_CAST(a AS BIGINT) FROM t")
+
+
+def test_a_cast_reads_its_type_name_against_the_dialect_type_set() raises:
+    assert_equal(
+        _plan("SELECT CAST(a AS BIGINT) AS wide FROM t"),
+        "PROJECT [a::int64 as wide]\n  SCAN t []\n",
+    )
+
+
+def test_a_spelling_is_not_a_type_here_either() raises:
+    # int8 is BIGINT and not TINYINT, so this is the one that would silently
+    # narrow the column if the spelling table were read the other way round.
+    assert_equal(
+        _plan("SELECT CAST(a AS int8) AS wide FROM t"),
+        "PROJECT [a::int64 as wide]\n  SCAN t []\n",
+    )
+    assert_equal(
+        _plan("SELECT CAST(a AS int1) AS narrow FROM t"),
+        "PROJECT [a::int8 as narrow]\n  SCAN t []\n",
+    )
+
+
+def test_a_cast_to_a_type_the_engine_has_no_column_for_is_refused() raises:
+    with assert_raises(contains="integers stop at 64 bits"):
+        _ = _plan("SELECT CAST(a AS HUGEINT) FROM t")
+    with assert_raises(contains="no exact decimal"):
+        _ = _plan("SELECT CAST(a AS DECIMAL(9,2)) FROM t")
+    with assert_raises(contains="firepanda does not cast to DATE yet"):
+        _ = _plan("SELECT CAST(a AS DATE) FROM t")
+
+
+def test_a_cast_to_a_type_nobody_spells_that_way_is_refused() raises:
+    with assert_raises(contains="does not exist"):
+        _ = _plan("SELECT CAST(a AS BIGGINT) FROM t")
 
 
 def test_a_column_can_say_which_table_it_is_from() raises:
