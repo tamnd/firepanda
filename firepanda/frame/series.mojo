@@ -50,6 +50,12 @@ from firepanda.kernel.chars import (
     text_slice_replace,
 )
 from firepanda.kernel.cumulative import CumulativeOp, cumulative_any
+from firepanda.kernel.edges import (
+    text_pad,
+    text_repeat,
+    text_strip,
+    text_zfill,
+)
 from firepanda.kernel.dictionary import (
     dictionary_codes,
     drop_unused_categories,
@@ -907,6 +913,104 @@ struct Series(Copyable, Movable, Sized, Writable):
             AnyArray(
                 text_remove_suffix(self.values.strings(), suffix.as_bytes())
             ),
+        )
+
+    def chars_strip(
+        self,
+        set: StringSlice,
+        by_set: Bool,
+        from_left: Bool,
+        from_right: Bool,
+    ) raises -> Self:
+        """Returns every row with characters taken off one end or both.
+
+        Args:
+            set: The characters to remove, read as a set and not as a prefix.
+            by_set: Whether to use the set. False means whitespace, which is
+                what pandas removes when no characters are named.
+            from_left: Whether to work on the near end.
+            from_right: Whether to work on the far end.
+
+        Returns:
+            A text series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name,
+            AnyArray(
+                text_strip(
+                    self.values.strings(),
+                    set.as_bytes(),
+                    by_set,
+                    from_left,
+                    from_right,
+                )
+            ),
+        )
+
+    def chars_pad(
+        self, width: Int, fill: StringSlice, on_left: Bool, on_right: Bool
+    ) raises -> Self:
+        """Returns every row padded to a width, in characters.
+
+        Args:
+            width: How many characters the answer should hold. A row that is
+                already that wide is handed back as it is.
+            fill: The character to pad with.
+            on_left: Whether to pad the near end.
+            on_right: Whether to pad the far end.
+
+        Returns:
+            A text series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name,
+            AnyArray(
+                text_pad(
+                    self.values.strings(),
+                    width,
+                    fill.as_bytes(),
+                    on_left,
+                    on_right,
+                )
+            ),
+        )
+
+    def chars_zfill(self, width: Int) raises -> Self:
+        """Returns every row zero filled to a width, with any sign kept first.
+
+        Args:
+            width: How many characters the answer should hold.
+
+        Returns:
+            A text series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name, AnyArray(text_zfill(self.values.strings(), width))
+        )
+
+    def chars_repeat(self, times: Int) raises -> Self:
+        """Returns every row written out several times, end to end.
+
+        Args:
+            times: How many copies. Zero or fewer is the empty string.
+
+        Returns:
+            A text series of the same height, null wherever this one is null.
+
+        Raises:
+            Error: If the series is not text.
+        """
+        return self._relabelled(
+            self.name, AnyArray(text_repeat(self.values.strings(), times))
         )
 
     def chars_starts_with(self, prefix: StringSlice) raises -> Self:

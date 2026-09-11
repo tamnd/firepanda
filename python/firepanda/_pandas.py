@@ -37,6 +37,7 @@ from .errors import (
     DTypeError,
     InvalidArgumentError,
     OutOfBoundsError,
+    UnsupportedError,
     translate,
 )
 
@@ -2785,8 +2786,15 @@ class StringMixin:
     argues for. Everything here turns what pandas lets a caller write into the
     word and the four values a door takes.
 
-    Two things are decided here rather than in the kernel, and both are decided
-    here because they are about the pandas surface. `index` and `rindex` are
+    Several things are decided here rather than in the kernel, and all of them
+    are decided here because they are about the pandas surface. A width that is
+    not a whole number, a fill character that is not one character, and a side
+    that is not one of three words are all refused with the message pandas would
+    have given, before anything crosses. `strip(None)` and `strip("")` are told
+    apart here as well, because the absence has to pick the word the crossing
+    carries and there is no way to spell an absent string on the other side.
+
+    `index` and `rindex` are
     `find` and `rfind` that raise when the substring is missing from any row, and
     the exception is a `ValueError` whose text pandas copied from Python's
     `str.index`. And `startswith` accepts a tuple of prefixes, which is Python's
@@ -2879,6 +2887,83 @@ class StringMixin:
     def _at(self, i: Any) -> Series:
         """One character out of every row, by position."""
         return self._text("get", "", i)
+
+    def _trimmed(self, kind: str, to_strip: Any) -> Series:
+        """Every row with characters taken off one end or both.
+
+        `None` and the empty string are two different requests and pandas keeps
+        them apart, because it hands both straight to Python: `strip()` removes
+        whitespace and `strip("")` removes nothing at all. So the absence picks
+        the word rather than being filled in with a default set, and the two
+        words reach two different calls in the kernel.
+        """
+        if to_strip is None:
+            return self._text(kind)
+        return self._text(f"{kind}_chars", str(to_strip))
+
+    def _padded(self, width: Any, side: Any, fillchar: Any) -> Series:
+        """Every row filled out to a width with a character.
+
+        All four checks here are pandas' own, in pandas' order and with pandas'
+        text. The kernel checks the fill as well, because it is reachable from
+        Mojo too, but the message a Python caller reads should be the one they
+        would have read from pandas and it says `str` where the kernel would
+        have counted the characters.
+        """
+        if not isinstance(fillchar, str):
+            raise DTypeError(
+                f"firepanda:dtype: fillchar must be a character, not {type(fillchar).__name__}"
+            )
+        if len(fillchar) != 1:
+            raise DTypeError("firepanda:dtype: fillchar must be a character, not str")
+        width = self._width(width)
+        if side not in ("left", "right", "both"):
+            raise InvalidArgumentError(
+                f"firepanda:value: Invalid side: {side}. Side must be one of"
+                " 'left', 'right', 'both'"
+            )
+        return self._text(f"pad_{side}", fillchar, width)
+
+    def _filled(self, width: Any) -> Series:
+        """Every row filled out to a width with zeros, after any leading sign."""
+        return self._text("zfill", "", self._width(width))
+
+    def _repeated(self, repeats: Any) -> Series:
+        """Every row written out several times, end to end.
+
+        pandas also takes one count per row here, which is a second method
+        wearing the same name: it answers a different column for every row and
+        needs a column of counts crossing rather than a number. That form is not
+        written yet and says so, rather than quietly repeating by the first count
+        it can find.
+        """
+        if isinstance(repeats, (str, bytes)) or not isinstance(repeats, int):
+            try:
+                iter(repeats)
+            except TypeError:
+                pass
+            else:
+                raise UnsupportedError(
+                    "firepanda:unsupported: str.repeat takes one count for the"
+                    " whole column, and a count per row is not written yet"
+                )
+        return self._text("repeat", "", self._width(repeats, "repeats"))
+
+    @staticmethod
+    def _width(value: Any, name: str = "width") -> int:
+        """Reads a count, and refuses anything that is not whole.
+
+        pandas checks this itself and says so in pandas' words, which is worth
+        the four lines: a caller who wrote `zfill("10")` gets told that the
+        argument is the wrong type rather than getting a message about the
+        column, and a bool is refused as well because `zfill(True)` is a mistake
+        every time even though Python is happy to call it an integer.
+        """
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise DTypeError(
+                f"firepanda:dtype: {name} must be of integer type, not {type(value).__name__}"
+            )
+        return value
 
     def _found(self, kind: str, sub: Any, start: Any, end: Any) -> Series:
         """Where a substring sits in every row, or -1 where it is not there."""

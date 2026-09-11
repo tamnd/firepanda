@@ -210,8 +210,8 @@ Ships whole at M6. A partial string namespace reads as a toy, and this is where 
 RE2 semantics throughout: linear time, no backreferences, no lookaround. That is a documented divergence and it is prominent in the migration guide, because a regex that works in pandas and raises here is a bad afternoon.
 
 - [ ] `len`, `lower`, `upper`, `title`, `capitalize`, `casefold`, `swapcase` (M6)
-- [ ] `strip`, `lstrip`, `rstrip`, `pad`, `center`, `ljust`, `rjust`, `zfill`, `wrap` (M6)
-- [ ] `slice`, `slice_replace`, `get`, `repeat` (M6)
+- [x] `strip`, `lstrip`, `rstrip`, `pad`, `center`, `ljust`, `rjust`, `zfill` (M6), and `wrap` is still to come
+- [x] `slice`, `slice_replace`, `get`, `repeat` (M6), and `repeat` takes one count for the whole column rather than one per row
 - [ ] `cat` with `sep` and `others` (M6)
 - [ ] `split`, `rsplit`, `partition`, `rpartition`, with `expand=` (M6)
 - [ ] `join` (M6)
