@@ -1165,7 +1165,7 @@ def test_a_cross_join_is_refused_by_name() raises:
         _ = lower(plan, root, two_frames())
 
 
-def test_a_join_whose_right_side_is_not_a_scan_is_refused_by_name() raises:
+def test_a_join_whose_right_side_is_a_filter_builds_it_first() raises:
     var plan = Plan()
     var left = plan.scan("sales", List[String](), 0)
     var right = plan.scan("tiers", List[String](), 1)
@@ -1181,8 +1181,66 @@ def test_a_join_whose_right_side_is_not_a_scan_is_refused_by_name() raises:
         [plan.exprs.column("band")],
         JoinKind.INNER,
     )
+    var out = run_two(plan, root)
+    same(read_back(out, "qty"), [20, 40], "qty")
+    same(read_back(out, "rate"), [200, 400], "rate")
+
+
+def test_a_join_can_build_from_a_projection() raises:
+    var plan = Plan()
+    var left = plan.scan("sales", List[String](), 0)
+    var right = plan.scan("tiers", List[String](), 1)
+    var narrowed = plan.project(
+        right,
+        [plan.exprs.column("rate"), plan.exprs.column("band")],
+        [String("rate"), String("band")],
+    )
+    var root = plan.join(
+        left,
+        narrowed,
+        [plan.exprs.column("qty")],
+        [plan.exprs.column("band")],
+        JoinKind.INNER,
+    )
+    var out = run_two(plan, root)
+    same(read_back(out, "qty"), [20, 3, 40], "qty")
+    same(read_back(out, "rate"), [200, 300, 400], "rate")
+
+
+def test_a_build_side_takes_the_relation_it_read() raises:
+    var plan = Plan()
+    var left = plan.scan("sales", List[String](), 0)
+    var right = plan.scan("sales", List[String](), 0)
+    var keep = plan.exprs.binary(
+        BinaryOp.GT,
+        plan.exprs.column("qty"),
+        plan.exprs.literal(Value(Int64(5))),
+    )
+    var root = plan.join(
+        left,
+        plan.filter(right, keep),
+        [plan.exprs.column("qty")],
+        [plan.exprs.column("qty")],
+        JoinKind.SEMI,
+    )
     _ = bind(plan, root, two_schemas())
-    with assert_raises(contains="it has to be a scan"):
+    with assert_raises(contains="both read relation 0"):
+        _ = lower(plan, root, two_frames())
+
+
+def test_a_build_side_that_cannot_be_lowered_says_what_it_was() raises:
+    var plan = Plan()
+    var left = plan.scan("sales", List[String](), 0)
+    var right = plan.scan("tiers", List[String](), 1)
+    var root = plan.join(
+        left,
+        plan.distinct(right, [plan.exprs.column("band")]),
+        [plan.exprs.column("qty")],
+        [plan.exprs.column("band")],
+        JoinKind.INNER,
+    )
+    _ = bind(plan, root, two_schemas())
+    with assert_raises(contains="there is no operator for a DISTINCT"):
         _ = lower(plan, root, two_frames())
 
 

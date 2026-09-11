@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: the build side of a join can be a query of its own
+
+`SELECT qty, rate FROM sales JOIN tiers ON qty = band WHERE qty > 10` runs. It did not before, and neither did almost any other join somebody would actually write, because a join with a `WHERE` on it is a join whose build side the optimizer has pushed a filter onto, and lowering only knew how to build from a scan.
+
+The right side of a join is a line of the same plan, so it lowers to a pipeline of its own and is run, and what comes back is the frame the probe operator hashes. Lowering is what runs it, rather than the outer pipeline when it starts. The operator holds a frame and holds one because a pipeline is what builds pipelines and an operator cannot hold the thing that holds it, and the build has to finish before the left side's first chunk is read either way, so the work is the same work in both places.
+
+The two sides share the relation numbering and the record of which relations have been read, so a plan whose build side reads a table the probe side already read says so rather than handing back an empty frame. A build side that refuses still refuses in its own words, and the refusal reaches the caller unchanged rather than becoming a fact about the join.
+
+Part of #309.
+
 ### Added: a query text in, rows out
 
 Every stage of the SQL front end has been testable on its own since it was written, and none of that asserted that the stages fit together. `firepanda.sql.run` is the seam written down once: a query text and a catalog go in, the rows come out. It parses, lowers, binds, optimizes, finds the frame each scan named, lowers the plan to a pipeline and runs it, and it decides nothing that another stage has not already decided.

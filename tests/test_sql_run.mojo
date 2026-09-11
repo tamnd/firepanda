@@ -250,19 +250,34 @@ def test_a_condition_that_reads_both_sides_runs_above_the_join() raises:
     same(read_back(out, "rate"), [300, 400], "rate")
 
 
-def test_a_where_the_optimizer_pushes_onto_the_build_side_is_refused() raises:
-    # The right side of a join is built into a hash table before the first chunk
-    # of the left arrives, so today it has to be a frame and a scan is the only
-    # thing that is one. A predicate pushed onto it makes it a filter and this
-    # says so rather than dropping the predicate.
-    with assert_raises(contains="it has to be a scan"):
-        _ = run(
-            (
-                "SELECT qty, rate FROM sales JOIN tiers ON qty = band"
-                " WHERE qty > 10"
-            ),
-            session(),
-        )
+def test_a_where_the_optimizer_pushes_onto_the_build_side_runs() raises:
+    # The predicate is written about the left table, and the equality carries it
+    # to the right one as well, so both sides end up with a filter under them.
+    # The right side is then not a scan, which is the shape a join has in almost
+    # every real query, and its build is a pipeline of its own.
+    var out = run(
+        (
+            "SELECT qty, rate FROM sales JOIN tiers ON qty = band"
+            " WHERE qty > 10 ORDER BY qty"
+        ),
+        session(),
+    )
+    same(read_back(out, "qty"), [20, 40], "qty")
+    same(read_back(out, "rate"), [200, 400], "rate")
+
+
+def test_a_where_about_the_right_table_alone_still_runs() raises:
+    # Nothing about this one is on the probe side, so the whole predicate ends
+    # up under the build and the left is read as it stands.
+    var out = run(
+        (
+            "SELECT qty, rate FROM sales JOIN tiers ON qty = band"
+            " WHERE rate > 250 ORDER BY qty"
+        ),
+        session(),
+    )
+    same(read_back(out, "qty"), [3, 40], "qty")
+    same(read_back(out, "rate"), [300, 400], "rate")
 
 
 def test_the_whole_shape_of_a_query_runs_at_once() raises:
