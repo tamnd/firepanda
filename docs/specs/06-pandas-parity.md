@@ -211,7 +211,10 @@ Ships whole at M6. A partial string namespace reads as a toy, and this is where 
 
 RE2 semantics throughout: linear time, no backreferences, no lookaround. That is a documented divergence and it is prominent in the migration guide, because a regex that works in pandas and raises here is a bad afternoon.
 
-- [ ] `len`, `lower`, `upper`, `title`, `capitalize`, `casefold`, `swapcase` (M6)
+`len` counts characters and not bytes, which is worth writing down because there are two kernels underneath and only one of them is this. `str.len` is `Series.chars_length`, which runs `text_character_length` in `chars.mojo`, walking the payload and counting anything that is not a continuation byte, and it is the one that answers `'café'` with 4 the way pandas does. `text_byte_length` in `substr.mojo` is SQL's `STRLEN` and answers 5, and it is a read of the length field in each view rather than a pass over anything, which is thirteen times cheaper on a column of thirty two byte elements. DuckDB spells the two apart as well, `length` against `strlen`, so this is a difference between two questions rather than between two libraries. The accessor never reaches the byte length one: it is reached from SQL and from the kernel package, and a caller who wants it in Python asks for it by its own name rather than by a flag on `len`. Written up in document 30.
+
+- [ ] `len` (M6), which ships as `chars_length` and stays unticked until there is a differential test for it in firepanda-bench, per the rule at the bottom of this document
+- [ ] `lower`, `upper`, `title`, `capitalize`, `casefold`, `swapcase` (M6)
 - [x] `strip`, `lstrip`, `rstrip`, `pad`, `center`, `ljust`, `rjust`, `zfill` (M6), and `wrap` is still to come
 - [x] `slice`, `slice_replace`, `get`, `repeat` (M6), and `repeat` takes one count for the whole column rather than one per row
 - [ ] `cat` with `sep` and `others` (M6)

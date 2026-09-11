@@ -569,5 +569,75 @@ def test_the_edges_of_a_whole_column_skip_the_nulls() raises:
     assert_equal(value_of(whole(col^, AggKind.LAST), 0), "c")
 
 
+def test_nulls_and_an_empty_string_order_the_way_both_rivals_say() raises:
+    """The ordering rule read off pandas 3.0.5 and DuckDB 1.5.5 rather than
+    reasoned about.
+
+    The column is `b`, a null, an empty string and `a`, which is the shape this
+    dataset does not have and the next one will. Both rivals answer the same
+    thing and this kernel answers it too:
+
+        >>> pd.Series(["b", None, "", "a"], dtype="str").min()
+        ''
+        >>> pd.Series(["b", None, "", "a"], dtype="str").max()
+        'b'
+
+        select min(x), max(x) from (values ('b'), (null), (''), ('a')) t(x)
+        ('', 'b')
+
+    So an empty string is a value and sorts before every other value, and a null
+    is not a value and is passed over. The two are one line apart in the kernel
+    and one row apart here.
+
+    pandas has a second answer available that this library does not offer.
+    `min(skipna=False)` is NaN as soon as any element is null, which is a
+    different question rather than a different result, and nothing in the
+    ClickBench queries or in SQL asks it.
+    """
+    var col = with_nulls(["b", "x", "", "a"], [True, False, True, True])
+    assert_equal(value_of(whole(StringArray(copy=col), AggKind.MIN), 0), "")
+    assert_equal(value_of(whole(col^, AggKind.MAX), 0), "b")
+
+
+def test_a_group_of_nulls_is_null_and_an_empty_string_group_is_not() raises:
+    """The same rule one level down, with the group that has nothing in it beside
+    the group whose only element is the empty string.
+
+    Three groups: one holding `b` and a null, one holding an empty string and a
+    null, one holding two nulls. pandas answers the same four ways for all four
+    reductions, and so does this:
+
+        >>> df.groupby("g")["v"].min().to_dict()
+        {1: 'b', 2: '', 3: nan}
+
+    pandas spells the missing group as NaN there because the column came back
+    with a missing element in it, and a null is what that means here.
+
+    DuckDB agrees on `min` and `max` and is not an authority on the other two.
+    `first` and `last` over a group with no `ORDER BY` are not defined to follow
+    row order in SQL, and DuckDB's `last` answered NULL for the first group in
+    the same query, which is allowed rather than wrong. pandas' `first` and
+    `last` skip nulls and follow row order, which is the rule this kernel
+    follows, and it is the rule a dataframe user is asking for.
+    """
+    var kinds = List[AggKind]()
+    kinds.append(AggKind.MIN)
+    kinds.append(AggKind.MAX)
+    kinds.append(AggKind.FIRST)
+    kinds.append(AggKind.LAST)
+
+    for k in range(len(kinds)):
+        var col = with_nulls(
+            ["b", "x", "", "y", "z", "w"],
+            [True, False, True, False, False, False],
+        )
+        var out = reduce(col^, kinds[k], [0, 0, 1, 1, 2, 2], 3)
+        assert_true(out.is_valid(0))
+        assert_true(out.is_valid(1))
+        assert_false(out.is_valid(2))
+        assert_equal(value_of(out, 0), "b")
+        assert_equal(value_of(out, 1), "")
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
