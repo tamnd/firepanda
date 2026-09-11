@@ -8,6 +8,76 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.55] - 2026-09-11
+
+Built against Mojo 1.0.0 (ed45d567).
+
+The SQL front end finishes the stage that turns a parse tree into something with meaning, and the category column becomes a column a caller can actually use rather than one the library can merely hold.
+
+On the SQL side this closes S2 of the DuckDB dialect milestone. Window specifications, `PIVOT` and `UNPIVOT` all read now, which is the whole analytical expression surface, and the two structural pieces underneath it changed as well. The jump table the transformer dispatches through can no longer be built with a hole in it, so a grammar rule nobody wrote a case for is a failure when the table is constructed rather than a fallthrough the first user to write that query discovers. And the corpus differential can say which refusal each of the 39,028 refused statements landed on, which turns the refusal table from a list into a measurement.
+
+On the categorical side a column survives being filtered, taken, stacked and filled, which it did not before: eight kernels were producing a column whose type said category and whose category list was empty, and had been since dictionary columns were added. Comparison works, the Mojo `Series` can reach the same surface the Python `cat` namespace could, and an imported dictionary column can be read at all.
+
+Two pandas surfaces arrived while this was being cut and are in it. `rolling` and `expanding` carry five reductions across a window, and the `str` accessor has twelve names on it that count in characters rather than bytes, which is the difference that makes a position mean the same thing it means in pandas.
+
+The query planner started while this was being cut too, and its first three files are here. `firepanda/plan/` has the expression tree with the three analyses every pass is written in terms of, the nine logical node kinds with a printed form, and the binding pass that turns a name into a position and gives every expression the type the kernel will really answer. Nothing calls any of it yet and no behaviour changes because of it, which is deliberate: the lowering into the existing chunked engine is what connects the two and it is the next piece.
+
+One thing does get faster on its own. A group by on a column already flagged as sorted stops building a hash table and walks the runs instead, which is 14.4 times on a sorted key of nearly distinct values and never a loss.
+
+There is also a join that builds on the shorter side rather than the one the caller named second, a parse budget with a number in it that anybody can reproduce, and four error messages that described our internals instead of the user's mistake.
+
+Patch rather than minor, since the milestone this SQL work belongs to is not finished. S2 is.
+
+### Added: the SQL front end reads a window specification
+
+`OVER` was one of four modifiers that could follow a call and refuse, and the `WINDOW` clause was one of the select clauses that refused. Both go to the AST now and print back, which was the last piece of the analytical expression surface still stopping at the transformer, and it is the piece `QUALIFY` was waiting on, since a `QUALIFY` over a call with no window on it is not a query anybody writes.
+
+Two node kinds carry it. The first is whatever follows `OVER`, which is also what `WINDOW w AS (...)` defines, because those are the same thing written in two places. The second is the frame, the `ROWS`, `RANGE` or `GROUPS` clause, whose two bound counts take the fields a node has and leave nowhere for the framing mode, the two bound kinds and the exclusion, so those four are packed four bits each into the field that was left.
+
+`OVER w` prints as `OVER (w)`. The grammar has three spellings for what can follow `OVER` and two of them are nothing but a name, so they share one shape and the printer picks the one that cannot be misread. A frame written without an `EXCLUDE` stays without one rather than growing an explicit `EXCLUDE NO OTHERS`.
+
+The tests are the 25 pairs of frame bounds, the three framings, the four exclusions, a named window, a window built on top of a named one, and every one of them parses, prints, reparses and fails if the two texts differ.
+
+`FILTER`, `WITHIN GROUP` and `EXPORT` still refuse by name after a call, and there is a test that says so.
+
+### Added: the SQL front end reads a PIVOT and an UNPIVOT
+
+Both were refusals under the entry that fires when something follows a table and is neither a join nor a pivot. Both go to the AST now, in both of the spellings DuckDB accepts for each.
+
+Each feature has a statement spelling and a table spelling, and they become one node. `FROM t PIVOT (sum(x) FOR a IN (1, 2))` comes back as `FROM (PIVOT t ON a IN (1, 2) USING sum(x))`, and the same direction for `UNPIVOT`. Normalizing that way round is forced rather than chosen: the standard spelling requires an `IN` on every pivot column and the statement one does not, so `PIVOT t ON a USING sum(x)` cannot be written in the standard form at all, and a printer that picked a spelling per query would be deciding which features each query is allowed to carry.
+
+For `UNPIVOT` neither spelling dominates, so the direction was measured rather than argued. The statement form can leave out `INTO` and the table form cannot. The table form can say `INCLUDE NULLS` and the statement form cannot. Of 194,135 statements in the corpus, 128 mention an unpivot, 3 say `INCLUDE NULLS` and 2 say `EXCLUDE NULLS`. So `INCLUDE NULLS` becomes a refusal that costs three queries, `EXCLUDE NULLS` is read and dropped because it is the default, which is what `EXCLUDE NO OTHERS` already does on a window frame, and everything else normalizes to the statement spelling.
+
+Two new rows in the refusal table and therefore two new rows in the README, one for `INCLUDE NULLS` and one for more than one `FOR` group, which a single node has nowhere to put.
+
+One old row stopped refusing anything. A join, a `PIVOT` and an `UNPIVOT` are the three things the grammar allows after a table and all three are read, so nothing reaches it. It stays as a guard against a fourth one a grammar bump might add, rather than being deleted and renumbering everything after it, and its text says that is what it now is.
+
+### Changed: the SQL transformer will not build a jump table with a hole in it
+
+The transformer dispatches on grammar rule index through a table of one byte per rule, and a rule with no byte meant two different things. Either the case above it reads it directly and nothing ever asks for its value, which is fine and is how a third of the table is meant to work. Or nobody had written its case yet, which is a bug that stays invisible until a user writes the query that reaches it and gets a fallthrough instead of an answer. There was no way to tell the two apart, so there was no way to check the table was complete.
+
+They are two different bytes now. The 481 rules that the case above them reads are listed in one block rather than marked one at a time beside each case, because what matters about that set is that it is complete, and a set is easier to check when it is written out in one place and in one order. The other byte is still zero, so it is still what a rule gets by not being registered, and building the table now walks the grammar from the statement rule, stops descending wherever a statement refuses outright, and raises if a rule it can still reach is holding it.
+
+Building the table is the check, which means every query the engine parses runs it and so does every test in the suite. The statement rule is 995 of 1,187, 697 rules are reachable from it, and 490 of the rest sit behind a refusal with no case, which is where they belong.
+
+Registering rules by name used to be a linear scan over 1,187 names each time. That is the right shape for the handful of callers that ask once and the wrong shape for six hundred in a row, and it took one test file from 39 seconds to 60 before the names went into a map.
+
+### Changed: the SQL corpus differential says which refusal each statement landed on
+
+The harness could say that 39,028 of 69,153 statements refused by name, and nothing else. Which refusals, and how many of each, was not a question it could ask, because a refusal is a raised error with text in it and there was no way back from the text to the table entry that produced it. A table with an entry nobody hits and a table with an entry that eats a third of the corpus look the same from the outside, and the second one is where the next feature should go.
+
+`firepanda.sql.feature_of` is the way back. Entries whose message has a hole in it match on the text either side and the longer match wins, so a short generic message cannot shadow a specific one, and a test walks the whole table and reads every entry back off its own message.
+
+What the corpus says is that the two statement tier refusals account for 33,716 between them, then a long tail from 679 down to 1, that 36 entries fire at all and they sum to exactly the number the round trip line already printed, and that the entry which fires when the transformer has no case at all is zero.
+
+### Changed: the SQL parse budget has a number in it that anybody can reproduce
+
+The parser specification had a measured column reading "380 us when the matcher landed, four to five times faster than that now". That was true when it was written and it was not checkable, because the readings were taken by hand on a quiet machine and the speedups were against a build that no longer exists. There was a second problem hiding in it: the measured column was tokenize and match while the target column included the transform, so the row compared two thirds of the work against a budget for all of it.
+
+There are six rows in the microbenchmark suite now, three per query, on TPC-H q1 and on `SELECT 1`, because the budget is spent in three places and the interesting question is which. Tokenizing is under one per cent of a parse in both, so the tokenizer is done. The matcher is 38 per cent of q1 and 61 per cent of the trivial one, and the transformer is the rest, which the old table could not see. Against the whole of the work q1 is nearly eight times over budget and the trivial query is nearly five times over.
+
+They were taken twice, before and after the window work landed, and nothing moved outside the spread, so adding a feature to the transformer does not cost the queries that do not use it.
+
 ### Added: binding a plan, so names become positions and every expression has a type
 
 A plan comes out of the builders holding names. `col("l_discount")` is a string, and finding out which column that is means asking a schema. `firepanda/plan/bind.mojo` is the pass that asks, once, and writes the answer onto the tree: a position, a relation, and the logical type the expression produces.
@@ -47,6 +117,7 @@ The three analyses land with the arena rather than with the first pass that want
 Two of the answers are not the obvious ones and both are tested. A sum of a constant is not input independent, because `sum(1)` is the row count and folding it to one at plan time would be wrong. And the table set of an unbound column raises rather than coming back empty, because empty is a real answer that an input independent expression has, and handing it back for a column whose table is simply not known yet would tell pushdown that a predicate is safe to move past the only node able to evaluate it.
 
 Nothing calls any of this yet. The logical nodes, binding, the passes and the lowering into the existing `exec` nodes follow, and the eager API does not change when they do.
+
 ### A group by on a sorted column stops building a hash table
 
 A group by builds a hash table because equal keys are scattered through the column and it has no other way to find them. When the column is already in order they are not scattered, every group is one run of adjacent rows, and walking the column and closing a group each time the value changes gives exactly the same ordinals for one comparison a row. `firepanda/hash/sorted.mojo` is that walk, and `DataFrame._grouping` is the one place that now decides between it and the ordinary route, for every group by, `drop_duplicates` and broadcast in the frame layer.
@@ -58,6 +129,7 @@ What it is worth depends on run length rather than on cardinality, and the measu
 The walk is split across cores the way the parallel filter is. Which ordinal a row gets depends on how many groups closed before it, which a worker handed the middle of the column does not know, so the boundaries are counted first and a prefix sum over the per worker counts is the ordinal each worker starts at. The comparison a worker makes at the first row of its own stretch reads the row before it, which belongs to the worker before, and reads are what make that safe.
 
 Two things are refused rather than attempted, and both hand back nothing so the caller falls through to the route that gets them right. A column holding a null does not come in at all, because `Sortedness` says nothing about which end a sort put the nulls at. And only a single key column qualifies, because the flag is per column and two columns each sorted on their own say nothing about whether the pairs are in lexicographic order. A descending column does qualify, since equal values are adjacent either way round and the runs come out in the order they appear either way round. Text is refused for now, because it would otherwise match the uint8 arm of the dtype dispatch and group on the first byte of each view.
+
 ### Added: rolling and expanding windows, and the five reductions a window can be carried through
 
 pandas has three window types and puts twenty six reductions on the first two, and the conformance board had every one of them at zero. `s.rolling(...)` and `s.expanding(...)` are here now, with `sum`, `mean`, `count`, `min` and `max` on each and with all five of the parameters that decide where a window sits.
@@ -673,6 +745,7 @@ A constant carries a resolution the same way a column does, through the new `Val
 `Series.dt_days` floors rather than truncating, so minus one microsecond is minus one day, which is the rule that keeps the days and the remainder adding back up and is the thing a positive only test corpus cannot catch. `Series.dt_total_seconds` answers float64 at every resolution, including on a column of whole seconds, and is lossy past 2 to the 53 because pandas' is. `Series.to_timedelta` on an integer column is a relabelling and not a conversion: the integers are already the counts, so nothing is computed and no null turns into a zero length span on the way through. A column that already carries a resolution comes back unchanged.
 
 Eighteen tests in `tests/test_temporal_duration.mojo`, every expected value read off pandas 3.0.3 rather than worked out, covering both signs of the mean truncation and both signs of the day rounding. The fuzzer checks the two readers and the three reductions against one row at a time twins one case in eight, with the day twin using an explicitly floored division rather than the language operator so that agreement is evidence about the answer and not about the operator, and with the duration columns drawn by random bit width and separately drawn sign so a run sees spans of a few units beside spans of a few centuries. Four hundred thousand cases at seed 20260907 found nothing. The arithmetic between two temporal columns is deliberately not fuzzed, because it is a rescale in front of the add and subtract loops the fuzzer already runs over every dtype.
+
 ### From a parse tree to something worth binding against
 
 `firepanda/sql/transform.mojo`, the piece between the matcher and the arenas, and the only file in the engine that knows a grammar rule name. A grammar bump therefore breaks this file or nothing.
@@ -1055,6 +1128,7 @@ Read honestly that says three things. Against polars, which is the like for like
 Starts with and ends with do not search at all. Both know where to look, so both are a length test and one run of bytes compared at a fixed offset, which is what `text/starts_with` and `text/ends_with` are in the benchmark suite to confirm: if they are ever close to `text/contains_hit` then the skipping has stopped working.
 
 There is no general pattern compiler and this is not a step towards one before it is needed. A matcher with a wildcard alphabet is a different piece of work, it would be slower on all four of these, and none of the queries ask for it.
+
 ### DuckDB's grammar is in the tree, and a table is generated from it
 
 DuckDB replaced its Bison parser with a hand written PEG parser and shipped the grammar as data. Forty `.gram` files, five keyword lists, 61,190 bytes, MIT licensed, and executed by the reference implementation itself rather than being a description of it. That is the artifact the whole SQL milestone rests on, and it is now vendored at `firepanda/sql/grammar/` with a `VENDOR` file recording the upstream commit and a SHA-256 for each of the 47 files.
@@ -2082,6 +2156,7 @@ The second gate took the measurement to find. Spreading the work costs a task pe
 On that machine, at a million rows, over a line of a computed column then a filter then a projection: `exec/pipeline_line_16k` 5.59 ms to 1.94 and `exec/pipeline_line` 5.26 to 1.66, both with every new run below every old one across three alternating blocks. `exec/pipeline_project`, `exec/pipeline_project_128k`, `exec/pipeline_cast` and `exec/pipeline_cast_128k` all take the sequential route now and all four land inside the noise, between minus 0.2 and plus 1.8 percent. `exec/pipeline_line_one_chunk` and `exec/pipeline_limited` are the controls and did not move.
 
 Handing tasks out one per chunk is not the last word. A shared counter that gives each worker several chunks would pay for the tasks once per core rather than once per chunk, and would let the projection and the cast back onto the parallel route. That is a later change and it needs the batch to stay bounded.
+
 ### A NaN is missing when you ask whether a row is missing
 
 The other side of the same question. pandas on the numpy backend has no separate presence bitmap for a float column, so NaN is the only missing it has there, and `Series([1.0, nan]).count()` is 1. firepanda followed Arrow, where a NaN is an ordinary float that happens to compare false against itself, so it answered 2. `isna` said False on a NaN, `notna` said True, `dropna` kept the row, and `hasnans` said a column with a NaN in it had none.
