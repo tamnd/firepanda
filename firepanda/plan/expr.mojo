@@ -796,3 +796,58 @@ struct Expressions(Movable, Sized):
             return
         for i in range(len(node.children)):
             self._positions(node.children[i], found)
+
+    def names(self, root: Int) raises -> List[String]:
+        """Which columns the expression reads, by name.
+
+        The third of the three and the one predicate pushdown asks. Moving a
+        predicate down the plan means asking whether the subtree below can
+        answer it, and a position cannot be asked that question, because a
+        position only means something against one schema and the whole point of
+        moving the predicate is that it will be read against a different one.
+        A name survives the move, so the question becomes whether the schema
+        below has a column of each name, which is a question a schema can
+        answer.
+
+        Unbound is fine here, and that is the difference from the other two. A
+        name is what the caller wrote and it is on the expression from the
+        moment it is built, so this is the one analysis of the three that is
+        worth asking before binding has run.
+
+        Args:
+            root: The expression.
+
+        Returns:
+            The names, in the order they were first met, each once.
+
+        Raises:
+            If the expression is not in the arena.
+        """
+        var found = List[String]()
+        self._names(root, found)
+        return found^
+
+    def _names(self, root: Int, mut found: List[String]) raises:
+        """Adds every column name under one expression to a set.
+
+        Kept in the order they were met rather than sorted, because there is no
+        order on names that means anything to a reader and the order a predicate
+        mentions its columns in is the order the person who wrote it chose.
+
+        Args:
+            root: The expression.
+            found: The set, added to, without repeats.
+
+        Raises:
+            If the expression is not in the arena.
+        """
+        self.check(root)
+        ref node = self.nodes[root]
+        if node.kind == ExprKind.COLUMN:
+            for i in range(len(found)):
+                if found[i] == node.name:
+                    return
+            found.append(node.name)
+            return
+        for i in range(len(node.children)):
+            self._names(node.children[i], found)
