@@ -368,8 +368,10 @@ def test_the_shapes_with_no_node_yet_each_say_which_one() raises:
         _ = _plan("WITH x AS (SELECT 1 AS a) SELECT a FROM x")
     with assert_raises(contains="GROUPING SETS"):
         _ = _plan("SELECT g FROM t GROUP BY CUBE (g)")
-    with assert_raises(contains="BETWEEN"):
-        _ = _plan("SELECT a FROM t WHERE b BETWEEN 1 AND 2")
+    with assert_raises(contains="subquery in an expression"):
+        _ = _plan("SELECT a FROM t WHERE b IN (SELECT b FROM u)")
+    with assert_raises(contains="subquery in an expression"):
+        _ = _plan("SELECT a FROM t WHERE EXISTS (SELECT b FROM u)")
     with assert_raises(contains="CAST"):
         _ = _plan("SELECT CAST(a AS BIGINT) FROM t")
 
@@ -635,6 +637,71 @@ def test_the_joins_with_no_node_yet_each_say_which_one() raises:
         _ = _plan("SELECT a FROM range(10) r")
     with assert_raises(contains="parenthesised table reference"):
         _ = _plan("SELECT a FROM (t JOIN u ON t.a = u.k) v")
+
+
+def test_a_between_is_the_two_comparisons_it_stands_for() raises:
+    # The operand is lowered once and both comparisons read it, so the arena
+    # holds one subtree with two parents. The printer walks the tree and so
+    # writes it twice, which is the only place the sharing is not visible.
+    assert_equal(
+        _plan("SELECT a FROM t WHERE b BETWEEN 1 AND 2"),
+        "PROJECT [a]\n  FILTER and(b >= 1, b <= 2)\n    SCAN t []\n",
+    )
+
+
+def test_a_not_between_negates_the_test_rather_than_turning_it_around() raises:
+    # `b < 1 OR b > 2` is the same answer only when nothing is null. With a null
+    # bound the positive test is false and its negation is true, where the two
+    # comparisons turned around answer null.
+    assert_equal(
+        _plan("SELECT a FROM t WHERE b NOT BETWEEN 1 AND 2"),
+        "PROJECT [a]\n  FILTER not(and(b >= 1, b <= 2))\n    SCAN t []\n",
+    )
+
+
+def test_a_between_may_be_written_anywhere_an_expression_may() raises:
+    assert_equal(
+        _plan("SELECT b BETWEEN 1 AND 2 AS ok FROM t"),
+        "PROJECT [and(b >= 1, b <= 2) as ok]\n  SCAN t []\n",
+    )
+
+
+def test_a_between_over_a_fold_is_a_having_like_any_other() raises:
+    # The bounds are lowered against the same scope the operand is, so a fold
+    # inside one is found by the walk and computed by the aggregate.
+    assert_equal(
+        _plan("SELECT g FROM t GROUP BY g HAVING sum(a) BETWEEN 1 AND 2"),
+        (
+            "PROJECT [g]\n"
+            "  FILTER and(__agg_0 >= 1, __agg_0 <= 2)\n"
+            "    AGGREGATE [g] -> [sum(a)]\n"
+            "      SCAN t []\n"
+        ),
+    )
+
+
+def test_an_in_is_one_equality_per_candidate() raises:
+    assert_equal(
+        _plan("SELECT a FROM t WHERE b IN (1, 2, 3)"),
+        "PROJECT [a]\n  FILTER or(or(b == 1, b == 2), b == 3)\n    SCAN t []\n",
+    )
+
+
+def test_an_in_of_one_is_one_comparison() raises:
+    assert_equal(
+        _plan("SELECT a FROM t WHERE g IN ('x')"),
+        "PROJECT [a]\n  FILTER g == x\n    SCAN t []\n",
+    )
+
+
+def test_a_not_in_negates_the_chain_rather_than_inverting_it() raises:
+    # The one that matters. `b <> 1 AND b <> 2` answers true for a row that a
+    # null in the list should have made null, which is the classic wrong answer
+    # for NOT IN and is silent.
+    assert_equal(
+        _plan("SELECT a FROM t WHERE b NOT IN (1, 2)"),
+        "PROJECT [a]\n  FILTER not(or(b == 1, b == 2))\n    SCAN t []\n",
+    )
 
 
 def test_a_window_is_a_node_of_its_own_under_the_projection() raises:

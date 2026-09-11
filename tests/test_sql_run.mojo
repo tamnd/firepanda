@@ -538,6 +538,51 @@ def test_an_alias_on_a_table_function_is_refused_by_name() raises:
         _ = run("SELECT * FROM range(5) AS r(i)", session())
 
 
+def test_a_between_keeps_the_rows_inside_both_bounds() raises:
+    # Closed at both ends, so the five and the twenty are in it.
+    same(
+        answer("SELECT qty FROM sales WHERE qty BETWEEN 5 AND 20", "qty"),
+        [5, 20, 12, 8, 15],
+        "qty",
+    )
+
+
+def test_a_between_may_be_computed_on_both_sides() raises:
+    # The operand is an expression and so is a bound, which is the case that
+    # would have gone wrong if the rewrite had lowered the operand twice.
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE qty * price BETWEEN qty AND price"
+                " * 10"
+            ),
+            "qty",
+        ),
+        [5, 3, 8, 1],
+        "qty",
+    )
+
+
+def test_an_in_of_one_candidate_runs_as_the_comparison_it_is() raises:
+    same(answer("SELECT qty FROM sales WHERE qty IN (25)", "qty"), [25], "qty")
+
+
+def test_the_shapes_that_need_an_or_are_waiting_on_the_operator() raises:
+    # The plans are right and nothing runs them. A conjunction at the top of a
+    # filter is a line of filters, which is why a plain BETWEEN runs, and an OR
+    # or a NOT is one column computed from another with nothing that computes
+    # it yet. A plain `WHERE a = 1 OR a = 2` has the same gap and has had it all
+    # along, so this is not something IN and NOT BETWEEN brought with them.
+    with assert_raises(contains="computes a call expression"):
+        _ = run("SELECT qty FROM sales WHERE qty IN (3, 25)", session())
+    with assert_raises(contains="computes a call expression"):
+        _ = run(
+            "SELECT qty FROM sales WHERE qty NOT BETWEEN 5 AND 20", session()
+        )
+    with assert_raises(contains="computes a call expression"):
+        _ = run("SELECT qty FROM sales WHERE qty = 3 OR qty = 25", session())
+
+
 def test_a_window_over_the_whole_table_is_on_every_row() raises:
     # The same 159 the aggregate test asks for, except that here it arrives
     # beside the ten rows rather than instead of them.
