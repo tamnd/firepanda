@@ -27,12 +27,30 @@ would lose each other's bits, so each range builds its own bitmap and they are
 pasted in afterwards on one thread. That is a bit per row rather than a value per
 row and does not show up next to the copy it follows.
 
+The output can come back in one chunk or in morsels, and the copy is the same
+either way. A frame in one chunk is what an eager caller needs, because
+`DataFrame.__getitem__` borrows a column only when there is a single chunk to
+borrow. A frame in morsels is what the pipeline needs, because it runs its
+elementwise operators a chunk per worker, so a frame in one chunk is a query on
+one core no matter how many the machine has. Cutting one up afterwards is a
+second copy of every byte, and putting the boundaries in while the first copy is
+happening is free: a piece is trimmed so that it never crosses one, and it then
+writes into its own morsel's sink at an offset rather than into a long sink at a
+larger one.
+
+There is no default height here on purpose. Which height is fastest is a property
+of the query, the machine's cache and how many cores are free, and measuring it
+wants an idle machine, so the caller names a height and this file has no opinion
+about it. The opinion belongs wherever the plan layer decides to run a query
+through the pipeline, which is not written yet.
+
 Nothing here owns the memory the arrays point into. The producer keeps it alive
 across the call and releases it afterwards, by which time every byte that was
 wanted has been copied.
 """
 
 from firepanda.array.any import AnyArray
+from firepanda.array.chunked import ChunkedArray
 from firepanda.array.strings import StringArray
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.logical import LogicalType
@@ -172,6 +190,14 @@ struct _Piece(ImplicitlyCopyable, Movable):
     """Whether the range is the whole batch, which decides whether a view column
     may take the producer's data buffer as it stands rather than compacting."""
 
+    var morsel: Int
+    """Which chunk of the output the range belongs to, and zero for a frame in
+    one chunk. A range never crosses a chunk boundary, so there is one answer."""
+
+    var within: Int
+    """The first row of the range within that chunk, which is where the fill
+    writes. The same number as `at` for a frame in one chunk."""
+
 
 def _slice(array: ArrowArray, start: Int, rows: Int) -> ArrowArray:
     """Narrows an array to a range of its rows without touching its buffers.
@@ -297,6 +323,7 @@ def assemble(
     layout: ArrowLayout,
     batches: List[List[ArrowArray]],
     var nested: List[ArrowNested] = List[ArrowNested](),
+    morsel_rows: Int = 0,
 ) raises -> DataFrame:
     """Copies every array into its place in a frame allocated once.
 
@@ -307,6 +334,14 @@ def assemble(
         nested: Whichever columns the producer built itself, because they are
             list or struct columns and do not come apart into row ranges. The
             arrays sitting in `batches` at those positions are not read.
+        morsel_rows: The chunk height to come back in, or zero for a frame in one
+            chunk. A frame in one chunk is what every eager caller wants, because
+            `DataFrame.__getitem__` borrows a column only when it has a single
+            chunk. A frame in morsels is what the pipeline wants, because it runs
+            its elementwise operators a chunk per worker and a frame in one chunk
+            is a query on one core. Nothing about the copy below changes either
+            way: the same pieces are filled by the same tasks, into a sink each
+            rather than into one long sink.
 
     Returns:
         The frame, holding its own copy of everything.
@@ -333,6 +368,11 @@ def assemble(
             plain.append(c)
     var taken = len(plain)
 
+    # A column the producer built whole cannot be cut into morsels, and a frame
+    # whose columns disagree about their chunk boundaries is not a frame, so one
+    # nested column puts the whole read back in one chunk.
+    var height = 0 if len(nested) != 0 else morsel_rows
+
     var pieces = List[_Piece]()
     var rows = 0
     for b in range(len(batches)):
@@ -340,12 +380,29 @@ def assemble(
         var start = 0
         while start < length:
             var take = min(PIECE_ROWS, length - start)
-            pieces.append(_Piece(b, start, take, rows, take == length))
+            if height > 0:
+                # A piece is one task's share of one sink, so it may not cross a
+                # morsel boundary. Cutting it short here is what keeps the fill
+                # below a plain write at an offset.
+                var room = height - rows % height
+                if take > room:
+                    take = room
+            var morsel = 0 if height <= 0 else rows // height
+            var within = rows if height <= 0 else rows % height
+            pieces.append(
+                _Piece(b, start, take, rows, take == length, morsel, within)
+            )
             start += take
             rows += take
         if length == 0:
-            pieces.append(_Piece(b, 0, 0, rows, True))
+            # A batch of no rows copies nothing, so where it is pointed does not
+            # matter, and the first chunk is the one that is always there.
+            pieces.append(_Piece(b, 0, 0, rows, True, 0, 0))
     var count = len(pieces)
+
+    var morsels = 1
+    if height > 0 and rows > 0:
+        morsels = (rows + height - 1) // height
 
     var payload = List[Int](length=taken * count, fill=0)
 
@@ -360,14 +417,22 @@ def assemble(
 
     parallel_for(plan, taken * count)
 
-    var sinks = List[ColumnSink](capacity=taken)
+    # One sink per column per morsel, and the payload each piece planned turns
+    # into that piece's offset within its own sink. In the one chunk case there
+    # is a sink a column and this is the running total it always was.
+    var sinks = List[ColumnSink](capacity=taken * morsels)
     for k in range(taken):
-        var total = 0
+        var totals = List[Int](length=morsels, fill=0)
         for p in range(count):
+            var m = pieces[p].morsel
             var here = payload[k * count + p]
-            payload[k * count + p] = total
-            total += here
-        sinks.append(ColumnSink(layout.formats[plain[k]], rows, total))
+            payload[k * count + p] = totals[m]
+            totals[m] += here
+        for m in range(morsels):
+            var tall = rows
+            if height > 0:
+                tall = min(height, rows - m * height)
+            sinks.append(ColumnSink(layout.formats[plain[k]], tall, totals[m]))
 
     var validity = List[Bitmap](length=taken * count, fill=Bitmap(0))
 
@@ -376,8 +441,8 @@ def assemble(
         var c = plain[k]
         ref piece = pieces[task % count]
         validity[task] = fill_column(
-            sinks[k],
-            piece.at,
+            sinks[k * morsels + piece.morsel],
+            piece.within,
             payload[task],
             _slice(batches[piece.batch][c], piece.start, piece.rows),
             layout.formats[c],
@@ -395,28 +460,45 @@ def assemble(
             ref piece = pieces[p]
             if batches[piece.batch][plain[k]].null_count == 0:
                 continue
-            sinks[k].validity.paste(
-                piece.at, validity[k * count + p], piece.rows
+            sinks[k * morsels + piece.morsel].validity.paste(
+                piece.within, validity[k * count + p], piece.rows
             )
 
     var fields = List[Field](capacity=width)
-    var columns = List[AnyArray](capacity=width)
+    var columns = List[ChunkedArray](capacity=width)
     for c in range(width):
-        var column: AnyArray
         var brought = -1
         for n in range(len(nested)):
             if nested[n].column == c:
                 brought = n
                 break
-        if brought >= 0:
-            column = nested.pop(brought).take()
-        else:
-            column = sinks.pop(0).finish()
         var at = layout.dictionary_at(c)
-        if at >= 0:
-            attach_dictionary(column, layout.dictionaries[at], layout.names[c])
-        var field = Field(layout.names[c], column.type)
+        var built: ChunkedArray
+        if brought >= 0:
+            var column = nested.pop(brought).take()
+            if at >= 0:
+                attach_dictionary(
+                    column, layout.dictionaries[at], layout.names[c]
+                )
+            built = ChunkedArray(column^)
+        else:
+            # The sinks of one column are next to each other and in morsel
+            # order, so the first one makes the column and the rest follow it.
+            var first = sinks.pop(0).finish()
+            if at >= 0:
+                attach_dictionary(
+                    first, layout.dictionaries[at], layout.names[c]
+                )
+            built = ChunkedArray(first^)
+            for _ in range(morsels - 1):
+                var chunk = sinks.pop(0).finish()
+                if at >= 0:
+                    attach_dictionary(
+                        chunk, layout.dictionaries[at], layout.names[c]
+                    )
+                built.append(chunk^)
+        var field = Field(layout.names[c], built.type)
         field.nullable = layout.nullable[c]
         fields.append(field^)
-        columns.append(column^)
+        columns.append(built^)
     return DataFrame(Schema(fields^), columns^)

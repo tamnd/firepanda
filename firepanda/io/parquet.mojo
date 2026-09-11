@@ -233,7 +233,9 @@ struct Session(Movable):
             self.lib.close(cells.at(DATABASE))
         _ = cells^
 
-    def run(mut self, sql: StringSlice) raises -> DataFrame:
+    def run(
+        mut self, sql: StringSlice, morsel_rows: Int = 0
+    ) raises -> DataFrame:
         """Runs one query and returns the whole answer as a frame.
 
         Every chunk is converted to Arrow and kept, and none of them is copied
@@ -244,6 +246,8 @@ struct Session(Movable):
 
         Args:
             sql: The query.
+            morsel_rows: The chunk height to come back in, or zero for a frame in
+                one chunk, which is what every eager caller wants.
 
         Returns:
             The result.
@@ -253,10 +257,10 @@ struct Session(Movable):
                 cannot read.
         """
         var result = Cells(RESULT_WORDS)
-        return self._execute(sql, result)
+        return self._execute(sql, result, morsel_rows)
 
     def _execute(
-        mut self, sql: StringSlice, mut result: Cells
+        mut self, sql: StringSlice, mut result: Cells, morsel_rows: Int = 0
     ) raises -> DataFrame:
         """Runs one query into a result the caller owns.
 
@@ -281,6 +285,7 @@ struct Session(Movable):
         Args:
             sql: The query.
             result: Six words for DuckDB's `duckdb_result`.
+            morsel_rows: The chunk height, passed through to the assembler.
 
         Returns:
             The answer.
@@ -308,18 +313,21 @@ struct Session(Movable):
             raise Error(message)
 
         try:
-            var frame = self._collect(slot)
+            var frame = self._collect(slot, morsel_rows)
             self.lib.destroy_result(slot)
             return frame^
         except error:
             self.lib.destroy_result(slot)
             raise error
 
-    def _collect(self, slot: ResultPtr) raises -> DataFrame:
+    def _collect(
+        self, slot: ResultPtr, morsel_rows: Int = 0
+    ) raises -> DataFrame:
         """Drains a result and turns it into a frame.
 
         Args:
             slot: The result, which the caller destroys either way.
+            morsel_rows: The chunk height, passed through to the assembler.
 
         Returns:
             The frame.
@@ -331,7 +339,7 @@ struct Session(Movable):
         var kinds = self._kinds(slot, width)
         var direct = self._direct_layout(slot, width, kinds)
         if len(direct) == width and width != 0:
-            return self._collect_direct(slot, width, kinds, direct)
+            return self._collect_direct(slot, width, kinds, direct, morsel_rows)
 
         var options = self.lib.arrow_options(slot)
         if not options:
@@ -372,7 +380,7 @@ struct Session(Movable):
 
         var frame: DataFrame
         try:
-            frame = assemble(layout, batches)
+            frame = assemble(layout, batches, morsel_rows=morsel_rows)
         except error:
             self._drop(arrays^)
             self._drop_options(settings)
@@ -456,6 +464,7 @@ struct Session(Movable):
         width: Int,
         kinds: List[Int32],
         layout: ArrowLayout,
+        morsel_rows: Int = 0,
     ) raises -> DataFrame:
         """Drains a result by describing DuckDB's own vectors as Arrow arrays.
 
@@ -469,6 +478,7 @@ struct Session(Movable):
             width: How many columns it has.
             kinds: The type ids from `_kinds`.
             layout: The layout from `_direct_layout`.
+            morsel_rows: The chunk height, passed through to the assembler.
 
         Returns:
             The frame.
@@ -500,7 +510,7 @@ struct Session(Movable):
         try:
             if count != 0:
                 parallel_for(describe, width * count)
-            frame = assemble(layout, batches)
+            frame = assemble(layout, batches, morsel_rows=morsel_rows)
         except error:
             _ = scratch^
             self._drop_chunks(chunks)
