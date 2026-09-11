@@ -696,6 +696,23 @@ def _bind_node(
         # what order, so the schema below is the schema above unchanged.
         return Bound(Schema(copy=input.schema), input.origin.copy())
 
+    if kind == NodeKind.WINDOW:
+        # The one node that adds to what is below rather than replacing it, so
+        # everything the input produces comes through at the position it had and
+        # the windows are appended in the order they were written.
+        var wider = Schema(copy=input.schema)
+        var whose = input.origin.copy()
+        for i in range(len(exprs)):
+            wider.append(
+                Field(
+                    plan.nodes[at].names[i],
+                    plan.exprs.nodes[exprs[i]].type,
+                    _nullable(plan.exprs, exprs[i], input.schema),
+                )
+            )
+            whose.append(_origin_of(plan.exprs, exprs[i]))
+        return Bound(wider^, whose^)
+
     var out = Schema()
     var origin = List[Int]()
     for i in range(len(exprs)):

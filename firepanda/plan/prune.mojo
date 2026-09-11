@@ -24,7 +24,7 @@ of it. No recursion and no visited set, the same shape `bind` already uses.
 
 ## What it rewrites
 
-Three of the eleven kinds carry a list of columns that this narrows, and the
+Four of the twelve kinds carry a list of columns that this narrows, and the
 other eight do not.
 
 A scan gets its column list narrowed, which is the point of the pass and where
@@ -39,6 +39,13 @@ for nobody. An aggregate keeps every group key whatever anything above thinks,
 because dropping a key is not a projection, it is a different query with
 different rows in it.
 
+A window gets its list narrowed too, and it is the one worth dropping. An
+unused window output is a partition of the input sorted and walked for a column
+nobody reads, which is the most expensive thing on this list to compute for
+nothing. Its input's columns come through at the positions they had and its own
+columns sit after them, so which demand is which is a comparison against the
+input's width.
+
 A filter, a sort, a limit, a distinct, a join and a union hand their input's
 columns through unchanged, so a position above one of them is the same position
 below it and there is nothing on the node itself to narrow.
@@ -49,7 +56,7 @@ it would mean rewriting a row major list around the columns that went. That is
 work for no saving, so it demands nothing and is rewritten not at all, the same
 as a scan of no columns.
 
-Two of the ten ask for more than anything above them wants. A distinct with no
+Two of the twelve ask for more than anything above them wants. A distinct with no
 keys compares whole rows, and so does a union that drops duplicates, so a column
 nothing above reads is still a column that decides whether two rows are one. Both
 of them demand every column of their input whatever the node above asked for,
@@ -121,7 +128,7 @@ def prune(mut plan: Plan, root: Int, sources: List[Schema]) raises -> Schema:
     for at in range(root + 1):
         if not wanted[at]:
             continue
-        _narrow(plan, at, need[at], sources)
+        _narrow(plan, at, need[at], sources, bound)
 
     return bind(plan, root, sources)
 
@@ -195,6 +202,23 @@ def _demand(
 
     var input = plan.nodes[at].inputs[0]
 
+    if kind == NodeKind.WINDOW:
+        # A position below the input's width is that same position below, and
+        # one at or above it is a window this node computes. A window that
+        # nothing reads is dropped here, so what it reads is not demanded
+        # either, and its partition and order keys go with it.
+        var keep = _windows_kept(plan, at, here, bound[input].schema)
+        var width = len(bound[input].schema)
+        for i in range(len(here)):
+            if here[i] < width:
+                _want(need[input], here[i])
+        for i in range(len(keep)):
+            _want_all(
+                need[input],
+                plan.exprs.positions(plan.nodes[at].exprs[keep[i]]),
+            )
+        return
+
     if kind == NodeKind.PROJECT or kind == NodeKind.AGGREGATE:
         # The only two that rename their columns, so a position above says
         # nothing about a position below and the expressions are the whole of
@@ -222,7 +246,11 @@ def _demand(
 
 
 def _narrow(
-    mut plan: Plan, at: Int, need: List[Int], sources: List[Schema]
+    mut plan: Plan,
+    at: Int,
+    need: List[Int],
+    sources: List[Schema],
+    bound: List[Bound],
 ) raises:
     """Narrows one node to the columns demanded of it.
 
@@ -231,6 +259,9 @@ def _narrow(
         at: The node.
         need: The output positions anything above it reads.
         sources: The schema of each relation.
+        bound: What every node produced before any of this ran, which is the
+            schema the demand was worked out against and therefore the one a
+            window's width has to be read from.
 
     Raises:
         If a scan names a relation with no schema.
@@ -267,6 +298,21 @@ def _narrow(
             # that gets here.
             keep.append(names[0])
         plan.nodes[at].names = keep^
+        return
+
+    if kind == NodeKind.WINDOW:
+        var windows = _windows_kept(
+            plan, at, need, bound[plan.nodes[at].inputs[0]].schema
+        )
+        if len(windows) == len(plan.nodes[at].exprs):
+            return
+        var exprs = List[Int]()
+        var names = List[String]()
+        for i in range(len(windows)):
+            exprs.append(plan.nodes[at].exprs[windows[i]])
+            names.append(plan.nodes[at].names[windows[i]])
+        plan.nodes[at].exprs = exprs^
+        plan.nodes[at].names = names^
         return
 
     if kind != NodeKind.PROJECT and kind != NodeKind.AGGREGATE:
@@ -318,6 +364,47 @@ def _kept(plan: Plan, at: Int, need: List[Int]) raises -> List[Int]:
         # A node with no columns is not a node. Nothing above wants anything
         # from this one, so which output stays is arbitrary and the first is as
         # good as any.
+        out.append(0)
+    return out^
+
+
+def _windows_kept(
+    plan: Plan, at: Int, need: List[Int], below: Schema
+) raises -> List[Int]:
+    """Which windows of a window node survive.
+
+    Args:
+        plan: The plan.
+        at: The node.
+        need: The output positions anything above it reads.
+        below: What its input produces, whose width says where its own columns
+            start.
+
+    Returns:
+        The surviving windows, as offsets into the node's expression list, in
+        order.
+    """
+    var out = List[Int]()
+    # The names this node's output has, which is the input's and then its own,
+    # because rebinding afterwards resolves against all of them together and a
+    # name that two of them share would resolve to a different column once the
+    # ones between them have gone.
+    var names = List[String](capacity=len(below) + len(plan.nodes[at].names))
+    for i in range(len(below)):
+        names.append(below[i].name)
+    for i in range(len(plan.nodes[at].names)):
+        names.append(plan.nodes[at].names[i])
+    if not _distinct(names):
+        for i in range(len(plan.nodes[at].exprs)):
+            out.append(i)
+        return out^
+    for i in range(len(need)):
+        if need[i] >= len(below):
+            out.append(need[i] - len(below))
+    if len(out) == 0:
+        # A window node that computes no window is not a node the builder makes,
+        # and taking this one out is a rewrite rather than a narrowing, so the
+        # first window stays and the pass above is free to drop the node later.
         out.append(0)
     return out^
 

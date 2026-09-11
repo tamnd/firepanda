@@ -474,5 +474,31 @@ def test_a_filter_over_a_table_function_stays_where_it_was() raises:
     )
 
 
+def test_a_filter_over_a_window_stays_above_it() raises:
+    # Not conservatism. A window reads the whole partition a row is in, so a
+    # row thrown away below it changes the answer for every row beside it, and
+    # the predicate here reads a column the window does not even mention.
+    var plan = Plan()
+    var scan = plan.scan("lineitem", ["l_orderkey", "l_quantity"], 0)
+    var qty = plan.exprs.column("l_quantity")
+    var key = plan.exprs.column("l_orderkey")
+    var running = plan.exprs.window(AggKind.SUM, qty, [key], List[Int]())
+    var over = plan.window(scan, [running], ["line_total"])
+    var thirty = plan.exprs.literal(Value(Float64(30.0)))
+    var few = plan.exprs.binary(BinaryOp.LT, qty, thirty)
+    var kept = plan.filter(over, few)
+    var at = push(plan, kept, [_lineitem()])
+    assert_equal(
+        explain(plan, at),
+        (
+            "FILTER l_quantity < 30.0\n"
+            "  WINDOW [sum(l_quantity) over (partition l_orderkey) as"
+            " line_total]\n"
+            "    SCAN lineitem [l_orderkey, l_quantity]\n"
+        ),
+        "the filter is where it was written",
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

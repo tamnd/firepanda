@@ -17,6 +17,10 @@ how SQL writes it and is the right way round here. A reader scanning an explain
 output wants to know what the columns are called, and a literal table of a
 hundred rows would bury that at the end of the line.
 
+A `WINDOW` prints the columns it adds and not the ones it hands through, which
+is the whole of what the node holds. The line is what the query wrote and the
+columns below it are on the line below it.
+
 An expression prints in the notation it was written in rather than as a tree,
 because a filter over five predicates is one line that way and eleven lines the
 other, and the point of an explain output is to be read. Parentheses go around
@@ -221,6 +225,18 @@ def _line(plan: Plan, at: Int) raises -> String:
             _list(plan.exprs, node.exprs, node.parts, len(node.exprs)),
             "]",
         )
+
+    if node.kind == NodeKind.WINDOW:
+        # The alias is always printed, unlike a projection's, because a window
+        # never renders as the name it is given and so the name is never the
+        # noise it is over a plain column.
+        var written = String("WINDOW [")
+        for i in range(len(node.exprs)):
+            if i != 0:
+                written += ", "
+            written += render_expr(plan.exprs, node.exprs[i])
+            written += String(" as ", node.names[i])
+        return written + "]"
 
     if node.kind == NodeKind.JOIN:
         var pairs = String()

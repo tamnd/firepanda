@@ -328,6 +328,56 @@ def test_a_table_function_cannot_read_anything() raises:
         _ = plan.table_function("range", [one, k], ["i"])
 
 
+def test_a_window_prints_the_columns_it_adds() raises:
+    var plan = Plan()
+    var scan = plan.scan("orders", ["o_custkey", "o_totalprice"], 0)
+    var price = plan.exprs.column("o_totalprice")
+    var who = plan.exprs.column("o_custkey")
+    var running = plan.exprs.window(AggKind.SUM, price, [who], List[Int]())
+    var at = plan.window(scan, [running], ["spent"])
+    assert_equal(
+        explain(plan, at),
+        (
+            "WINDOW [sum(o_totalprice) over (partition o_custkey) as spent]\n"
+            "  SCAN orders [o_custkey, o_totalprice]\n"
+        ),
+        "what it adds, over what it adds it, and what is underneath",
+    )
+
+
+def test_a_window_needs_a_name_for_each_column_it_adds() raises:
+    var plan = Plan()
+    var scan = plan.scan("orders", ["o_totalprice"], 0)
+    var price = plan.exprs.column("o_totalprice")
+    var total = plan.exprs.window(AggKind.SUM, price, List[Int](), List[Int]())
+    var most = plan.exprs.window(AggKind.MAX, price, List[Int](), List[Int]())
+    with assert_raises(contains="computes 2 columns and has 1 names"):
+        _ = plan.window(scan, [total, most], ["total"])
+
+
+def test_a_window_node_with_no_window_in_it_is_refused() raises:
+    var plan = Plan()
+    var scan = plan.scan("orders", ["o_totalprice"], 0)
+    with assert_raises(contains="computes no window"):
+        _ = plan.window(scan, List[Int](), List[String]())
+
+
+def test_only_a_window_goes_in_a_window_node() raises:
+    # The rule that keeps every other pass free to treat a project as
+    # elementwise. An aggregate here wanted a GROUP BY and a column here wanted
+    # a projection, and both of those have a node of their own already.
+    var plan = Plan()
+    var scan = plan.scan("orders", ["o_totalprice"], 0)
+    var price = plan.exprs.column("o_totalprice")
+    var folded = plan.exprs.aggregate(AggKind.SUM, price)
+    with assert_raises(
+        contains="column 1 of a window node is of kind aggregate"
+    ):
+        _ = plan.window(scan, [folded], ["total"])
+    with assert_raises(contains="column 1 of a window node is of kind column"):
+        _ = plan.window(scan, [price], ["price"])
+
+
 def test_an_input_outside_the_plan_is_refused() raises:
     var plan = Plan()
     _ = plan.scan("lineitem", ["l_quantity"], 0)

@@ -37,6 +37,12 @@ different name below than it is above. An aggregate's group keys qualify and its
 aggregate outputs never do, which is the difference between `where` and
 `having`.
 
+A window passes nothing through, and that is not conservatism. A window reads
+the whole partition a row is in, so a row removed below it changes the answer
+for every row that shares its partition. Even a predicate on the partition key
+is only safe when it keeps or drops whole partitions, which is a question about
+the predicate rather than about the node, so the pass leaves all of them above.
+
 A distinct with no keys passes everything through, since deduplicating whole
 rows and then dropping some is the same set as dropping some and then
 deduplicating. A distinct with keys passes through only a predicate that reads
@@ -195,11 +201,12 @@ def _split(
 ) raises:
     """Sorts the carried predicates into the ones that can go below one node.
 
-    The five kinds with a single input that are not a filter: the project, the
-    aggregate, the sort, the limit and the distinct. Each of them answers the
-    question with a set of column names that mean the same thing on both sides
-    of it, and the two that do not need a set say so by passing everything or
-    nothing.
+    The six kinds with a single input that are not a filter: the project, the
+    aggregate, the sort, the limit, the distinct and the window. Each of them
+    answers the question with a set of column names that mean the same thing on
+    both sides of it, and the ones that do not need a set say so by passing
+    everything or nothing. A window's set is empty, which is how it passes
+    nothing without a branch of its own.
 
     Args:
         plan: The plan.
@@ -270,6 +277,10 @@ def _through(mut plan: Plan, old: Int) raises -> List[String]:
         return out^
 
     if kind != NodeKind.PROJECT and kind != NodeKind.AGGREGATE:
+        # A window is the interesting one to arrive here empty handed. Its
+        # input's columns do come out under the names they went in with, and
+        # they still do not pass a predicate through, because what a window
+        # computes for one row depends on which other rows are beside it.
         return out^
 
     # An aggregate hands through its group keys and nothing else, which is the
