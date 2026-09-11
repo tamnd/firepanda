@@ -39,11 +39,17 @@ from std.testing import (
 
 from firepanda.array.any import AnyArray, borrow_columns
 from firepanda.array.array import Array, from_list
+from firepanda.array.strings import strings_from_list
 from firepanda.frame.frame import DataFrame
 from firepanda.frame.groupby import AggSpec
 from firepanda.frame.series import Series
 from firepanda.hash.factorize import DIRECT_LIMIT, factorize
-from firepanda.hash.grouping import Grouping, group_ordinals
+from firepanda.hash.grouping import (
+    Grouping,
+    _key_agrees,
+    _worth_fusing,
+    group_ordinals,
+)
 from firepanda.testing.rng import Rng
 from firepanda.kernel.group import (
     PARTITION_ROWS,
@@ -1124,6 +1130,168 @@ def test_enough_keys_to_overflow_the_packed_space_still_groups() raises:
             bad = i
             break
     assert_equal(bad, -1, String("wrong group at row ", bad))
+
+
+def _hashed_grouping(var series: List[Series]) raises -> Grouping:
+    """Groups every column of a frame built from the given series."""
+    var frame = DataFrame.from_series(series^)
+    var at = List[Int]()
+    for k in range(len(frame.schema)):
+        at.append(k)
+    return group_ordinals(frame.column_refs(), at, frame.rows)
+
+
+def test_a_hashed_tuple_of_wide_numbers_groups_what_narrow_ones_group() raises:
+    """Wide keys, against the same tuples written narrow enough to pack.
+
+    Both numbers are multiplied out past the direct table, so neither key can be
+    laid over one and neither can the pair, which is the route that hashes the
+    tuple once. The same tuples divided back down are two narrow integers and go
+    the packed route instead.
+
+    They are the same tuples, so both routes owe the same ordinals and the same
+    representative rows, and the ranges are small enough that every pair comes
+    back several times.
+    """
+    comptime stride = Int64(DIRECT_LIMIT) + 1
+    var rng = Rng(UInt64(0x1D0DE))
+    for _ in range(40):
+        var n = 1 + rng.next_below(300)
+        var wide = 1 + rng.next_below(12)
+
+        var far_a = Array[DType.int64](n)
+        var far_b = Array[DType.int64](n)
+        var near_a = Array[DType.int64](n)
+        var near_b = Array[DType.int64](n)
+        for i in range(n):
+            var x = Int64(rng.next_below(wide))
+            var y = Int64(rng.next_below(4))
+            far_a[i] = x * stride
+            far_b[i] = y * stride
+            near_a[i] = x
+            near_b[i] = y
+
+        var hashed = List[Series]()
+        hashed.append(Series("a", far_a^))
+        hashed.append(Series("b", far_b^))
+
+        var packed = List[Series]()
+        packed.append(Series("a", near_a^))
+        packed.append(Series("b", near_b^))
+
+        _same_grouping(_hashed_grouping(hashed^), _hashed_grouping(packed^), n)
+
+
+def test_a_hashed_tuple_gives_a_null_key_a_group_of_its_own() raises:
+    """A null in a key of a hashed tuple, against a value nothing else holds.
+
+    A null is not a value, so the hash has no bits to take from the row and
+    takes a constant instead, and the verification that follows compares whether
+    two rows are null before it compares what they hold. Both of those are what
+    puts every null of a column in one group and keeps it apart from everything
+    else, which is exactly what a value appearing nowhere else in the column
+    would do. So the two have to group identically, down to which row opened
+    each group.
+    """
+    comptime stride = Int64(DIRECT_LIMIT) + 1
+    var rng = Rng(UInt64(0x5E7C0))
+    for _ in range(40):
+        var n = 2 + rng.next_below(200)
+        var wide = 1 + rng.next_below(8)
+
+        var nulled = Array[DType.int64](n)
+        var sentinel = Array[DType.int64](n)
+        var beside = Array[DType.int64](n)
+        var beside_again = Array[DType.int64](n)
+        for i in range(n):
+            var x = Int64(rng.next_below(wide))
+            nulled[i] = x * stride
+            sentinel[i] = x * stride
+            if rng.next_below(4) == 0:
+                nulled.set_null(i)
+                sentinel[i] = -stride
+            var y = Int64(rng.next_below(3)) * stride
+            beside[i] = y
+            beside_again[i] = y
+
+        var missing = List[Series]()
+        missing.append(Series("n", nulled^))
+        missing.append(Series("m", beside^))
+
+        var present = List[Series]()
+        present.append(Series("n", sentinel^))
+        present.append(Series("m", beside_again^))
+
+        _same_grouping(
+            _hashed_grouping(missing^), _hashed_grouping(present^), n
+        )
+
+
+def test_the_tuple_verification_reads_the_column_it_is_given() raises:
+    """A grouping the column agrees with, and one it does not.
+
+    What this stands in for cannot be built: two different tuples landing on the
+    same 64 bits is roughly four billion hashes away and a test that spent that
+    is a test nobody runs, which is the same position `test_text_group.mojo` is
+    in over the same branch. So the collision is faked. The grouping handed in
+    is one the hash could have produced if it had collided, two rows with
+    different keys carrying the same ordinal, and the check has to say no to it
+    and yes to the honest one beside it.
+    """
+    var series = List[Series]()
+    series.append(Series("n", ints([5, 7, 5, 9])))
+    series.append(Series("m", ints([2, 4, 2, 6])))
+    var frame = DataFrame.from_series(series^)
+    var refs = frame.column_refs()
+
+    var honest = codes_of([0, 1, 0, 2])
+    var opened: List[Int] = [0, 1, 3]
+    assert_true(_key_agrees(refs[0][], honest, opened))
+    assert_true(_key_agrees(refs[1][], honest, opened))
+
+    # Rows 1 and 3 differ in both columns and are told they are one group.
+    var merged = codes_of([0, 1, 0, 1])
+    var fewer: List[Int] = [0, 1]
+    assert_false(_key_agrees(refs[0][], merged, fewer))
+    assert_false(_key_agrees(refs[1][], merged, fewer))
+
+
+def test_the_fused_route_is_declined_for_a_text_key() raises:
+    """Text beside a key too wide to table, which the composition must take.
+
+    The fused route removes a hash table a key, and a string key has nothing to
+    remove: hashing its bytes and comparing them is the string factorize's own
+    work, so fusing would pay for the table at the bottom and get nothing back.
+    `_worth_fusing` is where that is decided, and `_fold_key` raises rather than
+    fold text, so a wrong answer here would be an error rather than a slow
+    grouping. The grouping itself still has to come out right.
+    """
+    comptime stride = Int64(DIRECT_LIMIT) + 1
+    var numbers = Array[DType.int64](6)
+    var counted = Array[DType.int64](6)
+    var words: List[String] = ["ann", "bo", "ann", "bo", "carl", "ann"]
+    var alphabet: List[String] = ["ann", "bo", "carl"]
+    for i in range(6):
+        numbers[i] = Int64(i % 2) * stride
+        for w in range(len(alphabet)):
+            if alphabet[w] == words[i]:
+                counted[i] = Int64(w)
+
+    var series = List[Series]()
+    series.append(Series("n", numbers.copy()))
+    series.append(Series("t", strings_from_list(words)))
+    var frame = DataFrame.from_series(series^)
+    var at: List[Int] = [0, 1]
+    assert_false(_worth_fusing(frame.column_refs(), at))
+
+    var packed = List[Series]()
+    packed.append(Series("n", numbers^))
+    packed.append(Series("t", counted^))
+    _same_grouping(
+        group_ordinals(frame.column_refs(), at, frame.rows),
+        _hashed_grouping(packed^),
+        6,
+    )
 
 
 def test_no_keys_is_refused() raises:

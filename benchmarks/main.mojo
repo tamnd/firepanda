@@ -3610,6 +3610,22 @@ def bench_group(mut harness: Harness) raises:
     what the fused route saves when it applies, and against the same row before
     the route existed it says what asking costs when the answer is no.
 
+    `group/ordinals_two_keys_hashed` and `group/ordinals_four_keys_hashed` are
+    the other multi key route, the one hash of the tuple, over keys spread too
+    far apart for any table. Read them against each other: the four key row does
+    twice the hashing and twice the verifying of the two key row and one
+    factorize either way, so a ratio near one is the route working and a ratio
+    near two is a factorize a key that should not be there. On this laptop the
+    two rows were 18.7 ms and 37.6 ms before the route existed and are 7.3 and
+    10.2 after it, which is the ratio going from two to about one and a third.
+
+    The `group/ordinals_*_text_*` rows below are the case the route declines,
+    and they are here as the check that it keeps declining. Fusing a string key
+    hashes its bytes and compares them again to verify, which is what the string
+    factorize costs anyway, so it buys nothing and still pays for the hash table
+    at the bottom. If one of those rows ever moves with a change to this route,
+    the change took a key list it should have left alone.
+
     The three `group/ordinals_*_text_*` and `group/ordinals_six_keys` rows are
     the shapes db-benchmark actually groups on, over a table built to look like
     its own: three text key columns and the same three values again as integers.
@@ -4139,6 +4155,53 @@ def bench_group(mut harness: Harness) raises:
         "rows",
         rows,
         ordinals_two_declined,
+    )
+
+    # Four keys that are one key, which is the shape ClickBench q35 groups on:
+    # an address and the same address minus one, two and three. No key here can
+    # be laid over a table, so this is the hashed tuple, and the four rows it is
+    # read against are the two above it, which go the other way, and the one and
+    # two key rows at the top. What it should say is that a key costs a pass
+    # rather than a hash table: four keys near enough twice one key rather than
+    # four times it.
+    var far_a = Array[DType.int64](rows)
+    var far_b = Array[DType.int64](rows)
+    var far_c = Array[DType.int64](rows)
+    var far_d = Array[DType.int64](rows)
+    for i in range(rows):
+        var draw = Int64(rng.next_u64() % UInt64(wide)) * 1000003
+        far_a[i] = draw
+        far_b[i] = draw - 1
+        far_c[i] = draw - 2
+        far_d[i] = draw - 3
+    var fused_columns = List[Series]()
+    fused_columns.append(Series("a", far_a^))
+    fused_columns.append(Series("b", far_b^))
+    fused_columns.append(Series("c", far_c^))
+    fused_columns.append(Series("d", far_d^))
+    var fused_df = DataFrame.from_series(fused_columns^)
+    var four_keys: List[Int] = [0, 1, 2, 3]
+
+    def ordinals_two_hashed() raises {imm fused_df, imm two_keys}:
+        keep(fused_df.rows)
+        var out = group_ordinals(
+            fused_df.column_refs(), two_keys, fused_df.rows
+        )
+        keep(out.groups)
+
+    harness.record(
+        "group/ordinals_two_keys_hashed", "rows", rows, ordinals_two_hashed
+    )
+
+    def ordinals_four_hashed() raises {imm fused_df, imm four_keys}:
+        keep(fused_df.rows)
+        var out = group_ordinals(
+            fused_df.column_refs(), four_keys, fused_df.rows
+        )
+        keep(out.groups)
+
+    harness.record(
+        "group/ordinals_four_keys_hashed", "rows", rows, ordinals_four_hashed
     )
 
     # The db-benchmark group by table, near enough: two text keys of a hundred
