@@ -37,6 +37,12 @@ thirteen. It works out which columns anything above a node reads, narrows every
 scan, project and aggregate to those, and hands the plan back to `bind` so that
 the positions come out right without any of them being remapped by hand.
 
+`push.mojo` is predicate pushdown, which moves every filter as far toward the
+scans as it can go, splitting it at its `and` nodes first so that the halves can
+end up in different places. It is the one pass that rebuilds the node list rather
+than rewriting it, because moving a filter down makes new parents for old
+children and the arena's order forbids that in place.
+
 `lower.mojo` turns a bound plan into a `Pipeline` of physical operators, which
 is what makes any of the rest of it reachable from a running query. It lowers a
 line of scan, filter, projection and limit, and it raises by name on everything
@@ -52,5 +58,6 @@ from .expr import UNBOUND, Expr, ExprKind, Expressions
 from .lower import lower
 from .node import NO_LIMIT, NodeKind, Plan, PlanNode
 from .print import explain, render_expr
+from .push import push
 from .prune import prune
 from .simplify import ROUNDS, simplify, simplify_expr

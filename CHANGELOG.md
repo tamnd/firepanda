@@ -50,6 +50,26 @@ Three answers are not pandas' answer and all three are written down in document 
 
 Part of #495, after #493.
 
+### Added: predicate pushdown, so a row is thrown away before it is paid for
+
+The fourth pass in `docs/specs/planner/02-the-pass-pipeline.md`, and the one the spec says to build with predicate transfer in mind rather than as a separate thing. A filter now moves toward the scans until it cannot go further, so rows are eliminated before they are joined, aggregated or projected instead of after. The spec's own numbers for doing this by hand on the TPC-H driver: q19 went from 83 to 70 milliseconds by running its four cheap conditions on `part` and on `lineitem` before the join rather than running the disjunction over every shipped line, and q21 went from 285 to 169 by filtering before its joins rather than after them.
+
+The first thing the pass does is split every predicate at its `and` nodes, because a filter holds one expression and that expression usually wants to end up in more than one place. `l_quantity < 30 and p_size <= 15` over a join has one half belonging on each side. Whatever is left at a node is put back together as one filter above it, so a plan never comes out of here with two filters stacked on each other. An `or` is not split, since neither half of one has to hold for the row to survive.
+
+What stops a predicate is two questions rather than one, and the second is the one that is easy to get wrong: whether the rows below still answer it, and whether the answer means the same thing. A sort passes everything through, because sorting changes the order of the rows and not which rows there are. A limit passes nothing through, because which rows it keeps is exactly what it depends on. A project and an aggregate pass through a predicate that reads only columns they hand out under the name it arrived with, so a computed output stops a predicate and so does a renamed one, and an aggregate's group keys qualify while its aggregate outputs never do. That last line is the difference between a `where` and a `having` and it falls out of the rule rather than being written into it.
+
+A distinct with no keys passes everything through, since deduplicating whole rows and then dropping some is the same set as dropping some and then deduplicating. A distinct with keys passes through only a predicate that reads its keys, and that restriction is real rather than cautious: a keyed distinct keeps one row per key and does not promise which one, so a predicate on a non key column run afterwards can empty a group that running it beforehand would have kept a different row of.
+
+A join sends a predicate into the side that provides every column it reads, and only when the other side provides none of them, so the pass never has to decide which of two columns of one name was meant. Inner joins only for now. An outer join invents null rows and a semi join is already a filter, so what is safe there is a longer argument than what is safe here, and the pass would rather do nothing than do it on a guess.
+
+This is the one pass that rebuilds the node list rather than rewriting it in place. Node indices are handed out in creation order so that an input always sits below the node reading it, and every pass in the package relies on that, but moving a filter down the tree makes new parents for old children, which is the thing the invariant forbids. So the pass walks the plan and writes a new node list bottom up, which restores the order by construction and drops anything the root does not reach on the way. That is also why `push` returns the new root rather than the schema: the indices the caller handed in do not mean anything afterwards.
+
+There is one refusal and it is quiet, so it is written down. A node read by more than one other node is a shared subtree, and rebuilding a tree bottom up would write it out once per reader, turning a plan that says do this once into one that says do it twice. The pass looks for sharing first and hands the plan back untouched if it finds any. Every plan the frame API builds is a tree, so this is a guard rather than a limitation, and it is what common subplan elimination is for rather than this.
+
+Twenty two tests in `tests/test_plan_push.mojo`, most of them asserting a printed plan rather than a list, because what moved and how far is a shape. `Expressions.names` is new beside `tables` and `positions`, and it is the one of the three that pushdown wants: a position cannot be asked whether a subtree can answer a predicate, since a position only means something against one schema and the whole point of the move is that it will be read against a different one. A name survives the move.
+
+Part of #377.
+
 ### Documented: what an infinity does to an exponentially weighted window
 
 Arming the ten reachable `ewm` cases in the conformance suite turned up an answer the unit tests had not asked about, which is what happened with the category kernels in `docs/specs/29-a-category-that-survives-being-moved.md` and is what the second workstream is for. Nothing here is a behaviour change. The behaviour was right and undocumented, which is worse than it sounds, because the two shapes it takes are about to be registered as divergences and a registry entry that points at a section nobody wrote is not a reason.
