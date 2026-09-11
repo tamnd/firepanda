@@ -2000,6 +2000,49 @@ def index_to_series(
     return PythonObject(alloc=PySeries(ArcPointer(out^)))
 
 
+def series_to_frame(
+    column: PythonObject, name: PythonObject
+) raises -> PythonObject:
+    """Makes a column into a frame of one column, keeping its labels.
+
+    A free function for the reason the two above give, which is the import graph
+    and not taste. It reads a series and answers a frame, `series.mojo` cannot
+    import `frame.mojo` because `frame.mojo` already imports it, and a method on
+    the frame that takes a column and hands back a frame of that column reads
+    backwards.
+
+    This is the door going the other way from `index_to_series`, and it is worth
+    as much. Ten members of the pandas series are written on the frame here and
+    nowhere else, `duplicated`, `drop_duplicates`, `take`, `sort_index`,
+    `reset_index`, `truncate`, `filter`, `nlargest`, `nsmallest` and `groupby`,
+    and every one of them is a line once a column can be handed to a frame and
+    the one column taken back out.
+
+    The labels come across. A frame built out of a column and then read back has
+    to be the same column, so the row labels are copied over rather than left to
+    the default range a fresh frame would carry.
+
+    Args:
+        column: The series to read.
+        name: The column name, or `None` for the series' own name.
+
+    Returns:
+        A new frame of one column, over a copy of the values.
+
+    Raises:
+        Error: Tagged `value`, if the name is not a string.
+    """
+    var held = Pointer(to=PySeries._held(column)[].series[])
+    var title = held[].name
+    if name is not Python.none():
+        title = words(name, "name")
+    var columns = List[Series](capacity=1)
+    columns.append(Series(title, AnyArray(copy=held[].values)))
+    var out = DataFrame.from_series(columns^)
+    out.index = Index(copy=held[].index)
+    return PythonObject(alloc=PyDataFrame(ArcPointer(out^)))
+
+
 def raise_for_test(kind: PythonObject) raises -> PythonObject:
     """Raises one classified error of each kind, so the table can be tested.
 

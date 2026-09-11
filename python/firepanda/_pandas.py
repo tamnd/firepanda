@@ -2668,6 +2668,153 @@ class SeriesMixin:
                 raise translate(error) from None
         return _Along(self, True)[key]
 
+    def to_frame(self, name: Any = NO_DEFAULT) -> DataFrame:
+        """The column as a frame of one column, keeping its labels.
+
+        This is the door the eight methods below go through, and the reason it
+        is worth having on its own is that a frame in this library already
+        knows how to do things a column does not. Every one of them is a line
+        once the column can be handed to a frame and taken back out.
+
+        pandas calls the column of an unnamed series `0`, which is the integer
+        rather than the text of it, and a column name here is a string. So it
+        is the text of it, and a caller who writes `name=None` gets the empty
+        string for the same reason: there is no name that is not a string to
+        put there.
+
+        Args:
+            name: The column name, or left out for the series' own.
+
+        Returns:
+            A frame of one column.
+        """
+        wanted = self._inner.label() if name is NO_DEFAULT else name
+        return self._framed("0" if not wanted else str(wanted))
+
+    def duplicated(self, keep: Any = "first") -> Series:
+        """Which values repeat one that another row already carries.
+
+        The only one of these that does not take its own column back, because
+        what a frame answers here is a mask rather than a frame, and the mask
+        arrives unnamed where a series' own answer carries the series' name.
+        """
+        from ._frame import Series
+
+        label = self._inner.label()
+        mask = self._framed(label).duplicated(keep=keep)
+        try:
+            return Series._wrap(mask._inner.relabel(label))
+        except Exception as error:
+            raise translate(error) from None
+
+    def drop_duplicates(
+        self, *, keep: Any = "first", inplace: bool = False, ignore_index: bool = False
+    ) -> Series:
+        """The values with the repeated ones removed, by a chosen rule."""
+        return self._through(
+            lambda frame: frame.drop_duplicates(
+                keep=keep, inplace=inplace, ignore_index=ignore_index
+            )
+        )
+
+    def take(self, indices: Any, axis: Any = 0, **kwargs: Any) -> Series:
+        """The rows at a list of positions, in the order they are given in."""
+        return self._through(lambda frame: frame.take(indices, axis, **kwargs))
+
+    def sort_index(
+        self,
+        *,
+        axis: Any = 0,
+        level: Any = None,
+        ascending: Any = True,
+        inplace: bool = False,
+        kind: str = "quicksort",
+        na_position: str = "last",
+        sort_remaining: bool = True,
+        ignore_index: bool = False,
+        key: Any = None,
+    ) -> Series:
+        """The column with its rows in the order of their labels."""
+        return self._through(
+            lambda frame: frame.sort_index(
+                axis=axis,
+                level=level,
+                ascending=ascending,
+                inplace=inplace,
+                kind=kind,
+                na_position=na_position,
+                sort_remaining=sort_remaining,
+                ignore_index=ignore_index,
+                key=key,
+            )
+        )
+
+    def truncate(
+        self, before: Any = None, after: Any = None, axis: Any = None, copy: Any = NO_DEFAULT
+    ) -> Series:
+        """The rows between two labels, with both of them kept."""
+        return self._through(lambda frame: frame.truncate(before, after, axis, copy))
+
+    def nlargest(self, n: int = 5, keep: Any = "first") -> Series:
+        """The largest values, in order, with ties settled by a rule."""
+        return self._through(lambda frame: frame.nlargest(n, self._inner.label(), keep))
+
+    def nsmallest(self, n: int = 5, keep: Any = "first") -> Series:
+        """The smallest values, in order, with ties settled by a rule."""
+        return self._through(lambda frame: frame.nsmallest(n, self._inner.label(), keep))
+
+    def reset_index(
+        self,
+        level: Any = None,
+        *,
+        drop: bool = False,
+        name: Any = NO_DEFAULT,
+        inplace: bool = False,
+        allow_duplicates: bool = False,
+    ) -> Any:
+        """The labels numbered again, or moved into a column beside the values.
+
+        The two answers are different types, which is pandas and not an
+        invention here. Dropping the labels leaves a column and keeping them
+        makes a frame of two, because the labels have become values and values
+        in a second column are what a frame is.
+        """
+        if drop:
+            return self._through(
+                lambda frame: frame.reset_index(
+                    level, drop=True, inplace=inplace, allow_duplicates=allow_duplicates
+                )
+            )
+        wanted = self._inner.label() if name is NO_DEFAULT else name
+        made = self._framed("0" if not wanted else str(wanted))
+        return made.reset_index(
+            level, drop=False, inplace=inplace, allow_duplicates=allow_duplicates
+        )
+
+    def _framed(self, name: str) -> DataFrame:
+        """This column in a frame of one column, under a name of the caller's."""
+        from ._frame import _series_to_frame
+
+        return _series_to_frame(self._inner, name)
+
+    def _through(self, run: Any) -> Series:
+        """Runs a frame method on this one column and takes the column back.
+
+        The eight public methods above are all the same three steps, and the
+        column goes in and comes out under the name it already had so that the
+        answer is this series rather than a differently named one. A frame
+        method that removes rows or reorders them does the same thing to the
+        labels, which is why none of these has to touch the index at all.
+        """
+        from ._frame import Series
+
+        label = self._inner.label()
+        answered = run(self._framed(label))
+        try:
+            return Series._wrap(answered._inner.column(label))
+        except Exception as error:
+            raise translate(error) from None
+
     def _get(self, key: Any, default: Any) -> Any:
         """The value at a label, or a value of the caller's choosing.
 
@@ -5655,17 +5802,7 @@ class IndexMixin:
         """
         if how not in ("any", "all"):
             raise InvalidArgumentError(f"firepanda:value: invalid how option: {how}")
-        column = self.to_series().dropna()
-        # The class the index already was rather than `Index`, because a
-        # `DatetimeIndex` with a missing instant dropped is still a set of
-        # instants. The mixin cannot see `_wrap`, which the generated half
-        # writes, so the class goes through a name the checker leaves alone.
-        made: Any = type(self)
-        try:
-            kept: Index = made._wrap(column._inner.to_index(self._inner.label()))
-        except Exception as error:
-            raise translate(error) from None
-        return kept
+        return self._like(self.to_series().dropna())
 
     def min(self, axis: Any = None, skipna: bool = True, *args: Any, **kwargs: Any) -> Any:
         """The smallest label.
@@ -5718,6 +5855,40 @@ class IndexMixin:
         if dropna or self._inner.null_count() == 0:
             return answer
         return answer + 1
+
+    def to_frame(self, index: bool = True, name: Any = NO_DEFAULT) -> DataFrame:
+        """The labels as a frame of one column, under a name.
+
+        Two doors end to end. The labels become a column and the column becomes
+        a frame, and what the caller chooses is whether the labels stay on as
+        the row labels as well or the frame is numbered from nothing.
+        """
+        wanted = self._inner.label() if name is NO_DEFAULT else name
+        made = self.to_series().to_frame(wanted)
+        return made if index else made.reset_index(drop=True)
+
+    def duplicated(self, keep: Any = "first") -> Any:
+        """Which labels repeat one that an earlier label already carries."""
+        return self.to_series().duplicated(keep=keep).tolist()
+
+    def drop_duplicates(self, *, keep: Any = "first") -> Index:
+        """The labels with the repeated ones removed, by a chosen rule."""
+        return self._like(self.to_series().drop_duplicates(keep=keep))
+
+    def _like(self, column: Any) -> Index:
+        """The class this index already is, over the values of a column.
+
+        `dropna` wrote this rule first and the comment there is the argument:
+        an index of instants with rows taken out of it is still an index of
+        instants, and the mixin cannot see `_wrap`, which the generated half
+        writes, so the class goes through a name the checker leaves alone.
+        """
+        made: Any = type(self)
+        try:
+            kept: Index = made._wrap(column._inner.to_index(self._inner.label()))
+        except Exception as error:
+            raise translate(error) from None
+        return kept
 
     def _only_level(self, level: Any) -> None:
         """Holds that `level` names the one level a flat index has.

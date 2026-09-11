@@ -19,6 +19,7 @@ from firepanda.py.frame import (
     open_arrow,
     open_csv,
     raise_for_test,
+    series_to_frame,
 )
 from firepanda.py.index import PyIndex
 from firepanda.py.series import PySeries
@@ -48,6 +49,10 @@ def register(mut module: PythonModuleBuilder) raises:
         docstring=(
             "The labels of an index, as a column that carries them twice."
         ),
+    )
+    module.def_function[series_to_frame](
+        "_series_to_frame",
+        docstring="A column, as a frame of one column under a chosen name.",
     )
     module.def_function[raise_for_test](
         "_raise_for_test",
