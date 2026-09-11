@@ -111,11 +111,35 @@ subquery produces and then lowered as a bare `x`. Two sources in one `FROM` that
 both produce a column of that name come back from binding as an ambiguity, which
 is a refusal rather than a wrong answer.
 
+### A `WITH` is a name bound to a statement, and it lowers where it is named
+
+Every reference to a CTE lowers the statement again, in the place the name was
+written, which is the derived table above with the statement found by name
+instead of written out. That is DuckDB's default and it is the right one here
+for a plainer reason: a plan holding one node twice would be a graph rather than
+a tree, and every pass over it walks a tree. `MATERIALIZED` asks for the other
+thing, and it is read and not acted on, which costs a query that writes it the
+work of computing the statement more than once and never costs it a different
+answer. Deciding it is the optimizer's, where the use count `read_ctes` already
+worked out can be weighed against what the statement costs.
+
+The names bind in the order they were written and a reference lowers against the
+ones bound before it, which is what makes `WITH y AS (SELECT n FROM x), x AS
+(...)` a missing table rather than a forward reference. A `WITH` inside a
+subquery binds after the one outside it and a lookup runs from the end, so the
+inner one shadows the outer, and the whole list is looked in before the catalog,
+so a CTE hides a registered frame of the same name. The column alias list is a
+projection over the statement's root, applied as the prefix rule that
+`cte.mojo` and DuckDB both have.
+
+A recursive CTE is refused by name. The fixed point it asks for is a node that
+runs its own input until no new rows come out, and the plan has no such node.
+
 ### What is not lowered yet
 
-Named tables, the table functions above, the derived tables above, and the joins
-over them. A CTE is refused, and so is a subquery written where an expression
-goes, and so are the column aliases on a derived table and a `LATERAL` one.
+Named tables, the table functions above, the derived tables and the CTEs above,
+and the joins over them. A subquery written where an expression goes is refused,
+and so are the column aliases on a derived table and a `LATERAL` one.
 `USING`, `NATURAL`, `POSITIONAL`, `ASOF`, `SEMI` and `ANTI` are
 each refused by name: the first three decide their keys or their output columns
 from something other than the condition, `ASOF` matches on the nearest value
@@ -200,6 +224,7 @@ from .ast import (
     STMT_VALUES,
 )
 from .catalog import Catalog, KIND_FRAME, fold
+from .cte import NOT_A_CTE, aliased, read_ctes
 from .types import engine_type, parse_type
 
 
@@ -413,6 +438,81 @@ def _is_aggregate(name: String) -> Bool:
         return True
     except:
         return False
+
+
+struct _Bindings(Copyable, Movable):
+    """The CTE names in reach, in the order they were bound.
+
+    Order is the whole visibility rule and it does two jobs at once. Entries of
+    one `WITH` bind left to right and each sees the ones before it, which is why
+    `WITH y AS (SELECT n FROM x), x AS (...)` is a missing table rather than a
+    forward reference. And a `WITH` inside a subquery binds after the one
+    outside it, so looking a name up from the end is what makes the inner one
+    shadow the outer.
+
+    Lowering a reference at position `at` lowers its statement against the first
+    `at` entries, which is both rules in one line.
+    """
+
+    var keys: List[String]
+    """The folded names, which is what a lookup compares."""
+
+    var stmts: List[UInt32]
+    """The statement each name stands for."""
+
+    var columns: List[List[String]]
+    """The column alias list each was written with, empty when none was."""
+
+    def __init__(out self):
+        """Nothing bound, which is what a query with no WITH in it has."""
+        self.keys = List[String]()
+        self.stmts = List[UInt32]()
+        self.columns = List[List[String]]()
+
+    def bind(
+        mut self, var key: String, stmt: UInt32, var columns: List[String]
+    ):
+        """Binds one name.
+
+        Args:
+            key: The folded name.
+            stmt: The statement it stands for.
+            columns: Its column alias list.
+        """
+        self.keys.append(key^)
+        self.stmts.append(stmt)
+        self.columns.append(columns^)
+
+    def find(self, name: StringSlice) -> Int:
+        """Which entry a name is, latest first.
+
+        Args:
+            name: The name as the query wrote it.
+
+        Returns:
+            The entry's position, or `NOT_A_CTE`.
+        """
+        var key = fold(name)
+        for at in range(len(self.keys) - 1, -1, -1):
+            if self.keys[at] == key:
+                return at
+        return NOT_A_CTE
+
+    def upto(self, before: Int) raises -> Self:
+        """The entries bound before a position, which is what one of them sees.
+
+        Args:
+            before: The position asking.
+
+        Returns:
+            A copy holding the first `before` entries.
+        """
+        var out = Self()
+        for at in range(before):
+            out.bind(
+                String(self.keys[at]), self.stmts[at], self.columns[at].copy()
+            )
+        return out^
 
 
 comptime NOT_IN_REACH = -1
@@ -1447,6 +1547,7 @@ def _table(
     mut plan: Plan,
     mut sources: List[Schema],
     mut scope: _Scope,
+    ctes: _Bindings,
 ) raises -> _From:
     """Lowers one named table in a `FROM` to a scan.
 
@@ -1457,6 +1558,8 @@ def _table(
         plan: Where the node goes.
         sources: One schema per scan, appended to.
         scope: What the FROM has put in reach, added to.
+        ctes: The CTE names in reach, which a table name is looked up in
+            before the catalog.
 
     Returns:
         The scan and what it produces.
@@ -1477,6 +1580,13 @@ def _table(
     var called = name.copy()
     if named == 1:
         called = String(ast.text(ast.at(source.payload, 0)))
+
+    # The CTE names are looked in first, which is what makes a CTE hide a
+    # registered frame of the same name rather than collide with one.
+    var bound = ctes.find(name)
+    if bound != NOT_A_CTE:
+        return _cte(ast, bound, called^, catalog, plan, sources, scope, ctes)
+
     var found = catalog.find(name)
     if found < 0:
         raise Error(catalog.missing(name))
@@ -1579,6 +1689,7 @@ def _subquery(
     mut plan: Plan,
     mut sources: List[Schema],
     mut scope: _Scope,
+    ctes: _Bindings,
 ) raises -> _From:
     """Lowers a subquery written where a table goes.
 
@@ -1608,6 +1719,7 @@ def _subquery(
         plan: Where the nodes go.
         sources: One schema per scan, appended to.
         scope: What the FROM has put in reach, added to.
+        ctes: The CTE names in reach, which the statement inside it can name.
 
     Returns:
         The statement's root and what it produces.
@@ -1632,23 +1744,104 @@ def _subquery(
         )
 
     var inner = _Scope()
-    var root = _statement(ast, source.a, catalog, plan, sources, inner)
-    var names = _produces(plan, root)
-
-    # The types are the placeholder one. Nothing between here and binding reads
-    # a type off this schema, since what a source has to carry at this stage is
-    # the names and the relation each column came from, and binding is what
-    # works the types out from the nodes underneath.
-    var schema = Schema()
-    for i in range(len(names)):
-        schema.append(Field(String(names[i]), LogicalType.NULL, True))
+    var root = _statement(ast, source.a, catalog, plan, sources, inner, ctes)
 
     # A subquery with no alias on it still produces columns and they are still
     # in reach, so the only thing the missing name costs is the ability to
     # qualify one. DuckDB invents a name here and reading a column through the
     # name it invented is not a thing a query that ports would do.
+    var called = String()
     if named == 1:
-        scope.derive(String(ast.text(ast.at(source.payload, 0))), names.copy())
+        called = String(ast.text(ast.at(source.payload, 0)))
+    return _derived(plan, root, called^, scope)
+
+
+def _cte(
+    ast: Ast,
+    at: Int,
+    var called: String,
+    catalog: Catalog,
+    mut plan: Plan,
+    mut sources: List[Schema],
+    mut scope: _Scope,
+    ctes: _Bindings,
+) raises -> _From:
+    """Lowers one reference to a CTE, as the plan the name stands for.
+
+    Every reference lowers the statement again. That is DuckDB's default and it
+    is the right one here for a plainer reason: a plan holding one node twice
+    would be a graph rather than a tree, and every pass in the optimizer walks
+    it as a tree. `MATERIALIZED` asks for the other thing and is read and not
+    acted on, which costs a query that writes it the work of computing the
+    statement twice and never costs it a different answer. The place that
+    decision belongs is the optimizer, where the count of uses that `read_ctes`
+    already worked out can be weighed against what the statement costs.
+
+    Args:
+        ast: The arenas.
+        at: Which binding it is.
+        called: The name the reference is known by, its alias when it has one.
+        catalog: What the table names inside it are resolved against.
+        plan: Where the nodes go.
+        sources: One schema per scan, appended to.
+        scope: What the FROM has put in reach, added to.
+        ctes: The CTE names in reach.
+
+    Returns:
+        The statement's root and what it produces.
+
+    Raises:
+        If the statement the name stands for is one this does not lower.
+    """
+    # An entry sees the names bound before it and not itself or the ones after
+    # it, which is the rule that makes a forward reference a missing table.
+    var inner = _Scope()
+    var root = _statement(
+        ast, ctes.stmts[at], catalog, plan, sources, inner, ctes.upto(at)
+    )
+
+    # The alias list renames columns rather than the thing they came out of, so
+    # it is a projection and not a note kept on the side. It is a prefix rather
+    # than a list, which is `aliased`'s rule and DuckDB's.
+    if len(ctes.columns[at]) != 0:
+        var produced = _produces(plan, root)
+        var outputs = List[Int](capacity=len(produced))
+        for i in range(len(produced)):
+            outputs.append(plan.exprs.column(String(produced[i])))
+        root = plan.project(root, outputs^, aliased(produced, ctes.columns[at]))
+    return _derived(plan, root, called^, scope)
+
+
+def _derived(
+    plan: Plan, root: Int, var called: String, mut scope: _Scope
+) raises -> _From:
+    """Makes a source out of a statement that was lowered where a table goes.
+
+    The types in the schema are the placeholder one. Nothing between here and
+    binding reads a type off a source at this stage, since what a source has to
+    carry is the names and the relation each column came from, and binding is
+    what works the types out from the nodes underneath.
+
+    Args:
+        plan: The plan the statement was lowered into.
+        root: Its root.
+        called: What the query may write in front of its columns, empty when it
+            was not given a name.
+        scope: What the FROM has put in reach, added to.
+
+    Returns:
+        The root and what it produces.
+
+    Raises:
+        If the root is a node whose output names are not in the plan, or if the
+        name is already taken.
+    """
+    var names = _produces(plan, root)
+    var schema = Schema()
+    for i in range(len(names)):
+        schema.append(Field(String(names[i]), LogicalType.NULL, True))
+    if called.byte_length() != 0:
+        scope.derive(called^, names.copy())
     return _From(root, schema^, List[Int](length=len(names), fill=UNBOUND))
 
 
@@ -1659,6 +1852,7 @@ def _joined(
     mut plan: Plan,
     mut sources: List[Schema],
     mut scope: _Scope,
+    ctes: _Bindings,
 ) raises -> _From:
     """Lowers a `JOIN` in a `FROM`.
 
@@ -1681,6 +1875,7 @@ def _joined(
         plan: Where the nodes go.
         sources: One schema per scan, appended to.
         scope: What the FROM has put in reach, added to.
+        ctes: The CTE names in reach, for each side.
 
     Returns:
         The join, and any filter above it, and what it produces.
@@ -1690,8 +1885,8 @@ def _joined(
     """
     var node = ast.refs[Int(at)]
     var kind = _join_kind(ast.text(node.payload))
-    var left = _source(ast, node.a, catalog, plan, sources, scope)
-    var right = _source(ast, node.b, catalog, plan, sources, scope)
+    var left = _source(ast, node.a, catalog, plan, sources, scope, ctes)
+    var right = _source(ast, node.b, catalog, plan, sources, scope, ctes)
 
     var written = ast.items(node.children)
     var conjuncts = List[UInt32]()
@@ -1766,6 +1961,7 @@ def _source(
     mut plan: Plan,
     mut sources: List[Schema],
     mut scope: _Scope,
+    ctes: _Bindings,
 ) raises -> _From:
     """Lowers one table reference in a `FROM`.
 
@@ -1776,6 +1972,7 @@ def _source(
         plan: Where the nodes go.
         sources: One schema per scan, appended to.
         scope: What the FROM has put in reach, added to.
+        ctes: The CTE names in reach.
 
     Returns:
         The node and what it produces.
@@ -1785,9 +1982,9 @@ def _source(
     """
     var source = ast.refs[Int(at)]
     if source.kind == REF_TABLE:
-        return _table(ast, at, catalog, plan, sources, scope)
+        return _table(ast, at, catalog, plan, sources, scope, ctes)
     if source.kind == REF_JOIN:
-        return _joined(ast, at, catalog, plan, sources, scope)
+        return _joined(ast, at, catalog, plan, sources, scope, ctes)
     if source.kind == REF_PARENS:
         if ast.length(source.payload) != 0:
             raise Error(
@@ -1795,14 +1992,14 @@ def _source(
                 " reference yet, which gives a whole join one name and so takes"
                 " the names written inside it back out of reach"
             )
-        return _source(ast, source.a, catalog, plan, sources, scope)
+        return _source(ast, source.a, catalog, plan, sources, scope, ctes)
     if source.kind == REF_JOIN_USING:
         raise Error(
             "firepanda does not lower a USING join yet, which joins on the"
             " named columns and then outputs one of each pair rather than both"
         )
     if source.kind == REF_SUBQUERY:
-        return _subquery(ast, at, catalog, plan, sources, scope)
+        return _subquery(ast, at, catalog, plan, sources, scope, ctes)
     if source.kind == REF_FUNCTION:
         return _function(ast, at, plan)
     raise Error(
@@ -1817,6 +2014,7 @@ def _from(
     mut plan: Plan,
     mut sources: List[Schema],
     mut scope: _Scope,
+    ctes: _Bindings,
 ) raises -> _From:
     """Lowers a whole `FROM` clause.
 
@@ -1834,6 +2032,7 @@ def _from(
         plan: Where the nodes go.
         sources: One schema per scan, appended to.
         scope: What the FROM puts in reach, filled in.
+        ctes: The CTE names in reach.
 
     Returns:
         The node the clause produces and what it produces.
@@ -1844,9 +2043,9 @@ def _from(
     var refs = ast.items(clause)
     if len(refs) == 0:
         raise Error("a FROM with nothing in it")
-    var out = _source(ast, refs[0], catalog, plan, sources, scope)
+    var out = _source(ast, refs[0], catalog, plan, sources, scope, ctes)
     for i in range(1, len(refs)):
-        var more = _source(ast, refs[i], catalog, plan, sources, scope)
+        var more = _source(ast, refs[i], catalog, plan, sources, scope, ctes)
         out = _pair(plan, out, more, List[Int](), List[Int](), JoinKind.CROSS)
     return out^
 
@@ -1874,7 +2073,9 @@ def lower(ast: Ast, statement: UInt32, catalog: Catalog) raises -> Lowered:
     var plan = Plan()
     var sources = List[Schema]()
     var scope = _Scope()
-    var at = _statement(ast, statement, catalog, plan, sources, scope)
+    var at = _statement(
+        ast, statement, catalog, plan, sources, scope, _Bindings()
+    )
     return Lowered(plan^, at, sources^)
 
 
@@ -1885,6 +2086,7 @@ def _statement(
     mut plan: Plan,
     mut sources: List[Schema],
     mut scope: _Scope,
+    ctes: _Bindings,
 ) raises -> Int:
     """Lowers one `STMT_SELECT`: its body, and the `ORDER BY` and `LIMIT` on it.
 
@@ -1899,6 +2101,8 @@ def _statement(
         plan: Where the nodes go.
         sources: One schema per scan, appended to in scan order.
         scope: Filled in with what the statement's own FROM put in reach.
+        ctes: The CTE names the query around it bound, which its own WITH is
+            added to.
 
     Returns:
         The node the statement produces.
@@ -1911,13 +2115,24 @@ def _statement(
     var top = ast.stmts[Int(statement)]
     if top.kind != STMT_SELECT:
         raise Error("firepanda lowers a SELECT, and this statement is not one")
-    if ast.length(top.children) != 0:
-        raise Error(
-            "firepanda does not lower a WITH yet, because a CTE is a name bound"
-            " to a plan and the plan has nowhere to hold one"
-        )
 
-    var at = _combine(ast, top.a, catalog, plan, sources, scope)
+    # Read whether or not there is a WITH, because reading one checks it: a
+    # name bound twice, a self reference without the keyword, and an ORDER BY
+    # on a recursive entry are all refused in there and none of them is a thing
+    # this file should be checking a second time.
+    var visible = ctes.copy()
+    var clause = read_ctes(ast, statement)
+    for i in range(len(clause)):
+        ref entry = clause.entries[i]
+        if entry.recursive:
+            raise Error(
+                "firepanda does not lower a recursive CTE yet, because the"
+                " fixed point it asks for is a node that runs its own input"
+                " until no new rows come out, and the plan has no such node"
+            )
+        visible.bind(String(entry.key), entry.statement, entry.columns.copy())
+
+    var at = _combine(ast, top.a, catalog, plan, sources, scope, visible)
 
     # The ORDER BY and the LIMIT written after a set operation apply to the
     # whole of it rather than to its last arm, which is why they are put on
@@ -2066,6 +2281,7 @@ def _combine(
     mut plan: Plan,
     mut sources: List[Schema],
     mut scope: _Scope,
+    ctes: _Bindings,
 ) raises -> Int:
     """Lowers one query body: a block, a `VALUES`, or a set operation over two.
 
@@ -2083,6 +2299,7 @@ def _combine(
         scope: Filled in with what a single block's FROM put in reach, and left
             empty for a set operation and for a VALUES, since neither of those
             leaves a table in reach of an ORDER BY written after it.
+        ctes: The CTE names in reach.
 
     Returns:
         The node the body produces.
@@ -2098,13 +2315,13 @@ def _combine(
         # Each arm brings its own scope and neither survives the set operation,
         # so the arms get one apiece and the caller's stays empty.
         var arm = _Scope()
-        var left = _combine(ast, node.a, catalog, plan, sources, arm)
+        var left = _combine(ast, node.a, catalog, plan, sources, arm, ctes)
         arm = _Scope()
-        var right = _combine(ast, node.b, catalog, plan, sources, arm)
+        var right = _combine(ast, node.b, catalog, plan, sources, arm, ctes)
         return plan.setop([left, right], read[0], read[1])
     if node.kind == STMT_VALUES:
         return _values(ast, body, plan)
-    return _block(ast, body, catalog, plan, sources, scope)
+    return _block(ast, body, catalog, plan, sources, scope, ctes)
 
 
 def _values(ast: Ast, body: UInt32, mut plan: Plan) raises -> Int:
@@ -2171,6 +2388,7 @@ def _block(
     mut plan: Plan,
     mut sources: List[Schema],
     mut scope: _Scope,
+    ctes: _Bindings,
 ) raises -> Int:
     """Lowers one `SELECT ... FROM ... WHERE ...` block.
 
@@ -2187,6 +2405,7 @@ def _block(
         scope: Filled in with what the block's FROM put in reach, so that an
             ORDER BY written outside the block can qualify a name the same way
             the block's own clauses can.
+        ctes: The CTE names in reach.
 
     Returns:
         The node the block produces.
@@ -2240,7 +2459,9 @@ def _block(
         # only its row count matters.
         at = plan.values([plan.exprs.literal(Value(Int64(0)))], ["__row"])
     else:
-        var source = _from(ast, from_clause, catalog, plan, sources, scope)
+        var source = _from(
+            ast, from_clause, catalog, plan, sources, scope, ctes
+        )
         at = source.at
         schema = Schema(copy=source.schema)
         origin = source.origin.copy()

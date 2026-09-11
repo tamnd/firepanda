@@ -15,6 +15,19 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 The index is the exception and it does build a new index underneath, because `Index.is_` asks whether two indexes are the same object and has to answer that a copy is not. `Index.copy` also takes its class from `type(self)` now rather than always answering a plain `Index`, so a copy of an index of instants is still one, which is one instance of the wrapping bug #495 records.
 
 Specified in `docs/specs/44-copying-when-nothing-can-be-written.md`. Part of #156, after #8.
+### Added: a `WITH` clause binds a name to a statement
+
+`WITH v AS (SELECT ...) SELECT ... FROM v` was refused and runs now. A CTE reference is a derived table under a name that was written further up the query, so nothing new had to be invented for it: the name is looked up, the statement it stands for is lowered in the place the name was read, and the root of that becomes the source.
+
+Every reference lowers the statement again. The alternative is one node with two parents, which would make the plan a graph rather than a tree, and every pass in the optimizer walks a tree. `MATERIALIZED` asks for the other thing and is read and not acted on, which costs a query that writes it the work of computing the statement more than once and never costs it a different answer. That decision belongs in the optimizer, where the use count the CTE reader already works out can be weighed against what the statement costs, and it can be made there without the front end changing shape.
+
+The names bind in the order they were written and a reference lowers against the ones bound before it. So `WITH first AS (SELECT a FROM later), later AS (...)` is a missing table rather than a forward reference, and it says so in the catalog's own words. A `WITH` inside a subquery binds after the one outside it and a lookup runs from the end, so an inner name shadows an outer one of the same spelling. The whole list is looked in before the catalog, so a CTE hides a registered frame it shares a name with, and the body of a CTE is read with its own name already bound, which is what makes `WITH t AS (SELECT b FROM t)` the circular reference DuckDB calls it rather than a read of the frame.
+
+The column alias list is a projection over the statement's root and not a note kept beside it. It is a prefix: a name past the end of the columns is dropped, a column past the end of the names keeps the one it had, and neither is an error. That is DuckDB's rule and it is not the rule for a derived table's `v(x, y)`, which asks for a count match, which is why the two are still separate and the derived table's list is still refused.
+
+A recursive CTE is refused by name. The fixed point it asks for is a node that runs its own input until no new rows come out, and there is no such node in the plan yet.
+
+Part of #309.
 
 ### Added: a subquery may be written where a table goes
 
@@ -30,7 +43,7 @@ A join against a derived table finds its key pairs by name, since a derived colu
 
 A `VALUES` in parentheses goes through the same door, so `SELECT * FROM (VALUES (1, 2), (3, 4)) AS t` answers two rows under the names a `VALUES` invents, where before it said that a subquery in a `FROM` was not lowered.
 
-`LATERAL` is refused by name, because it reads the columns of the sources written to the left of it and so runs once per row of them rather than once for the query. The column aliases in `(SELECT ...) v(x, y)` are refused by name too, the same way a named table's are. A `WITH` is still refused, and it is the same hole one step further along: a CTE is a name bound to a plan and the plan has nowhere to hold one.
+`LATERAL` is refused by name, because it reads the columns of the sources written to the left of it and so runs once per row of them rather than once for the query. The column aliases in `(SELECT ...) v(x, y)` are refused by name too, the same way a named table's are. A `WITH` is the same shape one step further along, and it is the entry above this one.
 
 Part of #309.
 
