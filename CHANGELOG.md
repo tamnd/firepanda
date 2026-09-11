@@ -8,6 +8,17 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: three messages and a class that the conformance board found on loc
+
+Arming the fifteen indexing cases in `firepanda-compat` turned four of its error cases from unimplemented into failing, which is the board working: the names started resolving and the level that asks what happens when they are called wrongly could finally ask. Three of the four were bugs and are fixed here.
+
+A boolean list of the wrong length now raises an `OutOfBoundsError`, which is an `IndexError`, where it had been raising an `InvalidArgumentError`, which is a `ValueError`. pandas raises `IndexError: Boolean index has wrong length: 3 instead of 2` from both `loc` and `iloc`, and `except IndexError` is what a caller writes around a mask they built themselves. The `loc` side was also raising pandas' other sentence, `Item wrong length`, which is the one `df[mask]` uses and not the one either accessor does.
+
+A missing single label now raises `KeyError(label)` and nothing else. The index does answer with a sentence of its own, and the sentence names the index rather than the label, which is the right way round for somebody who called `get_loc` directly and the wrong way round for somebody who wrote `df.loc[99999]` and is searching their traceback for the number. pandas raises the bare label, so this does too.
+
+The fourth is not a bug and is not fixed. `Too many indexers` is a `pandas.errors.IndexingError`, firepanda does not import pandas, and so no firepanda exception can be a subclass of a class pandas defines. It is recorded as a divergence in the compat registry rather than left on the board as a failure, because it is the same fact about every pandas defined exception class and not a thing about indexing.
+
+Part of #156, after #504.
 ## [0.6.57] - 2026-09-11
 
 Built against Mojo 1.0.0 (ed45d567).

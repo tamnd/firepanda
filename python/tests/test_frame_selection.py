@@ -147,6 +147,21 @@ def test_loc_refuses_a_column_that_is_not_there(firepanda):
         made(firepanda).loc[:, "nope"]
 
 
+def test_a_mask_of_the_wrong_length_is_an_index_error(firepanda):
+    # pandas raises IndexError here and not ValueError, and it says both
+    # lengths, which is the only reason this mistake is ever quick to fix.
+    for read in (lambda df: df.loc[[True, False]], lambda df: df.iloc[[True, False]]):
+        with pytest.raises(IndexError) as raised:
+            read(made(firepanda))
+        assert "Boolean index has wrong length: 2 instead of 6" in str(raised.value)
+
+
+def test_a_missing_row_label_names_the_label_and_nothing_else(firepanda):
+    with pytest.raises(KeyError) as raised:
+        made(firepanda).set_index("k").loc[99]
+    assert str(raised.value) == "99"
+
+
 def test_at_and_iat_read_one_value(firepanda):
     mine = made(firepanda).set_index("k")
     them = theirs().set_index("k")

@@ -1006,7 +1006,7 @@ class _Positional(_Selection):
         if isinstance(key, (list, tuple)):
             if _is_mask(key):
                 if len(key) != height:
-                    raise InvalidArgumentError(
+                    raise OutOfBoundsError(
                         f"Boolean index has wrong length: {len(key)} instead of {height}"
                     )
                 return ("gather", [i for i, hit in enumerate(key) if hit])
@@ -1054,12 +1054,21 @@ class _Labelled(_Selection):
         if isinstance(key, (list, tuple)):
             if _is_mask(key):
                 if len(key) != height:
-                    raise InvalidArgumentError(f"Item wrong length {len(key)} instead of {height}")
+                    raise OutOfBoundsError(
+                        f"Boolean index has wrong length: {len(key)} instead of {height}"
+                    )
                 return ("gather", [i for i, hit in enumerate(key) if hit])
             return ("gather", _row_positions(self._owner.index, key))
         if isinstance(key, IndexMixin):
             return ("gather", _row_positions(self._owner.index, key._inner.to_list()))
-        found = self._owner.index.get_loc(key)
+        try:
+            found = self._owner.index.get_loc(key)
+        except KeyError:
+            # The label itself and nothing else, which is what pandas raises and
+            # what a person grepping their own traceback is looking for. The
+            # message underneath names the index rather than the label, because
+            # it was written for a caller who already has the label in hand.
+            raise KeyError(key) from None
         if isinstance(found, int):
             return ("one", found)
         return ("gather", _flattened(found))

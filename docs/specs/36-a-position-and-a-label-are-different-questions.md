@@ -52,9 +52,13 @@ pandas' `take` counts a negative from the end. Both are correct readings of the 
 
 ## 8. The messages, and which side raises them
 
-Document 22's rule is that a message leads with pandas' sentence. Four of the messages here are pandas' word for word: `positional indexers are out-of-bounds`, `Too many indexers`, `Item wrong length N instead of M`, and `[label] not in index`.
+Document 22's rule is that a message leads with pandas' sentence. Five of the messages here are pandas' word for word: `positional indexers are out-of-bounds`, `Too many indexers`, `Boolean index has wrong length: N instead of M`, `[label] not in index`, and a missing single label, which in pandas is the label on its own and nothing else.
 
-The last of those is raised as a plain `KeyError` rather than as one of the named classes in `firepanda.errors`, and that is the one deliberate exception in this file. The named classes exist because a Mojo error carries a kind tag across the boundary and the tag has to become a class on this side. A missing row label never crosses the boundary at all: it is found here, by asking the index where a label is and being told there is no such label, so there is no tag to translate and nothing for a named class to carry. pandas raises a plain `KeyError` too.
+The last two are raised as a plain `KeyError` rather than as one of the named classes in `firepanda.errors`, and that is the one deliberate exception in this file. The named classes exist because a Mojo error carries a kind tag across the boundary and the tag has to become a class on this side. A missing row label never crosses the boundary at all: it is found here, by asking the index where a label is and being told there is no such label, so there is no tag to translate and nothing for a named class to carry. pandas raises a plain `KeyError` too.
+
+The missing single label is worth one more sentence, because the message it is raised with is thrown away and rewritten. The index does answer with a sentence, and the sentence names the index rather than the label, which is the right way round for somebody who called `get_loc` and already has the label in their hand. It is the wrong way round for somebody who wrote `df.loc[99999]` and is now reading a traceback, because the thing they are going to search their own source for is the number. pandas raises `KeyError(99999)` and so does this.
+
+There is one message in the list that cannot be raised with the class pandas raises it with. `Too many indexers` is a `pandas.errors.IndexingError`, which is a class pandas defines rather than a builtin, and firepanda does not import pandas, so a firepanda exception cannot be a subclass of it and an `except pandas.errors.IndexingError` clause will not catch one. That is a consequence of the library not depending on the library it replaces, it applies to every pandas defined exception class and not only to this one, and it is registered as a divergence rather than left to be rediscovered.
 
 ## 9. What is refused, and what each would cost
 
@@ -66,8 +70,9 @@ The last of those is raised as a plain `KeyError` rather than as one of the name
 | `df.iloc[cond]` with a callable | Running a Python function over the frame, which is the `key` machinery nothing here has |
 | A key with three or more axes | A MultiIndex, since that is the only thing a third axis can mean |
 | `take(**kwargs)` | Nothing. pandas accepts them only to ignore them, and this refuses them |
+| `except pandas.errors.IndexingError` | Importing pandas, which document 14 section 8 rules out |
 
-Only one of the six is a missing kernel and it is the same one twice. Assignment is a decision about the whole library rather than about these accessors, and it is the same decision `inplace=True` is waiting on everywhere else.
+Only one of the seven is a missing kernel and it is the same one twice. Assignment is a decision about the whole library rather than about these accessors, and it is the same decision `inplace=True` is waiting on everywhere else.
 
 ## 10. What it is worth
 
