@@ -150,9 +150,14 @@ from .ast import (
     EXPR_CASE,
     EXPR_CAST,
     EXPR_COLUMN,
+    EXPR_EXISTS,
     EXPR_FUNCTION,
+    EXPR_IN,
+    EXPR_IN_SUBQUERY,
     EXPR_LITERAL,
+    EXPR_QUANTIFIED,
     EXPR_STAR,
+    EXPR_SUBQUERY,
     EXPR_UNARY,
     CALL_STAR,
     GROUP_EXPRESSION,
@@ -770,10 +775,11 @@ def _lower_expr(
         return plan.exprs.call(name, lowered^, True)
 
     if node.kind == EXPR_BETWEEN:
-        raise Error(
-            "firepanda does not lower BETWEEN yet, and the same query written"
-            " with two comparisons does lower"
-        )
+        return _lower_between(ast, at, plan, walk, scope, grouped)
+
+    if node.kind == EXPR_IN:
+        return _lower_in(ast, at, plan, walk, scope, grouped)
+
     if node.kind == EXPR_CAST:
         raise Error(
             "firepanda does not lower a CAST yet, because the type text has to"
@@ -781,7 +787,147 @@ def _lower_expr(
         )
     if node.kind == EXPR_STAR:
         raise Error("a star outside a select list")
+    if (
+        node.kind == EXPR_SUBQUERY
+        or node.kind == EXPR_EXISTS
+        or node.kind == EXPR_IN_SUBQUERY
+        or node.kind == EXPR_QUANTIFIED
+    ):
+        raise Error(
+            "firepanda does not lower a subquery in an expression yet. A"
+            " correlated one is a dependent join that decorrelation has to"
+            " remove, and an uncorrelated one is a plan of its own that the"
+            " outer plan has nowhere to hold"
+        )
     raise Error("an expression shape firepanda does not lower yet")
+
+
+def _lower_between(
+    ast: Ast,
+    at: UInt32,
+    mut plan: Plan,
+    mut walk: _Walk,
+    scope: _Scope,
+    grouped: Bool,
+) raises -> Int:
+    """Lowers `x BETWEEN lo AND hi` into the two comparisons it stands for.
+
+    The plan has no range test of its own and does not want one. A predicate
+    shape is something every pass over a filter has to know about, and a range
+    is already sayable, so adding it would buy nothing and cost pushdown, the
+    optimizer and the printer a case each.
+
+    The operand is lowered once and both comparisons point at what came back, so
+    the arena holds one subtree with two parents rather than two copies of it.
+    That is the same thing common subexpression elimination arrives at, and it
+    is the reason the AST keeps BETWEEN whole: rewriting it in the parser would
+    have written the operand out twice.
+
+    `NOT BETWEEN` is the whole test negated rather than the two comparisons
+    turned around. With `hi` null and `x` below `lo`, the positive test is false
+    whatever the null bound would have said, so the negation is true, while
+    `x < lo OR x > hi` answers null. Negating leaves the three valued logic in
+    the one place that already implements it.
+
+    Args:
+        ast: The arenas.
+        at: The `EXPR_BETWEEN`.
+        plan: Where the lowered expressions go.
+        walk: What the aggregates and windows found so far are recorded in.
+        scope: What the FROM put in reach.
+        grouped: Whether the block aggregates.
+
+    Returns:
+        The predicate.
+
+    Raises:
+        If the bounds are not a pair, or a part of it does not lower.
+    """
+    var node = ast.exprs[Int(at)]
+    var bounds = ast.items(node.children)
+    if len(bounds) != 2:
+        raise Error(
+            String(
+                (
+                    "a BETWEEN wants a low bound and a high one, and this one"
+                    " was given "
+                ),
+                len(bounds),
+            )
+        )
+    var over = _lower_expr(ast, node.a, plan, walk, scope, grouped)
+    var low = _lower_expr(ast, bounds[0], plan, walk, scope, grouped)
+    var high = _lower_expr(ast, bounds[1], plan, walk, scope, grouped)
+    var within = plan.exprs.call(
+        "and",
+        [
+            plan.exprs.binary(BinaryOp.GE, over, low),
+            plan.exprs.binary(BinaryOp.LE, over, high),
+        ],
+        True,
+    )
+    if node.payload == 1:
+        return plan.exprs.call("not", [within], True)
+    return within
+
+
+def _lower_in(
+    ast: Ast,
+    at: UInt32,
+    mut plan: Plan,
+    mut walk: _Walk,
+    scope: _Scope,
+    grouped: Bool,
+) raises -> Int:
+    """Lowers `x IN (a, b, c)` into the equalities it stands for.
+
+    One equality per candidate, joined by `OR`, with the operand shared the way
+    a BETWEEN shares it. A list of three is three comparisons, which is what
+    DuckDB does with a short list as well. A long list wants a hash set instead,
+    and that is a physical choice rather than a different meaning, so it belongs
+    in the operator and not here.
+
+    `NOT IN` is the negation of the whole test, which is what makes it the
+    classic wrong answer when it is written any other way. `x NOT IN (1, NULL)`
+    with `x` two is null rather than true, because the positive test cannot rule
+    the null out, and the chain of `OR` answers exactly that before the negation
+    turns it into a null as well. Written as a chain of `<>` joined by `AND` it
+    would answer true, which is the defect this shape avoids by not existing.
+
+    Args:
+        ast: The arenas.
+        at: The `EXPR_IN`.
+        plan: Where the lowered expressions go.
+        walk: What the aggregates and windows found so far are recorded in.
+        scope: What the FROM put in reach.
+        grouped: Whether the block aggregates.
+
+    Returns:
+        The predicate.
+
+    Raises:
+        If the list is empty, or a part of it does not lower.
+    """
+    var node = ast.exprs[Int(at)]
+    var candidates = ast.items(node.children)
+    if len(candidates) == 0:
+        raise Error("an IN with nothing in the list to be in")
+    var over = _lower_expr(ast, node.a, plan, walk, scope, grouped)
+    var built = plan.exprs.binary(
+        BinaryOp.EQ,
+        over,
+        _lower_expr(ast, candidates[0], plan, walk, scope, grouped),
+    )
+    for i in range(1, len(candidates)):
+        var more = plan.exprs.binary(
+            BinaryOp.EQ,
+            over,
+            _lower_expr(ast, candidates[i], plan, walk, scope, grouped),
+        )
+        built = plan.exprs.call("or", [built, more], True)
+    if node.payload == 1:
+        return plan.exprs.call("not", [built], True)
+    return built
 
 
 def _lower_over(
@@ -981,7 +1127,7 @@ def _has_aggregate(ast: Ast, at: UInt32) -> Bool:
             if _has_aggregate(ast, arm):
                 return True
         return False
-    if node.kind == EXPR_BETWEEN:
+    if node.kind == EXPR_BETWEEN or node.kind == EXPR_IN:
         for part in ast.items(node.children):
             if _has_aggregate(ast, part):
                 return True

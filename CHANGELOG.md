@@ -17,6 +17,19 @@ At four million rows the three rows read 6.9 ms with a handful of groups, 11.5 m
 The reason the last row is not much worse than the first is that each group sorts inside its own stretch of the slab, so more groups means shorter sorts. The argument and the memory behaviour are now in `_nunique_core`'s docstring, where the next person to look at this will be.
 
 Part of #479.
+### Added: `BETWEEN` and `IN` lower, and a subquery in an expression says which shape it is
+
+Both are rewrites rather than new plan nodes. `x BETWEEN lo AND hi` is the two comparisons it stands for and `x IN (a, b, c)` is one equality per candidate joined by `OR`. The plan has no range test and no membership test, and it should not grow one: a predicate shape is something every pass over a filter has to know about, and both of these are already sayable, so the only thing a new node would buy is a case to write in pushdown, in the optimizer and in the printer.
+
+The operand is lowered once and every comparison points at what came back, so the arena holds one subtree with two parents rather than a copy each. That is the same thing common subexpression elimination arrives at, and it is why the AST keeps `BETWEEN` whole rather than rewriting it in the parser, where the operand would have been written out twice.
+
+The negated forms are the whole answer negated rather than the comparisons turned around, which is the part that is easy to get wrong and silent when it is. `x NOT IN (1, NULL)` with `x` two is null rather than true, because the positive test cannot rule the null out, and a chain of `<>` joined by `AND` answers true. Written as the negation of the chain of `OR`, the three valued logic stays in the one place that already implements it. `NOT BETWEEN` has the same trap with a null bound.
+
+A subquery written in an expression is now refused by name rather than by the sentence that stands for every shape at once. `IN (SELECT ...)`, `EXISTS`, a scalar subquery and a quantified comparison all say that a correlated one is a dependent join decorrelation has to remove and an uncorrelated one is a plan the outer plan has nowhere to hold, which is what #309 has to build next.
+
+What runs is not yet what lowers. A conjunction at the top of a filter is a line of filters, so a plain `BETWEEN` in a `WHERE` runs today, and an `OR` or a `NOT` is a boolean column computed from another one with no operator that computes it. That gap is older than this change, since `WHERE a = 1 OR a = 2` has always had it, and the tests name it rather than working around it.
+
+Part of #309.
 
 ## [0.6.65] - 2026-09-12
 
