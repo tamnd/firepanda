@@ -56,42 +56,46 @@ ordinal, which is `firepanda/hash/partition.mojo`'s job and is not done here.
 
 ## The whole frame version, which is a limit over a sort
 
-`top_rows` answers the other shape: no groups, several keys of any sortable type
-pointing in any direction, and a limit with an offset on the front of it. That is
-`ORDER BY ... LIMIT n OFFSET m`, which nine of the ClickBench queries end with,
-and the point of it is the same as the point of the grouped version. Sorting a
-hundred million rows to look at ten of them is most of a query's time spent on an
-answer nobody reads.
+`top_rows` answers the other shape: no groups, several keys of any sortable
+type pointing in any direction, and a limit with an offset on the front of it.
+That is `ORDER BY ... LIMIT n OFFSET m`, which nine of the ClickBench queries
+end with, and the point of it is the same as the point of the grouped version.
+Sorting a hundred million rows to look at ten of them is most of a query's time
+spent on an answer nobody reads.
 
-The bound is `offset + limit` rather than `limit`. A query that skips ninety rows
-and then takes ten needs a hundred rows kept, and a pass that reads the limit and
-forgets the offset gives the wrong ten rows rather than a slower right answer.
+The bound is `offset + limit` rather than `limit`. A query that skips ninety
+rows and then takes ten needs a hundred rows kept, and a pass that reads the
+limit and forgets the offset gives the wrong ten rows rather than a slower
+right answer.
 
-It works a block of rows at a time. The kept set, at most `bound` rows, is put in
-front of the next block, the keys are gathered for that candidate list, the list
-is sorted, and the first `bound` of it becomes the new kept set. A row that is not
-in the best `bound` of the kept set and its own block cannot be in the best
-`bound` of the frame, so dropping it is safe. What that buys is memory: the sort
-never sees more than a block plus the bound, so the ten rows a query wants cost a
-few megabytes of scratch rather than a permutation of the whole frame.
+It works a block of rows at a time. The kept set, at most `bound` rows, is put
+in front of the next block, the keys are gathered for that candidate list, the
+list is sorted, and the first `bound` of it becomes the new kept set. A row
+that is not in the best `bound` of the kept set and its own block cannot be in
+the best `bound` of the frame, so dropping it is safe. What that buys is
+memory: the sort never sees more than a block plus the bound, so the ten rows a
+query wants cost a few megabytes of scratch rather than a permutation of the
+whole frame.
 
-Two things are deliberate about the candidate list. It is built in ascending row
-order, kept set first because every row in it came from an earlier block, which
-means the stable sort underneath breaks a tie by row number and the answer does
-not depend on where the block boundaries fell. And the kept set is read back out
-by walking the candidates and taking the chosen ones rather than by sorting the
-chosen rows, which is one pass over a list that is already in cache.
+Two things are deliberate about the candidate list. It is built in ascending
+row order, kept set first because every row in it came from an earlier block,
+which means the stable sort underneath breaks a tie by row number and the
+answer does not depend on where the block boundaries fell. And the kept set is
+read back out by walking the candidates and taking the chosen ones rather than
+by sorting the chosen rows, which is one pass over a list that is already in
+cache.
 
 A null is not dropped here, which is the difference from the grouped version
-above. A limit over a sort is asking for rows in an order and `nulls_first` says
-where the nulls go in it, so a null is a value with a position like any other.
-`nlargest` is asking for the largest values and a null is not one.
+above. A limit over a sort is asking for rows in an order and `nulls_first`
+says where the nulls go in it, so a null is a value with a position like any
+other. `nlargest` is asking for the largest values and a null is not one.
 
 This does not use the slot table above, and on one numeric key it could. The
-table's gate is one comparison per row against the current worst, with no gather
-and no per block sort, which is a better loop than this one. Wiring it in means a
-scan that takes no group ordinals, since a codes column of zeros costs four bytes
-a row for nothing, and that is worth doing with the benchmark in front of us.
+table's gate is one comparison per row against the current worst, with no
+gather and no per block sort, which is a better loop than this one. Wiring it
+in means a scan that takes no group ordinals, since a codes column of zeros
+costs four bytes a row for nothing, and that is worth doing with the benchmark
+in front of us.
 """
 
 from std.sys.info import size_of
@@ -781,6 +785,160 @@ def _sorted_order[
     return order^
 
 
+def _gate_into[
+    dt: DType, //, origin: ImmOrigin
+](
+    source: Pointer[Scalar[dt], origin],
+    validity: Bitmap,
+    has_nulls: Bool,
+    start: Int,
+    stop: Int,
+    at_worst: Int,
+    descending: Bool,
+    nulls_first: Bool,
+    strict: Bool,
+    mut out: List[Int],
+) -> Bool:
+    """Appends the rows of a range that could still displace the worst kept row.
+
+    One load and one comparison per row, and the rows that fail it are never
+    gathered, never sorted and never looked at again. That is the whole point of
+    a bounded top n and it is what the block loop on its own does not have.
+
+    A NaN row is kept rather than compared, because every comparison a NaN is in
+    is false and a gate written the obvious way would drop NaN rows that the
+    sort would have placed at the end. There are few of them, so letting them
+    through costs a row in the block sort and gets the answer right.
+
+    Args:
+        source: The key values.
+        validity: Which of them are present.
+        has_nulls: Whether the validity is worth reading.
+        start: The first row of the range.
+        stop: One past the last row of the range.
+        at_worst: The row holding the worst key currently kept.
+        descending: Whether the key reads large to small.
+        nulls_first: Where a null sits in the order.
+        strict: Whether a row that ties the worst kept row is dropped. It is
+            with one key, because every kept row came earlier and an earlier row
+            wins a tie. It is not with several, because a tie on this key is
+            decided by the next one.
+        out: Appended with the surviving rows, in ascending row order.
+
+    Parameters:
+        dt: The key dtype.
+        origin: The values pointer's origin.
+
+    Returns:
+        False if the gate declined to run, which means every row of the range is
+        still a candidate.
+    """
+    var worst_present = (not has_nulls) or validity.get(at_worst)
+    var worst = source.unsafe_offset(at_worst).unsafe_load()
+    comptime if dt.is_floating_point():
+        if worst_present and worst != worst:
+            return False
+
+    if not worst_present:
+        # The worst thing kept is a null. With the nulls last that beats
+        # nothing, so every present row is still a candidate and no null is.
+        # With the nulls first it beats everything, so nothing is.
+        if nulls_first:
+            if strict:
+                return True
+            for i in range(start, stop):
+                if has_nulls and not validity.get(i):
+                    out.append(i)
+            return True
+        for i in range(start, stop):
+            if (not has_nulls) or validity.get(i):
+                out.append(i)
+        return True
+
+    for i in range(start, stop):
+        if has_nulls and not validity.get(i):
+            # A null against a present worst: it wins outright with the nulls
+            # first and loses outright with them last.
+            if nulls_first:
+                out.append(i)
+            continue
+
+        var value = source.unsafe_offset(i).unsafe_load()
+        comptime if dt.is_floating_point():
+            if value != value:
+                out.append(i)
+                continue
+
+        if value == worst:
+            if not strict:
+                out.append(i)
+        elif descending:
+            if value > worst:
+                out.append(i)
+        else:
+            if value < worst:
+                out.append(i)
+    return True
+
+
+def _gate_block(
+    col: AnyArray,
+    has_nulls: Bool,
+    start: Int,
+    stop: Int,
+    at_worst: Int,
+    descending: Bool,
+    nulls_first: Bool,
+    strict: Bool,
+    mut out: List[Int],
+) raises -> Bool:
+    """Runs the gate over a range of a column whose dtype is a runtime value.
+
+    `has_nulls` is handed in rather than asked for here, and that is not
+    tidiness. `null_count` counts the bits every time it is called, so asking it
+    once a block is a second pass over the validity of the whole column per
+    block, which at a hundred million rows was most of the time this function
+    spent.
+
+    Args:
+        col: The most significant key.
+        has_nulls: Whether the column holds a null at all.
+        start: The first row of the range.
+        stop: One past the last row of the range.
+        at_worst: The row holding the worst key currently kept.
+        descending: Whether the key reads large to small.
+        nulls_first: Where a null sits in the order.
+        strict: Whether a tie with the worst kept row is dropped.
+        out: Appended with the surviving rows.
+
+    Returns:
+        False if there is no gate for this column, which means every row of the
+        range is still a candidate.
+    """
+    # The same question `group_top_rows_any` asks and for the same reason. A
+    # string is laid out as uint8 and a dictionary as its codes, so a check
+    # written against the physical dtype would gate on bytes or on ordinals
+    # rather than on the column.
+    if not (col.type.is_numeric() or col.type.is_temporal()):
+        return False
+
+    comptime for candidate in NUMERIC:
+        if col.dtype() == candidate:
+            return _gate_into(
+                col.unsafe_ptr[candidate](),
+                col.data.validity,
+                has_nulls,
+                start,
+                stop,
+                at_worst,
+                descending,
+                nulls_first,
+                strict,
+                out,
+            )
+    return False
+
+
 def _top_rows_core[
     o: ImmOrigin
 ](
@@ -826,6 +984,7 @@ def _top_rows_core[
         )
 
     var bound = offset + limit
+    var gate_nulls = columns[at[0]][].null_count() > 0
     var kept_in_order = List[Int]()
     var kept_by_row = List[Int]()
     var start = 0
@@ -842,8 +1001,35 @@ def _top_rows_core[
         var candidates = List[Int](capacity=len(kept_by_row) + stop - start)
         for i in range(len(kept_by_row)):
             candidates.append(kept_by_row[i])
-        for row in range(start, stop):
-            candidates.append(row)
+
+        # Once the kept set is full, most blocks hold nothing that can displace
+        # anything in it, and the gate is what says so without gathering or
+        # sorting a row. It reads the most significant key only, so a row it
+        # keeps may still lose on the next key, which is what the sort below is
+        # for. It declines on a key it cannot compare, and then every row of the
+        # block is a candidate, which is slower and not wrong.
+        var gated = False
+        if len(kept_by_row) == bound:
+            gated = _gate_block(
+                columns[at[0]][],
+                gate_nulls,
+                start,
+                stop,
+                kept_in_order[bound - 1],
+                descending[0],
+                nulls_first[0],
+                len(at) == 1,
+                candidates,
+            )
+        if not gated:
+            for row in range(start, stop):
+                candidates.append(row)
+
+        if len(candidates) == len(kept_by_row):
+            # The gate turned the whole block away, so the kept set is already
+            # the answer for everything seen so far.
+            start = stop
+            continue
 
         var keys = List[AnyArray](capacity=len(at))
         for k in range(len(at)):

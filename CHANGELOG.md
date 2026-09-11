@@ -14,6 +14,24 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 Part of #156, after #8.
 
+### Changed: a limit of ten stopped sorting the blocks that cannot win
+
+The block loop `top_rows` runs sorted every block whether or not anything in it belonged in the answer, which made a limit of ten slower than the sort it was meant to replace: 2357 ms against 940 ms at a hundred million rows. Ten rows out of a hundred million means almost every block is a block where nothing wins, and the pass now says so before doing any work on it.
+
+Once the kept set is full it has a worst row, and that row's first key is a threshold. The gate reads the block's first key straight out of the column and appends only the rows that could displace it. A block where nothing gets through costs one linear pass over one column, no gather, no sort, and the loop moves on with the kept set untouched.
+
+A row whose first key ties the threshold is let through when there is more than one key, because an equal first key says nothing about the second one. With a single key it is turned away, since the kept set is already full and a stable sort puts the earlier row first, so a later tie cannot get in. That is the same tie rule the unbounded path has, arrived at from the other side.
+
+A NaN threshold turns the gate off for that block rather than comparing against it, because every comparison with a NaN is false and a gate that answers false to everything would throw away the answer. A NaN row inside a block is kept rather than compared, for the same reason. A null threshold is handled both ways round: with `nulls_first` a null is the best value rather than the worst, so a null worst row means nothing else can be worse than it and the gate is on, and with nulls last it means nothing is turned away.
+
+Only a numeric or a temporal first key is gated. A string key falls through to the old path, which is still correct and still bounded, just not fast yet. Comparing two strings is not one machine instruction and the gate wants to be one.
+
+Hoisting the null count out of the loop is most of the win. `null_count()` is `length - count_ones()` over the whole validity bitmap, so asking a block whether the column has nulls was a scan of the whole column per block. With it inside, a sixty five thousand row block was five times worse than a million row block and the whole thing was break even against the sort. With it called once before the loop the block size stopped mattering at all.
+
+The probe in `tools/probes/limitscale.mojo` reads sort against limit ten at 8 and 1 ms over a million rows, 87 and 12 over ten million, 413 and 55 over fifty million, and 1012 and 128 over a hundred million. The shape is what it should be: the sort grows faster than the frame and the limit grows with it.
+
+Part of #481.
+
 ## [0.6.63] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).
@@ -69,6 +87,7 @@ The inputs are run rather than streamed, which is the same trade the join's buil
 `EXCEPT` and `INTERSECT` are the same plan node with another code on it and neither is a stack, so both are refused by name. Deciding a row of the left needs the right hashed first, which is an operator nobody has written.
 
 Part of #309.
+
 ### Added: the ten rows a query asked for, without sorting the other hundred million
 
 `top_rows` in `firepanda/kernel/topn.mojo`, and `DataFrame.argsort_limit` and `DataFrame.sort_limit` over it. `ORDER BY ... LIMIT 10` is how nine ClickBench queries end, and until now the only way to answer one was to sort every row and throw away all but ten of them.
