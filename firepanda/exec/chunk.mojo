@@ -21,16 +21,46 @@ A chunk owns its arrays. There is no sharing and no reference counting, so an
 operator that wants to keep a chunk keeps it and an operator that wants to
 transform one consumes it. That is why every method here that produces a chunk
 takes the old one by `var` rather than by reference.
+
+## The selection
+
+A chunk may carry a selection, which is a list of positions into its arrays.
+Section 4 of `docs/specs/engine/02-execution-model.md` and issue #521. The point
+is that filtering a column means writing a new one, and a filter that writes a
+list of positions instead has moved one number per surviving row rather than one
+value per surviving row per column.
+
+That makes a chunk's columns two different things, and the `dense` list is what
+says which is which. A dense column's element i is row i of the chunk. A column
+that is not dense has its row i at element `picks[i]`. A chunk with no selection
+has every column dense, which is what every chunk was before this existed and
+what most chunks still are.
+
+The two are both needed because an operator that computes something computes it
+over the chunk's rows and not over the array positions underneath them, so its
+output is dense while its inputs were not. Keeping the distinction per column is
+what lets a filter leave the columns it did not touch exactly as the scan handed
+them over.
+
+`flatten` puts a chunk back to all dense, and every operator that has not been
+taught to read through a selection has it called on its input first, so adding
+this changes no answer anywhere.
 """
 
 from firepanda.array.any import AnyArray
+from firepanda.kernel.select import take_any
 
 
 struct Chunk(Movable, Sized):
     """One horizontal slice of a frame, owned outright."""
 
     var columns: List[AnyArray]
-    """One array per column, in plan order. All the same length."""
+    """One array per column, in plan order.
+
+    All the same length when there is no selection. When there is one, a dense
+    column is as long as the chunk has rows and the rest are as long as whatever
+    they were gathered from.
+    """
 
     var rows: Int
     """The number of rows, which every column agrees on.
@@ -40,8 +70,22 @@ struct Chunk(Movable, Sized):
     `count(*)` over a projected away table is.
     """
 
+    var picks: List[Int]
+    """The selection, or empty when there is none.
+
+    A list of `Int` rather than of `UInt32`, because that is what `take_any`
+    takes and converting on every gather would cost more than the eight bytes a
+    position saves. Narrowing it is worth doing once something reads a selection
+    without gathering through it.
+    """
+
+    var dense: List[Bool]
+    """Whether each column's element i is row i, or empty when there is no
+    selection."""
+
     def __init__(out self, var columns: List[AnyArray]) raises:
-        """Constructs a chunk, taking the row count from the columns.
+        """Constructs a chunk with no selection, taking the row count from the
+        columns.
 
         Args:
             columns: The arrays. Consumed.
@@ -61,9 +105,11 @@ struct Chunk(Movable, Sized):
                     + String(self.rows)
                 )
         self.columns = columns^
+        self.picks = List[Int]()
+        self.dense = List[Bool]()
 
     def __init__(out self, var columns: List[AnyArray], rows: Int):
-        """Constructs a chunk whose row count the caller already knows.
+        """Constructs a chunk with no selection whose row count is known.
 
         Unchecked, and that is the point: an operator that just built every
         column with the same loop bound does not need the lengths compared
@@ -75,6 +121,31 @@ struct Chunk(Movable, Sized):
         """
         self.columns = columns^
         self.rows = rows
+        self.picks = List[Int]()
+        self.dense = List[Bool]()
+
+    def __init__(
+        out self,
+        var columns: List[AnyArray],
+        var picks: List[Int],
+        var dense: List[Bool],
+    ):
+        """Constructs a chunk under a selection.
+
+        Unchecked, like the constructor above and for the same reason. The
+        caller is the operator that just built the selection and it knows the
+        lengths line up.
+
+        Args:
+            columns: The arrays. Consumed.
+            picks: The selection, one position per row. Consumed.
+            dense: Whether each column is already at the chunk's rows, one per
+                column. Consumed.
+        """
+        self.rows = len(picks)
+        self.columns = columns^
+        self.picks = picks^
+        self.dense = dense^
 
     def __len__(self) -> Int:
         """Returns the number of rows.
@@ -92,10 +163,76 @@ struct Chunk(Movable, Sized):
         """
         return len(self.columns)
 
-    def into_columns(deinit self) -> List[AnyArray]:
-        """Gives up the arrays without copying them, consuming the chunk.
+    def selected(self) -> Bool:
+        """Whether the chunk carries a selection.
+
+        Returns:
+            True if some column is read through one.
+        """
+        return len(self.picks) > 0
+
+    def flatten(mut self, spread: Bool = True) raises:
+        """Gathers every column that is not dense and drops the selection.
+
+        Does nothing to a chunk that has no selection, which is the common case
+        and is why this is cheap to call unconditionally.
+
+        Args:
+            spread: Whether a gather may use more than one core. False when the
+                caller is already running on a worker.
+
+        Raises:
+            If a column's dtype is not one firepanda has a layout for.
+        """
+        if not self.selected():
+            return
+        for i in range(len(self.columns)):
+            if i < len(self.dense) and self.dense[i]:
+                continue
+            self.columns[i] = take_any(self.columns[i], self.picks, spread)
+        self.picks = List[Int]()
+        self.dense = List[Bool]()
+
+    def column(self, at: Int, spread: Bool = True) raises -> AnyArray:
+        """Returns one column at the chunk's rows, gathering it if it has to.
+
+        A copy either way, since the caller wants something contiguous. What it
+        saves over `flatten` is the columns it was not asked about.
+
+        Args:
+            at: The column.
+            spread: Whether a gather may use more than one core.
+
+        Returns:
+            An array of `rows` elements.
+
+        Raises:
+            If the position is out of range, or the dtype has no layout.
+        """
+        if at < 0 or at >= len(self.columns):
+            raise Error(
+                "chunk: column "
+                + String(at)
+                + " is outside a chunk of "
+                + String(len(self.columns))
+                + " columns"
+            )
+        if not self.selected() or (at < len(self.dense) and self.dense[at]):
+            return AnyArray(copy=self.columns[at])
+        return take_any(self.columns[at], self.picks, spread)
+
+    def into_columns(deinit self) raises -> List[AnyArray]:
+        """Gives up the arrays, consuming the chunk.
+
+        Flattens first, so what comes back is always one array per column at the
+        chunk's rows. Nothing is copied when there was no selection, which is
+        what the callers of this all expect.
 
         Returns:
             The columns, in order.
+
+        Raises:
+            If a column's dtype is not one firepanda has a layout for.
         """
+        self.flatten()
         return self.columns^

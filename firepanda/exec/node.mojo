@@ -2532,8 +2532,32 @@ def node_is_breaker(node: Node) -> Bool:
     return node.isa[Materialize]() or node.isa[Group]() or node.isa[Reduce]()
 
 
+def node_reads_selection(node: Node) -> Bool:
+    """Reports whether a node can take a chunk that carries a selection.
+
+    A chunk under a selection is one whose columns are not all at its rows, and
+    a kernel handed one without knowing would read the wrong values rather than
+    fail. So this is the list of what has been taught, and everything else has
+    `flatten` called on its input by the two dispatchers below before it sees
+    it. That is what lets the selection be turned on one operator at a time
+    without any answer changing in between.
+
+    Nothing reads one yet. Issue #521 turns them on.
+
+    Args:
+        node: The node.
+
+    Returns:
+        True if the node handles a selected chunk itself.
+    """
+    return False
+
+
 def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
     """Pushes one chunk through a node.
+
+    Flattens the chunk first unless the node says it reads a selection, so a
+    node that has not been taught about selections cannot be given one.
 
     Args:
         node: The node.
@@ -2545,6 +2569,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
     Raises:
         If the node cannot process the chunk.
     """
+    if chunk.selected() and not node_reads_selection(node):
+        chunk.flatten()
     if node.isa[Filter]():
         return node[Filter].process(chunk^)
     if node.isa[Project]():
@@ -2583,6 +2609,10 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
     Raises:
         If the node is not row local, or if it cannot process the chunk.
     """
+    if chunk.selected() and not node_reads_selection(node):
+        # False, for the reason the join below gives: this already runs on a
+        # worker, so a gather here must not hand itself out to workers again.
+        chunk.flatten(False)
     if node.isa[Filter]():
         return node[Filter].process(chunk^)
     if node.isa[Project]():

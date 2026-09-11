@@ -1390,5 +1390,157 @@ def test_a_partial_row_of_the_wrong_width_is_refused() raises:
         node.absorb(Chunk(columns^))
 
 
+def ints_of(col: AnyArray, rows: Int) raises -> List[Int64]:
+    """Reads a whole int64 column out, for comparing against a literal list."""
+    ref view = col.as_typed_view[DType.int64]()
+    var out = List[Int64](capacity=rows)
+    for i in range(rows):
+        out.append(view[i])
+    return out^
+
+
+def selected_chunk() raises -> Chunk:
+    """Six rows of values with a selection keeping the second and the fourth.
+
+    Column 0 is the six values and is not dense, so its rows are at positions 1
+    and 3. Column 1 is two values and is dense, which is what a column computed
+    after the selection was made looks like. The two together are the only shape
+    that matters, since a chunk whose columns are all one or all the other is
+    handled by the same loop.
+    """
+    var columns = List[AnyArray]()
+    columns.append(numbers([1, 2, 3, 4, 5, 6]))
+    columns.append(numbers([70, 80]))
+    var picks = List[Int]()
+    picks.append(1)
+    picks.append(3)
+    var dense = List[Bool]()
+    dense.append(False)
+    dense.append(True)
+    return Chunk(columns^, picks^, dense^)
+
+
+def test_a_chunk_built_from_columns_carries_no_selection() raises:
+    """Every chunk in the engine before selections existed, and most of them
+    after. The row count comes from the columns and nothing is read through
+    anything."""
+    var columns = List[AnyArray]()
+    columns.append(numbers([1, 2, 3]))
+    var chunk = Chunk(columns^)
+    assert_false(chunk.selected(), "no selection")
+    assert_equal(len(chunk), 3, "three rows")
+
+
+def test_a_selected_chunk_has_a_row_per_position() raises:
+    """The row count is the length of the selection and not the length of any
+    column, which is the whole point: the columns are longer."""
+    var chunk = selected_chunk()
+    assert_true(chunk.selected(), "a selection")
+    assert_equal(len(chunk), 2, "two rows, though a column holds six")
+    assert_equal(chunk.width(), 2, "two columns")
+
+
+def test_flattening_gathers_what_is_not_dense_and_leaves_what_is() raises:
+    """The first column is read through the selection and the second is already
+    at the chunk's rows, so flattening has to gather one and copy neither."""
+    var chunk = selected_chunk()
+    chunk.flatten()
+    assert_false(chunk.selected(), "the selection is gone")
+    assert_equal(len(chunk), 2, "still two rows")
+    var first = ints_of(chunk.columns[0], 2)
+    assert_equal(first[0], 2, "position 1 of 1 through 6")
+    assert_equal(first[1], 4, "position 3 of 1 through 6")
+    var second = ints_of(chunk.columns[1], 2)
+    assert_equal(second[0], 70, "the dense column, untouched")
+    assert_equal(second[1], 80, "and its second row")
+
+
+def test_flattening_twice_is_the_same_as_flattening_once() raises:
+    """Called on every chunk entering every operator that has not been taught
+    about selections, so the second call has to be free rather than wrong."""
+    var chunk = selected_chunk()
+    chunk.flatten()
+    chunk.flatten()
+    assert_false(chunk.selected(), "still gone")
+    var first = ints_of(chunk.columns[0], 2)
+    assert_equal(first[0], 2, "not gathered through the positions again")
+    assert_equal(first[1], 4, "nor this one")
+
+
+def test_flattening_a_chunk_that_has_no_selection_changes_nothing() raises:
+    """The common case, and the reason the call is cheap enough to make
+    unconditionally."""
+    var columns = List[AnyArray]()
+    columns.append(numbers([1, 2, 3]))
+    var chunk = Chunk(columns^)
+    chunk.flatten()
+    assert_false(chunk.selected(), "nothing appeared")
+    assert_equal(len(chunk), 3, "three rows")
+    var values = ints_of(chunk.columns[0], 3)
+    assert_equal(values[0], 1, "the first row")
+    assert_equal(values[2], 3, "the last row")
+
+
+def test_one_column_can_be_asked_for_without_flattening_the_rest() raises:
+    """What an operator reading two columns of a wide chunk wants. The chunk
+    keeps its selection, so the columns nobody asked about are not gathered."""
+    var chunk = selected_chunk()
+    var got = ints_of(chunk.column(0), 2)
+    assert_equal(got[0], 2, "gathered through the selection")
+    assert_equal(got[1], 4, "and the second row")
+    assert_true(chunk.selected(), "the chunk is unchanged")
+
+
+def test_asking_for_a_dense_column_does_not_gather_it() raises:
+    """A column computed since the selection was made is already at the chunk's
+    rows, so reading it through the positions would be reading the wrong
+    rows."""
+    var chunk = selected_chunk()
+    var got = ints_of(chunk.column(1), 2)
+    assert_equal(got[0], 70, "the first row as it stands")
+    assert_equal(got[1], 80, "and the second")
+
+
+def test_asking_for_a_column_the_chunk_does_not_have_is_refused() raises:
+    """The same message shape the filter and the projection give, because the
+    mistake is the same one."""
+    var chunk = selected_chunk()
+    with assert_raises(contains="outside a chunk of 2 columns"):
+        _ = chunk.column(2)
+
+
+def test_giving_up_the_columns_flattens_first() raises:
+    """Everything that consumes a chunk's arrays wants one array per column at
+    the chunk's rows, so this is where a selection stops rather than being
+    something every caller has to remember."""
+    var chunk = selected_chunk()
+    var columns = chunk^.into_columns()
+    assert_equal(len(columns), 2, "two columns")
+    assert_equal(len(columns[0]), 2, "gathered down to the rows")
+    var first = ints_of(columns[0], 2)
+    assert_equal(first[0], 2, "position 1")
+    assert_equal(first[1], 4, "position 3")
+
+
+def test_a_node_that_does_not_read_a_selection_is_given_a_flat_chunk() raises:
+    """The safety property the whole step rests on. Nothing has been taught to
+    read a selection yet, so a node handed a selected chunk sees it flattened
+    and gives the answer it would have given anyway."""
+    var keep = List[Int]()
+    keep.append(1)
+    keep.append(0)
+    var node = Node(Project(keep^))
+    var out = node_apply(node, selected_chunk())
+    assert_true(out.__bool__(), "a chunk came back")
+    var got = out.take()
+    assert_false(got.selected(), "and it is not selected")
+    assert_equal(len(got), 2, "two rows")
+    var swapped = ints_of(got.columns[0], 2)
+    assert_equal(swapped[0], 70, "what was column 1")
+    var under = ints_of(got.columns[1], 2)
+    assert_equal(under[0], 2, "and what was column 0, gathered")
+    assert_equal(under[1], 4, "and its second row")
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
