@@ -1161,6 +1161,108 @@ def test_a_not_in_over_a_subquery_says_why_it_is_refused() raises:
         )
 
 
+def test_a_correlated_exists_runs_as_a_semi_join() raises:
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE EXISTS"
+                " (SELECT 1 FROM tiers WHERE tiers.band = sales.qty)"
+                " ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [3, 20, 40],
+        "qty",
+    )
+
+
+def test_a_correlated_not_exists_runs_as_the_anti_join() raises:
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE NOT EXISTS"
+                " (SELECT 1 FROM tiers WHERE tiers.band = sales.qty)"
+                " ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [1, 5, 8, 12, 15, 25, 30],
+        "qty",
+    )
+
+
+def test_the_uncorrelated_half_of_an_exists_still_holds() raises:
+    # Band 20 is a tier and its rate is under the bar, so the row the first of
+    # these tests kept for it goes.
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE EXISTS"
+                " (SELECT 1 FROM tiers WHERE tiers.band = sales.qty"
+                " AND tiers.rate > 250) ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [3, 40],
+        "qty",
+    )
+
+
+def test_an_exists_answers_a_row_once_however_many_matched_it() raises:
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE EXISTS"
+                " (SELECT 1 FROM dupes WHERE dupes.band = sales.qty)"
+                " ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [3, 20],
+        "qty",
+    )
+
+
+def test_an_exists_correlated_on_a_column_that_repeats() raises:
+    # The key is the shop rather than the quantity, so several outer rows share
+    # a match and each is still written once.
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE EXISTS"
+                " (SELECT 1 FROM shops WHERE shops.shop = sales.shop"
+                " AND shops.floor = 22) ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [1, 8, 15, 20, 40],
+        "qty",
+    )
+
+
+def test_the_rest_of_the_where_still_holds_beside_an_exists() raises:
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales WHERE price > 4 AND EXISTS"
+                " (SELECT 1 FROM tiers WHERE tiers.band = sales.qty)"
+                " ORDER BY qty"
+            ),
+            "qty",
+        ),
+        [3],
+        "qty",
+    )
+
+
+def test_an_uncorrelated_exists_says_why_it_is_refused() raises:
+    with assert_raises(contains="mark join"):
+        _ = run(
+            "SELECT qty FROM sales WHERE EXISTS (SELECT 1 FROM tiers)",
+            session(),
+        )
+
+
 def test_a_right_join_has_no_operator_yet_either() raises:
     with assert_raises(contains="breaker rather than an operator"):
         _ = run(

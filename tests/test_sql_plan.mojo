@@ -369,7 +369,7 @@ def test_the_shapes_with_no_node_yet_each_say_which_one() raises:
     with assert_raises(contains="subquery in an expression"):
         _ = _plan("SELECT a FROM t WHERE (SELECT b FROM u) > 1")
     with assert_raises(contains="subquery in an expression"):
-        _ = _plan("SELECT a FROM t WHERE EXISTS (SELECT b FROM u)")
+        _ = _plan("SELECT EXISTS (SELECT b FROM u) FROM t")
     with assert_raises(contains="TRY_CAST"):
         _ = _plan("SELECT TRY_CAST(a AS BIGINT) FROM t")
 
@@ -1098,6 +1098,111 @@ def test_a_correlated_in_is_refused_by_the_scope_it_lowers_against() raises:
 def test_an_in_written_anywhere_but_a_top_level_and_is_still_refused() raises:
     with assert_raises(contains="does not lower a subquery in an expression"):
         _ = _plan("SELECT a FROM t WHERE a > 1 OR b IN (SELECT k FROM u)")
+
+
+def test_a_correlated_exists_is_a_semi_join() raises:
+    assert_equal(
+        _plan("SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.b = t.b)"),
+        "PROJECT [a]\n  JOIN semi [b = b]\n    SCAN t []\n    SCAN u []\n",
+    )
+
+
+def test_a_correlated_not_exists_is_the_anti_join() raises:
+    # The one place where the negation is the other join rather than a refusal.
+    # A left row with a null key matches nothing, so an anti join keeps it, and
+    # `NOT EXISTS` over a null is true, which is the same answer. `NOT IN` is
+    # the one that differs and it is why that one is refused.
+    assert_equal(
+        _plan(
+            "SELECT a FROM t WHERE NOT EXISTS (SELECT 1 FROM u WHERE u.b = t.b)"
+        ),
+        "PROJECT [a]\n  JOIN anti [b = b]\n    SCAN t []\n    SCAN u []\n",
+    )
+
+
+def test_the_uncorrelated_half_of_an_exists_is_a_filter_under_the_join() raises:
+    # Under the join rather than over it, because it reads the subquery's own
+    # table and there it runs once rather than once per pairing.
+    assert_equal(
+        _plan(
+            "SELECT a FROM t WHERE EXISTS"
+            " (SELECT 1 FROM u WHERE u.b = t.b AND u.k > 3)"
+        ),
+        (
+            "PROJECT [a]\n"
+            "  JOIN semi [b = b]\n"
+            "    SCAN t []\n"
+            "    FILTER k > 3\n"
+            "      SCAN u []\n"
+        ),
+    )
+
+
+def test_two_correlated_equalities_are_two_key_pairs() raises:
+    assert_true(
+        "JOIN semi [a = k, b = b]"
+        in _plan(
+            "SELECT g FROM t WHERE EXISTS"
+            " (SELECT 1 FROM u WHERE u.k = t.a AND t.b = u.b)"
+        )
+    )
+
+
+def test_the_subquery_of_an_exists_is_out_of_reach_above_it() raises:
+    with assert_raises(contains="nothing in this query is called 'u'"):
+        _ = _plan(
+            "SELECT u.k FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.b = t.b)"
+        )
+
+
+def test_an_exists_that_reads_no_outer_column_is_refused() raises:
+    # It asks whether the table has any row at all, which every outer row gets
+    # the same answer to, and that is a mark join rather than a semi join.
+    with assert_raises(contains="mark join"):
+        _ = _plan(
+            "SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.k > 3)"
+        )
+
+
+def test_a_correlation_that_is_not_an_equality_is_refused() raises:
+    with assert_raises(contains="dependent join"):
+        _ = _plan(
+            "SELECT a FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.b > t.b)"
+        )
+
+
+def test_an_exists_over_an_aggregate_is_refused() raises:
+    # An aggregate with no group by answers one row over no rows, so an EXISTS
+    # over one is true where the subquery found nothing.
+    with assert_raises(contains="does not aggregate"):
+        _ = _plan(
+            "SELECT a FROM t WHERE EXISTS"
+            " (SELECT sum(k) FROM u WHERE u.b = t.b)"
+        )
+
+
+def test_an_exists_with_a_limit_on_it_is_refused() raises:
+    with assert_raises(contains="one SELECT block"):
+        _ = _plan(
+            "SELECT a FROM t WHERE EXISTS"
+            " (SELECT 1 FROM u WHERE u.b = t.b LIMIT 1)"
+        )
+
+
+def test_an_exists_beside_a_plain_condition_keeps_both() raises:
+    assert_equal(
+        _plan(
+            "SELECT a FROM t WHERE a > 1 AND EXISTS"
+            " (SELECT 1 FROM u WHERE u.b = t.b)"
+        ),
+        (
+            "PROJECT [a]\n"
+            "  JOIN semi [b = b]\n"
+            "    FILTER a > 1\n"
+            "      SCAN t []\n"
+            "    SCAN u []\n"
+        ),
+    )
 
 
 def test_a_condition_may_reach_only_the_two_tables_it_joins() raises:
