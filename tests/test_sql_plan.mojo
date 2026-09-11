@@ -366,9 +366,9 @@ def test_a_decimal_literal_is_refused_rather_than_made_a_double() raises:
 def test_the_shapes_with_no_node_yet_each_say_which_one() raises:
     with assert_raises(contains="GROUPING SETS"):
         _ = _plan("SELECT g FROM t GROUP BY CUBE (g)")
-    with assert_raises(contains="subquery in an expression"):
+    with assert_raises(contains="one row by construction"):
         _ = _plan("SELECT a FROM t WHERE (SELECT b FROM u) > 1")
-    with assert_raises(contains="subquery in an expression"):
+    with assert_raises(contains="written as a value"):
         _ = _plan("SELECT EXISTS (SELECT b FROM u) FROM t")
     with assert_raises(contains="TRY_CAST"):
         _ = _plan("SELECT TRY_CAST(a AS BIGINT) FROM t")
@@ -1096,8 +1096,106 @@ def test_a_correlated_in_is_refused_by_the_scope_it_lowers_against() raises:
 
 
 def test_an_in_written_anywhere_but_a_top_level_and_is_still_refused() raises:
-    with assert_raises(contains="does not lower a subquery in an expression"):
+    with assert_raises(contains="written as a value"):
         _ = _plan("SELECT a FROM t WHERE a > 1 OR b IN (SELECT k FROM u)")
+
+
+def test_a_subquery_that_answers_one_value_is_a_cross_join() raises:
+    assert_equal(
+        _plan("SELECT a FROM t WHERE a > (SELECT max(b) FROM u)"),
+        (
+            "PROJECT [a]\n"
+            "  FILTER a > __sub_0\n"
+            "    JOIN cross []\n"
+            "      SCAN t []\n"
+            "      PROJECT [__expr_0 as __sub_0]\n"
+            "        PROJECT [__agg_0 as __expr_0]\n"
+            "          AGGREGATE [] -> [max(b)]\n"
+            "            SCAN u []\n"
+        ),
+    )
+
+
+def test_a_subquery_in_a_select_list_is_the_same_join() raises:
+    assert_equal(
+        _plan("SELECT a, (SELECT max(b) FROM u) AS top FROM t"),
+        (
+            "PROJECT [a, __sub_0 as top]\n"
+            "  JOIN cross []\n"
+            "    SCAN t []\n"
+            "    PROJECT [__expr_0 as __sub_0]\n"
+            "      PROJECT [__agg_0 as __expr_0]\n"
+            "        AGGREGATE [] -> [max(b)]\n"
+            "          SCAN u []\n"
+        ),
+    )
+
+
+def test_a_subquery_over_no_table_is_one_row_too() raises:
+    assert_equal(
+        _plan("SELECT a FROM t WHERE a > (SELECT 1)"),
+        (
+            "PROJECT [a]\n"
+            "  FILTER a > __sub_0\n"
+            "    JOIN cross []\n"
+            "      SCAN t []\n"
+            "      PROJECT [__expr_0 as __sub_0]\n"
+            "        PROJECT [1 as __expr_0]\n"
+            "          VALUES [__row] (0)\n"
+        ),
+    )
+
+
+def test_two_subqueries_in_one_query_are_two_cross_joins() raises:
+    var text = _plan(
+        "SELECT a FROM t WHERE a > (SELECT max(b) FROM u)"
+        " AND b < (SELECT min(k) FROM u)"
+    )
+    assert_true("__sub_0" in text)
+    assert_true("__sub_1" in text)
+
+
+def test_the_answer_is_renamed_so_it_cannot_clash() raises:
+    # Both tables have a column called b, and the subquery's answer is called
+    # that too until it is renamed on the way out.
+    assert_true(
+        "__sub_0" in _plan("SELECT a FROM t WHERE b > (SELECT max(b) FROM u)")
+    )
+
+
+def test_a_subquery_that_is_not_one_row_by_construction_is_refused() raises:
+    with assert_raises(contains="one row by construction"):
+        _ = _plan("SELECT a FROM t WHERE a > (SELECT b FROM u)")
+    with assert_raises(contains="one row by construction"):
+        _ = _plan("SELECT a FROM t WHERE a > (SELECT max(b) FROM u GROUP BY z)")
+
+
+def test_a_limit_on_a_subquery_is_not_read_as_a_row_count() raises:
+    # Over a table with nothing in it a LIMIT 1 answers no rows, where SQL says
+    # the subquery is null, so this is not the same guarantee a fold gives.
+    with assert_raises(contains="answers no rows"):
+        _ = _plan("SELECT a FROM t WHERE a > (SELECT b FROM u LIMIT 1)")
+
+
+def test_a_subquery_that_hands_out_two_columns_is_refused() raises:
+    with assert_raises(contains="hands out 2 columns"):
+        _ = _plan("SELECT a FROM t WHERE a > (SELECT max(b), min(k) FROM u)")
+
+
+def test_a_correlated_one_is_refused_by_the_scope_it_lowers_against() raises:
+    with assert_raises(contains="nothing in this query is called 't'"):
+        _ = _plan(
+            "SELECT a FROM t WHERE a > (SELECT max(k) FROM u WHERE u.b = t.b)"
+        )
+
+
+def test_a_subquery_above_an_aggregate_says_why_it_cannot_be_read() raises:
+    with assert_raises(contains="hands up its keys and its folds"):
+        _ = _plan(
+            "SELECT g FROM t GROUP BY g HAVING sum(a) > (SELECT max(b) FROM u)"
+        )
+    with assert_raises(contains="hands up its keys and its folds"):
+        _ = _plan("SELECT sum(a) + (SELECT max(b) FROM u) FROM t")
 
 
 def test_a_correlated_exists_is_a_semi_join() raises:

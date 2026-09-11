@@ -211,11 +211,44 @@ there that no table has, and here that name goes unread. Its rows also have to
 be the rows of one block over one `FROM`, so an aggregate, a `LIMIT`, a set
 operation and a `WITH` inside one are each refused by name.
 
+### A subquery that answers one value is a cross join onto one row
+
+An uncorrelated subquery written where a value goes answers the same value for
+every row of the query around it, so it is taken out of the expression, lowered
+into a plan of its own, and cross joined on above the `FROM`. The expression is
+then an ordinary expression over an ordinary column, the same way an aggregate
+in a select list is. The lowering turns a cross join onto one row into a
+constant per right column, so the subquery runs once rather than once per row.
+
+Only a subquery that is one row by construction is taken, which is one that
+folds with no `GROUP BY` or one with no `FROM`. In SQL both answer exactly one
+row whatever is in the tables, including nothing, where a fold answers a null. A
+`LIMIT 1` looks like the same guarantee and is not, since over an empty table it
+answers no rows where SQL says the subquery is null, so it is refused rather
+than read as one.
+
+The fold over nothing is the one place firepanda does not yet answer what SQL
+says. A fold with no `GROUP BY` over an empty input hands out no rows here
+rather than one row of null, so the cross join sees a right side of no rows and
+refuses by name. That is a gap in the aggregate rather than in this rewrite, and
+the refusal is the safe end of it, since the alternative is quietly dropping
+every row of the query around it.
+
+The cross join goes above the `FROM` and below everything else, so a subquery
+written in a `WHERE` is always reachable, and one written in a select list is
+reachable when the query does not aggregate. Above an aggregate it is not, since
+an aggregate hands up its keys and its folds rather than everything it read, and
+that is a refusal with the reason in it rather than a binding error. A
+correlated one is refused too, by the scope it lowers against, which is the same
+refusal a correlated `IN` gets and the same dependent join behind it.
+
 ### What is not lowered yet
 
 Named tables, the table functions above, the derived tables and the CTEs above,
-and the joins over them. A subquery written where an expression goes is refused,
-and so are the column aliases on a derived table and a `LATERAL` one.
+and the joins over them. An `EXISTS`, an `IN` and a quantified comparison
+written where a value goes are refused, because each answers a boolean per row
+and that is a mark join. So are the column aliases on a derived table and a
+`LATERAL` one.
 `POSITIONAL` and `ASOF` are refused by name: the first pairs its two sides by
 row number and so reads no column at all, and `ASOF` matches on the nearest
 value rather than an equal one. A `USING` or `NATURAL` join over a subquery is
@@ -883,6 +916,13 @@ struct _Walk(Movable):
     """What each one partitions by, written out, so that two windows over the
     same keys land in the same node and two over different keys do not."""
 
+    var scalars: List[UInt32]
+    """The uncorrelated subqueries a cross join has already been built for, as
+    they are written in the SQL arena."""
+
+    var scalar_names: List[String]
+    """What the one column each of those produced is called."""
+
     def __init__(out self):
         """Starts an empty walk."""
         self.aggs = List[Int]()
@@ -890,6 +930,23 @@ struct _Walk(Movable):
         self.windows = List[Int]()
         self.window_names = List[String]()
         self.window_keys = List[String]()
+        self.scalars = List[UInt32]()
+        self.scalar_names = List[String]()
+
+    def _scalar(self, at: UInt32) -> Int:
+        """Where a subquery's answer landed, if a cross join was built for it.
+
+        Args:
+            at: The subquery, in the SQL arena.
+
+        Returns:
+            Its position among the ones taken out, or -1 if this is not one of
+            them and so is a subquery the lowering still refuses.
+        """
+        for i in range(len(self.scalars)):
+            if self.scalars[i] == at:
+                return i
+        return -1
 
     def _record(mut self, at: Int, var name: String) -> Int:
         """Adds an aggregate to the list the `AGGREGATE` node will compute.
@@ -1125,20 +1182,30 @@ def _lower_expr(
         return plan.exprs.cast(engine_type(parse_type(written)), over)
     if node.kind == EXPR_STAR:
         raise Error("a star outside a select list")
+    if node.kind == EXPR_SUBQUERY:
+        var place = walk._scalar(at)
+        if place >= 0:
+            return plan.exprs.column(String(walk.scalar_names[place]))
+        raise Error(
+            "firepanda lowers an uncorrelated subquery that answers one value"
+            " where it is written in a WHERE, or in the select list of a query"
+            " that does not aggregate, and this one is written somewhere else."
+            " The answer is a column cross joined on above the FROM, which is"
+            " under the aggregate, and an aggregate hands up its keys and its"
+            " folds rather than everything it read"
+        )
     if (
-        node.kind == EXPR_SUBQUERY
-        or node.kind == EXPR_EXISTS
+        node.kind == EXPR_EXISTS
         or node.kind == EXPR_IN_SUBQUERY
         or node.kind == EXPR_QUANTIFIED
     ):
         raise Error(
-            "firepanda does not lower a subquery in an expression yet. A"
-            " correlated one is a dependent join that decorrelation has to"
-            " remove, and an uncorrelated one is a plan of its own that the"
-            " outer plan has nowhere to hold. An IN over a subquery and a"
-            " correlated EXISTS do lower where a WHERE is the AND of one and"
-            " other things, because there each is a semi join rather than a"
-            " value"
+            "firepanda does not lower an EXISTS, an IN or a quantified"
+            " comparison written as a value yet. Each of those answers a"
+            " boolean per row, which is a mark join, and a mark join is a node"
+            " nobody has written. An IN over a subquery and a correlated EXISTS"
+            " do lower where a WHERE is the AND of one and other things,"
+            " because there each is a semi join rather than a value"
         )
     raise Error("an expression shape firepanda does not lower yet")
 
@@ -1474,6 +1541,59 @@ def _has_aggregate(ast: Ast, at: UInt32) -> Bool:
                 return True
         return _has_aggregate(ast, node.a)
     return False
+
+
+def _scalars(ast: Ast, at: UInt32, mut found: List[UInt32]):
+    """Collects every subquery written as a value inside one expression.
+
+    The same walk `_has_aggregate` does and for the same reason. A subquery in
+    an expression is not lowered in place, it is lowered into a plan of its own
+    and cross joined on below, and that has to happen before the expression
+    around it is lowered at all.
+
+    It does not descend into a subquery it has found, because whatever is
+    written inside one belongs to that query and is lowered when that query is.
+
+    An `EXISTS`, an `IN` and a quantified comparison are not collected. Each of
+    those answers a boolean per row rather than one value, which is a mark join
+    rather than a cross join onto one row.
+
+    Args:
+        ast: The arenas.
+        at: The expression.
+        found: The list to add to, in the order the subqueries are written.
+    """
+    if at == NO_NODE:
+        return
+    var node = ast.exprs[Int(at)]
+    if node.kind == EXPR_SUBQUERY:
+        found.append(at)
+        return
+    if node.kind == EXPR_FUNCTION:
+        if node.b != NO_NODE:
+            var window = ast.exprs[Int(node.b)]
+            for key in ast.items(window.children):
+                _scalars(ast, key, found)
+        for arg in ast.items(node.children):
+            _scalars(ast, arg, found)
+        return
+    if node.kind == EXPR_BINARY:
+        _scalars(ast, node.a, found)
+        _scalars(ast, node.b, found)
+        return
+    if node.kind == EXPR_UNARY or node.kind == EXPR_CAST:
+        _scalars(ast, node.a, found)
+        return
+    if node.kind == EXPR_CASE:
+        _scalars(ast, node.a, found)
+        _scalars(ast, node.b, found)
+        for arm in ast.items(node.children):
+            _scalars(ast, arm, found)
+        return
+    if node.kind == EXPR_BETWEEN or node.kind == EXPR_IN:
+        for part in ast.items(node.children):
+            _scalars(ast, part, found)
+        _scalars(ast, node.a, found)
 
 
 comptime _NEITHER = -2
@@ -2884,6 +3004,120 @@ def _asks(ast: Ast, at: UInt32) raises -> UInt32:
     return NO_NODE
 
 
+def _scalar_join(
+    ast: Ast,
+    at: UInt32,
+    catalog: Catalog,
+    mut plan: Plan,
+    mut sources: List[Schema],
+    ctes: _Bindings,
+    mut walk: _Walk,
+    left: Int,
+) raises -> Int:
+    """Puts an uncorrelated subquery that answers one value under the query.
+
+    The subquery is a plan of its own and its answer is one value, the same
+    value for every row of the query around it, so it is a cross join onto one
+    row. That is a column added to each row and nothing moved, and the lowering
+    turns it into a constant per right column, so the cost is the subquery run
+    once rather than once per row.
+
+    Only a subquery that is one row by construction is taken, which means one
+    that aggregates with no `GROUP BY`, or one with no `FROM` at all. Both of
+    those answer exactly one row whatever is in the tables, including no rows,
+    where a fold answers a null and that is the right answer. A `LIMIT 1` looks
+    like the same guarantee and is not, because over an empty table it answers
+    no rows, where SQL says the subquery is null and the cross join here would
+    raise instead.
+
+    A correlated one is not taken either, and it is refused by where it lowers
+    rather than by a check: the subquery gets a scope of its own, so an outer
+    name written inside it is a name nothing in that query has. That is the
+    dependent join, and it is the same refusal a correlated `IN` gets.
+
+    Args:
+        ast: The arenas.
+        at: The `EXPR_SUBQUERY`.
+        catalog: What the table names inside it are resolved against.
+        plan: Where the nodes go.
+        sources: One schema per scan, appended to.
+        ctes: The CTE names in reach.
+        walk: Told what the answer's column is called, so that the expression
+            around it can read it back.
+        left: What the cross join is put over.
+
+    Returns:
+        The cross join, which produces what the left side produced and the one
+        column the subquery answered.
+
+    Raises:
+        If the subquery is a shape whose row count is not one by construction,
+        or if it hands out more than one column.
+    """
+    var node = ast.exprs[Int(at)]
+    var top = ast.stmts[Int(node.a)]
+    if top.kind != STMT_SELECT:
+        raise Error("a subquery over a statement that is not a SELECT")
+    if top.b != NO_NODE:
+        raise Error(
+            "firepanda lowers a subquery that answers one value when its block"
+            " is one row by construction, and an ORDER BY or a LIMIT on one"
+            " does not make it one: a LIMIT 1 over a table with nothing in it"
+            " answers no rows, where SQL says the subquery is null"
+        )
+    var body = ast.stmts[Int(top.a)]
+    if body.kind != STMT_QUERY:
+        raise Error(
+            "firepanda lowers a subquery that answers one value over one SELECT"
+            " block so far, and a VALUES or a set operation inside one is a"
+            " different node"
+        )
+
+    var clauses = body.children
+    var items = ast.items(ast.slot(clauses, CLAUSE_PROJECTION))
+    var from_clause = ast.slot(clauses, CLAUSE_FROM)
+    var folds = False
+    for one in items:
+        if _has_aggregate(ast, ast.stmts[Int(one)].a):
+            folds = True
+            break
+    if from_clause != NO_NODE:
+        if ast.length(ast.slot(clauses, CLAUSE_GROUP)) != 0 or not folds:
+            raise Error(
+                "firepanda lowers a subquery that answers one value when its"
+                " block is one row by construction, which is a fold with no"
+                " GROUP BY under it or a SELECT with no FROM. This one hands"
+                " out a row per row of its table, and the check that there is"
+                " exactly one of them is a node nobody has written"
+            )
+
+    var inner = _Scope()
+    var root = _statement(ast, node.a, catalog, plan, sources, inner, ctes)
+    var names = _produces(plan, root)
+    if len(names) != 1:
+        raise Error(
+            String(
+                "a subquery written as a value that hands out ",
+                len(names),
+                " columns, and a value is one column",
+            )
+        )
+
+    # Renamed on the way out, because the name the subquery gave its column is
+    # whatever was written in there and the query around it may already have a
+    # column called that. Nothing reads the new name but the expression this
+    # was taken out of, which is told it here.
+    var called = String("__sub_", len(walk.scalars))
+    var only = List[Int]()
+    only.append(plan.exprs.column(String(names[0])))
+    var renamed = List[String]()
+    renamed.append(String(called))
+    var one_row = plan.project(root, only^, renamed^)
+    walk.scalars.append(at)
+    walk.scalar_names.append(called^)
+    return plan.join(left, one_row, List[Int](), List[Int](), JoinKind.CROSS)
+
+
 def _exists_join(
     ast: Ast,
     at: UInt32,
@@ -3174,6 +3408,21 @@ def _block(
     # Not called `where`, which the formatter reads as the start of a
     # parameter constraint and then cannot parse the rest of the file.
     var restriction = ast.slot(clauses, CLAUSE_WHERE)
+
+    # An uncorrelated subquery written as a value is taken out and cross joined
+    # on here, above the FROM and below everything else, so that every clause
+    # under the aggregate can read the column it answered. The select list is
+    # only searched when the query does not aggregate, because there the
+    # projection sits straight on this and the column reaches it. Above an
+    # aggregate it does not, and the refusal in `_lower_expr` says so.
+    var found = List[UInt32]()
+    _scalars(ast, restriction, found)
+    if not grouped:
+        for one in items:
+            _scalars(ast, ast.stmts[Int(one)].a, found)
+    for i in range(len(found)):
+        at = _scalar_join(ast, found[i], catalog, plan, sources, ctes, walk, at)
+
     if restriction != NO_NODE:
         # An `IN` or a correlated `EXISTS` over a subquery is a join rather than
         # a predicate, so the WHERE is split on `AND` and the parts that are one
