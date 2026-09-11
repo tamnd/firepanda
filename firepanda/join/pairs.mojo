@@ -1014,7 +1014,7 @@ def _pair_core[
     """The two-source gather, over pointers and bitmaps rather than columns."""
     var n = len(a_at)
     var out = Array[dt](n)
-    var target = out.unsafe_ptr()
+    var target = out.unsafe_mut_ptr()
 
     # A fresh column is zeroed and all present, so the only work per row is the
     # value when there is one and the bit when there is not.

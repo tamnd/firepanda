@@ -1338,7 +1338,7 @@ def main() raises:
             # codes it did not produce.
             var groups = Int(rng.next_range(1, 5))
             var codes = Array[DType.uint32](len(values))
-            var codes_at = codes.unsafe_ptr()
+            var codes_at = codes.unsafe_mut_ptr()
             var assigned = List[Int](capacity=len(values))
             for i in range(len(values)):
                 var g = Int(rng.next_below(groups))

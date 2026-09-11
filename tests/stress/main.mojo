@@ -356,7 +356,7 @@ def churn_the_pool(mut rng: Rng, mut pool: BufferPool, operations: Int) raises:
         # Dirty it so that the next taker would see the bytes if the pool ever
         # stopped zeroing.
         for i in range(0, len(buffer), 97):
-            buffer.unsafe_ptr().unsafe_offset(i).unsafe_write(UInt8(0xCD))
+            buffer.unsafe_mut_ptr().unsafe_offset(i).unsafe_write(UInt8(0xCD))
         held.append(buffer^)
 
     while len(held) > 0:

@@ -558,7 +558,7 @@ def _count(
         Error: Only what allocation raises.
     """
     var answer = Array[DType.float64](shape.answered(rows))
-    var target = answer.unsafe_ptr()
+    var target = answer.unsafe_mut_ptr()
     for k in range(len(answer)):
         var span = shape.edges(k * shape.step, rows)
         if len(span) < shape.min_periods:
@@ -710,7 +710,7 @@ def _total[
         Error: Only what allocation raises.
     """
     var answer = Array[DType.float64](shape.answered(rows))
-    var target = answer.unsafe_ptr()
+    var target = answer.unsafe_mut_ptr()
     var carried = _Total()
     var last = Edges(0, 0)
     for k in range(len(answer)):
@@ -811,7 +811,7 @@ def _extreme[
         Error: Only what allocation raises.
     """
     var answer = Array[DType.float64](shape.answered(rows))
-    var target = answer.unsafe_ptr()
+    var target = answer.unsafe_mut_ptr()
     var deck = List[Int](length=rows, fill=0)
     var head = 0
     var tail = 0

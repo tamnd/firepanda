@@ -370,7 +370,7 @@ def group_ordinals[
     var running = Array[DType.int64](overwritten=rows)
 
     def widen(begin: Int, stop: Int) raises {mut running, imm}:
-        var into = running.unsafe_ptr()
+        var into = running.unsafe_mut_ptr()
         var from_ = stacked[0].unsafe_ptr()
         var i = begin
         while i + lanes <= stop:
@@ -417,7 +417,7 @@ def group_ordinals[
                 )
 
         def combine(begin: Int, stop: Int) raises {mut running, imm}:
-            var pack = running.unsafe_ptr()
+            var pack = running.unsafe_mut_ptr()
             var right = stacked[k].unsafe_ptr()
             var i = begin
             while i + lanes <= stop:
@@ -437,7 +437,7 @@ def group_ordinals[
                 i += 1
 
         def start(begin: Int, stop: Int) raises {mut running, imm}:
-            var pack = running.unsafe_ptr()
+            var pack = running.unsafe_mut_ptr()
             var left = stacked[0].unsafe_ptr()
             var right = stacked[k].unsafe_ptr()
             var i = begin
@@ -546,7 +546,7 @@ def _code_pack[
     var packed = Array[pt](overwritten=rows)
 
     def body(begin: Int, stop: Int) raises {mut packed, imm}:
-        var into = packed.unsafe_ptr()
+        var into = packed.unsafe_mut_ptr()
         var i = begin
         while i + lanes <= stop:
             # The accumulator is the packed column's own dtype, and the caller
@@ -683,7 +683,7 @@ def tuple_pack[
     var packed = Array[DType.uint32](overwritten=rows)
 
     def body(begin: Int, stop: Int) raises {mut packed, imm}:
-        var into = packed.unsafe_ptr()
+        var into = packed.unsafe_mut_ptr()
         var i = begin
         while i + lanes <= stop:
             # int64 rather than the key's own dtype, because the distance from
@@ -743,7 +743,7 @@ def _condense(mut running: Array[DType.int64], space: Int) raises -> Int:
     var rows = len(running)
 
     def widen(begin: Int, stop: Int) raises {mut running, imm}:
-        var into = running.unsafe_ptr()
+        var into = running.unsafe_mut_ptr()
         var from_ = codes.unsafe_ptr()
         var i = begin
         while i + lanes <= stop:
@@ -924,7 +924,7 @@ def _densify(
     Raises:
         Error: Only what the morsel runtime raises, through `max_of`.
     """
-    var at = codes.unsafe_ptr()
+    var at = codes.unsafe_mut_ptr()
     var n = len(codes)
     var top = -1
     if n > 0:

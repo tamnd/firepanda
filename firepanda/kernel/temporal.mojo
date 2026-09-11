@@ -516,7 +516,7 @@ def extract_field[
 
     def compute(start: Int, stop: Int) raises {mut out, imm}:
         var source = a.unsafe_ptr()
-        var target = out.unsafe_ptr()
+        var target = out.unsafe_mut_ptr()
         var i = start
         while i < stop:
             var value = (
@@ -773,7 +773,7 @@ def _shifted(a: Array[DType.int64], by: Int64) raises -> Array[DType.int64]:
 
     def compute(start: Int, stop: Int) raises {mut out, imm}:
         var source = a.unsafe_ptr()
-        var target = out.unsafe_ptr()
+        var target = out.unsafe_mut_ptr()
         var i = start
         while i < stop:
             var value = source.unsafe_offset(i).unsafe_load[width=width]()
@@ -1079,7 +1079,7 @@ def _days_of(
 
     def compute(start: Int, stop: Int) raises {mut out, imm}:
         var source = a.unsafe_ptr()
-        var target = out.unsafe_ptr()
+        var target = out.unsafe_mut_ptr()
         var i = start
         while i < stop:
             var value = source.unsafe_offset(i).unsafe_load[width=width]()
@@ -1118,7 +1118,7 @@ def _midnights_of(
 
     def compute(start: Int, stop: Int) raises {mut out, imm}:
         var source = a.unsafe_ptr()
-        var target = out.unsafe_ptr()
+        var target = out.unsafe_mut_ptr()
         var i = start
         while i < stop:
             var value = source.unsafe_offset(i).unsafe_load[width=width]()
@@ -1250,7 +1250,7 @@ def temporal_total_seconds(a: AnyArray) raises -> AnyArray:
 
     def compute(start: Int, stop: Int) raises {mut out, imm}:
         var source = counts.unsafe_ptr()
-        var target = out.unsafe_ptr()
+        var target = out.unsafe_mut_ptr()
         var i = start
         while i < stop:
             var value = source.unsafe_offset(i).unsafe_load[width=width]()
@@ -1302,7 +1302,7 @@ def temporal_duration_days(a: AnyArray) raises -> AnyArray:
 
     def compute(start: Int, stop: Int) raises {mut out, imm}:
         var source = counts.unsafe_ptr()
-        var target = out.unsafe_ptr()
+        var target = out.unsafe_mut_ptr()
         var i = start
         while i < stop:
             var value = source.unsafe_offset(i).unsafe_load[width=width]()
@@ -1588,7 +1588,7 @@ def round_to_period[
 
     def compute(start: Int, stop: Int) raises {mut out, imm}:
         var source = a.unsafe_ptr()
-        var target = out.unsafe_ptr()
+        var target = out.unsafe_mut_ptr()
         var i = start
         while i < stop:
             var value = source.unsafe_offset(i).unsafe_load[width=width]()
@@ -1775,7 +1775,7 @@ def _rescale[
 
     def compute(start: Int, stop: Int) raises {mut out, imm}:
         var source = a.unsafe_ptr()
-        var target = out.unsafe_ptr()
+        var target = out.unsafe_mut_ptr()
         var i = start
         while i < stop:
             var value = source.unsafe_offset(i).unsafe_load[width=width]()

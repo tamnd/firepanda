@@ -101,14 +101,33 @@ struct Array[dt: DType](Copyable, Movable, Sized):
         """
         return logical_for(Self.dt)
 
-    def unsafe_ptr(ref self) -> Pointer[Scalar[Self.dt], origin_of(self)]:
-        """Returns a typed pointer to the first value.
+    def unsafe_ptr(self) -> Pointer[Scalar[Self.dt], origin_of(self)]:
+        """Returns a typed pointer to the first value, for reading.
+
+        Borrowed rather than `ref`, so the buffer underneath stays shared. A
+        caller who means to write calls `unsafe_mut_ptr`, which is what makes
+        the copy happen. See `Buffer` for why the two are separate names.
 
         Returns:
             A pointer valid for at least `len(self)` elements, and readable for a
             further SIMD register beyond that thanks to buffer padding.
         """
         return self.data.values.bitcast[Self.dt]().unsafe_origin_cast[
+            origin_of(self)
+        ]()
+
+    def unsafe_mut_ptr(
+        mut self,
+    ) -> Pointer[Scalar[Self.dt], origin_of(self)]:
+        """Returns a typed pointer to the first value, for writing.
+
+        Takes a private copy of the buffer first if anything else is holding it.
+
+        Returns:
+            A pointer valid for at least `len(self)` elements, and readable for a
+            further SIMD register beyond that thanks to buffer padding.
+        """
+        return self.data.values.mut_bitcast[Self.dt]().unsafe_origin_cast[
             origin_of(self)
         ]()
 
@@ -135,7 +154,9 @@ struct Array[dt: DType](Copyable, Movable, Sized):
             i: The position. Must be less than `len(self)`.
             value: The value to write.
         """
-        self.data.values.bitcast[Self.dt]().unsafe_offset(i).unsafe_write(value)
+        self.data.values.mut_bitcast[Self.dt]().unsafe_offset(i).unsafe_write(
+            value
+        )
 
     def is_valid(self, i: Int) -> Bool:
         """Reports whether the value at a position is present.
@@ -207,7 +228,9 @@ struct Array[dt: DType](Copyable, Movable, Sized):
         Parameters:
             width: The register width in elements.
         """
-        self.data.values.bitcast[Self.dt]().unsafe_offset(i).unsafe_store(value)
+        self.data.values.mut_bitcast[Self.dt]().unsafe_offset(i).unsafe_store(
+            value
+        )
 
     def slice(self, start: Int, end: Int) -> Self:
         """Returns a copy of a half-open range of the array.
@@ -225,7 +248,7 @@ struct Array[dt: DType](Copyable, Movable, Sized):
         """
         var out = Self(end - start)
         unsafe_memcpy(
-            dest=out.data.values.unsafe_ptr(),
+            dest=out.data.values.unsafe_mut_ptr(),
             src=self.data.values.unsafe_ptr().unsafe_offset(
                 start * size_of[Self.dt]()
             ),

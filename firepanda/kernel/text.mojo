@@ -76,7 +76,7 @@ def compare_text[
     var validity = combined_validity(a.validity, b.validity)
 
     def compute(start: Int, stop: Int) {mut out, imm}:
-        var dst = out.unsafe_ptr()
+        var dst = out.unsafe_mut_ptr()
         comptime if op == CMP_EQ or op == CMP_NE:
             for i in range(start, stop):
                 # `equals` answers False for a null on the left, and the bytes
@@ -157,7 +157,7 @@ def compare_text_const[
             probe = make_inline(b)
 
     def compute(start: Int, stop: Int) {mut out, imm}:
-        var dst = out.unsafe_ptr()
+        var dst = out.unsafe_mut_ptr()
         comptime if op == CMP_EQ or op == CMP_NE:
             for i in range(start, stop):
                 var same: Bool

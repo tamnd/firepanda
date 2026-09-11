@@ -106,6 +106,13 @@ struct BufferPool(Movable):
             # Recycled memory carries the previous tenant's bytes. Callers are
             # entitled to assume a buffer is zeroed, and a validity bitmap that
             # is not zeroed reads as a column full of stale nulls.
+            #
+            # A pooled buffer can still be sharing its allocation with a column
+            # that outlived it, since `give` takes one handle and not the
+            # allocation. The zeroing un-shares first, so this hands back a
+            # private allocation either way and never writes over bytes someone
+            # is reading. What it costs in that case is the recycling, which is
+            # the right way round.
             buffer.zero()
             buffer.set_size(size)
             self._hits += 1

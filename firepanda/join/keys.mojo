@@ -724,7 +724,7 @@ def build_side_strings(
         )
         at += count
 
-    var out = codes.unsafe_ptr()
+    var out = codes.unsafe_mut_ptr()
     var got = mine.unsafe_ptr()
     for i in range(build_rows):
         out.unsafe_offset(build_at + i).unsafe_write(
@@ -1098,12 +1098,12 @@ def _build_direct[
     # Zero means unseen, so the ordinal is stored plus one and the table needs no
     # initialization pass. `Buffer` already handed back zeroed memory.
     var seats = Buffer(span * 4)
-    var table = seats.bitcast[DType.uint32]()
+    var table = seats.mut_bitcast[DType.uint32]()
 
     var build_rows = len(build)
     var build_nulls = build.null_count() > 0
     var values = build.unsafe_ptr()
-    var out = codes.unsafe_ptr()
+    var out = codes.unsafe_mut_ptr()
     var found = 0
     for i in range(build_rows):
         if build_nulls and not build.data.validity.get(i):
@@ -1188,7 +1188,7 @@ def _build_hashed[
         )
         at += count
 
-    var out = codes.unsafe_ptr()
+    var out = codes.unsafe_mut_ptr()
     var got = mine.unsafe_ptr()
     for i in range(build_rows):
         out.unsafe_offset(build_at + i).unsafe_write(
@@ -1304,7 +1304,7 @@ def _probe_direct[
     var probe_nulls = probe.null_count() > 0
 
     def look(start: Int, stop: Int) raises {mut codes, imm}:
-        var into = codes.unsafe_ptr()
+        var into = codes.unsafe_mut_ptr()
         var reads = probe.unsafe_ptr()
         var slots = seats.bitcast[DType.uint32]()
         for i in range(start, stop):

@@ -224,14 +224,14 @@ def import_validity(array: ArrowArray, length: Int) raises -> Bitmap:
     if offset % 8 == 0:
         var source = bits.unsafe_offset(offset // 8)
         var nbytes = out.byte_length()
-        unsafe_memcpy(dest=out.unsafe_ptr(), src=source, count=nbytes)
+        unsafe_memcpy(dest=out.unsafe_mut_ptr(), src=source, count=nbytes)
         # The last byte may carry bits belonging to rows past the end of this
         # slice, and `null_count` counts whole bytes, so they are cleared here
         # rather than left to be counted as present values that do not exist.
         var used = length & 7
         if used != 0:
             var last = nbytes - 1
-            var slot_ptr = out.unsafe_ptr().unsafe_offset(last)
+            var slot_ptr = out.unsafe_mut_ptr().unsafe_offset(last)
             slot_ptr.unsafe_write(
                 slot_ptr.unsafe_load() & UInt8((1 << used) - 1)
             )
@@ -265,7 +265,7 @@ def _import_fixed(
     var values = Buffer(overwritten=length * width)
     if length > 0:
         unsafe_memcpy(
-            dest=values.unsafe_ptr(),
+            dest=values.unsafe_mut_ptr(),
             src=_bytes_at(array, 1).unsafe_offset(Int(array.offset) * width),
             count=length * width,
         )
@@ -317,7 +317,7 @@ def import_list_offsets[
     var values = Buffer(overwritten=(rows + 1) * width)
     var source = _bytes_at(array, 1).unsafe_offset(Int(array.offset) * width)
     unsafe_memcpy(
-        dest=values.unsafe_ptr(), src=source, count=(rows + 1) * width
+        dest=values.unsafe_mut_ptr(), src=source, count=(rows + 1) * width
     )
 
     var read = values.bitcast[index]()
@@ -386,7 +386,7 @@ def _import_bool(array: ArrowArray, length: Int) raises -> AnyArray:
     if length > 0:
         var bits = _bytes_at(array, 1)
         var offset = Int(array.offset)
-        var out = values.unsafe_ptr()
+        var out = values.unsafe_mut_ptr()
         for i in range(length):
             var bit = offset + i
             var byte = bits.unsafe_offset(bit >> 3).unsafe_load()
@@ -478,7 +478,7 @@ def _import_views(
         needed += count
 
     var views = Buffer(length * VIEW_SIZE)
-    var target = views.unsafe_ptr().unsafe_bitcast[StringView]()
+    var target = views.unsafe_mut_ptr().unsafe_bitcast[StringView]()
 
     if variadic == 1 and array.offset == 0:
         # Every view already names buffer zero and every offset is already
@@ -491,13 +491,13 @@ def _import_views(
         var payload = Buffer(overwritten=total)
         if length > 0:
             unsafe_memcpy(
-                dest=views.unsafe_ptr(),
+                dest=views.unsafe_mut_ptr(),
                 src=_bytes_at(array, 1),
                 count=length * VIEW_SIZE,
             )
         if total > 0:
             unsafe_memcpy(
-                dest=payload.unsafe_ptr(),
+                dest=payload.unsafe_mut_ptr(),
                 src=_bytes_at(array, 2),
                 count=total,
             )
@@ -522,7 +522,7 @@ def _import_views(
             target.unsafe_offset(i)[] = view
             continue
         var count = len(view)
-        var dest = payload.unsafe_ptr().unsafe_offset(written)
+        var dest = payload.unsafe_mut_ptr().unsafe_offset(written)
         unsafe_memcpy(
             dest=dest,
             src=_bytes_at(array, 2 + view.block()).unsafe_offset(view.offset()),
@@ -570,7 +570,7 @@ def _import_offsets[
     if length == 0:
         return _as_text(views^, Buffer(0), validity^, length, type)
 
-    var target = views.unsafe_ptr().unsafe_bitcast[StringView]()
+    var target = views.unsafe_mut_ptr().unsafe_bitcast[StringView]()
     var offsets = (
         _bytes_at(array, 1)
         .unsafe_bitcast[Scalar[index]]()
@@ -608,7 +608,7 @@ def _import_offsets[
         if count <= INLINE_CAPACITY:
             target.unsafe_offset(i)[] = make_inline_at(src, count)
             continue
-        var dest = payload.unsafe_ptr().unsafe_offset(written)
+        var dest = payload.unsafe_mut_ptr().unsafe_offset(written)
         unsafe_memcpy(dest=dest, src=src, count=count)
         target.unsafe_offset(i)[] = make_long_at(dest, count, 0, written)
         written += count
@@ -1068,7 +1068,9 @@ def _fill_views(
     var validity = import_validity(array, length)
     var variadic = Int(array.n_buffers) - 3
     var target = (
-        sink.values.unsafe_ptr().unsafe_bitcast[StringView]().unsafe_offset(at)
+        sink.values.unsafe_mut_ptr()
+        .unsafe_bitcast[StringView]()
+        .unsafe_offset(at)
     )
     var sizes = _sizes_at(array, variadic)
 
@@ -1081,13 +1083,13 @@ def _fill_views(
         var total = Int(sizes.unsafe_load())
         if length > 0:
             unsafe_memcpy(
-                dest=sink.values.unsafe_ptr().unsafe_offset(at * VIEW_SIZE),
+                dest=sink.values.unsafe_mut_ptr().unsafe_offset(at * VIEW_SIZE),
                 src=_bytes_at(array, 1),
                 count=length * VIEW_SIZE,
             )
         if total > 0:
             unsafe_memcpy(
-                dest=sink.payload.unsafe_ptr().unsafe_offset(payload_at),
+                dest=sink.payload.unsafe_mut_ptr().unsafe_offset(payload_at),
                 src=_bytes_at(array, 2),
                 count=total,
             )
@@ -1128,7 +1130,7 @@ def _fill_views(
             continue
         var count = len(view)
         var spot = payload_at + written
-        var dest = sink.payload.unsafe_ptr().unsafe_offset(spot)
+        var dest = sink.payload.unsafe_mut_ptr().unsafe_offset(spot)
         unsafe_memcpy(
             dest=dest,
             src=_bytes_at(array, 2 + view.block()).unsafe_offset(view.offset()),
@@ -1167,7 +1169,9 @@ def _fill_offsets[
         return validity^
 
     var target = (
-        sink.values.unsafe_ptr().unsafe_bitcast[StringView]().unsafe_offset(at)
+        sink.values.unsafe_mut_ptr()
+        .unsafe_bitcast[StringView]()
+        .unsafe_offset(at)
     )
     var offsets = (
         _bytes_at(array, 1)
@@ -1188,7 +1192,7 @@ def _fill_offsets[
             target.unsafe_offset(i)[] = make_inline_at(src, count)
             continue
         var spot = payload_at + written
-        var dest = sink.payload.unsafe_ptr().unsafe_offset(spot)
+        var dest = sink.payload.unsafe_mut_ptr().unsafe_offset(spot)
         unsafe_memcpy(dest=dest, src=src, count=count)
         target.unsafe_offset(i)[] = make_long_at(dest, count, 0, spot)
         written += count
@@ -1239,7 +1243,7 @@ def fill_column(
         if length > 0:
             var bits = _bytes_at(array, 1)
             var offset = Int(array.offset)
-            var out = sink.values.unsafe_ptr().unsafe_offset(at)
+            var out = sink.values.unsafe_mut_ptr().unsafe_offset(at)
             for i in range(length):
                 var bit = offset + i
                 var byte = bits.unsafe_offset(bit >> 3).unsafe_load()
@@ -1248,7 +1252,7 @@ def fill_column(
     var width = dtype_size(sink.type.physical)
     if length > 0:
         unsafe_memcpy(
-            dest=sink.values.unsafe_ptr().unsafe_offset(at * width),
+            dest=sink.values.unsafe_mut_ptr().unsafe_offset(at * width),
             src=_bytes_at(array, 1).unsafe_offset(Int(array.offset) * width),
             count=length * width,
         )

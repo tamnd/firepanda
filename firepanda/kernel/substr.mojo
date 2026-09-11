@@ -133,9 +133,9 @@ def text_substring(
                 var cut = _cut(a.byte_length(i), offset, length)
                 if cut.count > INLINE_CAPACITY:
                     here += cut.count
-            bases.unsafe_ptr().unsafe_offset(start // MORSEL_ROWS).unsafe_write(
-                Int64(here)
-            )
+            bases.unsafe_mut_ptr().unsafe_offset(
+                start // MORSEL_ROWS
+            ).unsafe_write(Int64(here))
 
         parallel_morsels(size, n, MORSEL_ROWS)
 
@@ -149,8 +149,8 @@ def text_substring(
     var payload = Buffer(payload_bytes if payload_bytes > 0 else 1)
 
     def fill(start: Int, stop: Int) {mut views, mut payload, imm}:
-        var dst = views.unsafe_ptr().unsafe_bitcast[StringView]()
-        var out = payload.unsafe_ptr()
+        var dst = views.unsafe_mut_ptr().unsafe_bitcast[StringView]()
+        var out = payload.unsafe_mut_ptr()
         var at = Int(bases[start // MORSEL_ROWS])
         for i in range(start, stop):
             # A null's view is written rather than left alone, because a view

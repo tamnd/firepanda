@@ -149,7 +149,7 @@ def pick[
         var c = cond.unsafe_ptr()
         var x = a.unsafe_ptr()
         var y = b.unsafe_ptr()
-        var dst = out.unsafe_ptr()
+        var dst = out.unsafe_mut_ptr()
         var i = start
         while i < stop:
             var hit = c.unsafe_offset(i).unsafe_load[width=width]()
@@ -228,7 +228,7 @@ def pick_const[
     def body(start: Int, stop: Int) {mut out, mut validity, imm}:
         var c = cond.unsafe_ptr()
         var x = a.unsafe_ptr()
-        var dst = out.unsafe_ptr()
+        var dst = out.unsafe_mut_ptr()
         var i = start
         while i < stop:
             var hit = c.unsafe_offset(i).unsafe_load[width=width]()
@@ -289,7 +289,7 @@ def pick_constants[
 
     def body(start: Int, stop: Int) {mut out, imm}:
         var c = cond.unsafe_ptr()
-        var dst = out.unsafe_ptr()
+        var dst = out.unsafe_mut_ptr()
         var i = start
         while i < stop:
             var hit = c.unsafe_offset(i).unsafe_load[width=width]()

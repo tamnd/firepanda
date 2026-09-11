@@ -181,7 +181,7 @@ def argsort[
     """
     var n = len(col)
     var order = Array[DType.uint32](n)
-    var out = order.unsafe_ptr()
+    var out = order.unsafe_mut_ptr()
     for i in range(n):
         out.unsafe_offset(i).unsafe_write(UInt32(i))
 
@@ -325,7 +325,7 @@ def identity_permutation(n: Int) -> Array[DType.uint32]:
         A column of `n` uint32 values counting up from zero.
     """
     var order = Array[DType.uint32](n)
-    var out = order.unsafe_ptr()
+    var out = order.unsafe_mut_ptr()
     for i in range(n):
         out.unsafe_offset(i).unsafe_write(UInt32(i))
     return order^
@@ -424,8 +424,8 @@ def _argsort_core[
     var live = 0
 
     var order_ptr = order.unsafe_ptr()
-    var key = keys.bitcast[DType.uint64]()
-    var row = rows.bitcast[DType.uint32]()
+    var key = keys.mut_bitcast[DType.uint64]()
+    var row = rows.mut_bitcast[DType.uint32]()
 
     if has_null:
         for i in range(n):
@@ -459,7 +459,7 @@ def _argsort_core[
     var flipped = _radix_sort(keys, alt_keys, rows, alt_rows, live, digits)
 
     var lead = len(nulls) if nulls_first else 0
-    var target = order.unsafe_ptr()
+    var target = order.unsafe_mut_ptr()
     if flipped:
         var sorted_rows = alt_rows.bitcast[DType.uint32]()
         for i in range(live):
@@ -522,8 +522,8 @@ def _argsort_strings(
     var live = 0
 
     var order_ptr = order.unsafe_ptr()
-    var key = keys.bitcast[DType.uint64]()
-    var row = rows.bitcast[DType.uint32]()
+    var key = keys.mut_bitcast[DType.uint64]()
+    var row = rows.mut_bitcast[DType.uint32]()
 
     if has_null:
         for i in range(n):
@@ -550,7 +550,7 @@ def _argsort_strings(
     var flipped = _radix_sort(keys, alt_keys, rows, alt_rows, live, 8)
 
     var lead = len(nulls) if nulls_first else 0
-    var target = order.unsafe_ptr()
+    var target = order.unsafe_mut_ptr()
     var sorted_keys = alt_keys.bitcast[
         DType.uint64
     ]() if flipped else keys.bitcast[DType.uint64]()
@@ -570,7 +570,7 @@ def _argsort_strings(
 
 
 def _resolve_ties[
-    origin: MutOrigin, key_origin: MutOrigin
+    origin: MutOrigin, key_origin: ImmOrigin
 ](
     col: StringArray,
     keys: Pointer[UInt64, key_origin],
@@ -834,7 +834,7 @@ def _radix_sort(
     # the keys as many times as there are passes for no reason, and the counters
     # are 2 KB per digit, so all eight fit in L1 together.
     var counts = Buffer(digits * RADIX_SIZE * 8)
-    var count = counts.bitcast[DType.uint64]()
+    var count = counts.mut_bitcast[DType.uint64]()
     var key = keys.bitcast[DType.uint64]()
     for i in range(n):
         var k = key.unsafe_offset(i).unsafe_load()
@@ -895,7 +895,7 @@ def _radix_pass(
         digit: Which byte of the key.
         n: How many rows.
     """
-    var count = counts.bitcast[DType.uint64]()
+    var count = counts.mut_bitcast[DType.uint64]()
     var base = digit * RADIX_SIZE
     var shift = UInt64(digit * RADIX_BITS)
 
@@ -909,8 +909,8 @@ def _radix_pass(
 
     var from_key = src_keys.bitcast[DType.uint64]()
     var from_row = src_rows.bitcast[DType.uint32]()
-    var to_key = dst_keys.bitcast[DType.uint64]()
-    var to_row = dst_rows.bitcast[DType.uint32]()
+    var to_key = dst_keys.mut_bitcast[DType.uint64]()
+    var to_row = dst_rows.mut_bitcast[DType.uint32]()
 
     for i in range(n):
         var k = from_key.unsafe_offset(i).unsafe_load()
@@ -949,7 +949,7 @@ def sort_rows[
     var n = len(col)
     var out = Array[dt](n)
     var source = col.unsafe_ptr()
-    var target = out.unsafe_ptr()
+    var target = out.unsafe_mut_ptr()
     var rows = order.unsafe_ptr()
     var validity = Bitmap(n, all_valid=False)
 

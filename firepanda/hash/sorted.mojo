@@ -124,7 +124,7 @@ def _run_ordinals[
         return codes^
 
     var values = col.unsafe_ptr()
-    var out = codes.unsafe_ptr()
+    var out = codes.unsafe_mut_ptr()
     var workers = worker_count()
     if n < PARALLEL_RUN_ROWS or workers <= 1:
         var g = -1
@@ -157,7 +157,9 @@ def _run_ordinals[
                 or values.unsafe_offset(i)[] != values.unsafe_offset(i - 1)[]
             ):
                 runs += 1
-        opened.bitcast[DType.int64]().unsafe_offset(w).unsafe_store(Int64(runs))
+        opened.mut_bitcast[DType.int64]().unsafe_offset(w).unsafe_store(
+            Int64(runs)
+        )
 
     parallel_for(measure, workers)
 
@@ -170,7 +172,7 @@ def _run_ordinals[
     var firsts = Buffer(overwritten=groups * size_of[DType.int64]())
 
     def number(w: Int) raises {mut firsts, imm}:
-        var starts = firsts.bitcast[DType.int64]()
+        var starts = firsts.mut_bitcast[DType.int64]()
         # One below the first ordinal this stretch opens, so that a stretch
         # beginning in the middle of a group carries that group's ordinal until
         # it closes. The first row of the column always opens a group, so worker

@@ -496,7 +496,7 @@ def _scan[
     ) - 1 if width < 64 else UInt64.MAX
 
     var out = Array[dt](rows)
-    var target = out.unsafe_ptr()
+    var target = out.unsafe_mut_ptr()
     var carry = one
 
     var i = 0

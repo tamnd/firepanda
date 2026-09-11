@@ -818,7 +818,7 @@ def test_table_respects_a_custom_seed() raises:
 def test_radix_partition_covers_every_row_once() raises:
     var n = 1000
     var hashes = Buffer(n * 8)
-    var out = hashes.bitcast[DType.uint64]()
+    var out = hashes.mut_bitcast[DType.uint64]()
     for i in range(n):
         out.unsafe_offset(i).unsafe_write(hash_of(Int64(i)))
 
@@ -837,7 +837,7 @@ def test_radix_partition_covers_every_row_once() raises:
 def test_radix_partition_groups_by_the_high_bits() raises:
     var n = 1000
     var hashes = Buffer(n * 8)
-    var out = hashes.bitcast[DType.uint64]()
+    var out = hashes.mut_bitcast[DType.uint64]()
     for i in range(n):
         out.unsafe_offset(i).unsafe_write(hash_of(Int64(i)))
 
@@ -854,7 +854,7 @@ def test_radix_partition_groups_by_the_high_bits() raises:
 def test_radix_partition_is_stable() raises:
     var n = 500
     var hashes = Buffer(n * 8)
-    var out = hashes.bitcast[DType.uint64]()
+    var out = hashes.mut_bitcast[DType.uint64]()
     for i in range(n):
         # Deliberately only four distinct partitions, so every one holds a long
         # run and a reordering inside it would be obvious.

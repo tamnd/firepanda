@@ -191,7 +191,7 @@ def test_the_tie_break_is_stable() raises:
     """
     var keys = Series("k", strings_from_list(["same", "same", "same", "same"]))
     var tags = Array[DType.int64](4)
-    var values = tags.unsafe_ptr()
+    var values = tags.unsafe_mut_ptr()
     for i in range(4):
         values.unsafe_offset(i).unsafe_write(Int64(i))
     var frame = DataFrame.from_series([keys^, Series("t", tags^)])
@@ -324,7 +324,7 @@ def test_a_frame_sorts_on_text_then_number() raises:
         strings_from_list(["oslo", "lima", "oslo", "lima", "oslo"]),
     )
     var year = Array[DType.int64](5)
-    var values = year.unsafe_ptr()
+    var values = year.unsafe_mut_ptr()
     values.unsafe_offset(0).unsafe_write(2021)
     values.unsafe_offset(1).unsafe_write(2020)
     values.unsafe_offset(2).unsafe_write(2019)

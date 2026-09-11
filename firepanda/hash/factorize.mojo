@@ -628,14 +628,14 @@ def direct_plan[
                 col, prefix + begin, prefix + stop, ceiling
             )
             var at = begin // MORSEL_ROWS
-            lows.unsafe_ptr().unsafe_offset(at).unsafe_write(part.low)
-            highs.unsafe_ptr().unsafe_offset(at).unsafe_write(part.high)
+            lows.unsafe_mut_ptr().unsafe_offset(at).unsafe_write(part.low)
+            highs.unsafe_mut_ptr().unsafe_offset(at).unsafe_write(part.high)
             var mark = UInt8(0)
             if part.gave_up:
                 mark = UInt8(2)
             elif part.seen:
                 mark = UInt8(1)
-            marks.unsafe_ptr().unsafe_offset(at).unsafe_write(mark)
+            marks.unsafe_mut_ptr().unsafe_offset(at).unsafe_write(mark)
 
         parallel_morsels(scan, rest)
 
@@ -882,14 +882,14 @@ def _factorize_direct_serial[
     # Zero means unseen, so the ordinal is stored plus one and the table needs no
     # initialization pass. `Buffer` already handed back zeroed memory.
     var seen = Buffer(span * 4)
-    var slots = seen.bitcast[DType.uint32]()
+    var slots = seen.mut_bitcast[DType.uint32]()
 
     var has_null = col.null_count() > 0
     var offset = 1 if has_null else 0
     # Every row below is written, the null ones with a zero, so the array does
     # not need the pass that zeroes it first.
     var codes = Array[DType.uint32](overwritten=n)
-    var out = codes.unsafe_ptr()
+    var out = codes.unsafe_mut_ptr()
     var firsts = List[Int]()
     var null_group = -1
     if has_null:
@@ -964,7 +964,7 @@ def _factorize_direct_wide[
     # Zero means unseen and the ordinal is stored plus one, which is what lets a
     # zeroed buffer be a ready table. Same convention as the other two routes.
     var seen = Buffer(span * 4)
-    var slots = seen.bitcast[DType.uint32]()
+    var slots = seen.mut_bitcast[DType.uint32]()
     var firsts = List[Int]()
 
     for i in range(n):
@@ -988,7 +988,7 @@ def _factorize_direct_wide[
 
     def assign(w: Int) raises {mut codes, imm}:
         var table = seen.bitcast[DType.uint32]()
-        var out = codes.unsafe_ptr()
+        var out = codes.unsafe_mut_ptr()
         for i in range(bounds[w], bounds[w + 1]):
             if has_null and not col.is_valid(i):
                 out.unsafe_offset(i).unsafe_write(UInt32(0))
@@ -1087,7 +1087,7 @@ def _factorize_direct_parallel[
         founds.append(List[Int]())
 
     def discover(w: Int) raises {mut tables, mut founds, imm}:
-        var slots = tables.bitcast[DType.uint32]().unsafe_offset(w * span)
+        var slots = tables.mut_bitcast[DType.uint32]().unsafe_offset(w * span)
         var values = col.unsafe_ptr()
         # The found rows are collected into a local list and handed over once at
         # the end rather than appended straight into the shared one. A list is
@@ -1138,9 +1138,9 @@ def _factorize_direct_parallel[
 
     def claim(c: Int) raises {mut owners, mut marks, mut held, imm}:
         var slots = tables.bitcast[DType.uint32]()
-        var own = owners.bitcast[DType.uint32]()
-        var hold = held.bitcast[DType.uint32]()
-        var mark = marks.unsafe_ptr()
+        var own = owners.mut_bitcast[DType.uint32]()
+        var hold = held.mut_bitcast[DType.uint32]()
+        var mark = marks.unsafe_mut_ptr()
         var stop = min((c + 1) * DIRECT_CLAIM_BLOCK, span)
         for v in range(c * DIRECT_CLAIM_BLOCK, stop):
             var winner = -1
@@ -1168,7 +1168,7 @@ def _factorize_direct_parallel[
 
     def settle(c: Int) raises {mut settled, imm}:
         var hold = held.bitcast[DType.uint32]()
-        var final = settled.bitcast[DType.uint32]()
+        var final = settled.mut_bitcast[DType.uint32]()
         var stop = min((c + 1) * DIRECT_CLAIM_BLOCK, span)
         for v in range(c * DIRECT_CLAIM_BLOCK, stop):
             var winner = hold.unsafe_offset(v).unsafe_load()
@@ -1186,7 +1186,7 @@ def _factorize_direct_parallel[
     def assign(w: Int) raises {mut codes, imm}:
         var final = settled.bitcast[DType.uint32]()
         var values = col.unsafe_ptr()
-        var out = codes.unsafe_ptr()
+        var out = codes.unsafe_mut_ptr()
         for i in range(bounds[w], bounds[w + 1]):
             if has_null and not col.is_valid(i):
                 out.unsafe_offset(i).unsafe_write(UInt32(0))
@@ -1376,7 +1376,7 @@ def _flatten_reps(
     var reps = Buffer(overwritten=starts[workers] * 8)
 
     if starts[workers] <= MERGE_SERIAL_ENTRIES:
-        var out = reps.bitcast[DType.int64]()
+        var out = reps.mut_bitcast[DType.int64]()
         for w in range(workers):
             var at = starts[w]
             for k in range(len(founds[w])):
@@ -1384,7 +1384,7 @@ def _flatten_reps(
         return reps^
 
     def one(w: Int) raises {mut reps, imm}:
-        var out = reps.bitcast[DType.int64]()
+        var out = reps.mut_bitcast[DType.int64]()
         var at = starts[w]
         for k in range(len(founds[w])):
             out.unsafe_offset(at + k).unsafe_write(Int64(founds[w][k]))
@@ -1453,7 +1453,7 @@ def _bucket_entries(
 
     def place(w: Int) raises {mut order, imm}:
         var hashed = found.bitcast[DType.uint64]()
-        var slot = order.bitcast[DType.uint32]()
+        var slot = order.mut_bitcast[DType.uint32]()
         var at = List[Int](capacity=buckets)
         for b in range(buckets):
             at.append(counts[w * buckets + b])
@@ -1517,7 +1517,7 @@ def _rank_entries(
 
     def number(b: Int) raises {mut ranks, mut firsts, imm}:
         var mark = marks.unsafe_ptr()
-        var rank = ranks.bitcast[DType.uint32]()
+        var rank = ranks.mut_bitcast[DType.uint32]()
         var rep = reps.bitcast[DType.int64]()
         var stop = min((b + 1) * MERGE_BLOCK, total)
         var at = base[b]
@@ -1533,7 +1533,7 @@ def _rank_entries(
     var map = Buffer(overwritten=total * 4)
 
     def project(b: Int) raises {mut map, imm}:
-        var mapped = map.bitcast[DType.uint32]()
+        var mapped = map.mut_bitcast[DType.uint32]()
         var rank = ranks.bitcast[DType.uint32]()
         var own = owners.bitcast[DType.uint32]()
         var stop = min((b + 1) * MERGE_BLOCK, total)
@@ -1629,7 +1629,7 @@ def _rank_by_first_row(
 
     def place(k: Int) raises {mut order, imm}:
         var rep = reps.bitcast[DType.int64]()
-        var slot = order.bitcast[DType.uint32]()
+        var slot = order.mut_bitcast[DType.uint32]()
         var at = List[Int](capacity=blocks)
         for b in range(blocks):
             at.append(counts[k * blocks + b])
@@ -1651,12 +1651,12 @@ def _rank_by_first_row(
             return
         var rep = reps.bitcast[DType.int64]()
         var slot = order.bitcast[DType.uint32]()
-        var mapped = map.bitcast[DType.uint32]()
+        var mapped = map.mut_bitcast[DType.uint32]()
         # Zero means no group had this row, and `Buffer` hands back zeroed
         # memory, so the entry is stored plus one and the scratch needs no pass
         # of its own to be ready.
         var seat = Buffer(RANK_BLOCK * 4)
-        var seats = seat.bitcast[DType.uint32]()
+        var seats = seat.mut_bitcast[DType.uint32]()
         var floor = b * RANK_BLOCK
         for j in range(lo, hi):
             var e = Int(slot.unsafe_offset(j).unsafe_load())
@@ -1708,8 +1708,8 @@ def _merge_hashed_serial(
     var owners = Buffer(overwritten=total * 4)
     var marks = Buffer(total)
     var hashed = found.bitcast[DType.uint64]()
-    var own = owners.bitcast[DType.uint32]()
-    var mark = marks.unsafe_ptr()
+    var own = owners.mut_bitcast[DType.uint32]()
+    var mark = marks.unsafe_mut_ptr()
     var table = HashTable(total, seed)
     var winners = List[Int]()
     for e in range(total):
@@ -1765,8 +1765,8 @@ def _merge_hashed(
     def one(b: Int) raises {mut owners, mut marks, imm}:
         var hashed = found.bitcast[DType.uint64]()
         var slot = split.order.bitcast[DType.uint32]()
-        var own = owners.bitcast[DType.uint32]()
-        var mark = marks.unsafe_ptr()
+        var own = owners.mut_bitcast[DType.uint32]()
+        var mark = marks.unsafe_mut_ptr()
         var start = split.offsets[b]
         var stop = split.offsets[b + 1]
         var table = HashTable(stop - start, seed)
@@ -1815,8 +1815,8 @@ def _merge_strings_serial(
     var marks = Buffer(total)
     var hashed = found.bitcast[DType.uint64]()
     var rep = reps.bitcast[DType.int64]()
-    var own = owners.bitcast[DType.uint32]()
-    var mark = marks.unsafe_ptr()
+    var own = owners.mut_bitcast[DType.uint32]()
+    var mark = marks.unsafe_mut_ptr()
     var table = HashTable(total, seed)
     var local = List[Int]()
     var winners = List[Int]()
@@ -1879,8 +1879,8 @@ def _merge_strings(
         var hashed = found.bitcast[DType.uint64]()
         var rep = reps.bitcast[DType.int64]()
         var slot = split.order.bitcast[DType.uint32]()
-        var own = owners.bitcast[DType.uint32]()
-        var mark = marks.unsafe_ptr()
+        var own = owners.mut_bitcast[DType.uint32]()
+        var mark = marks.unsafe_mut_ptr()
         var start = split.offsets[b]
         var stop = split.offsets[b + 1]
         var table = HashTable(stop - start, seed)
@@ -2282,7 +2282,7 @@ def _factorize_hashed_parallel[
     var mapped = map.bitcast[DType.uint32]()
 
     def remap(w: Int) raises {mut codes, imm}:
-        var out = codes.unsafe_ptr()
+        var out = codes.unsafe_mut_ptr()
         var at = starts[w]
         for i in range(bounds[w], bounds[w + 1]):
             if has_null and not col.is_valid(i):
@@ -2405,8 +2405,8 @@ def _factorize_hashed_partitioned[
         var start = bounds[w]
         var stop = bounds[w + 1]
         var hash = hashes[w].bitcast[DType.uint64]()
-        var row = rows_at.bitcast[DType.uint32]()
-        var key = keys.bitcast[DType.uint64]()
+        var row = rows_at.mut_bitcast[DType.uint32]()
+        var key = keys.mut_bitcast[DType.uint64]()
         var at = List[Int](capacity=parts)
         for p in range(parts):
             at.append(counts[w * parts + p])
@@ -2474,7 +2474,7 @@ def _factorize_hashed_partitioned[
     var reps = Buffer(overwritten=total * 8)
 
     def gather(p: Int) raises {mut reps, imm}:
-        var out = reps.bitcast[DType.int64]()
+        var out = reps.mut_bitcast[DType.int64]()
         var row = rows_at.bitcast[DType.uint32]()
         var at = starts[p]
         for l in range(len(founds[p])):
@@ -2492,7 +2492,7 @@ def _factorize_hashed_partitioned[
     var codes = Array[DType.uint32](overwritten=n)
 
     def assign(p: Int) raises {mut codes, imm}:
-        var out = codes.unsafe_ptr()
+        var out = codes.unsafe_mut_ptr()
         var row = rows_at.bitcast[DType.uint32]()
         var code = local.unsafe_ptr()
         var at = starts[p]
@@ -2510,7 +2510,7 @@ def _factorize_hashed_partitioned[
     if has_null:
 
         def blank(w: Int) raises {mut codes, imm}:
-            var out = codes.unsafe_ptr()
+            var out = codes.unsafe_mut_ptr()
             for i in range(bounds[w], bounds[w + 1]):
                 if not col.is_valid(i):
                     out.unsafe_offset(i).unsafe_write(UInt32(0))
@@ -2907,7 +2907,7 @@ def _factorize_strings_parallel(
     var mapped = map.bitcast[DType.uint32]()
 
     def remap(w: Int) raises {mut codes, imm}:
-        var out = codes.unsafe_ptr()
+        var out = codes.unsafe_mut_ptr()
         var at = starts[w]
         for i in range(bounds[w], bounds[w + 1]):
             if has_null and not col.is_valid(i):
@@ -3053,9 +3053,9 @@ def _factorize_strings_partitioned(
         var start = bounds[w]
         var stop = bounds[w + 1]
         var hash = hashes[w].bitcast[DType.uint64]()
-        var row = rows_at.bitcast[DType.uint32]()
-        var key = keys.bitcast[DType.uint64]()
-        var view = views.unsafe_ptr().unsafe_bitcast[StringView]()
+        var row = rows_at.mut_bitcast[DType.uint32]()
+        var key = keys.mut_bitcast[DType.uint64]()
+        var view = views.unsafe_mut_ptr().unsafe_bitcast[StringView]()
         var at = List[Int](capacity=parts)
         for p in range(parts):
             at.append(counts[w * parts + p])
@@ -3125,7 +3125,7 @@ def _factorize_strings_partitioned(
     var reps = Buffer(overwritten=total * 8)
 
     def gather(p: Int) raises {mut reps, imm}:
-        var out = reps.bitcast[DType.int64]()
+        var out = reps.mut_bitcast[DType.int64]()
         var at = starts[p]
         for l in range(len(founds[p])):
             out.unsafe_offset(at + l).unsafe_write(Int64(founds[p][l]))
@@ -3140,7 +3140,7 @@ def _factorize_strings_partitioned(
     var codes = Array[DType.uint32](overwritten=n)
 
     def assign(p: Int) raises {mut codes, imm}:
-        var out = codes.unsafe_ptr()
+        var out = codes.unsafe_mut_ptr()
         var row = rows_at.bitcast[DType.uint32]()
         var code = local.unsafe_ptr()
         var at = starts[p]
@@ -3158,7 +3158,7 @@ def _factorize_strings_partitioned(
     if has_null:
 
         def blank(w: Int) raises {mut codes, imm}:
-            var out = codes.unsafe_ptr()
+            var out = codes.unsafe_mut_ptr()
             for i in range(bounds[w], bounds[w + 1]):
                 if not col.is_valid(i):
                     out.unsafe_offset(i).unsafe_write(UInt32(0))

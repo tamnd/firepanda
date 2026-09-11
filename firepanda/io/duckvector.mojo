@@ -155,7 +155,9 @@ struct Scratch(Movable):
         self.sizes = List[Int64](length=count, fill=0)
 
 
-def _erase[T: AnyType, o: MutOrigin](pointer: Pointer[T, o]) -> NullableVoidPtr:
+def _erase[
+    T: AnyType, mut: Bool, //, o: Origin[mut=mut]
+](pointer: Pointer[T, o]) -> NullableVoidPtr:
     """Turns any pointer into the `void*` an Arrow buffer slot holds.
 
     Args:
@@ -164,9 +166,13 @@ def _erase[T: AnyType, o: MutOrigin](pointer: Pointer[T, o]) -> NullableVoidPtr:
     Returns:
         The same address, with its type and origin gone.
     """
-    return pointer.unsafe_origin_cast[MutUntrackedOrigin]().unsafe_bitcast[
-        NoneType
-    ]()
+    # See `_as_void` in arrow_export. The slot is a `void*` because that is the
+    # C struct's shape, and DuckDB reads the buffers it is given.
+    return (
+        pointer.unsafe_mut_cast[True]()
+        .unsafe_origin_cast[MutUntrackedOrigin]()
+        .unsafe_bitcast[NoneType]()
+    )
 
 
 def _valid(mask: MaybeHandle, i: Int) -> Bool:
@@ -203,7 +209,7 @@ def _pack_bools(data: Handle, mask: MaybeHandle, rows: Int) -> Buffer:
         A buffer of `ceil(rows / 8)` bytes, set bit meaning true.
     """
     var out = Buffer((rows + 7) // 8)
-    var bits = out.unsafe_ptr()
+    var bits = out.unsafe_mut_ptr()
     for i in range(rows):
         if not _valid(mask, i):
             continue
@@ -252,8 +258,8 @@ def _views_of(
         A buffer of `rows * 16` bytes, one view per row, zero for a null.
     """
     var out = Buffer(rows * STRING_T_BYTES)
-    var views = out.unsafe_ptr()
-    var bytes = payload.unsafe_ptr()
+    var views = out.unsafe_mut_ptr()
+    var bytes = payload.unsafe_mut_ptr()
     var cursor = 0
     for i in range(rows):
         if not _valid(mask, i):
