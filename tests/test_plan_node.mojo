@@ -448,5 +448,17 @@ def test_nine_kinds_are_enough_for_a_real_query() raises:
     )
 
 
+def test_a_column_that_says_which_input_it_is_from_prints_it() raises:
+    var tree = Expressions()
+    var theirs = tree.column_of(1, "key")
+    assert_equal(render_expr(tree, theirs), "#1.key", "the input and the name")
+
+
+def test_a_column_that_says_nothing_about_an_input_prints_the_name() raises:
+    var tree = Expressions()
+    var plain = tree.column("key")
+    assert_equal(render_expr(tree, plain), "key", "the name on its own")
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

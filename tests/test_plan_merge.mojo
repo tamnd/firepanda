@@ -277,12 +277,18 @@ def test_a_projection_with_two_outputs_of_one_name_is_left_alone() raises:
     var scan = plan.scan("lineitem", List[String](), 0)
     var lower = plan.project(
         scan,
-        [plan.exprs.column("l_orderkey"), plan.exprs.column("l_partkey")],
-        ["x", "x"],
+        [
+            plan.exprs.column("l_orderkey"),
+            plan.exprs.column("l_partkey"),
+            plan.exprs.column("l_quantity"),
+        ],
+        ["x", "x", "q"],
     )
-    var root = plan.project(lower, [_plus(plan, "x", 1)], ["bumped"])
+    var root = plan.project(lower, [_plus(plan, "q", 1)], ["bumped"])
     _ = merge(plan, root, [_lineitem()])
-    # Which of the two was meant is not this pass's decision to make.
+    # `q` is not ambiguous and would substitute happily, but doing it would
+    # leave a node whose outputs had moved under a name that two of them share,
+    # and which of those two was meant is not this pass's decision to make.
     assert_equal(_projects(plan, root), 2, "both projections stayed")
 
 

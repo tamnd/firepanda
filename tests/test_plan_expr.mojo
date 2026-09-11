@@ -317,5 +317,14 @@ def test_a_graft_with_more_names_than_expressions_is_refused() raises:
         _ = tree.graft(a, ["a", "b"], [a])
 
 
+def test_a_column_that_says_its_input_has_a_table_set_before_binding() raises:
+    # The analysis refuses a column whose table is not known yet, and a pinned
+    # one's is known, because saying it is what pinning is. So a plan that
+    # qualifies its columns can be pushed over before it has been bound.
+    var tree = Expressions()
+    var said = tree.column_of(2, "a")
+    assert_equal(tree.tables(said), UInt64(4), "table two is bit two")
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

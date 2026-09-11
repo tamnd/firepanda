@@ -42,9 +42,11 @@ two and is the opposite of what the pass is for. Common subplan elimination is
 what creates that shape deliberately, and this pass leaving it alone is how the
 two stay out of each other's way.
 
-The lower node's output names have to be distinct. A name that appears twice
-resolves to the first, so substituting by name would be guessing which was
-meant. The same refusal `prune` makes, for the same reason.
+The lower node's output names have to be distinct. Binding refuses a reference
+to a name that two of them share, so the ambiguous name itself is a plan error
+before the pass runs, but substituting the rest of them into the node above
+would renumber what is left and change what an unambiguous name resolves to.
+The same refusal `prune` makes, for the same reason.
 
 An output the upper node reads more than once may be substituted as long as no
 mention of it is a whole output on its own. `b = a + a` over `a = expensive(x)`

@@ -66,11 +66,13 @@ free. Binding a plan twice at plan time costs nothing next to reading one column
 that nothing wanted.
 
 That is also why a node whose output names are not all distinct is left alone.
-Binding resolves a name to the first column that has it, so dropping the first
-of two columns called the same thing would silently point an expression above at
-the other one. A plan like that is ambiguous before this pass touches it, and the
-pass declining to make it worse is cheaper than the pass having an opinion about
-which of the two was meant.
+Dropping the first of two columns called the same thing moves the second into
+its position, and rebinding by name afterwards would then resolve to a different
+column than before. Binding refuses a reference to a name that two columns have,
+so an expression above that actually reads the ambiguous name is a plan error
+either way, but one that reads a different column of the same node is not, and
+the pass declining to renumber underneath it is cheaper than the pass having an
+opinion about which of the two was meant.
 """
 
 from firepanda.dtype.schema import Schema

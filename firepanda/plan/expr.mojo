@@ -189,9 +189,14 @@ struct Expr(Copyable, Movable):
     """The column position on a bound `COLUMN`, and `UNBOUND` otherwise."""
 
     var table: Int
-    """Which input relation a bound `COLUMN` reads from, as a bit index rather
-    than a mask, and `UNBOUND` otherwise. A single input plan leaves every
-    column on table zero and nothing notices."""
+    """Which input relation a `COLUMN` reads from, as a bit index rather than a
+    mask, and `UNBOUND` when nothing has said. A single input plan leaves every
+    column on table zero and nothing notices.
+
+    Binding fills this in, and a caller may fill it in first. A caller that does
+    is saying which input the name is to be looked up in, which is what
+    `column_of` is for and what a qualified name in SQL becomes. Binding then
+    checks that the name is there rather than overwriting what it was told."""
 
     var value: Value
     """The constant on a `LITERAL`. Absent elsewhere."""
@@ -332,6 +337,47 @@ struct Expressions(Movable, Sized):
                 name^,
                 UNBOUND,
                 UNBOUND,
+                Value(null=LogicalType.NULL),
+                0,
+                True,
+                0,
+                List[Int](),
+            )
+        )
+
+    def column_of(mut self, table: Int, var name: String) -> Int:
+        """Builds an unbound reference to a column of one named input.
+
+        The same as `column` except that it says which of the inputs the name is
+        to be looked up in. Binding then looks at the columns that came from
+        that input and nowhere else, so a name two inputs both have resolves to
+        the one that was meant rather than to whichever arrived first.
+
+        This is what a qualified name in SQL becomes. `l.a` knows which relation
+        `l` is by the time the plan is built, because the thing that gave `l` its
+        meaning was the FROM clause and that has already been walked, so the
+        plan carries the relation and not the word. A plan holding the word
+        would be a plan holding a name that something later has to resolve,
+        which is the thing `docs/specs/sql/08-plan-and-optimizer.md` says a
+        bound plan does not do.
+
+        Uses `name` and `table`. Leaves `at` at `UNBOUND` for binding to fill
+        in, and the type with it.
+
+        Args:
+            table: Which input relation the name is in, as a bit index, the same
+                numbering `table` uses everywhere else.
+            name: The column name.
+
+        Returns:
+            The index of the new node.
+        """
+        return self._add(
+            Expr(
+                ExprKind.COLUMN,
+                name^,
+                UNBOUND,
+                table,
                 Value(null=LogicalType.NULL),
                 0,
                 True,

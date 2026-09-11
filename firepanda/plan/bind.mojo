@@ -194,22 +194,77 @@ def _near(schema: Schema, name: String) -> String:
     return out^
 
 
-def _resolve(schema: Schema, name: String) raises -> Int:
-    """Returns the position of a column, or refuses with a suggestion.
+def _resolve(
+    schema: Schema, origin: List[Int], name: String, pin: Int
+) raises -> Int:
+    """Returns the position of a column, or refuses and says why.
+
+    A name that is in the schema twice is refused rather than answered with the
+    first of them. A join puts its two inputs end to end, so two tables that
+    both have a `key` produce a schema with two columns called `key`, and
+    answering the left one is a wrong answer that nothing downstream can notice.
+    The caller says which input it meant, with `column_of`, and the ambiguity
+    stops existing.
 
     Args:
         schema: The columns that are visible.
+        origin: Which input each of those columns came from.
         name: What was written.
+        pin: The input the name is to be looked for in, or `UNBOUND` to look in
+            all of them.
 
     Returns:
-        The position of the first column with that name.
+        The position of the column.
 
     Raises:
-        If nothing has that name.
+        If nothing has that name, or more than one thing does.
     """
+    var found = -1
+    var again = -1
     for i in range(len(schema)):
-        if schema[i].name == name:
-            return i
+        if schema[i].name == name and (pin == UNBOUND or origin[i] == pin):
+            if found == -1:
+                found = i
+            else:
+                again = i
+                break
+    if again != -1:
+        var message = String(
+            "'",
+            name,
+            "' is the name of more than one column here, at ",
+            found,
+            " and at ",
+            again,
+        )
+        if origin[found] != origin[again]:
+            # Two inputs each have one, which is what a join of two tables that
+            # share a key looks like, and the caller has a way to say which.
+            message += ", so say which input it is from"
+        raise Error(message)
+    if found != -1:
+        return found
+
+    if pin != UNBOUND:
+        # The name may well be in the schema, on a column from another input,
+        # and saying it is not here at all would send the reader looking for a
+        # typo that is not there.
+        for i in range(len(schema)):
+            if schema[i].name == name:
+                raise Error(
+                    String(
+                        "there is no column named '",
+                        name,
+                        "' in input ",
+                        pin,
+                        ", though another input has one",
+                    )
+                )
+        raise Error(
+            String(
+                "there is no column named '", name, "' in input ", pin, " here"
+            )
+        )
     var message = String("there is no column named '", name, "' here")
     var hint = _near(schema, name)
     if hint:
@@ -313,7 +368,12 @@ def bind_expr(
     var kind = exprs.nodes[root].kind
 
     if kind == ExprKind.COLUMN:
-        var at = _resolve(schema, exprs.nodes[root].name)
+        # A table already on the node is a caller saying which input the name is
+        # in, so it narrows the lookup rather than being overwritten by it. The
+        # write afterwards is the same number again in that case, and the one
+        # binding worked out when there was nothing there.
+        var pin = exprs.nodes[root].table
+        var at = _resolve(schema, origin, exprs.nodes[root].name, pin)
         exprs.nodes[root].at = at
         exprs.nodes[root].table = origin[at]
         exprs.nodes[root].type = schema[at].dtype
@@ -438,10 +498,11 @@ def _scan(
     """
     if len(node_names) == 0:
         return Bound(Schema(copy=src), table)
+    var one = List[Int](length=len(src), fill=table)
     var out = Schema()
     for i in range(len(node_names)):
         try:
-            out.append(src[_resolve(src, node_names[i])].copy())
+            out.append(src[_resolve(src, one, node_names[i], UNBOUND)].copy())
         except e:
             raise Error(String("scan of ", source, ": ", e))
     return Bound(out^, table)
