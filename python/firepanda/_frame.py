@@ -732,7 +732,9 @@ class Rolling(RollingMixin):
     ) -> Series | DataFrame:
         """The variance of the values in the window. Over every rolling window."""
         try:
-            return self._reduce("var", numeric_only, engine, engine_kwargs, ddof)
+            return self._reduce(
+                "var", numeric_only, engine, engine_kwargs, self._spread_settings(ddof)
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -745,7 +747,9 @@ class Rolling(RollingMixin):
     ) -> Series | DataFrame:
         """The standard deviation of the values in the window. Over every rolling window."""
         try:
-            return self._reduce("std", numeric_only, engine, engine_kwargs, ddof)
+            return self._reduce(
+                "std", numeric_only, engine, engine_kwargs, self._spread_settings(ddof)
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -754,7 +758,7 @@ class Rolling(RollingMixin):
         window.
         """
         try:
-            return self._reduce("sem", numeric_only, ddof=ddof)
+            return self._reduce("sem", numeric_only, settings=self._spread_settings(ddof))
         except Exception as error:
             raise translate(error) from None
 
@@ -778,6 +782,36 @@ class Rolling(RollingMixin):
         """The middle value of the window. Over every rolling window."""
         try:
             return self._reduce("median", numeric_only, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def quantile(
+        self, q: float, interpolation: str = "linear", numeric_only: bool = False
+    ) -> Series | DataFrame:
+        """The value a fraction of the way through the sorted window. Over every rolling
+        window.
+        """
+        try:
+            return self._reduce(
+                "quantile", numeric_only, settings=self._quantile_settings(q, interpolation)
+            )
+        except Exception as error:
+            raise translate(error) from None
+
+    def rank(
+        self,
+        method: str = "average",
+        ascending: bool = True,
+        pct: bool = False,
+        numeric_only: bool = False,
+    ) -> Series | DataFrame:
+        """Where the value in the window's last row sits among the window's values. Over
+        every rolling window.
+        """
+        try:
+            return self._reduce(
+                "rank", numeric_only, settings=self._rank_settings(method, ascending, pct)
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -935,7 +969,9 @@ class Expanding(ExpandingMixin):
     ) -> Series | DataFrame:
         """The variance of the values in the window. Over every expanding window."""
         try:
-            return self._reduce("var", numeric_only, engine, engine_kwargs, ddof)
+            return self._reduce(
+                "var", numeric_only, engine, engine_kwargs, self._spread_settings(ddof)
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -948,7 +984,9 @@ class Expanding(ExpandingMixin):
     ) -> Series | DataFrame:
         """The standard deviation of the values in the window. Over every expanding window."""
         try:
-            return self._reduce("std", numeric_only, engine, engine_kwargs, ddof)
+            return self._reduce(
+                "std", numeric_only, engine, engine_kwargs, self._spread_settings(ddof)
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -957,7 +995,7 @@ class Expanding(ExpandingMixin):
         window.
         """
         try:
-            return self._reduce("sem", numeric_only, ddof=ddof)
+            return self._reduce("sem", numeric_only, settings=self._spread_settings(ddof))
         except Exception as error:
             raise translate(error) from None
 
@@ -981,6 +1019,36 @@ class Expanding(ExpandingMixin):
         """The middle value of the window. Over every expanding window."""
         try:
             return self._reduce("median", numeric_only, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def quantile(
+        self, q: float, interpolation: str = "linear", numeric_only: bool = False
+    ) -> Series | DataFrame:
+        """The value a fraction of the way through the sorted window. Over every expanding
+        window.
+        """
+        try:
+            return self._reduce(
+                "quantile", numeric_only, settings=self._quantile_settings(q, interpolation)
+            )
+        except Exception as error:
+            raise translate(error) from None
+
+    def rank(
+        self,
+        method: str = "average",
+        ascending: bool = True,
+        pct: bool = False,
+        numeric_only: bool = False,
+    ) -> Series | DataFrame:
+        """Where the value in the window's last row sits among the window's values. Over
+        every expanding window.
+        """
+        try:
+            return self._reduce(
+                "rank", numeric_only, settings=self._rank_settings(method, ascending, pct)
+            )
         except Exception as error:
             raise translate(error) from None
 

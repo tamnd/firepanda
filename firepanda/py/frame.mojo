@@ -84,7 +84,7 @@ from firepanda.py.reduce import grouped_reduction, reduction
 from firepanda.py.series import PySeries
 from firepanda.py.temporal import iso_calendar
 from firepanda.py.transform import transformation, transformed
-from firepanda.py.window import window_frame
+from firepanda.py.window import window_frame, window_settings
 
 
 @fieldwise_init
@@ -449,7 +449,7 @@ struct PyDataFrame(Movable, Writable):
         center: PythonObject,
         closed: PythonObject,
         step: PythonObject,
-        ddof: PythonObject,
+        settings: PythonObject,
     ) raises -> PythonObject:
         """Runs one reduction over every window of every column.
 
@@ -467,8 +467,9 @@ struct PyDataFrame(Movable, Writable):
             center: Whether the window sits around its row.
             closed: Which of the two ends the window keeps.
             step: How many rows apart the answered rows are, or `None`.
-            ddof: Subtracted from the count of values to give the divisor of a
-                variance, read by `std`, `var` and `sem` alone.
+            settings: The parameters the reduction reads and the window does
+                not, as a tuple in the order pandas declares them, and empty for
+                the eight reductions that read none.
 
         Returns:
             A new frame of the same column names in the same order, every one
@@ -490,7 +491,7 @@ struct PyDataFrame(Movable, Writable):
                         flag(center, "center"),
                         words(closed, "closed"),
                         maybe_whole(step, "step"),
-                        whole(ddof, "ddof"),
+                        window_settings(words(kind, "kind"), settings),
                     )
                 )
             )

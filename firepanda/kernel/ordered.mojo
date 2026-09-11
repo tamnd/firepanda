@@ -67,6 +67,15 @@ sum is a number, and the halves are used only when that sum came out infinite
 and both values were finite. That is the one window where the two differ, it is
 the same disagreement the running total has and for the same reason, and the
 answer given is the one that is right.
+
+A quantile between two values has the same problem in a different place, and
+pandas answers the two of them inconsistently. Its linear rule is the lower
+value plus the fraction of the gap, which is exact for two copies of the largest
+finite double and infinite for one of each sign, so pandas' `quantile(0.5)` is
+an infinity on a pair whose `median` it gives as nought, and an exact value on
+the pair whose median it gives as an infinity. Both are the same overflow seen
+from two sides. Here the gap is checked the same way the sum is, the two values
+are weighted when it overflowed, and both answers come out right.
 """
 
 from std.math import floor, isinf
@@ -419,6 +428,32 @@ def middle(lower: Float64, upper: Float64) -> Float64:
     return plain
 
 
+def along(under: Float64, over: Float64, part: Float64) -> Float64:
+    """Reads a fraction of the way from one value to the next one up.
+
+    This is the linear rule, and it overflows in a different place from
+    `middle`. pandas writes it as the lower value plus the fraction of the gap,
+    which is exact when the two values are equal however large they are and
+    infinite when the gap between them is not a number, so a window holding the
+    largest finite double of each sign has a linear quantile of infinity in
+    pandas where its median is nought. Weighting the two values instead does not
+    overflow, and it is used only where the gap did, on the same terms `middle`
+    is: everywhere the gap is a number the answer is pandas' answer to the bit.
+
+    Args:
+        under: The value below the position.
+        over: The value above it.
+        part: How far between them, which is more than nought and less than one.
+
+    Returns:
+        The value at that fraction of the way between them.
+    """
+    var gap = over - under
+    if isinf(gap) and not (isinf(under) or isinf(over)):
+        return under * (1.0 - part) + over * part
+    return under + part * gap
+
+
 def halved(tree: Ordered, ranks: Ranks, found: Int) -> Float64:
     """Reads the middle of the window out.
 
@@ -478,7 +513,7 @@ def picked(
     var over = tree.value(ranks, lower + 1)
     if between == BETWEEN_MIDPOINT:
         return middle(under, over)
-    return under + part * (over - under)
+    return along(under, over, part)
 
 
 def placed(

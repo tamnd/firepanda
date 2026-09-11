@@ -8,6 +8,26 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a rolling and expanding quantile and rank, and the door they had to share
+
+`quantile` and `rank` are the twelfth and thirteenth window reductions. Both were written against the Fenwick tree the median reads out of at the same time as the median, and neither reached the surface with it, because what was stopping them was the shape of the Python door rather than anything in the kernel.
+
+Five of the thirteen reductions read something the window has no opinion about. `var`, `std` and `sem` read a degrees of freedom, `quantile` reads a fraction and an interpolation word, and `rank` reads a tie rule, a direction and a percentage flag. That is nine values, and a bound method gets seven arguments after the object, of which the window itself needs six. So the seventh slot is now a tuple rather than a `ddof`, `firepanda/py/window.mojo` reads it apart against the reduction's name into a `WindowSettings` with one typed field per parameter, and the door stays at seven however many reductions land on it. Section 7 of `docs/specs/31-a-window-is-a-pair-of-rows.md` is rewritten around that and section 17 is new.
+
+This is not a change a caller can see. Every one of the thirteen methods keeps the signature pandas gives it, including `sem` taking a `ddof` and no engine and `median` taking an engine and no `ddof`, and the three small helpers that build the tuple are where the reduction's own parameters are checked, so pandas' exact sentences for a bad fraction, a bad interpolation and an unsupported rank method are the sentences a caller gets.
+
+A quantile is a position computed from the fraction and then read out of the tree, and all five interpolation rules are here. `nearest` rounds a half to the even side rather than up, which is Python's rounding rule showing through pandas' use of it and is measured rather than assumed.
+
+`linear` is the one place a quantile disagrees with pandas, and it is the median's overflow seen from the other side. pandas writes the rule as the lower value plus the fraction of the gap, which is exact for two equal huge values and infinite for one of each sign, where its median is the reverse. So pandas answers nought for the median of a window holding the largest finite double of each sign and an infinity for the quantile of a half of the same window. Here the gap is checked the way the sum already was, the two values are weighted when it overflowed, and every window whose gap is a number agrees with pandas to the bit.
+
+A rank is a question about one row rather than about the window, and the row is the window's last one rather than the row the answer is written to. That is pandas' rule and it is a real difference under `center`, under a step and under the two closed rules that drop the answered row, all three of which are measured against pandas. It has one consequence that looks like a defect and is not: a window whose last row holds nothing has no rank, however many values the window holds and whatever `min_periods` asked for.
+
+One refusal is stricter than pandas on purpose. `quantile(float('nan'))` is accepted by pandas, whose check asks whether the fraction is below nought or above one and gets False for both, and answers a column of NaN. A caller who wrote that asked for a position in the window and there is no position to give them, so it is refused with the sentence a fraction of two gets.
+
+Nine new tests in `tests/test_ordered.mojo` and eight at the Python boundary, and both names join the shared parametrization in `python/tests/test_windows.py`, which is now thirteen names over four placements. `tools/bindings.py` gained a layout helper for a generated statement that does not fit on one line, since the generated files are format checked and the old one only knew how to lay out a signature.
+
+Part of #161, after #486, and the rest of #476, which the median closed early.
+
 ### Added: a rolling and expanding median, and the structure the other two order statistics will read out of
 
 `median` is the eleventh window reduction and the first that is not a fold. The ten before it carry a number or a state from one window to the next and correct it for the rows that changed, which is what section 3 of `docs/specs/31-a-window-is-a-pair-of-rows.md` is about. A median cannot be carried that way, because the answer is a position in the sorted window and one row arriving can move that position past any number of values.

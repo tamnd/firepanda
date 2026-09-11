@@ -110,6 +110,7 @@ from firepanda.kernel.window import (
     Shape,
     WindowEdge,
     WindowOp,
+    WindowSettings,
     expanding_shape,
     rolling_shape,
     window_agg,
@@ -1375,7 +1376,7 @@ struct Series(Copyable, Movable, Sized, Writable):
         center: Bool,
         closed: WindowEdge,
         step: Optional[Int],
-        ddof: Int = 1,
+        settings: WindowSettings = WindowSettings(),
     ) raises -> Self:
         """Returns one reduction run over every window of the column.
 
@@ -1393,8 +1394,9 @@ struct Series(Copyable, Movable, Sized, Writable):
             closed: Which of its two ends the window keeps.
             step: How many rows apart the answered rows are, or nothing for
                 every row.
-            ddof: Subtracted from the count of values to give the divisor of a
-                variance, and read only by the three spread reductions.
+            settings: The parameters the reduction reads and the window does
+                not, which is the degrees of freedom for the three spreads, a
+                fraction and a rule for the quantile, and three for the rank.
 
         Returns:
             A float64 series, as tall as this one when the step is one and
@@ -1405,11 +1407,16 @@ struct Series(Copyable, Movable, Sized, Writable):
                 do not describe a window.
         """
         return self._windowed(
-            op, rolling_shape(window, min_periods, center, closed, step), ddof
+            op,
+            rolling_shape(window, min_periods, center, closed, step),
+            settings,
         )
 
     def expanding(
-        self, op: WindowOp, min_periods: Int, ddof: Int = 1
+        self,
+        op: WindowOp,
+        min_periods: Int,
+        settings: WindowSettings = WindowSettings(),
     ) raises -> Self:
         """Returns one reduction run over every window with no left edge.
 
@@ -1421,8 +1428,9 @@ struct Series(Copyable, Movable, Sized, Writable):
         Args:
             op: Which reduction to run.
             min_periods: How many values a window needs before it answers.
-            ddof: Subtracted from the count of values to give the divisor of a
-                variance, and read only by the three spread reductions.
+            settings: The parameters the reduction reads and the window does
+                not, which is the degrees of freedom for the three spreads, a
+                fraction and a rule for the quantile, and three for the rank.
 
         Returns:
             A float64 series of the same height.
@@ -1431,10 +1439,12 @@ struct Series(Copyable, Movable, Sized, Writable):
             Error: If the column is not a number or a bool.
         """
         return self._windowed(
-            op, expanding_shape(min_periods, len(self.values)), ddof
+            op, expanding_shape(min_periods, len(self.values)), settings
         )
 
-    def _windowed(self, op: WindowOp, shape: Shape, ddof: Int) raises -> Self:
+    def _windowed(
+        self, op: WindowOp, shape: Shape, settings: WindowSettings
+    ) raises -> Self:
         """Runs the window kernel and puts the right row labels back on it.
 
         A step of one answers a row per row, so the labels carry over. A wider
@@ -1445,8 +1455,8 @@ struct Series(Copyable, Movable, Sized, Writable):
         Args:
             op: Which reduction to run.
             shape: Where the windows sit.
-            ddof: Subtracted from the count of values to give the divisor of a
-                variance.
+            settings: The parameters the reduction reads and the window does
+                not.
 
         Returns:
             The reduced series.
@@ -1454,7 +1464,7 @@ struct Series(Copyable, Movable, Sized, Writable):
         Raises:
             Error: Whatever the kernel raises.
         """
-        var values = window_agg(self.values, op, shape, ddof)
+        var values = window_agg(self.values, op, shape, settings)
         if shape.step == 1:
             return self._relabelled(self.name, values^)
         var sampled = List[Int](capacity=len(values))

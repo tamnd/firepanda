@@ -40,7 +40,12 @@ from firepanda.kernel.spread import (
     Moments,
     Spread,
 )
-from firepanda.kernel.window import WindowEdge, WindowOp, op_named
+from firepanda.kernel.window import (
+    WindowEdge,
+    WindowOp,
+    WindowSettings,
+    op_named,
+)
 
 comptime GONE = Float64(0) / Float64(0)
 """A missing row, written the way a float column writes one."""
@@ -112,6 +117,8 @@ def rolled(
     Raises:
         Error: Whatever the kernel raises.
     """
+    var settings = WindowSettings()
+    settings.ddof = ddof
     return rows(
         series.rolling(
             op_named(kind),
@@ -120,7 +127,7 @@ def rolled(
             False,
             WindowEdge.RIGHT,
             None,
-            ddof,
+            settings,
         )
     )
 
@@ -142,7 +149,9 @@ def expanded(
     Raises:
         Error: Whatever the kernel raises.
     """
-    return rows(series.expanding(op_named(kind), min_periods, ddof))
+    var settings = WindowSettings()
+    settings.ddof = ddof
+    return rows(series.expanding(op_named(kind), min_periods, settings))
 
 
 def assert_rows(
@@ -456,7 +465,7 @@ def test_an_integer_column_answers_float64() raises:
         whole[i] = Int64(i + 1)
     var series = Series("v", AnyArray(whole^))
     var spread = series.rolling(
-        WindowOp.VAR, 3, None, False, WindowEdge.RIGHT, None, 1
+        WindowOp.VAR, 3, None, False, WindowEdge.RIGHT, None, WindowSettings()
     )
     assert_equal(String(spread.logical()), "float64")
     assert_rows(rows(spread), [GONE, GONE, 1.0, 1.0, 1.0])
