@@ -268,6 +268,37 @@ struct PySeries(Movable, Writable):
         )
 
     @staticmethod
+    def to_index(
+        py_self: PythonObject, name: PythonObject
+    ) raises -> PythonObject:
+        """Makes the values of the column into the labels of an index.
+
+        The opposite direction from `labels`, which hands out the labels the
+        column already has. This one takes the values and makes labels of them,
+        which is what `pandas.Index(series)` does and is how a column of
+        instants becomes a `DatetimeIndex` without a second reader for the same
+        values.
+
+        The buffers are copied rather than shared, because an index is a value
+        here and a caller who then edits the column would otherwise be editing
+        the index.
+
+        Args:
+            py_self: The series.
+            name: The level name, or `None` for unnamed. The column's own name
+                is not used, because pandas takes the name from the argument and
+                leaves an unnamed index when none is given.
+
+        Returns:
+            A new index over the column's values.
+        """
+        var wanted = Optional[String]()
+        if name is not Python.none():
+            wanted = Optional[String](words(name, "name"))
+        var values = AnyArray(copy=Self._held(py_self)[].series[].values)
+        return PythonObject(alloc=PyIndex(ArcPointer(Index(values^, wanted^))))
+
+    @staticmethod
     def to_list(py_self: PythonObject) raises -> PythonObject:
         """Copies every value out into a Python list.
 

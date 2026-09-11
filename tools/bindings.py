@@ -2097,6 +2097,13 @@ SERIES = Exposed(
             returns="Index",
         ),
         Binding(
+            mojo="PySeries.to_index",
+            name="to_index",
+            doc="The values of the column, as the labels of an index.",
+            params=(("name", "str | None"),),
+            returns="Index",
+        ),
+        Binding(
             mojo="PySeries.reduce",
             name="reduce",
             doc="The whole column reduced to one Python value.",
@@ -2653,6 +2660,20 @@ INDEX = Exposed(
             doc="The index under a different level name.",
             params=(("name", "str | None"),),
             returns="Index",
+        ),
+        Binding(
+            mojo="PyIndex.temporal_part",
+            name="temporal_part",
+            doc="One part of temporal labels, as another index.",
+            params=(("kind", "str"), ("arg", "str")),
+            returns="Index",
+        ),
+        Binding(
+            mojo="PyIndex.temporal_word",
+            name="temporal_word",
+            doc="The one part of temporal labels that is a word.",
+            params=(("kind", "str"),),
+            returns="str",
         ),
         Binding(
             mojo="PyIndex.union",

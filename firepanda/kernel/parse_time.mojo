@@ -916,6 +916,13 @@ def numbers_to_timestamps(a: AnyArray, unit: TimeUnit) raises -> AnyArray:
     integers are already the counts and the unit says what they are counts of.
     So the buffer is copied once and a null stays a null.
 
+    A column with no rows in it is read as an empty column of instants whatever
+    its type says, since there is nothing there to relabel and an empty column
+    carries no evidence of what it was going to hold. Without that a caller
+    handing over an empty list would be refused, because an empty list with
+    nothing in it to look at infers as a column of floats, and pandas builds an
+    empty `DatetimeIndex` out of the same empty list.
+
     Args:
         a: An integer column.
         unit: The resolution the integers are counts of.
@@ -926,6 +933,10 @@ def numbers_to_timestamps(a: AnyArray, unit: TimeUnit) raises -> AnyArray:
     Raises:
         Error: If the column is not one of whole numbers.
     """
+    if len(a) == 0:
+        return AnyArray(
+            Array[DType.int64](0).into_data(), LogicalType.timestamp(unit)
+        )
     if a.type.physical != DType.int64:
         raise Error(
             "temporal: to_datetime with a unit needs a column of whole numbers"
