@@ -282,19 +282,21 @@ def test_a_scan_that_is_already_narrow_is_left_exactly_as_it_was() raises:
 
 
 def test_a_project_with_two_outputs_of_one_name_is_left_alone() raises:
-    # Binding resolves a name to the first column that has it, so dropping the
-    # first of two called the same thing would point the expression above at
-    # the other one. The plan is ambiguous before the pass sees it and the
-    # pass declines to decide which was meant.
+    # Dropping the first of two columns called the same thing would move the
+    # second one into its position, and the pass rebinds by name afterwards, so
+    # what an expression above resolved to would change under it. The plan is
+    # ambiguous before the pass sees it and the pass declines to make it worse,
+    # even though only the third output is wanted here.
     var plan = Plan()
     var scan = plan.scan("orders", List[String](), 0)
     var key = plan.exprs.column("o_orderkey")
     var cust = plan.exprs.column("o_custkey")
-    var twice = plan.project(scan, [key, cust], ["n", "n"])
-    var out = plan.exprs.column("n")
-    var root = plan.project(twice, [out], ["n"])
+    var price = plan.exprs.column("o_totalprice")
+    var twice = plan.project(scan, [key, cust, price], ["n", "n", "p"])
+    var out = plan.exprs.column("p")
+    var root = plan.project(twice, [out], ["p"])
     _ = prune(plan, root, [_orders()])
-    assert_equal(len(plan.nodes[twice].exprs), 2, "both outputs stay")
+    assert_equal(len(plan.nodes[twice].exprs), 3, "all three outputs stay")
 
 
 def test_a_join_narrows_each_side_to_what_that_side_provides() raises:

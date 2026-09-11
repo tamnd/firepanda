@@ -870,5 +870,24 @@ def test_a_q19_shaped_plan_survives_the_trip() raises:
     _ = _trip(plan, at)
 
 
+def test_a_column_that_says_which_input_it_is_from_keeps_saying_it() raises:
+    # A pinned column is neither bound nor entirely unbound, so it is the one
+    # case where the position is missing and the input is not, and the writer
+    # has to keep those two apart rather than writing both or neither.
+    var plan = Plan()
+    var t = plan.scan("t", ["a", "b"], 0)
+    var said = plan.exprs.column_of(1, "a")
+    var root = plan.project(t, [said], ["a"])
+    var text = to_json(plan, root)
+    assert_true(text.find('"table": 1') != -1, "the input is written")
+    assert_true(text.find('"at":') == -1, "and the position is not")
+    var back = _trip(plan, root)
+    ref out = back.plan.nodes[back.root].exprs
+    assert_equal(back.plan.exprs.nodes[out[0]].table, 1, "the input came back")
+    assert_equal(
+        back.plan.exprs.nodes[out[0]].at, UNBOUND, "and is still not bound"
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

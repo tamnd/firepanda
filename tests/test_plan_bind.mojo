@@ -664,5 +664,148 @@ def test_the_whole_of_q3_binds() raises:
     assert_equal(plan.exprs.nodes[out].at, 1, "revenue is the second output")
 
 
+def _keyed(name: String) -> Schema:
+    """Returns a two column schema whose key is called the same in both tables.
+
+    Args:
+        name: What to call the second column, so the two are otherwise apart.
+
+    Returns:
+        A `key` and one other column.
+    """
+    var out = Schema()
+    out.append(Field("key", LogicalType.INT64, False))
+    out.append(Field(name, LogicalType.STRING, True))
+    return out^
+
+
+def test_a_name_two_inputs_both_have_is_refused_rather_than_guessed() raises:
+    # The reason this is an error and not a first match. A join puts its two
+    # inputs end to end, so joining two tables that both have a `key` gives a
+    # schema with two columns called `key`, and answering the left one is a
+    # wrong answer that nothing downstream can notice.
+    var plan = Plan()
+    var left = plan.scan("l", List[String](), 0)
+    var right = plan.scan("r", List[String](), 1)
+    var lk = plan.exprs.column_of(0, "key")
+    var rk = plan.exprs.column_of(1, "key")
+    var joined = plan.join(left, right, [lk], [rk], JoinKind.INNER)
+    var out = plan.exprs.column("key")
+    var root = plan.project(joined, [out], ["key"])
+    with assert_raises(contains="more than one column here, at 0 and at 2"):
+        _ = bind(plan, root, [_keyed("a"), _keyed("b")])
+
+
+def test_the_message_says_to_say_which_input_when_two_have_it() raises:
+    var plan = Plan()
+    var left = plan.scan("l", List[String](), 0)
+    var right = plan.scan("r", List[String](), 1)
+    var lk = plan.exprs.column_of(0, "key")
+    var rk = plan.exprs.column_of(1, "key")
+    var joined = plan.join(left, right, [lk], [rk], JoinKind.INNER)
+    var out = plan.exprs.column("key")
+    var root = plan.project(joined, [out], ["key"])
+    with assert_raises(contains="say which input it is from"):
+        _ = bind(plan, root, [_keyed("a"), _keyed("b")])
+
+
+def test_a_name_one_input_has_twice_says_so_without_the_advice() raises:
+    # Two outputs of one node called the same thing is ambiguous too, and the
+    # advice that fits the join case does not fit this one, since there is only
+    # one input and naming it would not narrow anything.
+    var plan = Plan()
+    var scan = plan.scan("orders", List[String](), 0)
+    var key = plan.exprs.column("o_orderkey")
+    var cust = plan.exprs.column("o_custkey")
+    var twice = plan.project(scan, [key, cust], ["n", "n"])
+    var out = plan.exprs.column("n")
+    var root = plan.project(twice, [out], ["n"])
+    with assert_raises(contains="more than one column here"):
+        _ = bind(plan, root, [_orders()])
+    try:
+        _ = bind(plan, root, [_orders()])
+    except e:
+        assert_false(
+            String(e).find("say which input") != -1,
+            "naming the one input would not help",
+        )
+
+
+def test_a_column_that_says_which_input_it_is_from_binds_to_that_one() raises:
+    var plan = Plan()
+    var left = plan.scan("l", List[String](), 0)
+    var right = plan.scan("r", List[String](), 1)
+    var lk = plan.exprs.column_of(0, "key")
+    var rk = plan.exprs.column_of(1, "key")
+    var joined = plan.join(left, right, [lk], [rk], JoinKind.INNER)
+    var theirs = plan.exprs.column_of(1, "key")
+    var root = plan.project(joined, [theirs], ["key"])
+    var schema = bind(plan, root, [_keyed("a"), _keyed("b")])
+    assert_equal(len(schema), 1, "one column comes out")
+    assert_equal(plan.exprs.nodes[theirs].at, 2, "the right arm's key")
+    assert_equal(plan.exprs.nodes[theirs].table, 1, "from the right arm")
+
+
+def test_saying_the_other_input_binds_to_the_other_one() raises:
+    var plan = Plan()
+    var left = plan.scan("l", List[String](), 0)
+    var right = plan.scan("r", List[String](), 1)
+    var lk = plan.exprs.column_of(0, "key")
+    var rk = plan.exprs.column_of(1, "key")
+    var joined = plan.join(left, right, [lk], [rk], JoinKind.INNER)
+    var ours = plan.exprs.column_of(0, "key")
+    var root = plan.project(joined, [ours], ["key"])
+    _ = bind(plan, root, [_keyed("a"), _keyed("b")])
+    assert_equal(plan.exprs.nodes[ours].at, 0, "the left arm's key")
+    assert_equal(plan.exprs.nodes[ours].table, 0, "from the left arm")
+
+
+def test_saying_an_input_that_does_not_have_it_says_another_one_does() raises:
+    # The name is in the schema, on a column from the other arm, and a message
+    # saying it is not here at all would send the reader looking for a typo
+    # that is not there.
+    var plan = Plan()
+    var left = plan.scan("l", List[String](), 0)
+    var right = plan.scan("r", List[String](), 1)
+    var lk = plan.exprs.column_of(0, "key")
+    var rk = plan.exprs.column_of(1, "key")
+    var joined = plan.join(left, right, [lk], [rk], JoinKind.INNER)
+    var wrong = plan.exprs.column_of(0, "b")
+    var root = plan.project(joined, [wrong], ["b"])
+    with assert_raises(contains="though another input has one"):
+        _ = bind(plan, root, [_keyed("a"), _keyed("b")])
+
+
+def test_saying_an_input_for_a_name_nobody_has_is_still_a_missing_name() raises:
+    var plan = Plan()
+    var scan = plan.scan("orders", List[String](), 0)
+    var wrong = plan.exprs.column_of(0, "o_nothing")
+    var root = plan.project(scan, [wrong], ["x"])
+    with assert_raises(contains="there is no column named 'o_nothing'"):
+        _ = bind(plan, root, [_orders()])
+
+
+def test_saying_the_input_changes_nothing_when_the_name_is_unambiguous() raises:
+    var plan = Plan()
+    var scan = plan.scan("orders", List[String](), 0)
+    var plain = plan.exprs.column("o_custkey")
+    var said = plan.exprs.column_of(0, "o_custkey")
+    var root = plan.project(scan, [plain, said], ["a", "b"])
+    _ = bind(plan, root, [_orders()])
+    assert_equal(plan.exprs.nodes[plain].at, 1, "the same position")
+    assert_equal(plan.exprs.nodes[said].at, 1, "either way")
+
+
+def test_a_column_says_nothing_about_an_input_until_it_is_asked_to() raises:
+    var plan = Plan()
+    var plain = plan.exprs.column("a")
+    var said = plan.exprs.column_of(3, "a")
+    assert_equal(plan.exprs.nodes[plain].table, UNBOUND, "nothing said")
+    assert_equal(plan.exprs.nodes[said].table, 3, "and something said")
+    assert_equal(
+        plan.exprs.nodes[said].at, UNBOUND, "the position is binding's"
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

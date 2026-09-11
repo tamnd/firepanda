@@ -26,14 +26,17 @@ that leans on the reader knowing the precedence table is a printed plan that get
 misread.
 
 A bound column prints as its name and not as its position, for the same reason.
-The position is what execution uses and the name is what the caller wrote.
+The position is what execution uses and the name is what the caller wrote. A
+column that has not been bound yet but does say which input it is from prints
+the input too, since there the name on its own is not the whole of what was
+written, and it stops printing it the moment binding makes it redundant.
 """
 
 from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.unary import UnaryOp
-from firepanda.plan.expr import ExprKind, Expressions
+from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
 from firepanda.plan.node import (
     NO_LIMIT,
     SET_EXCEPT,
@@ -74,6 +77,13 @@ def render_expr(tree: Expressions, root: Int) raises -> String:
     ref node = tree.nodes[root]
 
     if node.kind == ExprKind.COLUMN:
+        # A column that says which input it is from before binding has run says
+        # so here too, because that is the one case where the name on its own is
+        # not the whole of what was written. Once binding has run every column
+        # has an input and printing it on all of them would be noise, so the
+        # qualifier disappears again at the point it stops carrying anything.
+        if node.at == UNBOUND and node.table != UNBOUND:
+            return String("#", node.table, ".", node.name)
         return node.name
 
     if node.kind == ExprKind.LITERAL:

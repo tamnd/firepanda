@@ -83,6 +83,19 @@ This release is the plumbing and nothing else. Nothing produces a selection, so 
 `Chunk.into_columns` flattens before handing the arrays over, so every existing caller keeps getting one array per column at the chunk's rows and none of them had to change. `Chunk.column` gets one column at the chunk's rows without flattening the others, which is what an operator reading two columns of a wide chunk wants.
 
 The positions are `Int` rather than `UInt32` because `take_any` takes a `List[Int]` and converting on every gather would cost more than the four bytes a position saves. That is worth revisiting once something reads a selection without gathering through it, which is the next step.
+### Fixed: a column name two inputs both have is no longer resolved to whichever came first
+
+Binding resolved a column name to the first column in the schema that had it. A join puts its two inputs end to end, so joining two tables that both have a `key` produces a schema with two columns called `key`, and a projection above it asking for `key` got the left one without anything saying so. That is a wrong answer rather than a missing feature, and it is the kind that nothing downstream can notice, because the plan binds, the types check and the query runs.
+
+A name that more than one visible column has is now refused, and the message says both positions. When the two come from different inputs it adds that the caller should say which input was meant, and when they come from the same one it does not, since naming the only input would not narrow anything.
+
+Saying which input is what `Expressions.column_of` is for. It is `column` with the relation given, so binding looks at the columns that came from that relation and nowhere else. This is what a qualified name in SQL becomes. `l.a` knows which relation `l` is by the time the plan is built, because the FROM clause that gave `l` its meaning has already been walked, so the plan carries the relation and not the word, which is what the plan spec means when it says a bound plan holds no name that something later has to resolve.
+
+Three smaller things follow from it. A column that says its input but has not been bound prints as `#1.key` rather than as `key`, since there the name on its own is not the whole of what was written, and it goes back to printing `key` the moment binding makes the qualifier redundant. The JSON form already wrote the position and the input as separate fields, so a pinned column round trips with no change to the format. And the table set analysis answers for a pinned column before binding has run, because a pinned column's table is known and saying so is the whole of what pinning does.
+
+Projection pushdown and projection merging both still leave a node whose output names are not all distinct alone, and both keep their reason with a small change to it. Narrowing or substituting the rest of the outputs moves them into new positions, and both passes rebind by name afterwards, so a different and unambiguous name of the same node would resolve differently. An expression that reads the ambiguous name itself is now a plan error before either pass runs.
+
+Part of #309.
 
 ### Changed: a filter writes only the columns something downstream reads
 
