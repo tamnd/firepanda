@@ -60,6 +60,12 @@ computes once because it remembers where it put an index it has already met. It
 works a node at a time because binding writes a position onto a column and the
 same name under two nodes can bind to two different positions.
 
+`empty.mojo` is empty and constant pruning. A filter whose predicate folded to
+false becomes a limit of zero rows, which is an empty relation with the schema
+it had, and a filter that folded to true is spliced out, as is any filter, sort,
+distinct or limit sitting over something empty. It is the only pass that makes
+the plan smaller rather than different.
+
 `optimize.mojo` is the pipeline: every pass above, in the order the spec fixes,
 run again if a run changed anything and up to a small bound. It is the one entry
 point, and the passes that are not written yet slot into it and nowhere else.
@@ -76,6 +82,7 @@ does not change when they do.
 
 from .bind import Bound, bind, bind_all, bind_expr
 from .cse import cse
+from .empty import empty
 from .expr import UNBOUND, Expr, ExprKind, Expressions
 from .limits import limits
 from .lower import lower
