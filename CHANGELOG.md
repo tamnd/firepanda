@@ -101,6 +101,25 @@ Details in document 38. Part of #156, after #517.
 `duplicated` is what made it visible, because the mask carries the frame's labels and a mask whose labels are missing cannot be handed back to `filter`, which is the whole of what a caller does with it. The fix builds a default index when the index and the height disagree, which can only happen on the first column and cannot overwrite labels somebody set, because a frame with no rows has none to set.
 
 Part of #156, after #517.
+### Changed: a projection of a wide frame resolves its names once instead of twice
+
+The widest frame anything here had been pointed at was TPC-H's `lineitem`, at sixteen columns. The ClickBench hits table has a hundred and five, and most of its queries read three of them, so a projection that copies almost nothing is the operation the suite does most.
+
+`select` looked every name up and then handed the same names to `schema.select`, which looked them all up again, and it decided a name had been asked for twice by comparing it against every earlier name. `drop` checked that each name existed and then asked, for every column in the frame, whether any of the dropped names matched it. The names are resolved once now, into positions, and everything after that works in positions: `Schema.select_at` is the positional half of `Schema.select`, `drop` goes through it rather than rebuilding a list of names for `select` to resolve a third time, and the repeat check is a flag per column. That last part is sound because two names resolve to the same position exactly when they are the same name, since `index_of` always answers with the first.
+
+On a 105 column frame, selecting three columns went from 1.43 to 0.78 microseconds, selecting all of them from 72.1 to 23.6, and dropping 102 of 105 from 47.2 to 10.3. There are four rows in `benchmarks/main.mojo` for this now, counted in columns rather than rows, because nothing there had ever looked at a frame wider than sixteen.
+
+A map from name to position was the obvious fix and it is much slower, which is recorded in `index_of_all`'s docstring so the next person does not reach for it again. Building a `Dict[String, Int]` over 105 names costs more than the eleven thousand string comparisons a full width projection makes without one, because almost every comparison stops on the first byte and every insertion hashes a whole name. The scan is not the expensive part. Doing it twice was.
+
+Part of #478.
+
+### Added: binary columns can be relabelled as text without copying them
+
+The hits table stores its text as bare `BYTE_ARRAY` with no string logical type on it, so every text column arrives as `BINARY` and every string predicate over one silently matches nothing. `DataFrame.text_from_binary` gives back the frame with each binary column relabelled as text, and `ChunkedArray.retyped` is the piece underneath it that carries another logical type over the same chunks.
+
+Nothing is converted and no bytes move, because `STRING` and `BINARY` have the same physical layout and the offsets and the buffer are already what a string column wants. The import is left faithful to what the producer said and the caller says, in one line, that it knows better for a particular file.
+
+Part of #478.
 
 ### Added: a plan as JSON, and the same JSON back as a plan
 
