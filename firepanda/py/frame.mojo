@@ -1938,6 +1938,68 @@ def isocalendar(column: PythonObject) raises -> PythonObject:
         raise retagged(DTYPE, cause)
 
 
+def index_to_series(
+    index: PythonObject, labels: PythonObject, name: PythonObject
+) raises -> PythonObject:
+    """Makes the labels of an index into a column that carries them twice.
+
+    A free function for the reason the one above gives, which is the import
+    graph and not taste. It reads an index and answers a series, `index.mojo`
+    cannot import `series.mojo` because `series.mojo` already imports it, and a
+    method on the series that takes an index and hands back a series of the
+    index reads backwards.
+
+    What comes back holds the labels as its values and, unless the caller gives
+    another index, the same labels again as its own labels. That is what
+    `pandas.Index.to_series` answers, and the reason it earns a door of its own
+    rather than a loop in Python is that it is the bridge: every reduction and
+    every transform already written for a column is a thing an index can do once
+    the labels can be handed to one, and none of them has to be written twice.
+
+    The buffers are copied rather than shared, the same as `PySeries.to_index`
+    going the other way, because an index is a value here and a caller who then
+    sorts the column would otherwise be sorting the index it came from.
+
+    Args:
+        index: The index to read.
+        labels: The labels the answer carries, as another index, or `None` for
+            the ones it was read from.
+        name: The column name, or `None` for the index's own name, which is the
+            empty string when the index has none.
+
+    Returns:
+        A new series over a copy of the labels.
+
+    Raises:
+        Error: Tagged `value`, if the given labels are not as many as the ones
+            they are put against.
+    """
+    var held = Pointer(to=PyIndex._held(index)[].index[])
+    var title = String("")
+    if name is not Python.none():
+        title = words(name, "name")
+    elif held[].name:
+        title = held[].name.value()
+    var out = Series(title, held[].materialize())
+    if labels is Python.none():
+        out.index = Index(copy=held[])
+    else:
+        var given = PyIndex._other(labels, "index")
+        if len(given[]) != len(held[]):
+            raise tagged(
+                VALUE,
+                String(
+                    "index has ",
+                    len(given[]),
+                    " labels and the values have ",
+                    len(held[]),
+                    ", so there is no row for each of them",
+                ),
+            )
+        out.index = Index(copy=given[])
+    return PythonObject(alloc=PySeries(ArcPointer(out^)))
+
+
 def raise_for_test(kind: PythonObject) raises -> PythonObject:
     """Raises one classified error of each kind, so the table can be tested.
 

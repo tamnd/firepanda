@@ -14,6 +14,7 @@ from std.python.bindings import PythonModuleBuilder
 
 from firepanda.py.frame import (
     PyDataFrame,
+    index_to_series,
     isocalendar,
     open_arrow,
     open_csv,
@@ -40,6 +41,12 @@ def register(mut module: PythonModuleBuilder) raises:
         "_isocalendar",
         docstring=(
             "The ISO 8601 year, week and day of a temporal column, as a frame."
+        ),
+    )
+    module.def_function[index_to_series](
+        "_index_to_series",
+        docstring=(
+            "The labels of an index, as a column that carries them twice."
         ),
     )
     module.def_function[raise_for_test](

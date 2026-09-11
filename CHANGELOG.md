@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: an index can become a column, and nine members that follow from it
+
+`Index.to_series` hands back a series whose values are the labels and whose own labels are the same labels again, which is what pandas answers and is the bridge the rest of this entry is about. An index and a column hold the same thing in this library, so a door between them means every reduction and every transform already written for a column is a thing an index can do, and none of them has to be written twice.
+
+Eight members went in through that door in this change. `isna`, `isnull`, `notna` and `notnull` say which labels are missing, as a list of bools where pandas gives a numpy array. `dropna` takes the missing labels out and hands back the class it was given, so an index of instants with a gap in it stays an index of instants. `min` and `max` read the ends, with numpy's extra arguments checked rather than dropped. `nunique` counts the distinct labels, and answers `dropna=False` by adding one when a label is missing, which is a parameter the column it is built on still refuses.
+
+It is worth more on the conformance board than nine names, because `DatetimeIndex` subclasses `Index` and every member added to one is scored against both. The larger point is that another thirteen names on the same list are the same one line each, and this is the change that makes them so.
+
+Part of #156, after #8.
+
 ### Added: the grouped distinct count measured where it is asked for, at a million groups
 
 `group_nunique` was written for a high group count and until now nothing said so. There is a test that gives a million groups two rows each and checks every one of the million answers, and there are two benchmark rows beside the existing one that hold the row count still and move the group count instead, since the group count is the axis the naive shape falls over on.

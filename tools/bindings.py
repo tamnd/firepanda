@@ -3482,6 +3482,18 @@ FUNCTIONS = (
         params=(("column", "object"),),
         returns="DataFrame",
     ),
+    # Not a user entry point either, and here for the same reason the one above
+    # is: it reads an index and answers a series, and the import graph will not
+    # let a function of an index that gives a series live on the index.
+    # `IndexMixin.to_series` is what calls it, and so does every index method
+    # that is a column method underneath.
+    Binding(
+        mojo="index_to_series",
+        name="_index_to_series",
+        doc="The labels of an index, as a column that carries them twice.",
+        params=(("index", "object"), ("labels", "object"), ("name", "object")),
+        returns="Series",
+    ),
     # Not a user entry point. Every row of the error table in
     # `python/firepanda/errors.py` has to be exercised from Python, and five
     # bound methods cannot reach most of them, so the Mojo side offers a way to

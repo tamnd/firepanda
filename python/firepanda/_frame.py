@@ -3740,6 +3740,14 @@ def _isocalendar(column: object) -> DataFrame:
         raise translate(error) from None
 
 
+def _index_to_series(index: object, labels: object, name: object) -> Series:
+    """The labels of an index, as a column that carries them twice."""
+    try:
+        return Series._wrap(_firepanda._index_to_series(index, labels, name))
+    except Exception as error:
+        raise translate(error) from None
+
+
 def _raise_for_test(kind: str) -> object:
     """Raises one classified error of the given kind. For tests only."""
     try:
