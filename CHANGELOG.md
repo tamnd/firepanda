@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a correlated `EXISTS` is decorrelated into a semi join
+
+`WHERE EXISTS (SELECT 1 FROM u WHERE u.b = t.b)` asks a question once per outer row as written, and it runs here as one semi join between the two tables on `b = b`. `NOT EXISTS` is the same join asking the other way, which is the anti join. On anything the size of a benchmark that rewrite is the difference between a query that finishes and one that does not, and it is the first decorrelation in the front end rather than another refusal.
+
+The subquery's `FROM` is lowered into the scope the outer query is already using, so both sides are in reach at once and the correlation can be read. Its `WHERE` is then split the way a join condition is split: an equality with one side out and one side in is a key pair, a part that reads the subquery's own tables and nothing else becomes a filter under the join where it runs once rather than once per outer row, and a part that reads the outer query any other way is refused as the dependent join it is. Afterwards the subquery's tables go back out of reach, for the reason every semi join's right side does.
+
+Unlike `NOT IN`, `NOT EXISTS` really is the anti join under nulls, because `EXISTS` asks whether a row was found rather than comparing values, and a null key finds nothing. DuckDB's own plan for one shows `IS NOT DISTINCT FROM` on the keys, which is an artifact of how it decorrelates and not a difference in the answer.
+
+An `EXISTS` that reads no outer column is refused rather than answered, since every outer row gets the same answer and that is a mark join. So is one over an aggregate, because an aggregate with no `GROUP BY` answers one row over no rows and an `EXISTS` over it would be true where the subquery found nothing. A `LIMIT` inside one is refused for the same kind of reason, since it changes whether there is a row. The subquery's select list is not read at all, which is where this is looser than DuckDB: a name in there that no table has goes unnoticed here.
+
+Part of #309.
+
 ### Added: an `IN` over a subquery lowers and runs
 
 `WHERE x IN (SELECT k FROM u)` is a semi join between whatever the `FROM` built and the subquery's own plan, on `x = k`. That is the first subquery shape the front end lowers at all, and it is the rewrite decorrelation is built out of rather than a special case beside it.

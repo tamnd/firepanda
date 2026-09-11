@@ -188,6 +188,29 @@ here it is also what makes the rewrite safe: a subquery that reads no outer
 column runs once, and running it once is what a join does with its build side. A
 correlated one refuses, since the name it reaches for is not in reach inside it.
 
+### A correlated `EXISTS` is the same join, decorrelated
+
+`WHERE EXISTS (SELECT 1 FROM u WHERE u.b = t.b AND u.k > 3)` is a semi join on
+`t.b = u.b` with `u.k > 3` as a filter under it, and `NOT EXISTS` is the same
+join asking the other way. That is decorrelation, done for the one shape where
+it is a rewrite rather than a pass, and it is the shape worth having first: an
+`EXISTS` read literally is a query run once per outer row.
+
+So this one lowers its `FROM` into the scope the outer query is already using,
+which is what puts both sides of the join in reach at once, and then splits its
+`WHERE` the way a join condition is split. A part with one side out and one side
+in is a key pair. A part that reads the subquery's own tables and nothing else
+is a filter under the join, where it runs once rather than once per outer row.
+A part that reads the outer query any other way is refused, and so is an
+`EXISTS` that reads no outer column at all, which asks whether a table has any
+row and is a mark join rather than a semi join.
+
+The subquery's select list is not lowered, because `EXISTS` asks whether there
+is a row rather than what is in it. DuckDB does bind it and so refuses a name in
+there that no table has, and here that name goes unread. Its rows also have to
+be the rows of one block over one `FROM`, so an aggregate, a `LIMIT`, a set
+operation and a `WITH` inside one are each refused by name.
+
 ### What is not lowered yet
 
 Named tables, the table functions above, the derived tables and the CTEs above,
@@ -1112,9 +1135,10 @@ def _lower_expr(
             "firepanda does not lower a subquery in an expression yet. A"
             " correlated one is a dependent join that decorrelation has to"
             " remove, and an uncorrelated one is a plan of its own that the"
-            " outer plan has nowhere to hold. An IN over a subquery does lower"
-            " where a WHERE is the AND of it and other things, because there it"
-            " is a semi join rather than a value"
+            " outer plan has nowhere to hold. An IN over a subquery and a"
+            " correlated EXISTS do lower where a WHERE is the AND of one and"
+            " other things, because there each is a semi join rather than a"
+            " value"
         )
     raise Error("an expression shape firepanda does not lower yet")
 
@@ -2831,6 +2855,237 @@ def _in_join(
     return _pair(plan, left, right, keys^, others^, JoinKind.SEMI)
 
 
+def _asks(ast: Ast, at: UInt32) raises -> UInt32:
+    """The `IN` or the `EXISTS` one part of a `WHERE` is, if it is one.
+
+    A `NOT EXISTS` parses as a `NOT` written over a plain `EXISTS` rather than
+    as an `EXISTS` carrying its own negation, so the `NOT` is looked through
+    here and what comes back is the `EXISTS` under it. A `NOT` over anything
+    else is not looked through, so a `NOT (x IN (SELECT ...))` still goes the
+    way it went before, which is refused where the expression is lowered.
+
+    Args:
+        ast: The arenas.
+        at: One part of the `WHERE`.
+
+    Returns:
+        The `EXPR_IN_SUBQUERY` or the `EXPR_EXISTS`, or `NO_NODE` if this part
+        is neither and so is an ordinary condition.
+
+    Raises:
+        If the text of an operator is not there to read.
+    """
+    var node = ast.exprs[Int(at)]
+    if node.kind == EXPR_IN_SUBQUERY or node.kind == EXPR_EXISTS:
+        return at
+    if node.kind == EXPR_UNARY and ast.text(node.payload) == "NOT":
+        if ast.exprs[Int(node.a)].kind == EXPR_EXISTS:
+            return node.a
+    return NO_NODE
+
+
+def _exists_join(
+    ast: Ast,
+    at: UInt32,
+    catalog: Catalog,
+    mut plan: Plan,
+    mut sources: List[Schema],
+    mut scope: _Scope,
+    ctes: _Bindings,
+    var left: _From,
+    negated: Bool,
+) raises -> _From:
+    """Turns a correlated `EXISTS` written in a `WHERE` into a semi join.
+
+    This is decorrelation, done for the one shape it is a rewrite rather than a
+    pass. An `EXISTS` whose subquery reads the query around it is a question
+    asked once per outer row, and on anything the size of a benchmark that is
+    the difference between a query that finishes and one that does not. When the
+    reading it does is equalities against the outer tables, the answer for every
+    outer row at once is a semi join on those equalities, and `NOT EXISTS` is
+    the same join asking the other way.
+
+    So the subquery's `FROM` is lowered into the scope the outer query is
+    already using, which puts both sides of the eventual join in reach at once,
+    and its `WHERE` is then split the way a join condition is split. A part with
+    one side out and one side in is a key pair. A part that reads the subquery's
+    own tables and nothing else is a filter under the join, where it runs once
+    rather than once per outer row. A part that reads the outer query any other
+    way is refused, since it is correlation the key pairs cannot carry.
+
+    Afterwards the subquery's tables go back out of reach, for the reason every
+    semi join's right side does: the join kept no column of them.
+
+    The subquery's select list is not lowered at all, because `EXISTS` asks
+    whether there is a row rather than what is in it. DuckDB does bind it and so
+    refuses a name in there that no table has, and here that name goes unread.
+
+    Args:
+        ast: The arenas.
+        at: The `EXPR_EXISTS`.
+        catalog: What the table names inside it are resolved against.
+        plan: Where the nodes go.
+        sources: One schema per scan, appended to.
+        scope: What the outer `FROM` put in reach, added to and put back.
+        ctes: The CTE names in reach.
+        left: What the join probes with.
+        negated: Whether a `NOT` is written over it, which is how a `NOT EXISTS`
+            reaches here.
+
+    Returns:
+        The join, which produces what the left side produced and nothing else.
+
+    Raises:
+        If the subquery is a shape whose rows are not the rows of one block over
+        one `FROM`, if it reads no outer column, or if it reads one any way but
+        an equality.
+    """
+    var node = ast.exprs[Int(at)]
+    # Either spelling of the negation arrives, since the node carries one and a
+    # `NOT` written in front of it is the other, and two of them cancel.
+    var anti = (node.b == 1) != negated
+    var kind = JoinKind.ANTI if anti else JoinKind.SEMI
+    var word = "NOT EXISTS" if anti else "EXISTS"
+
+    var top = ast.stmts[Int(node.a)]
+    if top.kind != STMT_SELECT:
+        raise Error("an EXISTS over a statement that is not a SELECT")
+    if top.b != NO_NODE:
+        raise Error(
+            String(
+                "firepanda lowers a ",
+                word,
+                (
+                    " whose subquery is one SELECT block so far, and a LIMIT on"
+                    " one changes how many rows it has and so whether it has"
+                    " any"
+                ),
+            )
+        )
+    if len(read_ctes(ast, node.a)) != 0:
+        raise Error(
+            "firepanda does not lower a WITH written inside an EXISTS yet,"
+            " which binds a name for that subquery alone"
+        )
+
+    var body = ast.stmts[Int(top.a)]
+    if body.kind != STMT_QUERY:
+        raise Error(
+            "firepanda lowers an EXISTS over one SELECT block so far, and a"
+            " VALUES or a set operation inside one is a different node"
+        )
+    var clauses = body.children
+    if (
+        ast.length(ast.slot(clauses, CLAUSE_GROUP)) != 0
+        or ast.slot(clauses, CLAUSE_HAVING) != NO_NODE
+    ):
+        raise Error(
+            "firepanda lowers an EXISTS over a SELECT that does not aggregate,"
+            " because an aggregate with no group by answers one row over no"
+            " rows and so an EXISTS over one is true where the subquery is"
+            " empty"
+        )
+    for item in ast.items(ast.slot(clauses, CLAUSE_PROJECTION)):
+        if _has_aggregate(ast, ast.stmts[Int(item)].a):
+            raise Error(
+                "firepanda lowers an EXISTS over a SELECT that does not"
+                " aggregate, and this one folds in its select list"
+            )
+    if ast.length(ast.slot(clauses, CLAUSE_WINDOW)) != 0:
+        raise Error("firepanda does not lower a WINDOW clause yet")
+
+    var from_clause = ast.slot(clauses, CLAUSE_FROM)
+    if from_clause == NO_NODE:
+        raise Error(
+            "an EXISTS over a SELECT with no FROM, which has one row and so is"
+            " a constant rather than a question about a table"
+        )
+
+    # Lowered into the caller's scope rather than a scope of its own, which is
+    # the whole difference between this and the uncorrelated case: a condition
+    # that reads both sides can only be written where both sides are in reach.
+    var reach = len(scope.names)
+    var merged = len(scope.merged)
+    var right = _from(ast, from_clause, catalog, plan, sources, scope, ctes)
+
+    var conjuncts = List[UInt32]()
+    var restriction = ast.slot(clauses, CLAUSE_WHERE)
+    if restriction != NO_NODE:
+        _conjuncts(ast, restriction, conjuncts)
+
+    var left_keys = List[Int]()
+    var right_keys = List[Int]()
+    var inside = List[Int]()
+    var walk = _Walk()
+    for i in range(len(conjuncts)):
+        var one = ast.exprs[Int(conjuncts[i])]
+        if one.kind == EXPR_BINARY and ast.text(one.payload) == "=":
+            var a = _lower_expr(ast, one.a, plan, walk, scope, False)
+            var b = _lower_expr(ast, one.b, plan, walk, scope, False)
+            var first = _side(plan, a, left, right)
+            var second = _side(plan, b, left, right)
+            if first == _LEFT and second == _RIGHT:
+                left_keys.append(a)
+                right_keys.append(b)
+                continue
+            if first == _RIGHT and second == _LEFT:
+                left_keys.append(b)
+                right_keys.append(a)
+                continue
+            if (
+                first != _LEFT
+                and first != _BOTH
+                and second != _LEFT
+                and (second != _BOTH)
+            ):
+                inside.append(plan.exprs.binary(BinaryOp.EQ, a, b))
+                continue
+        else:
+            var whole = _lower_expr(ast, conjuncts[i], plan, walk, scope, False)
+            var reads = _side(plan, whole, left, right)
+            if reads != _LEFT and reads != _BOTH:
+                inside.append(whole)
+                continue
+        raise Error(
+            String(
+                "firepanda decorrelates a ",
+                word,
+                (
+                    " whose subquery reads the query around it through"
+                    " equalities and nothing else, and this part of its"
+                    " condition reads it another way, which is the dependent"
+                    " join that a decorrelation pass removes rather than one"
+                    " this rewrite can"
+                ),
+            )
+        )
+
+    # Back out of reach, for the reason a written out semi join's right side
+    # goes out of reach: the join hands out no column of it.
+    scope.hide(reach, merged)
+
+    if len(left_keys) == 0:
+        raise Error(
+            String(
+                "a ",
+                word,
+                (
+                    " that reads no column of the query around it, which asks"
+                    " whether its own table has any row at all rather than"
+                    " whether it has a matching one, and that is a mark join"
+                    " rather than a semi join"
+                ),
+            )
+        )
+
+    # Under the join rather than over it. A condition that reads the subquery
+    # alone is the same answer wherever it is tested, and tested here it runs
+    # once over that table instead of once per pairing.
+    for i in range(len(inside)):
+        right.at = plan.filter(right.at, inside[i])
+    return _pair(plan, left, right, left_keys^, right_keys^, kind)
+
+
 def _block(
     ast: Ast,
     body: UInt32,
@@ -2920,17 +3175,20 @@ def _block(
     # parameter constraint and then cannot parse the rest of the file.
     var restriction = ast.slot(clauses, CLAUSE_WHERE)
     if restriction != NO_NODE:
-        # An `IN` over a subquery is a join rather than a predicate, so the
-        # WHERE is split on `AND` and the parts that are one are taken out and
-        # put above whatever is left. Splitting only when there is one keeps
-        # every other query's plan the shape it already was, which is one
-        # filter holding the condition as it was written.
+        # An `IN` or a correlated `EXISTS` over a subquery is a join rather than
+        # a predicate, so the WHERE is split on `AND` and the parts that are one
+        # are taken out and put above whatever is left. Splitting only when
+        # there is one keeps every other query's plan the shape it already was,
+        # which is one filter holding the condition as it was written.
         var conjuncts = List[UInt32]()
         _conjuncts(ast, restriction, conjuncts)
         var asked = List[UInt32]()
+        var flipped = List[Bool]()
         for i in range(len(conjuncts)):
-            if ast.exprs[Int(conjuncts[i])].kind == EXPR_IN_SUBQUERY:
-                asked.append(conjuncts[i])
+            var part = _asks(ast, conjuncts[i])
+            if part != NO_NODE:
+                asked.append(part)
+                flipped.append(part != conjuncts[i])
         if len(asked) == 0:
             at = plan.filter(
                 at, _lower_expr(ast, restriction, plan, walk, scope, False)
@@ -2938,7 +3196,7 @@ def _block(
         else:
             var tested = -1
             for i in range(len(conjuncts)):
-                if ast.exprs[Int(conjuncts[i])].kind == EXPR_IN_SUBQUERY:
+                if _asks(ast, conjuncts[i]) != NO_NODE:
                     continue
                 var one = _lower_expr(
                     ast, conjuncts[i], plan, walk, scope, False
@@ -2955,6 +3213,19 @@ def _block(
                 at = plan.filter(at, tested)
             var source = _From(at, Schema(copy=schema), origin.copy())
             for i in range(len(asked)):
+                if ast.exprs[Int(asked[i])].kind == EXPR_EXISTS:
+                    source = _exists_join(
+                        ast,
+                        asked[i],
+                        catalog,
+                        plan,
+                        sources,
+                        scope,
+                        ctes,
+                        source^,
+                        flipped[i],
+                    )
+                    continue
                 source = _in_join(
                     ast,
                     asked[i],
