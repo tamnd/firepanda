@@ -1073,11 +1073,100 @@ def test_a_subquery_naming_a_column_the_outer_query_has_is_not_ambiguous() raise
     )
 
 
-def test_a_not_in_over_a_subquery_is_refused_rather_than_an_anti_join() raises:
-    # The classic wrong answer. One null in the subquery makes NOT IN null for
-    # every row, and an anti join keeps those rows rather than dropping them.
-    with assert_raises(contains="null aware anti join"):
-        _ = _plan("SELECT a FROM t WHERE b NOT IN (SELECT k FROM u)")
+def test_a_not_in_over_a_subquery_is_a_mark_join_and_a_not() raises:
+    # An anti join is the classic wrong answer here. One null in the subquery
+    # makes NOT IN null for every row rather than true, and an anti join keeps
+    # those rows rather than dropping them. The mark join marks such a row null,
+    # the NOT over it is null in turn, and a filter does not keep a null.
+    assert_equal(
+        _plan("SELECT a FROM t WHERE b NOT IN (SELECT k FROM u)"),
+        (
+            "PROJECT [a]\n"
+            "  FILTER not(__mark_0)\n"
+            "    JOIN mark [b = k] -> __mark_0\n"
+            "      SCAN t []\n"
+            "      PROJECT [k]\n"
+            "        SCAN u []\n"
+        ),
+    )
+
+
+def test_an_in_written_in_the_select_list_is_a_mark_join() raises:
+    # Written there it is a value rather than a filter, so the answer has to
+    # arrive on every row and not only on the rows that matched.
+    assert_equal(
+        _plan("SELECT a, b IN (SELECT k FROM u) AS hit FROM t"),
+        (
+            "PROJECT [a, __mark_0 as hit]\n"
+            "  JOIN mark [b = k] -> __mark_0\n"
+            "    SCAN t []\n"
+            "    PROJECT [k]\n"
+            "      SCAN u []\n"
+        ),
+    )
+
+
+def test_an_in_under_an_or_is_a_mark_join_rather_than_a_semi_join() raises:
+    # A semi join answers which rows to keep, and under an OR that is not the
+    # question being asked: a row the IN did not match can still be kept.
+    assert_equal(
+        _plan("SELECT a FROM t WHERE b IN (SELECT k FROM u) OR a > 5"),
+        (
+            "PROJECT [a]\n"
+            "  FILTER or(__mark_0, a > 5)\n"
+            "    JOIN mark [b = k] -> __mark_0\n"
+            "      SCAN t []\n"
+            "      PROJECT [k]\n"
+            "        SCAN u []\n"
+        ),
+    )
+
+
+def test_the_in_a_where_is_the_and_of_is_still_the_semi_join() raises:
+    # The mark join answers the same question and a semi join is the cheaper
+    # way to ask it, so the one place a semi join is right keeps it.
+    assert_equal(
+        _plan("SELECT a FROM t WHERE b IN (SELECT k FROM u) AND a > 5"),
+        (
+            "PROJECT [a]\n"
+            "  JOIN semi [b = k]\n"
+            "    FILTER a > 5\n"
+            "      SCAN t []\n"
+            "    PROJECT [k]\n"
+            "      SCAN u []\n"
+        ),
+    )
+
+
+def test_two_ins_written_as_values_each_get_a_column() raises:
+    # Named by how many were taken out before, so two of them in one query are
+    # two joins and two columns rather than one name meaning both.
+    assert_equal(
+        _plan(
+            "SELECT a FROM t WHERE b IN (SELECT k FROM u) OR b NOT IN"
+            " (SELECT b FROM u)"
+        ),
+        (
+            "PROJECT [a]\n"
+            "  FILTER or(__mark_0, not(__mark_1))\n"
+            "    JOIN mark [b = b] -> __mark_1\n"
+            "      JOIN mark [b = k] -> __mark_0\n"
+            "        SCAN t []\n"
+            "        PROJECT [k]\n"
+            "          SCAN u []\n"
+            "      PROJECT [b]\n"
+            "        SCAN u []\n"
+        ),
+    )
+
+
+def test_an_in_written_over_an_aggregate_says_why_it_is_refused() raises:
+    # The mark join goes above the FROM, which is under the aggregate, and an
+    # aggregate hands up its keys and its folds rather than everything it read.
+    with assert_raises(contains="written somewhere else"):
+        _ = _plan(
+            "SELECT g FROM t GROUP BY g HAVING sum(a) IN (SELECT k FROM u)"
+        )
 
 
 def test_an_in_whose_subquery_hands_out_two_columns_is_refused() raises:
@@ -1095,9 +1184,12 @@ def test_a_correlated_in_is_refused_by_the_scope_it_lowers_against() raises:
         )
 
 
-def test_an_in_written_anywhere_but_a_top_level_and_is_still_refused() raises:
+def test_an_exists_written_anywhere_but_a_top_level_and_is_refused() raises:
+    # An `IN` written there is the mark join and this is the same boolean per
+    # row, but a mark join is given a pair of keys and an `EXISTS` is not
+    # written with one. It gets there through `count(*) > 0` instead.
     with assert_raises(contains="written as a value"):
-        _ = _plan("SELECT a FROM t WHERE a > 1 OR b IN (SELECT k FROM u)")
+        _ = _plan("SELECT a FROM t WHERE a > 1 OR EXISTS (SELECT k FROM u)")
 
 
 def test_a_subquery_that_answers_one_value_is_a_cross_join() raises:
