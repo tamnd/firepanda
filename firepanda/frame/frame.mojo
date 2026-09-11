@@ -1692,6 +1692,30 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         """
         return self.columns[self.schema.index_of(name)].prove_sorted()
 
+    def nunique(mut self, name: String) raises -> Int:
+        """Counts the distinct non-null values of a column, and remembers it.
+
+        The whole column `nunique`, and the one place it is worth asking for by
+        name rather than through `agg`, because a frame this has mutable access
+        to can keep the answer. A column a group by has already been over knows
+        it without counting anything, and a column counted here answers the
+        second time for free.
+
+        Nulls are not values. An empty string is one, which is the distinction
+        `distinct_count_any` makes and the one a dataset that spells its missing
+        text as an empty string turns into a wrong answer rather than a debate.
+
+        Args:
+            name: The column.
+
+        Returns:
+            How many distinct non-null values it holds.
+
+        Raises:
+            If the name is missing or the dtype is not one firepanda can count.
+        """
+        return self.columns[self.schema.index_of(name)].prove_distinct()
+
     def is_monotonic_increasing(mut self, name: String) raises -> Bool:
         """Reports whether a column never decreases, as pandas does.
 
@@ -1802,6 +1826,19 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                     codes^,
                     1,
                 )
+            elif (
+                specs[s].kind == AggKind.NUNIQUE
+                and self.columns[self.schema.index_of(specs[s].column)].distinct
+                >= 0
+            ):
+                # The column already knows, because something factorized it and
+                # wrote the number down. `reduce_any` would build a second hash
+                # table over the same values to arrive back at it.
+                var known = Array[DType.int64](1)
+                known[0] = Int64(
+                    self.columns[self.schema.index_of(specs[s].column)].distinct
+                )
+                produced = AnyArray(known^)
             else:
                 produced = reduce_any(
                     self.columns[self.schema.index_of(specs[s].column)].only(),
@@ -2361,6 +2398,19 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         # because the dropna filter and the sort have both run since then and the
         # labels have to be the keys of the rows that survived, in the order they
         # came out in.
+        # One key means one row per distinct value of it, which is the number a
+        # later `nunique` on the same column would build a second hash table to
+        # learn. The group by has just built the first one and this is what it
+        # handed out, so it goes on the column rather than being thrown away.
+        # More than one key says nothing about any single column, because a
+        # value there can appear beside several others and be back several
+        # times, so the mark is only made for one.
+        if len(by) == 1:
+            var key = out.schema.index_of(by[0])
+            out.columns[key].mark_distinct(
+                len(out) - out.columns[key].null_count()
+            )
+
         if as_index:
             var at = out.schema.index_of(by[0])
             var labels = ChunkedArray(copy=out.columns[at]).combine()

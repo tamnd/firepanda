@@ -29,6 +29,7 @@ from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer
 from firepanda.dtype.logical import LogicalType
 from firepanda.kernel.concat import concat_any, concat_two_any
+from firepanda.kernel.reduce import distinct_count_any
 from firepanda.kernel.sort import is_sorted_any
 
 from .any import AnyArray
@@ -164,6 +165,20 @@ struct ChunkedArray(Copyable, Movable, Sized):
     var order: Sortedness
     """What is known about the order of the values. Never guessed, only set."""
 
+    var distinct: Int
+    """How many distinct non-null values the column holds, or -1 for unknown.
+
+    The second thing a kernel computes on the way past and throws away, after
+    the order. A factorize hands out an ordinal per distinct value and the
+    number it handed out is this, so a column that has been grouped on knows it
+    already and a second count is a second hash table over the same values.
+
+    Same discipline as `order`. Unknown is always safe, the answer is never
+    guessed, and anything that changes which values are here puts it back to
+    unknown rather than trying to keep it current. Nulls are not counted, which
+    is `nunique`'s rule and the one `distinct_count_any` follows.
+    """
+
     def __init__(out self, type: LogicalType):
         """Constructs a column with no chunks.
 
@@ -176,6 +191,7 @@ struct ChunkedArray(Copyable, Movable, Sized):
         self.type = type
         self.nulls = 0
         self.order = Sortedness.UNKNOWN
+        self.distinct = -1
 
     def __init__(out self, var first: AnyArray):
         """Constructs a column from one chunk, taking its dtype.
@@ -191,6 +207,7 @@ struct ChunkedArray(Copyable, Movable, Sized):
         self.chunks = List[AnyArray]()
         self.chunks.append(first^)
         self.order = Sortedness.UNKNOWN
+        self.distinct = -1
 
     def __init__(out self, *, copy: Self):
         """Copies a column chunk by chunk, sharing the bytes of each.
@@ -211,6 +228,7 @@ struct ChunkedArray(Copyable, Movable, Sized):
         self.type = copy.type
         self.nulls = copy.nulls
         self.order = copy.order
+        self.distinct = copy.distinct
 
     def __len__(self) -> Int:
         """Returns the total number of values across all chunks.
@@ -263,6 +281,10 @@ struct ChunkedArray(Copyable, Movable, Sized):
         # of the new chunk. That is `prove_sorted`'s job and it is the caller's
         # decision to pay for it, so the flag is dropped rather than defended.
         self.order = Sortedness.UNKNOWN
+        # A chunk can hold values the column already had or values it did not,
+        # and finding out which is the count itself. So it goes back to unknown,
+        # for the same reason the order does.
+        self.distinct = -1
         self.nulls += chunk.null_count()
         self.starts.append(self.starts[len(self.starts) - 1] + len(chunk))
         self.chunks.append(chunk^)
@@ -292,6 +314,7 @@ struct ChunkedArray(Copyable, Movable, Sized):
         out.starts = self.starts.copy()
         out.nulls = self.nulls
         out.order = self.order
+        out.distinct = self.distinct
         return out^
 
     def null_count(self) -> Int:
@@ -376,6 +399,56 @@ struct ChunkedArray(Copyable, Movable, Sized):
         if self.nulls > 0:
             return
         self.order = order
+
+    def mark_distinct(mut self, count: Int):
+        """Records a distinct count the caller already knows, without checking.
+
+        The counterpart to `mark_sorted`, and unchecked for the same reason: the
+        caller has just factorized this column and the number it handed out is
+        the answer, so recounting to confirm it would be the whole cost of the
+        thing this exists to avoid.
+
+        Nulls are not in the count. A factorize gives them a group of their own,
+        so a caller passing `Factorized.count()` straight through would be one
+        out on a column that has any, and `firsts` is the length that already
+        leaves them out.
+
+        Args:
+            count: How many distinct non-null values the column holds. A
+                negative number puts the answer back to unknown.
+        """
+        self.distinct = count if count >= 0 else -1
+
+    def prove_distinct(mut self) raises -> Int:
+        """Counts the distinct non-null values, and remembers the answer.
+
+        One pass the first time and nothing afterwards, which is `prove_sorted`
+        with a different question. A column a group by has already been over
+        answers without the pass at all, because the group by wrote the answer
+        down.
+
+        A column of more than one chunk is counted by flattening a copy of it,
+        since a count across chunks needs one table over all of them and the
+        kernel takes one array. That copy is why this is `prove` rather than
+        something a reader calls by reflex, and it is the case `combine` exists
+        for.
+
+        Returns:
+            How many distinct non-null values the column holds.
+
+        Raises:
+            If the dtype is not one firepanda can count.
+        """
+        if self.distinct >= 0:
+            return self.distinct
+        if len(self.chunks) == 0:
+            self.distinct = 0
+            return 0
+        if len(self.chunks) == 1:
+            self.distinct = distinct_count_any(self.chunks[0])
+            return self.distinct
+        self.distinct = distinct_count_any(Self(copy=self).combine())
+        return self.distinct
 
     def prove_sorted(mut self) raises -> Sortedness:
         """Finds out whether the column is sorted, and remembers the answer.

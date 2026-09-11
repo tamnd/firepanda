@@ -1314,6 +1314,80 @@ def test_group_by_produces_one_row_per_group() raises:
     assert_equal(out.names()[1], "v_sum")
 
 
+def test_a_group_by_leaves_the_key_count_on_the_column_it_made() raises:
+    """One key, one row per distinct value, and the count that falls out.
+
+    The group by has just built a hash table over the key and the number of
+    ordinals it handed out is the distinct count of that key. The output's key
+    column holds one row per group, so the count is its height less whatever
+    null group survived, and writing it down is what saves a later `nunique`
+    from building the same table again.
+
+    Three real keys and a null one here. With `dropna` the null group is gone
+    and the count is the height; without it the null row is there and is not a
+    value, so the count is one less.
+    """
+    var frame = sample_frame()
+    var by: List[String] = [String("k")]
+    var specs = List[AggSpec]()
+    specs.append(AggSpec("v", AggKind.SUM))
+
+    var dropped = frame.group_by(by, specs)
+    assert_equal(len(dropped), 3)
+    assert_equal(dropped.columns[0].distinct, 3)
+
+    var kept = frame.group_by(by, specs, dropna=False)
+    assert_equal(len(kept), 4)
+    assert_equal(kept.columns[0].distinct, 3, "a null key is not a value")
+
+
+def test_a_group_by_on_two_keys_marks_neither_column() raises:
+    """A value can be back several times beside a different second key.
+
+    The group count is a fact about the pair and says nothing about either
+    column on its own, so there is nothing to write down and the columns stay
+    at unknown rather than taking the height of the output.
+    """
+    var keys = ints([1, 1, 2, 2])
+    var other = ints([7, 8, 7, 8])
+    var values = ints([10, 20, 30, 40])
+    var series = List[Series]()
+    series.append(Series("k", keys^))
+    series.append(Series("j", other^))
+    series.append(Series("v", values^))
+    var frame = DataFrame.from_series(series^)
+
+    var by: List[String] = [String("k"), String("j")]
+    var specs = List[AggSpec]()
+    specs.append(AggSpec("v", AggKind.SUM))
+    var out = frame.group_by(by, specs)
+    assert_equal(len(out), 4)
+    assert_equal(out.columns[0].distinct, -1)
+    assert_equal(out.columns[1].distinct, -1)
+
+
+def test_nunique_answers_from_the_count_the_group_by_left() raises:
+    """The same number three ways, one of which counts nothing.
+
+    `nunique` on a fresh column counts and remembers. On a column a group by
+    produced the answer is already there. `agg` reads the same field, so a
+    reduction over a column that knows does not build a second hash table, and
+    the only thing a test can assert about that is that the answer is the same
+    one.
+    """
+    var frame = sample_frame()
+    assert_equal(frame.nunique("k"), 3)
+    assert_equal(frame.columns[0].distinct, 3)
+
+    var specs = List[AggSpec]()
+    specs.append(AggSpec("k", AggKind.NUNIQUE))
+    var counted = frame.agg(specs)
+    assert_equal(len(counted), 1)
+    assert_equal(
+        counted.columns[0].only().as_typed_view[DType.int64]()[0], Int64(3)
+    )
+
+
 def test_group_by_sorts_by_the_key() raises:
     var frame = sample_frame()
     var by = List[String]()
