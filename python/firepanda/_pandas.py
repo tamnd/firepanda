@@ -5092,6 +5092,18 @@ class IndexMixin:
         rest refused by name. `tupleize_cols` is the one parameter here that is
         not refused, because refusing it would mean refusing its default, and
         what it turns on is the MultiIndex that does not exist yet.
+
+        A series and another index are both taken as well as a plain sequence,
+        and neither goes through the reader that a sequence goes through. Both
+        already hold a column of a known type, so reading them back out into
+        Python values and inferring a type from those again would be slower and
+        would be a second chance to land somewhere else, which is the same
+        argument `DatetimeIndex` makes for its own shortcut.
+
+        A name that is not given comes off whatever the labels came from, which
+        is pandas' rule and is the reason this is not one line. An index built
+        out of a named series is named after it, and a name written in the call
+        wins over one the data was carrying.
         """
         _refuse("dtype", dtype, "casting on the way in needs the cast machinery")
         _refuse("copy", copy, "there is exactly one behaviour and it always copies")
@@ -5100,8 +5112,14 @@ class IndexMixin:
                 "tupleize_cols=False is not supported yet, because there is no"
                 " MultiIndex for it to turn off"
             )
+        label = _label_of(data) if name is None else str(name)
         try:
-            self._inner = _firepanda.Index(data, None if name is None else str(name))
+            if isinstance(data, IndexMixin):
+                self._inner = data._inner.renamed(label)
+            elif isinstance(data, SeriesMixin):
+                self._inner = data._inner.to_index(label)
+            else:
+                self._inner = _firepanda.Index(data, label)
         except Exception as error:
             raise translate(error) from None
 
@@ -5813,6 +5831,32 @@ class IndexMixin:
             return Index._wrap(getattr(self._inner, which)(_unwrap(other, "other"), sort))
         except Exception as error:
             raise translate(error) from None
+
+
+def _label_of(data: Any) -> str | None:
+    """The name a set of labels arrives already carrying, or None for neither.
+
+    pandas takes the name off the data when the call did not write one, so an
+    index built out of a named series is named after the series and an index
+    built out of another index keeps the name that one had. Anything else, a
+    list or a tuple or a range, has no name to take and answers None.
+
+    A series here is named by a string and the empty string is what unnamed
+    looks like on one, so a series named that way gives an unnamed index rather
+    than a level called nothing. That is the same rule read backwards that
+    `Index.to_series` follows going the other way.
+
+    Args:
+        data: Whatever the constructor was handed.
+
+    Returns:
+        The name, or None.
+    """
+    if isinstance(data, IndexMixin):
+        return data._inner.label()
+    if isinstance(data, SeriesMixin):
+        return data._inner.label() or None
+    return None
 
 
 def _unwrap(value: Any, name: str) -> Any:

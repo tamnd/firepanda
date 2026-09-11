@@ -34,6 +34,7 @@ from ._pandas import (
     _NONEXISTENT_REFUSAL,
     NO_DEFAULT,
     _held_at,
+    _label_of,
     _spelled,
     to_datetime,
 )
@@ -96,7 +97,9 @@ class DatetimeIndex(Index):
             dtype: Refused. The unit comes off the values and `as_unit` changes
                 it afterwards.
             copy: Refused. There is one behaviour and it always copies.
-            name: The level name, or None for unnamed.
+            name: The level name. Left out, it comes off the data when the
+                data is a named series or another index, and is unnamed when
+                the data is a list with nobody to name it.
 
         Raises:
             NotImplementedError: If any of the refused arguments was passed.
@@ -132,7 +135,7 @@ class DatetimeIndex(Index):
                 "copy= is not supported yet, because there is exactly one"
                 " behaviour and it always copies"
             )
-        label = None if name is None else str(name)
+        label = _label_of(data) if name is None else str(name)
         if isinstance(data, Index) and _is_temporal(data.dtype):
             # The labels are already instants, so there is nothing to read and
             # the only thing that can change is the level name. Going through
