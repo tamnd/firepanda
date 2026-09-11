@@ -199,6 +199,44 @@ def test_the_sql_path_and_the_frame_path_build_the_same_plan() raises:
     assert_equal(_plan("SELECT a FROM t WHERE b > 1"), explain(by_hand, at))
 
 
+def test_a_values_is_the_rows_that_were_written() raises:
+    assert_equal(
+        _plan("VALUES (1, 'a'), (2, 'b')"),
+        "VALUES [col0, col1] (1, a), (2, b)\n",
+    )
+
+
+def test_a_select_with_no_from_projects_over_one_row() raises:
+    # The row is there so that the projection has something to be one row of,
+    # and its value is never read.
+    assert_equal(
+        _plan("SELECT 1 AS a, 2 AS b"),
+        "PROJECT [1 as a, 2 as b]\n  VALUES [__row] (0)\n",
+    )
+
+
+def test_a_star_with_no_from_has_nothing_to_stand_for() raises:
+    with assert_raises(contains="nothing for it to stand for"):
+        _ = _plan("SELECT *")
+
+
+def test_every_row_of_a_values_is_the_same_width() raises:
+    with assert_raises(contains="row 2 of a VALUES has 1 values"):
+        _ = _plan("VALUES (1, 2), (3)")
+
+
+def test_a_values_column_is_the_type_that_holds_every_row() raises:
+    var grammar = Grammar()
+    var rules = Transform(grammar)
+    var ast = Ast()
+    var node = rules.parse_statement("VALUES (1), (NULL)", grammar, ast)
+    var out = lower(ast, node, _catalog())
+    var schema = bind(out.plan, out.root, out.sources)
+    assert_equal(len(schema), 1, "one column")
+    assert_equal(schema[0].name, "col0", "named the way DuckDB names it")
+    assert_true(schema[0].nullable, "one NULL in the column is enough")
+
+
 def test_a_union_stacks_two_blocks_and_drops_duplicates_by_default() raises:
     assert_equal(
         _plan("SELECT a FROM t UNION SELECT b FROM t"),

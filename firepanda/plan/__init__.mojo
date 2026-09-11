@@ -13,7 +13,7 @@ docs/specs/planner/02-the-pass-pipeline.md is written in terms of those three,
 which is why they arrive in the first file rather than with the first pass that
 wants one.
 
-`node.mojo` has the nine logical node kinds and the arena, which holds the
+`node.mojo` has the ten logical node kinds and the arena, which holds the
 expression arena inside it so that a plan is one value rather than a pair a
 caller has to keep together. The name collision with `exec/node.mojo` is the
 right collision, because they are the same concept at two levels: a node here

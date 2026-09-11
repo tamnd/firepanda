@@ -597,6 +597,9 @@ def _bind_node(
             sources[table],
         )
 
+    if kind == NodeKind.VALUES:
+        return _bind_values(plan, at)
+
     if kind == NodeKind.UNION:
         return _bind_union(plan, at, done)
 
@@ -700,6 +703,69 @@ def _bind_join(mut plan: Plan, at: Int, done: List[Bound]) raises -> Bound:
         kind == JoinKind.RIGHT or kind == JoinKind.OUTER,
         kind == JoinKind.LEFT or kind == JoinKind.OUTER,
     )
+
+
+def _bind_values(mut plan: Plan, at: Int) raises -> Bound:
+    """Binds a literal table and works out what it produces.
+
+    Nothing to bind against, which is the whole point of the node, so this is
+    typing rather than resolving. A column's type is the one that holds every
+    row's value in that position, worked out the same way a union works out the
+    type that holds both of its arms, and for the same reason: a column of an
+    int32 and an int64 is an int64 column and not an error.
+
+    A column can be missing if any row's value in it can be, so a single `NULL`
+    in a column of a hundred literals makes that column nullable and the other
+    ninety nine do not make it otherwise.
+
+    No column belongs to a relation, since there is no relation. A qualified name
+    over a `VALUES` has nothing to qualify, and leaving the origin unbound is
+    what makes that a name that does not resolve rather than one that resolves to
+    whatever relation zero happens to be.
+
+    The expressions are still bound, against nothing, because a literal knows
+    its type and `1 + 1` does not. Binding is what works out the type of the
+    second, and against an empty schema it is arithmetic and nothing else.
+
+    Args:
+        plan: The plan, written through.
+        at: The node.
+
+    Returns:
+        What the literal table produces.
+
+    Raises:
+        If a column holds two values with no type that holds both.
+    """
+    var width = plan.nodes[at].parts
+    var rows = plan.nodes[at].exprs.copy()
+    for i in range(len(rows)):
+        bind_expr(plan.exprs, rows[i], Schema(), List[Int]())
+    var out = Schema()
+    var origin = List[Int]()
+    for j in range(width):
+        var dtype = plan.exprs.nodes[rows[j]].type
+        var nullable = _nullable(plan.exprs, rows[j], Schema())
+        for i in range(width + j, len(rows), width):
+            var next = plan.exprs.nodes[rows[i]].type
+            try:
+                dtype = promote(dtype, next)
+            except:
+                raise Error(
+                    String(
+                        "column ",
+                        j,
+                        " of a VALUES puts ",
+                        next,
+                        " against ",
+                        dtype,
+                        ", and there is no type that holds both",
+                    )
+                )
+            nullable = nullable or _nullable(plan.exprs, rows[i], Schema())
+        out.append(Field(plan.nodes[at].names[j], dtype, nullable))
+        origin.append(UNBOUND)
+    return Bound(out^, origin^)
 
 
 def _bind_union(mut plan: Plan, at: Int, done: List[Bound]) raises -> Bound:

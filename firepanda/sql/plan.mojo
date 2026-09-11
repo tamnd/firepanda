@@ -27,6 +27,17 @@ alias from the select list and `ORDER BY` can, and why `HAVING` may name an
 aggregate and `WHERE` may not. Writing the lowering in this order is what makes
 those rules fall out rather than be enforced.
 
+### A query with no table still reads one
+
+`SELECT 1` has no `FROM` and a plan has no node that produces a row out of
+nothing, until the literal table node. A query with no `FROM` lowers to a
+projection over one row of one constant, and the projection drops the constant
+again, so the only thing that row does is exist. `VALUES (1), (2)` is the same
+node with the rows the query wrote in it.
+
+That is what makes `SELECT 1` a plan rather than a special case, and it is why
+the node went in rather than a flag somewhere saying this query has no input.
+
 ### A set operation is two of those with a node over them
 
 `UNION`, `EXCEPT` and `INTERSECT` each take a whole query on both sides, so the
@@ -117,6 +128,7 @@ from .ast import (
     STMT_QUERY,
     STMT_SELECT,
     STMT_SET_OPERATION,
+    STMT_VALUES,
 )
 from .catalog import Catalog, KIND_FRAME, fold
 
@@ -754,7 +766,7 @@ def _combine(
     mut plan: Plan,
     mut sources: List[Schema],
 ) raises -> Int:
-    """Lowers one query body, which is a block or a set operation over two.
+    """Lowers one query body: a block, a `VALUES`, or a set operation over two.
 
     A set operation nests rather than flattening. `a EXCEPT b EXCEPT c` and
     `a EXCEPT (b EXCEPT c)` are different answers, so the left leaning shape the
@@ -763,7 +775,7 @@ def _combine(
 
     Args:
         ast: The arenas.
-        body: The `STMT_QUERY` or `STMT_SET_OPERATION`.
+        body: The `STMT_QUERY`, `STMT_VALUES` or `STMT_SET_OPERATION`.
         catalog: What the table names are resolved against.
         plan: Where the nodes go.
         sources: One schema per scan, appended to in scan order.
@@ -782,7 +794,64 @@ def _combine(
         var left = _combine(ast, node.a, catalog, plan, sources)
         var right = _combine(ast, node.b, catalog, plan, sources)
         return plan.setop([left, right], read[0], read[1])
+    if node.kind == STMT_VALUES:
+        return _values(ast, body, plan)
     return _block(ast, body, catalog, plan, sources)
+
+
+def _values(ast: Ast, body: UInt32, mut plan: Plan) raises -> Int:
+    """Lowers a `VALUES` into the literal table node.
+
+    The first row decides how wide the table is and every other row has to
+    agree, which is what SQL says and is also the only rule that gives a column
+    a position to be in.
+
+    The columns are called `col0`, `col1` and so on, because a `VALUES` names
+    nothing and that is what DuckDB calls them. A name it invents is a name a
+    query can write, so inventing the same ones DuckDB does is the difference
+    between a query that ports and one that almost does.
+
+    Args:
+        ast: The arenas.
+        body: The `STMT_VALUES`.
+        plan: Where the nodes go.
+
+    Returns:
+        The node the rows produce.
+
+    Raises:
+        If there are no rows, if two rows are different widths, or if a value is
+        an expression this does not lower.
+    """
+    var rows = ast.items(ast.stmts[Int(body)].children)
+    if len(rows) == 0:
+        raise Error("a VALUES with no rows in it")
+
+    # Nothing under a VALUES, so nothing can aggregate and the walk collects
+    # nothing. It is here because lowering an expression takes one.
+    var walk = _Walk()
+    var width = len(ast.items(rows[0]))
+    var lowered = List[Int]()
+    for i in range(len(rows)):
+        var row = ast.items(rows[i])
+        if len(row) != width:
+            raise Error(
+                String(
+                    "row ",
+                    i + 1,
+                    " of a VALUES has ",
+                    len(row),
+                    " values and the first row has ",
+                    width,
+                )
+            )
+        for j in range(len(row)):
+            lowered.append(_lower_expr(ast, row[j], plan, walk, False))
+
+    var names = List[String]()
+    for j in range(width):
+        names.append(String("col", j))
+    return plan.values(lowered^, names^)
 
 
 def _block(
@@ -814,8 +883,8 @@ def _block(
     var query = ast.stmts[Int(body)]
     if query.kind != STMT_QUERY:
         raise Error(
-            "firepanda lowers a SELECT block and a set operation over two so"
-            " far, and a VALUES and a TABLE are each a different node"
+            "firepanda lowers a SELECT block, a VALUES and a set operation over"
+            " two so far, and a TABLE is a different node"
         )
     if ast.length(query.b) != 0:
         raise Error(
@@ -835,8 +904,11 @@ def _block(
             " it does not lower a window function"
         )
 
-    var table = _table_of(ast, ast.slot(clauses, CLAUSE_FROM), catalog)
-    var schema = Schema(copy=catalog.frame_at(catalog.find(table)).schema)
+    var from_clause = ast.slot(clauses, CLAUSE_FROM)
+    var schema = Schema()
+    if from_clause != NO_NODE:
+        var table = _table_of(ast, from_clause, catalog)
+        schema = Schema(copy=catalog.frame_at(catalog.find(table)).schema)
 
     var group_clause = ast.slot(clauses, CLAUSE_GROUP)
     var having = ast.slot(clauses, CLAUSE_HAVING)
@@ -853,11 +925,22 @@ def _block(
                 break
 
     var walk = _Walk()
-    # The scan carries the offset of its own schema in `sources`, so a query
-    # over two blocks hands binding two schemas and each scan reaches its own.
-    var table_at = len(sources)
-    sources.append(Schema(copy=schema))
-    var at = plan.scan(String(table), List[String](), table_at)
+    var at: Int
+    if from_clause == NO_NODE:
+        # A query with no FROM still has to project over something, and one row
+        # of one constant is the smallest something there is. The projection
+        # above drops the column again, so the value in it is never read and
+        # only its row count matters.
+        at = plan.values([plan.exprs.literal(Value(Int64(0)))], ["__row"])
+    else:
+        # The scan carries the offset of its own schema in `sources`, so a query
+        # over two blocks hands binding two schemas and each scan reaches its
+        # own.
+        var table_at = len(sources)
+        sources.append(Schema(copy=schema))
+        at = plan.scan(
+            _table_of(ast, from_clause, catalog), List[String](), table_at
+        )
 
     # Not called `where`, which the formatter reads as the start of a
     # parameter constraint and then cannot parse the rest of the file.
@@ -886,6 +969,11 @@ def _block(
     for i in range(len(items)):
         var item = ast.stmts[Int(items[i])]
         if ast.exprs[Int(item.a)].kind == EXPR_STAR:
+            if from_clause == NO_NODE:
+                raise Error(
+                    "a star in a SELECT with no FROM, and there is nothing for"
+                    " it to stand for"
+                )
             _expand(ast, item.a, schema, plan, outputs, names)
             continue
         outputs.append(_lower_expr(ast, item.a, plan, walk, grouped))
