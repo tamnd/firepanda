@@ -304,11 +304,42 @@ def test_a_column_no_table_has_is_refused() raises:
         _ = run("SELECT nosuch FROM sales", session())
 
 
-def test_a_distinct_is_refused_by_name() raises:
-    # There is no physical operator for one yet. The refusal is what stops it
-    # being silently dropped, which would return the duplicates.
-    with assert_raises(contains="no operator"):
-        _ = run("SELECT DISTINCT shop FROM sales", session())
+def test_a_distinct_keeps_one_row_of_each() raises:
+    # Two shops over ten rows, and the second one is seen on the second row, so
+    # first seen order is the order they were written in the frame.
+    var out = run("SELECT DISTINCT shop FROM sales", session())
+    same(read_back(out, "shop"), [1, 2], "the shops")
+
+
+def test_a_distinct_over_two_columns_reads_the_pair() raises:
+    # Every quantity is its own row, so the pair of a shop and a quantity is as
+    # tall as the frame and the distinct keeps all ten.
+    var out = run(
+        "SELECT DISTINCT shop, qty FROM sales ORDER BY qty", session()
+    )
+    same(
+        read_back(out, "qty"),
+        [1, 3, 5, 8, 12, 15, 20, 25, 30, 40],
+        "every quantity",
+    )
+
+
+def test_a_distinct_runs_after_the_where() raises:
+    var out = run(
+        "SELECT DISTINCT shop FROM sales WHERE qty > 25 ORDER BY shop",
+        session(),
+    )
+    same(read_back(out, "shop"), [1, 2], "both shops sold a large order")
+
+
+def test_a_distinct_on_part_of_the_row_is_refused_by_name() raises:
+    # `DISTINCT ON` keeps whole rows chosen by some of their columns, and a
+    # group by carries its keys in front of what it reduced, so the answer would
+    # not be the columns in the order the query asked for them. The front end
+    # already has it in the unsupported table, so the refusal comes from there
+    # rather than from lowering, which is the earlier and better of the two.
+    with assert_raises(contains="does not lower DISTINCT ON yet"):
+        _ = run("SELECT DISTINCT ON (shop) shop, qty FROM sales", session())
 
 
 def main() raises:
