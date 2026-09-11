@@ -1,4 +1,4 @@
-"""The best few rows of every group, without sorting anything.
+"""The best few rows, of every group or of the whole frame.
 
 `group.mojo` reduces each group to one value. This picks each group's `n` best
 rows and reports their positions, which is what pandas spells
@@ -53,17 +53,62 @@ A table is `n` slots per group, so the memory is proportional to
 `n * groups * workers` and the ceiling is the one `group.mojo` has. Past it the
 scan stays on one core. The fix for that case is partitioning the rows by group
 ordinal, which is `firepanda/hash/partition.mojo`'s job and is not done here.
+
+## The whole frame version, which is a limit over a sort
+
+`top_rows` answers the other shape: no groups, several keys of any sortable type
+pointing in any direction, and a limit with an offset on the front of it. That is
+`ORDER BY ... LIMIT n OFFSET m`, which nine of the ClickBench queries end with,
+and the point of it is the same as the point of the grouped version. Sorting a
+hundred million rows to look at ten of them is most of a query's time spent on an
+answer nobody reads.
+
+The bound is `offset + limit` rather than `limit`. A query that skips ninety rows
+and then takes ten needs a hundred rows kept, and a pass that reads the limit and
+forgets the offset gives the wrong ten rows rather than a slower right answer.
+
+It works a block of rows at a time. The kept set, at most `bound` rows, is put in
+front of the next block, the keys are gathered for that candidate list, the list
+is sorted, and the first `bound` of it becomes the new kept set. A row that is not
+in the best `bound` of the kept set and its own block cannot be in the best
+`bound` of the frame, so dropping it is safe. What that buys is memory: the sort
+never sees more than a block plus the bound, so the ten rows a query wants cost a
+few megabytes of scratch rather than a permutation of the whole frame.
+
+Two things are deliberate about the candidate list. It is built in ascending row
+order, kept set first because every row in it came from an earlier block, which
+means the stable sort underneath breaks a tie by row number and the answer does
+not depend on where the block boundaries fell. And the kept set is read back out
+by walking the candidates and taking the chosen ones rather than by sorting the
+chosen rows, which is one pass over a list that is already in cache.
+
+A null is not dropped here, which is the difference from the grouped version
+above. A limit over a sort is asking for rows in an order and `nulls_first` says
+where the nulls go in it, so a null is a value with a position like any other.
+`nlargest` is asking for the largest values and a null is not one.
+
+This does not use the slot table above, and on one numeric key it could. The
+table's gate is one comparison per row against the current worst, with no gather
+and no per block sort, which is a better loop than this one. Wiring it in means a
+scan that takes no group ordinals, since a codes column of zeros costs four bytes
+a row for nothing, and that is worth doing with the benchmark in front of us.
 """
 
 from std.sys.info import size_of
 
-from firepanda.array.any import AnyArray
+from firepanda.array.any import AnyArray, ColumnRefs
 from firepanda.array.array import Array
 from firepanda.bitmap.bitmap import Bitmap
 from firepanda.buffer.buffer import Buffer
 from firepanda.dtype.lists import NUMERIC
 from firepanda.exec.parallel import parallel_for, worker_count
 from firepanda.kernel.accum import highest, lowest
+from firepanda.kernel.select import take_any
+from firepanda.kernel.sort import (
+    argsort_any_into,
+    argsort_multi,
+    identity_permutation,
+)
 
 comptime TOP_PRIVATE_BYTES = 64 * 1024 * 1024
 """How much memory the private slot tables may take, in total.
@@ -640,3 +685,258 @@ def group_top_rows_any(
                 n,
             )
     raise Error("group top: the ranked column must be a numeric one")
+
+
+comptime TOP_ROWS_BLOCK = 1 << 16
+"""How many rows a whole frame top n looks at in one go.
+
+Large enough that the per block sort is a real radix sort rather than a handful
+of rows, small enough that the block's keys and its permutation sit in cache
+while they are being sorted. The kept set is added to every block, so a bound
+larger than this raises the block to the bound rather than sorting the kept set
+over and over against a smaller one.
+"""
+
+
+def _clip_order(
+    order: Array[DType.uint32], offset: Int, limit: Int
+) -> Array[DType.uint32]:
+    """Takes `limit` rows out of a permutation, starting at `offset`.
+
+    Args:
+        order: The rows in the order the keys put them in.
+        offset: How many to drop from the front.
+        limit: How many to keep after that.
+
+    Returns:
+        The kept rows, which is shorter than `limit` if the order ran out.
+    """
+    var rows = len(order)
+    var start = offset if offset < rows else rows
+    var stop = start + limit
+    if stop > rows:
+        stop = rows
+    var out = Array[DType.uint32](stop - start)
+    var src = order.unsafe_ptr()
+    for i in range(start, stop):
+        out.set_valid(i - start, src.unsafe_offset(i).unsafe_load())
+    return out^
+
+
+def _clip_rows(
+    rows_at: List[Int], offset: Int, limit: Int
+) -> Array[DType.uint32]:
+    """The same clip over a list of row numbers.
+
+    Args:
+        rows_at: The rows in the order the keys put them in.
+        offset: How many to drop from the front.
+        limit: How many to keep after that.
+
+    Returns:
+        The kept rows.
+    """
+    var rows = len(rows_at)
+    var start = offset if offset < rows else rows
+    var stop = start + limit
+    if stop > rows:
+        stop = rows
+    var out = Array[DType.uint32](stop - start)
+    for i in range(start, stop):
+        out.set_valid(i - start, UInt32(rows_at[i]))
+    return out^
+
+
+def _sorted_order[
+    o: ImmOrigin
+](
+    columns: ColumnRefs[o],
+    at: List[Int],
+    rows: Int,
+    descending: List[Bool],
+    nulls_first: List[Bool],
+) raises -> Array[DType.uint32]:
+    """Sorts every row, which is what a bound that covers the frame asks for.
+
+    `argsort_multi` with the keys borrowed out of the frame rather than copied
+    into a list, which is the same thing `DataFrame.argsort` does and for the
+    same reason.
+
+    Args:
+        columns: The frame's columns, borrowed.
+        at: Which of them are keys, most significant first.
+        rows: The frame's height.
+        descending: One flag per key.
+        nulls_first: One flag per key.
+
+    Returns:
+        A permutation of `[0, rows)`.
+
+    Raises:
+        Error: If a key dtype is not sortable.
+    """
+    var order = identity_permutation(rows)
+    for k in range(len(at) - 1, -1, -1):
+        argsort_any_into(columns[at[k]][], order, descending[k], nulls_first[k])
+    return order^
+
+
+def _top_rows_core[
+    o: ImmOrigin
+](
+    columns: ColumnRefs[o],
+    at: List[Int],
+    rows: Int,
+    descending: List[Bool],
+    nulls_first: List[Bool],
+    limit: Int,
+    offset: Int,
+    block: Int,
+) raises -> Array[DType.uint32]:
+    """The bounded scan, with the block size handed in.
+
+    Split out from `top_rows` so a test can run the several block path over
+    forty rows instead of over a quarter of a million.
+
+    Args:
+        columns: The frame's columns, borrowed.
+        at: Which of them are keys, most significant first.
+        rows: The frame's height.
+        descending: One flag per key.
+        nulls_first: One flag per key.
+        limit: How many rows to return.
+        offset: How many to drop before those.
+        block: How many rows to consider at a time.
+
+    Returns:
+        The rows the keys put in `[offset, offset + limit)`.
+
+    Raises:
+        Error: If a key dtype is not sortable.
+    """
+    if limit == 0 or rows == 0 or offset >= rows:
+        return Array[DType.uint32](0)
+    if limit >= rows - offset:
+        # The bound covers the frame, so there is nothing to be bounded about
+        # and one sort of everything is the cheaper of the two.
+        return _clip_order(
+            _sorted_order(columns, at, rows, descending, nulls_first),
+            offset,
+            limit,
+        )
+
+    var bound = offset + limit
+    var kept_in_order = List[Int]()
+    var kept_by_row = List[Int]()
+    var start = 0
+    while start < rows:
+        var stop = start + block
+        if stop > rows:
+            stop = rows
+
+        # The candidates are the kept set followed by the block, and both of
+        # those are in ascending row order, so the whole list is. That is what
+        # makes the tie rule right: the sort under this is stable, so rows the
+        # keys cannot tell apart come back in the order they are handed over,
+        # which is the frame's own row order.
+        var candidates = List[Int](capacity=len(kept_by_row) + stop - start)
+        for i in range(len(kept_by_row)):
+            candidates.append(kept_by_row[i])
+        for row in range(start, stop):
+            candidates.append(row)
+
+        var keys = List[AnyArray](capacity=len(at))
+        for k in range(len(at)):
+            keys.append(take_any(columns[at[k]][], candidates))
+        var order = argsort_multi(keys, descending, nulls_first)
+
+        var take = bound if bound < len(candidates) else len(candidates)
+        var chosen = List[Bool](length=len(candidates), fill=False)
+
+        var ranked = List[Int](capacity=take)
+        var ranks = order.unsafe_ptr()
+        for i in range(take):
+            var which = Int(ranks.unsafe_offset(i).unsafe_load())
+            chosen[which] = True
+            ranked.append(candidates[which])
+
+        # Reading the chosen flags in candidate order rather than sorting the
+        # kept rows is what keeps the list ascending for the next block, and it
+        # is one pass over a list that is already in cache.
+        var by_row = List[Int](capacity=take)
+        for i in range(len(candidates)):
+            if chosen[i]:
+                by_row.append(candidates[i])
+
+        kept_in_order = ranked^
+        kept_by_row = by_row^
+        start = stop
+
+    return _clip_rows(kept_in_order, offset, limit)
+
+
+def top_rows[
+    o: ImmOrigin
+](
+    columns: ColumnRefs[o],
+    at: List[Int],
+    rows: Int,
+    descending: List[Bool],
+    nulls_first: List[Bool],
+    limit: Int,
+    offset: Int = 0,
+) raises -> Array[DType.uint32]:
+    """Picks the rows a sort would put in `[offset, offset + limit)`.
+
+    Args:
+        columns: The frame's columns, borrowed.
+        at: Which of them are keys, most significant first.
+        rows: The frame's height.
+        descending: One flag per key.
+        nulls_first: One flag per key.
+        limit: How many rows to return. Zero returns nothing.
+        offset: How many rows to drop before those.
+
+    Returns:
+        The chosen rows, best first, which is shorter than `limit` when the
+        frame ran out.
+
+    Raises:
+        Error: If there are no keys, if the flag lists are the wrong length, if
+            a key is not in the frame or is a different height, if the limit or
+            the offset is negative, if there are more rows than a row number can
+            hold, or if a key dtype is not sortable.
+    """
+    if len(at) == 0:
+        raise Error("top rows: at least one key column is required")
+    if len(descending) != len(at) or len(nulls_first) != len(at):
+        raise Error(
+            "top rows needs one descending and one nulls_first flag per key;"
+            " got "
+            + String(len(at))
+            + " keys, "
+            + String(len(descending))
+            + " descending and "
+            + String(len(nulls_first))
+            + " nulls_first"
+        )
+    if limit < 0:
+        raise Error("top rows: the limit cannot be negative")
+    if offset < 0:
+        raise Error("top rows: the offset cannot be negative")
+    if rows > Int(Scalar[DType.uint32].MAX):
+        raise Error("top rows: more than four billion rows")
+    for k in range(len(at)):
+        if at[k] < 0 or at[k] >= len(columns):
+            raise Error("top rows: a key column is not in the frame")
+        if len(columns[at[k]][]) != rows:
+            raise Error(
+                "top rows: a key column is not the same height as the frame"
+            )
+
+    var block = TOP_ROWS_BLOCK
+    if limit > 0 and offset <= rows and offset + limit > block:
+        block = offset + limit
+    return _top_rows_core(
+        columns, at, rows, descending, nulls_first, limit, offset, block
+    )

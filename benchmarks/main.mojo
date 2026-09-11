@@ -1385,6 +1385,14 @@ def bench_frame(mut harness: Harness) raises:
     which is what a frame sort costs over a column sort and is why `argsort` and
     `take` are separate functions in the first place.
 
+    `frame/limit_ten` against `frame/sort_then_slice_ten` is the third, and it
+    is the one a query reads. Nine ClickBench queries end in an order by with a
+    limit of ten on it, and the two rows are the two ways to answer that: sort
+    every row and take ten of them, or keep ten and throw the rest away as they
+    go past. The offset row beside them is there because a limit with an offset
+    has to keep `offset + limit` rows rather than `limit`, so it is the same
+    scan with a hundred times the kept set and it says what that costs.
+
     Args:
         harness: The harness.
 
@@ -1565,6 +1573,50 @@ def bench_frame(mut harness: Harness) raises:
         keep(out.rows)
 
     harness.record("frame/sort_two_keys", "rows", rows, frame_sort_two)
+
+    # The pair that says whether the bounded top n was worth writing. Both rows
+    # answer the same question, the ten smallest rows by key, and the only
+    # difference is that the first one sorts every row to find them and the
+    # second one keeps ten. Both stop at the positions rather than gathering, so
+    # the gather is not in either number. The ratio is what matters and it grows
+    # with the row count, because the sort is the thing that scales with it and
+    # the kept set is not, so the number to quote is the one taken at the
+    # largest `--rows` the machine will hold rather than the default.
+    def frame_sort_then_slice() raises {imm df}:
+        keep(df.rows)
+        var order = df.argsort(["key"], [False], [False])
+        keep(order[0])
+
+    harness.record(
+        "frame/sort_then_slice_ten", "rows", rows, frame_sort_then_slice
+    )
+
+    def frame_limit_ten() raises {imm df}:
+        keep(df.rows)
+        var order = df.argsort_limit(["key"], [False], [False], 10)
+        keep(order[0])
+
+    harness.record("frame/limit_ten", "rows", rows, frame_limit_ten)
+
+    def frame_limit_ten_offset() raises {imm df}:
+        keep(df.rows)
+        var order = df.argsort_limit(["key"], [False], [False], 10, 1000)
+        keep(order[0])
+
+    harness.record(
+        "frame/limit_ten_offset_1000", "rows", rows, frame_limit_ten_offset
+    )
+
+    def frame_limit_two_keys() raises {imm df}:
+        keep(df.rows)
+        var order = df.argsort_limit(
+            ["key", "score"], [False, True], [False, False], 10
+        )
+        keep(order[0])
+
+    harness.record(
+        "frame/limit_ten_two_keys", "rows", rows, frame_limit_two_keys
+    )
 
     # Read these three against `group/ordinals_one_key`, which is the pass they
     # all start with. What is left over is the gather of three columns, and the
