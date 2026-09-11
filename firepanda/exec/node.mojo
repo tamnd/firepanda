@@ -123,6 +123,7 @@ from firepanda.kernel.running import (
     widen_any,
 )
 from firepanda.kernel.select import filter_any, take_any
+from firepanda.kernel.sort import argsort_any_into, identity_permutation
 
 from .chunk import Chunk
 from .morsel import MORSEL_ROWS
@@ -433,6 +434,250 @@ struct Limit(Movable):
             cut.append(chunk.columns[i].slice(0, room))
         self.emitted = self.n
         return Chunk(cut^, room)
+
+
+struct Sort(Movable):
+    """Holds every row, orders them on a set of keys, emits chunks again.
+
+    A breaker, and the one kind of breaker that cannot be anything else. A group
+    by holds one row per group because two rows with the same key are one answer.
+    A sort has no such reduction: the last row to arrive can belong at the front,
+    so the first row of the answer is not known until the last row of the input
+    has been seen, and there is nothing shorter than the input to hold in the
+    meantime.
+
+    What it does instead of getting smaller is get cheaper per row. The sort is
+    the least significant digit pass in `firepanda/kernel/sort.mojo`, run once
+    per key from the last key to the first, each pass refining the permutation
+    the one after it produced rather than starting again. Every pass is stable,
+    so the earlier key stays dominant, and none of them compares a tuple. Then
+    the permutation is applied to every column once, which is the only place the
+    rows move.
+
+    The keys are column positions rather than names, because a chunk has no
+    schema and the pipeline hands one in at `bind` time. The nulls flag is
+    `nulls_first` rather than the plan's `nulls_last` for the same reason the
+    kernel spells it that way, and the lowering flips it.
+
+    Chunk boundaries survive. The input's row counts are recorded on the way in
+    and the output is cut at the same places, so a sort in the middle of a
+    pipeline does not turn ten million rows into one chunk for whatever is above
+    it. The rows in each are of course not the rows that arrived in it.
+
+    This does not honour a limit above it. A sort that only has to get the first
+    n rows right is a different operator with a heap in it rather than a
+    permutation, and the plan writes the bound down on the node for one to read
+    later. Ignoring it is slow rather than wrong, because the limit is still
+    sitting above the sort and still doing the cutting.
+    """
+
+    var keys: List[Int]
+    """The key columns, as input positions, most significant first."""
+
+    var descending: List[Bool]
+    """One flag per key."""
+
+    var nulls_first: List[Bool]
+    """One flag per key."""
+
+    var input: Schema
+    """The schema of the chunks coming in, filled in by `Pipeline.add`."""
+
+    var held: List[ChunkedArray]
+    """The chunks seen so far, one column per position."""
+
+    var sizes: List[Int]
+    """How many rows each chunk that arrived had, in order."""
+
+    var output: List[AnyArray]
+    """The result, in chunks, in reverse order so `finish` can pop."""
+
+    var ran: Bool
+    """Whether the rows have been ordered."""
+
+    var width: Int
+    """The number of columns, known once `bind` has run."""
+
+    def __init__(
+        out self,
+        var keys: List[Int],
+        var descending: List[Bool],
+        var nulls_first: List[Bool],
+    ) raises:
+        """Constructs a sort.
+
+        Args:
+            keys: The key columns, as input positions, most significant first.
+                Consumed.
+            descending: Whether each key orders downwards. Consumed.
+            nulls_first: Whether each key's missing values go at the front.
+                Consumed.
+
+        Raises:
+            If there are no keys, or if the flag lists are a different length
+            from the keys.
+        """
+        if len(keys) == 0:
+            raise Error("sort: a sort with no key does not order anything")
+        if len(descending) != len(keys) or len(nulls_first) != len(keys):
+            raise Error(
+                String(
+                    "sort: ",
+                    len(keys),
+                    " keys, ",
+                    len(descending),
+                    " directions and ",
+                    len(nulls_first),
+                    " null placements",
+                )
+            )
+        self.keys = keys^
+        self.descending = descending^
+        self.nulls_first = nulls_first^
+        self.input = Schema()
+        self.held = List[ChunkedArray]()
+        self.sizes = List[Int]()
+        self.output = List[AnyArray]()
+        self.ran = False
+        self.width = 0
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Records the input schema, which is also the output one.
+
+        Args:
+            input: The schema of the chunks that will arrive. Consumed.
+
+        Returns:
+            The same schema. A sort moves rows and leaves columns alone.
+
+        Raises:
+            If a key is outside the input.
+        """
+        for i in range(len(self.keys)):
+            if self.keys[i] < 0 or self.keys[i] >= len(input):
+                raise Error(
+                    String(
+                        "sort: key column ",
+                        self.keys[i],
+                        " is outside a schema of ",
+                        len(input),
+                        " columns",
+                    )
+                )
+        self.input = input^
+        self.width = len(self.input)
+        for i in range(self.width):
+            self.held.append(ChunkedArray(self.input[i].dtype))
+        return Schema(copy=self.input)
+
+    def update_state(self) -> NodeStatus:
+        """Reports whether the rows have been ordered and handed back.
+
+        Returns:
+            NEED_MORE_INPUT until `finish` has sorted, then HAVE_OUTPUT while
+            chunks remain and FINISHED after that.
+        """
+        if not self.ran:
+            return NodeStatus.NEED_MORE_INPUT
+        if len(self.output) > 0:
+            return NodeStatus.HAVE_OUTPUT
+        return NodeStatus.FINISHED
+
+    def process(mut self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Keeps the chunk and emits nothing.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            None, always. The first row of the answer is not known until the
+            last row of the input has arrived.
+
+        Raises:
+            If the chunk's width does not match the input schema.
+        """
+        if chunk.width() != self.width:
+            raise Error(
+                String(
+                    "sort: chunk has ",
+                    chunk.width(),
+                    " columns and the input schema has ",
+                    self.width,
+                )
+            )
+        self.sizes.append(len(chunk))
+        var backwards = chunk^.into_columns()
+        var forwards = List[AnyArray](capacity=len(backwards))
+        while len(backwards) > 0:
+            forwards.append(backwards.pop())
+        for i in range(self.width):
+            self.held[i].append(forwards.pop())
+        return None
+
+    def finish(mut self) raises -> Optional[Chunk]:
+        """Orders the rows the first time, then hands them back in chunks.
+
+        Returns:
+            One chunk of the ordered result per call, in order, and None when
+            there are none left.
+
+        Raises:
+            If a key column's dtype is not one firepanda can sort.
+        """
+        if not self.ran:
+            self.ran = True
+            self._order()
+        if len(self.output) == 0:
+            return None
+        var row = List[AnyArray](capacity=self.width)
+        for _ in range(self.width):
+            row.append(self.output.pop())
+        return Chunk(row^)
+
+    def _order(mut self) raises:
+        """Sorts what was held and lays it out as chunks ready to be popped.
+
+        The columns are flattened once each, because a permutation reaches any
+        row from any chunk and a gather that had to find which chunk a row was
+        in per row would pay for the chunking on every row rather than once per
+        column. Then the permutation is cut at the boundaries the input had and
+        each piece gathers its own chunk, so the flattening is the one copy.
+
+        Raises:
+            If a key column's dtype is not one firepanda can sort.
+        """
+        var backwards = List[AnyArray](capacity=self.width)
+        while len(self.held) > 0:
+            backwards.append(self.held.pop().combine())
+        var flat = List[AnyArray](capacity=self.width)
+        while len(backwards) > 0:
+            flat.append(backwards.pop())
+        if self.width == 0:
+            return
+
+        var order = identity_permutation(len(flat[0]))
+        for i in range(len(self.keys) - 1, -1, -1):
+            argsort_any_into(
+                flat[self.keys[i]],
+                order,
+                self.descending[i],
+                self.nulls_first[i],
+            )
+        var rows = List[Int](capacity=len(order))
+        for i in range(len(order)):
+            rows.append(Int(order[i]))
+
+        # Backwards, and columns backwards inside a chunk, because `finish`
+        # takes what it hands over off the end of this list.
+        var at = len(rows)
+        for c in range(len(self.sizes) - 1, -1, -1):
+            var start = at - self.sizes[c]
+            var piece = List[Int](capacity=self.sizes[c])
+            for i in range(start, at):
+                piece.append(rows[i])
+            for i in range(self.width - 1, -1, -1):
+                self.output.append(take_any(flat[i], piece))
+            at = start
 
 
 struct Compute(Movable):
@@ -2358,7 +2603,16 @@ def _stripe(var frame: DataFrame) raises -> List[AnyArray]:
 
 
 comptime Node = Variant[
-    Filter, Project, Compute, Cast, Join, Limit, Group, Reduce, Materialize
+    Filter,
+    Project,
+    Compute,
+    Cast,
+    Join,
+    Limit,
+    Sort,
+    Group,
+    Reduce,
+    Materialize,
 ]
 """One operator, as a value the pipeline can hold in a list.
 
@@ -2397,6 +2651,8 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
         return node[Cast].bind(input^)
     if node.isa[Join]():
         return node[Join].bind(input^)
+    if node.isa[Sort]():
+        return node[Sort].bind(input^)
     if node.isa[Project]():
         return _narrow(node[Project].keep, input, "project")
     if node.isa[Filter]() and node[Filter].narrows:
@@ -2446,6 +2702,8 @@ def node_status(node: Node) -> NodeStatus:
         return node[Limit].update_state()
     if node.isa[Materialize]():
         return node[Materialize].update_state()
+    if node.isa[Sort]():
+        return node[Sort].update_state()
     if node.isa[Group]():
         return node[Group].update_state()
     if node.isa[Reduce]():
@@ -2460,9 +2718,10 @@ def node_is_row_local(node: Node) -> Bool:
     depends on its own input row and on a table that was finished before the
     first chunk arrived. What that buys is that the node reads itself and never
     writes itself, so one of them can be handed to every core at once without a
-    copy per worker and without a lock. `Limit` counts rows, `Group` holds a
-    table it is still filling, `Reduce` holds a running answer and `Materialize`
-    holds the input, so all four say no.
+    copy per worker and without a lock. `Limit` counts rows, `Sort` holds every
+    row until it knows where the first one goes, `Group` holds a table it is
+    still filling, `Reduce` holds a running answer and `Materialize` holds the
+    input, so all five say no.
 
     Args:
         node: The node.
@@ -2482,9 +2741,9 @@ def node_is_row_local(node: Node) -> Bool:
 def node_ends_early(node: Node) -> Bool:
     """Reports whether a node can say FINISHED before its input runs out.
 
-    Only `Limit` can. `Group` and `Materialize` say FINISHED too, but not until
-    `finish` has handed back everything they held, which is after the source is
-    empty. The distinction matters to the driver: a pipeline that can stop early
+    Only `Limit` can. `Sort`, `Group` and `Materialize` say FINISHED too, but
+    not until `finish` has handed back everything they held, which is after the
+    source is empty. The distinction matters to the driver: a pipeline that can stop early
     must be fed one chunk at a time, because reading ahead on behalf of thirty
     two cores is reading rows that a limit was about to make unnecessary.
 
@@ -2529,7 +2788,12 @@ def node_is_breaker(node: Node) -> Bool:
     Returns:
         True for a breaker, which is where a pipeline is cut.
     """
-    return node.isa[Materialize]() or node.isa[Group]() or node.isa[Reduce]()
+    return (
+        node.isa[Materialize]()
+        or node.isa[Sort]()
+        or node.isa[Group]()
+        or node.isa[Reduce]()
+    )
 
 
 def node_reads_selection(node: Node) -> Bool:
@@ -2583,6 +2847,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Join].process(chunk^)
     if node.isa[Limit]():
         return node[Limit].process(chunk^)
+    if node.isa[Sort]():
+        return node[Sort].process(chunk^)
     if node.isa[Group]():
         return node[Group].process(chunk^)
     if node.isa[Reduce]():
@@ -2646,6 +2912,8 @@ def node_finish(mut node: Node) raises -> Optional[Chunk]:
     """
     if node.isa[Materialize]():
         return node[Materialize].finish()
+    if node.isa[Sort]():
+        return node[Sort].finish()
     if node.isa[Group]():
         return node[Group].finish()
     if node.isa[Reduce]():

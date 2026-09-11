@@ -83,9 +83,23 @@ left in its place, because the numbers are relation ids rather than positions in
 a list, and a list that closes up renumbers every relation above the one that
 went. With one scan per plan that was invisible.
 
+### A sort is a breaker whose schema is its input's
+
+Every other node this lowers either leaves the columns alone or replaces them.
+A sort does the first and holds every row while doing it, which makes it the one
+place where a trim happens above a breaker rather than below one. `ORDER BY
+a + b` appends the sum, the sort carries it along with everything else, and the
+projection that drops it sits after the sort, because a position below the sort
+is the same position above it.
+
+The bound the plan may have written on the node is not read here. A sort that
+only has to get the first n rows right is a different operator with a heap in it,
+and the limit that wrote the bound down is still sitting above the sort and still
+doing the cutting, so ignoring it is slow rather than wrong.
+
 ### What it refuses, and why refusing is the design
 
-Sorts, distincts and unions are not lowered here yet, and neither is a unary
+Distincts and unions are not lowered here yet, and neither is a unary
 expression, a conditional, a window, or a cast over an input column.
 Every one of those raises an error that names what it was. It does not fall
 back to `Materialize`, and the reason is that `Materialize` holds a function
@@ -113,6 +127,7 @@ from firepanda.exec.node import (
     Node,
     Project,
     Reduce,
+    Sort,
 )
 from firepanda.exec.pipeline import Pipeline
 from firepanda.frame.frame import DataFrame
@@ -617,6 +632,55 @@ def _lower_aggregate(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     pipe.add(Node(Group(keys^, aggs^)))
 
 
+def _lower_sort(plan: Plan, at: Int, mut pipe: Pipeline) raises:
+    """Lowers a sort into the computes its keys need and one breaker.
+
+    A key is an expression rather than a column, so `ORDER BY a + b` appends the
+    sum and sorts on that. The appended columns are trimmed afterwards, which a
+    projection above the breaker does, because the sort hands its input schema
+    back unchanged and a position below it is the same position above it.
+
+    Two keys that are the same expression share one column. Unlike a projection
+    a sort key owns no name, it is read and not emitted, so there is nothing to
+    stop the second from being the first.
+
+    The bound the plan may have put on the node is not read. A sort that only
+    has to get the first n rows right is a different operator, and the limit
+    that wrote the bound down is still above the sort and still doing the
+    cutting, so ignoring it is slow rather than wrong.
+
+    Args:
+        plan: The plan.
+        at: The sort node.
+        pipe: The pipeline, added to.
+
+    Raises:
+        Error: If a key has a kind no operator computes.
+    """
+    var base = len(pipe.schema)
+    var memo = Memo()
+    var held = plan.nodes[at].exprs.copy()
+    var keys = List[Int](capacity=len(held))
+    for i in range(len(held)):
+        keys.append(
+            _lower_expr(
+                plan.exprs, held[i], pipe, base, "key", memo, reuse=True
+            )
+        )
+
+    # The plan writes the directions down first and the null placements after
+    # them, in one list, and it says where the nulls go rather than where they
+    # come first, which is the other way round from the kernel.
+    var descending = List[Bool](capacity=len(held))
+    var nulls_first = List[Bool](capacity=len(held))
+    for i in range(len(held)):
+        descending.append(plan.nodes[at].flags[i])
+        nulls_first.append(not plan.nodes[at].flags[len(held) + i])
+
+    pipe.add(Node(Sort(keys^, descending^, nulls_first^)))
+    _trim(pipe, base)
+
+
 def _lower_limit(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     """Lowers a limit, which has to start at the first row.
 
@@ -876,6 +940,8 @@ def lower(
             _lower_aggregate(plan, at, pipe)
         elif kind == NodeKind.FILTER:
             _lower_filter(plan, at, pipe)
+        elif kind == NodeKind.SORT:
+            _lower_sort(plan, at, pipe)
         elif kind == NodeKind.PROJECT:
             _lower_project(plan, at, pipe)
         elif kind == NodeKind.LIMIT:
