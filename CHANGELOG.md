@@ -49,6 +49,7 @@ One kernel line changed with it. A column with no rows in it now reads as an emp
 Three answers are not pandas' answer and all three are written down in document 33 section 5. An index of instants lists as the whole numbers it stores, which is issue #348 and is not new, though it is a great deal more visible on a thing people print. A yes or no calendar field of a missing label answers missing here and `False` in pandas, because the array pandas hands back has no missing value in it. A fixed offset zone reads back as `+09:00` rather than as `UTC+09:00`.
 
 Part of #495, after #493.
+
 ### Added: predicate pushdown, so a row is thrown away before it is paid for
 
 The fourth pass in `docs/specs/planner/02-the-pass-pipeline.md`, and the one the spec says to build with predicate transfer in mind rather than as a separate thing. A filter now moves toward the scans until it cannot go further, so rows are eliminated before they are joined, aggregated or projected instead of after. The spec's own numbers for doing this by hand on the TPC-H driver: q19 went from 83 to 70 milliseconds by running its four cheap conditions on `part` and on `lineitem` before the join rather than running the disjunction over every shipped line, and q21 went from 285 to 169 by filtering before its joins rather than after them.
