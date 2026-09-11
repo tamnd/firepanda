@@ -159,7 +159,9 @@ def _rebuild(
         plan.exprs.conjuncts(plan.nodes[old].exprs[0], carried)
         return _rebuild(plan, inputs[0], bound, carried^, into)
 
-    if kind == NodeKind.SCAN:
+    if kind == NodeKind.SCAN or kind == NodeKind.VALUES:
+        # The two with no input, and therefore the two where a predicate that
+        # got this far has nowhere further to go and is written back above.
         var at = _emit(plan, old, List[Int](), into)
         return _apply(plan, at, carried^, into)
 
@@ -384,6 +386,12 @@ def _union(
     All or nothing, because a union's arms line up by position and a predicate
     that one arm can answer by name and another cannot is a predicate that would
     mean two different things depending on which arm the row came from.
+
+    The same rewrite is right for a difference and an intersection, which are the
+    same node with a different code on it. A row of the right arm that the
+    predicate throws away could only ever have cancelled a row of the left arm
+    that the predicate throws away too, so pushing into both sides is the answer
+    the filter above would have given.
 
     Args:
         plan: The plan.

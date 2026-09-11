@@ -24,7 +24,8 @@ of it. No recursion and no visited set, the same shape `bind` already uses.
 
 ## What it rewrites
 
-Three of the nine kinds carry a list of columns and the other six do not.
+Three of the ten kinds carry a list of columns that this narrows, and the other
+seven do not.
 
 A scan gets its column list narrowed, which is the point of the pass and where
 the reading stops happening. A scan with no list means the whole table, so a
@@ -42,11 +43,19 @@ A filter, a sort, a limit, a distinct, a join and a union hand their input's
 columns through unchanged, so a position above one of them is the same position
 below it and there is nothing on the node itself to narrow.
 
-Two of the nine ask for more than anything above them wants. A distinct with no
+A values carries a list of columns and is left alone anyway. It is the one node
+that costs nothing to read, since its rows are already in the plan, and narrowing
+it would mean rewriting a row major list around the columns that went. That is
+work for no saving, so it demands nothing and is rewritten not at all, the same
+as a scan of no columns.
+
+Two of the ten ask for more than anything above them wants. A distinct with no
 keys compares whole rows, and so does a union that drops duplicates, so a column
 nothing above reads is still a column that decides whether two rows are one. Both
 of them demand every column of their input whatever the node above asked for,
-because narrowing either one deletes rows rather than reads.
+because narrowing either one deletes rows rather than reads. A difference and an
+intersection are the same node as the union and they compare whole rows whether
+duplicates survive or not, since being on both sides is what they are asking.
 
 ## Why it rebinds
 
@@ -66,7 +75,11 @@ which of the two was meant.
 
 from firepanda.dtype.schema import Schema
 from firepanda.plan.bind import Bound, bind, bind_all
-from firepanda.plan.node import NodeKind, Plan
+from firepanda.plan.node import (
+    SET_UNION,
+    NodeKind,
+    Plan,
+)
 
 
 def prune(mut plan: Plan, root: Int, sources: List[Schema]) raises -> Schema:
@@ -126,7 +139,7 @@ def _demand(
         If an expression holds a column that binding has not reached.
     """
     var kind = plan.nodes[at].kind
-    if kind == NodeKind.SCAN:
+    if kind == NodeKind.SCAN or kind == NodeKind.VALUES:
         return
 
     # Copied out once, because every branch below hands it to a routine that
@@ -142,7 +155,14 @@ def _demand(
         # nothing above reads are two rows, and a union narrowed to the columns
         # above it are one, so narrowing that union deletes a row rather than a
         # read. It asks for the whole of every input for that reason.
-        var whole = not plan.nodes[at].flags[0]
+        #
+        # A difference and an intersection compare whole rows whatever the
+        # duplicate flag says, since deciding whether a row is on both sides is
+        # the operation rather than a step in it. They ask for the whole of every
+        # input always.
+        var whole = (
+            not plan.nodes[at].flags[0] or plan.nodes[at].op != SET_UNION
+        )
         for i in range(len(plan.nodes[at].inputs)):
             var input = plan.nodes[at].inputs[i]
             _want_all(need[input], here)

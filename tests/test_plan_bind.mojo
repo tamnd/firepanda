@@ -30,7 +30,7 @@ from firepanda.kernel.group import AggKind
 from firepanda.kernel.unary import UnaryOp
 from firepanda.plan.bind import bind, bind_expr
 from firepanda.plan.expr import UNBOUND, Expressions
-from firepanda.plan.node import NO_LIMIT, Plan
+from firepanda.plan.node import NO_LIMIT, SET_EXCEPT, SET_INTERSECT, Plan
 
 
 def _customer() -> Schema:
@@ -455,6 +455,48 @@ def test_a_join_key_pair_with_nothing_in_common_is_refused() raises:
         _ = bind(plan, joined, [_customer(), _orders()])
 
 
+def test_a_values_takes_the_type_that_holds_every_row() raises:
+    var plan = Plan()
+    var small = plan.exprs.literal(Value(Int32(1)))
+    var large = plan.exprs.literal(Value(Float64(2.5)))
+    var table = plan.values([small, large], ["n"])
+    var schema = bind(plan, table, List[Schema]())
+    assert_equal(len(schema), 1, "one column two rows tall")
+    assert_equal(schema[0].dtype, LogicalType.FLOAT64, "the type that holds it")
+    assert_false(schema[0].nullable, "two literals and neither is null")
+
+
+def test_one_null_in_a_values_column_is_enough() raises:
+    var plan = Plan()
+    var one = plan.exprs.literal(Value(Int64(1)))
+    var missing = plan.exprs.literal(Value(null=LogicalType.INT64))
+    var table = plan.values([one, one, one, missing], ["a", "b"])
+    var schema = bind(plan, table, List[Schema]())
+    assert_false(schema[0].nullable, "no null in the first column")
+    assert_true(schema[1].nullable, "and one in the second")
+
+
+def test_a_values_column_of_two_types_that_do_not_meet_is_refused() raises:
+    var plan = Plan()
+    var one = plan.exprs.literal(Value(Int64(1)))
+    var word = plan.exprs.literal(Value(String("a")))
+    var table = plan.values([one, word], ["n"])
+    with assert_raises(contains="column 0 of a VALUES puts"):
+        _ = bind(plan, table, List[Schema]())
+
+
+def test_a_values_belongs_to_no_relation() raises:
+    # A qualified name over one has nothing to qualify, so the origin stays
+    # unbound rather than pointing at whatever relation zero happens to be.
+    var plan = Plan()
+    var one = plan.exprs.literal(Value(Int64(1)))
+    var table = plan.values([one], ["n"])
+    var key = plan.exprs.column("n")
+    var root = plan.project(table, [key], ["n"])
+    _ = bind(plan, root, List[Schema]())
+    assert_equal(plan.exprs.nodes[key].table, UNBOUND, "from nowhere")
+
+
 def test_a_union_promotes_the_types_of_the_columns_it_stacks() raises:
     var narrow = Schema()
     narrow.append(Field("n", LogicalType.INT32, False))
@@ -475,8 +517,65 @@ def test_a_union_of_two_different_widths_is_refused() raises:
     var a = plan.scan("customer", ["c_custkey", "c_name"], 0)
     var b = plan.scan("orders", ["o_custkey"], 1)
     var both = plan.union([a, b], all=True)
-    with assert_raises(contains="stacks a 2 column input on a 1 column one"):
+    with assert_raises(contains="a union is between a 2 column input"):
         _ = bind(plan, both, [_customer(), _orders()])
+    var apart = plan.setop([a, b], SET_EXCEPT, all=True)
+    with assert_raises(contains="a difference is between a 2 column input"):
+        _ = bind(plan, apart, [_customer(), _orders()])
+
+
+def test_which_column_can_be_missing_is_a_question_per_operation() raises:
+    # A union produces rows from either side, a difference only from the left,
+    # and an intersection only rows that were on both, so the same pair of
+    # inputs answers three different ways.
+    var never = Schema()
+    never.append(Field("n", LogicalType.INT64, False))
+    var sometimes = Schema()
+    sometimes.append(Field("n", LogicalType.INT64, True))
+
+    var plan = Plan()
+    var a = plan.scan("solid", ["n"], 0)
+    var b = plan.scan("holey", ["n"], 1)
+    var stacked = plan.union([a, b], all=True)
+    var apart = plan.setop([a, b], SET_EXCEPT, all=True)
+    var shared = plan.setop([a, b], SET_INTERSECT, all=True)
+
+    # A fresh pair each time because binding takes them by value, and the point
+    # is that the same two answer three different ways.
+    assert_true(
+        bind(plan, stacked, [Schema(copy=never), Schema(copy=sometimes)])[
+            0
+        ].nullable,
+        "the right arm's missing values are in the answer",
+    )
+    assert_false(
+        bind(plan, apart, [Schema(copy=never), Schema(copy=sometimes)])[
+            0
+        ].nullable,
+        "every row of a difference came from the left",
+    )
+    assert_false(
+        bind(plan, shared, [Schema(copy=never), Schema(copy=sometimes)])[
+            0
+        ].nullable,
+        "and every row of an intersection was on both sides",
+    )
+
+
+def test_an_intersection_keeps_the_relation_the_left_arm_named() raises:
+    # Unlike a union, where the column is two columns stacked and belongs to
+    # neither table. A row in both is the left's row, so the left's origin is
+    # true of it and a qualified name above still resolves.
+    var plan = Plan()
+    var a = plan.scan("customer", ["c_custkey"], 0)
+    var b = plan.scan("orders", ["o_custkey"], 1)
+    var shared = plan.setop([a, b], SET_INTERSECT, all=True)
+    var key = plan.exprs.column("c_custkey")
+    var floor = plan.exprs.literal(Value(Int64(0)))
+    var big = plan.exprs.binary(BinaryOp.GT, key, floor)
+    var kept = plan.filter(shared, big)
+    _ = bind(plan, kept, [_customer(), _orders()])
+    assert_equal(plan.exprs.nodes[key].table, 0, "the left arm's relation")
 
 
 def test_a_union_of_two_relations_leaves_the_column_with_neither() raises:

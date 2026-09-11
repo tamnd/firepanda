@@ -27,6 +27,30 @@ alias from the select list and `ORDER BY` can, and why `HAVING` may name an
 aggregate and `WHERE` may not. Writing the lowering in this order is what makes
 those rules fall out rather than be enforced.
 
+### A query with no table still reads one
+
+`SELECT 1` has no `FROM` and a plan has no node that produces a row out of
+nothing, until the literal table node. A query with no `FROM` lowers to a
+projection over one row of one constant, and the projection drops the constant
+again, so the only thing that row does is exist. `VALUES (1), (2)` is the same
+node with the rows the query wrote in it.
+
+That is what makes `SELECT 1` a plan rather than a special case, and it is why
+the node went in rather than a flag somewhere saying this query has no input.
+
+### A set operation is two of those with a node over them
+
+`UNION`, `EXCEPT` and `INTERSECT` each take a whole query on both sides, so the
+block above is what `_block` lowers and `_combine` is what stacks two of them.
+The `ORDER BY` and the `LIMIT` written at the end belong to the set operation
+rather than to its right arm, which is why they are put on in `lower` after the
+arms are joined and not at the bottom of a block.
+
+The chain nests left, so `a EXCEPT b EXCEPT c` lowers as `(a EXCEPT b) EXCEPT c`
+and not as the other reading, which is a different answer and not a different
+spelling of the same one. Each arm brings its own table into `sources`, so a scan
+carries the offset of its own schema rather than always zero.
+
 ### A HAVING is a filter over a column, not over an aggregate
 
 `plan.filter` refuses a predicate that is not elementwise, which is correct and
@@ -41,10 +65,12 @@ the query runs.
 
 ### What is not lowered yet
 
-One table in the `FROM`, and no joins, no subqueries, no CTEs, no set
-operations, no windows and no `QUALIFY`. Each is a refusal by name rather than a
-silence, so `pixi run sql-support` lists them and the conformance harness can
-tell a missing feature from a crash.
+One table in the `FROM`, and no joins, no subqueries, no CTEs, no windows and no
+`QUALIFY`. A set operation written `BY NAME` is refused too, since lining two
+arms up by column name is a projection on each arm rather than a different node,
+and that needs each arm's output names threaded back out of the block. Each is a
+refusal by name rather than a silence, so `pixi run sql-support` lists them and
+the conformance harness can tell a missing feature from a crash.
 
 A decimal literal is refused too, and that one is not about effort. The engine's
 `LogicalType` has no decimal and no 128 bit integer, which is the whole reason
@@ -61,7 +87,13 @@ from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.unary import UnaryOp
 from firepanda.array.value import Value
-from firepanda.plan.node import NO_LIMIT, Plan
+from firepanda.plan.node import (
+    NO_LIMIT,
+    SET_EXCEPT,
+    SET_INTERSECT,
+    SET_UNION,
+    Plan,
+)
 
 from .ast import (
     Ast,
@@ -95,6 +127,8 @@ from .ast import (
     SORT_DESCENDING,
     STMT_QUERY,
     STMT_SELECT,
+    STMT_SET_OPERATION,
+    STMT_VALUES,
 )
 from .catalog import Catalog, KIND_FRAME, fold
 
@@ -629,11 +663,228 @@ def lower(ast: Ast, statement: UInt32, catalog: Catalog) raises -> Lowered:
             " to a plan and the plan has nowhere to hold one"
         )
 
-    var query = ast.stmts[Int(top.a)]
+    var plan = Plan()
+    var sources = List[Schema]()
+    var at = _combine(ast, top.a, catalog, plan, sources)
+
+    # The ORDER BY and the LIMIT written after a set operation apply to the
+    # whole of it rather than to its last arm, which is why they are put on
+    # here and not inside the block.
+    if top.b != NO_NODE:
+        var walk = _Walk()
+        at = _modifiers(ast, top.b, plan, walk, at)
+
+    return Lowered(plan^, at, sources^)
+
+
+def _words(text: StringSlice) -> List[String]:
+    """Splits a run of text on its spaces, folding each word down.
+
+    Args:
+        text: The text.
+
+    Returns:
+        The words, in order, with the empty ones between two spaces dropped.
+    """
+    var words = List[String]()
+    var word = List[UInt8]()
+    for byte in text.as_bytes():
+        if (
+            byte == UInt8(32)
+            or byte == UInt8(9)
+            or byte == UInt8(10)
+            or byte == UInt8(13)
+        ):
+            if len(word) != 0:
+                words.append(fold(StringSlice(unsafe_from_utf8=Span(word))))
+                word = List[UInt8]()
+        else:
+            word.append(byte)
+    if len(word) != 0:
+        words.append(fold(StringSlice(unsafe_from_utf8=Span(word))))
+    return words^
+
+
+def _set_operation(text: StringSlice) raises -> Tuple[Int, Bool]:
+    """Reads the words a set operation was written with.
+
+    The AST keeps the operator as the source span it came from, so
+    `UNION ALL BY NAME` arrives as one string and this is where it stops being
+    one. Splitting on the spaces rather than matching whole strings is what makes
+    `union  all` written with two spaces the same operator as `UNION ALL`, and
+    folding each word is what makes the lower case spelling the same one too.
+
+    Args:
+        text: The operator as it was written.
+
+    Returns:
+        The `SET_` code, and whether duplicates survive.
+
+    Raises:
+        If the operator is not one of the three, or carries `BY NAME`.
+    """
+    var words = _words(text)
+    if len(words) == 0:
+        raise Error("a set operation with no operator on it")
+
+    var op: Int
+    if words[0] == "union":
+        op = SET_UNION
+    elif words[0] == "except":
+        op = SET_EXCEPT
+    elif words[0] == "intersect":
+        op = SET_INTERSECT
+    else:
+        raise Error(String(words[0], " is not a set operation firepanda knows"))
+
+    # Absent means DISTINCT, which is the one place in SQL where leaving a word
+    # out asks for the slower answer.
+    var all = False
+    for i in range(1, len(words)):
+        if words[i] == "all":
+            all = True
+        elif words[i] == "distinct":
+            all = False
+        elif words[i] == "by":
+            raise Error(
+                "firepanda does not lower a set operation written BY NAME yet,"
+                " which lines the two sides up by column name rather than by"
+                " position and is a projection on each side rather than a"
+                " different node"
+            )
+        else:
+            raise Error(
+                String(words[i], " is not a word a set operation takes")
+            )
+    return (op, all)
+
+
+def _combine(
+    ast: Ast,
+    body: UInt32,
+    catalog: Catalog,
+    mut plan: Plan,
+    mut sources: List[Schema],
+) raises -> Int:
+    """Lowers one query body: a block, a `VALUES`, or a set operation over two.
+
+    A set operation nests rather than flattening. `a EXCEPT b EXCEPT c` and
+    `a EXCEPT (b EXCEPT c)` are different answers, so the left leaning shape the
+    parser built is the shape the plan gets, and the node is built after both
+    sides so that the arena stays in the order binding walks it in.
+
+    Args:
+        ast: The arenas.
+        body: The `STMT_QUERY`, `STMT_VALUES` or `STMT_SET_OPERATION`.
+        catalog: What the table names are resolved against.
+        plan: Where the nodes go.
+        sources: One schema per scan, appended to in scan order.
+
+    Returns:
+        The node the body produces.
+
+    Raises:
+        If the body is a shape this does not lower yet.
+    """
+    if body == NO_NODE:
+        raise Error("a query body that is not there")
+    var node = ast.stmts[Int(body)]
+    if node.kind == STMT_SET_OPERATION:
+        var read = _set_operation(ast.text(node.payload))
+        var left = _combine(ast, node.a, catalog, plan, sources)
+        var right = _combine(ast, node.b, catalog, plan, sources)
+        return plan.setop([left, right], read[0], read[1])
+    if node.kind == STMT_VALUES:
+        return _values(ast, body, plan)
+    return _block(ast, body, catalog, plan, sources)
+
+
+def _values(ast: Ast, body: UInt32, mut plan: Plan) raises -> Int:
+    """Lowers a `VALUES` into the literal table node.
+
+    The first row decides how wide the table is and every other row has to
+    agree, which is what SQL says and is also the only rule that gives a column
+    a position to be in.
+
+    The columns are called `col0`, `col1` and so on, because a `VALUES` names
+    nothing and that is what DuckDB calls them. A name it invents is a name a
+    query can write, so inventing the same ones DuckDB does is the difference
+    between a query that ports and one that almost does.
+
+    Args:
+        ast: The arenas.
+        body: The `STMT_VALUES`.
+        plan: Where the nodes go.
+
+    Returns:
+        The node the rows produce.
+
+    Raises:
+        If there are no rows, if two rows are different widths, or if a value is
+        an expression this does not lower.
+    """
+    var rows = ast.items(ast.stmts[Int(body)].children)
+    if len(rows) == 0:
+        raise Error("a VALUES with no rows in it")
+
+    # Nothing under a VALUES, so nothing can aggregate and the walk collects
+    # nothing. It is here because lowering an expression takes one.
+    var walk = _Walk()
+    var width = len(ast.items(rows[0]))
+    var lowered = List[Int]()
+    for i in range(len(rows)):
+        var row = ast.items(rows[i])
+        if len(row) != width:
+            raise Error(
+                String(
+                    "row ",
+                    i + 1,
+                    " of a VALUES has ",
+                    len(row),
+                    " values and the first row has ",
+                    width,
+                )
+            )
+        for j in range(len(row)):
+            lowered.append(_lower_expr(ast, row[j], plan, walk, False))
+
+    var names = List[String]()
+    for j in range(width):
+        names.append(String("col", j))
+    return plan.values(lowered^, names^)
+
+
+def _block(
+    ast: Ast,
+    body: UInt32,
+    catalog: Catalog,
+    mut plan: Plan,
+    mut sources: List[Schema],
+) raises -> Int:
+    """Lowers one `SELECT ... FROM ... WHERE ...` block.
+
+    The clause order is the one in the module docstring and the reason for it is
+    there too. Every block brings its own `_Walk`, because an aggregate belongs
+    to the block it was written in and two sides of a union are two queries.
+
+    Args:
+        ast: The arenas.
+        body: The `STMT_QUERY`.
+        catalog: What the table names are resolved against.
+        plan: Where the nodes go.
+        sources: One schema per scan, appended to in scan order.
+
+    Returns:
+        The node the block produces.
+
+    Raises:
+        If the block is a shape this does not lower yet.
+    """
+    var query = ast.stmts[Int(body)]
     if query.kind != STMT_QUERY:
         raise Error(
-            "firepanda lowers one SELECT block so far, and a set operation, a"
-            " VALUES and a TABLE are each a different node"
+            "firepanda lowers a SELECT block, a VALUES and a set operation over"
+            " two so far, and a TABLE is a different node"
         )
     if ast.length(query.b) != 0:
         raise Error(
@@ -653,8 +904,11 @@ def lower(ast: Ast, statement: UInt32, catalog: Catalog) raises -> Lowered:
             " it does not lower a window function"
         )
 
-    var table = _table_of(ast, ast.slot(clauses, CLAUSE_FROM), catalog)
-    var schema = Schema(copy=catalog.frame_at(catalog.find(table)).schema)
+    var from_clause = ast.slot(clauses, CLAUSE_FROM)
+    var schema = Schema()
+    if from_clause != NO_NODE:
+        var table = _table_of(ast, from_clause, catalog)
+        schema = Schema(copy=catalog.frame_at(catalog.find(table)).schema)
 
     var group_clause = ast.slot(clauses, CLAUSE_GROUP)
     var having = ast.slot(clauses, CLAUSE_HAVING)
@@ -671,8 +925,22 @@ def lower(ast: Ast, statement: UInt32, catalog: Catalog) raises -> Lowered:
                 break
 
     var walk = _Walk()
-    var plan = Plan()
-    var at = plan.scan(String(table), List[String](), 0)
+    var at: Int
+    if from_clause == NO_NODE:
+        # A query with no FROM still has to project over something, and one row
+        # of one constant is the smallest something there is. The projection
+        # above drops the column again, so the value in it is never read and
+        # only its row count matters.
+        at = plan.values([plan.exprs.literal(Value(Int64(0)))], ["__row"])
+    else:
+        # The scan carries the offset of its own schema in `sources`, so a query
+        # over two blocks hands binding two schemas and each scan reaches its
+        # own.
+        var table_at = len(sources)
+        sources.append(Schema(copy=schema))
+        at = plan.scan(
+            _table_of(ast, from_clause, catalog), List[String](), table_at
+        )
 
     # Not called `where`, which the formatter reads as the start of a
     # parameter constraint and then cannot parse the rest of the file.
@@ -701,6 +969,11 @@ def lower(ast: Ast, statement: UInt32, catalog: Catalog) raises -> Lowered:
     for i in range(len(items)):
         var item = ast.stmts[Int(items[i])]
         if ast.exprs[Int(item.a)].kind == EXPR_STAR:
+            if from_clause == NO_NODE:
+                raise Error(
+                    "a star in a SELECT with no FROM, and there is nothing for"
+                    " it to stand for"
+                )
             _expand(ast, item.a, schema, plan, outputs, names)
             continue
         outputs.append(_lower_expr(ast, item.a, plan, walk, grouped))
@@ -729,12 +1002,7 @@ def lower(ast: Ast, statement: UInt32, catalog: Catalog) raises -> Lowered:
     if (query.a & SELECT_DISTINCT) != 0:
         at = plan.distinct(at, List[Int]())
 
-    if top.b != NO_NODE:
-        at = _modifiers(ast, top.b, plan, walk, at)
-
-    var sources = List[Schema]()
-    sources.append(schema^)
-    return Lowered(plan^, at, sources^)
+    return at
 
 
 def _name_of(ast: Ast, at: UInt32, place: Int) raises -> String:

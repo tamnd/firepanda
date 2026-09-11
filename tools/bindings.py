@@ -1794,6 +1794,12 @@ FRAME = Exposed(
             returns="list[str]",
         ),
         Binding(
+            mojo="PyDataFrame.dtypes",
+            name="dtypes",
+            doc="The column types, in order, as dtype spells them.",
+            returns="list[str]",
+        ),
+        Binding(
             mojo="PyDataFrame.set_index",
             name="set_index",
             doc="The frame with one column moved into the row labels.",
@@ -2167,6 +2173,36 @@ FRAME = Exposed(
                 " sort_remaining, ignore_index, key)"
             ),
             doc="The frame with its rows in the order of their labels.",
+            returns="DataFrame",
+        ),
+        Member(
+            name="filter",
+            kind="method",
+            signature=(
+                "items: Any = None, like: str | None = None,"
+                " regex: str | None = None, axis: Any = None"
+            ),
+            body="self._filter(items, like, regex, axis)",
+            doc="The columns named by one of three rules, in the frame's own order.",
+            returns="DataFrame",
+        ),
+        Member(
+            name="select_dtypes",
+            kind="method",
+            signature="include: Any = None, exclude: Any = None",
+            body="self._select_dtypes(include, exclude)",
+            doc="The columns whose type is in one set of types and not in another.",
+            returns="DataFrame",
+        ),
+        Member(
+            name="truncate",
+            kind="method",
+            signature=(
+                "before: Any = None, after: Any = None, axis: Any = None,"
+                " copy: Any = NO_DEFAULT"
+            ),
+            body="self._truncate(before, after, axis, copy)",
+            doc="The rows between two labels, with both of them kept.",
             returns="DataFrame",
         ),
         Member(

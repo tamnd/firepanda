@@ -76,6 +76,8 @@ Three representations, kept apart, with both of the first two printable.
 
 Nine logical node kinds and nine expression kinds. Write the list down and refuse to add to it without an argument.
 
+The tenth node went in and the argument was this. `SELECT 1` and `VALUES (1), (2)` produce rows out of nothing, and there was no node for that, so either a query with no `FROM` is refused or a projection sits over an input that is not there. A projection over nothing is a node that means something different depending on what is missing under it, which is worse than a node that says what it is. So the list is Scan, Filter, Project, Aggregate, Join, Sort, Limit, Distinct, Union and Values, and the rule that a new one needs an argument stands.
+
 The elementwise, input independent and table set analyses, all three, early, because every later pass is written in terms of them.
 
 Binding to positions, which retires the copying by name accessor rather than working around it.

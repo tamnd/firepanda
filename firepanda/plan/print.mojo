@@ -8,7 +8,14 @@ the second form arrives with the first pass that changes anything.
 
 The shape is a tree, one node a line, indented by depth, children below their
 parent. A `JOIN` prints both of its inputs and a `UNION` prints all of them, so
-the indent is what says which subtree a line belongs to.
+the indent is what says which subtree a line belongs to. A `UNION` prints as the
+set operation it carries, so an `EXCEPT` says `EXCEPT` and not `UNION` with a
+code nobody can see.
+
+A `VALUES` prints its names first and its rows after, which is the opposite of
+how SQL writes it and is the right way round here. A reader scanning an explain
+output wants to know what the columns are called, and a literal table of a
+hundred rows would bury that at the end of the line.
 
 An expression prints in the notation it was written in rather than as a tree,
 because a filter over five predicates is one line that way and eleven lines the
@@ -27,7 +34,13 @@ from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.unary import UnaryOp
 from firepanda.plan.expr import ExprKind, Expressions
-from firepanda.plan.node import NO_LIMIT, NodeKind, Plan
+from firepanda.plan.node import (
+    NO_LIMIT,
+    SET_EXCEPT,
+    SET_INTERSECT,
+    NodeKind,
+    Plan,
+)
 
 
 def _compound(tree: Expressions, at: Int) -> Bool:
@@ -239,7 +252,27 @@ def _line(plan: Plan, at: Int) raises -> String:
             "]",
         )
 
-    return String("UNION all" if node.flags[0] else "UNION")
+    if node.kind == NodeKind.VALUES:
+        # The names first, because they are the thing a reader needs to know and
+        # a hundred row literal table would bury them otherwise.
+        var written = String("VALUES [")
+        for i in range(len(node.names)):
+            if i != 0:
+                written += ", "
+            written += node.names[i]
+        written += "]"
+        for i in range(0, len(node.exprs), node.parts):
+            written += " (" if i == 0 else ", ("
+            written += _list(plan.exprs, node.exprs, i, i + node.parts)
+            written += ")"
+        return written
+
+    var word = "UNION"
+    if node.op == SET_EXCEPT:
+        word = "EXCEPT"
+    elif node.op == SET_INTERSECT:
+        word = "INTERSECT"
+    return String(word, " all") if node.flags[0] else String(word)
 
 
 def explain(plan: Plan, root: Int) raises -> String:

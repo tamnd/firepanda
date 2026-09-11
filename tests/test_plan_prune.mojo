@@ -21,7 +21,7 @@ from firepanda.dtype.schema import Field, Schema
 from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
-from firepanda.plan.node import Plan
+from firepanda.plan.node import SET_EXCEPT, Plan
 from firepanda.plan.print import explain
 from firepanda.plan.prune import prune
 
@@ -359,6 +359,53 @@ def test_a_union_that_drops_duplicates_reads_the_whole_row() raises:
     var all_four = "o_orderkey, o_custkey, o_totalprice, o_comment"
     assert_equal(_read(plan, first), all_four, "one arm whole")
     assert_equal(_read(plan, second), all_four, "and the other")
+
+
+def test_a_values_is_left_alone_and_the_pass_walks_past_it() raises:
+    # It has no input, so a pass that reached for one would be reaching into an
+    # empty list. Leaving it whole is also the right answer: its rows are
+    # already in the plan and reading them costs nothing.
+    var plan = Plan()
+    var one = plan.exprs.literal(Value(Int64(1)))
+    var table = plan.values([one, one, one, one], ["a", "b"])
+    var key = plan.exprs.column("a")
+    var root = plan.project(table, [key], ["a"])
+    _ = prune(plan, root, List[Schema]())
+    assert_equal(
+        explain(plan, root),
+        "PROJECT [a]\n  VALUES [a, b] (1, 1), (1, 1)\n",
+        "both columns still there",
+    )
+
+
+def test_a_difference_that_keeps_duplicates_reads_the_whole_row_too() raises:
+    # The duplicate flag decides nothing here. Whether an orders row is in the
+    # right arm is a question about the whole row whatever happens to the
+    # copies of it afterwards, so both arms stay wide.
+    var plan = Plan()
+    var first = plan.scan("orders", List[String](), 0)
+    var second = plan.scan("orders", List[String](), 1)
+    var apart = plan.setop([first, second], SET_EXCEPT, all=True)
+    var key = plan.exprs.column("o_orderkey")
+    var root = plan.project(apart, [key], ["o_orderkey"])
+    _ = prune(plan, root, [_orders(), _orders()])
+    var all_four = "o_orderkey, o_custkey, o_totalprice, o_comment"
+    assert_equal(_read(plan, first), all_four, "the left arm whole")
+    assert_equal(_read(plan, second), all_four, "and the right one")
+
+
+def test_a_union_that_keeps_duplicates_still_narrows() raises:
+    # The one of the four that is a read and nothing else, so the pass is free
+    # to take the other three columns away.
+    var plan = Plan()
+    var first = plan.scan("orders", List[String](), 0)
+    var second = plan.scan("orders", List[String](), 1)
+    var stacked = plan.union([first, second], True)
+    var key = plan.exprs.column("o_orderkey")
+    var root = plan.project(stacked, [key], ["o_orderkey"])
+    _ = prune(plan, root, [_orders(), _orders()])
+    assert_equal(_read(plan, first), "o_orderkey", "one column on the left")
+    assert_equal(_read(plan, second), "o_orderkey", "and one on the right")
 
 
 def test_a_q6_shaped_plan_reads_four_columns_of_sixteen() raises:
