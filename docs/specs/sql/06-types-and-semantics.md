@@ -61,6 +61,8 @@ The consequence is that `1.1 + 2.2 = 3.3` is true in DuckDB and false in pandas,
 
 Scale and precision rules must match DuckDB's exactly. Addition takes the maximum scale and widens precision by one, multiplication adds both precisions and both scales, division has its own rule, and overflowing `DECIMAL(38, s)` promotes to DOUBLE at some operations and raises at others. `sum()` over `DECIMAL(5,2)` is `DECIMAL(38,2)`, so scale is preserved and precision is maxed.
 
+There is one more rule and it is not in DuckDB's documentation. A result that would need more than 18 digits is narrowed back to 18 when both operands already fit in 18, because 18 digits is what fits in 64 bits and DuckDB would rather keep the cheap representation than take the width the formula asks for. `DECIMAL(10,4) * DECIMAL(10,4)` is `DECIMAL(18,8)` where the formula says 20 digits, and `DECIMAL(18,1) + DECIMAL(18,1)` is `DECIMAL(18,1)` where it says 19. Multiplication has a guard on that guard: a product whose scale reaches 18 is left at its full width, so `DECIMAL(18,9) * DECIMAL(18,9)` is `DECIMAL(36,18)`. Past 38 digits the width stops at 38 and the scale is kept, and a multiplication whose scales alone exceed 38 is an error rather than a type. `firepanda/sql/arith.mojo` has the measured rules and document 11 section 5 is the harness that measured them.
+
 ## 4. Aggregate result types
 
 ```
@@ -137,6 +139,8 @@ String literals are cast to the other side's type, and if the cast fails at runt
 
 The binder inserts every cast explicitly, per document 05, so the plan contains no implicit conversion. That property is what makes an execution time type surprise impossible: if the plan says the operands are INTEGER, they are.
 
+Where the lattice joins two decimals it keeps the larger scale and the larger number of digits in front of the point, and where those two together exceed 38 it is the scale that gives way rather than the digits. `DECIMAL(18,18)` and `DECIMAL(38,10)` agree on `DECIMAL(38,10)`. That only happens when both sides are decimals: an integer against a decimal keeps the decimal's scale, so `HUGEINT` and `DECIMAL(4,2)` agree on `DECIMAL(38,2)` and not on `DECIMAL(38,0)`. `firepanda/sql/cast.mojo` has it.
+
 ## 9. Indexing is one based and slices are inclusive
 
 ```
@@ -169,8 +173,10 @@ Integer addition to a date is days. `INTERVAL` is a triple of months, days and m
 
 ## 11. How this is tested
 
-Not by reading this document. `tests/differential/sql_semantics.mojo` holds one case per rule above, and each case runs the expression through DuckDB in process, using the same `libduckdb` that `firepanda/io/duckdb.mojo` already opens with `dlopen`, and through firepanda, and compares the value and `typeof()`.
+Not by reading this document. One case per rule above runs the expression through DuckDB and through firepanda and compares the value and `typeof()`.
 
-Beyond the enumerated cases, an expression fuzzer generates random typed expression trees from the operator and function tables and compares both engines. Type disagreement is a failure even when the values match, because a wrong type is a wrong answer one operator later.
+The half of that which asks about types rather than values exists now. `tests/differential/semantics.mojo` and `pixi run differential-semantics` put every ordered pair of 27 typed columns through all six arithmetic operators, through negation, through `CASE` and through every name in the tier 1 catalog, and compare the type firepanda's binder gives against the one `typeof` gives, at 15,001 expressions and zero disagreements. It is not an enumerated list of cases and that is the point: the rules above about the 18 digit narrowing and about which decimals give up scale were read off it rather than written into it. Document 11 section 5 has the detail.
+
+Type disagreement is a failure even when the values match, because a wrong type is a wrong answer one operator later.
 
 This suite runs before any of the performance work, because a fast wrong answer is not a result.

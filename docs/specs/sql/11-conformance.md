@@ -43,7 +43,7 @@ The first reading, at the commit the matcher landed on, was 2 and 1,130 out of 7
 
 **The execution harness.** Runs `.test` files against firepanda, compares values, classifies failures. It drives the CLI from document 10, so it is testing the whole stack the way a user gets it.
 
-**The semantics harness.** One case per rule in document 06, comparing value and `typeof()` against DuckDB in process, plus the expression fuzzer and the overload resolution fuzzer from document 07. This one catches what the corpus does not, because the corpus was written to test DuckDB's features rather than to pin down its type lattice.
+**The semantics harness.** One case per rule in document 06, comparing value and `typeof()` against DuckDB, plus the expression fuzzer and the overload resolution fuzzer from document 07. This one catches what the corpus does not, because the corpus was written to test DuckDB's features rather than to pin down its type lattice. The half of it that asks about types rather than values is `tests/differential/semantics.mojo` and `pixi run differential-semantics`, and section 5 is what it does and what it found.
 
 ## 4. Fuzzing
 
@@ -65,7 +65,17 @@ The first run found one thing, and it was in the grammar rather than in the matc
 
 **Pathological input.** The cases from document 04, meaning deep nesting, long lists and unmatched parentheses, each with a wall clock ceiling in CI, because a PEG parser's failure mode is exponential and a front door that takes untrusted SQL turns that into a denial of service.
 
-## 5. The plan equality test
+## 5. The type differential harness
+
+The two parse harnesses ask whether a statement parses. This one asks the question after that, and it is the one the compatibility claim actually turns on: given columns of known types, what type does an expression over them come out as. A parser that agrees with DuckDB everywhere and a binder that makes `sum` a `BIGINT` where DuckDB makes it a `HUGEINT` is a library that returns wrong answers with no error attached to them, and `typeof()` is itself in the corpus, so the difference is not even hidden. It is `tests/differential/semantics.mojo` and `pixi run differential-semantics`.
+
+The matrix is 27 columns, every scalar type the binder knows plus six decimals chosen to sit on the edges of DuckDB's width rules, including `DECIMAL(18,18)` and `DECIMAL(38,10)`. Four things are compared over it. Arithmetic, over every ordered pair and all six operators, which is the one place firepanda derives a type rather than looking one up. Negation, which is a short list and a different rule from subtraction. The lattice, through `CASE`, over every ordered pair, which is the type two branches of one expression agree on. And calls, over the tier 1 catalog at every arity up to two, which is the overload resolution fuzzer document 07 asks for. Where the winning signature names a concrete return type the type is compared, and where it says `ANY`, a template letter or a bare `DECIMAL` only the choice between binding and refusing is, because substituting a template and deriving a decimal's precision are jobs the binder does not do yet. That comes to 15,001 expressions and takes about four seconds.
+
+The oracle is `tools/semantics.py`, which builds a table with one column per type and asks DuckDB for `typeof` of each expression over it. Both halves of that are needed. A column rather than a literal, because DuckDB folds an expression whose arguments are all constants before anything can be read off it, and one row rather than none, because `typeof` over an empty table returns no rows to read. The script runs DuckDB in a child process for the same reason `tools/corpus.py` does: importing the module inside the CPython embedded in a Mojo binary registers exit handlers that run after that interpreter has been torn down, and the process then dies in a destructor with the report already printed.
+
+It earned its keep on the first run, at 348 disagreements over five separate defects, none of which the unit tests or the generators had caught. DuckDB narrows an addition or a multiplication back to 18 digits when both sides already fit in 18, which is where `DECIMAL(9,4) * DECIMAL(9,4)` stops being `DECIMAL(18,8)` and stays there, except that a multiplication whose scale reaches 18 is left alone. The lattice gives up scale rather than digits when two decimals do not fit in 38, and does not do that when one side is an integer. `greatest` and `least` are declared over `ANY` and then insist their arguments share a common type, which no signature can say. And two of them were in the cast cost generator rather than in the binder: `EXPLAIN` wraps its output to the box width and had been splitting long casts across lines where the generator read them, which left the measured cost of reaching a `DECIMAL` wrong relative to reaching a `DOUBLE`. The harness now runs at zero disagreements over 15,001 expressions, with 359 cases in a `known` list, each carrying the reason it is there.
+
+## 6. The plan equality test
 
 The single most valuable test in this specification, and it is not about compatibility at all.
 
@@ -73,13 +83,13 @@ For each of the twenty two TPC-H queries, the physical plan produced by `fp.sql(
 
 It costs almost nothing, because the plans already print and round trip per document 08, and it is what enforces document 02's rule that SQL and dataframes are one engine. Without it, the SQL path grows its own lowering for one operator, then another, and a year later there are two engines with different bugs and different performance, which is precisely the outcome that issue #13's line about parsing into the same logical plan so the optimizer is shared exists to prevent.
 
-## 6. The optimizer equivalence test
+## 7. The optimizer equivalence test
 
 From document 08, restated because it belongs to conformance as much as to the optimizer: every query in the corpus runs twice, once with all optimizer passes disabled and once with all enabled, and the results must be identical including order.
 
 This is the test that catches a filter pushed through a node that does not preserve its meaning, a join reordered across an outer join that is not reorderable, or a decorrelation that changed null semantics. Those bugs produce plausible wrong answers on real queries and are nearly impossible to find any other way.
 
-## 7. What runs when
+## 8. What runs when
 
 **Every commit:** the parse differential over the full corpus, the semantics cases, unit tests, and the pathological input ceilings. Minutes.
 
@@ -89,7 +99,7 @@ This is the test that catches a filter pushed through a node that does not prese
 
 **Weekly:** the grammar bump check from document 03 against the latest upstream tag.
 
-## 8. What the corpus does not cover
+## 9. What the corpus does not cover
 
 Stated so that the published number is read correctly.
 

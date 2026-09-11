@@ -23,6 +23,7 @@ from firepanda.sql.types import (
     SqlType,
     TYPE_BOOLEAN,
     TYPE_COUNT,
+    TYPE_DATE,
     TYPE_DECIMAL,
     TYPE_DOUBLE,
     TYPE_FLOAT,
@@ -31,6 +32,7 @@ from firepanda.sql.types import (
     TYPE_LIST,
     TYPE_MAP,
     TYPE_NULL,
+    TYPE_TIMESTAMP,
     TYPE_TINYINT,
     TYPE_UTINYINT,
     TYPE_VARCHAR,
@@ -338,6 +340,55 @@ def test_one_signature_can_be_priced_on_its_own() raises:
             [SqlType(TYPE_TINYINT), SqlType(TYPE_TINYINT)],
         ),
         NO_MATCH,
+    )
+
+
+def test_greatest_takes_anything_and_then_wants_them_to_agree() raises:
+    var registry = Registry()
+    var casts = Casts()
+    # The signature is `greatest(ANY)` with a variadic, so on price alone every
+    # one of these binds. DuckDB refuses the ones whose arguments have no type
+    # in common, with the sentence CASE gives for the same pair, and a
+    # signature has no way to say that.
+    assert_equal(
+        _bind(registry, casts, "greatest", [SqlType(TYPE_TINYINT)]),
+        "greatest(ANY, [ANY...]) -> ANY",
+    )
+    assert_equal(
+        _bind(
+            registry,
+            casts,
+            "greatest",
+            [SqlType(TYPE_DATE), SqlType(TYPE_TIMESTAMP)],
+        ),
+        "greatest(ANY, [ANY...]) -> ANY",
+    )
+    assert_equal(
+        _bind(
+            registry,
+            casts,
+            "greatest",
+            [SqlType(TYPE_TINYINT), SqlType(TYPE_VARCHAR)],
+        ),
+        String(),
+    )
+    assert_equal(
+        _bind(
+            registry,
+            casts,
+            "least",
+            [SqlType(TYPE_TINYINT), SqlType(TYPE_VARCHAR)],
+        ),
+        String(),
+    )
+    assert_equal(
+        _bind(
+            registry,
+            casts,
+            "greatest",
+            [SqlType(TYPE_TINYINT), SqlType(TYPE_DATE)],
+        ),
+        String(),
     )
 
 

@@ -144,6 +144,21 @@ def test_a_decimal_too_wide_to_exist_stops_at_thirty_eight() raises:
     assert_equal(_joined("DECIMAL(38,10)", "BIGINT"), "DECIMAL(38,10)")
 
 
+def test_two_decimals_that_do_not_fit_give_up_scale_and_not_digits() raises:
+    # Which is the opposite of what saturating the width alone would do. The
+    # digits in front of the point are what a value needs to exist at all, so
+    # they are kept and the scale takes the loss.
+    assert_equal(_joined("DECIMAL(30,25)", "DECIMAL(30,4)"), "DECIMAL(38,12)")
+    assert_equal(_joined("DECIMAL(18,18)", "DECIMAL(38,10)"), "DECIMAL(38,10)")
+    assert_equal(_joined("DECIMAL(38,37)", "DECIMAL(20,19)"), "DECIMAL(38,37)")
+    # An integer against a decimal does not do that. It keeps the decimal's
+    # scale and saturates the width, which is the test above, and the two rules
+    # give different answers for the same pair of widths.
+    assert_equal(_joined("DECIMAL(30,25)", "HUGEINT"), "DECIMAL(38,25)")
+    assert_equal(_joined("DECIMAL(18,18)", "HUGEINT"), "DECIMAL(38,18)")
+    assert_equal(_joined("DECIMAL(38,0)", "DECIMAL(4,2)"), "DECIMAL(38,0)")
+
+
 def test_a_decimal_meeting_a_binary_float_gives_up_being_exact() raises:
     # The one place the reason a decimal exists is thrown away, and DuckDB
     # throws it away silently rather than asking.

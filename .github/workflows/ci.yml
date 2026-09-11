@@ -444,6 +444,14 @@ jobs:
         run: pixi run differential-sql-generated
         timeout-minutes: 5
 
+      # The two steps above ask whether a statement parses. This one asks what
+      # an expression's type comes out as, which is the question a wrong answer
+      # with no error attached comes from. It needs no corpus either.
+      # docs/specs/sql/11-conformance.md section 5.
+      - name: Expression types, through both binders
+        run: pixi run differential-semantics
+        timeout-minutes: 5
+
   required:
     name: CI
     if: always()

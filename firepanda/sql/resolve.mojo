@@ -54,6 +54,7 @@ and answering that means substituting what `T` bound to, which is the binder's
 job and not the scorer's.
 """
 
+from .cast import common_type
 from .casts import Casts
 from .generated.casts import ANY_COST, NO_CAST
 from .generated.functions import KIND_MACRO
@@ -66,7 +67,13 @@ from .registry import (
     Overload,
     Registry,
 )
-from .types import TYPE_ARRAY, TYPE_LIST, SqlType, type_name
+from .types import (
+    TYPE_ARRAY,
+    TYPE_INVALID,
+    TYPE_LIST,
+    SqlType,
+    type_name,
+)
 
 
 comptime NO_MATCH: Int = -1
@@ -161,7 +168,42 @@ def resolve(
             if len(tied) == 0:
                 tied.append(best)
             tied.append(which)
+    if best != NO_MATCH and not _combines(registry.names[at], arguments):
+        return Resolution(NO_MATCH, NO_MATCH, List[Int]())
     return Resolution(best, cost, tied^)
+
+
+def _combines(name: String, arguments: List[SqlType]) -> Bool:
+    """Whether a name that wants one type from all of its arguments gets one.
+
+    A handful of names take `ANY` and then insist the arguments agree with
+    each other. `greatest` is the shape: the catalog says `greatest(ANY)` and
+    takes any number of them, and DuckDB then refuses `greatest(a, b)` over a
+    `TINYINT` and a `VARCHAR` with the same sentence `CASE` gives for the same
+    pair, because both of them are asking the lattice the same question. The
+    signature cannot say that, so it is said here.
+
+    What firepanda prints when this refuses is the sentence for a call that
+    matches no overload, and DuckDB prints the one about combining types.
+
+    Args:
+        name: The name the query wrote.
+        arguments: The argument types, in order.
+
+    Returns:
+        Whether the call is allowed, which is true for every name not in this
+        handful.
+    """
+    if name != "greatest" and name != "least":
+        return True
+    if len(arguments) == 0:
+        return True
+    var joined = arguments[0]
+    for which in range(1, len(arguments)):
+        joined = common_type(joined, arguments[which])
+        if joined.id == TYPE_INVALID:
+            return False
+    return True
 
 
 def ambiguity(

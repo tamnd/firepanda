@@ -127,13 +127,14 @@ stress = "mojo run -I . tests/stress/main.mojo"
 # `inputs` and `outputs` are what keep the three steps below from compiling
 # everything three times over. Each of them depends on this task, and without a
 # cache key pixi would honour that literally.
-differential-build = { cmd = "mkdir -p build/differential && mojo build -I . tests/differential/main.mojo -o build/differential/frames && mojo build -I . tests/differential/sql.mojo -o build/differential/sql && mojo build -I . tests/differential/sql_generated.mojo -o build/differential/generated", default-environment = "differential", inputs = [
+differential-build = { cmd = "mkdir -p build/differential && mojo build -I . tests/differential/main.mojo -o build/differential/frames && mojo build -I . tests/differential/sql.mojo -o build/differential/sql && mojo build -I . tests/differential/sql_generated.mojo -o build/differential/generated && mojo build -I . tests/differential/semantics.mojo -o build/differential/semantics", default-environment = "differential", inputs = [
   "firepanda/**",
   "tests/differential/*.mojo",
 ], outputs = [
   "build/differential/frames",
   "build/differential/sql",
   "build/differential/generated",
+  "build/differential/semantics",
 ] }
 
 differential = { cmd = "./build/differential/frames", default-environment = "differential", depends-on = ["differential-build"] }
@@ -145,6 +146,13 @@ differential = { cmd = "./build/differential/frames", default-environment = "dif
 # See docs/specs/sql/13-open-questions.md question 10.
 corpus = { cmd = "bash tools/fetch_corpus.sh && python tools/corpus.py" }
 differential-sql = { cmd = "./build/differential/sql", default-environment = "differential", depends-on = ["corpus", "differential-build"] }
+
+# The question after the parser's. Both harnesses above ask whether a statement
+# parses; this one asks what an expression's type comes out as, over columns of
+# known types, which is what the binder decides and what a wrong answer with no
+# error attached would come from. It needs no corpus either.
+# See docs/specs/sql/11-conformance.md section 5.
+differential-semantics = { cmd = "./build/differential/semantics", default-environment = "differential", depends-on = ["differential-build"] }
 
 # The same comparison against statements nobody wrote. The grammar writes them,
 # which reaches the rules DuckDB's corpus happens to have no test for, and it
