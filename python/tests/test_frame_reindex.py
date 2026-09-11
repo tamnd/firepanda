@@ -110,7 +110,11 @@ def test_the_labels_keep_the_name_the_index_had(firepanda):
 
 def test_a_repeated_label_in_the_frame_is_refused(firepanda):
     twice = firepanda.DataFrame({"key": [10, 10], "count": [1, 2]}).set_index("key")
-    with pytest.raises(ValueError, match="unique"):
+    # pandas' sentence rather than the one the lookup underneath raises, which
+    # is about `get_indexer` wanting a unique index and names the function to
+    # call instead. That is the right thing to say to whoever called
+    # `get_indexer` and it is not what happened here.
+    with pytest.raises(ValueError, match="cannot reindex on an axis with duplicate labels"):
         twice.reindex([10])
 
 

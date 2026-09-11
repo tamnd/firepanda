@@ -8,6 +8,26 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a frame on a set of labels it may not have
+
+`DataFrame.reindex`, with both of its halves and eight of pandas' ten parameters. On the rows it is `get_indexer` and then a gather, and a label the frame does not have costs no branch of its own, since the lookup answers a not found label with a negative position and the gather already reads a negative position as a null row. On the columns it is a lookup in the schema instead, and a name the frame does not have becomes a column of missing values as tall as the frame. The boundary applies the columns first and then the rows, because narrowing the frame before gathering it means the gather moves less.
+
+`fill_value` is done on the way past rather than as a second pass over the answer. One row holding the value is appended to each column and every not found label is pointed at that row, so the gather fills as it goes. Writing it as a fill over the result would also have filled the nulls the frame already had, which pandas does not do, and that is the kind of wrong answer that ships.
+
+An integer column that loses a row comes back as float64 with a NaN in it, which is pandas' rule and lives above the gather rather than in it. A fill value stops the widening, because with a fill there is no missing row to widen for. A column made out of nothing by the other half of the method is spelled the same way, which is a NaN in the values rather than a cleared bit in a bitmap.
+
+A frame whose own labels repeat is refused with pandas' own sentence rather than with the one the lookup underneath raises, which is about `get_indexer` wanting a unique index and names the function to call instead.
+
+`method` is refused, since filling a label from the label beside it needs the labels in order and is a different operation. `limit` and `tolerance` without it give pandas' own sentence back word for word. `copy` and `level` are accepted and ignored, which is what pandas does on a flat index. Two answers here are deliberately not pandas': a column name asked for twice is refused rather than answered with two columns under one name, and a label whose type is not the index's is refused rather than answered with a frame of nothing but missing rows.
+
+Part of #156, after #8.
+
+### Changed: the block of one value repeated has a name now
+
+`filled_block` in `kernel/binary.mojo`, next to the `all_null` it is the filled half of. It was `_gap_block` in `shift.mojo` and it moved because `reindex` wanted the same thing, which is a column of one value in a type the value did not arrive with. The two other copies of it, in `frame/align.mojo` and `plan/simplify.mojo`, were left where they are: the first refuses text for a reason that belongs to alignment and not to block building, and folding that in would have moved a domain rule into a place that has no domain.
+
+Part of #156, after #8.
+
 ### Added: SELECT DISTINCT runs, and it needed no operator
 
 A distinct is a group by that reduces nothing. A group by holds one row per group and the rows of a group differ only in what was not the key, so when the key is every column there is nothing they can differ in, and `SELECT DISTINCT a, b` is the existing `Group` with every position as a key and an empty list of folds.
@@ -77,23 +97,6 @@ The right side of a join is a line of the same plan, so it lowers to a pipeline 
 The two sides share the relation numbering and the record of which relations have been read, so a plan whose build side reads a table the probe side already read says so rather than handing back an empty frame. A build side that refuses still refuses in its own words, and the refusal reaches the caller unchanged rather than becoming a fact about the join.
 
 Part of #309.
-### Added: a frame on a set of labels it may not have
-
-`DataFrame.reindex`, with both of its halves and eight of pandas' ten parameters. On the rows it is `get_indexer` and then a gather, and a label the frame does not have costs no branch of its own, since the lookup answers a not found label with a negative position and the gather already reads a negative position as a null row. On the columns it is a lookup in the schema instead, and a name the frame does not have becomes a column of missing values as tall as the frame. The boundary applies the columns first and then the rows, because narrowing the frame before gathering it means the gather moves less.
-
-`fill_value` is done on the way past rather than as a second pass over the answer. One row holding the value is appended to each column and every not found label is pointed at that row, so the gather fills as it goes. Writing it as a fill over the result would also have filled the nulls the frame already had, which pandas does not do, and that is the kind of wrong answer that ships.
-
-An integer column that loses a row comes back as float64 with a NaN in it, which is pandas' rule and lives above the gather rather than in it. A fill value stops the widening, because with a fill there is no missing row to widen for. A column made out of nothing by the other half of the method is spelled the same way, which is a NaN in the values rather than a cleared bit in a bitmap.
-
-`method` is refused, since filling a label from the label beside it needs the labels in order and is a different operation. `limit` and `tolerance` without it give pandas' own sentence back word for word. `copy` and `level` are accepted and ignored, which is what pandas does on a flat index. Two answers here are deliberately not pandas': a column name asked for twice is refused rather than answered with two columns under one name, and a label whose type is not the index's is refused rather than answered with a frame of nothing but missing rows.
-
-Part of #156, after #8.
-
-### Changed: the block of one value repeated has a name now
-
-`filled_block` in `kernel/binary.mojo`, next to the `all_null` it is the filled half of. It was `_gap_block` in `shift.mojo` and it moved because `reindex` wanted the same thing, which is a column of one value in a type the value did not arrive with. The two other copies of it, in `frame/align.mojo` and `plan/simplify.mojo`, were left where they are: the first refuses text for a reason that belongs to alignment and not to block building, and folding that in would have moved a domain rule into a place that has no domain.
-
-Part of #156, after #8.
 
 ### Added: a query text in, rows out
 

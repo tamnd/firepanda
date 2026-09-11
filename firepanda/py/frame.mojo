@@ -729,6 +729,13 @@ struct PyDataFrame(Movable, Writable):
         refuses here is about a type, so the rule is that the message with the
         word unique in it is the value error and the rest are type errors.
 
+        That one is also the only refusal here whose message is replaced rather
+        than passed along. The core's sentence is about `get_indexer` needing a
+        unique index and names the function to call instead, which is the right
+        thing to say to whoever called `get_indexer` and is not what happened
+        here. The caller made pandas' mistake, so the caller gets pandas'
+        sentence.
+
         Args:
             py_self: The frame.
             labels: The row labels the result should have, in order.
@@ -750,7 +757,9 @@ struct PyDataFrame(Movable, Writable):
             )
         except cause:
             if "unique" in String(cause):
-                raise retagged(VALUE, cause)
+                raise tagged(
+                    VALUE, "cannot reindex on an axis with duplicate labels"
+                )
             raise retagged(DTYPE, cause)
 
     @staticmethod
