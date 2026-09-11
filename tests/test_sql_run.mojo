@@ -1004,27 +1004,39 @@ def test_a_recursive_cte_is_refused_by_name() raises:
         )
 
 
-def test_a_join_of_two_tables_that_share_a_name_stops_at_the_operator() raises:
-    # Nothing to do with USING. The probe operator renames a right column whose
-    # name the left already has, which moves the columns the plan numbered, so
-    # it refuses rather than answering the wrong positions. This is #590.
-    with assert_raises(contains="both sides of this join have a column called"):
-        _ = run(
-            "SELECT * FROM sales JOIN shops ON sales.shop = shops.shop",
-            session(),
-        )
+def test_two_tables_that_share_a_name_join_on_that_name() raises:
+    # The star writes the shared name twice here, once from each side, which is
+    # what DuckDB writes for the same query and is the whole reason the operator
+    # is told its output by position.
+    var out = run(
+        (
+            "SELECT * FROM sales JOIN shops ON sales.shop = shops.shop"
+            " ORDER BY qty"
+        ),
+        session(),
+    )
+    assert_equal(len(out.schema), 5, "five columns")
+    assert_equal(out.schema[2].name, "shop", "the left one")
+    assert_equal(out.schema[3].name, "shop", "and the right one under its name")
+    same(read_back(out, "qty"), [1, 3, 5, 8, 12, 15, 20, 25, 30, 40], "qty")
+    same(read_back(out, "floor"), [22, 11, 11, 22, 11, 22, 22, 11, 11, 22], "f")
 
 
-def test_a_using_join_lowers_and_stops_at_the_same_place() raises:
-    # A USING join names a column both sides have, which is what it is for, so
-    # every one of them meets #590. The message is the operator's rather than
-    # the lowering's, which is what says the query got all the way through.
-    with assert_raises(contains="both sides of this join have a column called"):
-        _ = run(
-            "SELECT qty, floor FROM sales JOIN shops USING (shop)", session()
-        )
-    with assert_raises(contains="both sides of this join have a column called"):
-        _ = run("SELECT * FROM sales NATURAL JOIN shops", session())
+def test_a_using_join_runs_and_writes_the_pair_once() raises:
+    var out = run(
+        "SELECT qty, floor FROM sales JOIN shops USING (shop) ORDER BY qty",
+        session(),
+    )
+    same(read_back(out, "qty"), [1, 3, 5, 8, 12, 15, 20, 25, 30, 40], "qty")
+    same(read_back(out, "floor"), [22, 11, 11, 22, 11, 22, 22, 11, 11, 22], "f")
+
+    var stars = run("SELECT * FROM sales NATURAL JOIN shops", session())
+    assert_equal(len(stars.schema), 4, "the shared name written once")
+    assert_equal(stars.schema[2].name, "shop")
+    assert_equal(stars.schema[3].name, "floor")
+    same(
+        read_back(stars, "floor"), [11, 22, 11, 22, 11, 22, 11, 22, 11, 22], "f"
+    )
 
 
 def test_a_right_join_has_no_operator_yet_either() raises:

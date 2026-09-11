@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a join of two tables that share a column name runs
+
+It was refused, and any `USING` or `NATURAL` join was refused with it, since one of those names a column both sides have by definition. The refusal was physical lowering's and the reason was the probe operator: left to itself it renames a right column whose name the left already has, and drops the right key outright when the two keys are called the same. Either one moves a column the plan had numbered, and a position that means a different column is a wrong answer rather than a missing feature, so it was refused instead.
+
+What the operator was missing is a way to be told its output rather than work it out. It has one now: a list of positions over the two schemas end to end, which is exactly how a plan numbers a join, and when it is given one nothing is renamed and nothing is dropped. The key is passed the same way, because a name finds the first column that has it and that is the wrong column as soon as two of them do. Physical lowering always passes both now, so what the operator emits is what the plan says it emits, and the old refusal is gone.
+
+So `SELECT * FROM sales JOIN shops ON sales.shop = shops.shop` answers with both `shop` columns, which is what DuckDB answers, and a `USING` or a `NATURAL` join runs end to end and writes each merged pair once. A `RIGHT` or a `FULL` join still has no operator, which is a different missing thing: it has to emit right rows that nothing matched, and that is not known until the last chunk has gone past.
+
+Closes #590.
+
 ### Added: a `USING` or a `NATURAL` join lowers to a plan
 
 Both were refused by name and both lower now. They are one thing written two ways: a join with one equality per named column, where `NATURAL` takes the names from every column the two sides share. The node is the same join the `ON` spelling builds, and everything that differs is about what the query may write afterwards.
@@ -18,7 +28,7 @@ The node underneath still produces both columns of every pair. Dropping one woul
 
 A `USING` or `NATURAL` join over a subquery is refused, because the merged name is on both sides and a column a subquery computed carries no table to tell the two apart.
 
-None of these run end to end yet, and the reason is not in the front end. The probe operator renames a right column whose name the left already has, which moves the columns the plan numbered, so physical lowering refuses any join of two tables that share a column name. A `USING` join names a column both sides have by definition, so all of them meet it. That is #590, and it has a small fix: the operator already drops the right key when the two keys are called the same, which is what `USING` means, so what is missing is a plan node that says the pair is merged.
+These lowered before they ran. Physical lowering refused any join of two tables that share a column name, and a `USING` join names one by definition, so all of them met it. That is the #590 entry above and it is fixed in the same release.
 
 Part of #309.
 

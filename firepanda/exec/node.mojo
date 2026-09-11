@@ -1671,6 +1671,27 @@ struct Join(Movable):
     dropped is not a small waste at the end, it is most of the work.
     """
 
+    var wanted: List[Int]
+    """The projection by position, or empty for the one `columns` names.
+
+    A position below the probe side's width is a probe column and the rest are
+    the build side's, counted on from that width, which is how a plan numbers
+    the two schemas end to end. A name cannot say which side it meant, so a
+    caller whose two sides share one says so here instead, and then nothing is
+    renamed and nothing is dropped: the output is this list and in this order.
+    """
+
+    var left_at: Int
+    """The key's position on the probe side, or -1 to find it by name."""
+
+    var right_at: Int
+    """The key's position on the build side, or -1 to find it by name.
+
+    Both are here for the same reason `wanted` is. A name finds the first column
+    that has it, which is the wrong column as soon as two of them do, and a
+    caller that numbered its columns already knows which one it meant.
+    """
+
     var _left_at: Int
     """Where the key sits in the chunk, settled by `bind`."""
 
@@ -1705,6 +1726,9 @@ struct Join(Movable):
         kind: JoinKind = JoinKind.INNER,
         var suffix: String = "_right",
         var columns: List[String] = List[String](),
+        var wanted: List[Int] = List[Int](),
+        left_at: Int = -1,
+        right_at: Int = -1,
     ):
         """Constructs a join against a frame.
 
@@ -1720,6 +1744,10 @@ struct Join(Movable):
             suffix: Appended to a right column whose name collides. Consumed.
             columns: Which output columns to build, in the order wanted, or
                 empty for all of them in their natural order. Consumed.
+            wanted: The same thing by position over the two schemas end to end,
+                or empty to go by name. Consumed.
+            left_at: The key's position on the probe side, or -1 for by name.
+            right_at: The key's position on the build side, or -1 for by name.
         """
         self.right = right^
         self.left_on = left_on^
@@ -1727,6 +1755,9 @@ struct Join(Movable):
         self.kind = kind
         self.suffix = suffix^
         self.columns = columns^
+        self.wanted = wanted^
+        self.left_at = left_at
+        self.right_at = right_at
         self._left_at = -1
         self._right_at = -1
         self._side = BuildSide()
@@ -1759,8 +1790,12 @@ struct Join(Movable):
         if self.kind == JoinKind.CROSS:
             raise Error("join: a cross join has no key to build a table from")
 
-        var here = input.index_of(self.left_on)
-        var there = self.right.schema.index_of(self.right_on)
+        var here = self.left_at
+        var there = self.right_at
+        if here < 0:
+            here = input.index_of(self.left_on)
+        if there < 0:
+            there = self.right.schema.index_of(self.right_on)
         var dt = self.right.schema[there].dtype.physical
         # The string test is separate from the dtype test rather than folded into
         # it, because a string column's physical dtype is its byte type and a
@@ -1795,6 +1830,9 @@ struct Join(Movable):
             len(self._absent) > 0,
             self._side.groups(),
         )
+
+        if len(self.wanted) != 0:
+            return self._picked(input)
 
         # The same plan `join_on` makes, without the coalescing branch: an
         # output row of these four kinds always has a probe side row behind it,
@@ -1858,6 +1896,62 @@ struct Join(Movable):
                 kept.append(fields[found].copy())
                 self._from_right.append(from_right[found])
                 self._source.append(source[found])
+        return Schema(kept^)
+
+    def _picked(mut self, input: Schema) raises -> Schema:
+        """Plans the output from the positions `wanted` asked for.
+
+        This is the other half of `bind`, and it is the half that does nothing
+        clever. A caller that numbered the two schemas end to end has already
+        decided what the output is, so there is no collision to rename around
+        and no shared key to drop: every column asked for is gathered from the
+        side its number falls on and keeps the name it had there.
+
+        Args:
+            input: The schema of the chunks that will arrive.
+
+        Returns:
+            The schema of the chunks this emits.
+
+        Raises:
+            If a position is not a column of either side, or if it is a build
+            side column on a kind that keeps none of them.
+        """
+        var kept = List[Field]()
+        self._from_right = List[Bool]()
+        self._source = List[Int]()
+        for i in range(len(self.wanted)):
+            var p = self.wanted[i]
+            if p < 0 or p >= len(input) + len(self.right.schema):
+                raise Error(
+                    String(
+                        "join: column ",
+                        p,
+                        " was asked for and the two sides have ",
+                        len(input) + len(self.right.schema),
+                        " between them",
+                    )
+                )
+            if p < len(input):
+                kept.append(Field(input[p].name, input[p].dtype))
+                self._from_right.append(False)
+                self._source.append(p)
+                continue
+            if not self.kind.keeps_right_columns():
+                raise Error(
+                    String(
+                        "join: a ",
+                        self.kind,
+                        " join keeps no column of the right side, and column ",
+                        p,
+                        " is one",
+                    )
+                )
+            var j = p - len(input)
+            var field = self.right.schema[j].copy()
+            kept.append(Field(field.name, field.dtype))
+            self._from_right.append(True)
+            self._source.append(j)
         return Schema(kept^)
 
     def process(

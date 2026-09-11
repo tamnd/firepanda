@@ -1586,8 +1586,8 @@ def _lower_join(
 
     Raises:
         Error: If the join is one the probe operator does not do, if it has
-            anything other than one key pair of plain columns, if the two sides
-            share a column name, or whatever the build side itself refuses.
+            anything other than one key pair of plain columns, or whatever the
+            build side itself refuses.
     """
     var kind = JoinKind(UInt8(plan.nodes[at].op))
     if kind == JoinKind.RIGHT or kind == JoinKind.OUTER:
@@ -1643,32 +1643,34 @@ def _lower_join(
     else:
         var side = _lower_from(plan, right, frames, taken)
         build = side^.run()
+    # Left to itself the operator renames a right column whose name the left
+    # already has and drops the right key outright when the two keys are called
+    # the same, and either one moves a column the plan's schema numbered. So it
+    # is told the numbers instead. The output is the two schemas end to end,
+    # which is what the join binds to, and the keys are the positions binding
+    # gave them rather than the first column with the name.
+    var width = len(pipe.schema)
+    var wanted = List[Int](capacity=width + len(build.schema))
+    for i in range(width):
+        wanted.append(i)
     if kind.keeps_right_columns():
-        # The operator renames a right column whose name the left already has,
-        # and drops the right key outright when the two keys are called the
-        # same. Either one moves the columns the plan's schema numbered, and a
-        # position that means something else is a wrong answer rather than a
-        # missing feature, so it is refused while the operator carries no output
-        # names of its own.
         for i in range(len(build.schema)):
-            for j in range(len(pipe.schema)):
-                if build.schema[i].name == pipe.schema[j].name:
-                    raise Error(
-                        String(
-                            (
-                                "lower: both sides of this join have a column"
-                                " called '"
-                            ),
-                            build.schema[i].name,
-                            (
-                                "', and the probe operator renames the right"
-                                " one, so the result would not be the two"
-                                " schemas end to end the way the plan numbered"
-                                " them"
-                            ),
-                        )
-                    )
-    pipe.add(Node(Join(build^, left_on^, right_on^, kind)))
+            wanted.append(width + i)
+    pipe.add(
+        Node(
+            Join(
+                build^,
+                left_on^,
+                right_on^,
+                kind,
+                "_right",
+                List[String](),
+                wanted^,
+                plan.exprs.nodes[left_key].at,
+                plan.exprs.nodes[right_key].at,
+            )
+        )
+    )
 
 
 def lower(
