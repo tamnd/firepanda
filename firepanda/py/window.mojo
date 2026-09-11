@@ -29,12 +29,11 @@ in on the Python side by a layer that would then own the rule.
 
 ### What is not here
 
-`skew` and `kurt`, which carry the third and fourth moments. `median`, `quantile`
-and `rank`, which need the window sorted. `apply`, `corr` and `cov`. The
-exponentially weighted window, which has no edges and so shares nothing with any
-of this. And a window given as a frequency, which needs a calendar first. None of
-them resolves rather than resolving and refusing, for the reason document 07
-gives.
+`median`, `quantile` and `rank`, which need the window sorted. `apply`, `corr`
+and `cov`. The exponentially weighted window, which has no edges and so shares
+nothing with any of this. And a window given as a frequency, which needs a
+calendar first. None of them resolves rather than resolving and refusing, for the
+reason document 07 gives.
 
 ### Why ddof is the last parameter this door can take
 
@@ -43,7 +42,9 @@ reduction rather than of the window, and it arrives here anyway because there is
 one door and not fifty three. With it the bound method on the Python side has
 seven arguments after the object, which document 13 section 4 measured as the
 most a bound method can have. Whatever the next window parameter turns out to be,
-it comes through keyword arguments, which do not count against that.
+it comes through keyword arguments, which do not count against that. `skew` and
+`kurt` were the next two reductions to land and cost nothing on this door, because
+pandas gives neither of them a degrees of freedom to pass.
 """
 
 from firepanda.dtype.logical import LogicalType

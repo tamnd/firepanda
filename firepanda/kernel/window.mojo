@@ -89,30 +89,31 @@ and there is one loop rather than one per dtype. A missing row in the answer is
 a NaN with no validity bit behind it, which is what every float column in this
 package holds and what `nan_over_nulls` exists to say.
 
-## The spread reductions are here and their arithmetic is not
+## The moment reductions are here and their arithmetic is not
 
-`var`, `std` and `sem` walk the same edges as everything else and are folded
-through the same loop shape, so they are dispatched from here. What they carry is
-not a number, it is a state, and the argument about when that state stops being
-worth carrying is long enough and separate enough to live in `spread.mojo` next
-to its own tests. This file asks it whether it has settled and rebuilds the
-window when it says no, which is the same conversation the running total already
-has, and knows nothing else about how a variance is computed.
+`var`, `std`, `sem`, `skew` and `kurt` walk the same edges as everything else
+and are folded through the same loop shape, so they are dispatched from here.
+What they carry is not a number, it is a state, and the argument about when
+that state stops being worth carrying is long enough and separate enough to
+live in `spread.mojo` next to its own tests. This file asks it whether it has
+settled and rebuilds the window when it says no, which is the same conversation
+the running total already has, and knows nothing else about how a variance is
+computed.
 
-They are also where the window parameters run out of room at the Python
-boundary. `ddof` belongs to the reduction rather than to the window, and adding
-it makes seven arguments after the object, which document 13 section 4 measured
-as the ceiling for a bound method. The eighth window parameter, whichever it
-turns out to be, goes through a keyword route.
+The first three are also where the window parameters run out of room at the
+Python boundary. `ddof` belongs to the reduction rather than to the window, and
+adding it makes seven arguments after the object, which document 13 section 4
+measured as the ceiling for a bound method. The eighth window parameter,
+whichever it turns out to be, goes through a keyword route. `skew` and `kurt`
+take no `ddof` in pandas and so cost nothing on that door.
 
 ## What is not here
 
-`skew` and `kurt`, which need the third and fourth moments and the same argument
-again about carrying them. The order statistics, `median`, `quantile` and `rank`,
-which need the window sorted rather than folded and are a different data
-structure. The exponentially weighted window, which has no edges at all and so
-has nothing to do with this file. And the windows given as a frequency rather
-than a count, which need a calendar before they need any of this.
+The order statistics, `median`, `quantile` and `rank`, which need the window
+sorted rather than folded and are a different data structure. The exponentially
+weighted window, which has no edges at all and so has nothing to do with this
+file. And the windows given as a frequency rather than a count, which need a
+calendar before they need any of this.
 """
 
 from std.math import isinf, isnan, nan
@@ -124,7 +125,15 @@ from firepanda.dtype.logical import LogicalType
 
 from .cast import cast_any
 from .nulls import present_bitmap_any
-from .spread import SPREAD_SEM, SPREAD_STD, SPREAD_VAR, Spread
+from .spread import (
+    MOMENT_KURT,
+    MOMENT_SKEW,
+    SPREAD_SEM,
+    SPREAD_STD,
+    SPREAD_VAR,
+    Moments,
+    Spread,
+)
 
 comptime OP_SUM = 0
 """Operation code for the total over the window."""
@@ -150,6 +159,12 @@ comptime OP_STD = 6
 comptime OP_SEM = 7
 """Operation code for the standard error of the window's mean."""
 
+comptime OP_SKEW = 8
+"""Operation code for the skewness of the window."""
+
+comptime OP_KURT = 9
+"""Operation code for the excess kurtosis of the window."""
+
 comptime EDGE_RIGHT = 0
 """Closed code for a window that drops the first row of its span."""
 
@@ -173,7 +188,7 @@ struct WindowOp(Equatable, ImplicitlyCopyable, Movable, Writable):
     """
 
     var code: Int
-    """The operation, as one of the eight values below."""
+    """The operation, as one of the ten values below."""
 
     comptime SUM = Self(OP_SUM)
     """The total over the window."""
@@ -199,6 +214,12 @@ struct WindowOp(Equatable, ImplicitlyCopyable, Movable, Writable):
     comptime SEM = Self(OP_SEM)
     """The standard error of the window's mean."""
 
+    comptime SKEW = Self(OP_SKEW)
+    """The skewness of the window."""
+
+    comptime KURT = Self(OP_KURT)
+    """The excess kurtosis of the window."""
+
     def spreads(self) -> Bool:
         """Says whether this reduction measures a spread rather than a level.
 
@@ -207,7 +228,17 @@ struct WindowOp(Equatable, ImplicitlyCopyable, Movable, Writable):
             are the three that carry a state rather than a number and are the
             three that read `ddof`.
         """
-        return self.code >= OP_VAR
+        return self.code >= OP_VAR and self.code <= OP_SEM
+
+    def shapes(self) -> Bool:
+        """Says whether this reduction measures the shape of the window.
+
+        Returns:
+            True for the skewness and the kurtosis, which carry a third and a
+            fourth moment beside the spread and which take no `ddof`, because
+            pandas gives neither of them one.
+        """
+        return self.code >= OP_SKEW
 
     def __eq__(self, other: Self) -> Bool:
         """Compares two operations.
@@ -251,8 +282,12 @@ struct WindowOp(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("var")
         elif self == Self.STD:
             writer.write("std")
-        else:
+        elif self == Self.SEM:
             writer.write("sem")
+        elif self == Self.SKEW:
+            writer.write("skew")
+        else:
+            writer.write("kurt")
 
 
 def op_named(name: StringSlice) raises -> WindowOp:
@@ -265,7 +300,7 @@ def op_named(name: StringSlice) raises -> WindowOp:
         The reduction it names.
 
     Raises:
-        Error: If it is not one of the eight this file answers.
+        Error: If it is not one of the ten this file answers.
     """
     if name == "sum":
         return WindowOp.SUM
@@ -283,6 +318,10 @@ def op_named(name: StringSlice) raises -> WindowOp:
         return WindowOp.STD
     if name == "sem":
         return WindowOp.SEM
+    if name == "skew":
+        return WindowOp.SKEW
+    if name == "kurt":
+        return WindowOp.KURT
     raise Error("window: no window reduction is called " + String(name))
 
 
@@ -534,7 +573,7 @@ def window_agg(
         shape: Where the windows sit.
         ddof: Subtracted from the count of values to give the divisor of a
             variance. Read by the three spread reductions and ignored by the
-            other five, which is why it has a default and they do not pass one.
+            other seven, which is why it has a default and they do not pass one.
 
     Returns:
         A float64 column with one row per step, holding a NaN wherever the
@@ -572,6 +611,9 @@ def window_agg(
         elif op == WindowOp.SEM:
             form = SPREAD_SEM
         return AnyArray(_spread(src, present, seen, rows, shape, ddof, form))
+    if op.shapes():
+        var form = MOMENT_SKEW if op == WindowOp.SKEW else MOMENT_KURT
+        return AnyArray(_moments(src, present, seen, rows, shape, form))
     return AnyArray(
         _total(src, present, seen, rows, shape, op == WindowOp.MEAN)
     )
@@ -926,6 +968,96 @@ def _gather[
         start: The first row.
         stop: One past the last row.
         into: The spread to add them to.
+
+    Parameters:
+        origin: The origin of the values.
+    """
+    for j in range(start, stop):
+        if present.get(j):
+            into.add(src.unsafe_offset(j).unsafe_load())
+
+
+def _moments[
+    origin: ImmOrigin
+](
+    src: Pointer[Scalar[DType.float64], origin],
+    present: Bitmap,
+    seen: List[Int],
+    rows: Int,
+    shape: Shape,
+    form: Int,
+) raises -> Array[DType.float64]:
+    """Measures the shape of every window, carrying the state between them.
+
+    The same loop as `_spread` again, over a state that carries two more
+    numbers.
+    There is no `ddof` here because neither pandas method takes one, and the
+    rebuild fires on whichever of the two moments has lost the most, so a fourth
+    moment that has given up takes the third down with it rather than the third
+    being trusted on its own.
+
+    Args:
+        src: The values, already float64.
+        present: Which rows hold a value.
+        seen: The running count of rows holding a value.
+        rows: How tall the column is.
+        shape: Where the windows sit.
+        form: Which of the two shapes to answer.
+
+    Parameters:
+        origin: The origin of the values.
+
+    Returns:
+        A float64 column with one row per step.
+
+    Raises:
+        Error: Only what allocation raises.
+    """
+    var answer = Array[DType.float64](shape.answered(rows))
+    var target = answer.unsafe_mut_ptr()
+    var carried = Moments()
+    var last = Edges(0, 0)
+    for k in range(len(answer)):
+        var span = shape.edges(k * shape.step, rows)
+        if k == 0 or span.start >= last.stop:
+            carried = Moments()
+            _gather(src, present, span.start, span.stop, carried)
+        else:
+            for j in range(last.start, span.start):
+                if present.get(j):
+                    carried.drop(src.unsafe_offset(j).unsafe_load())
+            for j in range(last.stop, span.stop):
+                if present.get(j):
+                    carried.add(src.unsafe_offset(j).unsafe_load())
+            if not carried.settled():
+                carried = Moments()
+                _gather(src, present, span.start, span.stop, carried)
+        last = span
+        var found = seen[span.stop] - seen[span.start]
+        var value = nan[DType.float64]()
+        if found >= shape.min_periods:
+            value = carried.answer(found, form)
+        target.unsafe_offset(k).unsafe_store(value)
+    return answer^
+
+
+def _gather[
+    origin: ImmOrigin
+](
+    src: Pointer[Scalar[DType.float64], origin],
+    present: Bitmap,
+    start: Int,
+    stop: Int,
+    mut into: Moments,
+):
+    """Adds a run of rows to a moment state that was just started.
+
+    Args:
+        src: The values.
+        present: Which rows hold a value.
+        start: The first row.
+        stop: One past the last row.
+        into: The moments to add them to.
 
     Parameters:
         origin: The origin of the values.

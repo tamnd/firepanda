@@ -1,4 +1,4 @@
-"""The eight window reductions, checked against a running pandas.
+"""The ten window reductions, checked against a running pandas.
 
 The kernel has its own tests in `tests/test_window.mojo` and `tests/
 test_spread.mojo` and they check the arithmetic. These check the surface: that
@@ -47,12 +47,30 @@ HOLED = [1.0, None, 3.0, None, 5.0, 6.0]
 """Six rows with the gaps arranged so that no three wide window holds three
 values, which is what makes `min_periods` visible."""
 
-WINDOWED = ["sum", "mean", "count", "min", "max", "var", "std", "sem"]
-"""The eight reductions, every one of which has to answer over every placement.
+WINDOWED = ["sum", "mean", "count", "min", "max", "var", "std", "sem", "skew", "kurt"]
+"""The ten reductions, every one of which has to answer over every placement.
 
 Written once because a reduction added to the library and not added here would
-leave four tests passing on seven names and looking complete.
+leave four tests passing on nine names and looking complete.
 """
+
+CARRIED = ("skew", "kurt")
+"""The two reductions compared with a tolerance rather than to the last bit.
+
+Everything else here matches pandas exactly on these columns and is asserted to.
+These two do not, because pandas reconstructs a third and a fourth central moment
+from raw sums of powers where this library carries the moments themselves, and two
+correct methods of taking a cube do not land on the same double. The gap measured
+on the columns in this file is in the sixteenth digit. The kernel tests own the
+question of which of the two is closer to the true answer, and the answer there is
+this one.
+"""
+
+NEAR = 1e-12
+"""How far apart two answers for `skew` or `kurt` are allowed to be, relative to
+the larger of the two. Four figures looser than the gap that has ever been
+measured, so that a real regression fails here and a compiler changing the order
+of two multiplications does not."""
 
 
 def made(firepanda: ModuleType, values: list[Any] = ROWS) -> Any:
@@ -67,8 +85,16 @@ def theirs(values: list[Any] = ROWS) -> Any:
     return pd.Series(values, name="v", dtype="float64")
 
 
-def same(mine: Any, them: Any) -> bool:
-    """Compares two answers, reading a missing row as equal to a missing row."""
+def same(mine: Any, them: Any, tolerance: float = 0.0) -> bool:
+    """Compares two answers, reading a missing row as equal to a missing row.
+
+    Args:
+        mine: What this library answered.
+        them: What pandas answered.
+        tolerance: How far apart two values are allowed to be, relative to the
+            larger of the two, which is nought everywhere but the two reductions
+            `CARRIED` names.
+    """
     ours = mine.tolist()
     other = them.tolist()
     if len(ours) != len(other):
@@ -78,28 +104,42 @@ def same(mine: Any, them: Any) -> bool:
             if two is None or (isinstance(two, float) and math.isnan(two)):
                 continue
             return False
-        if one != two:
+        if one != two and not close(one, two, tolerance):
             return False
     return list(mine.index) == list(them.index)
+
+
+def close(one: Any, two: Any, tolerance: float) -> bool:
+    """Says whether two values are within a relative tolerance of each other."""
+    if tolerance == 0.0 or two is None or (isinstance(two, float) and math.isnan(two)):
+        return False
+    return abs(one - two) <= tolerance * max(abs(one), abs(two), 1.0)
+
+
+def slack(kind: str) -> float:
+    """The tolerance a reduction's answers are compared with."""
+    return NEAR if kind in CARRIED else 0.0
 
 
 @needs_pandas
 @pytest.mark.parametrize("kind", WINDOWED)
 def test_every_reduction_matches_over_a_plain_window(firepanda: ModuleType, kind: str) -> None:
-    """The eight names, over a five wide window with nothing unusual about it."""
+    """The ten names, over a five wide window with nothing unusual about it."""
     assert same(
         getattr(made(firepanda).rolling(5), kind)(),
         getattr(theirs().rolling(5), kind)(),
+        slack(kind),
     )
 
 
 @needs_pandas
 @pytest.mark.parametrize("kind", WINDOWED)
 def test_every_reduction_matches_over_an_expanding_window(firepanda: ModuleType, kind: str) -> None:
-    """The same eight with no near end, which is the other half of the surface."""
+    """The same ten with no near end, which is the other half of the surface."""
     assert same(
         getattr(made(firepanda).expanding(), kind)(),
         getattr(theirs().expanding(), kind)(),
+        slack(kind),
     )
 
 
@@ -158,6 +198,7 @@ def test_a_missing_row_is_stepped_over(firepanda: ModuleType, kind: str) -> None
     assert same(
         getattr(made(firepanda, HOLED).rolling(3, min_periods=1), kind)(),
         getattr(theirs(HOLED).rolling(3, min_periods=1), kind)(),
+        slack(kind),
     )
 
 
@@ -182,7 +223,7 @@ def test_an_integer_column_comes_back_as_float64(firepanda: ModuleType) -> None:
     for kind in WINDOWED:
         ours = getattr(mine.rolling(2), kind)()
         assert str(ours.dtype) == "float64"
-        assert same(ours, getattr(them.rolling(2), kind)())
+        assert same(ours, getattr(them.rolling(2), kind)(), slack(kind))
 
 
 @needs_pandas
@@ -409,12 +450,116 @@ def test_the_standard_error_is_the_one_spread_with_no_engine_to_choose(
     """pandas writes `sem` as `std(ddof) / count ** 0.5` rather than as a kernel,
     so it never had a numba path to offer and its signature has no `engine` on
     it. Declaring one here that pandas does not have would fail the signature
-    parity check, so `sem` is the one reduction of the eight that takes only the
-    two arguments."""
+    parity check, so `sem` is one of the four reductions of the ten that takes
+    only the two arguments."""
     with pytest.raises(TypeError):
         made(firepanda).rolling(3).sem(engine="cython")
     with pytest.raises(TypeError):
         theirs().rolling(3).sem(engine="cython")
+
+
+@needs_pandas
+@pytest.mark.parametrize("kind", CARRIED)
+def test_a_shape_takes_neither_an_engine_nor_a_degrees_of_freedom(
+    firepanda: ModuleType, kind: str
+) -> None:
+    """The two shapes have kernels in pandas and still declare neither argument,
+    which is pandas' own inconsistency and is copied because the signature is the
+    surface being matched. A skewness has a denominator that a degrees of freedom
+    could reasonably move and pandas does not offer the choice."""
+    for argument in ({"engine": "cython"}, {"ddof": 0}):
+        with pytest.raises(TypeError):
+            getattr(made(firepanda).rolling(3), kind)(**argument)
+        with pytest.raises(TypeError):
+            getattr(theirs().rolling(3), kind)(**argument)
+
+
+@needs_pandas
+@pytest.mark.parametrize("kind,least", [("skew", 3), ("kurt", 4)])
+def test_a_shape_needs_more_rows_than_min_periods_asks_for(
+    firepanda: ModuleType, kind: str, least: int
+) -> None:
+    """A skewness needs three values and a kurtosis four whatever `min_periods`
+    says, because below that the denominator of the standardized moment is nought
+    and there is nothing to answer. pandas holds to the same floor and this checks
+    that asking for one value does not move it."""
+    mine = getattr(made(firepanda).rolling(5, min_periods=1), kind)().tolist()
+    them = getattr(theirs().rolling(5, min_periods=1), kind)().tolist()
+    assert all(math.isnan(row) for row in mine[: least - 1])
+    assert all(math.isnan(row) for row in them[: least - 1])
+    assert not math.isnan(mine[least - 1])
+    assert same(
+        getattr(made(firepanda).rolling(5, min_periods=1), kind)(),
+        getattr(theirs().rolling(5, min_periods=1), kind)(),
+        NEAR,
+    )
+
+
+@needs_pandas
+@pytest.mark.parametrize("kind,stated", [("skew", 0.0), ("kurt", -3.0)])
+def test_a_window_of_one_repeated_value_answers_what_pandas_states(
+    firepanda: ModuleType, kind: str, stated: float
+) -> None:
+    """A constant window has no shape and pandas answers a nought for the skewness
+    and a minus three for the kurtosis at every width.
+
+    Nought is right, because a constant is symmetric. Minus three is not a value
+    arithmetic supports, since the standardized fourth moment of a real
+    distribution is never below one and minus three is what falls out of taking
+    the ratio to be nought and subtracting the excess offset anyway. It is copied
+    rather than derived, because a caller comparing the two libraries on a column
+    of one repeated value would read a NaN as a bug in this one. pandas disagrees
+    with itself here too: `Series([2.0] * 6).kurt()` is nought and
+    `Series([2.0] * 6).expanding().kurt()` is minus three on the same column.
+    """
+    rows = [2.0] * 6
+    for width in (4, 5, 6):
+        got = getattr(firepanda.Series(rows, name="v").rolling(width), kind)().tolist()
+        assert got[-1] == stated
+        assert getattr(theirs(rows).rolling(width), kind)().tolist()[-1] == stated
+
+
+@needs_pandas
+def test_a_shape_over_a_window_holding_an_infinity_is_not_a_number(
+    firepanda: ModuleType,
+) -> None:
+    """The same argument as the spread above, one power further along.
+
+    pandas replaced the infinity with a missing value before its kernel saw the
+    column, so its four wide window over rows nought to three is a window over
+    three values and it answers their skewness. There is no skewness there: the
+    mean of a set holding an infinity is an infinity and every deviation from it
+    is an infinity minus an infinity.
+    """
+    rows = [1.0, math.inf, 2.0, 3.0, 4.0, 5.0]
+    got = firepanda.Series(rows, name="v").rolling(3).skew().tolist()
+    assert all(math.isnan(row) for row in got[:4])
+    assert got[4] == 0.0 and got[5] == 0.0
+    them = theirs(rows).rolling(3).skew().tolist()
+    assert math.isnan(them[3])
+
+
+@needs_pandas
+def test_a_shape_below_the_variance_pandas_refuses_still_answers(
+    firepanda: ModuleType,
+) -> None:
+    """pandas refuses a skewness or a kurtosis whenever the population variance of
+    the window is at or below ten to the minus fourteen, and the threshold is
+    absolute rather than relative.
+
+    So whether pandas will tell you the skewness of your readings depends on the
+    units you wrote them in, and the same four measurements in kilometres and in
+    millimetres differ by twelve orders of magnitude in variance. A one pass power
+    sum cannot compute a shape down there, so the threshold is doing real work for
+    pandas. A carried central moment with a rebuild can, so this answers the
+    number.
+    """
+    rows = [-1e-8, 1e-8, -1e-8, 1e-8]
+    got = firepanda.Series(rows, name="v").rolling(4).kurt().tolist()
+    assert got[3] == pytest.approx(-6.0, rel=NEAR)
+    assert math.isnan(theirs(rows).rolling(4).kurt().tolist()[3])
+    wider = [-1.1e-7, 1.1e-7, -1.1e-7, 1.1e-7]
+    assert theirs(wider).rolling(4).kurt().tolist()[3] == pytest.approx(-6.0, rel=1e-9)
 
 
 @needs_pandas
@@ -501,32 +646,33 @@ def their_frame() -> Any:
     return pd.DataFrame(COLUMNS, dtype="float64")
 
 
-def matching(mine: Any, them: Any) -> bool:
+def matching(mine: Any, them: Any, tolerance: float = 0.0) -> bool:
     """Compares two frames column by column, reading a missing row as equal to a
     missing row, which is what `same` does for a column."""
     if list(mine.columns) != list(them.columns):
         return False
-    return all(same(mine[name], them[name]) for name in list(mine.columns))
+    return all(same(mine[name], them[name], tolerance) for name in list(mine.columns))
 
 
 @needs_pandas
 @pytest.mark.parametrize("kind", WINDOWED)
 def test_every_reduction_matches_over_a_frame(firepanda: ModuleType, kind: str) -> None:
-    """The same eight names over a frame, which answers a frame of the same
+    """The same ten names over a frame, which answers a frame of the same
     columns in the same order rather than a column."""
     mine = getattr(framed(firepanda).rolling(4), kind)()
     them = getattr(their_frame().rolling(4), kind)()
     assert type(mine).__name__ == "DataFrame"
-    assert matching(mine, them)
+    assert matching(mine, them, slack(kind))
 
 
 @needs_pandas
 @pytest.mark.parametrize("kind", WINDOWED)
 def test_every_reduction_matches_over_an_expanding_frame(firepanda: ModuleType, kind: str) -> None:
-    """The eight again over the window with no near end."""
+    """The ten again over the window with no near end."""
     assert matching(
         getattr(framed(firepanda).expanding(), kind)(),
         getattr(their_frame().expanding(), kind)(),
+        slack(kind),
     )
 
 
