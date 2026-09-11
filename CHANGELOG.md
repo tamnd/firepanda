@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.68] - 2026-09-12
+
+Built against Mojo 1.0.0 (ed45d567).
+
+The two spellings of a join that names its keys by column name rather than by equality, `USING` and `NATURAL`, and then the operator work that lets them and every other join over two tables that share a column name actually run. The second entry is the interesting one, because the fix was to take a decision away from the operator rather than give it a feature: it worked its output columns out from names, which is fine until two of them are the same, and it is handed the plan's numbering now instead.
+
 ### Fixed: a join of two tables that share a column name runs
 
 It was refused, and any `USING` or `NATURAL` join was refused with it, since one of those names a column both sides have by definition. The refusal was physical lowering's and the reason was the probe operator: left to itself it renames a right column whose name the left already has, and drops the right key outright when the two keys are called the same. Either one moves a column the plan had numbered, and a position that means a different column is a wrong answer rather than a missing feature, so it was refused instead.
@@ -5779,7 +5785,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.67...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.68...HEAD
+[0.6.68]: https://github.com/tamnd/firepanda/releases/tag/v0.6.68
 [0.6.67]: https://github.com/tamnd/firepanda/releases/tag/v0.6.67
 [0.6.66]: https://github.com/tamnd/firepanda/releases/tag/v0.6.66
 [0.6.65]: https://github.com/tamnd/firepanda/releases/tag/v0.6.65
