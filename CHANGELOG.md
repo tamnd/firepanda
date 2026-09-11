@@ -8,6 +8,24 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.57] - 2026-09-11
+
+Built against Mojo 1.0.0 (ed45d567).
+
+The planner runs as one call now, and the thing it was quietly wasting turns out to have been in the layer below it.
+
+`optimize` is the entry point. It runs simplification, projection pushdown, predicate pushdown, common subexpression elimination, projection merging and slice pushdown, in the order the spec fixes, and runs the whole thing again if a run changed anything, up to four times. Until this went in every pass was a thing a caller could run on its own and nothing ran any of them, which is why the pass count could go from zero to five without a single query getting faster. Each adjacency has a reason and the module docstring gives all of them, the shortest being that simplification goes first so every later pass sees the simplest form of every expression, and slice pushdown goes last because a limit is happiest once the nodes it might swap past have stopped moving underneath it.
+
+Writing it turned up something none of the passes could see on its own. Lowering walked an expression tree by arena index and remembered nothing, so an index it met twice appended the same operator twice, and over six million rows that is a second pass for a column already sitting in the chunk. It now keeps a memo per plan node. The rule that makes it safe is that an output owns the name of the column it lands in, so the top of an output is never shared and everything below it always is, and a cast forgets its position because it converts where the column lies rather than appending.
+
+That memo is what made the sixth pass worth writing. Common subexpression elimination makes two expressions of one shape into one index, within one plan node. Before the memo that was a rewrite with no saving attached, since lowering would have computed the one index twice anyway. It works a node at a time because binding writes a position onto a column and the same name under two nodes can bind to two different positions, so shapes that look alike across nodes are not alike. A dataframe library needs this more than a SQL engine does, because the arena hands out an index per call rather than per shape and a person writing Python repeats themselves: q1 asks for the discounted price and then for the discounted price times one plus the tax, and that is the product built twice.
+
+It also took a refusal off the merging pass. That pass declined to substitute an expression an upper projection reads more than once, because one evaluation would have become two. With the memo it does not, so `b = a + a` over an expensive `a` merges now. What is left of the refusal is the case where one of the mentions is a whole output on its own, which is the only shape lowering cannot share, and that comes off when a physical projection can rename.
+
+On the pandas side a frame became addressable. `loc`, `iloc`, `at`, `iat` and `take` went in, with the shape of the answer decided by the shape of the key rather than by the data, and with the off by one that catches everybody asserted both ways: a slice of positions excludes the position it stops at and a slice of labels includes the label it stops at. `set_index`, `reset_index` and `sort_index` went in alongside, specified by the round trip, which is that `df.set_index("k").reset_index()` has to give back the frame that went in.
+
+Patch rather than minor, since the planner milestone is not finished. Seven of its thirteen passes are.
+
 ### Added: common subexpression elimination, so one shape is one expression
 
 `cse` in `firepanda/plan/cse.mojo`, section 5 of the pass pipeline spec, and the sixth pass in the pipeline. Within one plan node, two expressions that are the same shape become one index, and lowering then computes them once because it remembers where it put an index it has already met.
