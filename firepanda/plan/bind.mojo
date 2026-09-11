@@ -253,15 +253,20 @@ def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
                 "' yet, so a plan cannot say what it answers",
             )
         )
-    var wanted = 1 if name == "not" else 2
-    if len(args) != wanted:
+    # `and` and `or` take two or more, because the simplify pass flattens
+    # `a AND (b AND c)` into one call with three arguments and a plan that has
+    # been through a pass has to bind again afterwards.
+    if name == "not":
+        if len(args) != 1:
+            raise Error(
+                String("'not' takes 1 argument and was given ", len(args))
+            )
+    elif len(args) < 2:
         raise Error(
             String(
                 "'",
                 name,
-                "' takes ",
-                wanted,
-                " arguments and was given ",
+                "' takes two or more arguments and was given ",
                 len(args),
             )
         )

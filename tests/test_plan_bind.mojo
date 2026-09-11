@@ -226,6 +226,41 @@ def test_the_connectives_are_calls_and_answer_a_yes_or_a_no() raises:
     assert_equal(tree.nodes[both].type, LogicalType.BOOL, "a conjunction")
 
 
+def test_a_conjunction_of_three_binds_because_the_pass_makes_them() raises:
+    # The simplify pass flattens `a AND (b AND c)` into one call with three
+    # arguments, and a plan that has been through a pass binds again after it,
+    # so a fixed arity of two here would reject the pass's own output.
+    var tree = Expressions()
+    var bal = tree.column("c_acctbal")
+    var zero = tree.literal(Value(Float64(0.0)))
+    var rich = tree.binary(BinaryOp.GT, bal, zero)
+    var richer = tree.binary(BinaryOp.GT, bal, zero)
+    var richest = tree.binary(BinaryOp.GT, bal, zero)
+    var all_of = tree.call("and", [rich, richer, richest], rowwise=True)
+    bind_expr(tree, all_of, _customer(), [0, 0, 0, 0])
+    assert_equal(tree.nodes[all_of].type, LogicalType.BOOL, "a conjunction")
+
+
+def test_a_connective_with_one_argument_is_still_refused() raises:
+    var tree = Expressions()
+    var bal = tree.column("c_acctbal")
+    var zero = tree.literal(Value(Float64(0.0)))
+    var rich = tree.binary(BinaryOp.GT, bal, zero)
+    var alone = tree.call("or", [rich], rowwise=True)
+    with assert_raises(contains="takes two or more arguments"):
+        bind_expr(tree, alone, _customer(), [0, 0, 0, 0])
+
+
+def test_a_negation_still_takes_exactly_one() raises:
+    var tree = Expressions()
+    var bal = tree.column("c_acctbal")
+    var zero = tree.literal(Value(Float64(0.0)))
+    var rich = tree.binary(BinaryOp.GT, bal, zero)
+    var twice = tree.call("not", [rich, rich], rowwise=True)
+    with assert_raises(contains="'not' takes 1 argument"):
+        bind_expr(tree, twice, _customer(), [0, 0, 0, 0])
+
+
 def test_a_connective_over_something_that_is_not_a_question_is_refused() raises:
     var tree = Expressions()
     var bal = tree.column("c_acctbal")

@@ -398,15 +398,145 @@ def test_a_scan_with_no_frame_for_its_relation_says_so() raises:
         _ = lower(plan, root, one_frame())
 
 
-def test_an_aggregate_is_refused_by_name() raises:
+def test_a_whole_frame_reduction_answers_one_row() raises:
     var plan = Plan()
     var scan = plan.scan("sales", List[String](), 0)
     var qty = plan.exprs.column("qty")
     var total = plan.exprs.aggregate(AggKind.SUM, qty)
     var root = plan.aggregate(scan, List[Int](), [total], ["total"])
+    var out = run(plan, root)
+
+    assert_equal(out.width(), 1, "one column")
+    assert_equal(len(out), 1, "one row")
+    var got = read_back(out, "total")
+    assert_equal(got[0], 159, "five and twenty and the other eight")
+
+
+def test_a_reduction_over_an_expression_folds_the_expression() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var price = plan.exprs.column("price")
+    var line = plan.exprs.binary(BinaryOp.MUL, qty, price)
+    var revenue = plan.exprs.aggregate(AggKind.SUM, line)
+    var root = plan.aggregate(scan, List[Int](), [revenue], ["revenue"])
+    var out = run(plan, root)
+
+    # 50, 40, 21, 40, 60, 72, 75, 100, 120 and 90.
+    var got = read_back(out, "revenue")
+    assert_equal(got[0], 668, "the sum of the products")
+
+
+def test_a_group_by_keeps_the_key_and_names_the_fold() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var price = plan.exprs.column("price")
+    var qty = plan.exprs.column("qty")
+    var total = plan.exprs.aggregate(AggKind.SUM, qty)
+    var root = plan.aggregate(scan, [price], [total], ["price", "total"])
+    var out = run(plan, root)
+
+    # Every price is distinct, so the grouping is the rows in the order they
+    # were first seen, which is what makes the check readable.
+    assert_equal(out.width(), 2, "the key and the fold")
+    assert_equal(out.schema[0].name, "price", "the key keeps its name")
+    assert_equal(out.schema[1].name, "total", "the fold takes the plan's")
+    assert_equal(len(out), 10, "one row per price")
+
+
+def test_a_group_by_on_a_computed_key_groups_by_what_it_computed() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var bucket = plan.exprs.binary(
+        BinaryOp.FLOORDIV, qty, plan.exprs.literal(Value(Int64(10)))
+    )
+    var counted = plan.exprs.aggregate(AggKind.COUNT, qty)
+    var root = plan.aggregate(scan, [bucket], [counted], ["tens", "rows"])
+    var out = run(plan, root)
+
+    # 5, 20, 3, 40, 12, 8, 25, 1, 30 and 15 fall in tens 0, 2, 0, 4, 1, 0, 2, 0,
+    # 3 and 1, so the buckets first seen are 0, 2, 4, 1 and 3.
+    assert_equal(len(out), 5, "buckets")
+    var tens = read_back(out, "tens")
+    assert_equal(tens[0], 0, "the first bucket seen")
+    assert_equal(tens[1], 2, "the second")
+    var rows = read_back(out, "rows")
+    assert_equal(rows[0], 4, "four rows under ten")
+
+
+def test_the_shape_of_q6_lowers_and_runs() raises:
+    # Scan, a conjunction of three range predicates, a product, and one sum,
+    # which is the whole of TPC-H q6 with the column names changed.
+    var plan = Plan()
+    var scan = plan.scan("sales", ["qty", "price"], 0)
+    var qty = plan.exprs.column("qty")
+    var price = plan.exprs.column("price")
+    var low = plan.exprs.binary(
+        BinaryOp.GE, price, plan.exprs.literal(Value(Int64(2)))
+    )
+    var high = plan.exprs.binary(
+        BinaryOp.LE, price, plan.exprs.literal(Value(Int64(9)))
+    )
+    var small = plan.exprs.binary(
+        BinaryOp.LT, qty, plan.exprs.literal(Value(Int64(25)))
+    )
+    var all_of = plan.exprs.call(
+        String("and"), [low, high, small], rowwise=True
+    )
+    var kept = plan.filter(scan, all_of)
+    var line = plan.exprs.binary(BinaryOp.MUL, qty, price)
+    var revenue = plan.exprs.aggregate(AggKind.SUM, line)
+    var root = plan.aggregate(kept, List[Int](), [revenue], ["revenue"])
+
+    _ = bind(plan, root, schemas())
+    simplify(plan, root)
+    var pipe = lower(plan, root, one_frame())
+    var out = pipe^.run()
+
+    # Prices between two and nine with a quantity under twenty five keep
+    # 20 at 2, 3 at 7, 12 at 5, 8 at 9, and 15 at 6, for 40, 21, 60, 72 and 90.
+    assert_equal(len(out), 1, "one row")
+    var got = read_back(out, "revenue")
+    assert_equal(got[0], 283, "the revenue")
+
+
+def test_an_aggregation_whose_output_is_not_a_fold_is_refused() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var price = plan.exprs.column("price")
+    var root = plan.aggregate(scan, [price], [qty], ["price", "qty"])
     _ = bind(plan, root, schemas())
 
-    with assert_raises(contains="no operator for a AGGREGATE node"):
+    with assert_raises(contains="rather than a fold"):
+        _ = lower(plan, root, one_frame())
+
+
+def test_a_group_by_that_renames_its_key_is_refused() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var price = plan.exprs.column("price")
+    var qty = plan.exprs.column("qty")
+    var total = plan.exprs.aggregate(AggKind.SUM, qty)
+    var root = plan.aggregate(scan, [price], [total], ["each", "total"])
+    _ = bind(plan, root, schemas())
+
+    with assert_raises(contains="carries the key field through"):
+        _ = lower(plan, root, one_frame())
+
+
+def test_a_reduction_that_cannot_fold_a_chunk_at_a_time_is_refused() raises:
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var middle = plan.exprs.aggregate(AggKind.MEDIAN, qty)
+    var root = plan.aggregate(scan, List[Int](), [middle], ["middle"])
+    _ = bind(plan, root, schemas())
+
+    # The refusal comes from the physical node rather than from lowering, which
+    # is the right place for it: what folds is a property of the reduction.
+    with assert_raises(contains="cannot be computed a chunk at a time"):
         _ = lower(plan, root, one_frame())
 
 

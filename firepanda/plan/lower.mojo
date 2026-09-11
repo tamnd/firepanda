@@ -43,13 +43,13 @@ is the one conjunct case of the same loop.
 
 ### What it refuses, and why refusing is the design
 
-Aggregates, joins, sorts, distincts and unions are not lowered here yet, and
-neither is a unary expression, a conditional, a window, or a cast over an input
-column. Every one of those raises an error that names what it was. It does not
-fall back to `Materialize`, and the reason is that `Materialize` holds a
-function pointer that captures nothing, so there is no way to hand it the
-expression that could not be lowered. A fallback that cannot carry the thing it
-is falling back from is not a fallback.
+Joins, sorts, distincts and unions are not lowered here yet, and neither is a
+unary expression, a conditional, a window, or a cast over an input column.
+Every one of those raises an error that names what it was. It does not fall
+back to `Materialize`, and the reason is that `Materialize` holds a function
+pointer that captures nothing, so there is no way to hand it the expression
+that could not be lowered. A fallback that cannot carry the thing it is falling
+back from is not a fallback.
 
 Raising by name is what makes this file safe to grow. A caller that gets an
 error keeps whatever route it had, so lowering can be tried first and cost
@@ -60,10 +60,21 @@ argument `Materialize` makes for the physical layer, one level up.
 
 from firepanda.array.value import Value
 from firepanda.dtype.schema import Schema
-from firepanda.exec.node import Cast, Compute, Filter, Limit, Node, Project
+from firepanda.exec.node import (
+    Cast,
+    Compute,
+    Filter,
+    Group,
+    GroupAgg,
+    Limit,
+    Node,
+    Project,
+    Reduce,
+)
 from firepanda.exec.pipeline import Pipeline
 from firepanda.frame.frame import DataFrame
 from firepanda.kernel.binary import BinaryOp
+from firepanda.kernel.group import AggKind
 from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
 from firepanda.plan.node import NO_LIMIT, NodeKind, Plan
 
@@ -338,6 +349,78 @@ def _lower_project(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     pipe.add(Node(Project(keep^)))
 
 
+def _lower_aggregate(plan: Plan, at: Int, mut pipe: Pipeline) raises:
+    """Lowers an aggregation into the computes it needs and one breaker.
+
+    No keys is a whole frame reduction and goes to `Reduce`, and any keys go to
+    `Group`. That is the one place lowering makes a physical choice, and it is
+    the choice the plan node's own docstring says is physical: knowing there is
+    one group rather than hashing every row to find out is not a difference in
+    what the query means.
+
+    No trim is needed afterwards. Both breakers produce the key columns and the
+    aggregate columns and nothing else, so whatever intermediates the keys and
+    the aggregated expressions needed are gone by the time a row comes out.
+
+    Args:
+        plan: The plan.
+        at: The aggregation node.
+        pipe: The pipeline, added to.
+
+    Raises:
+        Error: If an aggregate is not a fold over something, if a key is
+            renamed, which the breakers cannot do because they carry the input
+            field through, or if an expression has a kind no operator computes.
+    """
+    var base = len(pipe.schema)
+    var held = plan.nodes[at].exprs.copy()
+    var names = plan.nodes[at].names.copy()
+    var count = plan.nodes[at].parts
+
+    var keys = List[Int](capacity=count)
+    for i in range(count):
+        var made = _lower_expr(plan.exprs, held[i], pipe, base, names[i])
+        if pipe.schema[made].name != names[i]:
+            raise Error(
+                String(
+                    "lower: the aggregation calls the group key '",
+                    pipe.schema[made].name,
+                    "' by the name '",
+                    names[i],
+                    (
+                        "', and a physical group by carries the key field"
+                        " through as it found it"
+                    ),
+                )
+            )
+        keys.append(made)
+
+    var aggs = List[GroupAgg](capacity=len(held) - count)
+    for i in range(count, len(held)):
+        if plan.exprs.nodes[held[i]].kind != ExprKind.AGGREGATE:
+            raise Error(
+                String(
+                    "lower: the aggregation's output '",
+                    names[i],
+                    "' is a ",
+                    plan.exprs.nodes[held[i]].kind,
+                    (
+                        " expression rather than a fold, and there is no"
+                        " operator that computes one beside the groups"
+                    ),
+                )
+            )
+        var over = plan.exprs.nodes[held[i]].children[0]
+        var made = _lower_expr(plan.exprs, over, pipe, base, names[i])
+        var kind = AggKind(UInt8(plan.exprs.nodes[held[i]].op))
+        aggs.append(GroupAgg(made, kind, names[i]))
+
+    if count == 0:
+        pipe.add(Node(Reduce(aggs^)))
+        return
+    pipe.add(Node(Group(keys^, aggs^)))
+
+
 def _lower_limit(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     """Lowers a limit, which has to start at the first row.
 
@@ -444,7 +527,9 @@ def lower(
     for i in range(1, len(order)):
         var at = order[i]
         var kind = plan.nodes[at].kind
-        if kind == NodeKind.FILTER:
+        if kind == NodeKind.AGGREGATE:
+            _lower_aggregate(plan, at, pipe)
+        elif kind == NodeKind.FILTER:
             _lower_filter(plan, at, pipe)
         elif kind == NodeKind.PROJECT:
             _lower_project(plan, at, pipe)
