@@ -1772,5 +1772,20 @@ def test_an_argument_that_is_computed_is_folded_before_it_gets_here() raises:
         _ = lower(plan, root, List[DataFrame]())
 
 
+def test_a_window_is_refused_by_name() raises:
+    # There is no physical operator for one yet. The node binds and prints and
+    # goes through every pass, and running it says so rather than answering
+    # something that is not what was asked.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var running = plan.exprs.window(AggKind.SUM, qty, List[Int](), List[Int]())
+    var root = plan.window(scan, [running], ["running"])
+    _ = bind(plan, root, schemas())
+
+    with assert_raises(contains="no operator for a WINDOW node yet"):
+        _ = lower(plan, root, one_frame())
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

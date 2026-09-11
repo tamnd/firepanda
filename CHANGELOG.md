@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a window is a plan node of its own
+
+The twelfth node kind, and the argument for it is that a window is the one thing a projection cannot hold. Every other expression a project computes reads one row, and a window reads the whole partition the row is in, so putting one in a project would mean every pass that treats a project as elementwise now has to check for it. The node keeps that check in one place, and the builder refuses anything that is not a window expression, so the rule is enforced where it is written down.
+
+It adds its columns to the ones below it rather than replacing them, which is what `SELECT x, sum(x) OVER ()` asks for and is how DuckDB's own window operator is shaped. A node that replaced its input's columns would need a projection above it saying so, on every query.
+
+Binding, printing and the JSON round trip all handle it. Projection pushdown drops a window nothing reads, which is the one on that list worth dropping, since keeping it means partitioning the input and walking every partition to produce a column the query never asks for. Predicate pushdown moves nothing below a window at all, and that is not conservatism: a row thrown away below one changes the answer for every row that shares its partition.
+
+There is no physical operator yet, so lowering refuses it by name the way a difference and an intersection are refused. The SQL front end does not build one yet either, which is waiting on `AggKind` growing a `row_number`, a `rank`, a `lag` and a `lead`.
+
+Part of #309.
+
 ### Added: a frame and a series can be shaped the way another one is shaped
 
 `DataFrame.reindex_like` and `Series.reindex_like`, which are `reindex` with the labels read off another object rather than written out. The reason they are methods rather than a line at the call site is the index name: taking the labels out and passing them as a list gives the right rows back under the name the frame already had, and coming back labelled the way the other frame is labelled is the whole point of asking for its shape. So the core's `reindex` gained an overload that takes an `Index` and keeps its name, and the overload that takes a bare set of labels is now one line that builds an index under this frame's own name and calls the other. The frame's version does both axes and therefore needs another frame, which is why pandas refuses a series there with a sentence about there being no axis named columns on one, while the series' version needs only labels and takes either. There is no fill value, because pandas does not offer one here, so a column that gains a row widens to float64. Document 40 section 11 has the rest.

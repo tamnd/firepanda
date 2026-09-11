@@ -1,11 +1,11 @@
-"""The ten logical nodes a query is, and the arena they live in.
+"""The twelve logical nodes a query is, and the arena they live in.
 
 The same collision as `exec/node.mojo` and the right one, because these are the
 same concept at two levels. A node here says what the query wants. A node there
 says how one chunk of it is computed. The list here is shorter than the list
 there, since several physical nodes are alternative implementations of one
-logical node, and it is shorter than it looks: nine of the ten cover every TPC-H
-query and the tenth is how a query with no `FROM` is written down.
+logical node, and it is shorter than it looks: nine of them cover every TPC-H
+query and the rest are how the queries that TPC-H does not ask are written down.
 
 Scan, Filter, Project, Aggregate, Join, Sort, Limit, Distinct and Union. That is
 the list in `docs/specs/planner/01-what-a-plan-is.md` and the spec says to refuse
@@ -19,6 +19,14 @@ are the same node with a different code in `op`, because all three line their
 inputs up by position, take the first input's names, and have the same question
 about duplicates hanging off them. Three kinds for that would be three copies of
 every pass that touches one.
+
+Window is the twelfth and the argument for it is that a window is the one thing
+a projection cannot hold. Every other expression a project computes reads one
+row, and a window reads the partition the row is in, so putting one in a project
+would mean every pass that treats a project as elementwise now has to check. The
+node keeps that check in one place, and it adds its columns to the ones below it
+rather than replacing them, because `SELECT x, sum(x) OVER ()` wants both and a
+node that replaced them would need a project above it saying so.
 
 ## The arena, and why the expressions are in it
 
@@ -56,10 +64,10 @@ from firepanda.plan.expr import UNBOUND, ExprKind, Expressions
 
 @fieldwise_init
 struct NodeKind(Equatable, ImplicitlyCopyable, Movable, Writable):
-    """Which of the eleven kinds a logical node is."""
+    """Which of the twelve kinds a logical node is."""
 
     var code: Int
-    """The kind, as one of the eleven values below."""
+    """The kind, as one of the twelve values below."""
 
     comptime SCAN = Self(0)
     """A table, a file or an in memory frame. The only node with no input, and
@@ -107,6 +115,11 @@ struct NodeKind(Equatable, ImplicitlyCopyable, Movable, Writable):
     arguments. The third node with no input. What it is called is in `source`
     and the arguments are the expressions, and like a `VALUES` every one of them
     has to read nothing, because there is nothing under it to read."""
+
+    comptime WINDOW = Self(11)
+    """A list of window expressions over one input, added to the columns that
+    input already produces. The one node whose output is wider than what it was
+    asked for, and the only place a window expression is allowed to sit."""
 
     def __eq__(self, other: Self) -> Bool:
         """Compares two kinds.
@@ -156,6 +169,8 @@ struct NodeKind(Equatable, ImplicitlyCopyable, Movable, Writable):
             writer.write("VALUES")
         elif self == Self.TABLE_FUNCTION:
             writer.write("TABLE FUNCTION")
+        elif self == Self.WINDOW:
+            writer.write("WINDOW")
         else:
             writer.write("UNION")
 
@@ -179,17 +194,17 @@ comptime SET_INTERSECT = 2
 struct PlanNode(Copyable, Movable):
     """One node of a logical plan.
 
-    One struct for all eleven kinds, on the same grounds as `Expr`: the arena
+    One struct for all twelve kinds, on the same grounds as `Expr`: the arena
     holds them in one list and a list has one element type. Which fields a kind
     uses is documented on the builder that makes it.
     """
 
     var kind: NodeKind
-    """Which of the eleven this is."""
+    """Which of the twelve this is."""
 
     var inputs: List[Int]
     """The nodes this one reads, as plan arena indices. Empty on a `SCAN`, on a
-    `VALUES` and on a `TABLE_FUNCTION`, one on the four in the middle, two on a
+    `VALUES` and on a `TABLE_FUNCTION`, one on the seven in the middle, two on a
     `JOIN`, and any number on a `UNION`."""
 
     var exprs: List[Int]
@@ -205,8 +220,8 @@ struct PlanNode(Copyable, Movable):
 
     var names: List[String]
     """The output names on a `PROJECT`, an `AGGREGATE`, a `VALUES` and a
-    `TABLE_FUNCTION`, and the column names read on a `SCAN`. Empty
-    elsewhere."""
+    `TABLE_FUNCTION`, the names of the columns a `WINDOW` adds, and the column
+    names read on a `SCAN`. Empty elsewhere."""
 
     var flags: List[Bool]
     """The directions on a `SORT`, descending first and nulls last after, each
@@ -249,7 +264,7 @@ struct PlanNode(Copyable, Movable):
         """Builds a node.
 
         Args:
-            kind: Which of the ten.
+            kind: Which of the twelve.
             inputs: The nodes this one reads.
             exprs: The expressions.
             parts: Where the first expression list ends.
@@ -469,6 +484,84 @@ struct Plan(Movable, Sized):
         return self._add(
             PlanNode(
                 NodeKind.PROJECT,
+                [input],
+                outputs^,
+                0,
+                names^,
+                List[Bool](),
+                0,
+                0,
+                0,
+                UNBOUND,
+                String(),
+            )
+        )
+
+    def window(
+        mut self, input: Int, var outputs: List[Int], var names: List[String]
+    ) raises -> Int:
+        """Builds a window node.
+
+        One input, one window expression per column added, and a name for each.
+        The columns the input already produces come out first and these come
+        after them, which is the order `SELECT x, sum(x) OVER ()` reads in and
+        is why the node does not carry the input's names anywhere.
+
+        Every expression has to be a window. An aggregate here is a query that
+        wanted a `GROUP BY`, and anything elementwise is a projection, and both
+        of those have a node already. Keeping the rule this tight is what lets
+        every other pass go on treating a project as elementwise.
+
+        The frame is not here yet. Every window this builds reads its whole
+        partition, which is what `OVER (PARTITION BY ...)` with no frame clause
+        means and is the only frame the expression arena can spell.
+
+        Args:
+            input: The node the windows are computed over.
+            outputs: The window expressions.
+            names: What each one is called.
+
+        Returns:
+            The index of the new node.
+
+        Raises:
+            If the input is not in the plan, an expression is not in the arena
+            or is not a window, the two lists are different lengths, or there
+            are no windows at all.
+        """
+        self.check(input)
+        if len(outputs) != len(names):
+            raise Error(
+                String(
+                    "a window node computes ",
+                    len(outputs),
+                    " columns and has ",
+                    len(names),
+                    " names for them",
+                )
+            )
+        if len(outputs) == 0:
+            raise Error(
+                "a window node that computes no window is the node below it"
+            )
+        for i in range(len(outputs)):
+            self.exprs.check(outputs[i])
+            if self.exprs.nodes[outputs[i]].kind != ExprKind.WINDOW:
+                raise Error(
+                    String(
+                        "column ",
+                        i + 1,
+                        " of a window node is of kind ",
+                        self.exprs.nodes[outputs[i]].kind,
+                        (
+                            ", and a window node holds windows because"
+                            " everything else has a node of its own"
+                        ),
+                    )
+                )
+        return self._add(
+            PlanNode(
+                NodeKind.WINDOW,
                 [input],
                 outputs^,
                 0,

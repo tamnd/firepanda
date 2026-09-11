@@ -569,6 +569,62 @@ def test_a_table_function_belongs_to_no_relation() raises:
     assert_equal(plan.exprs.nodes[i].table, UNBOUND, "from nowhere")
 
 
+def test_a_window_keeps_its_input_and_adds_to_it() raises:
+    var plan = Plan()
+    var scan = plan.scan("orders", List[String](), 0)
+    var price = plan.exprs.column("o_totalprice")
+    var who = plan.exprs.column("o_custkey")
+    var running = plan.exprs.window(AggKind.SUM, price, [who], List[Int]())
+    var at = plan.window(scan, [running], ["spent"])
+    var schema = bind(plan, at, [_orders()])
+    assert_equal(len(schema), 4, "the three below and the one it adds")
+    assert_equal(schema[0].name, "o_orderkey", "in the order they arrived")
+    assert_equal(schema[3].name, "spent", "and the window after them")
+    assert_equal(schema[3].dtype, LogicalType.FLOAT64, "a sum of the prices")
+
+
+def test_a_window_binds_the_keys_it_partitions_and_orders_by() raises:
+    # The keys are children of the window expression rather than fields of the
+    # node, so this is really asserting that binding walks into them.
+    var plan = Plan()
+    var scan = plan.scan("orders", List[String](), 0)
+    var price = plan.exprs.column("o_totalprice")
+    var who = plan.exprs.column("o_custkey")
+    var key = plan.exprs.column("o_orderkey")
+    var running = plan.exprs.window(AggKind.SUM, price, [who], [key])
+    var at = plan.window(scan, [running], ["spent"])
+    _ = bind(plan, at, [_orders()])
+    assert_equal(plan.exprs.nodes[who].at, 1, "the partition key by position")
+    assert_equal(plan.exprs.nodes[key].at, 0, "and the order key too")
+
+
+def test_a_window_column_is_read_by_the_node_above_it() raises:
+    var plan = Plan()
+    var scan = plan.scan("orders", List[String](), 0)
+    var price = plan.exprs.column("o_totalprice")
+    var running = plan.exprs.window(
+        AggKind.SUM, price, List[Int](), List[Int]()
+    )
+    var at = plan.window(scan, [running], ["spent"])
+    var spent = plan.exprs.column("spent")
+    var root = plan.project(at, [spent], ["spent"])
+    var schema = bind(plan, root, [_orders()])
+    assert_equal(plan.exprs.nodes[spent].at, 3, "after the three below it")
+    assert_equal(schema[0].dtype, LogicalType.FLOAT64, "and typed by the sum")
+
+
+def test_a_window_over_a_name_that_is_not_there_is_refused() raises:
+    var plan = Plan()
+    var scan = plan.scan("orders", List[String](), 0)
+    var missing = plan.exprs.column("o_shipdate")
+    var running = plan.exprs.window(
+        AggKind.SUM, missing, List[Int](), List[Int]()
+    )
+    var at = plan.window(scan, [running], ["when"])
+    with assert_raises(contains="o_shipdate"):
+        _ = bind(plan, at, [_orders()])
+
+
 def test_a_union_promotes_the_types_of_the_columns_it_stacks() raises:
     var narrow = Schema()
     narrow.append(Field("n", LogicalType.INT32, False))

@@ -396,6 +396,69 @@ def test_a_table_function_is_left_alone_too() raises:
     )
 
 
+def test_a_window_nothing_reads_is_dropped() raises:
+    # The one on this list worth dropping. Keeping it means partitioning the
+    # orders and walking every partition to produce a column the query never
+    # asks for.
+    var plan = Plan()
+    var scan = plan.scan("orders", List[String](), 0)
+    var price = plan.exprs.column("o_totalprice")
+    var who = plan.exprs.column("o_custkey")
+    var spent = plan.exprs.window(AggKind.SUM, price, [who], List[Int]())
+    var most = plan.exprs.window(AggKind.MAX, price, [who], List[Int]())
+    var at = plan.window(scan, [spent, most], ["spent", "most"])
+    var key = plan.exprs.column("o_orderkey")
+    var kept = plan.exprs.column("spent")
+    var root = plan.project(at, [key, kept], ["o_orderkey", "spent"])
+    _ = prune(plan, root, [_orders()])
+    assert_equal(
+        explain(plan, root),
+        (
+            "PROJECT [o_orderkey, spent]\n"
+            "  WINDOW [sum(o_totalprice) over (partition o_custkey) as"
+            " spent]\n"
+            "    SCAN orders [o_orderkey, o_custkey, o_totalprice]\n"
+        ),
+        "the window nobody read went and the other one kept its keys",
+    )
+
+
+def test_a_window_keeps_the_columns_its_keys_read() raises:
+    # The partition key is read by the node and by nothing above it, which is
+    # the case this pass exists to get right.
+    var plan = Plan()
+    var scan = plan.scan("orders", List[String](), 0)
+    var price = plan.exprs.column("o_totalprice")
+    var who = plan.exprs.column("o_custkey")
+    var spent = plan.exprs.window(AggKind.SUM, price, [who], List[Int]())
+    var at = plan.window(scan, [spent], ["spent"])
+    var kept = plan.exprs.column("spent")
+    var root = plan.project(at, [kept], ["spent"])
+    _ = prune(plan, root, [_orders()])
+    assert_equal(
+        _read(plan, scan),
+        "o_custkey, o_totalprice",
+        "what the window reads and nothing else",
+    )
+
+
+def test_a_column_under_a_window_that_nothing_reads_still_goes() raises:
+    var plan = Plan()
+    var scan = plan.scan("orders", List[String](), 0)
+    var price = plan.exprs.column("o_totalprice")
+    var spent = plan.exprs.window(AggKind.SUM, price, List[Int](), List[Int]())
+    var at = plan.window(scan, [spent], ["spent"])
+    var key = plan.exprs.column("o_orderkey")
+    var kept = plan.exprs.column("spent")
+    var root = plan.project(at, [key, kept], ["o_orderkey", "spent"])
+    _ = prune(plan, root, [_orders()])
+    assert_equal(
+        _read(plan, scan),
+        "o_orderkey, o_totalprice",
+        "a window hands its input through and narrows it all the same",
+    )
+
+
 def test_a_difference_that_keeps_duplicates_reads_the_whole_row_too() raises:
     # The duplicate flag decides nothing here. Whether an orders row is in the
     # right arm is a question about the whole row whatever happens to the

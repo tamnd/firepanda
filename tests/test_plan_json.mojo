@@ -7,7 +7,7 @@ what a reader of the test checks against, and the second is what catches a field
 that was dropped on the way out and therefore never got a chance to come back
 wrong.
 
-The groups are: the eleven node kinds, the nine expression kinds, the constants,
+The groups are: the twelve node kinds, the nine expression kinds, the constants,
 what a bound plan keeps, the sharing that `cse` and `subplan` leave behind, JSON
 written by hand rather than by the writer, and the things that are refused.
 """
@@ -24,9 +24,15 @@ from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.unary import UnaryOp
 from firepanda.plan.bind import bind
-from firepanda.plan.expr import UNBOUND
+from firepanda.plan.expr import UNBOUND, ExprKind
 from firepanda.plan.json import Loaded, from_json, to_json
-from firepanda.plan.node import NO_LIMIT, SET_EXCEPT, SET_INTERSECT, Plan
+from firepanda.plan.node import (
+    NO_LIMIT,
+    SET_EXCEPT,
+    SET_INTERSECT,
+    NodeKind,
+    Plan,
+)
 from firepanda.plan.print import explain, render_expr
 
 
@@ -322,6 +328,48 @@ def test_a_table_function_with_no_arguments_comes_back_with_none() raises:
     var at = plan.table_function("now", List[Int](), ["t"])
     var back = _trip(plan, at)
     assert_equal(len(back.plan.nodes[back.root].exprs), 0, "and none came back")
+
+
+def test_a_window_carries_the_columns_it_adds() raises:
+    var plan = Plan()
+    var t = plan.scan("orders", ["o_custkey", "o_totalprice"], 0)
+    var price = plan.exprs.column("o_totalprice")
+    var who = plan.exprs.column("o_custkey")
+    var running = plan.exprs.window(AggKind.SUM, price, [who], List[Int]())
+    var at = plan.window(t, [running], ["spent"])
+    assert_true(
+        to_json(plan, at).find('"kind": "window"') != -1,
+        "the node says which kind it is",
+    )
+    var back = _trip(plan, at)
+    assert_equal(
+        back.plan.nodes[back.root].names[0], "spent", "under the same name"
+    )
+    assert_equal(
+        back.plan.exprs.nodes[back.plan.nodes[back.root].exprs[0]].parts,
+        1,
+        "and the partition key came back on the expression",
+    )
+
+
+def test_a_window_node_and_a_window_expression_are_told_apart() raises:
+    # Both write `"kind": "window"` and they are read in different places, so
+    # this says that reading one of them where the other belongs is not
+    # something the document leaves open.
+    var plan = Plan()
+    var t = plan.scan("orders", ["o_totalprice"], 0)
+    var price = plan.exprs.column("o_totalprice")
+    var total = plan.exprs.window(AggKind.SUM, price, List[Int](), List[Int]())
+    var at = plan.window(t, [total], ["total"])
+    var back = _trip(plan, at)
+    assert_equal(
+        back.plan.nodes[back.root].kind, NodeKind.WINDOW, "the node is a window"
+    )
+    assert_equal(
+        back.plan.exprs.nodes[back.plan.nodes[back.root].exprs[0]].kind,
+        ExprKind.WINDOW,
+        "and so is the one expression on it",
+    )
 
 
 def test_every_expression_kind_goes_out_and_comes_back() raises:
