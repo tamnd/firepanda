@@ -33,6 +33,15 @@ The parallel route works unchanged. `partial` runs on a worker and cannot write 
 A reduction that reads two columns is still refused, and by a better sentence. `corr` and `cov` want a pair and the plan node here names one column, so they say so instead of saying they cannot fold.
 
 `Group` still refuses. Holding a column beside a key map is a change of its own and is not in here.
+### Fixed: a join whose build side has no rows joins against nothing
+
+`SELECT qty FROM sales WHERE qty IN (SELECT band FROM tiers WHERE band > 1000)` raised `column has 0 chunks, not one; call combine() first`. A column that no rows reached has no chunks at all rather than one empty chunk, which is the column's own rule and a good one, because an empty chunk would put two equal entries in the offsets and a row position could then name it. The pipeline join read the one chunk of the build side's key column and there was not one.
+
+Every kind has an answer here and none of them is an error. An inner join over an empty build side is no rows, a left join is every left row with nulls on the right, a semi join is no rows, an anti join is every left row, and a mark join is false on every row, since there is nothing to match and no null to be unsure about. All five are pinned now.
+
+The join settles its build side once in `bind`, one array per right column, lending the chunk when there is one and making an empty array of the column's type when there is not. `empty_any` is that array, and `ChunkedArray.combine` now goes through it as well, which fixes the same shape for a text column: an empty text column built the plain way says it is not text, because that question reads whether the string half is there rather than what the logical type says.
+
+The multi chunk end of the same accessor is #583 and is still open. This was #611.
 
 ## [0.6.73] - 2026-09-12
 
