@@ -25,6 +25,7 @@ A negative position counts from the end, and the counting happens in the binding
 One shape of answer is refused rather than approximated. `df.iloc[0]` and `df.loc[label]` on a unique index collapse the row axis and leave the columns, so both answer a series whose labels are the column names, and a series has one type while a frame has one per column. Nothing here computes a type that every column fits, and inventing that rule inside an indexing accessor would put a type rule in the last place anybody would look for it. `docs/specs/36-a-position-and-a-label-are-different-questions.md` has the whole argument and the table of what else is refused.
 
 Part of #156, after #500.
+
 ### Added: slice pushdown and top n, so ten rows are not paid for six million times
 
 Four of the twenty two TPC-H queries end in an order by with a limit on it, and the difference between answering one of those by sorting the whole table and answering it by keeping the best ten rows as they go past is most of the query. `limits` is the pass that spots the shape.
