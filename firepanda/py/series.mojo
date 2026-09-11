@@ -764,6 +764,7 @@ struct PySeries(Movable, Writable):
         center: PythonObject,
         closed: PythonObject,
         step: PythonObject,
+        ddof: PythonObject,
     ) raises -> PythonObject:
         """Runs one reduction over every window of the column.
 
@@ -781,6 +782,8 @@ struct PySeries(Movable, Writable):
             center: Whether the window sits around its row.
             closed: Which of the two ends the window keeps.
             step: How many rows apart the answered rows are, or `None`.
+            ddof: Subtracted from the count of values to give the divisor of a
+                variance, read by `std`, `var` and `sem` alone.
 
         Returns:
             A new series of float64.
@@ -801,6 +804,7 @@ struct PySeries(Movable, Writable):
                         flag(center, "center"),
                         words(closed, "closed"),
                         maybe_whole(step, "step"),
+                        whole(ddof, "ddof"),
                     )
                 )
             )

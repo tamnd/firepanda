@@ -449,13 +449,14 @@ struct PyDataFrame(Movable, Writable):
         center: PythonObject,
         closed: PythonObject,
         step: PythonObject,
+        ddof: PythonObject,
     ) raises -> PythonObject:
         """Runs one reduction over every window of every column.
 
         The frame half of the one door behind `Rolling` and `Expanding`. It
-        takes the same six arguments the column one takes and means the same
-        thing by all six of them, because a window is a pair of row numbers and
-        a frame's columns all have the same rows.
+        takes the same seven arguments the column one takes and means the same
+        thing by all seven of them, because a window is a pair of row numbers
+        and a frame's columns all have the same rows.
 
         Args:
             py_self: The frame.
@@ -466,6 +467,8 @@ struct PyDataFrame(Movable, Writable):
             center: Whether the window sits around its row.
             closed: Which of the two ends the window keeps.
             step: How many rows apart the answered rows are, or `None`.
+            ddof: Subtracted from the count of values to give the divisor of a
+                variance, read by `std`, `var` and `sem` alone.
 
         Returns:
             A new frame of the same column names in the same order, every one
@@ -487,6 +490,7 @@ struct PyDataFrame(Movable, Writable):
                         flag(center, "center"),
                         words(closed, "closed"),
                         maybe_whole(step, "step"),
+                        whole(ddof, "ddof"),
                     )
                 )
             )

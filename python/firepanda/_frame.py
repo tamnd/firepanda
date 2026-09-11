@@ -723,6 +723,41 @@ class Rolling(RollingMixin):
         except Exception as error:
             raise translate(error) from None
 
+    def var(
+        self,
+        ddof: int = 1,
+        numeric_only: bool = False,
+        engine: Any = None,
+        engine_kwargs: Any = None,
+    ) -> Series | DataFrame:
+        """The variance of the values in the window. Over every rolling window."""
+        try:
+            return self._reduce("var", numeric_only, engine, engine_kwargs, ddof)
+        except Exception as error:
+            raise translate(error) from None
+
+    def std(
+        self,
+        ddof: int = 1,
+        numeric_only: bool = False,
+        engine: Any = None,
+        engine_kwargs: Any = None,
+    ) -> Series | DataFrame:
+        """The standard deviation of the values in the window. Over every rolling window."""
+        try:
+            return self._reduce("std", numeric_only, engine, engine_kwargs, ddof)
+        except Exception as error:
+            raise translate(error) from None
+
+    def sem(self, ddof: int = 1, numeric_only: bool = False) -> Series | DataFrame:
+        """The standard error of the mean of the values in the window. Over every rolling
+        window.
+        """
+        try:
+            return self._reduce("sem", numeric_only, ddof=ddof)
+        except Exception as error:
+            raise translate(error) from None
+
 
 class Expanding(ExpandingMixin):
     """A window that starts at the first row and grows, waiting for a reduction.
@@ -865,6 +900,41 @@ class Expanding(ExpandingMixin):
         """The largest value in the window. Over every expanding window."""
         try:
             return self._reduce("max", numeric_only, engine, engine_kwargs)
+        except Exception as error:
+            raise translate(error) from None
+
+    def var(
+        self,
+        ddof: int = 1,
+        numeric_only: bool = False,
+        engine: Any = None,
+        engine_kwargs: Any = None,
+    ) -> Series | DataFrame:
+        """The variance of the values in the window. Over every expanding window."""
+        try:
+            return self._reduce("var", numeric_only, engine, engine_kwargs, ddof)
+        except Exception as error:
+            raise translate(error) from None
+
+    def std(
+        self,
+        ddof: int = 1,
+        numeric_only: bool = False,
+        engine: Any = None,
+        engine_kwargs: Any = None,
+    ) -> Series | DataFrame:
+        """The standard deviation of the values in the window. Over every expanding window."""
+        try:
+            return self._reduce("std", numeric_only, engine, engine_kwargs, ddof)
+        except Exception as error:
+            raise translate(error) from None
+
+    def sem(self, ddof: int = 1, numeric_only: bool = False) -> Series | DataFrame:
+        """The standard error of the mean of the values in the window. Over every expanding
+        window.
+        """
+        try:
+            return self._reduce("sem", numeric_only, ddof=ddof)
         except Exception as error:
             raise translate(error) from None
 

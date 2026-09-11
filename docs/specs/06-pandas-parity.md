@@ -282,7 +282,7 @@ pandas 3.0 covers nested data thinly and Polars covers it well. We follow Polars
 - [ ] `rolling` with a time based window, meaning an offset string on a datetime index (M7)
 - [x] `expanding` on a column, with `min_periods` (M6)
 - [ ] `ewm` with `com`, `span`, `halflife`, `alpha`, `adjust`, `ignore_na` (M6)
-- [ ] All of `sum`, `mean`, `median`, `min`, `max`, `std`, `var`, `count`, `quantile`, `skew`, `kurt`, `sem`, `corr`, `cov`, `rank` on each of the three (M6), of which `sum`, `mean`, `count`, `min` and `max` are written on `rolling` and `expanding`
+- [ ] All of `sum`, `mean`, `median`, `min`, `max`, `std`, `var`, `count`, `quantile`, `skew`, `kurt`, `sem`, `corr`, `cov`, `rank` on each of the three (M6), of which `sum`, `mean`, `count`, `min`, `max`, `var`, `std` and `sem` are written on `rolling` and `expanding`
 - [ ] `rolling.apply` with a callable (M6)
 - [ ] `win_type` weighted windows: triang, gaussian, boxcar, and the rest (M6)
 - [x] `over` with an aggregate and no ordering, which is the Polars spelling of `group_broadcast` (M6)

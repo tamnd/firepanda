@@ -48,6 +48,7 @@ class DataFrame:
         center: bool,
         closed: str,
         step: int | None,
+        ddof: int,
     ) -> DataFrame:
         """One reduction over every window of every column."""
         ...
@@ -170,6 +171,7 @@ class Series:
         center: bool,
         closed: str,
         step: int | None,
+        ddof: int,
     ) -> Series:
         """One reduction over every window of the column."""
         ...

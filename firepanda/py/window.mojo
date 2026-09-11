@@ -29,12 +29,21 @@ in on the Python side by a layer that would then own the rule.
 
 ### What is not here
 
-`std`, `var`, `sem`, `skew` and `kurt`, which carry more state than a total.
-`median`, `quantile` and `rank`, which need the window sorted. `apply`, `corr`
-and `cov`. The exponentially weighted window, which has no edges and so shares
-nothing with any of this. And a window given as a frequency, which needs a
-calendar first. None of them resolves rather than resolving and refusing, for
-the reason document 07 gives.
+`skew` and `kurt`, which carry the third and fourth moments. `median`, `quantile`
+and `rank`, which need the window sorted. `apply`, `corr` and `cov`. The
+exponentially weighted window, which has no edges and so shares nothing with any
+of this. And a window given as a frequency, which needs a calendar first. None of
+them resolves rather than resolving and refusing, for the reason document 07
+gives.
+
+### Why ddof is the last parameter this door can take
+
+`std`, `var` and `sem` read a degrees of freedom, which is a property of the
+reduction rather than of the window, and it arrives here anyway because there is
+one door and not fifty three. With it the bound method on the Python side has
+seven arguments after the object, which document 13 section 4 measured as the
+most a bound method can have. Whatever the next window parameter turns out to be,
+it comes through keyword arguments, which do not count against that.
 """
 
 from firepanda.dtype.logical import LogicalType
@@ -86,6 +95,7 @@ def window(
     center: Bool,
     closed: String,
     step: Optional[Int],
+    ddof: Int,
 ) raises -> Series:
     """Runs one reduction over every window of a column.
 
@@ -101,6 +111,8 @@ def window(
             words.
         step: How many rows apart the answered rows are, or nothing for every
             row.
+        ddof: Subtracted from the count of values to give the divisor of a
+            variance, read by `std`, `var` and `sem` and ignored by the rest.
 
     Returns:
         A float64 column, as tall as the one it read unless a step made it
@@ -122,6 +134,7 @@ def window(
                 center,
                 edge_named(closed),
                 step,
+                ddof,
             )
         if center or step:
             # pandas has no place to put either of these on an expanding
@@ -130,7 +143,9 @@ def window(
             raise Error(
                 "window: an expanding window takes neither center nor step"
             )
-        return column.expanding(op, min_periods.value() if min_periods else 1)
+        return column.expanding(
+            op, min_periods.value() if min_periods else 1, ddof
+        )
     except e:
         raise tagged(VALUE, String(e))
 
@@ -143,6 +158,7 @@ def window_frame(
     center: Bool,
     closed: String,
     step: Optional[Int],
+    ddof: Int,
 ) raises -> DataFrame:
     """Runs one reduction over every window of every column.
 
@@ -171,6 +187,8 @@ def window_frame(
             words.
         step: How many rows apart the answered rows are, or nothing for every
             row.
+        ddof: Subtracted from the count of values to give the divisor of a
+            variance, read by `std`, `var` and `sem` and ignored by the rest.
 
     Returns:
         A frame of the same column names in the same order, every one of them
@@ -199,6 +217,7 @@ def window_frame(
                 center,
                 closed,
                 step,
+                ddof,
             )
         )
     # Taken off the first answer rather than off the frame, because a step makes
