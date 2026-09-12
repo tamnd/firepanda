@@ -53,6 +53,8 @@ from .factorize import (
     Factorized,
     FactorizedStrings,
     direct_plan,
+    distinct_hashed,
+    distinct_strings,
     factorize,
     factorize_dense,
     factorize_strings,

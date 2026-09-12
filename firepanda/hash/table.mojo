@@ -869,6 +869,249 @@ struct HashTable(Movable, Sized):
         self._half = half
         self._mark = mark
 
+    def tally(
+        mut self,
+        hashes: Buffer,
+        validity: Bitmap,
+        has_null: Bool,
+        base: Int,
+        count: Int,
+        hash_at: Int = 0,
+    ):
+        """Inserts a chunk of a column's keys and keeps nothing per row.
+
+        `build` with the payload side removed. The probe is the same and the
+        growth is the same, and what is gone is the ordinal written back for
+        every row and the row recorded for every group. A distinct count wants
+        neither. It asks how many keys there were, which is `len(self)`, and it
+        never asks which row any of them came from.
+
+        What that saves is the four bytes a row of ordinals, which for a count is
+        an array the size of the column that is written once and then thrown away
+        unread, and the row per group behind it. The table is what is left and it
+        is sized by cardinality rather than by height.
+
+        The sizing schedule is gone too, and that one is not an omission. It
+        projects the group count from the discovery rate and it overshoots on
+        purpose, which `project_groups` says outright, because for a build the
+        cost of guessing high is memory and the cost of guessing low is a rehash,
+        and the build had already committed to four bytes a row so the memory was
+        the cheaper mistake. For a count the table is the whole footprint, so the
+        overshoot is the only cost there is. Measured on ten million int64 rows
+        with a key every six of them, the schedule sizes the table for the whole
+        column and the count peaks at six hundred megabytes against the hundred
+        and fifty it needs.
+
+        So this grows rather than guessing, and the guessing is left to the
+        caller, which has a better one to make. `_count_capacity` sizes the table
+        up front from the curve fit instead of the projection and bounds what it
+        reserves, and a table handed that estimate reaches the same place in one
+        or two rehashes rather than eighteen.
+
+        It is a second loop rather than a flag on the first because the first one
+        is a loop with almost nothing in it, and a branch per row to skip two
+        stores would cost the case that matters more than the stores do.
+
+        Nulls are skipped rather than counted, which is the rule `nunique` wants
+        and is why there is no null group and no ordinal offset here.
+
+        Args:
+            hashes: Hashes for this chunk, indexed from `hash_at`, from
+                `hash_chunk`.
+            validity: The column's validity bitmap, indexed by absolute row. Read
+                only when `has_null`.
+            has_null: Whether the column has any nulls at all.
+            base: The absolute row index this chunk starts at.
+            count: How many rows are in this chunk.
+            hash_at: Where this chunk's hashes start in `hashes`.
+        """
+        var hash = hashes.bitcast[DType.uint64]().unsafe_offset(hash_at)
+        var slots = self._slots.mut_bitcast[DType.uint64]()
+        var mask = self._mask
+        var capacity = self._capacity
+        var found = self._count
+
+        for j in range(count):
+            if has_null and not validity.get(base + j):
+                continue
+
+            if (found + 1) * 2 > capacity:
+                self._count = found
+                self._grow()
+                slots = self._slots.mut_bitcast[DType.uint64]()
+                mask = self._mask
+                capacity = self._capacity
+
+            if j + PROBE_LOOKAHEAD < count:
+                var ahead = (
+                    hash.unsafe_offset(j + PROBE_LOOKAHEAD).unsafe_load() & mask
+                )
+                prefetch[PrefetchOptions().for_read().high_locality()](
+                    slots.unsafe_offset(Int(ahead) * SLOT_WORDS)
+                )
+
+            var wanted = hash.unsafe_offset(j).unsafe_load()
+            var at = wanted & mask
+            while True:
+                var slot = Int(at) * SLOT_WORDS
+                var ordinal = slots.unsafe_offset(slot + 1).unsafe_load()
+                if ordinal == 0:
+                    slots.unsafe_offset(slot).unsafe_write(wanted)
+                    slots.unsafe_offset(slot + 1).unsafe_write(
+                        UInt64(found + 1)
+                    )
+                    found += 1
+                    break
+                if slots.unsafe_offset(slot).unsafe_load() == wanted:
+                    break
+                at = (at + 1) & mask
+
+        self._count = found
+
+    def tally_keys(mut self, keys: Buffer, order: Buffer, at: Int, count: Int):
+        """Inserts keys that came out of other tables' slots.
+
+        The end of a parallel count. Each worker holds a table over its own share
+        of the rows and the answer is the size of the union of those tables, so
+        somebody has to fold them together. The keys are hashes already, which
+        `keys_by_ordinal` reads back out of the slots, so nothing is hashed
+        twice. The counterpart of this on the factorize side is `_merge_hashed`,
+        which does the same fold and then has to number the result.
+
+        The keys arrive through a list of positions rather than as a run because
+        the caller bucketed them by hash first, and a bucket is a stride through
+        the entries rather than a stretch of them. Equal keys have equal hashes,
+        so a bucket holds every copy of every key it holds any copy of, and the
+        counts of the buckets add up to the count of the whole.
+
+        Args:
+            keys: One hash per entry, from `keys_by_ordinal`.
+            order: Entry indices as uint32, from the bucketing.
+            at: Where in `order` this bucket starts.
+            count: How many entries this bucket has.
+        """
+        var hash = keys.bitcast[DType.uint64]()
+        var entry = order.bitcast[DType.uint32]().unsafe_offset(at)
+        var slots = self._slots.mut_bitcast[DType.uint64]()
+        var mask = self._mask
+        var capacity = self._capacity
+        var found = self._count
+
+        for j in range(count):
+            if (found + 1) * 2 > capacity:
+                self._count = found
+                self._grow()
+                slots = self._slots.mut_bitcast[DType.uint64]()
+                mask = self._mask
+                capacity = self._capacity
+
+            var wanted = hash.unsafe_offset(
+                Int(entry.unsafe_offset(j).unsafe_load())
+            ).unsafe_load()
+            var to = wanted & mask
+            while True:
+                var slot = Int(to) * SLOT_WORDS
+                var ordinal = slots.unsafe_offset(slot + 1).unsafe_load()
+                if ordinal == 0:
+                    slots.unsafe_offset(slot).unsafe_write(wanted)
+                    slots.unsafe_offset(slot + 1).unsafe_write(
+                        UInt64(found + 1)
+                    )
+                    found += 1
+                    break
+                if slots.unsafe_offset(slot).unsafe_load() == wanted:
+                    break
+                to = (to + 1) & mask
+
+        self._count = found
+
+    def tally_strings(
+        mut self,
+        hashes: Buffer,
+        col: StringArray,
+        has_null: Bool,
+        base: Int,
+        count: Int,
+        mut firsts: List[Int],
+        mut reps: List[StringView],
+        hash_at: Int = 0,
+    ):
+        """Inserts a chunk of a string column's keys and keeps nothing per row.
+
+        `tally` with the key comparison put back, for the reason the module
+        docstring gives: a hash is not a string and a hash match is a candidate
+        rather than an answer.
+
+        So this keeps two things `tally` does not, a row and a view per group.
+        The view is what the comparison reads and the row is what a parallel
+        count's merge compares with, since the merge cannot settle a hash match
+        on the hash either. Both are one per distinct value rather than one per
+        row, so they sit on the cardinality side of the ledger with the table and
+        not on the height side with the ordinals this route exists to stop
+        allocating.
+
+        Args:
+            hashes: Hashes for this chunk, from `hash_strings_chunk`. Indexed
+                from `hash_at`.
+            col: The column, needed for the comparison. Indexed by absolute row.
+            has_null: Whether the column has any nulls at all.
+            base: The absolute row index this chunk starts at.
+            count: How many rows are in this chunk.
+            firsts: Appended with the absolute row index of every key that was
+                new, in ordinal order.
+            reps: Appended with the view of every key that was new, in the same
+                order, and read back to settle a hash match. Pass the same two
+                lists across the chunks of one count.
+            hash_at: Where this chunk's hashes start in `hashes`.
+        """
+        var hash = hashes.bitcast[DType.uint64]().unsafe_offset(hash_at)
+        var slots = self._slots.mut_bitcast[DType.uint64]()
+        var mask = self._mask
+        var capacity = self._capacity
+        var found = self._count
+
+        for j in range(count):
+            var row = base + j
+
+            if has_null and not col.is_valid(row):
+                continue
+
+            if (found + 1) * 2 > capacity:
+                self._count = found
+                self._grow()
+                slots = self._slots.mut_bitcast[DType.uint64]()
+                mask = self._mask
+                capacity = self._capacity
+
+            if j + PROBE_LOOKAHEAD < count:
+                var ahead = (
+                    hash.unsafe_offset(j + PROBE_LOOKAHEAD).unsafe_load() & mask
+                )
+                prefetch[PrefetchOptions().for_read().high_locality()](
+                    slots.unsafe_offset(Int(ahead) * SLOT_WORDS)
+                )
+
+            var wanted = hash.unsafe_offset(j).unsafe_load()
+            var at = wanted & mask
+            while True:
+                var slot = Int(at) * SLOT_WORDS
+                var ordinal = slots.unsafe_offset(slot + 1).unsafe_load()
+                if ordinal == 0:
+                    slots.unsafe_offset(slot).unsafe_write(wanted)
+                    slots.unsafe_offset(slot + 1).unsafe_write(
+                        UInt64(found + 1)
+                    )
+                    firsts.append(row)
+                    reps.append(col.view(row))
+                    found += 1
+                    break
+                if slots.unsafe_offset(slot).unsafe_load() == wanted:
+                    if col.element_equals_view(row, reps[Int(ordinal) - 1]):
+                        break
+                at = (at + 1) & mask
+
+        self._count = found
+
     def keys_by_ordinal(self, mut out: Buffer, at: Int):
         """Writes every key this table holds out, indexed by its ordinal.
 

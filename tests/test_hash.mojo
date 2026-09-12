@@ -28,6 +28,7 @@ from firepanda.hash import (
     DIRECT_LIMIT,
     HashTable,
     direct_plan,
+    distinct_hashed,
     factorize,
     factorize_dense,
     factorize_dict,
@@ -41,12 +42,20 @@ from firepanda.hash import (
 from firepanda.exec import MORSEL_ROWS, worker_count
 from firepanda.hash.factorize import (
     DIRECT_SHARE,
+    MERGE_SERIAL_ENTRIES,
     PARALLEL_MIN_SLICE,
     PARALLEL_ROWS,
     PARALLEL_STRING_ROWS,
     PLAN_PREFIX_ROWS,
+    ORDINAL_BYTES,
     RANK_BLOCK,
+    SHARED_CACHE_BYTES,
+    TABLE_BYTES_PER_GROUP,
     Factorized,
+    _count_capacity,
+    _count_workers,
+    _distinct_hashed_parallel,
+    _distinct_hashed_serial,
     _estimate_groups,
     _factorize_direct_parallel,
     _factorize_direct_serial,
@@ -1564,6 +1573,170 @@ def test_the_range_scan_skips_nulls_on_both_sides_of_the_split() raises:
     assert_equal(Int(found.codes[PLAN_PREFIX_ROWS - 1]), 0)
     assert_equal(Int(found.codes[rows - 1]), 0)
     assert_equal(Int(found.codes[0]), 1)
+
+
+def same_counts(col: Array[DType.int64], workers: Int, what: String) raises:
+    """Checks the two count routes and the factorize against each other.
+
+    Args:
+        col: The column.
+        workers: How many slices the parallel route should cut.
+        what: What the column is, for the failure message.
+    """
+    var wanted = len(factorize(col).firsts)
+    assert_equal(
+        _distinct_hashed_serial(col, DEFAULT_SEED),
+        wanted,
+        "serial count, " + what,
+    )
+    assert_equal(
+        _distinct_hashed_parallel(col, DEFAULT_SEED, workers),
+        wanted,
+        "parallel count, " + what,
+    )
+
+
+def test_the_hashed_count_agrees_with_the_factorize_it_replaces() raises:
+    same_counts(hashed_column(1 << 14, 7), 4, "a handful of groups")
+    same_counts(hashed_column(1 << 14, 1000), 4, "a thousand groups")
+    same_counts(hashed_column(1 << 14, 1 << 14), 4, "every row its own group")
+
+
+def test_the_hashed_count_leaves_the_nulls_out() raises:
+    var col = hashed_column(1 << 13, 11)
+    for i in range(0, len(col), 3):
+        col.set_null(i)
+    same_counts(col, 4, "a third of it null")
+
+
+def test_the_hashed_count_of_a_column_of_nulls_is_zero() raises:
+    var col = hashed_column(1 << 13, 11)
+    for i in range(len(col)):
+        col.set_null(i)
+    same_counts(col, 4, "all null")
+
+
+def test_the_hashed_count_grows_its_table_through_many_doublings() raises:
+    """`tally` has no sizing schedule, so its table gets there by doubling.
+
+    A column with more groups than the table's starting capacity by four orders
+    of magnitude walks the whole growth path, and every rehash reinserts from
+    the stored hashes, so an off by one in the regrown probe would show up as a
+    count that disagrees with the factorize rather than as a crash.
+    """
+    same_counts(hashed_column(SIZING_LATE * 3, SIZING_EARLY * 5), 2, "climbing")
+
+
+def test_a_count_reserves_no_more_than_the_ordinals_would_have_cost() raises:
+    """A column whose keys are nearly all distinct is where the fit gives up.
+
+    `_estimate_groups` answers `n` there, and sizing a table for `n` keys costs
+    more than the ordinals this route exists to not write, so `_count_capacity`
+    stops at the group count those ordinals would have paid for.
+    """
+    var rows = 1 << 24
+    var bound = rows * ORDINAL_BYTES // TABLE_BYTES_PER_GROUP
+    assert_equal(_count_capacity(rows, rows, 1), bound, "the whole column")
+    assert_true(
+        bound * TABLE_BYTES_PER_GROUP <= rows * ORDINAL_BYTES,
+        "the reservation stays inside the ordinals it replaced",
+    )
+
+
+def test_a_count_reserves_the_estimate_when_the_estimate_is_small() raises:
+    """Below the bound there is nothing to clamp, so the estimate goes through.
+
+    Splitting the count divides the bound rather than the estimate, because
+    every worker sees most of the key set and so every table has to hold it.
+    """
+    var rows = 1 << 24
+    assert_equal(_count_capacity(4096, rows, 1), 4096, "a serial count")
+    assert_equal(_count_capacity(4096, rows, 8), 4096, "eight workers")
+    assert_equal(_count_capacity(0, rows, 1), 0, "no estimate at all")
+
+
+def test_a_split_count_sizes_every_table_inside_the_shared_bound() raises:
+    """Eight tables sized for the whole column would be eight times the bound.
+    """
+    var rows = 1 << 24
+    var workers = 8
+    var room = _count_capacity(rows, rows, workers)
+    assert_true(
+        room * workers * TABLE_BYTES_PER_GROUP <= rows * ORDINAL_BYTES,
+        "the tables together stay inside the ordinals they replaced",
+    )
+
+
+def test_the_parallel_count_folds_its_tables_on_one_thread() raises:
+    """Few enough entries that the fold stays under `MERGE_SERIAL_ENTRIES`."""
+    var col = hashed_column(1 << 14, 64)
+    assert_true(4 * 64 <= MERGE_SERIAL_ENTRIES, "the serial fold")
+    same_counts(col, 4, "a serial fold")
+
+
+def test_the_parallel_count_folds_its_tables_on_every_thread() raises:
+    """Enough entries that the fold buckets them by hash and runs in parallel.
+
+    Every slice sees every group here, which is what makes the entry count the
+    worker count times the group count rather than something smaller.
+    """
+    var col = hashed_column(1 << 16, 1 << 12)
+    assert_true(8 * (1 << 12) > MERGE_SERIAL_ENTRIES, "the bucketed fold")
+    same_counts(col, 8, "a bucketed fold")
+
+
+def test_the_parallel_count_agrees_on_an_uneven_slice_count() raises:
+    same_counts(hashed_column(10007, 97), 3, "a prime row count over three")
+    same_counts(hashed_column(10007, 97), 7, "a prime row count over seven")
+
+
+def test_a_count_takes_the_split_only_while_the_tables_fit() raises:
+    """`_count_workers` caps on the budget rather than halving past it."""
+    var n = PARALLEL_ROWS
+    var most = min(worker_count(), n // PARALLEL_MIN_SLICE)
+    assert_equal(_count_workers(64, n), most, "a column of few groups")
+
+    var fills = SHARED_CACHE_BYTES // TABLE_BYTES_PER_GROUP
+    assert_equal(_count_workers(fills, n), 1, "a table that fills the cache")
+    assert_equal(_count_workers(fills * 8, n), 1, "a table eight times that")
+    assert_equal(_count_workers(0, n), 1, "nothing measured")
+
+
+def test_a_long_column_counts_against_the_ordinals_it_is_not_writing() raises:
+    """Past the cache the budget is what a factorize would have spent per row.
+
+    A column long enough that four bytes a row is the larger of the two bounds,
+    holding one group for every thirty two rows, which is a table the cache rule
+    alone would have given one worker and this one gives several.
+    """
+    var n = 1 << 26
+    var groups = n // 32
+    assert_true(
+        groups * TABLE_BYTES_PER_GROUP > SHARED_CACHE_BYTES,
+        "one table already past the cache",
+    )
+    assert_equal(
+        _count_workers(groups, n),
+        min(
+            min(worker_count(), n // PARALLEL_MIN_SLICE),
+            n * ORDINAL_BYTES // (groups * TABLE_BYTES_PER_GROUP),
+        ),
+        "the row budget",
+    )
+
+
+def test_a_short_column_counts_on_one_thread() raises:
+    assert_equal(_count_workers(4, PARALLEL_MIN_SLICE), 1, "one slice's worth")
+
+
+def test_the_dispatched_count_agrees_with_the_factorize() raises:
+    """`distinct_hashed` picks a route and every route answers the same."""
+    var col = hashed_column(PARALLEL_ROWS + 1001, 1 << 11)
+    assert_equal(distinct_hashed(col), len(factorize(col).firsts))
+
+
+def test_the_dispatched_count_of_an_empty_column_is_zero() raises:
+    assert_equal(distinct_hashed(Array[DType.int64](0)), 0)
 
 
 def main() raises:
