@@ -103,9 +103,11 @@ def test_no_door_at_all_is_the_pandas_type_error(firepanda):
         frame(firepanda).rename()
 
 
-def test_rename_refuses_inplace(firepanda):
-    with pytest.raises(NotImplementedError, match="inplace"):
-        frame(firepanda).rename(columns={"v": "value"}, inplace=True)
+def test_rename_settles_in_place_and_answers_nothing(firepanda):
+    """`DataFrame.rename` answers None where `Series.rename` answers itself."""
+    made = frame(firepanda)
+    assert made.rename(columns={"v": "value"}, inplace=True) is None
+    assert "value" in list(made.columns)
 
 
 def test_rename_refuses_a_level(firepanda):
@@ -144,9 +146,10 @@ def test_rename_axis_has_nowhere_to_put_a_name_for_the_columns(firepanda):
         frame(firepanda).rename_axis("cols", axis=1)
 
 
-def test_rename_axis_refuses_inplace(firepanda):
-    with pytest.raises(NotImplementedError, match="inplace"):
-        frame(firepanda).rename_axis("row", inplace=True)
+def test_rename_axis_settles_in_place_and_answers_nothing(firepanda):
+    made = frame(firepanda)
+    assert made.rename_axis("row", inplace=True) is None
+    assert made.index.name == "row"
 
 
 def test_a_column_can_be_renamed(firepanda):

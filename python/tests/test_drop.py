@@ -182,11 +182,14 @@ def test_a_level_is_refused_because_there_is_no_multiindex(firepanda):
         frame(firepanda).drop([0], level=0)
 
 
-def test_inplace_is_refused_on_both(firepanda):
-    with pytest.raises(NotImplementedError, match="inplace"):
-        frame(firepanda).drop(columns=["s"], inplace=True)
-    with pytest.raises(NotImplementedError, match="inplace"):
-        frame(firepanda)["v"].drop([0], inplace=True)
+def test_inplace_settles_on_both_and_answers_nothing(firepanda):
+    """`drop` is on the side of the split that answers None, as pandas does."""
+    made = frame(firepanda)
+    assert made.drop(columns=["s"], inplace=True) is None
+    assert "s" not in list(made.columns)
+    column = frame(firepanda)["v"]
+    assert column.drop([0], inplace=True) is None
+    assert column.tolist() == [4.0, 6.0, 7.0]
 
 
 def test_a_repeated_row_label_is_refused_where_pandas_drops_both(firepanda):

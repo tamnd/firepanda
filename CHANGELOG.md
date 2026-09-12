@@ -45,6 +45,15 @@ A `LIKE` is a call in the plan rather than a thirteenth binary operator. Its rig
 A null matches nothing and its negation is not true either, both being null, which is what the kernels already did and what DuckDB does. An empty element matches `%` and nothing else. `ESCAPE` was already refused by the front end, and a backslash in a pattern is an ordinary byte here as it is in DuckDB with no escape set.
 
 What is refused is refused by name rather than answered approximately. A `_` says it stands for any one character and that a substring search has no way to say that. A pattern with a run in the middle, like `'a%e'`, says it is none of the five shapes, because reading it as the prefix alone would keep rows the query did not ask for. `ILIKE` says it is the case fold that is missing, `GLOB` says its wildcards are not these, and `SIMILAR TO` and the regex operators say there is no regular expression engine.
+### Added: inplace, on the thirty one callables that were refusing it
+
+`inplace=True` was refused everywhere, with a sentence saying that every operation here answers a new frame over Arrow buffers that are shared rather than owned. That sentence was answering a question pandas stopped asking in 3.0. Under copy on write an inplace call in pandas cannot be seen by a column taken out of the frame beforehand, by a copy, or by the frame when the call was made on one of its columns. The only thing that sees it is a second name for the same object.
+
+A wrapper here holds one slot, which is the extension object under it, so putting an answer back is writing that slot. No buffer is touched and nothing that shares the old buffers can tell, which is the same set of observers pandas has, which is none. The library was already doing this for `Index.rename` and `Index.set_names`, and this is that made general.
+
+The methods that take it now are `drop`, `dropna`, `drop_duplicates`, `sort_values`, `sort_index`, `reset_index`, `set_index`, `rename`, `rename_axis`, `fillna`, `ffill`, `bfill`, `where`, `mask`, `clip` and `replace`, on a frame and on a column wherever pandas has both. The return matches pandas' own undocumented split: the first group answers None and `fillna`, `ffill`, `bfill`, `where`, `mask`, `clip`, `replace` and `Series.rename` answer the object itself.
+
+The flag is validated the way pandas validates it, so a one is refused with `For argument "inplace" expected type bool, received type int.` even though `1 == True`, a `numpy.bool_` is accepted, and None is accepted and means False. `Series.reset_index(drop=False, inplace=True)` raises `TypeError("Cannot reset_index inplace on a Series to create a DataFrame")`, which is pandas' refusal and the one that is about the operation rather than the library. Document 51 is the argument and document 44 has been corrected where it rested on the old refusal.
 
 ### Added: an aggregate written in the ORDER BY
 

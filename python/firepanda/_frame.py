@@ -1817,7 +1817,7 @@ class DataFrame(DataFrameMixin):
         append: bool = False,
         inplace: bool = False,
         verify_integrity: Any = NO_DEFAULT,
-    ) -> DataFrame:
+    ) -> DataFrame | None:
         """The frame with one of its columns moved into the row labels."""
         try:
             return self._set_index(keys, drop, append, inplace, verify_integrity)
@@ -1834,7 +1834,7 @@ class DataFrame(DataFrameMixin):
         col_fill: Any = "",
         allow_duplicates: Any = NO_DEFAULT,
         names: Any = None,
-    ) -> DataFrame:
+    ) -> DataFrame | None:
         """The frame with its row labels put back to a count from zero."""
         try:
             return self._reset_index(
@@ -1855,7 +1855,7 @@ class DataFrame(DataFrameMixin):
         sort_remaining: bool = True,
         ignore_index: bool = False,
         key: Any = None,
-    ) -> DataFrame:
+    ) -> DataFrame | None:
         """The frame with its rows in the order of their labels."""
         try:
             return self._sort_index(
@@ -1875,7 +1875,7 @@ class DataFrame(DataFrameMixin):
         na_position: str = "last",
         ignore_index: bool = False,
         key: Any = None,
-    ) -> DataFrame:
+    ) -> DataFrame | None:
         """The frame with its rows in the order of some of its columns."""
         try:
             return self._sort_values(by, axis, ascending, inplace, na_position, ignore_index, key)
@@ -1935,7 +1935,7 @@ class DataFrame(DataFrameMixin):
         keep: Any = "first",
         inplace: bool = False,
         ignore_index: bool = False,
-    ) -> DataFrame:
+    ) -> DataFrame | None:
         """The frame with the repeated rows removed, by a chosen rule."""
         try:
             return self._drop_duplicates(subset, keep, inplace, ignore_index)
@@ -2205,7 +2205,7 @@ class DataFrame(DataFrameMixin):
         subset: Any = None,
         inplace: bool = False,
         ignore_index: bool = False,
-    ) -> DataFrame:
+    ) -> DataFrame | None:
         """The rows with no missing value in them."""
         try:
             return self._dropna(axis, how, thresh, subset, inplace, ignore_index)
@@ -2222,14 +2222,14 @@ class DataFrame(DataFrameMixin):
     def isna(self) -> DataFrame:
         """True where a value is missing."""
         try:
-            return self._transform("isna", 0, 0, False, False)
+            return self._transformed("isna", 0)
         except Exception as error:
             raise translate(error) from None
 
     def notna(self) -> DataFrame:
         """True where a value is present."""
         try:
-            return self._transform("notna", 0, 0, False, False)
+            return self._transformed("notna", 0)
         except Exception as error:
             raise translate(error) from None
 
@@ -2268,7 +2268,7 @@ class DataFrame(DataFrameMixin):
     def diff(self, periods: int = 1, axis: Any = 0) -> DataFrame:
         """The difference between each row and the one that many rows before it."""
         try:
-            return self._transform("diff", periods, axis, False, False)
+            return self._transformed("diff", periods, axis)
         except Exception as error:
             raise translate(error) from None
 
@@ -3010,7 +3010,7 @@ class Series(SeriesMixin):
 
     def dropna(
         self, *, axis: Any = 0, inplace: bool = False, how: Any = None, ignore_index: bool = False
-    ) -> Series:
+    ) -> Series | None:
         """The values that are not missing."""
         try:
             return self._transform("dropna", 0, axis, inplace, ignore_index)
@@ -3027,14 +3027,14 @@ class Series(SeriesMixin):
     def isna(self) -> Series:
         """True where a value is missing."""
         try:
-            return self._transform("isna", 0, 0, False, False)
+            return self._transformed("isna", 0)
         except Exception as error:
             raise translate(error) from None
 
     def notna(self) -> Series:
         """True where a value is present."""
         try:
-            return self._transform("notna", 0, 0, False, False)
+            return self._transformed("notna", 0)
         except Exception as error:
             raise translate(error) from None
 
@@ -3073,7 +3073,7 @@ class Series(SeriesMixin):
     def diff(self, periods: int = 1) -> Series:
         """The difference between each row and the one that many rows before it."""
         try:
-            return self._transform("diff", periods, 0, False, False)
+            return self._transformed("diff", periods)
         except Exception as error:
             raise translate(error) from None
 

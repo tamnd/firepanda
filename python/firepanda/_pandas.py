@@ -31,7 +31,7 @@ import math
 import operator
 import re
 import warnings
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from . import _firepanda
 from .errors import (
@@ -110,10 +110,125 @@ _NO_LABEL_MAP = (
     " place"
 )
 
-_NO_INPLACE = (
-    "every operation here answers a new frame and the Arrow buffers underneath"
-    " are shared rather than owned"
-)
+_BOOL_ARGUMENT = 'For argument "{name}" expected type bool, received type {kind}.'
+"""What pandas says when a flag arrives as something that is not a flag.
+
+It refuses a one as well as a word, which is worth knowing because `1 == True`
+in Python and every other check in this file would have let it through. None is
+allowed and means False, which is also pandas, and is the reason this is a
+function rather than an isinstance call written out twenty three times.
+"""
+
+
+_RESET_INDEX_INPLACE = "Cannot reset_index inplace on a Series to create a DataFrame"
+"""The one place `inplace` is refused for a reason that is not a shortcoming.
+
+`s.reset_index()` on a column that keeps its labels answers a frame, because
+the labels have become a second column of values. There is nowhere to put that
+in the column it was asked of, so pandas refuses rather than changing what the
+name refers to, and this refuses with the same sentence and the same class.
+"""
+
+
+def _flag(name: str, value: Any) -> bool:
+    """Reads an argument pandas declares as a flag and will not widen.
+
+    Three things arrive here and only three. A real flag, which is taken. None,
+    which pandas allows for these and reads as False. And a boolean out of
+    numpy, which pandas also allows because its own answer to a comparison is
+    one of those, and which is recognised by its type's name and module rather
+    than by importing numpy to ask, since nothing else in this library needs
+    numpy to be present. Two names are checked because numpy 2 spells that type
+    `bool` where numpy 1 spells it `bool_`, and the module is checked as well so
+    that nothing else called `bool` is let through by accident.
+
+    Args:
+        name: The parameter name, for the sentence.
+        value: What arrived.
+
+    Returns:
+        The flag.
+
+    Raises:
+        InvalidArgumentError: If it is anything else, including a one or a zero.
+    """
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    kind = type(value)
+    if kind.__name__ in ("bool", "bool_") and kind.__module__.split(".")[0] == "numpy":
+        return bool(value)
+    raise InvalidArgumentError(_BOOL_ARGUMENT.format(name=name, kind=kind.__name__))
+
+
+def _settled[Answer](owner: Any, answer: Answer, inplace: bool) -> Answer | None:
+    """Hands back the answer, or puts it into the object that was asked.
+
+    Document 51 is the argument. The short version is that an object here holds
+    one thing, which is the extension object underneath it, so putting an answer
+    in place is rebinding that one attribute. No buffer is written, nothing that
+    shares the old buffers can tell, and that is not a compromise: pandas 3.0
+    under copy on write cannot tell either, because it copies before it writes
+    whenever anything else refers to the same block.
+
+    This is the half of pandas that answers nothing after it has settled. The
+    other half is `_kept` and which method is in which half is document 51
+    section 4.
+
+    Args:
+        owner: The frame, column or index the call was made on.
+        answer: What the call worked out.
+        inplace: Whether the caller asked for it to be put back.
+
+    Returns:
+        The answer, or None when it was put back, which is pandas' return.
+    """
+    if not inplace:
+        return answer
+    settled: Any = answer
+    owner._inner = settled._inner
+    return None
+
+
+def _kept[Answer](owner: Any, answer: Answer, inplace: bool) -> Answer:
+    """The same thing, for the methods pandas hands the object back from.
+
+    Seven methods and one more on a column answer the object itself rather than
+    None when they are asked for `inplace`, which is a wart rather than a design
+    and is matched here because people write `df.fillna(0, inplace=True).sum()`
+    and it works in pandas. Document 51 section 4 has the list.
+
+    Args:
+        owner: The frame or column the call was made on.
+        answer: What the call worked out.
+        inplace: Whether the caller asked for it to be put back.
+
+    Returns:
+        The answer, or the object it was put into.
+    """
+    if not inplace:
+        return answer
+    settled: Any = answer
+    owner._inner = settled._inner
+    return cast("Answer", owner)
+
+
+def _answered[Answer](made: Answer | None) -> Answer:
+    """The answer of a call that was never asked to settle in place.
+
+    Every method taking `inplace` is typed as though it might hand back nothing,
+    because it might. The calls inside this file that use one of those methods
+    know they did not ask for it, and this says so once rather than each of them
+    carrying a check that cannot fire.
+
+    Args:
+        made: What the call answered, typed as though it might be nothing.
+
+    Returns:
+        The same thing, typed as the answer it is.
+    """
+    return cast("Answer", made)
 
 
 def _renaming(mapper: Any, axis: Any, index: Any, columns: Any) -> tuple[str, Any]:
@@ -1362,7 +1477,7 @@ def _labelled(labels: list[Any], values: list[Any]) -> Any:
     from ._frame import DataFrame
 
     made = DataFrame({"labels": labels, "values": values})
-    return made.set_index("labels")["values"]
+    return _answered(made.set_index("labels"))["values"]
 
 
 def _fill_column(printed: str, value: Any, labels: list[Any], missing: Any, column: Any) -> Any:
@@ -3321,10 +3436,10 @@ class DataFrameMixin:
         `deep` is accepted and never read, and the reason is stronger than the
         one `Index.copy` gives for the same parameter. Nothing in this library
         writes into a frame. There is no `__setitem__`, there is no `assign`,
-        and every call pandas would let run `inplace` answers a new frame here
-        instead. So there is no later write for a deep copy to protect the
-        original from, and no expression a caller can write tells the two kinds
-        of copy apart.
+        and `inplace` is a rebind of the one attribute a frame has rather than
+        a write into a buffer, which document 51 is the argument for. So there
+        is no later write for a deep copy to protect the original from, and no
+        expression a caller can write tells the two kinds of copy apart.
 
         This is the one member where the difference in cost is worth saying out
         loud rather than leaving in the benchmarks. `df.copy()` in pandas
@@ -3362,7 +3477,7 @@ class DataFrameMixin:
         level: Any = None,
         inplace: bool = False,
         errors: str = "raise",
-    ) -> DataFrame:
+    ) -> DataFrame | None:
         """The frame without some of its columns, or some of its rows, or both.
 
         Document 46 is the long version. Both halves are here, unlike `rename`,
@@ -3390,7 +3505,7 @@ class DataFrameMixin:
         """
         from ._frame import DataFrame
 
-        _held_at("inplace", inplace, False, _NO_INPLACE)
+        inplace = _flag("inplace", inplace)
         _no_level(level)
         _ignore_or_raise(errors)
         rows, names = _dropping(labels, axis, index, columns, "DataFrame")
@@ -3410,10 +3525,10 @@ class DataFrameMixin:
                 tolerance=None,
             )
         if names is None:
-            return answer
+            return _settled(self, answer, inplace)
         going = _dropped(names, list(answer.columns), errors)
         try:
-            return DataFrame._wrap(answer._inner.drop(going))
+            return _settled(self, DataFrame._wrap(answer._inner.drop(going)), inplace)
         except Exception as error:
             raise translate(error) from None
 
@@ -3459,7 +3574,7 @@ class DataFrameMixin:
                 A key the frame does not have is dropped.
             axis: Which axis to fill along. Accepted and not read, since with
                 one value per column both answers are the same frame.
-            inplace: Refused.
+            inplace: Puts the answer into this object and hands the object back.
             limit: Refused, after being checked the way pandas checks it.
 
         Returns:
@@ -3472,7 +3587,7 @@ class DataFrameMixin:
         """
         from ._frame import DataFrame, Series
 
-        _held_at("inplace", inplace, False, _NO_INPLACE)
+        inplace = _flag("inplace", inplace)
         _axis_number(axis, "DataFrame", 0, (0, 1))
         if _limit_wanted(limit):
             raise UnsupportedError(f"limit= is not supported yet, because {_NO_FILL_LIMIT}")
@@ -3517,7 +3632,7 @@ class DataFrameMixin:
                 answer = DataFrame._wrap(answer._inner.fill_null(name, filled))
             except Exception as error:
                 raise translate(error) from None
-        return answer
+        return _kept(self, answer, inplace)
 
     def where(
         self,
@@ -3553,7 +3668,7 @@ class DataFrameMixin:
                 them, a frame lined up on both axes, a column that needs an axis
                 named, a run of values read by position, or a callable handed
                 this frame. Nothing means a missing value.
-            inplace: Refused.
+            inplace: Puts the answer into this object and hands the object back.
             axis: Which way to read a condition or an other side that has one
                 axis. Named rather than guessed, the way pandas insists.
             level: Refused.
@@ -3590,7 +3705,7 @@ class DataFrameMixin:
         Args:
             cond: The flags, in every shape `where` takes them.
             other: What the cells the condition picked out take.
-            inplace: Refused.
+            inplace: Puts the answer into this object and hands the object back.
             axis: Which way to read a condition or an other side that has one
                 axis.
             level: Refused.
@@ -3615,7 +3730,7 @@ class DataFrameMixin:
         Args:
             cond: The flags.
             other: What the cells this does not keep take.
-            inplace: Refused.
+            inplace: Puts the answer into this object and hands the object back.
             axis: Which way to read something with one axis.
             level: Refused.
             flip: Whether the condition picks out the cells to replace rather
@@ -3632,7 +3747,7 @@ class DataFrameMixin:
         """
         from ._frame import DataFrame, Series
 
-        _held_at("inplace", inplace, False, _NO_INPLACE)
+        inplace = _flag("inplace", inplace)
         _no_level(level)
         along = _axis_number(axis, "DataFrame", 0, (0, 1))
         if callable(cond):
@@ -3664,7 +3779,7 @@ class DataFrameMixin:
                 answer = DataFrame._wrap(answer._inner.pick(name, kept, taken))
             except Exception as error:
                 raise translate(error) from None
-        return answer
+        return _kept(self, answer, inplace)
 
     def clip(
         self,
@@ -3699,7 +3814,7 @@ class DataFrameMixin:
                 column name, or a frame lined up on both axes.
             upper: The ceiling, in the same shapes.
             axis: Which way to read something with one axis.
-            inplace: Refused.
+            inplace: Puts the answer into this object and hands the object back.
             **kwargs: numpy's, which is `out` and nothing else.
 
         Returns:
@@ -3712,12 +3827,12 @@ class DataFrameMixin:
         """
         from ._frame import DataFrame, Series
 
-        _held_at("inplace", inplace, False, _NO_INPLACE)
+        inplace = _flag("inplace", inplace)
         along = _axis_number(axis, "DataFrame", 0, (0, 1))
         _numpy_clip(kwargs)
         low, high = _thresholds(lower, upper)
         if low is None and high is None:
-            return self.copy()
+            return _kept(self, self.copy(), inplace)
         names = [str(name) for name in self.columns]
         labels = self._inner.labels().to_list()
         told = axis is not None
@@ -3741,7 +3856,7 @@ class DataFrameMixin:
                     answer = DataFrame._wrap(answer._inner.pick(name, sides[0], sides[1]))
                 except Exception as error:
                     raise translate(error) from None
-        return answer
+        return _kept(self, answer, inplace)
 
     def replace(
         self,
@@ -3770,7 +3885,7 @@ class DataFrameMixin:
             value: What to put in place of it, which is a value, a run of them
                 as long as the run being replaced, or a mapping read by column
                 name.
-            inplace: Refused.
+            inplace: Puts the answer into this object and hands the object back.
             regex: Refused, for now.
 
         Returns:
@@ -3783,7 +3898,7 @@ class DataFrameMixin:
         """
         from ._frame import DataFrame, Series
 
-        _held_at("inplace", inplace, False, _NO_INPLACE)
+        inplace = _flag("inplace", inplace)
         _held_at("regex", regex, False, _NO_REGEX)
         names = [str(name) for name in self.columns]
         wanted = _frame_replacements(to_replace, value, names, "DataFrame")
@@ -3802,7 +3917,7 @@ class DataFrameMixin:
                     answer = DataFrame._wrap(answer._inner.pick(name, sides[0], sides[1]))
                 except Exception as error:
                     raise translate(error) from None
-        return answer
+        return _kept(self, answer, inplace)
 
     def rename(
         self,
@@ -3815,7 +3930,7 @@ class DataFrameMixin:
         inplace: bool = False,
         level: Any = None,
         errors: str = "ignore",
-    ) -> DataFrame:
+    ) -> DataFrame | None:
         """The same rows under different column names.
 
         The column door is here and the row label door is not, and document 45
@@ -3845,7 +3960,7 @@ class DataFrameMixin:
         """
         from ._frame import DataFrame
 
-        _held_at("inplace", inplace, False, _NO_INPLACE)
+        inplace = _flag("inplace", inplace)
         _no_level(level)
         where, mapping = _renaming(mapper, axis, index, columns)
         if where == "index":
@@ -3863,7 +3978,7 @@ class DataFrameMixin:
                 " the collision is refused rather than made"
             )
         try:
-            return DataFrame._wrap(self._inner.renamed_columns(olds, news))
+            return _settled(self, DataFrame._wrap(self._inner.renamed_columns(olds, news)), inplace)
         except Exception as error:
             raise translate(error) from None
 
@@ -3876,7 +3991,7 @@ class DataFrameMixin:
         axis: Any = 0,
         copy: Any = NO_DEFAULT,
         inplace: bool = False,
-    ) -> DataFrame:
+    ) -> DataFrame | None:
         """The same frame with the row labels under a different level name.
 
         Not one label moves. The level name is what the index is called rather
@@ -3896,7 +4011,7 @@ class DataFrameMixin:
         """
         from ._frame import DataFrame
 
-        _held_at("inplace", inplace, False, _NO_INPLACE)
+        inplace = _flag("inplace", inplace)
         if columns is not NO_DEFAULT or axis in (1, "columns"):
             raise NotImplementedError(
                 "naming the column axis is not supported yet, because a frame's"
@@ -3907,9 +4022,11 @@ class DataFrameMixin:
             raise InvalidArgumentError(f"No axis named {axis} for object type DataFrame")
         wanted = mapper if mapper is not NO_DEFAULT else index
         if wanted is NO_DEFAULT:
-            return self.copy()
+            return _settled(self, self.copy(), inplace)
         try:
-            return DataFrame._wrap(self._inner.renamed_axis(_one_name(wanted)))
+            return _settled(
+                self, DataFrame._wrap(self._inner.renamed_axis(_one_name(wanted))), inplace
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -4125,7 +4242,7 @@ class DataFrameMixin:
 
     def _set_index(
         self, keys: Any, drop: bool, append: bool, inplace: bool, verify_integrity: Any
-    ) -> DataFrame:
+    ) -> DataFrame | None:
         """Moves one column into the row labels.
 
         `keys` is a label, or a list holding one. A list holding two or more is
@@ -4136,13 +4253,7 @@ class DataFrameMixin:
         from ._frame import DataFrame
 
         _held_at("append", append, False, "keeping the old labels as well needs a MultiIndex")
-        _held_at(
-            "inplace",
-            inplace,
-            False,
-            "every operation here answers a new frame and the Arrow buffers"
-            " underneath are shared rather than owned",
-        )
+        inplace = _flag("inplace", inplace)
         if verify_integrity is not NO_DEFAULT and verify_integrity:
             raise NotImplementedError(
                 "verify_integrity=True is not supported yet, because checking"
@@ -4156,7 +4267,9 @@ class DataFrameMixin:
                 " the result is a MultiIndex and there is not one yet"
             )
         try:
-            return DataFrame._wrap(self._inner.set_index(str(wanted[0]), bool(drop)))
+            return _settled(
+                self, DataFrame._wrap(self._inner.set_index(str(wanted[0]), bool(drop))), inplace
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -4169,7 +4282,7 @@ class DataFrameMixin:
         col_fill: Any,
         allow_duplicates: Any,
         names: Any,
-    ) -> DataFrame:
+    ) -> DataFrame | None:
         """Puts the row labels back to a count from zero.
 
         With `drop` the old labels are thrown away and without it they become the
@@ -4181,13 +4294,7 @@ class DataFrameMixin:
 
         _no_level(level)
         _refuse("names", names, "naming the columns the old labels land in needs a MultiIndex")
-        _held_at(
-            "inplace",
-            inplace,
-            False,
-            "every operation here answers a new frame and the Arrow buffers"
-            " underneath are shared rather than owned",
-        )
+        inplace = _flag("inplace", inplace)
         _held_at("col_level", col_level, 0, "there is one level of columns and it is that one")
         _held_at("col_fill", col_fill, "", "there is nothing above the columns to fill")
         if allow_duplicates is not NO_DEFAULT and allow_duplicates:
@@ -4196,7 +4303,7 @@ class DataFrameMixin:
                 " under one name is a shape the schema does not carry"
             )
         try:
-            return DataFrame._wrap(self._inner.reset_index(bool(drop)))
+            return _settled(self, DataFrame._wrap(self._inner.reset_index(bool(drop))), inplace)
         except Exception as error:
             raise translate(error) from None
 
@@ -4210,7 +4317,7 @@ class DataFrameMixin:
         sort_remaining: bool,
         ignore_index: bool,
         key: Any,
-    ) -> DataFrame:
+    ) -> DataFrame | None:
         """Puts the rows in the order of their labels.
 
         `kind` is the one argument in the library that is accepted and never
@@ -4226,13 +4333,7 @@ class DataFrameMixin:
         _no_level(level)
         _refuse("key", key, "running a function over the labels before sorting is not written")
         _axis_number(axis, "DataFrame", 0, (0,))
-        _held_at(
-            "inplace",
-            inplace,
-            False,
-            "every operation here answers a new frame and the Arrow buffers"
-            " underneath are shared rather than owned",
-        )
+        inplace = _flag("inplace", inplace)
         _held_at(
             "na_position",
             na_position,
@@ -4253,7 +4354,7 @@ class DataFrameMixin:
                 " level for it to describe"
             )
         try:
-            return DataFrame._wrap(self._inner.sort_index(bool(ascending)))
+            return _settled(self, DataFrame._wrap(self._inner.sort_index(bool(ascending))), inplace)
         except Exception as error:
             raise translate(error) from None
 
@@ -4266,7 +4367,7 @@ class DataFrameMixin:
         na_position: str,
         ignore_index: bool,
         key: Any,
-    ) -> DataFrame:
+    ) -> DataFrame | None:
         """Puts the rows in the order of one or more of their columns.
 
         `kind` is accepted and never looked at, for the reason `_sort_index`
@@ -4282,13 +4383,7 @@ class DataFrameMixin:
 
         _refuse("key", key, "running a function over the values before sorting is not written")
         _axis_number(axis, "DataFrame", 0, (0,))
-        _held_at(
-            "inplace",
-            inplace,
-            False,
-            "every operation here answers a new frame and the Arrow buffers"
-            " underneath are shared rather than owned",
-        )
+        inplace = _flag("inplace", inplace)
         keys = [str(one) for one in _as_keys(by)]
         directions = _directions(ascending, len(keys))
         front = [_na_first(na_position)] * len(keys)
@@ -4296,7 +4391,11 @@ class DataFrameMixin:
             sorted_frame = DataFrame._wrap(self._inner.sort_values(keys, directions, front))
         except Exception as error:
             raise translate(error) from None
-        return sorted_frame.reset_index(drop=True) if ignore_index else sorted_frame
+        return _settled(
+            self,
+            _answered(sorted_frame.reset_index(drop=True)) if ignore_index else sorted_frame,
+            inplace,
+        )
 
     def _take(self, indices: Any, axis: Any, kwargs: dict[str, Any]) -> DataFrame:
         """Gathers rows or columns by position, in the order asked for.
@@ -4526,7 +4625,7 @@ class DataFrameMixin:
 
     def _drop_duplicates(
         self, subset: Any, keep: Any, inplace: bool, ignore_index: bool
-    ) -> DataFrame:
+    ) -> DataFrame | None:
         """Removes the rows that repeat a key another row already carries.
 
         `ignore_index` is honoured rather than refused, because the labels of the
@@ -4537,20 +4636,14 @@ class DataFrameMixin:
         """
         from ._frame import DataFrame
 
-        _held_at(
-            "inplace",
-            inplace,
-            False,
-            "every operation here answers a new frame and the Arrow buffers"
-            " underneath are shared rather than owned",
-        )
+        inplace = _flag("inplace", inplace)
         word = _keep_word(keep)
         names = self._duplicate_subset(subset)
         try:
             kept = self._inner if not names else self._inner.drop_duplicates(names, word)
             if ignore_index:
                 kept = kept.reset_index(True)
-            return DataFrame._wrap(kept)
+            return _settled(self, DataFrame._wrap(kept), inplace)
         except Exception as error:
             raise translate(error) from None
 
@@ -4764,24 +4857,14 @@ class DataFrameMixin:
 
     def _transform(
         self, kind: str, periods: int, axis: Any, inplace: bool, ignore_index: bool
-    ) -> DataFrame:
+    ) -> DataFrame | None:
         """Runs one named transformation down every column.
 
         Eleven of the twelve come through here. `dropna` on a frame does not,
         because it removes rows rather than transforming columns, and it has its
         own method below.
         """
-        from ._frame import DataFrame
-
-        _transforming_axis(axis, "DataFrame")
-        _held_at(
-            "inplace",
-            inplace,
-            False,
-            "every operation here answers a new frame and the Arrow buffers"
-            " underneath are shared rather than owned, so writing into one would"
-            " change frames the caller never mentioned",
-        )
+        inplace = _flag("inplace", inplace)
         _held_at(
             "ignore_index",
             ignore_index,
@@ -4789,6 +4872,19 @@ class DataFrameMixin:
             "throwing the labels away and numbering the rows again is a change to"
             " the index rather than to the values",
         )
+        return _settled(self, self._transformed(kind, periods, axis), inplace)
+
+    def _transformed(self, kind: str, periods: int, axis: Any = 0) -> DataFrame:
+        """The same transformation with nothing left to read first.
+
+        The half of `_transform` that always answers, which is what the members
+        that cannot be asked for `inplace` call, so that they are not typed as
+        though they might hand back nothing.
+        """
+        from ._frame import DataFrame
+
+        _transforming_axis(axis, "DataFrame")
+
         try:
             return DataFrame._wrap(self._inner.transform(kind, periods))
         except Exception as error:
@@ -4803,7 +4899,9 @@ class DataFrameMixin:
             " outside them, needs the fill to know where the ends are and it"
             " walks the column without looking",
         )
-        return self._transform(kind, _limit_wanted(limit), axis, inplace, False)
+        return _kept(
+            self, self._transformed(kind, _limit_wanted(limit), axis), _flag("inplace", inplace)
+        )
 
     def _shift(self, periods: Any, freq: Any, axis: Any, fill_value: Any, suffix: Any) -> DataFrame:
         """Moves every column's rows along, leaving the gap missing."""
@@ -4827,13 +4925,13 @@ class DataFrameMixin:
                 "periods has to be a single number for now, because a list of them"
                 " answers a frame with one set of columns per period"
             )
-        return self._transform("shift", periods, axis, False, False)
+        return self._transformed("shift", periods, axis)
 
     def _pct_change(self, periods: int, fill_method: Any, freq: Any) -> DataFrame:
         """The fractional change between each row and the one before it."""
         _refuse("fill_method", fill_method, "pandas removed it in 3.0 and only accepts None")
         _refuse("freq", freq, "it needs the offset vocabulary, which is the resampling milestone")
-        return self._transform("pct_change", periods, 0, False, False)
+        return self._transformed("pct_change", periods)
 
     def _scan(self, kind: str, axis: Any, skipna: bool, numeric_only: bool) -> DataFrame:
         """Runs one of the four scans down every column."""
@@ -4851,7 +4949,7 @@ class DataFrameMixin:
             "dropping the columns a scan cannot read is a choice about the shape"
             " of the answer rather than about the scan",
         )
-        return self._transform(kind, 0, axis, False, False)
+        return self._transformed(kind, 0, axis)
 
     def _dropna(
         self,
@@ -4861,7 +4959,7 @@ class DataFrameMixin:
         subset: Any,
         inplace: bool,
         ignore_index: bool,
-    ) -> DataFrame:
+    ) -> DataFrame | None:
         """Removes the rows that have a missing value in them.
 
         The one name on the transformation list that means something different
@@ -4884,13 +4982,7 @@ class DataFrameMixin:
             "keeping a row that has at least so many values counts per row, and"
             " the mask says present or absent rather than how many",
         )
-        _held_at(
-            "inplace",
-            inplace,
-            False,
-            "the answer is a new frame over shared Arrow buffers, so writing into"
-            " one would change frames the caller never mentioned",
-        )
+        inplace = _flag("inplace", inplace)
         _held_at(
             "ignore_index",
             ignore_index,
@@ -4902,7 +4994,7 @@ class DataFrameMixin:
         if subset is not None:
             names = [subset] if isinstance(subset, str) else [str(one) for one in subset]
         try:
-            return DataFrame._wrap(self._inner.dropna(names))
+            return _settled(self, DataFrame._wrap(self._inner.dropna(names)), inplace)
         except Exception as error:
             raise translate(error) from None
 
@@ -5068,13 +5160,12 @@ class SeriesMixin:
 
     def drop_duplicates(
         self, *, keep: Any = "first", inplace: bool = False, ignore_index: bool = False
-    ) -> Series:
+    ) -> Series | None:
         """The values with the repeated ones removed, by a chosen rule."""
-        return self._through(
-            lambda frame: frame.drop_duplicates(
-                keep=keep, inplace=inplace, ignore_index=ignore_index
-            )
+        made = self._through(
+            lambda frame: frame.drop_duplicates(keep=keep, ignore_index=ignore_index)
         )
+        return _settled(self, made, _flag("inplace", inplace))
 
     def take(self, indices: Any, axis: Any = 0, **kwargs: Any) -> Series:
         """The rows at a list of positions, in the order they are given in."""
@@ -5092,14 +5183,13 @@ class SeriesMixin:
         sort_remaining: bool = True,
         ignore_index: bool = False,
         key: Any = None,
-    ) -> Series:
+    ) -> Series | None:
         """The column with its rows in the order of their labels."""
-        return self._through(
+        made = self._through(
             lambda frame: frame.sort_index(
                 axis=axis,
                 level=level,
                 ascending=ascending,
-                inplace=inplace,
                 kind=kind,
                 na_position=na_position,
                 sort_remaining=sort_remaining,
@@ -5107,6 +5197,7 @@ class SeriesMixin:
                 key=key,
             )
         )
+        return _settled(self, made, _flag("inplace", inplace))
 
     def sort_values(
         self,
@@ -5118,7 +5209,7 @@ class SeriesMixin:
         na_position: str = "last",
         ignore_index: bool = False,
         key: Any = None,
-    ) -> Series:
+    ) -> Series | None:
         """The column with its rows in the order of their own values.
 
         Not through the frame, unlike the rest of this group. A column is one
@@ -5130,20 +5221,18 @@ class SeriesMixin:
 
         _refuse("key", key, "running a function over the values before sorting is not written")
         _axis_number(axis, "Series", 0, (0,))
-        _held_at(
-            "inplace",
-            inplace,
-            False,
-            "every operation here answers a new column and the Arrow buffers"
-            " underneath are shared rather than owned",
-        )
+        inplace = _flag("inplace", inplace)
         try:
             sorted_column: Series = Series._wrap(
                 self._inner.sort_values(_directions(ascending, 1)[0], _na_first(na_position))
             )
         except Exception as error:
             raise translate(error) from None
-        return sorted_column.reset_index(drop=True) if ignore_index else sorted_column
+        return _settled(
+            self,
+            _answered(sorted_column.reset_index(drop=True)) if ignore_index else sorted_column,
+            inplace,
+        )
 
     def argsort(
         self, axis: Any = 0, kind: str = "quicksort", order: Any = None, stable: Any = None
@@ -5200,17 +5289,17 @@ class SeriesMixin:
         makes a frame of two, because the labels have become values and values
         in a second column are what a frame is.
         """
+        inplace = _flag("inplace", inplace)
         if drop:
-            return self._through(
-                lambda frame: frame.reset_index(
-                    level, drop=True, inplace=inplace, allow_duplicates=allow_duplicates
-                )
+            numbered = self._through(
+                lambda frame: frame.reset_index(level, drop=True, allow_duplicates=allow_duplicates)
             )
+            return _settled(self, numbered, inplace)
+        if inplace:
+            raise TypeError(_RESET_INDEX_INPLACE)
         wanted = self._inner.label() if name is NO_DEFAULT else name
         made = self._framed("0" if not wanted else str(wanted))
-        return made.reset_index(
-            level, drop=False, inplace=inplace, allow_duplicates=allow_duplicates
-        )
+        return made.reset_index(level, drop=False, allow_duplicates=allow_duplicates)
 
     def _framed(self, name: str) -> DataFrame:
         """This column in a frame of one column, under a name of the caller's."""
@@ -5266,7 +5355,7 @@ class SeriesMixin:
         level: Any = None,
         inplace: bool = False,
         errors: str = "raise",
-    ) -> Series:
+    ) -> Series | None:
         """The column without the rows carrying some of its labels.
 
         The row half of the frame's method with one column under it, and there
@@ -5282,13 +5371,13 @@ class SeriesMixin:
         thing it copies is still incompatible with it, so this does the same.
         `axis=1` is a different matter and raises, with pandas' own sentence.
         """
-        _held_at("inplace", inplace, False, _NO_INPLACE.replace("frame", "column"))
+        inplace = _flag("inplace", inplace)
         _no_level(level)
         _ignore_or_raise(errors)
         rows, _ = _dropping(labels, axis, index, columns, "Series")
         if rows is None:
-            return self.copy()
-        return self._reindex(
+            return _settled(self, self.copy(), inplace)
+        kept = self._reindex(
             index=self.index.drop(_sequence(rows), errors),
             axis=None,
             method=None,
@@ -5298,6 +5387,7 @@ class SeriesMixin:
             limit=None,
             tolerance=None,
         )
+        return _settled(self, kept, inplace)
 
     def fillna(
         self,
@@ -5329,7 +5419,7 @@ class SeriesMixin:
             value: The value to put in every missing row, or a mapping from row
                 labels to values, or a column to line up and read row by row.
             axis: Accepted and not read, the way every axis on a column is.
-            inplace: Refused.
+            inplace: Puts the answer into this object and hands the object back.
             limit: Refused, after being checked the way pandas checks it.
 
         Returns:
@@ -5342,7 +5432,7 @@ class SeriesMixin:
         """
         from ._frame import Series
 
-        _held_at("inplace", inplace, False, _NO_INPLACE.replace("frame", "column"))
+        inplace = _flag("inplace", inplace)
         _axis_number(axis, "Series", 0, (0,))
         if _limit_wanted(limit):
             raise UnsupportedError(f"limit= is not supported yet, because {_NO_FILL_LIMIT}")
@@ -5355,7 +5445,7 @@ class SeriesMixin:
         # these are two facts about the column and neither of them is a reason
         # to build a wrapper around it.
         if value is None or self._inner.null_count() == 0:
-            return self.copy()
+            return _kept(self, self.copy(), inplace)
         printed = self._inner.dtype()
         if _is_object(value):
             filled = _fill_column(
@@ -5368,7 +5458,7 @@ class SeriesMixin:
         else:
             filled = _fallback(printed, value, self)
         try:
-            return Series._wrap(self._inner.fill_null(filled))
+            return _kept(self, Series._wrap(self._inner.fill_null(filled)), inplace)
         except Exception as error:
             raise translate(error) from None
 
@@ -5399,7 +5489,7 @@ class SeriesMixin:
             other: What the rows that were not kept take. A value for all of
                 them, a column lined up by label, a sequence read by position,
                 or a callable handed this column. Nothing means a missing value.
-            inplace: Refused.
+            inplace: Puts the answer into this object and hands the object back.
             axis: Accepted and not read, the way every axis on a column is.
             level: Refused.
 
@@ -5434,7 +5524,7 @@ class SeriesMixin:
         Args:
             cond: The flags, in every shape `where` takes them.
             other: What the rows the condition picked out take.
-            inplace: Refused.
+            inplace: Puts the answer into this object and hands the object back.
             axis: Accepted and not read.
             level: Refused.
 
@@ -5457,7 +5547,7 @@ class SeriesMixin:
         Args:
             cond: The flags.
             other: What the rows this does not keep take.
-            inplace: Refused.
+            inplace: Puts the answer into this object and hands the object back.
             axis: Accepted and not read.
             level: Refused.
             flip: Whether the condition picks out the rows to replace rather
@@ -5474,7 +5564,7 @@ class SeriesMixin:
         """
         from ._frame import Series
 
-        _held_at("inplace", inplace, False, _NO_INPLACE.replace("frame", "column"))
+        inplace = _flag("inplace", inplace)
         _no_level(level)
         _axis_number(axis, "Series", 0, (0,))
         if callable(cond):
@@ -5492,10 +5582,10 @@ class SeriesMixin:
         # something, so `s.where(every_row, "a word")` on a column of numbers is
         # the column over there and is the column here.
         if not bool(replaced.reduce("max", 0.0)):
-            return self.copy()
+            return _kept(self, self.copy(), inplace)
         taken = _other_side(other, self._inner.dtype(), labels, replaced, self)
         try:
-            return Series._wrap(self._inner.pick(kept, taken))
+            return _kept(self, Series._wrap(self._inner.pick(kept, taken)), inplace)
         except Exception as error:
             raise translate(error) from None
 
@@ -5524,7 +5614,7 @@ class SeriesMixin:
                 mapping read by label, or a column lined up by label.
             upper: The ceiling, in the same shapes.
             axis: Accepted and not read, since a column has one.
-            inplace: Refused.
+            inplace: Puts the answer into this object and hands the object back.
             **kwargs: numpy's, which is `out` and nothing else.
 
         Returns:
@@ -5538,12 +5628,12 @@ class SeriesMixin:
         """
         from ._frame import Series
 
-        _held_at("inplace", inplace, False, _NO_INPLACE.replace("frame", "column"))
+        inplace = _flag("inplace", inplace)
         _axis_number(axis, "Series", 0, (0,))
         _numpy_clip(kwargs)
         low, high = _thresholds(lower, upper)
         if low is None and high is None:
-            return self.copy()
+            return _kept(self, self.copy(), inplace)
         labels = self._inner.labels().to_list()
         printed = self._inner.dtype()
         answer = self._inner
@@ -5560,7 +5650,7 @@ class SeriesMixin:
                 answer = answer.pick(sides[0], sides[1])
             except Exception as error:
                 raise translate(error) from None
-        return Series._wrap(answer)
+        return _kept(self, Series._wrap(answer), inplace)
 
     def replace(
         self,
@@ -5582,7 +5672,7 @@ class SeriesMixin:
             to_replace: A value, a run of values, or a mapping of pairs.
             value: What to put in place of it, which is a value or a run of them
                 as long as the run being replaced.
-            inplace: Refused.
+            inplace: Puts the answer into this object and hands the object back.
             regex: Refused, for now.
 
         Returns:
@@ -5595,7 +5685,7 @@ class SeriesMixin:
         """
         from ._frame import Series
 
-        _held_at("inplace", inplace, False, _NO_INPLACE.replace("frame", "column"))
+        inplace = _flag("inplace", inplace)
         _held_at("regex", regex, False, _NO_REGEX)
         pairs = _replacements(to_replace, value, "Series")
         labels = self._inner.labels().to_list()
@@ -5609,7 +5699,7 @@ class SeriesMixin:
                 answer = answer.pick(sides[0], sides[1])
             except Exception as error:
                 raise translate(error) from None
-        return Series._wrap(answer)
+        return _kept(self, Series._wrap(answer), inplace)
 
     def rename(
         self,
@@ -5647,14 +5737,18 @@ class SeriesMixin:
         """
         from ._frame import Series
 
-        _held_at("inplace", inplace, False, _NO_INPLACE.replace("frame", "column"))
+        inplace = _flag("inplace", inplace)
         _no_level(level)
         if axis not in (0, "index", None):
             raise InvalidArgumentError(f"No axis named {axis} for object type Series")
         if callable(index) or hasattr(index, "items"):
             raise NotImplementedError(f"a mapping is not supported yet, because {_NO_LABEL_MAP}")
         try:
-            return Series._wrap(self._inner.relabel("" if index is None else str(index)))
+            return _kept(
+                self,
+                Series._wrap(self._inner.relabel("" if index is None else str(index))),
+                inplace,
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -5666,7 +5760,7 @@ class SeriesMixin:
         axis: Any = 0,
         copy: Any = NO_DEFAULT,
         inplace: bool = False,
-    ) -> Series:
+    ) -> Series | None:
         """The same values with the row labels under a different level name.
 
         The frame's method with one axis instead of two, and the same point: the
@@ -5676,14 +5770,16 @@ class SeriesMixin:
         """
         from ._frame import Series
 
-        _held_at("inplace", inplace, False, _NO_INPLACE.replace("frame", "column"))
+        inplace = _flag("inplace", inplace)
         if axis not in (0, "index"):
             raise InvalidArgumentError(f"No axis named {axis} for object type Series")
         wanted = mapper if mapper is not NO_DEFAULT else index
         if wanted is NO_DEFAULT:
-            return self.copy()
+            return _settled(self, self.copy(), inplace)
         try:
-            return Series._wrap(self._inner.renamed_axis(_one_name(wanted)))
+            return _settled(
+                self, Series._wrap(self._inner.renamed_axis(_one_name(wanted))), inplace
+            )
         except Exception as error:
             raise translate(error) from None
 
@@ -5854,23 +5950,14 @@ class SeriesMixin:
 
     def _transform(
         self, kind: str, periods: int, axis: Any, inplace: bool, ignore_index: bool
-    ) -> Series:
+    ) -> Series | None:
         """Runs one named transformation over the whole column.
 
         All twelve come through here, including `dropna`, because a column
         `dropna` removes values and is a transformation like the rest. The frame
         one removes rows and is not.
         """
-        from ._frame import Series
-
-        _transforming_axis(axis, "Series")
-        _held_at(
-            "inplace",
-            inplace,
-            False,
-            "the answer is a new series over shared Arrow buffers, so writing into"
-            " one would change columns the caller never mentioned",
-        )
+        inplace = _flag("inplace", inplace)
         _held_at(
             "ignore_index",
             ignore_index,
@@ -5878,6 +5965,19 @@ class SeriesMixin:
             "throwing the labels away and numbering the rows again is a change to"
             " the index rather than to the values",
         )
+        return _settled(self, self._transformed(kind, periods, axis), inplace)
+
+    def _transformed(self, kind: str, periods: int, axis: Any = 0) -> Series:
+        """The same transformation with nothing left to read first.
+
+        The half of `_transform` that always answers, which is what the members
+        that cannot be asked for `inplace` call, so that they are not typed as
+        though they might hand back nothing.
+        """
+        from ._frame import Series
+
+        _transforming_axis(axis, "Series")
+
         try:
             return Series._wrap(self._inner.transform(kind, periods))
         except Exception as error:
@@ -5892,7 +5992,9 @@ class SeriesMixin:
             " outside them, needs the fill to know where the ends are and it"
             " walks the column without looking",
         )
-        return self._transform(kind, _limit_wanted(limit), axis, inplace, False)
+        return _kept(
+            self, self._transformed(kind, _limit_wanted(limit), axis), _flag("inplace", inplace)
+        )
 
     def _shift(self, periods: Any, freq: Any, axis: Any, fill_value: Any, suffix: Any) -> Series:
         """Moves the column's rows along, leaving the gap missing."""
@@ -5916,13 +6018,13 @@ class SeriesMixin:
                 "periods has to be a single number for now, because a list of them"
                 " answers a frame with one column per period"
             )
-        return self._transform("shift", periods, axis, False, False)
+        return self._transformed("shift", periods, axis)
 
     def _pct_change(self, periods: int, fill_method: Any, freq: Any) -> Series:
         """The fractional change between each row and the one before it."""
         _refuse("fill_method", fill_method, "pandas removed it in 3.0 and only accepts None")
         _refuse("freq", freq, "it needs the offset vocabulary, which is the resampling milestone")
-        return self._transform("pct_change", periods, 0, False, False)
+        return self._transformed("pct_change", periods)
 
     def _scan(self, kind: str, axis: Any, skipna: bool, numeric_only: bool) -> Series:
         """Runs one of the four scans over the whole column."""
@@ -5933,7 +6035,7 @@ class SeriesMixin:
             "a missing row is stepped over and put back where it was, and letting"
             " one through would poison every row after it",
         )
-        return self._transform(kind, 0, axis, False, False)
+        return self._transformed(kind, 0, axis)
 
     def _astype(self, dtype: Any, copy: Any, errors: Any) -> Series:
         """Converts the column and hands back a new one.
@@ -8767,7 +8869,7 @@ class IndexMixin:
         """
         wanted = self._inner.label() if name is NO_DEFAULT else name
         made = self.to_series().to_frame(wanted)
-        return made if index else made.reset_index(drop=True)
+        return made if index else _answered(made.reset_index(drop=True))
 
     def duplicated(self, keep: Any = "first") -> Any:
         """Which labels repeat one that an earlier label already carries."""

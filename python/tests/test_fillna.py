@@ -208,11 +208,14 @@ def test_a_limit_is_refused_and_a_bad_one_is_refused_first(firepanda):
         frame(firepanda).fillna({"i": 0}, limit=1.5)
 
 
-def test_inplace_is_refused_on_both(firepanda):
-    with pytest.raises(NotImplementedError, match="inplace"):
-        frame(firepanda).fillna({"i": 0}, inplace=True)
-    with pytest.raises(NotImplementedError, match="inplace"):
-        firepanda.Series([1.0, None]).fillna(0.0, inplace=True)
+def test_inplace_settles_on_both_and_hands_the_object_back(firepanda):
+    """`fillna` is on the side of the split that answers the object."""
+    made = frame(firepanda)
+    assert made.fillna({"i": 0}, inplace=True) is made
+    assert made["i"].tolist() == [1, 0, 3]
+    column = firepanda.Series([1.0, None])
+    assert column.fillna(0.0, inplace=True) is column
+    assert column.tolist() == [1.0, 0.0]
 
 
 def test_an_axis_the_object_does_not_have_says_so(firepanda):
