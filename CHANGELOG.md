@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: an aggregate written in the ORDER BY
+
+`SELECT shop, sum(qty) FROM stock GROUP BY shop ORDER BY sum(qty) DESC` is the shape most of ClickBench is written in, and until now it was refused with "sum is an aggregate and this query has no GROUP BY", which was a confusing thing to read on a query whose second line is a GROUP BY. Writing the fold once in the select list and sorting on the name it was given did work, and was the workaround.
+
+The reason for the refusal was where the sort keys were lowered. They were lowered above the block, after the node that computes the aggregates had already been built, and up there a fold has nowhere to be recorded. They are read inside the block now, after the select list and the HAVING, so a fold written in all three is one slot the three of them share and a fold written only in the ORDER BY is a slot of its own. The sort then reads the column that node puts it in, the projection under the sort is widened to carry that column, and the projection above takes the query's own columns back, which is the same thing an `ORDER BY` on a plain column the query does not return has always done.
+
+An expression over a fold sorts too, so `ORDER BY count(*) * 100 + sum(qty) DESC` is two slots and one sort key over both. An entry with no fold in it is lowered where it always was, so `ORDER BY c` still means the output column called `c` rather than a column of the table with that name. A fold in the `ORDER BY` of a query that does not otherwise aggregate is still refused, in the same words as before, and so is one written after a set operation, where there is no single aggregate underneath to add a slot to.
+
 ### Added: a release that hits an index rate limit now says when to try again
 
 An index answers an upload with 429 when too many versions have gone out in too short a time. Until now that was a red job in a workflow nobody was watching, and the tag sat published nowhere with nothing written down about why.

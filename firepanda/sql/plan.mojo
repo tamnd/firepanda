@@ -3236,8 +3236,32 @@ def _statement(
     if top.a != NO_NODE and ast.stmts[Int(top.a)].kind == STMT_QUERY:
         on = ast.items(ast.stmts[Int(top.a)].b)
 
+    # An aggregate written in the ORDER BY is lowered inside the block, for the
+    # same reason the select list's aggregates are: the node that computes them
+    # is built in there, and a sort key that reads one has to be a column that
+    # node already produces. Only a single block, because an ORDER BY after a
+    # set operation sorts what the whole of it produced and there is no one
+    # aggregate underneath it to add a slot to.
+    var orders = List[UInt32]()
+    if (
+        top.b != NO_NODE
+        and top.a != NO_NODE
+        and ast.stmts[Int(top.a)].kind == STMT_QUERY
+    ):
+        orders = ast.items(ast.stmts[Int(top.b)].children)
+
+    var ordered = List[Int]()
     var at = _combine(
-        ast, top.a, catalog, plan, sources, scope, visible, len(on) != 0
+        ast,
+        top.a,
+        catalog,
+        plan,
+        sources,
+        scope,
+        visible,
+        len(on) != 0,
+        orders,
+        ordered,
     )
 
     # The ORDER BY and the LIMIT written after a set operation apply to the
@@ -3249,7 +3273,7 @@ def _statement(
         # names the same table the rest of the query named. A set operation
         # leaves it empty, because the tables were inside the arms and an ORDER
         # BY written after one sorts what the whole of it produced.
-        at = _modifiers(ast, top.b, plan, walk, scope, at, on^)
+        at = _modifiers(ast, top.b, plan, walk, scope, at, on^, ordered)
     return at
 
 
@@ -3407,6 +3431,8 @@ def _combine(
     mut scope: _Scope,
     ctes: _Bindings,
     defer: Bool,
+    orders: List[UInt32],
+    mut ordered: List[Int],
 ) raises -> Int:
     """Lowers one query body: a block, a `VALUES`, or a set operation over two.
 
@@ -3429,6 +3455,12 @@ def _combine(
             caller to apply, which it is when an ORDER BY outside the block has
             to run underneath it. An arm of a set operation is never deferred,
             since nothing can be written between the arm and the operation.
+        orders: The `ORDER BY` entries written outside the body, so that a block
+            can lower an aggregate written in one before it builds the node that
+            has to compute it. Empty for an arm of a set operation and for a
+            `VALUES`, neither of which has an aggregate for a sort key to read.
+        ordered: Filled in with one entry per `orders` entry: the lowered sort
+            key when the block lowered it, and -1 when it left it alone.
 
     Returns:
         The node the body produces.
@@ -3444,12 +3476,33 @@ def _combine(
         # Each arm brings its own scope and neither survives the set operation,
         # so the arms get one apiece and the caller's stays empty.
         var arm = _Scope()
+        var none = List[UInt32]()
+        var untouched = List[Int]()
         var left = _combine(
-            ast, node.a, catalog, plan, sources, arm, ctes, False
+            ast,
+            node.a,
+            catalog,
+            plan,
+            sources,
+            arm,
+            ctes,
+            False,
+            none,
+            untouched,
         )
         arm = _Scope()
+        untouched = List[Int]()
         var right = _combine(
-            ast, node.b, catalog, plan, sources, arm, ctes, False
+            ast,
+            node.b,
+            catalog,
+            plan,
+            sources,
+            arm,
+            ctes,
+            False,
+            none,
+            untouched,
         )
         if read[2]:
             var lined = _by_name(plan, left, right, sources)
@@ -3458,7 +3511,9 @@ def _combine(
         return plan.setop([left, right], read[0], read[1])
     if node.kind == STMT_VALUES:
         return _values(ast, body, plan)
-    return _block(ast, body, catalog, plan, sources, scope, ctes, defer)
+    return _block(
+        ast, body, catalog, plan, sources, scope, ctes, defer, orders, ordered
+    )
 
 
 def _by_name(
@@ -5098,6 +5153,8 @@ def _block(
     mut scope: _Scope,
     ctes: _Bindings,
     defer: Bool,
+    orders: List[UInt32],
+    mut ordered: List[Int],
 ) raises -> Int:
     """Lowers one `SELECT ... FROM ... WHERE ...` block.
 
@@ -5118,6 +5175,10 @@ def _block(
         defer: Whether a `DISTINCT ON` here is left for the caller to apply,
             which it is when an ORDER BY written outside the block has to run
             underneath it.
+        orders: The `ORDER BY` entries written outside the block, read for the
+            aggregates in them and nothing else.
+        ordered: Filled in with one entry per `orders` entry: the lowered sort
+            key for an entry that folds, and -1 for one that does not.
 
     Returns:
         The node the block produces.
@@ -5421,6 +5482,23 @@ def _block(
                 " same condition written in WHERE does lower"
             )
 
+    # An aggregate written in the ORDER BY is lowered here, after the select
+    # list and the HAVING so that one written in both is recorded once and lands
+    # in the slot they already made for it. `ORDER BY count(*)` over a query
+    # that does not return the count is a slot of its own, which is why this
+    # runs before the aggregate is built rather than above it: up there the node
+    # exists and a column it does not compute cannot be added to it.
+    #
+    # An entry with no fold in it is left alone and lowered above the block,
+    # where a bare name still means an output column and `ORDER BY c` can find
+    # the alias the select list wrote.
+    for i in range(len(orders)):
+        var entry = ast.stmts[Int(orders[i])]
+        if not grouped or not _has_aggregate(ast, entry.a):
+            ordered.append(-1)
+            continue
+        ordered.append(_lower_expr(ast, entry.a, plan, walk, scope, True))
+
     if grouped:
         var aggs = walk.aggs.copy()
         var agg_names = walk.agg_names.copy()
@@ -5444,7 +5522,9 @@ def _block(
         # A DISTINCT ON sets the same flag a plain DISTINCT does, and it is the
         # key list rather than the flag that says which of the two was written.
         if not defer:
-            at = _modifiers(ast, NO_NODE, plan, walk, scope, at, picked^)
+            at = _modifiers(
+                ast, NO_NODE, plan, walk, scope, at, picked^, List[Int]()
+            )
     elif (query.a & SELECT_DISTINCT) != 0:
         at = plan.distinct(at, List[Int]())
 
@@ -5843,6 +5923,7 @@ def _modifiers(
     scope: _Scope,
     input: Int,
     var on: List[UInt32],
+    ordered: List[Int],
 ) raises -> Int:
     """Puts the `DISTINCT ON`, `ORDER BY`, `LIMIT` and `OFFSET` on a plan.
 
@@ -5862,6 +5943,9 @@ def _modifiers(
         input: What they apply to.
         on: The `DISTINCT ON` expressions, and empty when none was written.
             Consumed.
+        ordered: One entry per `ORDER BY` entry, holding the sort key the block
+            lowered for it and -1 when the block left it alone. Empty when the
+            block was never asked, which is every entry left alone.
 
     Returns:
         The topmost node built.
@@ -5903,7 +5987,15 @@ def _modifiers(
                     descending.append(down)
                     nulls_last.append(last)
                 continue
-            keys.append(_lower_expr(ast, entry.a, plan, walk, scope, False))
+            if i < len(ordered) and ordered[i] >= 0:
+                # A fold in the ORDER BY was lowered inside the block, back when
+                # the node that computes it was still being built, and what came
+                # back is a reference to the column that node puts it in. Asking
+                # for it again here would be asking above the aggregate, where
+                # there is nothing left to record it in.
+                keys.append(ordered[i])
+            else:
+                keys.append(_lower_expr(ast, entry.a, plan, walk, scope, False))
             descending.append(down)
             nulls_last.append(last)
 

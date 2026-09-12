@@ -358,6 +358,91 @@ def test_an_order_by_adds_a_column_once_however_often_it_is_read() raises:
     )
 
 
+def test_an_order_by_may_sort_on_a_fold_the_query_returns() raises:
+    # The fold is one slot in the aggregate whether it is written once or twice,
+    # so the sort reads the column the select list already asked for. This shape
+    # is most of ClickBench: group, count, and put the biggest count first.
+    assert_equal(
+        _plan("SELECT g, sum(a) FROM t GROUP BY g ORDER BY sum(a) DESC"),
+        (
+            "PROJECT [g, __expr_1]\n"
+            "  SORT [__agg_0 desc]\n"
+            "    PROJECT [g, __agg_0 as __expr_1, __agg_0]\n"
+            "      AGGREGATE [g] -> [sum(a)]\n"
+            "        SCAN t []\n"
+        ),
+    )
+
+
+def test_an_order_by_may_sort_on_a_fold_the_query_does_not_return() raises:
+    # A slot of its own, because nothing else asked for it. That is why the
+    # ORDER BY is read before the aggregate is built rather than after: above
+    # the node a column it does not compute cannot be added to it.
+    assert_equal(
+        _plan("SELECT g FROM t GROUP BY g ORDER BY sum(a) DESC"),
+        (
+            "PROJECT [g]\n"
+            "  SORT [__agg_0 desc]\n"
+            "    PROJECT [g, __agg_0]\n"
+            "      AGGREGATE [g] -> [sum(a)]\n"
+            "        SCAN t []\n"
+        ),
+    )
+
+
+def test_an_order_by_may_sort_on_an_expression_over_a_fold() raises:
+    assert_equal(
+        _plan("SELECT g FROM t GROUP BY g ORDER BY sum(a) * 2 DESC"),
+        (
+            "PROJECT [g]\n"
+            "  SORT [__agg_0 * 2 desc]\n"
+            "    PROJECT [g, __agg_0]\n"
+            "      AGGREGATE [g] -> [sum(a)]\n"
+            "        SCAN t []\n"
+        ),
+    )
+
+
+def test_an_order_by_on_a_folds_alias_reads_the_output_column() raises:
+    # No fold is written in the ORDER BY here, only the name the select list
+    # gave one, so this goes the way every other name does and sorts on the
+    # column the projection produced. No widening and no second projection.
+    assert_equal(
+        _plan("SELECT g, count(*) AS c FROM t GROUP BY g ORDER BY c DESC"),
+        (
+            "SORT [c desc]\n"
+            "  PROJECT [g, __agg_0 as c]\n"
+            "    AGGREGATE [g] -> [count(1)]\n"
+            "      SCAN t []\n"
+        ),
+    )
+
+
+def test_two_folds_of_one_shape_across_the_order_by_are_one_slot() raises:
+    assert_equal(
+        _plan(
+            "SELECT g, sum(a) AS x FROM t GROUP BY g HAVING sum(a) > 1 ORDER BY"
+            " sum(a)"
+        ),
+        (
+            "PROJECT [g, x]\n"
+            "  SORT [__agg_0 asc nulls last]\n"
+            "    PROJECT [g, __agg_0 as x, __agg_0]\n"
+            "      FILTER __agg_0 > 1\n"
+            "        AGGREGATE [g] -> [sum(a)]\n"
+            "          SCAN t []\n"
+        ),
+    )
+
+
+def test_a_fold_in_an_order_by_over_a_query_that_does_not_fold_is_refused() raises:
+    # The same refusal a fold written anywhere else in such a query gets. DuckDB
+    # refuses it too, for the column in the select list rather than for the
+    # fold, and either way the query does not run.
+    with assert_raises(contains="is an aggregate and this query has no GROUP"):
+        _ = _plan("SELECT a FROM t ORDER BY count(*) DESC")
+
+
 def test_a_distinct_on_sits_over_the_projection_it_was_written_in() raises:
     assert_equal(
         _plan("SELECT DISTINCT ON (a) a, b FROM t"),
