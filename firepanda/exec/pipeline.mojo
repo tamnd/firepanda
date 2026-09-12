@@ -255,6 +255,14 @@ def _apply_prefix(
 ) raises -> Optional[Chunk]:
     """Runs one chunk through the first `lead` operators.
 
+    A selection stops here. A filter writes one rather than copying every
+    column, and whatever reads the column next gathers the rows out of it, so if
+    the last operator of the prefix was the filter the gather would otherwise
+    fall to the sink, which runs on this thread after the batch is done. That
+    turns work that was spread over every core into work done one chunk at a
+    time in the serial part of the run, which is the opposite of what writing
+    the selection was for.
+
     Args:
         ops: The line of operators. Only the first `lead` are used.
         lead: How many leading operators to run. At least one.
@@ -271,6 +279,10 @@ def _apply_prefix(
         if not out:
             return None
         chunk = out.take()
+    if chunk.selected():
+        # False because this is a worker and the batch above it is already
+        # using the machine.
+        chunk.flatten(False)
     return Optional[Chunk](chunk^)
 
 

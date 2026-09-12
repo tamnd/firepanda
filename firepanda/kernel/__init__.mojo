@@ -178,6 +178,8 @@ from .select import (
     filter_rows,
     gather_any,
     gather_rows,
+    mask_keeps_more_than,
+    mask_kept,
     select_positions,
     take_any,
     take_range,
