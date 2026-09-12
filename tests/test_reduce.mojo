@@ -612,18 +612,17 @@ def test_a_string_column_refuses_a_product() raises:
         _ = reduce_any(AnyArray(col^), AggKind.PROD)
 
 
-def test_the_three_new_reductions_have_no_grouped_form_yet() raises:
-    # Every other reduction in this file is checked against the group by on a
-    # constant key, and these three cannot be, because the grouped chain has no
-    # branch for them. That is the whole reason they are asserted by hand above,
-    # and this says out loud that the missing branch is known rather than
-    # forgotten, so that whoever adds it has a test to delete.
-    var frame = sample_frame()
-    for kind in [AggKind.PROD, AggKind.ANY, AggKind.ALL]:
-        var specs = List[AggSpec]()
-        specs.append(AggSpec("v", kind, "answer"))
-        with assert_raises(contains="no grouped one yet"):
-            _ = frame.group_by(["k"], specs^, True, False)
+def test_a_product_agrees_with_the_group_by() raises:
+    agreed(AggKind.PROD)
+
+
+def test_a_truth_agrees_with_the_group_by() raises:
+    # These three used to be the only reductions in the file that could not be
+    # checked against a group by on a constant key, because the grouped chain
+    # had no branch for them, and the test in this spot said so out loud. It has
+    # a branch now, so they are checked the way the other fifteen are.
+    agreed(AggKind.ANY)
+    agreed(AggKind.ALL)
 
 
 def test_agg_returns_one_row_named_by_the_specs() raises:
