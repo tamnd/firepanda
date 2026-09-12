@@ -809,20 +809,30 @@ struct Series(Copyable, Movable, Sized, Writable):
         accept as an identifier, and it is not `case_when` because there is no
         chain of conditions here, only one.
 
+        The other side may be one row, which is that row for every row the
+        condition did not keep and is how choosing against a constant is
+        spelled. That is `fill_null`'s rule about its fallback, said again, and
+        it is said the same way because the layer above this one is the side
+        that knows what type a value written in Python has to become.
+
         Args:
             cond: The condition, as tall as the series. Usually a mask that came
                 out of a comparison or one of the `str_` methods.
             otherwise: The series to take a row from where the condition does
-                not hold. Must be the same type and length.
+                not hold. Must be the same type, and either as tall as this one
+                or one row.
 
         Returns:
             A series with this one's name, taking each row from whichever side
             the condition chose.
 
         Raises:
-            If the two are not the same type, or the lengths disagree.
+            If the two are not the same type, or the other side is neither one
+            row nor as tall as the condition.
         """
-        return Series(self.name, pick_any(cond, self.values, otherwise.values))
+        return self._relabelled(
+            self.name, pick_any(cond, self.values, otherwise.values)
+        )
 
     def str_contains(self, needle: StringSlice) raises -> Array[DType.bool]:
         """Returns a mask that is true where the text holds a substring.

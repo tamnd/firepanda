@@ -16,6 +16,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 The ORDER BY runs underneath the distinct rather than over it. That is what DuckDB does and it is the only reading that makes the query useful: `ORDER BY qty DESC` with a `DISTINCT ON (shop)` means the largest order of each shop, so the sort chooses which row of each group survives as well as ordering the answer. A `DISTINCT ON` written inside one arm of a set operation stays inside that arm, since nothing can be written between an arm and the operation over it. The key may be a column the query does not return, which gets the same widening an `ORDER BY` on a column the query does not return already gets. A computed key is still refused by name.
 
+### Added: where and mask
+
+`DataFrame.where`, `DataFrame.mask`, `Series.where` and `Series.mask` are here, with the pandas 3.0 signature and every shape of condition and other side pandas takes. A condition lines up by label and a label it does not carry is a false, a condition with no labels is read by position, a frame lines up on both axes, and a callable is handed the thing it is judging. The other side is a value, a column, a run of values, a frame, or nothing at all.
+
+Nothing at all is the shape that decides the type of the answer. pandas widens a column when it puts a missing value in one, so a column of integers becomes floats, and here the column keeps its type and holds a null, which is what pandas' own `Int64` does for the same reason. A column that keeps every one of its rows is answered untouched and its other side is never looked at, which is pandas' rule rather than a shortcut, so `s.where(everything, "a word")` on a column of numbers is the column in both libraries.
+
+A row the condition says nothing in is replaced by both methods, not kept by either, so `mask` turns the condition over before its gaps are read as falses rather than after. `df.where(flags, axis=1)` with one flag per column is implemented, and cannot currently be run in pandas at all, which is reported upstream and written up in document 48.
+
+The kernel grew a false side of one row for it, so a scalar other side costs one row rather than a column of copies, and a one row side that holds nothing is the pass that builds a validity bitmap rather than copying one. `Series.pick`, `DataFrame.pick` and `Series.missing_row` are the bindings over it.
+
 ## [0.6.82] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).

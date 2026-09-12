@@ -45,6 +45,13 @@ letting each fill its own stretch of it, which is the shape `text_substring`
 uses and documents. It follows the same null rule as the rest of the file,
 because it reads the same condition bytes.
 
+`pick_one` is `pick_const` with the constant arriving as a column of one row
+rather than as a value, which is the only shape a caller that learns the dtype at
+runtime can hand one over in, and it is the shape `coalesce` already takes its
+fallback in. The one thing it adds is that the row it reads is allowed to be
+null, which a `Scalar` cannot be and which `where` with no other value named
+needs on every row the condition did not keep.
+
 The last word of a column whose length is not a multiple of sixty four hangs over
 the end, and the bits out there have to be left clear, because `count_ones` walks
 whole words and a bit set past the end is a row that does not exist counted as
@@ -193,6 +200,84 @@ def pick[
 
     if mixed:
         out.data.validity = validity^
+    return out^
+
+
+def pick_one[
+    dt: DType
+](cond: Array[DType.bool], a: Array[dt], b: Array[dt]) raises -> Array[dt]:
+    """Returns a column taking each row from `a` or from one row of `b`.
+
+    This is the false side handed over as a column of one row rather than as a
+    value, which is how a caller that does not know the dtype at compile time
+    spells a constant. `coalesce` takes its fallback the same way and for the
+    same reason: the layer above knows what the value is and this layer knows
+    what type it has to be, so the value crosses already typed.
+
+    The row that arrived can itself be null, which a `Scalar` cannot be, and
+    that is the only thing here `pick_const` does not already do. It is a real
+    case rather than a corner: `where` with no `other` named puts a missing
+    value in every row the condition did not keep, and that is this.
+
+    Args:
+        cond: The condition. A null in it takes the false side.
+        a: The true side. Must be as long as the condition.
+        b: The false side, as a column of exactly one row.
+
+    Parameters:
+        dt: The dtype of both sides.
+
+    Returns:
+        A column of the same dtype and length as the condition.
+
+    Raises:
+        Error: If `a` is not as long as the condition, or `b` is not one row.
+    """
+    var n = len(cond)
+    if len(a) != n or len(b) != 1:
+        raise Error(
+            "pick: condition of "
+            + String(n)
+            + " rows against sides of "
+            + String(len(a))
+            + " and "
+            + String(len(b))
+        )
+    if b.is_valid(0):
+        return pick_const[dt](cond, a, b[0])
+
+    var out = Array[dt](overwritten=n)
+    comptime width = simd_width_of[dt]()
+    # The zero is the value under a null, which `kernel/__init__.mojo` requires
+    # and which the rest of this module relies on rather than writes.
+    var empty = SIMD[dt, width](0)
+    var validity = Bitmap(n)
+
+    def body(start: Int, stop: Int) {mut out, mut validity, imm}:
+        var c = cond.unsafe_ptr()
+        var x = a.unsafe_ptr()
+        var dst = out.unsafe_mut_ptr()
+        var i = start
+        while i < stop:
+            var hit = c.unsafe_offset(i).unsafe_load[width=width]()
+            dst.unsafe_offset(i).unsafe_store(
+                hit.select(x.unsafe_offset(i).unsafe_load[width=width](), empty)
+            )
+            i += width
+
+        for w in range(start // 64, (stop + 63) // 64):
+            # Present only where the condition held and `a` had something, since
+            # every other row took the one row that has nothing in it. The tail
+            # mask matters here for `pick_const`'s reason: the false side is not
+            # a column whose cleared tail could be borrowed.
+            var sel = _selected_word(cond, w)
+            validity.unsafe_set_word(
+                w, sel & a.data.validity.unsafe_word(w) & _tail_mask(n, w)
+            )
+
+    parallel_morsels(body, n)
+
+    out.data.validity = validity^
     return out^
 
 
@@ -345,17 +430,18 @@ def text_pick(
     Args:
         cond: The condition. A null in it takes the false side.
         a: The true side. Must be as long as the condition.
-        b: The false side. Must be as long as the condition.
+        b: The false side, as long as the condition or one row, which is
+            `pick_one`'s rule and is how a constant arrives here.
 
     Returns:
         A text column of the same length.
 
     Raises:
-        Error: If the three are not all the same length, or what the morsel
-            runtime raises.
+        Error: If the sides are not the length the condition asks for, or what
+            the morsel runtime raises.
     """
     var n = len(cond)
-    if len(a) != n or len(b) != n:
+    if len(a) != n or (len(b) != n and len(b) != 1):
         raise Error(
             "pick: condition of "
             + String(n)
@@ -373,6 +459,10 @@ def text_pick(
     var src = cond.unsafe_ptr()
     var a_views = a.views.unsafe_ptr().unsafe_bitcast[StringView]()
     var b_views = b.views.unsafe_ptr().unsafe_bitcast[StringView]()
+    # One row on the false side is that row for every row, and the two passes
+    # below both have to ask for it the same way or they will disagree about
+    # how many bytes the payload needs.
+    var spread = len(b) != n
 
     var morsels = (n + MORSEL_ROWS - 1) // MORSEL_ROWS
     # One entry per morsel, holding that morsel's payload bytes on the way in
@@ -388,13 +478,14 @@ def text_pick(
                 # The values buffer and not the validity, which is the null
                 # rule. It is read here as well as in the fill so that the two
                 # passes agree about which side every row came from.
+                var at = 0 if spread else i
                 if src.unsafe_offset(i).unsafe_load():
                     if a.is_valid(i):
                         var view = a_views.unsafe_offset(i)[]
                         if not view.is_inline():
                             wide += len(view)
-                elif b.is_valid(i):
-                    var view = b_views.unsafe_offset(i)[]
+                elif b.is_valid(at):
+                    var view = b_views.unsafe_offset(at)[]
                     if not view.is_inline():
                         wide += len(view)
             bases.unsafe_mut_ptr().unsafe_offset(
@@ -422,14 +513,15 @@ def text_pick(
         var word = UInt64(0)
         for i in range(start, stop):
             var yes = src.unsafe_offset(i).unsafe_load()
-            if not (a.is_valid(i) if yes else b.is_valid(i)):
+            var at = 0 if spread else i
+            if not (a.is_valid(i) if yes else b.is_valid(at)):
                 # The view of the empty string, so that reading a null's bytes
                 # gives an empty span rather than whatever the allocation held.
                 dst.unsafe_offset(i)[] = StringView()
             else:
                 var view = a_views.unsafe_offset(
                     i
-                )[] if yes else b_views.unsafe_offset(i)[]
+                )[] if yes else b_views.unsafe_offset(at)[]
                 if view.is_inline():
                     # The bytes are already inside the sixteen, so the view is
                     # the whole element and copying it is the whole job.
@@ -475,7 +567,8 @@ def pick_any(
         a: The true side.
         b: The false side. Must be the same type as `a`, because promoting here
             would decide silently which side loses precision and a caller that
-            meant to mix types can cast first and say so.
+            meant to mix types can cast first and say so. It may be one row,
+            which is that row for every row and is how a constant arrives.
 
     Returns:
         A column of that type.
@@ -491,7 +584,16 @@ def pick_any(
             + " and "
             + String(b.type)
         )
+    if len(b) != len(cond) and len(b) != 1:
+        raise Error(
+            "pick: the false side must have one row or as many as the"
+            " condition; the condition has "
+            + String(len(cond))
+            + " rows and the false side has "
+            + String(len(b))
+        )
     check_same_categories(a, b, "pick")
+    var spread = len(b) != len(cond)
     if a.is_dictionary():
         # The codes and not the values, because that is the whole point of the
         # layout, and both sides name the same categories or the check above
@@ -501,7 +603,9 @@ def pick_any(
         var left = dictionary_codes(a)
         var right = dictionary_codes(b)
         return AnyArray.dictionary(
-            pick[DType.int32](cond, left, right),
+            pick_one[DType.int32](cond, left, right) if spread else pick[
+                DType.int32
+            ](cond, left, right),
             StringArray(copy=a.categories()),
             a.type.ordered,
         )
@@ -514,5 +618,7 @@ def pick_any(
         if a.type.physical == target:
             ref x = a.as_typed_view[target]()
             ref y = b.as_typed_view[target]()
+            if spread:
+                return AnyArray(pick_one[target](cond, x, y)).retyped(a.type)
             return AnyArray(pick[target](cond, x, y)).retyped(a.type)
     raise Error("pick: unsupported dtype")

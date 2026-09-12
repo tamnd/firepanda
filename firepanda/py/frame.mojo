@@ -467,6 +467,53 @@ struct PyDataFrame(Movable, Writable):
             raise retagged(DTYPE, cause)
 
     @staticmethod
+    def pick(
+        py_self: PythonObject,
+        name: PythonObject,
+        cond: PythonObject,
+        other: PythonObject,
+    ) raises -> PythonObject:
+        """Takes one column's rows from itself or from a second column.
+
+        One column at a time for the reason `fill_null` gives, which is that the
+        other side has to be of the column's own dtype. A choice across a frame
+        is this called once per column, and each call shares the buffers of the
+        columns it did not touch.
+
+        Args:
+            py_self: The frame.
+            name: The column to choose over.
+            cond: A boolean column as tall as the frame.
+            other: What to take where the condition does not hold, of that
+                column's dtype and either one row or as tall as the frame.
+
+        Returns:
+            A new frame of the same shape with that one column chosen over.
+
+        Raises:
+            Error: Tagged `dtype`, since the caller has already checked that the
+                column is there and has already been told what type to send.
+        """
+        var mask = PySeries._other(cond, "cond")
+        var right = PySeries._other(other, "other")
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(
+                        Self._frame(py_self)[]
+                        .frame[]
+                        .pick(
+                            String(name),
+                            mask[].values.as_typed[DType.bool](),
+                            right[],
+                        )
+                    )
+                )
+            )
+        except cause:
+            raise retagged(DTYPE, cause)
+
+    @staticmethod
     def cell(
         py_self: PythonObject, row: PythonObject, at: PythonObject
     ) raises -> PythonObject:
