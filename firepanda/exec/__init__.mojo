@@ -40,7 +40,16 @@ and nothing is read until every task has been waited on.
 
 from .chunk import Chunk
 from .morsel import MORSEL_ROWS, Morsel, MorselQueue, parallel_morsels
-from .node import Cast, Compute, Connective, Constant, Filter, Group, GroupAgg
+from .node import (
+    Cast,
+    Choose,
+    Compute,
+    Connective,
+    Constant,
+    Filter,
+    Group,
+    GroupAgg,
+)
 from .node import Join, Limit, Materialize, Node, NodeStatus, Project, Reduce
 from .node import Sort, Window
 from .node import node_apply, node_bind, node_computes_per_row

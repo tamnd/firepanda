@@ -280,10 +280,12 @@ empty subquery and is the identity of that operator otherwise, so it decides a
 subquery with no rows in it and decides nothing anywhere else. A null `x` needs
 nothing written for it, because comparing it against either end is null already.
 
-Nothing in any of that is a `CASE`, and that is not a stylistic choice. The
-physical lowering has no conditional yet, so a plan with one in it lowers and
-then does not run, while `AND` and `OR` over a null are the three valued
-operators the engine already has and are what the whole rule is made of anyway.
+Nothing in any of that is a `CASE`, and that is not a stylistic choice. `AND`
+and `OR` over a null are the three valued operators the whole rule is made of,
+so writing it with them says what it means, and a conditional wrapped around a
+comparison would be saying the same thing in a way a reader has to unpick.
+There is an operator for a conditional now, so this would run either way, and
+it was written before there was one.
 
 ### A subquery that answers one value is a cross join onto one row
 
@@ -308,6 +310,22 @@ an aggregate hands up its keys and its folds rather than everything it read, and
 that is a refusal with the reason in it rather than a binding error. A
 correlated one is refused too, by the scope it lowers against, which is the same
 refusal a correlated `IN` gets and the same dependent join behind it.
+
+### A `CASE` is a chain of conditionals, and the simple form is the same chain
+
+`CASE WHEN c1 THEN r1 WHEN c2 THEN r2 ELSE e END` lowers right to left, each
+arm's else side being the arm below it and the last one's being the `ELSE`. So
+a chain is nested conditionals rather than a list, and the first arm that holds
+is the one that answers without anything counting arms. An `ELSE` that is not
+written is an `ELSE` of null, which is what the standard says, so no shape of
+`CASE` is refused for want of one.
+
+`CASE x WHEN v1 THEN r1 ... END` is the simple form and it is the searched one
+with the comparison written out, so `x` is lowered once and every arm compares
+against the same handle. That gives the null rule for free in both directions:
+a null `x` is null against every arm and falls through to the `ELSE`, and an
+arm that names a null is never matched by anything, including by a null `x`.
+Checked against DuckDB both ways.
 
 ### What is not lowered yet
 
@@ -1263,23 +1281,45 @@ def _lower_expr(
         return plan.exprs.binary(_binary_op(op), left, right)
 
     if node.kind == EXPR_CASE:
-        if node.a != NO_NODE:
-            raise Error(
-                "firepanda lowers the searched CASE, and CASE x WHEN is the"
-                " simple one"
-            )
         var arms = ast.items(node.children)
-        if len(arms) != 2:
+        if len(arms) == 0 or len(arms) % 2 != 0:
             raise Error(
-                "firepanda lowers a CASE of one WHEN so far, and this one has"
-                " more"
+                String(
+                    "a CASE is a run of WHEN and THEN pairs and this one has ",
+                    len(arms),
+                    " halves",
+                )
             )
-        var when = _lower_expr(ast, arms[0], plan, walk, scope, grouped)
-        var then = _lower_expr(ast, arms[1], plan, walk, scope, grouped)
+        # An ELSE that is not written is an ELSE of null, which is what the
+        # standard says and is why nothing here refuses the shape.
+        var built: Int
         if node.b == NO_NODE:
-            raise Error("firepanda lowers a CASE that has an ELSE")
-        var otherwise = _lower_expr(ast, node.b, plan, walk, scope, grouped)
-        return plan.exprs.conditional(when, then, otherwise)
+            built = plan.exprs.literal(Value(null=LogicalType.NULL))
+        else:
+            built = _lower_expr(ast, node.b, plan, walk, scope, grouped)
+        # Right to left, because each arm's else side is the arm below it and
+        # the last one's is the ELSE. A chain is nested conditionals rather
+        # than a list, so the first WHEN that holds is the one that answers
+        # without anything counting arms.
+        # `CASE x WHEN v` is the simple form, and it is the searched one with
+        # the comparison written out: each arm asks whether `x` equals what the
+        # arm names. `x` is lowered once and the arms share the handle, so it
+        # is one column however many arms there are, and an arm that asks about
+        # a null answers null and so takes the arm below it, which is what the
+        # standard says the simple form does.
+        var simple = node.a != NO_NODE
+        var subject = 0
+        if simple:
+            subject = _lower_expr(ast, node.a, plan, walk, scope, grouped)
+        var i = len(arms) - 2
+        while i >= 0:
+            var when = _lower_expr(ast, arms[i], plan, walk, scope, grouped)
+            if simple:
+                when = plan.exprs.binary(BinaryOp.EQ, subject, when)
+            var then = _lower_expr(ast, arms[i + 1], plan, walk, scope, grouped)
+            built = plan.exprs.conditional(when, then, built)
+            i -= 2
+        return built
 
     if node.kind == EXPR_FUNCTION:
         var name = fold(_one_name(ast, node.payload, "a function"))

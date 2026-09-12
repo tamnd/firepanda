@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: CASE runs, in every shape SQL writes it
+
+`SELECT CASE WHEN qty > 10 THEN qty ELSE price END FROM sales` parsed, planned and printed, and then stopped at the physical lowering with "there is no operator that computes a conditional expression yet". There is one now, and three refusals in the SQL planner went with it, so every `CASE` firepanda can parse it can also run.
+
+The operator is `Choose` and it is three column positions and a name. The kernel it calls has been there since the beginning, because `pick` was written for the three TPC-H queries that ask for this shape and nothing had wired it to a plan. What is new is the node, the lowering and the rule for a null: a null condition takes the `ELSE` side rather than making the answer null. That is what the standard says, and it is the reason this is a node of its own rather than a thirteenth binary operation, where a null operand is a null answer.
+
+The three refusals were a `CASE` with more than one `WHEN`, a `CASE` with no `ELSE`, and the simple `CASE x WHEN v` form. All three are gone and none needed anything new. A chain of `WHEN`s lowers right to left, each arm's else side being the arm below it, so the first arm that holds is the one that answers and nothing counts arms. A missing `ELSE` is an `ELSE` of null. The simple form is the searched form with the comparison written out, with `x` lowered once and shared, which gives the null rule in both directions: a null subject falls through to the `ELSE`, and `WHEN NULL` is an arm nothing ever reaches. Both were read off DuckDB 1.5.1 first.
+
+Two sides of different types are promoted at binding and the side that moves gets a cast into a column of its own, not a conversion where it lies, since it may be an input column something else still reads at its own type. A null on one side is written down at the type the other side decided rather than being built as a column of nulls and converted.
+
+`sum(CASE WHEN shop = 1 THEN qty ELSE 0 END)` is the shape TPC-H q8, q12 and q14 are all written in, and it runs.
+
 ## [0.6.75] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).

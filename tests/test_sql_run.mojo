@@ -200,6 +200,22 @@ def truths(df: DataFrame, name: String) raises -> List[Int64]:
     return out^
 
 
+def gapped(df: DataFrame, name: String) raises -> List[Int64]:
+    """Reads an int64 column out, with a null as a minus one.
+
+    Minus one rather than an option because nothing in these fixtures holds
+    one, so a minus one in the answer is a null and reads as one.
+    """
+    var col = df.column(name).as_typed[DType.int64]()
+    var out = List[Int64](capacity=len(col))
+    for i in range(len(col)):
+        if not col.is_valid(i):
+            out.append(-1)
+        else:
+            out.append(col[i])
+    return out^
+
+
 def answer(sql: StringSlice, name: String) raises -> List[Int64]:
     """Runs a query against the session and reads one column of the answer."""
     return read_back(run(sql, session()), name)
@@ -2011,6 +2027,136 @@ def test_distinct_inside_another_aggregate_is_refused_rather_than_ignored() rais
 def test_count_distinct_star_has_no_column_to_count() raises:
     with assert_raises(contains="no column to count the distinct values of"):
         _ = run("SELECT count(DISTINCT *) AS n FROM sales", session())
+
+
+def test_a_case_picks_between_two_columns() raises:
+    same(
+        answer(
+            (
+                "SELECT CASE WHEN qty > 10 THEN qty ELSE price END AS taken"
+                " FROM sales"
+            ),
+            "taken",
+        ),
+        [10, 20, 7, 40, 12, 9, 25, 100, 30, 15],
+        "the quantity over ten and the price otherwise",
+    )
+
+
+def test_a_case_over_a_null_takes_the_else_side() raises:
+    # Not a null answer. A row the question could not be asked about is a row
+    # the question did not hold for, which is what the standard says.
+    same(
+        answer(
+            "SELECT CASE WHEN mark > 3 THEN 1 ELSE 0 END AS big FROM gappy",
+            "big",
+        ),
+        [1, 1, 0, 1, 0, 0],
+        "the two nulls take the else side",
+    )
+
+
+def test_a_case_with_several_whens_takes_the_first_that_holds() raises:
+    same(
+        answer(
+            (
+                "SELECT CASE WHEN qty > 25 THEN 3 WHEN qty > 10 THEN 2 ELSE 1"
+                " END AS band FROM sales"
+            ),
+            "band",
+        ),
+        [1, 2, 1, 3, 2, 1, 2, 1, 3, 2],
+        "three bands over the quantity",
+    )
+
+
+def test_a_case_with_no_else_answers_a_null() raises:
+    same(
+        gapped(
+            run(
+                "SELECT CASE WHEN qty > 10 THEN qty END AS big FROM sales",
+                session(),
+            ),
+            "big",
+        ),
+        [-1, 20, -1, 40, 12, -1, 25, -1, 30, 15],
+        "no else is an else of null",
+    )
+
+
+def test_a_case_inside_a_sum_is_the_shape_tpch_asks_for() raises:
+    # q8, q12 and q14 are all this: a condition over one column, the value on
+    # the true side and a zero on the false side, summed.
+    same(
+        answer(
+            (
+                "SELECT sum(CASE WHEN shop = 1 THEN qty ELSE 0 END) AS mine"
+                " FROM sales"
+            ),
+            "mine",
+        ),
+        [75],
+        "the five rows of shop one",
+    )
+
+
+def test_a_case_may_be_the_whole_of_a_where() raises:
+    same(
+        answer(
+            (
+                "SELECT qty FROM sales"
+                " WHERE CASE WHEN shop = 1 THEN qty > 10 ELSE false END"
+            ),
+            "qty",
+        ),
+        [12, 25, 30],
+        "shop one and over ten",
+    )
+
+
+def test_a_simple_case_compares_the_subject_against_each_arm() raises:
+    # `CASE x WHEN v` is the searched form with the comparison written out, so
+    # the subject is lowered once and every arm shares it.
+    same(
+        answer(
+            (
+                "SELECT CASE shop WHEN 1 THEN 100 WHEN 2 THEN 200 END AS tag"
+                " FROM sales"
+            ),
+            "tag",
+        ),
+        [100, 200, 100, 200, 100, 200, 100, 200, 100, 200],
+        "one arm per shop",
+    )
+
+
+def test_a_simple_case_over_a_null_subject_takes_the_else() raises:
+    # A comparison against a null is null, and a null condition takes the arm
+    # below it, so a null subject falls all the way through to the ELSE.
+    same(
+        answer(
+            (
+                "SELECT CASE mark WHEN 4 THEN 1 WHEN 9 THEN 2 ELSE 0 END AS tag"
+                " FROM gappy"
+            ),
+            "tag",
+        ),
+        [1, 1, 0, 2, 0, 0],
+        "the two null marks take the else",
+    )
+
+
+def test_a_simple_case_whose_arm_is_null_matches_nothing() raises:
+    # Including the null rows, which is the point. `x = NULL` is null and never
+    # true, so WHEN NULL is an arm nothing reaches, the same as in DuckDB.
+    same(
+        answer(
+            "SELECT CASE mark WHEN NULL THEN 1 ELSE 0 END AS tag FROM gappy",
+            "tag",
+        ),
+        [0, 0, 0, 0, 0, 0],
+        "no row matches a null arm",
+    )
 
 
 def main() raises:
