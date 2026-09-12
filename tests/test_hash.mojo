@@ -827,6 +827,83 @@ def test_table_respects_a_custom_seed() raises:
         assert_equal(table.insert(mix(bits, table.seed())), i)
 
 
+def test_probe_lengths_of_an_empty_table_are_nothing() raises:
+    var table = HashTable()
+    var stats = table.probe_lengths()
+    assert_equal(stats.keys, 0)
+    assert_equal(stats.longest(), 0)
+    assert_equal(stats.quantile(0.5), 0)
+    assert_true(stats.mean() == 0.0, "no keys, no mean")
+
+
+def test_probe_lengths_are_one_when_nothing_collides() raises:
+    # Hashes taken straight as the slot index, so every key sits in the slot it
+    # asked for and every lookup reads one slot. This is the floor and it pins
+    # what the numbers mean: a probe length is slots read, not slots skipped.
+    var table = HashTable(200)
+    for i in range(100):
+        _ = table.insert(UInt64(i))
+    var stats = table.probe_lengths()
+    assert_equal(stats.keys, 100)
+    assert_equal(stats.longest(), 1)
+    assert_true(stats.mean() == 1.0, "every lookup reads one slot")
+    assert_equal(stats.counts[0], 100, "nobody was displaced")
+
+
+def test_probe_lengths_count_a_cluster_exactly() raises:
+    # The other extreme, built rather than hoped for: every key hashes to slot
+    # zero, so the nth one inserted sits n slots along and costs n + 1 reads.
+    # The distribution is then known in closed form and the arithmetic here can
+    # be checked against it rather than against itself.
+    var keys = 64
+    var table = HashTable(keys)
+    var capacity = UInt64(table.capacity())
+    for i in range(keys):
+        _ = table.insert(UInt64(i) * capacity)
+    assert_equal(table.capacity(), Int(capacity), "no growth happened")
+
+    var stats = table.probe_lengths()
+    assert_equal(stats.keys, keys)
+    assert_equal(stats.longest(), keys, "the last key read the whole cluster")
+    for away in range(keys):
+        assert_equal(stats.counts[away], 1, "one key at each displacement")
+    # One plus two plus up to keys, over keys.
+    assert_true(
+        stats.mean() == Float64(keys + 1) / 2.0,
+        String("mean ", stats.mean()),
+    )
+    assert_equal(stats.quantile(0.5), keys // 2 + 1)
+    assert_equal(stats.quantile(1.0), keys)
+
+
+def test_probe_lengths_of_a_real_build_are_short() raises:
+    # The measurement as it is actually taken, over a table `factorize` built.
+    # Nothing here pins a number, because the numbers belong to the machine and
+    # to the hash; what is pinned is that the distribution covers every key and
+    # that the table is under its load factor, which is what makes the far end of
+    # it meaningful.
+    var n = 100000
+    var col = Array[DType.int64](n)
+    for i in range(n):
+        col[i] = Int64(i) * 2_654_435_761
+
+    var table = HashTable()
+    for i in range(n):
+        _ = table.insert(mix(UInt64(Int(col[i])), table.seed()))
+
+    var stats = table.probe_lengths()
+    assert_equal(stats.keys, len(table), "every key is in the distribution")
+    var total = 0
+    for away in range(len(stats.counts)):
+        total += stats.counts[away]
+    assert_equal(total, stats.keys, "the counts add up")
+    assert_true(stats.load() <= 0.5, String("load ", stats.load()))
+    assert_true(stats.mean() >= 1.0, "a lookup reads at least one slot")
+    assert_true(
+        stats.quantile(0.99) <= stats.longest(), "p99 is under the worst"
+    )
+
+
 def test_radix_partition_covers_every_row_once() raises:
     var n = 1000
     var hashes = Buffer(n * 8)

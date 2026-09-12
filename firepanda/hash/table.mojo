@@ -145,6 +145,97 @@ def project_groups(seen: Int, half: Int, rows: Int, n: Int) -> Int:
     return min(n, seen + found * (n - rows) // (rows // 2))
 
 
+struct ProbeLengths(Copyable, Movable):
+    """What a lookup in one table costs, key by key.
+
+    A probe length is how many slots a successful lookup reads, so it is one for
+    a key sitting in its home slot and two for a key one past it. The mean of it
+    is the number every hash table paper quotes and it is the least useful thing
+    in here, because the mean of a linear probing table at half load is a little
+    over one and a half whatever the keys are. What separates a table that is
+    fine from a table that is not is the far end of the distribution, where a
+    cluster that has grown to a few hundred slots makes a handful of keys cost a
+    few hundred reads each.
+    """
+
+    var counts: List[Int]
+    """Keys at each displacement. `counts[0]` sat down where it wanted to."""
+
+    var keys: Int
+    """How many keys the table held."""
+
+    var capacity: Int
+    """How many slots it had, so the load factor can be read off."""
+
+    def __init__(out self, var counts: List[Int], keys: Int, capacity: Int):
+        """Constructs a distribution.
+
+        Args:
+            counts: Keys at each displacement.
+            keys: How many keys there were.
+            capacity: How many slots there were.
+        """
+        self.counts = counts^
+        self.keys = keys
+        self.capacity = capacity
+
+    def load(self) -> Float64:
+        """Returns the fraction of slots that are occupied.
+
+        Returns:
+            Between zero and one half, since the table grows at one half.
+        """
+        if self.capacity == 0:
+            return 0.0
+        return Float64(self.keys) / Float64(self.capacity)
+
+    def mean(self) -> Float64:
+        """Returns the average probe length over the keys.
+
+        Returns:
+            Slots read by an average successful lookup, or zero for an empty
+            table.
+        """
+        if self.keys == 0:
+            return 0.0
+        var total = 0
+        for away in range(len(self.counts)):
+            total += self.counts[away] * (away + 1)
+        return Float64(total) / Float64(self.keys)
+
+    def quantile(self, q: Float64) -> Int:
+        """Returns the probe length at a quantile of the keys.
+
+        Args:
+            q: Where to cut, in `[0, 1]`. `0.99` is the length that ninety nine
+                percent of lookups are at or under.
+
+        Returns:
+            Slots read, or zero for an empty table.
+        """
+        if self.keys == 0:
+            return 0
+        var wanted = Int(Float64(self.keys) * q)
+        if wanted >= self.keys:
+            wanted = self.keys - 1
+        var seen = 0
+        for away in range(len(self.counts)):
+            seen += self.counts[away]
+            if seen > wanted:
+                return away + 1
+        return len(self.counts)
+
+    def longest(self) -> Int:
+        """Returns the worst probe length in the table.
+
+        Returns:
+            Slots read by the unluckiest key, or zero for an empty table.
+        """
+        if self.keys == 0:
+            return 0
+        return len(self.counts)
+
+
 struct HashTable(Movable, Sized):
     """A key-bits to group-ordinal map."""
 
@@ -1185,6 +1276,39 @@ struct HashTable(Movable, Sized):
             dest.unsafe_offset(at + Int(ordinal) - 1).unsafe_write(
                 slots.unsafe_offset(word).unsafe_load()
             )
+
+    def probe_lengths(self) -> ProbeLengths:
+        """Measures how far this table's keys sit from where they wanted to sit.
+
+        Not on any hot path and not called by anything the library does. It is
+        here because a group by that is slow on one key column and fast on
+        another is either a cache story or a probe story, and until this existed
+        there was no way to tell which without guessing.
+
+        The measurement is exact rather than sampled, and it needs no
+        instrumentation of the probe. Linear probing with no deletion puts a key
+        at the first free slot at or after its home slot, so the distance from
+        home to where it ended up is precisely the number of extra slots a lookup
+        of that key reads, for every lookup of it, forever. Walking the slots
+        once recovers that for every key.
+
+        Returns:
+            The distribution, one count per displacement.
+        """
+        var slots = self._slots.bitcast[DType.uint64]()
+        var counts = List[Int]()
+        var keys = 0
+        for slot in range(self._capacity):
+            var word = slot * SLOT_WORDS
+            if slots.unsafe_offset(word + 1).unsafe_load() == 0:
+                continue
+            var home = slots.unsafe_offset(word).unsafe_load() & self._mask
+            var away = Int((UInt64(slot) - home) & self._mask)
+            while len(counts) <= away:
+                counts.append(0)
+            counts[away] += 1
+            keys += 1
+        return ProbeLengths(counts^, keys, self._capacity)
 
     def _reserve(mut self, groups: Int):
         """Grows the table to hold a group count without further growth.

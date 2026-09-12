@@ -24,6 +24,18 @@ A fallback whose labels repeat is refused, in the sentence pandas gives when a r
 
 `DataFrame.fillna` had the NaN disagreement the core's fill had until 0.6.81, and it survived that fix because it never reached the core. The frame's method decides which columns have work in them from the null counts on the schema, which are the cleared validity bits and nothing else, so a frame whose float column held a NaN and no cleared bit was handed straight back, while the same column asked on its own was filled. The counts are still where that question starts, since they are free and they are the whole answer for every type that cannot hold a NaN, and a float column the bits call complete is now asked again before it is skipped.
 
+### Added: a key column shaped like a real one, and the measurement that reads it
+
+ClickBench q31 groups a hundred million rows by `ClientIP`. That is the query the hash table was written for and it is the first thing in this repository to ask it at that scale, and every number the table has ever been tuned against came from a uniform column. An address column is not one. A thousand addresses take half the rows and the rest are seen once, and every key sits inside one of a handful of networks, so the top of the key is drawn from a set of eight and the entropy is all in the bottom. tamnd/firepanda#484 asks what that costs, before anything is changed to make it cheaper, on the grounds that the answer might be that the table is fine.
+
+`firepanda/testing/skew.mojo` generates the column, deterministically from a seed on the same terms as `Rng`. `HashTable.probe_lengths` measures the table it builds, exactly rather than by sampling and with no instrumentation in the probe: linear probing with no deletion puts a key at the first free slot at or after its home, so the distance from home is precisely what every lookup of that key will cost, and one walk of the slots recovers it for every key. `benchmarks/probe_lengths.mojo` runs both over four columns of the same height, and splits the time three ways between hashing, probing and building the answer.
+
+The table is fine. At a hundred million rows the skewed column's probe lengths are a mean of 1.19 slots, a 99th percentile of 4 and a worst case of 21, against 1.30, 5 and 40 for the uniform column of the same height, so the structured key is if anything the easier of the two and `mix` is carrying the low entropy at the top of an address without help. At ten million the two are 1.212 and 1.212. Nothing here needs a different hash, a different probe or a different resize schedule, which is worth having measured rather than assumed.
+
+What is not fine is the third phase. On the nearly unique column at a hundred million rows the group by spends 0.35 s hashing, 0.99 s probing and 1.53 s building the answer, and on the uniform column of the same shape it is 0.21, 1.17 and 4.84. The answer is more than half the query in both, and between 73.6 million groups and 100 million it grows by a factor of three for a third more groups, which is not a shape anything in the table explains. `group/frame_nearly_unique_key` is the new benchmark row that watches it: at a million rows it is 145 ms where `group/frame_one_key`, the same rows and the same reduction over a key with a thousand values, is 2.7 ms. `hash/factorize_skewed` and `hash/factorize_skewed_tail` are the factorize on its own over the same columns.
+
+Measured on an M4 laptop, which is not a publication machine, so read the ratios rather than the seconds.
+
 ## [0.6.81] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).
