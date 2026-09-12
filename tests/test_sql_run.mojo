@@ -27,6 +27,7 @@ from firepanda.array.chunked import ChunkedArray
 from firepanda.array.strings import StringBuilder
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
+from firepanda.dtype.temporal import TimeUnit
 from firepanda.frame.frame import DataFrame
 from firepanda.sql.catalog import Catalog
 from firepanda.sql.run import run
@@ -3642,6 +3643,106 @@ def test_a_field_nobody_has_a_kernel_for_says_so_by_name() raises:
 def test_an_extract_off_a_column_that_is_not_a_date_is_refused() raises:
     with assert_raises(contains="reads a date or a timestamp"):
         _ = run("SELECT EXTRACT(YEAR FROM qty) FROM sales", session())
+
+
+def test_a_truncation_moves_every_row_back_to_a_period_start() raises:
+    # The four days are the 30th of June, the 1st and the 15th of July and the
+    # 1st of August 2013, and the numbers are microseconds since the epoch,
+    # which is what DuckDB answers a `DATE_TRUNC` with.
+    same(
+        answer("SELECT date_trunc('month', eventdate) AS m FROM hits", "m"),
+        [
+            1370044800000000,
+            1372636800000000,
+            1372636800000000,
+            1375315200000000,
+        ],
+        "the first of each day's month",
+    )
+    same(
+        answer("SELECT date_trunc('year', eventdate) AS y FROM hits", "y"),
+        [
+            1356998400000000,
+            1356998400000000,
+            1356998400000000,
+            1356998400000000,
+        ],
+        "and one year for all four",
+    )
+
+
+def test_the_two_spellings_of_a_truncation_answer_the_same_column() raises:
+    var want: List[Int64] = [
+        1364774400000000,
+        1372636800000000,
+        1372636800000000,
+        1372636800000000,
+    ]
+    same(
+        answer("SELECT date_trunc('quarter', eventdate) AS q FROM hits", "q"),
+        want,
+        "the name DuckDB gives it",
+    )
+    same(
+        answer("SELECT datetrunc('quarter', eventdate) AS q FROM hits", "q"),
+        want,
+        "and its other spelling",
+    )
+
+
+def test_a_truncation_to_a_week_lands_on_the_monday_before() raises:
+    # The 30th of June 2013 was a Sunday, so it goes back six days, and the
+    # 1st of July was the Monday after it and stays where it is.
+    same(
+        answer("SELECT date_trunc('week', eventdate) AS w FROM hits", "w"),
+        [
+            1372032000000000,
+            1372636800000000,
+            1373846400000000,
+            1375056000000000,
+        ],
+        "the Monday of each day's week",
+    )
+
+
+def test_a_truncation_answers_a_timestamp_even_off_a_date() raises:
+    var out = run(
+        "SELECT date_trunc('year', eventdate) AS y FROM hits", session()
+    )
+    assert_true(
+        out.schema[0].dtype == LogicalType.timestamp(TimeUnit.MICRO),
+        "the type DuckDB answers",
+    )
+
+
+def test_a_truncation_read_in_a_group_by_folds_on_what_it_answers() raises:
+    # Grouped through a derived table, for the reason the same test on a field
+    # read is: a GROUP BY of an expression does not lower yet.
+    var out = run(
+        (
+            "SELECT m, count(*) AS n FROM (SELECT date_trunc('month',"
+            " eventdate) AS m FROM hits) GROUP BY m ORDER BY 1"
+        ),
+        session(),
+    )
+    same(
+        read_back(out, "m"),
+        [1370044800000000, 1372636800000000, 1375315200000000],
+        "one row per month",
+    )
+    same(read_back(out, "n"), [1, 2, 1], "and the count in each")
+
+
+def test_a_period_nobody_has_a_unit_for_says_so_by_name() raises:
+    with assert_raises(contains="nothing to truncate to called fortnight"):
+        _ = run(
+            "SELECT date_trunc('fortnight', eventdate) FROM hits", session()
+        )
+
+
+def test_a_truncation_off_a_column_that_is_not_a_date_is_refused() raises:
+    with assert_raises(contains="truncates a date or a timestamp"):
+        _ = run("SELECT date_trunc('month', qty) FROM sales", session())
 
 
 def test_an_answer_of_no_rows_can_still_be_read() raises:

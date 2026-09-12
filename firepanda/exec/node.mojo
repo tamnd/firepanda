@@ -93,6 +93,7 @@ from firepanda.bitmap.bitmap import Bitmap
 from firepanda.dtype.lists import ALL
 from firepanda.dtype.logical import LogicalType, TypeKind
 from firepanda.dtype.schema import Field, Schema
+from firepanda.dtype.temporal import TimeUnit, TimeZone
 from firepanda.frame.frame import DataFrame
 from firepanda.hash.grouping import group_ordinals
 from firepanda.hash.lasting import LastingKeys
@@ -144,9 +145,12 @@ from firepanda.kernel.running import (
 from firepanda.kernel.select import filter_any, take_any
 from firepanda.kernel.sort import argsort_any_into, identity_permutation
 from firepanda.kernel.temporal import (
+    TRUNC_CODES,
     TemporalField,
     field_dtype,
+    temporal_as_timestamp,
     temporal_field,
+    temporal_truncate,
 )
 from firepanda.kernel.unary import UnaryOp, unary_any, unary_type
 
@@ -1974,6 +1978,133 @@ struct Part(Movable):
         var made = cast_any(
             temporal_field(chunk.columns[self.at], self.field),
             LogicalType.INT64,
+        )
+        var rows = len(chunk)
+        var columns = chunk^.into_columns()
+        columns.append(made^)
+        return Chunk(columns^, rows)
+
+
+struct Truncate(Movable):
+    """Appends a column holding every element moved back to a period start.
+
+    This is SQL's `DATE_TRUNC`, and it is a node for the reason `Part` is one:
+    the unit is decided once while the plan is built and is not an operand.
+
+    The answer is a microsecond timestamp whatever went in, because that is
+    DuckDB's rule and it is the one thing about `DATE_TRUNC` that surprises
+    people: truncating a date to the year gives back a timestamp at midnight
+    and not a date. A date column is cast on the way in, which is one pass and
+    is needed anyway, since the units below a day mean nothing to a column of
+    day numbers.
+
+    A null element gives a null answer, which the kernel already does.
+    """
+
+    var at: Int
+    """The position of the column being truncated."""
+
+    var unit: Int
+    """Which period, as one of the `TRUNC_` codes."""
+
+    var name: String
+    """The name the appended column gets in the output schema."""
+
+    def __init__(out self, at: Int, unit: Int, name: String):
+        """Constructs a truncation over a column.
+
+        Args:
+            at: The position of the column being truncated.
+            unit: Which period, as one of the `TRUNC_` codes.
+            name: The name of the appended column.
+        """
+        self.at = at
+        self.unit = unit
+        self.name = name
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Reports the input schema with a microsecond timestamp appended.
+
+        Args:
+            input: The schema of the chunks that will arrive. Consumed.
+
+        Returns:
+            The input schema with one timestamp field on the end.
+
+        Raises:
+            If the position is outside the schema, if the column is not a date
+            or a timestamp, or if the unit is not one of the thirteen.
+        """
+        var out = input^
+        if self.at < 0 or self.at >= len(out):
+            raise Error(
+                "truncate: column "
+                + String(self.at)
+                + " is outside a schema of "
+                + String(len(out))
+                + " columns"
+            )
+        var read = out[self.at].copy()
+        if (
+            read.dtype.kind != TypeKind.DATE
+            and read.dtype.kind != TypeKind.TIMESTAMP
+        ):
+            raise Error(
+                "truncate: a date or a timestamp is what there is to truncate"
+                + " and column "
+                + String(self.at)
+                + " holds "
+                + String(read.dtype)
+            )
+        var known = False
+        comptime for code in TRUNC_CODES:
+            if self.unit == code:
+                known = True
+        if not known:
+            raise Error(
+                "truncate: "
+                + String(self.unit)
+                + " is not one of the periods there is a unit for"
+            )
+        # A date has no clock and so no zone, and the timestamp it becomes is
+        # naive. A timestamp keeps whatever clock it was already being read
+        # against, since truncating does not move it onto another one.
+        var zone = TimeZone() if read.dtype.kind == TypeKind.DATE else (
+            read.dtype.zone
+        )
+        out.append(
+            Field(
+                self.name,
+                LogicalType.timestamp(TimeUnit.MICRO, zone),
+                read.nullable,
+            )
+        )
+        return out^
+
+    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Truncates the column and puts the answer on the end of the chunk.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            The chunk with one more column and the same number of rows.
+
+        Raises:
+            If the position is outside the chunk, or the column is not temporal.
+        """
+        var width = chunk.width()
+        if self.at < 0 or self.at >= width:
+            raise Error(
+                "truncate: column "
+                + String(self.at)
+                + " is outside a chunk of "
+                + String(width)
+                + " columns"
+            )
+        var made = temporal_truncate(
+            temporal_as_timestamp(chunk.columns[self.at], TimeUnit.MICRO),
+            self.unit,
         )
         var rows = len(chunk)
         var columns = chunk^.into_columns()
@@ -5014,6 +5145,7 @@ comptime Node = Variant[
     Match,
     Cut,
     Part,
+    Truncate,
     Presence,
     Fill,
     Choose,
@@ -5071,6 +5203,8 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
         return node[Cut].bind(input^)
     if node.isa[Part]():
         return node[Part].bind(input^)
+    if node.isa[Truncate]():
+        return node[Truncate].bind(input^)
 
     if node.isa[Presence]():
         return node[Presence].bind(input^)
@@ -5208,8 +5342,8 @@ def node_is_row_local(node: Node) -> Bool:
 
     Returns:
         True for `Filter`, `Expand`, `Project`, `Compute`, `Connective`,
-        `Apply`, `Match`, `Cut`, `Part`, `Presence`, `Fill`, `Choose`,
-        `Constant`, `Cast` and `Join`.
+        `Apply`, `Match`, `Cut`, `Part`, `Truncate`, `Presence`, `Fill`,
+        `Choose`, `Constant`, `Cast` and `Join`.
     """
     return (
         node.isa[Filter]()
@@ -5221,6 +5355,7 @@ def node_is_row_local(node: Node) -> Bool:
         or node.isa[Match]()
         or node.isa[Cut]()
         or node.isa[Part]()
+        or node.isa[Truncate]()
         or node.isa[Presence]()
         or node.isa[Fill]()
         or node.isa[Choose]()
@@ -5272,17 +5407,17 @@ def node_computes_per_row(node: Node) -> Bool:
     payload offset every row writes at is a running total of the ones before it,
     which is the serial thing `StringBuilder` exists to do.
 
-    `Part` says yes. Turning a day number into a year is a run of multiplies and
-    shifts per row and not a load and a store, which is the one thing on this
-    list that is arithmetic rather than memory, so it is on the side `Compute`
-    is on.
+    `Part` and `Truncate` say yes. Turning a day number into a year, or a year
+    back into a day number, is a run of multiplies and shifts per row and not a
+    load and a store, which is the one thing on this list that is arithmetic
+    rather than memory, so both are on the side `Compute` is on.
 
     Args:
         node: The node.
 
     Returns:
         True for `Filter`, `Compute`, `Connective`, `Apply`, `Match`, `Part`,
-        `Choose` and `Join`.
+        `Truncate`, `Choose` and `Join`.
     """
     return (
         node.isa[Filter]()
@@ -5291,6 +5426,7 @@ def node_computes_per_row(node: Node) -> Bool:
         or node.isa[Apply]()
         or node.isa[Match]()
         or node.isa[Part]()
+        or node.isa[Truncate]()
         or node.isa[Choose]()
         or node.isa[Join]()
     )
@@ -5372,6 +5508,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Cut].process(chunk^)
     if node.isa[Part]():
         return node[Part].process(chunk^)
+    if node.isa[Truncate]():
+        return node[Truncate].process(chunk^)
 
     if node.isa[Presence]():
         return node[Presence].process(chunk^)
@@ -5441,6 +5579,8 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Cut].process(chunk^)
     if node.isa[Part]():
         return node[Part].process(chunk^)
+    if node.isa[Truncate]():
+        return node[Truncate].process(chunk^)
 
     if node.isa[Presence]():
         return node[Presence].process(chunk^)

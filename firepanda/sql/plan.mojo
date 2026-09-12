@@ -417,7 +417,7 @@ from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
-from firepanda.kernel.temporal import sql_field_named
+from firepanda.kernel.temporal import sql_field_named, trunc_unit_named
 from firepanda.kernel.unary import UnaryOp
 from firepanda.array.value import Value
 from firepanda.join.pairs import JoinKind
@@ -749,6 +749,59 @@ def _lower_nullif(mut plan: Plan, args: List[Int]) raises -> Int:
     )
 
 
+def _lower_date_trunc(mut plan: Plan, var args: List[Int]) raises -> Int:
+    """Builds what a `date_trunc` means, after checking the unit it names.
+
+    Nothing is rewritten here. Every unit DuckDB truncates to that firepanda
+    has means the same period in both, so unlike the day of the week there is
+    nothing that has to move. What this is for is the check: the unit is read
+    while the query is still close enough to say `DATE_TRUNC('fortnight', x)`
+    back to whoever wrote it. The engine checks it again when it builds the
+    operator, which is the check that covers a plan nobody wrote in SQL.
+
+    Args:
+        plan: The plan, whose arena the pieces go in.
+        args: The two arguments, already lowered. Consumed.
+
+    Returns:
+        The expression that answers the call.
+
+    Raises:
+        Error: If the call was not given two arguments, or the unit is not a
+            name written in the query, or nothing is called that.
+    """
+    if len(args) != 2:
+        raise Error(
+            String(
+                "date_trunc cuts one column back to one period and was given ",
+                len(args),
+                " arguments",
+            )
+        )
+    if plan.exprs.nodes[args[0]].kind != ExprKind.LITERAL:
+        raise Error(
+            "the unit a DATE_TRUNC truncates to has to be written out, and this"
+            " one is an expression, which would mean a different unit for every"
+            " row and there is no kernel that does that"
+        )
+    if plan.exprs.nodes[args[0]].value.is_null():
+        raise Error(
+            "a DATE_TRUNC to a null unit is null for every row, and there is no"
+            " operator that answers a column of nulls yet"
+        )
+
+    var unit = plan.exprs.nodes[args[0]].value.as_string().lower()
+    _ = trunc_unit_named(unit)
+
+    # The unit is put back in lower case, so that `DATE_TRUNC('Month', d)` and
+    # `date_trunc('month', d)` are the same expression by the time anything
+    # compares two plans.
+    var lowered = List[Int]()
+    lowered.append(plan.exprs.literal(Value(String(unit))))
+    lowered.append(args[1])
+    return plan.exprs.call("date_trunc", lowered^, True)
+
+
 def _lower_date_part(mut plan: Plan, var args: List[Int]) raises -> Int:
     """Builds what a `date_part` means, and rewrites the one field that differs.
 
@@ -803,7 +856,15 @@ def _lower_date_part(mut plan: Plan, var args: List[Int]) raises -> Int:
     var field = plan.exprs.nodes[args[0]].value.as_string().lower()
     if field != "dow" and field != "dayofweek":
         _ = sql_field_named(field)
-        return plan.exprs.call("date_part", args^, True)
+
+        # The field is put back in lower case rather than left as it was
+        # written. `date_part('YEAR', d)` is the same call as
+        # `date_part('year', d)` and the operator looks the name up in a table
+        # that has it in lower case only, so this is where the two become one.
+        var named = List[Int]()
+        named.append(plan.exprs.literal(Value(String(field))))
+        named.append(args[1])
+        return plan.exprs.call("date_part", named^, True)
 
     var iso = List[Int]()
     iso.append(plan.exprs.literal(Value(String("isodow"))))
@@ -1852,6 +1913,8 @@ def _lower_expr(
             return plan.exprs.call("substring", lowered^, True)
         if name == "date_part" or name == "datepart":
             return _lower_date_part(plan, lowered^)
+        if name == "date_trunc" or name == "datetrunc":
+            return _lower_date_trunc(plan, lowered^)
         return plan.exprs.call(name, lowered^, True)
 
     if node.kind == EXPR_BETWEEN:

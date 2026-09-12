@@ -2673,6 +2673,12 @@ def test_the_field_is_folded_down_the_way_a_name_is() raises:
     assert_equal(_plan("SELECT extract(Year FROM d) FROM w"), want)
     assert_equal(_plan("SELECT extract('YEAR' FROM d) FROM w"), want)
 
+    # The function spelling does not go through the rule that folds the keyword
+    # one, so the fold has to happen again where the call is lowered. Without
+    # it the field reaches the operator as it was typed and is looked up in a
+    # table that holds it in lower case only.
+    assert_equal(_plan("SELECT date_part('YEAR', d) FROM w"), want)
+
 
 def test_a_day_of_week_is_written_as_the_iso_day_read_modulo_seven() raises:
     # The one field the two systems number differently. DuckDB starts the week
@@ -2713,6 +2719,44 @@ def test_a_field_that_is_not_a_name_at_all_is_refused() raises:
 def test_a_field_worked_out_per_row_is_refused() raises:
     with assert_raises(contains="has to be written out"):
         _ = _plan("SELECT date_part(g, d) FROM w, t")
+
+
+def test_a_date_trunc_is_a_call_of_its_own() raises:
+    assert_equal(
+        _plan("SELECT date_trunc('month', d) FROM w"),
+        "PROJECT [date_trunc(month, d) as __expr_0]\n  SCAN w []\n",
+    )
+
+
+def test_the_two_spellings_of_a_truncation_build_the_same_plan() raises:
+    var want = _plan("SELECT date_trunc('month', d) FROM w")
+    assert_equal(_plan("SELECT datetrunc('month', d) FROM w"), want)
+
+
+def test_the_unit_is_folded_down_the_way_a_field_is() raises:
+    var want = _plan("SELECT date_trunc('month', d) FROM w")
+    assert_equal(_plan("SELECT date_trunc('MONTH', d) FROM w"), want)
+    assert_equal(_plan("SELECT DATE_TRUNC('Month', d) FROM w"), want)
+
+
+def test_a_truncation_of_a_number_is_refused_while_it_binds() raises:
+    with assert_raises(contains="truncates a date or a timestamp"):
+        _ = _plan("SELECT date_trunc('month', n) FROM w")
+
+
+def test_a_period_nobody_has_a_unit_for_is_refused_by_name() raises:
+    with assert_raises(contains="nothing to truncate to called fortnight"):
+        _ = _plan("SELECT date_trunc('fortnight', d) FROM w")
+
+
+def test_a_field_name_is_not_a_period_even_where_duckdb_takes_one() raises:
+    with assert_raises(contains="nothing to truncate to called dayofweek"):
+        _ = _plan("SELECT date_trunc('dayofweek', d) FROM w")
+
+
+def test_a_period_worked_out_per_row_is_refused() raises:
+    with assert_raises(contains="has to be written out"):
+        _ = _plan("SELECT date_trunc(g, d) FROM w, t")
 
 
 def test_a_coalesce_is_a_call_of_its_own() raises:
