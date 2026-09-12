@@ -2534,6 +2534,38 @@ def test_an_is_not_false_keeps_the_value_half_as_it_was_written() raises:
     )
 
 
+def test_a_substring_is_a_call_with_its_two_numbers_on_it() raises:
+    assert_equal(
+        _plan("SELECT substring(g, 2, 3) FROM t"),
+        "PROJECT [substring(g, 2, 3) as __expr_0]\n  SCAN t []\n",
+    )
+
+
+def test_the_three_spellings_of_a_substring_build_the_same_plan() raises:
+    var want = _plan("SELECT substring(g, 2, 3) FROM t")
+    assert_equal(_plan("SELECT substr(g, 2, 3) FROM t"), want)
+    assert_equal(_plan("SELECT SUBSTRING(g FROM 2 FOR 3) FROM t"), want)
+
+
+def test_a_substring_written_with_only_a_for_starts_at_one() raises:
+    assert_equal(
+        _plan("SELECT SUBSTRING(g FOR 3) FROM t"),
+        _plan("SELECT substring(g, 1, 3) FROM t"),
+    )
+
+
+def test_a_substring_with_no_length_keeps_the_one_number() raises:
+    assert_equal(
+        _plan("SELECT substring(g, 2) FROM t"),
+        "PROJECT [substring(g, 2) as __expr_0]\n  SCAN t []\n",
+    )
+
+
+def test_a_substring_of_a_number_is_refused_while_it_binds() raises:
+    with assert_raises(contains="'substring' reads text"):
+        _ = _plan("SELECT substring(a, 1, 2) FROM t")
+
+
 def test_a_coalesce_is_a_call_of_its_own() raises:
     assert_equal(
         _plan("SELECT coalesce(a, b) FROM t"),

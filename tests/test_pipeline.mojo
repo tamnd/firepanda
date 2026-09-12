@@ -31,6 +31,7 @@ from firepanda.exec import (
     Collect,
     Compute,
     Constant,
+    Cut,
     Expand,
     Fill,
     Filter,
@@ -856,6 +857,53 @@ def _presence(missing: Bool) raises -> List[Bool]:
     for i in range(len(col)):
         flags.append(col[i])
     return flags^
+
+
+def test_a_cut_takes_the_characters_the_two_numbers_name() raises:
+    # `word_frame` holds ok, fail, ok, ok, fail, ok in `status`, so a cut of two
+    # from the front keeps the whole of the short rows and half of the long
+    # ones, and the two answers differ, which they would not if the cut had
+    # ignored one of its numbers.
+    var pipeline = Pipeline(word_frame())
+    pipeline.add(Node(Cut(1, 1, 2, "front")))
+    var out = pipeline^.run()
+    assert_equal(out.width(), 4, "the answer was appended")
+    assert_true(out.schema[3].dtype == LogicalType.STRING, "text out")
+    var got = out.column("front").as_strings()
+    assert_equal(len(got), 6, "one answer per row")
+    assert_equal(got[0], "ok", "a row shorter than the window")
+    assert_equal(got[1], "fa", "and one longer than it")
+    assert_equal(got[5], "ok", "and the last row")
+
+
+def test_a_cut_with_no_length_runs_to_the_end_of_each_row() raises:
+    var pipeline = Pipeline(word_frame())
+    pipeline.add(Node(Cut(1, 2, None, "back")))
+    var out = pipeline^.run()
+    var got = out.column("back").as_strings()
+    assert_equal(got[0], "k", "what was left of a two character row")
+    assert_equal(got[1], "ail", "and of a four character one")
+
+
+def test_a_cut_keeps_the_column_it_read_where_it_was() raises:
+    var pipeline = Pipeline(word_frame())
+    pipeline.add(Node(Cut(1, 1, 1, "first")))
+    var out = pipeline^.run()
+    var whole = out.column("status").as_strings()
+    assert_equal(whole[1], "fail", "the column it read is as it was")
+    assert_equal(out.column("first").as_strings()[1], "f", "and the cut is new")
+
+
+def test_a_cut_over_a_missing_column_is_caught_at_plan_time() raises:
+    var pipeline = Pipeline(word_frame())
+    with assert_raises(contains="is outside a schema of 3 columns"):
+        pipeline.add(Node(Cut(9, 1, 2, "nope")))
+
+
+def test_a_cut_over_a_column_that_is_not_text_is_caught_at_plan_time() raises:
+    var pipeline = Pipeline(word_frame())
+    with assert_raises(contains="a substring reads text"):
+        pipeline.add(Node(Cut(0, 1, 2, "nope")))
 
 
 def test_a_null_test_appends_a_column_of_yes_and_no() raises:

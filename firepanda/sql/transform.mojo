@@ -222,6 +222,9 @@ comptime _COALESCE: UInt8 = 17
 comptime _NULLIF: UInt8 = 18
 """`NullIfExpression`, the same."""
 
+comptime _SUBSTRING: UInt8 = 75
+"""`SubstringExpression`, which is a call with two ways of spelling it."""
+
 comptime _STRING: UInt8 = 19
 comptime _NUMBER: UInt8 = 20
 comptime _NULL: UInt8 = 21
@@ -673,6 +676,7 @@ struct Transform(Movable):
         self._set(names, "Parameter", _PARAMETER)
         self._set(names, "CoalesceExpression", _COALESCE)
         self._set(names, "NullIfExpression", _NULLIF)
+        self._set(names, "SubstringExpression", _SUBSTRING)
         self._set(names, "StringLiteral", _STRING)
         self._set(names, "NumberLiteral", _NUMBER)
         self._set(names, "NullLiteral", _NULL)
@@ -838,7 +842,6 @@ struct Transform(Movable):
         # message fills in whichever one it was, so they share an entry.
         var special: List[StaticString] = [
             "ExtractExpression",
-            "SubstringExpression",
             "TrimExpression",
             "PositionExpression",
             "OverlayExpression",
@@ -1658,6 +1661,9 @@ struct Transform(Movable):
                 "coalesce",
                 at,
             )
+
+        if action == _SUBSTRING:
+            return self._substring(tree, sql, node, ast, work, at)
 
         if action == _NULLIF:
             # `NULLIF Parens(NullIfArguments)`, and the arguments rule holds
@@ -2496,6 +2502,71 @@ struct Transform(Movable):
                 payload=ast.run(names),
             )
         )
+
+    def _substring(
+        self,
+        tree: Parse,
+        sql: StringSlice,
+        node: UInt32,
+        mut ast: Ast,
+        mut work: Work,
+        at: UInt32,
+    ) raises -> UInt32:
+        """Builds a `SUBSTRING` out of either of the two ways it is written.
+
+        `SUBSTRING(s, 2, 3)` and `SUBSTRING(s FROM 2 FOR 3)` are the same call
+        and both become one, so nothing after this point has to know which
+        spelling a query used. The keyword form is the one the standard defines
+        and the comma form is the one everybody writes, and DuckDB takes both.
+
+        `SUBSTRING(s FOR 3)` leaves the start out, which means the first
+        character, and a literal one is written in rather than left implied,
+        because a call with a hole in it would be a second shape for everything
+        downstream to carry.
+
+        Args:
+            tree: The parse.
+            sql: The query.
+            node: The `SubstringExpression` node.
+            ast: Where to put the nodes.
+            work: The walk, for the values of the arguments.
+            at: The token the call starts at.
+
+        Returns:
+            The expression node.
+
+        Raises:
+            Error: If an argument is one this has no case for.
+        """
+        # Past the parentheses and past the rule that offers the two spellings.
+        # The comma form is a `List(Expression)` and so has the one child every
+        # list sits under, and the keyword form has two, the string and the
+        # `FROM` and `FOR` that follow it, which is what tells them apart.
+        var inside = self._only(tree, self._only(tree, self._only(tree, node)))
+        var kids = tree.children(inside)
+        if len(kids) == 1:
+            return self._named_call(
+                ast, work, self._items(tree, inside), "substring", at
+            )
+
+        var parts = tree.children(self._only(tree, kids[1]))
+        var items = List[UInt32]()
+        items.append(kids[0])
+        for part in parts:
+            items.append(self._only(tree, part))
+
+        # Every argument is asked for before anything is built, because a build
+        # that raises for a child it has not got is retried from the top and
+        # anything it wrote down first would be written down twice.
+        work.warm(items)
+
+        var arguments = List[UInt32]()
+        arguments.append(work.value(items[0]))
+        if _word(tree, sql, parts[0]) == "FOR":
+            arguments.append(ast.literal(LITERAL_NUMBER, "1", at))
+        for i in range(1, len(items)):
+            arguments.append(work.value(items[i]))
+        return ast.call("substring", arguments, 0, at)
 
     def _named_call(
         self,

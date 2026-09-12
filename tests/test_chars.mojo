@@ -23,6 +23,7 @@ from firepanda.kernel.chars import (
     text_character_get,
     text_character_length,
     text_character_slice,
+    text_character_substring,
     text_find,
     text_remove_prefix,
     text_remove_suffix,
@@ -94,6 +95,25 @@ def sliced(
         Error: If the slice is refused.
     """
     return rows(text_character_slice(made(values^), start, stop, step))
+
+
+def cut(
+    var values: List[String], start: Int, length: Optional[Int] = None
+) raises -> List[String]:
+    """Cuts a column built from a list the way SQL cuts one and reads it back.
+
+    Args:
+        values: The values.
+        start: The first character, counting from one.
+        length: How many characters, or nothing for everything to the end.
+
+    Returns:
+        One string per row.
+
+    Raises:
+        Error: If the cut is refused.
+    """
+    return rows(text_character_substring(made(values^), start, length))
 
 
 def test_a_character_count_is_not_a_byte_count() raises:
@@ -299,6 +319,77 @@ def test_a_reverse_byte_search_finds_the_last_match() raises:
     assert_equal(rfind_bytes(bytes, "bc".as_bytes(), 0, 6), 4)
     assert_equal(rfind_bytes(bytes, "bc".as_bytes(), 0, 5), 1)
     assert_equal(rfind_bytes(bytes, "q".as_bytes(), 0, 6), -1)
+
+
+def test_a_sql_substring_counts_from_one_and_counts_characters() raises:
+    # Every answer in this file's SQL half was read out of DuckDB 1.5.1 first.
+    # The accented row is the one that says this is not the byte kernel: cut by
+    # byte, two characters of `héllo` would be one letter and half of another.
+    var read = cut(["hello", "héllo", "日本語です"], 1, 2)
+    assert_equal(read[0], "he")
+    assert_equal(read[1], "hé")
+    assert_equal(read[2], "日本")
+
+
+def test_a_sql_substring_with_no_length_runs_to_the_end() raises:
+    var read = cut(["hello", "日本語です"], 2)
+    assert_equal(read[0], "ello")
+    assert_equal(read[1], "本語です")
+
+
+def test_a_start_of_zero_loses_the_first_character_of_the_window() raises:
+    # The window covers positions 0, 1 and 2, and no string has a position 0,
+    # so what comes back is two characters and not three. This is the corner
+    # that makes these rules different from Python's rather than a rewriting of
+    # them, and clamping the start to the front would answer `hel`.
+    assert_equal(cut(["hello"], 0, 3)[0], "he")
+
+
+def test_a_start_of_zero_with_no_length_is_the_whole_string() raises:
+    assert_equal(cut(["hello"], 0)[0], "hello")
+
+
+def test_a_negative_start_counts_back_from_the_end_of_the_element() raises:
+    var read = cut(["hello", "héllo"], -2, 2)
+    assert_equal(read[0], "lo")
+    assert_equal(read[1], "lo")
+
+
+def test_a_start_far_enough_back_leaves_the_window_off_the_front() raises:
+    # Python would clamp this to the front and answer `hel`. SQL clips the
+    # window instead, and the window is positions -4, -3 and -2, none of which
+    # the string has.
+    assert_equal(cut(["hello"], -10, 3)[0], "")
+    # With no length the window has no far end, so the same start keeps
+    # everything.
+    assert_equal(cut(["hello"], -10)[0], "hello")
+
+
+def test_a_negative_length_runs_the_window_backwards() raises:
+    # `substring('hello', 2, -1)` is the one character before position 2, which
+    # falls out of reading the two numbers as the ends of a range.
+    assert_equal(cut(["hello"], 2, -1)[0], "h")
+    assert_equal(cut(["hello"], 4, -2)[0], "el")
+
+
+def test_a_window_off_the_end_is_empty_rather_than_an_error() raises:
+    var read = cut(["hello", ""], 10, 2)
+    assert_equal(read[0], "")
+    assert_equal(read[1], "")
+
+
+def test_a_length_of_zero_takes_nothing() raises:
+    assert_equal(cut(["hello"], 2, 0)[0], "")
+
+
+def test_a_length_past_the_end_stops_at_the_end() raises:
+    assert_equal(cut(["hello"], 1, 100)[0], "hello")
+
+
+def test_a_missing_row_is_missing_in_the_answer() raises:
+    var read = cut(["hello", "null"], 1, 2)
+    assert_equal(read[0], "he")
+    assert_equal(read[1], "null")
 
 
 def main() raises:
