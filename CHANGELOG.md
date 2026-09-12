@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.80] - 2026-09-12
+
+Built against Mojo 1.0.0 (ed45d567).
+
+A distinct count that was smaller than the route it replaced and slower than it is now smaller and faster, and the last member of the fill family that Mojo could reach and Python could not has a binding. The count is the one worth reading about, because nothing about the probe changed. All that changed is which rows a worker is handed, and that alone is the difference between one core and all of them.
+
 ### Changed: a distinct count with a lot of distinct values uses every core
 
 A distinct count holds a hash table and nothing else, which is the whole reason it exists, and until now splitting one across workers meant a table per worker. On a column whose values nearly all differ that is a copy of the key set per core, so the rule that chooses the split refused it and handed the column to one core. That is ClickBench q3 and q4, where `UserID` has about one distinct value for every six rows. Ten million rows of that shape counted in 49.7 milliseconds on one core, which is slower than the factorize the count had just replaced.
@@ -6284,7 +6290,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.79...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.80...HEAD
+[0.6.80]: https://github.com/tamnd/firepanda/releases/tag/v0.6.80
 [0.6.79]: https://github.com/tamnd/firepanda/releases/tag/v0.6.79
 [0.6.78]: https://github.com/tamnd/firepanda/releases/tag/v0.6.78
 [0.6.77]: https://github.com/tamnd/firepanda/releases/tag/v0.6.77
