@@ -2269,11 +2269,17 @@ def _folds(kind: AggKind) -> Bool:
     columns rather than output columns, and it is the only kind where the two
     are not the same thing.
 
+    A kind that does not fold is not a kind nothing can run. It means the state
+    is the values, so the operator holds the column and calls the whole frame
+    kernel once at the end. `Reduce` does that. `Group` still refuses, because
+    holding a column beside a key map is a change of its own.
+
     Args:
         kind: The reduction.
 
     Returns:
-        True if `Group` can run it, False if it belongs on `Materialize`.
+        True if a running state is enough, False if the values themselves are
+        the state.
     """
     return (
         kind == AggKind.SUM
@@ -2943,10 +2949,31 @@ struct Reduce(Movable):
     division happens once, at the end, because a mean of means is only the mean
     when every chunk is the same size.
 
-    `_folds` is the list of reductions that can be done this way, and the ones
-    that cannot are not a gap. A median of medians is not a median and no state
-    short of the values themselves would make it one, so asking for one here is
-    an error at plan time and the answer is `Materialize`.
+    `_folds` is the list of reductions that can be done this way. A median of
+    medians is not a median and no state short of the values themselves would
+    make it one, and a distinct count's partial answer has thrown away exactly
+    what the merge would need, so those reductions are not folded here.
+
+    ## The ones that do not fold
+
+    They are held instead. A reduction that does not fold names its source
+    column, the node keeps that column's chunks as they go past, and at `finish`
+    it flattens them and calls the whole frame kernel once. That is what
+    `Window` already does with its partition, which is why `count(DISTINCT x)
+    OVER ()` has worked all along, and it is the only shape there is: the values
+    themselves are the state.
+
+    The cost is honest and it is the whole column resident, which is the thing a
+    chunked engine exists to avoid. It is paid only for the columns the non
+    folding reductions read. `sum(x), median(y)` folds `x` a chunk at a time and
+    holds `y`, so a query that asks for one median does not stop being streaming
+    everywhere else. The alternative to paying it is refusing the query, which
+    is what this node used to do.
+
+    A held column can be made smaller, and for a distinct count it can be made
+    into nothing at all, since a set of values seen is not the values. That is a
+    kernel change rather than an operator one and it goes under this without
+    changing it.
 
     Floating point is the one place the answer can differ from calling `agg` on
     the whole frame. Adding a column in chunks and then adding the chunk sums is
@@ -2987,10 +3014,23 @@ struct Reduce(Movable):
     """Per state slot, the reduction that combines two partial answers."""
 
     var _at: List[Int]
-    """Per aggregate, the state slot it starts at. A mean owns two."""
+    """Per aggregate, the slot it starts at. A state slot when it folds and a
+    held slot when it does not. A mean folds and owns two state slots."""
+
+    var _holds: List[Bool]
+    """Per aggregate, whether `_at` points into `held` rather than `state`."""
+
+    var held: List[ChunkedArray]
+    """Per held slot, every chunk of the column that slot reduces."""
+
+    var _kept: List[Int]
+    """Per held slot, the input column it holds."""
+
+    var _late: List[AggKind]
+    """Per held slot, the reduction to run over the whole column at the end."""
 
     var started: Bool
-    """Whether a chunk has arrived."""
+    """Whether a chunk with rows in it has arrived."""
 
     var ran: Bool
     """Whether `finish` has handed the answer back."""
@@ -3009,6 +3049,10 @@ struct Reduce(Movable):
         self._produce = List[AggKind]()
         self._merge = List[AggKind]()
         self._at = List[Int]()
+        self._holds = List[Bool]()
+        self.held = List[ChunkedArray]()
+        self._kept = List[Int]()
+        self._late = List[AggKind]()
         self.started = False
         self.ran = False
 
@@ -3026,7 +3070,7 @@ struct Reduce(Movable):
 
         Raises:
             If no aggregates were given, if a position is outside the schema, if
-            a reduction does not fold, if a reduction has no meaning on its
+            a reduction reads two columns, if a reduction has no meaning on its
             column's type, or if two output columns would have the same name.
         """
         self.input = input^
@@ -3045,11 +3089,11 @@ struct Reduce(Movable):
                     + String(len(self.input))
                     + " columns"
                 )
-            if not _folds(kind):
+            if kind.reads_two_columns():
                 raise Error(
                     "reduce: "
                     + String(kind)
-                    + " cannot be computed a chunk at a time"
+                    + " reads two columns and a reduction here names one"
                 )
             var source = self.input[at].dtype
             if source.is_variable_width() and (
@@ -3067,6 +3111,17 @@ struct Reduce(Movable):
                     )
             fields.append(Field(name, agg_type(kind, source)))
 
+            if not _folds(kind):
+                # The values themselves are the state, so the column goes by
+                # and the kernel runs once over all of it at the end.
+                self._holds.append(True)
+                self._at.append(len(self._kept))
+                self._kept.append(at)
+                self._late.append(kind)
+                self.held.append(ChunkedArray(source))
+                continue
+
+            self._holds.append(False)
             self._at.append(len(self._source))
             if kind == AggKind.MEAN:
                 self._source.append(at)
@@ -3109,11 +3164,20 @@ struct Reduce(Movable):
         two columns at this point. `absorb` is what reads it and it is written
         for that.
 
+        A reduction that does not fold has nothing to put in that row, so its
+        column rides along behind it at full height instead. That keeps the two
+        halves of this node the same shape whichever route a chunk took, which
+        matters because the parallel path calls this from a worker and `absorb`
+        from the thread that owns the node. What comes back is one row per
+        partial answer and then one whole column per held slot, so it is a chunk
+        of two different heights and nothing but `absorb` may read it.
+
         Args:
             chunk: The chunk. Consumed.
 
         Returns:
-            One row of partial answers, or None for a chunk with no rows.
+            The partial answers and the held columns, or None for a chunk with
+            no rows.
 
         Raises:
             If the chunk is not as wide as the input schema, or if a reduction
@@ -3129,32 +3193,41 @@ struct Reduce(Movable):
         if len(chunk) == 0:
             return None
         var columns = chunk^.into_columns()
-        var made = List[AnyArray](capacity=len(self._source))
+        var made = List[AnyArray](capacity=len(self._source) + len(self._kept))
         for s in range(len(self._source)):
             made.append(reduce_any(columns[self._source[s]], self._produce[s]))
-        return Chunk(made^)
+        for k in range(len(self._kept)):
+            made.append(AnyArray(copy=columns[self._kept[k]]))
+        # Unchecked, because the held columns are the chunk's height and the
+        # partial answers are one row, and nothing but `absorb` reads this.
+        return Chunk(made^, 1)
 
     def absorb(mut self, var partial: Chunk) raises:
         """Merges one chunk's partial answers into the running row.
 
         Args:
-            partial: A row from `partial`, in `_source` order. Consumed.
+            partial: The output of `partial`, which is the folded answers in
+                `_source` order and then the held columns. Consumed.
 
         Raises:
-            If the row is not the width `partial` produces, or if merging
-            raises.
+            If it is not the width `partial` produces, or if merging raises.
         """
-        if partial.width() != len(self._source):
+        var want = len(self._source) + len(self._kept)
+        if partial.width() != want:
             raise Error(
                 "reduce: a partial row has "
                 + String(partial.width())
                 + " columns and this reduction produces "
-                + String(len(self._source))
+                + String(want)
             )
-        var made = partial^.into_columns()
+        var made = partial^.into_raw_columns()
+        for k in range(len(self._kept)):
+            self.held[k].append(AnyArray(copy=made[len(self._source) + k]))
         if not self.started:
             self.started = True
-            self.state = made^
+            self.state = List[AnyArray](capacity=len(self._source))
+            for s in range(len(self._source)):
+                self.state.append(AnyArray(copy=made[s]))
             return
         for s in range(len(self._source)):
             var pair = concat_two_any(self.state[s], made[s])
@@ -3188,7 +3261,8 @@ struct Reduce(Movable):
 
         Raises:
             If a mean cannot be computed from its sum and its count, or if a
-            state slot's column has no empty form.
+            state slot's column has no empty form, or if a held column cannot
+            be flattened or reduced.
         """
         if self.ran:
             return None
@@ -3209,11 +3283,21 @@ struct Reduce(Movable):
         var out = List[AnyArray](capacity=len(self.aggs))
         for a in range(len(self.aggs)):
             var at = self._at[a]
-            if self.aggs[a].kind == AggKind.MEAN:
+            if self._holds[a]:
+                # One kernel call over the whole column, which is the same call
+                # `agg` on a frame would have made and the only one there is.
+                out.append(
+                    reduce_any(
+                        ChunkedArray(copy=self.held[at]).combine(),
+                        self._late[at],
+                    )
+                )
+            elif self.aggs[a].kind == AggKind.MEAN:
                 out.append(_mean_of(self.state[at], self.state[at + 1]))
             else:
                 out.append(AnyArray(copy=self.state[at]))
         self.state = List[AnyArray]()
+        self.held = List[ChunkedArray]()
         return Chunk(out^)
 
 

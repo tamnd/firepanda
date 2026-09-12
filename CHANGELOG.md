@@ -18,6 +18,24 @@ The flag now reaches the plan. `count(DISTINCT x)` is `AggKind.NUNIQUE`, in the 
 
 Being clear about what runs. The window form runs, because a window holds its whole partition and can call the whole frame kernel. The grouped and ungrouped forms plan correctly and then stop at the operator with "nunique cannot be computed a chunk at a time", which is the same refusal `median` and `stddev` already get and is not new behaviour for this engine. A refusal by name is the fix for a silently wrong number. Making those two run is the streaming distinct count, which is its own change.
 
+The ungrouped form runs as of the next entry, which landed after this one. The grouped form still stops.
+
+### Added: an ungrouped reduction whose state is the values holds the column and answers
+
+Ten reductions planned and then died at the operator. `nunique`, `median`, `quantile`, `var_samp`, `variance`, `stddev`, `sem`, `skew`, `corr` and `cov` all reached `Reduce.bind` and raised "cannot be computed a chunk at a time", with no test covering any of them, because `_folds` lists the eight kinds that carry a running state and every other kind was treated as a kind nothing can run.
+
+That was the wrong reading. A kind that does not fold is a kind whose state is the values themselves, so the operator holds the column and calls the whole frame kernel once at the end. That is not a new shape either, it is what `Window` has always done with its partition. `Reduce` does it now, so `SELECT median(qty) FROM sales` and `SELECT count(DISTINCT band) FROM dupes` answer.
+
+The cost is stated rather than hidden. A held column is resident for the length of the run, and it is paid only for the columns a non folding reduction reads, so a query that mixes `sum(a)` with `median(b)` holds `b` and folds `a`. A held column can be made smaller later, a distinct count only needs a set rather than the values, and that is a kernel change underneath an operator that does not have to move.
+
+The parallel route works unchanged. `partial` runs on a worker and cannot write to the node, so the held chunk rides inside the chunk `partial` returns, beside the one row of folded answers, and only `absorb` reads it. The chunk has mixed heights on purpose and nothing else looks at it.
+
+A reduction that reads two columns is still refused, and by a better sentence. `corr` and `cov` want a pair and the plan node here names one column, so they say so instead of saying they cannot fold.
+
+Over an input that kept no rows a held reduction flattens a column of no rows and the kernel answers over that, so nothing about the empty case is written down in the operator. That answer is a NaN that is still valid rather than a null, which is `_quantile_core`'s rule and pandas' as well. It disagrees with the null a minimum of nothing gets and that disagreement is #170's.
+
+`Group` still refuses. Holding a column beside a key map is a change of its own and is not in here.
+
 ### Fixed: a join whose build side has no rows joins against nothing
 
 `SELECT qty FROM sales WHERE qty IN (SELECT band FROM tiers WHERE band > 1000)` raised `column has 0 chunks, not one; call combine() first`. A column that no rows reached has no chunks at all rather than one empty chunk, which is the column's own rule and a good one, because an empty chunk would put two equal entries in the offsets and a row position could then name it. The pipeline join read the one chunk of the build side's key column and there was not one.
