@@ -26,11 +26,13 @@ exactly the shape the generator cannot write and exactly the shape `_refuse` and
 
 from __future__ import annotations
 
+import collections
 import datetime
 import math
 import operator
 import re
 import warnings
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, cast
 
 from . import _firepanda
@@ -3711,6 +3713,115 @@ class DataFrameMixin:
             " name or a list of column names"
         )
 
+    def __iter__(self) -> Iterator[str]:
+        """The column names, one at a time.
+
+        This is the one place the two classes disagree on purpose. Iterating a
+        frame walks its column names and iterating a column walks its values,
+        which reads like a mistake until you write `for name in df` and then
+        `df[name]`, which is the loop the rule was chosen for. A frame is a
+        mapping of name to column and a column is a sequence of values, and each
+        one iterates the way its own kind does.
+        """
+        return iter(self._inner.names())
+
+    def __contains__(self, key: Any) -> bool:
+        """Whether a column name is in the frame.
+
+        Names, for the same reason `__iter__` walks them, so `"a" in df` asks
+        whether there is a column called `a` and never looks at a single value.
+
+        A key of a kind a name could never be answers False rather than raising,
+        because `in` is a question and the answer to it is no. `Index` has said
+        the same thing since it was written and the sentence there is the same
+        sentence.
+        """
+        return isinstance(key, str) and key in self._inner.names()
+
+    def __bool__(self) -> bool:
+        """Refuses, in the same words pandas refuses in.
+
+        Python's default would make this true whenever the frame has a row in
+        it, because `__len__` is defined, and that default is the reason the
+        method has to exist at all. `if df:` reads as a question about whether
+        there is anything there and a reader expects it to be about the values,
+        and there is no answer to that question that is not a guess, so pandas
+        raises rather than picking one. The sentence is copied exactly because
+        it is the sentence people paste into a search box.
+        """
+        raise ValueError(
+            "The truth value of a DataFrame is ambiguous. Use a.empty, a.bool(),"
+            " a.item(), a.any() or a.all()."
+        )
+
+    def keys(self) -> list[str]:
+        """The column names, which is what `columns` answers.
+
+        pandas gives back an `Index` here and this gives back a list, which is
+        the divergence `columns` already has rather than a new one, and the two
+        answer the same thing so they answer it the same way.
+        """
+        return self._inner.names()
+
+    def items(self) -> Iterator[tuple[str, Series]]:
+        """Each column name with its column.
+
+        The column carries the frame's labels and its own name, which is what
+        `df[name]` hands back, and that is what this is: the loop `__iter__`
+        was chosen for, written once so the caller does not have to.
+        """
+        from ._frame import Series
+
+        for name in self._inner.names():
+            yield name, Series._wrap(self._inner.column(name))
+
+    def itertuples(self, index: bool = True, name: str | None = "Pandas") -> Iterator[Any]:
+        """Each row as a named tuple of its values.
+
+        The fast way to walk rows in pandas and the reason `iterrows` is the
+        slow one, because a tuple of values costs a tuple and a row as a series
+        costs an object with an index on it. That difference is smaller here,
+        since neither exists yet, but the shape of the answer is pandas' and is
+        copied exactly down to the default type name.
+
+        Every column is read into a Python list once and the rows are cut out of
+        those lists, rather than each row being read out of the frame. That is
+        one pass per column instead of one lookup per cell, which is the whole
+        reason this is worth writing rather than leaving callers to index.
+
+        A column name that is not a name Python would accept, which means one
+        that is not an identifier or is a keyword, becomes `_N` for its position
+        in the tuple. That is not a rule written here: it is what
+        `collections.namedtuple` does when it is asked to rename, and pandas
+        asks it the same way, so the two agree without either one saying how.
+
+        A `name` that could not be a type name raises, with the sentence
+        `collections.namedtuple` raises, for the same reason the renaming is
+        left to it: pandas hands the argument over without looking at it too,
+        so the two libraries agree on the message without either one writing it.
+
+        Args:
+            index: Whether the row label is the first field, called `Index`.
+            name: What to call the tuple type, or None for a plain tuple.
+
+        Returns:
+            An iterator of named tuples, one per row.
+
+        Raises:
+            ValueError: If `name` could not be the name of a type.
+        """
+        names = self._inner.names()
+        try:
+            columns = [self._inner.column(held).to_list() for held in names]
+            labels = self._inner.labels().to_list() if index else []
+        except Exception as error:
+            raise translate(error) from None
+        fields = (["Index"] if index else []) + names
+        made: Any = None if name is None else collections.namedtuple(name, fields, rename=True)
+        for at in range(self._inner.length()):
+            row = tuple(([labels[at]] if index else []) + [column[at] for column in columns])
+            yield row if made is None else made(*row)
+
     def copy(self, deep: bool = True) -> DataFrame:
         """Another handle on the same rows, which costs nothing here.
 
@@ -5516,6 +5627,87 @@ class SeriesMixin:
             except Exception as error:
                 raise translate(error) from None
         return _Along(self, True)[key]
+
+    def __iter__(self) -> Iterator[Any]:
+        """The values, one at a time.
+
+        The values and not the labels, which is the half of the rule a frame
+        does the other way round, and `__iter__` on a frame is where the pair
+        is argued for. It means `list(s)` is `s.tolist()` and that `sum(s)`,
+        `min(s)`, `sorted(s)` and a comprehension over a column all work, none
+        of which is true of a class that leaves this out.
+
+        Leaving it out is not neutral, which is the thing worth recording. A
+        class with `__getitem__` and no `__iter__` still iterates, because
+        Python falls back to calling `__getitem__` with 0, 1, 2 and so on until
+        it gets an `IndexError`. Here `__getitem__` reads a label, so that loop
+        asks for the label 0 and then the label 1, which on most frames is a
+        different set of rows or no rows at all, and the error it ends on is a
+        `KeyError` rather than an `IndexError`, so the loop does not end, it
+        raises. On a frame whose labels happen to be 0, 1, 2 it silently works.
+        Two callers writing the same line and getting an answer, an exception or
+        a wrong answer depending on their labels is worse than any of the three.
+
+        The whole list at once rather than a cursor into the column, for the
+        reason `Index.__iter__` gives, which is that a cursor would have to keep
+        the column alive across the loop body and the list already does.
+        """
+        try:
+            return iter(self._inner.to_list())
+        except Exception as error:
+            raise translate(error) from None
+
+    def __contains__(self, key: Any) -> bool:
+        """Whether a label is in the index, which is not whether a value is in the column.
+
+        This is pandas' rule and it surprises almost everybody, so it is worth
+        saying plainly: `2 in s` asks whether the column has a row labelled two
+        and never looks at what the rows hold. It follows from the same place
+        `__getitem__` follows from, which is that a column is a mapping from
+        label to value wearing a sequence's clothes, and `in` on a mapping has
+        always asked about the keys.
+
+        A caller who wanted the other question has `s.isin([2]).any()`, and a
+        caller who wanted this one and got the other would have no way of
+        telling, which is why matching pandas here matters more than being
+        reasonable.
+        """
+        try:
+            return self._inner.labels().contains(key)
+        except Exception as error:
+            raise translate(error) from None
+
+    def __bool__(self) -> bool:
+        """Refuses, in the same words pandas refuses in, for the frame's reason."""
+        raise ValueError(
+            "The truth value of a Series is ambiguous. Use a.empty, a.bool(),"
+            " a.item(), a.any() or a.all()."
+        )
+
+    def keys(self) -> Index:
+        """The labels, which is what `index` answers.
+
+        pandas has this on both classes and means the same thing by it in both,
+        which is the thing `in` asks about and the thing `items` pairs with. On
+        a frame that is the column names and here it is the row labels, and the
+        two are the same member because a frame and a column are both mappings,
+        differing in what they are a mapping of.
+        """
+        from ._frame import Index
+
+        return Index._wrap(self._inner.labels())
+
+    def items(self) -> Iterator[tuple[Any, Any]]:
+        """Each label with its value.
+
+        Both halves at once, which is the loop neither `__iter__` nor
+        `__contains__` gives on its own, and the reason all three exist rather
+        than one of them being enough.
+        """
+        try:
+            return iter(zip(self._inner.labels().to_list(), self._inner.to_list(), strict=True))
+        except Exception as error:
+            raise translate(error) from None
 
     def to_frame(self, name: Any = NO_DEFAULT) -> DataFrame:
         """The column as a frame of one column, keeping its labels.

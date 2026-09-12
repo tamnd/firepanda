@@ -108,6 +108,13 @@ A second note, internal rather than user facing: Mojo 1.0 removed negative index
 - [ ] `index`, `columns`, `dtypes`, `shape`, `size`, `ndim`, `empty`, `values`, `axes`, `flags`, `attrs` (M1)
 - [ ] `T` — `adapted`, transpose of a columnar frame requires a common dtype and raises otherwise (M6)
 
+### Iteration
+
+- [x] `__iter__`, `__contains__`, `keys`, `items` (M6), where a frame walks its column names and `in` on a frame asks about a name
+- [x] `itertuples` with `index` and `name` (M6)
+- [ ] `iterrows` (M6), which needs one type every column fits, the same as `xs` and a positional row
+- [x] `__bool__`, which refuses in pandas' own words rather than answering from the row count (M6)
+
 ### Selection and indexing
 
 - [ ] `__getitem__` for column, list of columns, boolean mask, slice (M1)
@@ -192,6 +199,7 @@ A second note, internal rather than user facing: Mojo 1.0 removed negative index
 
 Everything in section 2 that makes sense on one dimension, plus:
 
+- [x] `__iter__`, `__contains__`, `keys`, `items` (M6), where a column walks its values and `in` asks about a label rather than a value
 - [ ] `values`, `array`, `name`, `dtype`, `hasnans`, `is_unique`, `is_monotonic_increasing`, `is_monotonic_decreasing` (M1)
 - [ ] `item`, `tolist`, `to_frame`, `to_list`, `unique`, `nunique`, `value_counts` (M1)
 - [ ] `argsort`, `argmin`, `argmax`, `searchsorted` (M6)

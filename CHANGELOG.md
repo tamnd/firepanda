@@ -8,6 +8,22 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: a frame and a column can be walked, and asked whether something is in one
+
+`for name in df`, `for value in s`, `"a" in df`, `"p" in s`, `df.keys()`, `s.keys()`, `df.items()`, `s.items()` and `df.itertuples()`, plus `sum(s)`, `min(s)`, `sorted(s)`, `set(s)` and a comprehension over a column, none of which worked before.
+
+A frame walks its column names and a column walks its values, which is pandas' split and is the reason `for name in df` then `df[name]` reads the way it does. `in` follows it, so `"a" in df` asks whether there is a column called `a` and `2 in s` asks whether there is a row labelled two. That second one never looks at a value, which surprises almost everybody and is copied anyway, because a caller who wanted the other question and got this one has no way of telling. The other question is `s.isin([2]).any()`.
+
+This is a fix as much as an addition. A class with `__getitem__` and no `__iter__` is still iterable in Python, because the interpreter falls back to calling `__getitem__` with 0, 1, 2 and so on until it gets an `IndexError`. On a column that reads labels rather than positions, so `list(s)` used to raise `KeyError` on a frame whose labels were words, silently stop early on a frame whose labels had a gap, and work on a frame whose labels were 0, 1, 2. Three outcomes for one line of code, decided by data the caller was not thinking about.
+
+`bool(df)` and `bool(s)` now raise the way pandas raises, with pandas' own sentence. They used to answer from the row count, because `__len__` is defined and Python's default reads it, so `if s:` ran and meant something other than what the person writing it meant.
+
+`itertuples` reads every column into a list once and cuts the rows out of those lists, rather than reading each cell where it is needed, which is one crossing of the extension boundary per column instead of one per cell. The tuple type is called `Pandas` by default, as it is in pandas, because code matches on that name.
+
+`iterrows` is not here. A row across a mixed frame needs one type every column fits, which is the same thing `xs`, a positional row and `squeeze(axis=0)` are waiting on.
+
+Written up in `docs/specs/56-walking-a-frame-and-a-column.md`.
+
 ### Added: POSITION, STRPOS and INSTR in SQL
 
 The search for a run of characters inside a column runs now, under all three of the names DuckDB gives it and in both spellings. `POSITION('an' IN word)` and `strpos(word, 'an')` are the same search written in opposite orders, and the keyword form becomes the call form while the query is read, the way `TRIM` and `SUBSTRING` already do.
