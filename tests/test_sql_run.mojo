@@ -666,6 +666,56 @@ def test_an_order_by_descending_reverses_it() raises:
     )
 
 
+def test_an_order_by_of_a_position_orders_the_answer() raises:
+    # The same rows the query naming the column gets. Before this the number
+    # lowered as a constant and every row sorted the same, so the answer came
+    # back in the order it was read in and nothing said so.
+    same(
+        answer("SELECT qty FROM sales ORDER BY 1", "qty"),
+        [1, 3, 5, 8, 12, 15, 20, 25, 30, 40],
+        "qty",
+    )
+
+
+def test_an_order_by_of_a_position_counts_the_columns_returned() raises:
+    var out = run("SELECT qty, price FROM sales ORDER BY 2", session())
+    same(read_back(out, "price"), [1, 2, 3, 4, 5, 6, 7, 9, 10, 100], "price")
+    same(read_back(out, "qty"), [40, 20, 25, 30, 12, 15, 3, 8, 5, 1], "qty")
+
+
+def test_an_order_by_of_a_position_past_the_end_is_refused() raises:
+    with assert_raises(contains="positions this query has are 1 to 1"):
+        _ = run("SELECT qty FROM sales ORDER BY 2", session())
+
+
+def test_a_group_by_of_a_position_folds_on_the_item_it_counts_to() raises:
+    # ClickBench and the TPC-H reference queries both write their keys this
+    # way, and so does most SQL a tool generates.
+    var out = run(
+        "SELECT qty % 2 AS r, count(*) AS n FROM sales GROUP BY 1 ORDER BY 1",
+        session(),
+    )
+    same(read_back(out, "r"), [0, 1], "the two remainders")
+    same(read_back(out, "n"), [5, 5], "and how many rows are in each")
+
+
+def test_a_group_by_of_a_position_still_folds_the_other_columns() raises:
+    # qty is 5, 20, 3, 40, 12, 8, 25, 1, 30, 15 and price is 10, 2, 7, 1, 5, 9,
+    # 3, 100, 4, 6, so the even rows carry 2, 1, 5, 9, 4 and the odd ones carry
+    # 10, 7, 3, 100, 6.
+    var out = run(
+        "SELECT qty % 2 AS r, sum(price) AS s FROM sales GROUP BY 1 ORDER BY 1",
+        session(),
+    )
+    same(read_back(out, "r"), [0, 1], "the two remainders")
+    same(read_back(out, "s"), [21, 126], "and the sum over each")
+
+
+def test_a_group_by_of_a_position_past_the_end_is_refused() raises:
+    with assert_raises(contains="the select list has are 1 to 2"):
+        _ = run("SELECT qty, count(*) FROM sales GROUP BY 3", session())
+
+
 def test_a_limit_cuts_the_answer() raises:
     same(answer("SELECT qty FROM sales LIMIT 3", "qty"), [5, 20, 3], "qty")
 

@@ -610,6 +610,50 @@ def _number(text: String) raises -> Value:
     return Value(Int64(atol(text)))
 
 
+def _ordinal(ast: Ast, at: UInt32) -> Int:
+    """The position a clause wrote as a bare number, or -1 for anything else.
+
+    `ORDER BY 1` is the first output column and `GROUP BY 1` is the first select
+    list item. Both are positions rather than the number one, which is what
+    DuckDB reads them as and what every generated query and most hand written
+    ones rely on.
+
+    Only a bare integer literal counts. `ORDER BY 1 + 1` is a constant
+    expression and not the second column, in DuckDB as well, so the test is on
+    the node being a literal rather than on what the expression works out to. A
+    zero comes back as a zero and not as a refusal, because the caller is the
+    one that knows how many positions there are and can say so.
+
+    Args:
+        ast: The arenas.
+        at: The expression.
+
+    Returns:
+        The position as it was written, and -1 when a position was not written.
+    """
+    if at == NO_NODE:
+        return -1
+    var node = ast.exprs[Int(at)]
+    if node.kind != EXPR_LITERAL or node.b != LITERAL_NUMBER:
+        return -1
+    ref written = ast.text(node.payload)
+    var raw = written.as_bytes()
+    if len(raw) == 0:
+        return -1
+    var value = 0
+    for i in range(len(raw)):
+        var digit = Int(raw[i]) - 48
+        if digit < 0 or digit > 9:
+            return -1
+        # A select list nobody will ever write is still a select list, and a
+        # position past this one is out of range whatever the rest of the
+        # digits say, so the count stops here rather than overflowing.
+        if value > 1 << 30:
+            return value
+        value = value * 10 + digit
+    return value
+
+
 def _binary_op(text: String) raises -> BinaryOp:
     """The kernel operator an infix operator's text names.
 
@@ -6026,14 +6070,53 @@ def _block(
                     " GROUP BY ALL so far, and GROUPING SETS, CUBE and ROLLUP"
                     " are masks on one aggregate the plan cannot carry yet"
                 )
-            var named = _aliased_key(ast, group.a, items, scope)
+            # A number here counts the select list rather than being the number
+            # itself, so it lands on an item the same way a name that is an
+            # alias does and takes the same route from there. The item is
+            # picked out before it is lowered, which is what makes
+            # `GROUP BY 1` over a computed item work: the key is the item's own
+            # expression, lowered once, and the projection reads it back.
+            var counted = _ordinal(ast, group.a)
+            var named: Int
+            if counted >= 0:
+                if counted < 1 or counted > len(items):
+                    raise Error(
+                        String(
+                            "a GROUP BY of position ",
+                            counted,
+                            ", and the positions the select list has are 1 to ",
+                            len(items),
+                        )
+                    )
+                named = counted - 1
+                if ast.exprs[Int(ast.stmts[Int(items[named])].a)].kind == (
+                    EXPR_STAR
+                ):
+                    raise Error(
+                        String(
+                            "a GROUP BY of position ",
+                            counted,
+                            (
+                                ", and the select list wrote a star there,"
+                                " which stands for however many columns the"
+                                " FROM has rather than for one"
+                            ),
+                        )
+                    )
+            else:
+                named = _aliased_key(ast, group.a, items, scope)
             if named >= 0:
                 var item = ast.stmts[Int(items[named])]
                 if _has_aggregate(ast, item.a):
+                    var wrote: String
+                    if counted >= 0:
+                        wrote = String(counted)
+                    else:
+                        wrote = String(ast.text(item.payload))
                     raise Error(
                         String(
                             "a GROUP BY names '",
-                            ast.text(item.payload),
+                            wrote,
                             (
                                 "', which the select list wrote for a fold, and"
                                 " a fold is computed over the groups rather"
@@ -6049,9 +6132,16 @@ def _block(
                 # and has nowhere to rename one, and the projection asks for
                 # whichever of the two this decided.
                 if reads[named] < 0:
-                    var name = String(ast.text(item.payload))
+                    # An item a GROUP BY named by its alias has one to take. One
+                    # it counted to may not, and then the key is named the way
+                    # any other expression in a select list is named.
+                    var name: String
                     if ast.exprs[Int(item.a)].kind == EXPR_COLUMN:
                         name = _name_of(ast, item.a, len(key_names), scope)
+                    elif item.payload != NO_NODE:
+                        name = String(ast.text(item.payload))
+                    else:
+                        name = _name_of(ast, item.a, named, scope)
                     keys.append(
                         _lower_expr(ast, item.a, plan, walk, scope, False)
                     )
@@ -6109,14 +6199,22 @@ def _block(
             )
             continue
         if reads[i] >= 0:
+            # An item a GROUP BY named by its alias has one. One it counted to
+            # by position may not, and then the item is named the way any other
+            # expression in a select list is named.
+            var called: String
+            if item.payload != NO_NODE:
+                called = String(ast.text(item.payload))
+            else:
+                called = _name_of(ast, item.a, i, scope)
             outputs.append(plan.exprs.column(key_names[reads[i]].copy()))
-            names.append(ast.text(item.payload))
+            names.append(called.copy())
             # The item was never lowered, so the shape an ORDER BY would have
             # written is the key's, and the name it reads it back by is this
             # item's rather than the key's.
             if plan.exprs.nodes[keys[reads[i]]].kind != ExprKind.COLUMN:
                 item_shapes.append(_agg_shape(plan.exprs, keys[reads[i]]))
-                item_names.append(ast.text(item.payload))
+                item_names.append(called^)
             continue
         var lowered = _lower_expr(ast, item.a, plan, walk, scope, grouped)
         outputs.append(_read_keys(plan.exprs, lowered, shapes, shape_names))
@@ -6199,6 +6297,7 @@ def _block(
         if (
             len(sort_shapes) == 0
             or entry.a == NO_NODE
+            or _ordinal(ast, entry.a) >= 0
             or _has_over(ast, entry.a)
         ):
             ordered.append(-1)
@@ -6754,6 +6853,28 @@ def _modifiers(
                     descending.append(down)
                     nulls_last.append(last)
                 continue
+            var position = _ordinal(ast, entry.a)
+            if position >= 0:
+                # A number here is a position in the select list rather than
+                # the number itself. The names come off the plan for the same
+                # reason ORDER BY ALL takes them from there: a star has already
+                # been expanded by this point and a set operation has no select
+                # list of its own, and both of those are things a position is
+                # allowed to count.
+                var produced = _produces(plan, input)
+                if position < 1 or position > len(produced):
+                    raise Error(
+                        String(
+                            "an ORDER BY of position ",
+                            position,
+                            ", and the positions this query has are 1 to ",
+                            len(produced),
+                        )
+                    )
+                keys.append(plan.exprs.column(String(produced[position - 1])))
+                descending.append(down)
+                nulls_last.append(last)
+                continue
             if i < len(ordered) and ordered[i] >= 0:
                 # A fold in the ORDER BY was lowered inside the block, back when
                 # the node that computes it was still being built, and what came
@@ -6768,6 +6889,20 @@ def _modifiers(
 
     var chosen = List[Int](capacity=len(on))
     for i in range(len(on)):
+        var spot = _ordinal(ast, on[i])
+        if spot >= 0:
+            var produced = _produces(plan, input)
+            if spot < 1 or spot > len(produced):
+                raise Error(
+                    String(
+                        "a DISTINCT ON of position ",
+                        spot,
+                        ", and the positions this query has are 1 to ",
+                        len(produced),
+                    )
+                )
+            chosen.append(plan.exprs.column(String(produced[spot - 1])))
+            continue
         chosen.append(_lower_expr(ast, on[i], plan, walk, scope, False))
 
     var kept = List[String]()
