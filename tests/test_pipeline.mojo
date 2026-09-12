@@ -1134,6 +1134,64 @@ def test_a_mean_over_uneven_chunks_is_not_a_mean_of_means() raises:
     assert_equal(got, Float64(3.5), "the mean of one through six")
 
 
+def big_frame() raises -> DataFrame:
+    """Six values near 1.9e18, in chunks of two, three and one.
+
+    Their total is about 1.14e19 and int64 stops at 9.22e18, so a sum over this
+    column wraps, and it is supposed to: pandas wraps there and firepanda
+    follows it. What must not wrap is the sum a mean is divided out of, which is
+    why the values are this size and why the chunks are uneven, so that the
+    wrap has to survive the merge as well as the chunk.
+    """
+    var base = Int64(1_900_000_000_000_000_000)
+    var n = ChunkedArray(LogicalType.INT64)
+    n.append(numbers([base, base + 2]))
+    n.append(numbers([base + 4, base + 6, base + 8]))
+    n.append(numbers([base + 10]))
+    var columns = List[ChunkedArray]()
+    columns.append(n^)
+    var fields = List[Field]()
+    fields.append(Field("n", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
+def test_a_mean_of_large_ints_is_not_divided_out_of_a_wrapped_sum() raises:
+    """The mean here is 1.9e18 plus five and the wrapped sum gives -1.17e18.
+
+    Not a near miss in the last bits: the wrong answer is negative and there is
+    no negative value in the column. The operator keeps a running sum and a
+    running count so that the state folds, and that sum is a numerator rather
+    than a sum anybody asked for, so it accumulates in float64. See #673.
+    """
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.MEAN, "average"))
+    var pipeline = Pipeline(big_frame())
+    pipeline.add(Node(Reduce(aggs^)))
+    var out = pipeline^.run()
+    assert_equal(len(out), 1, "one row")
+    var got = out.column("average").as_typed[DType.float64]()[0]
+    var want = Float64(1_900_000_000_000_000_005)
+    assert_true(got > 0.0, "no value in the column is negative")
+    var gap = got - want
+    if gap < 0.0:
+        gap = -gap
+    assert_true(gap <= 1e-9 * want, "the mean of the six values")
+
+
+def test_a_sum_of_large_ints_still_wraps() raises:
+    """The other half of the same rule, and the reason the fix is a flag on one
+    slot rather than a wider accumulator everywhere. A sum over int64 wraps in
+    pandas, so it wraps here, and the mean above is not allowed to change that.
+    """
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(0, AggKind.SUM, "total"))
+    var pipeline = Pipeline(big_frame())
+    pipeline.add(Node(Reduce(aggs^)))
+    var out = pipeline^.run()
+    assert_equal(len(out), 1, "one row")
+    assert_true(one_int(out, "total") < 0, "six times 1.9e18 does not fit")
+
+
 def kept_nothing() raises -> DataFrame:
     """Three rows behind a mask that keeps none of them."""
     var n = ChunkedArray(LogicalType.INT64)

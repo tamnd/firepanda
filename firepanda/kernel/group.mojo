@@ -3184,6 +3184,7 @@ def _dispatch_core[
     kind: AggKind,
     codes: Array[DType.uint32],
     groups: Int,
+    as_float: Bool = False,
 ) raises -> AnyArray:
     """Picks the reduction. One instantiation per dtype, thirteen loops inside.
     """
@@ -3192,6 +3193,12 @@ def _dispatch_core[
     if kind == AggKind.COUNT:
         return AnyArray(_count_core(source, validity, has_null, codes, groups))
     if kind == AggKind.SUM:
+        if as_float:
+            # A caller that is building a mean out of a sum and a count, which
+            # is what the streaming operators do so that the state folds. It
+            # wants the numerator `_mean_core` builds, and `_mean_core` gets it
+            # by asking this same core for float64.
+            return AnyArray(_sum_core[acc=DType.float64](source, codes, groups))
         return AnyArray(_sum_core(source, codes, groups))
     if kind == AggKind.MEAN:
         return AnyArray(_mean_core(source, validity, has_null, codes, groups))
@@ -4022,6 +4029,7 @@ def aggregate_group_any(
     groups: Int,
     *,
     trusted: Bool = False,
+    as_float: Bool = False,
 ) raises -> AnyArray:
     """Runs one grouped reduction over a column whose dtype is a runtime value.
 
@@ -4051,6 +4059,13 @@ def aggregate_group_any(
         groups: The number of distinct ordinals.
         trusted: True if the caller produced these codes and has already
             established that every one of them names a group that exists.
+        as_float: True to take a sum in float64 rather than in the natural
+            accumulator. A grouped sum over int64 wraps and has to, because
+            pandas wraps there too, but the sum inside a mean is not the sum
+            anybody asked for and must not wrap, which is why `_mean_core` has
+            always asked for float64. An operator that splits a mean into a sum
+            and a count so the state folds needs the same thing. Ignored by
+            every reduction that is not a sum.
 
     Returns:
         A column of `groups` values.
@@ -4100,6 +4115,7 @@ def aggregate_group_any(
                 kind,
                 codes,
                 groups,
+                as_float,
             )
             if not col.type.is_temporal() or not wanted.is_temporal():
                 return raw^

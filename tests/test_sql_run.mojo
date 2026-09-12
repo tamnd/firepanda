@@ -223,8 +223,31 @@ def hits() raises -> DataFrame:
     return DataFrame(Schema(fields^), columns^)
 
 
+def visits() raises -> DataFrame:
+    """Six user ids near 4e18, three to a site.
+
+    Real user ids are this size and there are a lot of them, which is the whole
+    reason #673 existed: three of these add up to 1.2e19 and int64 stops at
+    9.22e18. A sum over the column is allowed to wrap, and does. A mean is not.
+    """
+    var base = Int64(4_000_000_000_000_000_000)
+    var user = ChunkedArray(LogicalType.INT64)
+    user.append(numbers([base, base + 2, base + 4]))
+    user.append(numbers([base + 6, base + 8, base + 10]))
+    var site = ChunkedArray(LogicalType.INT64)
+    site.append(numbers([1, 2, 1]))
+    site.append(numbers([2, 1, 2]))
+    var columns = List[ChunkedArray]()
+    columns.append(user^)
+    columns.append(site^)
+    var fields = List[Field]()
+    fields.append(Field("user_id", LogicalType.INT64))
+    fields.append(Field("site", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
 def session() raises -> Catalog:
-    """A catalog holding the eight frames under the names the queries write."""
+    """A catalog holding the nine frames under the names the queries write."""
     var catalog = Catalog()
     catalog.register("sales", sales())
     catalog.register("tiers", tiers())
@@ -234,6 +257,7 @@ def session() raises -> Catalog:
     catalog.register("gappy", gappy())
     catalog.register("gaps", gaps())
     catalog.register("hits", hits())
+    catalog.register("visits", visits())
     return catalog^
 
 
@@ -2455,6 +2479,52 @@ def test_count_distinct_does_not_count_a_null() raises:
         "three values",
     )
     same(answer("SELECT count(mark) AS n FROM gappy", "n"), [4], "not null")
+
+
+def test_an_average_of_large_ids_is_not_a_wrapped_sum_divided() raises:
+    """The answer is 4e18 plus five. Through the wrapped sum it was 9.3e17.
+
+    This is #673, which was found on ClickBench q3, `SELECT AVG(UserID) FROM
+    hits`, where the answer came back negative over a column with no negative
+    value in it. The plan splits a mean into a running sum and a running count
+    so the state folds across chunks, and that sum has to be taken in float64
+    because it is a numerator and not a sum anybody asked for.
+    """
+    var out = run("SELECT avg(user_id) AS m FROM visits", session())
+    assert_equal(len(out), 1, "one row")
+    var got = out.column("m").as_typed[DType.float64]()[0]
+    var want = Float64(4_000_000_000_000_000_005)
+    assert_true(abs(got - want) <= 1e-9 * want, "the mean of the six ids")
+
+
+def test_a_grouped_average_of_large_ids_is_not_either() raises:
+    """Each site's three ids add up to 1.2e19, which wraps to minus 6.4e18, so
+    the two group means were negative as well."""
+    var out = run(
+        (
+            "SELECT site, avg(user_id) AS m FROM visits GROUP BY site ORDER BY"
+            " site"
+        ),
+        session(),
+    )
+    assert_equal(len(out), 2, "two sites")
+    var got = out.column("m").as_typed[DType.float64]()
+    var base = Float64(4_000_000_000_000_000_000)
+    assert_true(abs(got[0] - (base + 4.0)) <= 1e-9 * base, "site one")
+    assert_true(abs(got[1] - (base + 6.0)) <= 1e-9 * base, "site two")
+
+
+def test_a_sum_of_large_ids_still_wraps() raises:
+    """pandas wraps an int64 sum and firepanda follows it, so the fix for the
+    two above is a flag on the one slot a mean owns rather than a wider
+    accumulator everywhere."""
+    var out = run("SELECT sum(user_id) AS t FROM visits", session())
+    assert_equal(len(out), 1, "one row")
+    assert_equal(
+        out.column("t").as_typed[DType.int64]()[0],
+        Int64(5_553_255_926_290_448_414),
+        "six times 4e18 plus 30, wrapped back round",
+    )
 
 
 def test_a_median_comes_back_through_sql() raises:

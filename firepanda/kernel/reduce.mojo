@@ -137,12 +137,20 @@ def _reduce_text(col: StringArray, kind: AggKind) raises -> AnyArray:
     return AnyArray(builder^.finish())
 
 
-def reduce_any(col: AnyArray, kind: AggKind) raises -> AnyArray:
+def reduce_any(
+    col: AnyArray, kind: AggKind, as_float: Bool = False
+) raises -> AnyArray:
     """Reduces a column to a single row.
 
     Args:
         col: The column.
         kind: Which reduction.
+        as_float: True to take a sum in float64 rather than in the natural
+            accumulator. A sum over int64 wraps and has to, because pandas
+            wraps there too, but the sum inside a mean is not the sum anybody
+            asked for and must not wrap. See `mean_over`, which is the whole
+            column mean and has taken float64 since it was written. Ignored by
+            every reduction that is not a sum.
 
     Returns:
         A column of exactly one row, in the dtype the grouped reduction would
@@ -192,10 +200,13 @@ def reduce_any(col: AnyArray, kind: AggKind) raises -> AnyArray:
                     len(col) - col.null_count(),
                     len(col),
                     kind,
+                    as_float,
                 )
 
     var codes = Array[DType.uint32](len(col))
-    return aggregate_group_any(col, kind, codes^, 1, trusted=True)
+    return aggregate_group_any(
+        col, kind, codes^, 1, trusted=True, as_float=as_float
+    )
 
 
 comptime DISTINCT_SHARE = 8
@@ -406,6 +417,7 @@ def _reduce_core[
     present: Int,
     n: Int,
     kind: AggKind,
+    as_float: Bool = False,
 ) raises -> AnyArray:
     """Runs one whole column reduction. One instantiation per dtype.
 
@@ -415,6 +427,7 @@ def _reduce_core[
         present: How many of them are present.
         n: How many there are.
         kind: Which reduction.
+        as_float: True to take a sum in float64.
 
     Parameters:
         dt: The value dtype.
@@ -428,6 +441,14 @@ def _reduce_core[
         mean `_takes_fast_route` and this disagree.
     """
     if kind == AggKind.SUM:
+        if as_float:
+            # The caller is a mean that keeps its sum and its count apart so
+            # that the two fold across chunks, and it is asking for the
+            # numerator `mean_over` would have built if it had been allowed to
+            # do the whole thing in one pass.
+            var widened = Array[DType.float64](1)
+            widened[0] = sum_over[acc=DType.float64](source, n).value
+            return AnyArray(widened^)
         comptime acc = accumulator(dt)
         var summed = Array[acc](1)
         # A sum is always valid, including over an empty column and over a column

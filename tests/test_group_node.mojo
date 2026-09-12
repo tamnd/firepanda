@@ -149,6 +149,60 @@ def holey_frame() raises -> DataFrame:
     return cut(pieces^, fields^)
 
 
+def big_frame() raises -> DataFrame:
+    """Six rows in three chunks, two groups, every value near 4e18.
+
+    Three of these add up to 1.2e19 and int64 stops at 9.22e18, so each group's
+    sum wraps, and it is supposed to: pandas wraps there and firepanda follows
+    it. What must not wrap is the sum a mean is divided out of. Each group has a
+    row in every chunk, so the running sum has to survive two merges as well as
+    the chunk it was built in.
+
+    The key is a single int64 column with no nulls, which is the shape that goes
+    through the lookup table that outlives the chunk, so the sum here is folded
+    into a slot rather than reduced and stacked. `tagged_frame` is the same six
+    rows down the other route.
+    """
+    var base = Int64(4_000_000_000_000_000_000)
+    var pieces = List[List[AnyArray]]()
+    var one = List[AnyArray]()
+    one.append(numbers([1, 2]))
+    one.append(numbers([base, base + 6]))
+    pieces.append(one^)
+    var two = List[AnyArray]()
+    two.append(numbers([1, 2]))
+    two.append(numbers([base + 2, base + 8]))
+    pieces.append(two^)
+    var three = List[AnyArray]()
+    three.append(numbers([1, 2]))
+    three.append(numbers([base + 4, base + 10]))
+    pieces.append(three^)
+    var fields = List[Field]()
+    fields.append(Field("k", LogicalType.INT64))
+    fields.append(Field("v", LogicalType.INT64))
+    return cut(pieces^, fields^)
+
+
+def tagged_frame() raises -> DataFrame:
+    """`big_frame` with the key column repeated, which changes the route.
+
+    Two key columns is not a shape the lookup table takes, so this goes through
+    the merge that stacks the running table with a reduction of the chunk. The
+    groups are the same two and the values are the same, so an answer that
+    differs from `big_frame`'s is a difference between the routes.
+    """
+    var df = big_frame()
+    var columns = List[ChunkedArray](capacity=3)
+    columns.append(ChunkedArray(copy=df.columns[0]))
+    columns.append(ChunkedArray(copy=df.columns[0]))
+    columns.append(ChunkedArray(copy=df.columns[1]))
+    var fields = List[Field]()
+    fields.append(Field("k", LogicalType.INT64))
+    fields.append(Field("tag", LogicalType.INT64))
+    fields.append(Field("v", LogicalType.INT64))
+    return DataFrame(Schema(fields^), columns^)
+
+
 def worded_frame() raises -> DataFrame:
     """Six rows in two chunks with a text key and a text column beside it."""
     var pieces = List[List[AnyArray]]()
@@ -292,6 +346,76 @@ def test_a_mean_is_a_sum_and_a_count_until_the_end() raises:
     assert_true(close_enough(col[0], 11.0), "33 over 3")
     assert_true(close_enough(col[1], 21.0), "63 over 3")
     assert_true(close_enough(col[2], 31.0), "93 over 3")
+
+
+def test_a_mean_of_large_ints_is_not_divided_out_of_a_wrapped_sum() raises:
+    """The means here are 4e18 plus two and plus eight, and the wrapped sums
+    give minus 2.1e18 for both groups.
+
+    Not a near miss in the last bits: the wrong answer is negative and there is
+    no negative value in the column. The operator keeps a running sum and a
+    running count so that the state folds, and that sum is a numerator rather
+    than a sum anybody asked for, so it accumulates in float64. See #673.
+    """
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(1, AggKind.MEAN, "average"))
+    var out = run_group(big_frame(), [0], aggs^)
+    assert_equal(len(out), 2, "two groups")
+    var col = out.column("average").as_typed[DType.float64]()
+    var base = Float64(4_000_000_000_000_000_000)
+    assert_true(col[0] > 0.0, "no value in the column is negative")
+    assert_true(close_enough(col[0], base + 2.0), "the first group's mean")
+    assert_true(close_enough(col[1], base + 8.0), "the second group's mean")
+
+
+def test_the_other_route_divides_the_same_sum() raises:
+    """The same six rows through the stacking merge instead of the lookup table.
+
+    The two routes keep their running state in different places and fold into it
+    with different code, so a flag set on one of them and not the other would
+    show up here and nowhere else.
+    """
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(2, AggKind.MEAN, "average"))
+    var out = run_group(tagged_frame(), [0, 1], aggs^)
+    assert_equal(len(out), 2, "two groups")
+    var col = out.column("average").as_typed[DType.float64]()
+    var base = Float64(4_000_000_000_000_000_000)
+    assert_true(close_enough(col[0], base + 2.0), "the first group's mean")
+    assert_true(close_enough(col[1], base + 8.0), "the second group's mean")
+
+
+def test_a_grouped_sum_of_large_ints_still_wraps() raises:
+    """The other half of the same rule, and the reason the fix is a flag on one
+    slot rather than a wider accumulator everywhere. A sum over int64 wraps in
+    pandas, so it wraps here, and the mean above is not allowed to change that.
+    """
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(1, AggKind.SUM, "total"))
+    var out = run_group(big_frame(), [0], aggs^)
+    var totals = read_ints(out, "total")
+    assert_true(totals[0] < 0, "three times 4e18 does not fit")
+    assert_true(totals[1] < 0, "and neither does the second group's")
+
+
+def test_the_node_agrees_with_the_frame_method_about_a_big_mean() raises:
+    """The eager path takes float64 for a grouped mean and says so in
+    `_mean_core`, and it has done since it was written. This is the operator
+    being held to it over values where the two used to differ by the whole
+    number."""
+    var aggs = List[GroupAgg]()
+    aggs.append(GroupAgg(1, AggKind.MEAN, "v_mean"))
+    var specs = List[AggSpec]()
+    specs.append(AggSpec("v", AggKind.MEAN))
+    var want = flat(big_frame()).group_by(
+        ["k"], specs^, dropna=False, sort=False
+    )
+    var got = run_group(big_frame(), [0], aggs^)
+    var mine = got.column("v_mean").as_typed[DType.float64]()
+    var theirs = want.column("v_mean").as_typed[DType.float64]()
+    assert_equal(len(mine), len(theirs), "a row per group either way")
+    for i in range(len(theirs)):
+        assert_true(close_enough(mine[i], theirs[i]), "group " + String(i))
 
 
 def test_a_count_skips_nulls_and_a_size_does_not() raises:

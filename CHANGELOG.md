@@ -22,6 +22,14 @@ An index answers an upload with 429 when too many versions have gone out in too 
 
 The Release workflow now reads its own failed logs, and when the failure was a rate limit it opens an issue holding the tag, the run that hit it, and the time the window reopens. A new Publish watch workflow reads that time once an hour and comments on the issue when it has passed, then takes the blocked label off so it does not say it twice. It does not republish by itself. Pushing a version to an index is the one thing here that cannot be taken back, so the last step stays a person deciding to take it.
 
+### Fixed: an average taken in a plan was divided out of a sum that had wrapped
+
+`SELECT AVG(UserID) FROM hits` over the ClickBench table answered a negative number, over a column with no negative value in it. The same average asked of the frame was right, and so was `DataFrame.groupby(k)["UserID"].mean()`. What was wrong was every average that went through an execution operator, which is every SQL statement and every lazy plan.
+
+An operator splits an average into a running sum and a running count so that the state folds across chunks, and that is right: dividing earlier would make the running value an average of averages, which is the average only when every chunk holds the same number of rows. What was wrong is the accumulator the sum ran in. It was the column's own, which for int64 is int64, and a million user ids near 1.9e18 add up to 1.9e24. The total wrapped and the average was divided out of the wrap.
+
+Both of the kernels that compute an average in one pass already take float64 for exactly this reason, and both say so where they do it. The operators are the place that did not, because they reused the sum reduction, which has to keep wrapping: a sum over int64 wraps in pandas, so it wraps here. The sum inside an average is not that sum, so it no longer shares its accumulator. Which slots take float64 is decided once when the operator is bound, and a column that already accumulates in float64 is left alone.
+
 ### Fixed: a query that kept no rows answered a frame nothing could read
 
 `run("SELECT qty FROM sales WHERE qty = 999", catalog)` came back with a frame of no rows, which is right, and then `out[0]` raised `column has 0 chunks, not one; call combine() first`. The sink builds the empty answer from the schema, and a column built that way held no chunks at all, while `DataFrame.__getitem__` is `ChunkedArray.only`, which wants exactly one. So the frame was one nothing could read a column out of, and a predicate that happened to match nothing was a raise rather than an empty answer.
