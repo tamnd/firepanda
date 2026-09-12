@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: an ORDER BY may name a column the query does not return
+
+`SELECT name FROM t ORDER BY score DESC LIMIT 10` was refused, because the sort was built over the projection and the projection had already dropped the column the sort wanted. So was `SELECT a AS z FROM t ORDER BY a`, where the name the sort wrote is the one the projection renamed away. SQL allows both and now so does this.
+
+The projection under the sort is rebuilt one column wider, holding what the query returns and then what the sort reads, and a second projection above the sort takes the query's own columns back. A projection above a sort cannot change the order, since it is one expression per row and the rows are already where they are going. A column is added once however many keys read it, and a name the select list gave an output wins over the column of the same name under it, which is the rule SQL states and what DuckDB does.
+
+An `ORDER BY` over a `SELECT DISTINCT` or over a set operation may still only name what the query returns. There is no row underneath those to go and read a dropped column off, which is why SQL says the same thing about them, and the refusal is binding's "there is no column named" rather than a rule written twice.
+
 ### Added: GROUP BY ALL and ORDER BY ALL
 
 Both were parsed and printed already and refused by the planner. They lower now, and neither is a new node.

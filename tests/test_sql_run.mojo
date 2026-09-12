@@ -411,6 +411,27 @@ def test_a_group_by_all_over_a_star_groups_by_the_whole_row() raises:
     same(read_back(out, "floor"), [11, 22, 33], "floor")
 
 
+def test_an_order_by_sorts_on_a_column_the_answer_does_not_hold() raises:
+    var out = run("SELECT price FROM sales ORDER BY qty", session())
+    assert_equal(out.width(), 1, "the column the sort read is not in it")
+    same(
+        read_back(out, "price"),
+        [100, 7, 10, 9, 5, 6, 2, 3, 4, 1],
+        "the prices in quantity order",
+    )
+
+
+def test_an_order_by_sorts_on_the_name_the_query_renamed_away() raises:
+    same(
+        answer(
+            "SELECT qty AS howmany FROM sales ORDER BY qty DESC LIMIT 3",
+            "howmany",
+        ),
+        [40, 30, 25],
+        "the three largest",
+    )
+
+
 def test_an_order_by_all_sorts_on_every_column_it_produced() raises:
     var out = run("SELECT qty, shop FROM sales ORDER BY ALL", session())
     same(read_back(out, "qty"), [1, 3, 5, 8, 12, 15, 20, 25, 30, 40], "qty")

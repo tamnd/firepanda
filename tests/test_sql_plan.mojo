@@ -311,6 +311,58 @@ def test_a_group_by_all_with_no_fold_is_a_distinct() raises:
     )
 
 
+def test_an_order_by_may_name_a_column_the_query_does_not_return() raises:
+    # The projection under the sort is one column wider than the query asked
+    # for and the one above it takes the query's own columns back.
+    assert_equal(
+        _plan("SELECT a FROM t ORDER BY b"),
+        (
+            "PROJECT [a]\n"
+            "  SORT [b asc nulls last]\n"
+            "    PROJECT [a, b]\n"
+            "      SCAN t []\n"
+        ),
+    )
+
+
+def test_an_order_by_may_name_a_column_the_query_renamed() raises:
+    assert_equal(
+        _plan("SELECT a AS z FROM t ORDER BY a"),
+        (
+            "PROJECT [z]\n"
+            "  SORT [a asc nulls last]\n"
+            "    PROJECT [a as z, a]\n"
+            "      SCAN t []\n"
+        ),
+    )
+
+
+def test_an_order_by_on_an_output_name_beats_the_column_under_it() raises:
+    # `a` is what the second output is called, so that is what the sort reads
+    # and the column the table has by that name is not in it at all.
+    assert_equal(
+        _plan("SELECT b AS z, a AS b FROM t ORDER BY b"),
+        "SORT [b asc nulls last]\n  PROJECT [b as z, a as b]\n    SCAN t []\n",
+    )
+
+
+def test_an_order_by_adds_a_column_once_however_often_it_is_read() raises:
+    assert_equal(
+        _plan("SELECT a FROM t ORDER BY b, b DESC"),
+        (
+            "PROJECT [a]\n"
+            "  SORT [b asc nulls last, b desc]\n"
+            "    PROJECT [a, b]\n"
+            "      SCAN t []\n"
+        ),
+    )
+
+
+def test_an_order_by_over_a_distinct_may_only_name_what_it_returns() raises:
+    with assert_raises(contains="there is no column named 'b'"):
+        _ = _plan("SELECT DISTINCT a FROM t ORDER BY b")
+
+
 def test_an_order_by_all_sorts_on_every_output_column() raises:
     assert_equal(
         _plan("SELECT a, b FROM t ORDER BY ALL"),
