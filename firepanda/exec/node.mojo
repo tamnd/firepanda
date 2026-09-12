@@ -2351,7 +2351,19 @@ def _probe_key(
 
 
 struct GroupAgg(Copyable, Movable, Writable):
-    """One output column of a grouped aggregation."""
+    """One output column of a grouped aggregation.
+
+    An aggregate may carry an operation against a constant, which means it
+    reduces `column op constant` rather than `column`. That is the same thing a
+    `Compute` below the reduction would have produced, and the reason it can be
+    said here instead is `Reduce`'s docstring: ninety sums over ninety
+    expressions built by ninety `Compute` nodes is ninety columns of the chunk
+    resident at once, and said here it is one at a time.
+
+    Only `Reduce` reads it. A `Group` is given aggregates with no operation on
+    them, because the lowering only folds the expression in when there are no
+    keys, and `Group.bind` says so rather than ignoring it.
+    """
 
     var column: Int
     """The position of the column to reduce, in the node's input."""
@@ -2361,6 +2373,15 @@ struct GroupAgg(Copyable, Movable, Writable):
 
     var name: String
     """The name the output column gets."""
+
+    var op: Optional[BinaryOp]
+    """The operation applied to the column before reducing it, if any."""
+
+    var constant: Value
+    """The other operand of that operation. Read only when `op` is set."""
+
+    var value_on_left: Bool
+    """True for `5 - x` rather than `x - 5`. Read only when `op` is set."""
 
     def __init__(out self, column: Int, kind: AggKind, name: String):
         """Constructs one output column.
@@ -2373,6 +2394,37 @@ struct GroupAgg(Copyable, Movable, Writable):
         self.column = column
         self.kind = kind
         self.name = name
+        self.op = None
+        # Nothing reads this while `op` is empty, so it is the value that says
+        # so rather than a second optional wrapped around the first.
+        self.constant = Value(null=LogicalType.NULL)
+        self.value_on_left = False
+
+    def __init__(
+        out self,
+        column: Int,
+        kind: AggKind,
+        name: String,
+        op: BinaryOp,
+        var constant: Value,
+        value_on_left: Bool = False,
+    ):
+        """Constructs one output column over an expression rather than a column.
+
+        Args:
+            column: The position of the column the operation reads.
+            kind: The reduction.
+            name: The output column's name.
+            op: The operation applied before the reduction.
+            constant: The operation's other operand. Consumed.
+            value_on_left: Whether the constant is the left operand.
+        """
+        self.column = column
+        self.kind = kind
+        self.name = name
+        self.op = op
+        self.constant = constant^
+        self.value_on_left = value_on_left
 
     def write_to(self, mut writer: Some[Writer]):
         """Writes the aggregate as it would be read back.
@@ -2380,7 +2432,13 @@ struct GroupAgg(Copyable, Movable, Writable):
         Args:
             writer: The sink.
         """
-        writer.write(self.kind, "(", self.column, ") as ", self.name)
+        writer.write(self.kind, "(", self.column)
+        if self.op:
+            if self.value_on_left:
+                writer.write(" on the right of ", self.op.value())
+            else:
+                writer.write(" ", self.op.value(), " a constant")
+        writer.write(") as ", self.name)
 
 
 def _folds(kind: AggKind) -> Bool:
@@ -2761,6 +2819,16 @@ struct Group(Movable):
                     "group: "
                     + String(kind)
                     + " reads two columns and a reduction here names one"
+                )
+            if self.aggs[a].op:
+                # Only `Reduce` folds an operation into the reduction, because
+                # only `Reduce` reads every row of the column it reduces. Here
+                # the rows are scattered across groups and the operation would
+                # have to move with them, which is what a `Compute` in front of
+                # this node already does.
+                raise Error(
+                    "group: a reduction here cannot carry an operation, the"
+                    " column has to be computed first"
                 )
             var source = self.input[at].dtype
             if source.is_variable_width() and (
@@ -3260,6 +3328,17 @@ struct Reduce(Movable):
     is whatever the same reduction answers over a column of no rows, which is a
     zero for a count and a null for a minimum and a maximum, and it is read off
     the kernel rather than written out here so that the two cannot drift.
+
+    An aggregate here may carry an operation against a constant and reduce what
+    that produces rather than the column itself. The one that made it worth
+    doing is ClickBench q29, ninety sums over one column under ninety different
+    constants, which as ninety `Compute` nodes is ninety columns of the chunk
+    alive at once and costs ninety times the column being read. Folded in, each
+    one is computed, reduced and dropped before the next is built, so at any
+    moment the chunk holds what arrived and one more column. At ten million
+    rows in one chunk that is four and a half gigabytes of difference, and the
+    fused route is also the faster of the two by a wide margin once the
+    materializing one starts paging.
     """
 
     var aggs: List[GroupAgg]
@@ -3277,6 +3356,16 @@ struct Reduce(Movable):
 
     var _source: List[Int]
     """Per state slot, the input column it reduces."""
+
+    var _shift: List[Int]
+    """Per state slot, the entry of `_shifts` that transforms its column before
+    the reduction reads it, or minus one for a slot that reads the column as it
+    arrived."""
+
+    var _shifts: List[GroupAgg]
+    """The aggregates that carry an operation, kept for their operand. An
+    aggregate rather than a tuple of its own because that is already what holds
+    the three fields together and what `bind` was handed."""
 
     var _produce: List[AggKind]
     """Per state slot, the reduction run over a chunk."""
@@ -3296,6 +3385,9 @@ struct Reduce(Movable):
 
     var _kept: List[Int]
     """Per held slot, the input column it holds."""
+
+    var _kept_shift: List[Int]
+    """Per held slot, its entry in `_shifts`, or minus one."""
 
     var _late: List[AggKind]
     """Per held slot, the reduction to run over the whole column at the end."""
@@ -3317,12 +3409,15 @@ struct Reduce(Movable):
         self.output = Schema()
         self.state = List[AnyArray]()
         self._source = List[Int]()
+        self._shift = List[Int]()
+        self._shifts = List[GroupAgg]()
         self._produce = List[AggKind]()
         self._merge = List[AggKind]()
         self._at = List[Int]()
         self._holds = List[Bool]()
         self.held = List[ChunkedArray]()
         self._kept = List[Int]()
+        self._kept_shift = List[Int]()
         self._late = List[AggKind]()
         self.started = False
         self.ran = False
@@ -3366,7 +3461,24 @@ struct Reduce(Movable):
                     + String(kind)
                     + " reads two columns and a reduction here names one"
                 )
+            # An aggregate over an expression reduces what the operation
+            # produces, not what the column holds, and the promotion is worked
+            # out here for the reason `Compute.bind` works it out there: this
+            # declares the dtype of a call that has not run yet, and a rule
+            # applied in one place and not the other is a schema that does not
+            # describe the data. Both go through `resolve_constant` and
+            # `binary_type`, so the two cannot drift.
+            var shift = -1
             var source = self.input[at].dtype
+            if self.aggs[a].op:
+                var op = self.aggs[a].op.value()
+                var k = resolve_constant(source, self.aggs[a].constant, op).type
+                var on_left = self.aggs[a].value_on_left
+                var left = source if not on_left else k
+                var right = k if not on_left else source
+                source = binary_type(op, left, right)
+                shift = len(self._shifts)
+                self._shifts.append(self.aggs[a].copy())
             if source.is_variable_width() and (
                 kind == AggKind.SUM or kind == AggKind.MEAN
             ):
@@ -3388,6 +3500,7 @@ struct Reduce(Movable):
                 self._holds.append(True)
                 self._at.append(len(self._kept))
                 self._kept.append(at)
+                self._kept_shift.append(shift)
                 self._late.append(kind)
                 self.held.append(ChunkedArray(source))
                 continue
@@ -3396,13 +3509,16 @@ struct Reduce(Movable):
             self._at.append(len(self._source))
             if kind == AggKind.MEAN:
                 self._source.append(at)
+                self._shift.append(shift)
                 self._produce.append(AggKind.SUM)
                 self._merge.append(AggKind.SUM)
                 self._source.append(at)
+                self._shift.append(shift)
                 self._produce.append(AggKind.COUNT)
                 self._merge.append(AggKind.SUM)
             else:
                 self._source.append(at)
+                self._shift.append(shift)
                 self._produce.append(kind)
                 self._merge.append(_merge_kind(kind))
 
@@ -3466,9 +3582,41 @@ struct Reduce(Movable):
         var columns = chunk^.into_columns()
         var made = List[AnyArray](capacity=len(self._source) + len(self._kept))
         for s in range(len(self._source)):
-            made.append(reduce_any(columns[self._source[s]], self._produce[s]))
+            if self._shift[s] < 0:
+                made.append(
+                    reduce_any(columns[self._source[s]], self._produce[s])
+                )
+                continue
+            # Computed, reduced and dropped inside the one iteration, which is
+            # the whole point of folding the operation in here. The `Compute`
+            # nodes this replaces each left their column on the chunk until the
+            # reduction above them had read all of them, so ninety of them meant
+            # ninety columns of the chunk resident at once. Here it is one.
+            ref it = self._shifts[self._shift[s]]
+            var made_here = binary_value_any(
+                columns[self._source[s]],
+                it.constant,
+                it.op.value(),
+                it.value_on_left,
+            )
+            made.append(reduce_any(made_here, self._produce[s]))
         for k in range(len(self._kept)):
-            made.append(AnyArray(copy=columns[self._kept[k]]))
+            if self._kept_shift[k] < 0:
+                made.append(AnyArray(copy=columns[self._kept[k]]))
+                continue
+            # A held slot keeps the whole column whatever happens, so there is
+            # no footprint to save here and the operation is applied for the
+            # one reason that matters, which is that the answer has to be the
+            # same as the `Compute` route's.
+            ref it = self._shifts[self._kept_shift[k]]
+            made.append(
+                binary_value_any(
+                    columns[self._kept[k]],
+                    it.constant,
+                    it.op.value(),
+                    it.value_on_left,
+                )
+            )
         # Unchecked, because the held columns are the chunk's height and the
         # partial answers are one row, and nothing but `absorb` reads this.
         return Chunk(made^, 1)

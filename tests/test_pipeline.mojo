@@ -1201,6 +1201,43 @@ def test_a_held_column_survives_the_parallel_route() raises:
     assert_equal(one_int(out, "distinct"), Int64(kept), "all of them differ")
 
 
+def test_a_reduction_carrying_an_operation_runs_it_a_chunk_at_a_time() raises:
+    """The node level of what the lowering builds for a whole frame reduction
+    over a column and a constant. The frame arrives in chunks of two, three and
+    one, and the operation has to run on each of them, so an answer that is
+    right here is an answer the chunking did not change."""
+    var aggs = List[GroupAgg]()
+    aggs.append(
+        GroupAgg(0, AggKind.SUM, "total", BinaryOp.ADD, Value(Int64(10)))
+    )
+    aggs.append(GroupAgg(0, AggKind.MAX, "high", BinaryOp.MUL, Value(Int64(2))))
+    aggs.append(
+        GroupAgg(0, AggKind.MIN, "low", BinaryOp.SUB, Value(Int64(10)), True)
+    )
+    var pipeline = Pipeline(cut_frame())
+    pipeline.add(Node(Reduce(aggs^)))
+    var out = pipeline^.run()
+    assert_equal(len(out), 1, "one row")
+    assert_equal(one_int(out, "total"), 81, "one through six and six tens")
+    assert_equal(one_int(out, "high"), 12, "twice the largest")
+    assert_equal(one_int(out, "low"), 4, "ten less the largest")
+
+
+def test_a_group_by_refuses_a_reduction_carrying_an_operation() raises:
+    """Only a reduction folds one in, because only a reduction reads the whole
+    column. A group by scatters its rows and the operation would have to go with
+    them, which is the `Compute` the lowering puts in front of it."""
+    var aggs = List[GroupAgg]()
+    aggs.append(
+        GroupAgg(0, AggKind.SUM, "total", BinaryOp.ADD, Value(Int64(1)))
+    )
+    var keys = List[Int]()
+    keys.append(1)
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="cannot carry an operation"):
+        pipeline.add(Node(Group(keys^, aggs^)))
+
+
 def test_a_reduction_that_reads_two_columns_is_refused() raises:
     """A correlation wants a pair and a `GroupAgg` names one column, so there
     is nothing for the second one to be."""

@@ -4872,6 +4872,67 @@ def bench_pipeline(mut harness: Harness) raises:
 
     harness.record("exec/pipeline_reduce_only", "rows", rows, reduce_alone)
 
+    # ClickBench q29 in miniature: one column summed under ninety different
+    # constants. Fused, the reduction builds one shifted column at a time and
+    # drops it before it builds the next, so the chunk never holds more than
+    # the column it read plus one. Materialized, a `Compute` per sum puts all
+    # ninety in the chunk at once and the chunk costs ninety times the column.
+    #
+    # Both read the one chunk frame rather than the chunked one, because a
+    # chunk of a hundred and twenty eight thousand rows is a megabyte and
+    # ninety of those is ninety megabytes, which is not a number anybody
+    # notices. A frame that arrived in one piece is where the multiplier lands
+    # on the whole column, and a frame read out of one parquet row group is a
+    # frame that arrived in one piece. The fused row is slower, and the comment
+    # above `reduce_ninety_materialized` says what that buys.
+    def reduce_ninety_fused() raises {imm whole}:
+        keep(whole.rows)
+        var aggs = List[GroupAgg]()
+        for i in range(90):
+            aggs.append(
+                GroupAgg(
+                    1,
+                    AggKind.SUM,
+                    String("s", i),
+                    BinaryOp.ADD,
+                    Value(Int64(i)),
+                )
+            )
+        var pipeline = Pipeline(DataFrame(copy=whole))
+        pipeline.add(Node(Reduce(aggs^)))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record(
+        "exec/reduce_ninety_fused", "rows", rows, reduce_ninety_fused
+    )
+
+    # Ninety live columns against one, which at ten million rows is seven
+    # gigabytes against eighty megabytes. That is what the fused row spends its
+    # time on: the same ninety operations and the same ninety reductions, done
+    # one at a time against a fresh allocation each time rather than against
+    # ninety that were allocated once and left alive. The trade is deliberate,
+    # because a query that does not fit in memory has no running time at all.
+    def reduce_ninety_materialized() raises {imm whole}:
+        keep(whole.rows)
+        var aggs = List[GroupAgg]()
+        var pipeline = Pipeline(DataFrame(copy=whole))
+        for i in range(90):
+            pipeline.add(
+                Node(Compute(1, Value(Int64(i)), BinaryOp.ADD, String("c", i)))
+            )
+            aggs.append(GroupAgg(2 + i, AggKind.SUM, String("s", i)))
+        pipeline.add(Node(Reduce(aggs^)))
+        var out = pipeline^.run()
+        keep(out.rows)
+
+    harness.record(
+        "exec/reduce_ninety_materialized",
+        "rows",
+        rows,
+        reduce_ninety_materialized,
+    )
+
     # The copy is here because every pipeline row above pays one when it builds
     # its source, and a reference that did not pay it would be measuring the
     # copy rather than the reduction.

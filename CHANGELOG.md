@@ -41,6 +41,26 @@ The qualified one turned out to need nothing new. Every column a star stands for
 The modifiers apply in the order the grammar forces them to be written, exclude then replace then rename. A bare name applies to every column that has it, so `EXCLUDE (b)` over a join where both sides have a `b` drops both, and `REPLACE` puts its expression where the column stood and keeps the column's name. Every rule and every refusal comes from `star.mojo`, which is what the binder already used, so the two stages that expand a star do not disagree about what the query said. That includes the two places DuckDB is wrong, a `REPLACE` matching twice losing a column and a duplicate `RENAME` entry being blamed on the `EXCLUDE` list, both reproduced on the argument that a query which binds here and fails there is worse than one that is wrong the same way in both.
 
 A modifier is never qualified. A dotted name in one is refused while the AST is built, since the node has nowhere to put the two halves, so nothing at this stage has a qualifier to match.
+### Changed: a whole frame reduction over a column and a constant runs without building the column
+
+ClickBench q29 is `SELECT SUM(ResolutionWidth), SUM(ResolutionWidth + 1), ... SUM(ResolutionWidth + 89) FROM hits`, which is ninety sums over one column. Lowering gave each of them a `Compute` in front of the reduction, so the chunk carried ninety full columns at once and cost ninety times what the column it read cost. At ten million rows that is seven gigabytes to answer a query that needs to look at eighty megabytes.
+
+A `GroupAgg` can now carry the operation and its constant operand, and `_lower_aggregate` puts it there instead of adding a `Compute` when the aggregation has no keys and the fold is over a column and a literal. `Reduce` computes one shifted column, reduces it, and drops it before it builds the next, so at any moment the chunk holds the column it read and one more. The dtype comes from `resolve_constant` and `binary_type`, which is what `Compute.bind` calls, and the values come from `binary_value_any`, which is what `Compute.process` calls, so neither the schema nor the answer can drift from what the other route would have given.
+
+A group by does not fold it and is refused if it is handed one. Its rows scatter into groups and the operation would have to scatter with them, which is what the `Compute` in front of it already does.
+
+Ninety sums over one int64 column arriving as one chunk, on ten cores:
+
+| rows | route | median | peak resident set over a run that reduces nothing |
+| --- | --- | --- | --- |
+| 1M | fused | 17.99 ms | 0 MB |
+| 1M | ninety computes | 23.83 ms | 569 MB |
+| 10M | fused | 298.71 ms | 0.5 MB |
+| 10M | ninety computes | 4.14 s | 4419 MB |
+
+The arithmetic here is degenerate, since the sum of a column plus a constant is the sum of the column plus the constant times the row count, and a lowering that noticed could answer all ninety from one sum. That is not done and there is a note in `_lower_aggregate` saying not to add it. The query exists to measure whether an engine fuses an expression into a reduction, and answering it with algebra measures nothing.
+
+Part of #482.
 
 ### Changed: a conditional over text is built on every core instead of one
 

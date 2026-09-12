@@ -315,6 +315,43 @@ def test_an_aggregate_over_the_whole_table_is_one_row() raises:
     same(answer("SELECT SUM(qty) AS total FROM sales", "total"), [159], "total")
 
 
+def test_the_shape_of_q29_sums_one_column_under_many_constants() raises:
+    # ClickBench q29 with three constants instead of ninety and a smaller
+    # column. The lowering folds each operation into its own reduction rather
+    # than putting a compute in front of it, so the answers are what matters
+    # here: a wrong side or a dropped constant would still give three numbers.
+    var out = run(
+        (
+            "SELECT SUM(qty) AS a, SUM(qty + 1) AS b, SUM(qty + 2) AS c,"
+            " SUM(qty * 2) AS d, SUM(100 - qty) AS e FROM sales"
+        ),
+        session(),
+    )
+    assert_equal(len(out), 1, "one row")
+    same(read_back(out, "a"), [159], "the column itself")
+    same(read_back(out, "b"), [169], "and ten ones")
+    same(read_back(out, "c"), [179], "and ten twos")
+    same(read_back(out, "d"), [318], "twice each")
+    same(read_back(out, "e"), [841], "a thousand less the total")
+
+
+def test_q29_under_a_group_by_answers_the_same_thing() raises:
+    # The same expressions with a key on them, which takes the other route
+    # through the lowering and has to come out agreeing with it. Every shop's
+    # rows are counted, so the constant lands once per row on both sides.
+    var out = run(
+        (
+            "SELECT shop, SUM(qty) AS a, SUM(qty + 1) AS b, SUM(100 - qty)"
+            " AS e FROM sales GROUP BY shop ORDER BY shop"
+        ),
+        session(),
+    )
+    same(read_back(out, "shop"), [1, 2], "shop")
+    same(read_back(out, "a"), [75, 84], "the column itself")
+    same(read_back(out, "b"), [80, 89], "and one per row")
+    same(read_back(out, "e"), [425, 416], "a hundred per row less the total")
+
+
 def test_a_group_by_folds_the_rows_into_groups() raises:
     # Ordered by the key, because which group comes out first is the hash
     # table's business and not the query's.

@@ -894,6 +894,157 @@ def test_a_reduction_over_an_expression_folds_the_expression() raises:
     assert_equal(got[0], 668, "the sum of the products")
 
 
+def test_a_whole_frame_reduction_over_a_constant_folds_it_into_the_fold() raises:
+    # The count is the point here, against the file's usual rule. A `Compute`
+    # in front of the reduction would hold a whole column of its own for as
+    # long as the chunk lives, and a query with ninety of these would hold
+    # ninety, so whether one is added is the thing the change was made about.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var wider = plan.exprs.binary(
+        BinaryOp.ADD, qty, plan.exprs.literal(Value(Int64(1)))
+    )
+    var total = plan.exprs.aggregate(AggKind.SUM, wider)
+    var root = plan.aggregate(scan, List[Int](), [total], ["total"])
+    _ = bind(plan, root, schemas())
+    var pipe = lower(plan, root, one_frame())
+
+    assert_equal(len(pipe.operators), 1, "the reduction, and no add in front")
+
+    var out = pipe^.run()
+    var got = read_back(out, "total")
+    assert_equal(got[0], 169, "the sum of ten quantities and ten ones")
+
+
+def test_a_folded_constant_may_sit_on_either_side() raises:
+    # Subtraction is the one that tells the two apart, and getting the side
+    # wrong here would give the negation of the right answer, which is exactly
+    # the kind of wrong that reads as right.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var left = plan.exprs.binary(
+        BinaryOp.SUB, plan.exprs.literal(Value(Int64(100))), qty
+    )
+    var right = plan.exprs.binary(
+        BinaryOp.SUB, qty, plan.exprs.literal(Value(Int64(100)))
+    )
+    var root = plan.aggregate(
+        scan,
+        List[Int](),
+        [
+            plan.exprs.aggregate(AggKind.SUM, left),
+            plan.exprs.aggregate(AggKind.SUM, right),
+        ],
+        ["down", "up"],
+    )
+    var out = run(plan, root)
+
+    assert_equal(read_back(out, "down")[0], 841, "a thousand less the sum")
+    assert_equal(read_back(out, "up")[0], -841, "the sum less a thousand")
+
+
+def test_a_folded_operation_answers_what_the_long_way_answers() raises:
+    # The same query lowered both ways. The fused one reads the column and the
+    # operand off the aggregate, the other one reads the column a `Compute`
+    # wrote, and if the two ever disagree one of the two paths has a bug in it.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var over = plan.exprs.binary(
+        BinaryOp.MUL, qty, plan.exprs.literal(Value(Int64(3)))
+    )
+    var root = plan.aggregate(
+        scan,
+        List[Int](),
+        [
+            plan.exprs.aggregate(AggKind.SUM, over),
+            plan.exprs.aggregate(AggKind.MIN, over),
+            plan.exprs.aggregate(AggKind.MAX, over),
+            plan.exprs.aggregate(AggKind.MEAN, over),
+            plan.exprs.aggregate(AggKind.COUNT, over),
+        ],
+        ["total", "least", "most", "middle", "rows"],
+    )
+    var out = run(plan, root)
+
+    assert_equal(read_back(out, "total")[0], 477, "three times the sum")
+    assert_equal(read_back(out, "least")[0], 3, "three times the smallest")
+    assert_equal(read_back(out, "most")[0], 120, "three times the largest")
+    assert_equal(decimals(out, "middle")[0], 47.7, "three times the mean")
+    assert_equal(read_back(out, "rows")[0], 10, "every row is still counted")
+
+
+def test_a_folded_operation_reaches_a_reduction_that_holds_its_column() raises:
+    # A distinct count does not fold, so its column is kept whole and the
+    # operation has to run on the way in rather than on the way through. The
+    # two halves of `Reduce` take different routes to it and both are wrong in
+    # their own way if only one of them was wired up.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var tens = plan.exprs.binary(
+        BinaryOp.FLOORDIV, qty, plan.exprs.literal(Value(Int64(10)))
+    )
+    var root = plan.aggregate(
+        scan, List[Int](), [plan.exprs.aggregate(AggKind.NUNIQUE, tens)], ["n"]
+    )
+    var out = run(plan, root)
+
+    # The tens are 0, 2, 0, 4, 1, 0, 2, 0, 3 and 1, so five of them are distinct.
+    assert_equal(read_back(out, "n")[0], 5, "distinct tens")
+
+
+def test_a_folded_operation_promotes_the_type_the_way_a_compute_does() raises:
+    # The declared dtype comes from the same two calls `Compute.bind` makes, so
+    # an integer column against a decimal constant sums as a decimal here for
+    # the same reason it would have there.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var half = plan.exprs.binary(
+        BinaryOp.MUL, qty, plan.exprs.literal(Value(Float64(0.5)))
+    )
+    var root = plan.aggregate(
+        scan, List[Int](), [plan.exprs.aggregate(AggKind.SUM, half)], ["half"]
+    )
+    var out = run(plan, root)
+
+    assert_equal(
+        out.schema[0].dtype, LogicalType.FLOAT64, "the constant widened it"
+    )
+    assert_equal(decimals(out, "half")[0], 79.5, "half of the total")
+
+
+def test_a_group_by_over_a_constant_still_computes_the_column() raises:
+    # A group by cannot fold the operation in, because its rows scatter into
+    # groups and the operation would have to scatter with them. It gets the
+    # `Compute` it always got, and the answer is the same either way.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var price = plan.exprs.column("price")
+    var wider = plan.exprs.binary(
+        BinaryOp.ADD, qty, plan.exprs.literal(Value(Int64(1)))
+    )
+    var root = plan.aggregate(
+        scan,
+        [price],
+        [plan.exprs.aggregate(AggKind.SUM, wider)],
+        ["price", "total"],
+    )
+    _ = bind(plan, root, schemas())
+    var pipe = lower(plan, root, one_frame())
+
+    assert_equal(len(pipe.operators), 2, "the add and the group by")
+
+    var out = pipe^.run()
+    assert_equal(len(out), 10, "one row per price")
+    var totals = read_back(out, "total")
+    assert_equal(totals[0], 6, "the first quantity and one")
+
+
 def test_a_group_by_keeps_the_key_and_names_the_fold() raises:
     var plan = Plan()
     var scan = plan.scan("sales", List[String](), 0)

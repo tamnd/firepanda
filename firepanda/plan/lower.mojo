@@ -887,6 +887,25 @@ def _lower_aggregate(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     aggregate columns and nothing else, so whatever intermediates the keys and
     the aggregated expressions needed are gone by the time a row comes out.
 
+    A whole frame reduction over a column and a constant folds the operation
+    into the reduction rather than putting a `Compute` in front of it. A query
+    that sums the same column ninety times under ninety different constants is
+    ninety `Compute` nodes otherwise, and every one of them holds a full column
+    for as long as the chunk is alive, so the chunk costs ninety times what the
+    column it reads costs. Folded, `Reduce` builds one of them at a time and
+    drops it before it builds the next, and the chunk costs one column and
+    change. Only a reduction folds this. A group by cannot, because its rows
+    scatter and the operation would have to move with them, which is what the
+    `Compute` in front of it already does.
+
+    It is worth saying what this does not do, because the shortcut is sitting
+    right there. The sum of a column plus a constant is the sum of the column
+    plus the constant times the row count, so a clever enough lowering answers
+    all ninety from one sum and never touches the data again. Do not add that.
+    The query exists to measure whether an engine fuses an expression into a
+    reduction, and an engine that answers it with algebra has measured nothing
+    and has published a number it did not earn. The operation runs on every row.
+
     Args:
         plan: The plan.
         at: The aggregation node.
@@ -937,13 +956,44 @@ def _lower_aggregate(plan: Plan, at: Int, mut pipe: Pipeline) raises:
                 )
             )
         var over = plan.exprs.nodes[held[i]].children[0]
+        var kind = AggKind(UInt8(plan.exprs.nodes[held[i]].op))
+
+        if count == 0 and plan.exprs.nodes[over].kind == ExprKind.BINARY:
+            var op = BinaryOp(UInt8(plan.exprs.nodes[over].op))
+            var left = plan.exprs.nodes[over].children[0]
+            var right = plan.exprs.nodes[over].children[1]
+            var left_is_value = plan.exprs.nodes[left].kind == ExprKind.LITERAL
+            var right_is_value = (
+                plan.exprs.nodes[right].kind == ExprKind.LITERAL
+            )
+            # Both constant is an expression simplify refused to fold, and
+            # neither constant is a second column, and neither of those is the
+            # shape this folds. They go the long way and get the error or the
+            # `Compute` pair they would have got before.
+            if left_is_value != right_is_value:
+                var side = right if left_is_value else left
+                var value = left if left_is_value else right
+                var at = _lower_expr(
+                    plan.exprs, side, pipe, base, names[i], memo, reuse=True
+                )
+                aggs.append(
+                    GroupAgg(
+                        at,
+                        kind,
+                        names[i],
+                        op,
+                        Value(copy=plan.exprs.nodes[value].value),
+                        value_on_left=left_is_value,
+                    )
+                )
+                continue
+
         # The fold names its own output, so unlike a projection this one does
         # not own the name of the column it reads, and two folds over the same
         # expression can read the same column.
         var made = _lower_expr(
             plan.exprs, over, pipe, base, names[i], memo, reuse=True
         )
-        var kind = AggKind(UInt8(plan.exprs.nodes[held[i]].op))
         aggs.append(GroupAgg(made, kind, names[i]))
 
     if count == 0:
