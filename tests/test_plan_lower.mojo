@@ -1382,26 +1382,51 @@ def test_a_distinct_may_name_the_columns_it_decides_on() raises:
     same(read_back(out, "ones"), [5, 0, 3, 2, 8, 1], "one of each, first seen")
 
 
-def test_a_distinct_on_part_of_the_row_is_refused_by_name() raises:
+def test_a_distinct_on_part_of_the_row_keeps_the_first_of_each() raises:
+    # The last digit of each quantity repeats where the quantity does not, so
+    # the rows that survive are chosen by a column and carry another one out
+    # with them, which is the whole difference from the distinct above.
     var plan = Plan()
     var scan = plan.scan("sales", List[String](), 0)
-    var root = plan.distinct(scan, [plan.exprs.column("qty")])
-    _ = bind(plan, root, schemas())
-
-    with assert_raises(contains="decides on 1 of the row's 2 columns"):
-        _ = lower(plan, root, one_frame())
-
-
-def test_a_distinct_that_reorders_the_row_is_refused_by_name() raises:
-    var plan = Plan()
-    var scan = plan.scan("sales", List[String](), 0)
-    var root = plan.distinct(
-        scan, [plan.exprs.column("price"), plan.exprs.column("qty")]
+    var ones = plan.exprs.binary(
+        BinaryOp.MOD,
+        plan.exprs.column("qty"),
+        plan.exprs.literal(Value(Int64(10))),
     )
-    _ = bind(plan, root, schemas())
+    var narrowed = plan.project(
+        scan, [ones, plan.exprs.column("qty")], [String("ones"), String("qty")]
+    )
+    var root = plan.distinct(narrowed, [plan.exprs.column("ones")])
+    var out = run(plan, root)
+    same(read_back(out, "ones"), [5, 0, 3, 2, 8, 1], "one of each, first seen")
+    same(read_back(out, "qty"), [5, 20, 3, 12, 8, 1], "the row it came from")
 
-    with assert_raises(contains="in another order"):
-        _ = lower(plan, root, one_frame())
+
+def test_a_distinct_that_reorders_the_row_keeps_the_first_of_each() raises:
+    # Naming every column but in the other order is still the whole row, and
+    # the answer has to come back in the order the plan numbered the columns
+    # rather than in the order the keys were written.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var ones = plan.exprs.binary(
+        BinaryOp.MOD,
+        plan.exprs.column("qty"),
+        plan.exprs.literal(Value(Int64(10))),
+    )
+    var evens = plan.exprs.binary(
+        BinaryOp.MOD,
+        plan.exprs.column("price"),
+        plan.exprs.literal(Value(Int64(2))),
+    )
+    var narrowed = plan.project(
+        scan, [ones, evens], [String("ones"), String("evens")]
+    )
+    var root = plan.distinct(
+        narrowed, [plan.exprs.column("evens"), plan.exprs.column("ones")]
+    )
+    var out = run(plan, root)
+    same(read_back(out, "ones"), [5, 0, 3, 0, 2, 8, 5, 1], "the first column")
+    same(read_back(out, "evens"), [0, 0, 1, 1, 1, 1, 1, 0], "the second")
 
 
 def test_a_computed_distinct_key_is_refused_by_name() raises:
@@ -2208,15 +2233,18 @@ def test_a_build_side_that_cannot_be_lowered_says_what_it_was() raises:
     var plan = Plan()
     var left = plan.scan("sales", List[String](), 0)
     var right = plan.scan("tiers", List[String](), 1)
+    var computed = plan.exprs.binary(
+        BinaryOp.ADD, plan.exprs.column("band"), plan.exprs.column("rate")
+    )
     var root = plan.join(
         left,
-        plan.distinct(right, [plan.exprs.column("band")]),
+        plan.distinct(right, [computed]),
         [plan.exprs.column("qty")],
         [plan.exprs.column("band")],
         JoinKind.INNER,
     )
     _ = bind(plan, root, two_schemas())
-    with assert_raises(contains="decides on 1 of the row's 2 columns"):
+    with assert_raises(contains="decides on a binary expression"):
         _ = lower(plan, root, two_frames())
 
 

@@ -3839,6 +3839,183 @@ struct Reduce(Movable):
         return Chunk(out^)
 
 
+struct Unique(Movable):
+    """Keeps the first whole row of each group a key list decides.
+
+    This is `DISTINCT ON` and it is `drop_duplicates` with a subset, which are
+    the same operation under two names. `Group` is what a distinct over the
+    whole row lowers to, because there every row of a group is the same row and
+    which one survives cannot be seen. Here it can: the columns that are not
+    keys differ between the rows of a group, and the one that comes out is the
+    first the input handed over.
+
+    A breaker, and a breaker that holds its input rather than a summary of it,
+    which is what makes it the more expensive of the two distincts and is why
+    the whole row case does not come here. The first row of a group is not known
+    until the group is known, and a group is not known until the last chunk has
+    gone past.
+
+    A null in a key is a value here, not a missing one, so two rows whose key is
+    null are the same row. That is the rule pandas and Polars both have for
+    dropping duplicates and it is the rule SQL has for `DISTINCT`, and it is the
+    opposite of a group by's, which drops a null key because its answer is one
+    row per key and a null is not one.
+
+    The keys are positions rather than names, because a frame that came out of a
+    join can hold two columns with the same name and a position is the only
+    thing that says which is meant.
+    """
+
+    var keys: List[Int]
+    """The positions of the columns that decide whether two rows are the same.
+    """
+
+    var input: Schema
+    """The schema of the chunks coming in, filled in by `Pipeline.add`."""
+
+    var held: List[ChunkedArray]
+    """The chunks seen so far, one column per position."""
+
+    var output: List[AnyArray]
+    """The result, in chunks, in reverse order so `finish` can pop."""
+
+    var ran: Bool
+    """Whether the duplicates have been dropped."""
+
+    var width: Int
+    """The number of columns in the output, which is the input's."""
+
+    def __init__(out self, var keys: List[Int]) raises:
+        """Constructs a distinct over part of the row.
+
+        Args:
+            keys: The positions that decide whether two rows are the same. At
+                least one, no repeats. Consumed.
+
+        Raises:
+            Error: If no key was given, since a distinct on nothing at all is
+                one row and is not something a query can write.
+        """
+        if len(keys) == 0:
+            raise Error(
+                "unique: a distinct on no column at all would answer one row"
+                " whatever went in, and a distinct over the whole row is the"
+                " group by that SELECT DISTINCT lowers to"
+            )
+        self.keys = keys^
+        self.input = Schema()
+        self.held = List[ChunkedArray]()
+        self.output = List[AnyArray]()
+        self.ran = False
+        self.width = 0
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Checks the keys against the input and reports it back unchanged.
+
+        Args:
+            input: The schema of the chunks that will arrive. Consumed.
+
+        Returns:
+            The same schema, since every column comes back and none moves.
+
+        Raises:
+            Error: If a key is out of range or written twice.
+        """
+        for i in range(len(self.keys)):
+            if self.keys[i] < 0 or self.keys[i] >= len(input):
+                raise Error(
+                    "unique: column "
+                    + String(self.keys[i])
+                    + " is outside a schema of "
+                    + String(len(input))
+                    + " columns"
+                )
+            for j in range(i):
+                if self.keys[j] == self.keys[i]:
+                    raise Error(
+                        "unique: column "
+                        + String(self.keys[i])
+                        + " was given twice"
+                    )
+        self.input = input^
+        for i in range(len(self.input)):
+            self.held.append(ChunkedArray(self.input[i].dtype))
+        return Schema(copy=self.input)
+
+    def update_state(self) -> NodeStatus:
+        """Reports whether the collected input has been turned into output.
+
+        Returns:
+            NEED_MORE_INPUT until `finish` has run, then HAVE_OUTPUT while
+            chunks remain and FINISHED after that.
+        """
+        if not self.ran:
+            return NodeStatus.NEED_MORE_INPUT
+        if len(self.output) > 0:
+            return NodeStatus.HAVE_OUTPUT
+        return NodeStatus.FINISHED
+
+    def process(mut self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Keeps the chunk and emits nothing.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            None, always.
+
+        Raises:
+            Error: If the chunk is not as wide as the input schema.
+        """
+        if chunk.width() != len(self.held):
+            raise Error(
+                "unique: chunk has "
+                + String(chunk.width())
+                + " columns and the input schema has "
+                + String(len(self.held))
+            )
+        var backwards = chunk^.into_columns()
+        var forwards = List[AnyArray](capacity=len(backwards))
+        while len(backwards) > 0:
+            forwards.append(backwards.pop())
+        for i in range(len(self.held)):
+            self.held[i].append(forwards.pop())
+        return None
+
+    def finish(mut self) raises -> Optional[Chunk]:
+        """Drops the duplicates the first time, then hands the rows back.
+
+        Returns:
+            One chunk of the result per call, in order, and None when there are
+            none left.
+
+        Raises:
+            Error: If a key's dtype has no physical layout.
+        """
+        if not self.ran:
+            self.ran = True
+            var flipped = List[ChunkedArray](capacity=len(self.held))
+            while len(self.held) > 0:
+                flipped.append(self.held.pop())
+            # Stacked rather than left in chunks, because the grouping this
+            # leans on reads its key columns as one array each. That is a copy
+            # of every column, and it is the cost of holding the whole input
+            # that the docstring above says this operator has.
+            var columns = List[AnyArray](capacity=len(flipped))
+            while len(flipped) > 0:
+                columns.append(flipped.pop().combine())
+            var frame = DataFrame(Schema(copy=self.input), columns^)
+            var result = frame^.drop_duplicates_at(self.keys)
+            self.width = result.width()
+            self.output = _stripe(result^)
+        if len(self.output) == 0:
+            return None
+        var row = List[AnyArray](capacity=self.width)
+        for _ in range(self.width):
+            row.append(self.output.pop())
+        return Chunk(row^)
+
+
 struct Materialize(Movable):
     """Collects every chunk, calls a whole frame function, emits chunks again.
 
@@ -4081,6 +4258,7 @@ comptime Node = Variant[
     Window,
     Group,
     Reduce,
+    Unique,
     Materialize,
 ]
 """One operator, as a value the pipeline can hold in a list.
@@ -4130,6 +4308,8 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
         return node[Sort].bind(input^)
     if node.isa[Window]():
         return node[Window].bind(input^)
+    if node.isa[Unique]():
+        return node[Unique].bind(input^)
     if node.isa[Project]():
         return _rename(
             node[Project].names,
@@ -4224,6 +4404,8 @@ def node_status(node: Node) -> NodeStatus:
         return node[Group].update_state()
     if node.isa[Reduce]():
         return node[Reduce].update_state()
+    if node.isa[Unique]():
+        return node[Unique].update_state()
     return NodeStatus.NEED_MORE_INPUT
 
 
@@ -4326,6 +4508,7 @@ def node_is_breaker(node: Node) -> Bool:
         or node.isa[Window]()
         or node.isa[Group]()
         or node.isa[Reduce]()
+        or node.isa[Unique]()
     )
 
 
@@ -4396,6 +4579,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Group].process(chunk^)
     if node.isa[Reduce]():
         return node[Reduce].process(chunk^)
+    if node.isa[Unique]():
+        return node[Unique].process(chunk^)
     return node[Materialize].process(chunk^)
 
 
@@ -4471,4 +4656,6 @@ def node_finish(mut node: Node) raises -> Optional[Chunk]:
         return node[Group].finish()
     if node.isa[Reduce]():
         return node[Reduce].finish()
+    if node.isa[Unique]():
+        return node[Unique].finish()
     return None

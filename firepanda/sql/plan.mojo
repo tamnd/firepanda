@@ -3135,18 +3135,27 @@ def _statement(
             )
         visible.bind(String(entry.key), entry.statement, entry.columns.copy())
 
-    var at = _combine(ast, top.a, catalog, plan, sources, scope, visible)
+    # A DISTINCT ON written on a single block is applied here rather than in the
+    # block, because the ORDER BY chooses which row of each group survives as
+    # well as ordering the answer, so the sort has to run underneath it.
+    var on = List[UInt32]()
+    if top.a != NO_NODE and ast.stmts[Int(top.a)].kind == STMT_QUERY:
+        on = ast.items(ast.stmts[Int(top.a)].b)
+
+    var at = _combine(
+        ast, top.a, catalog, plan, sources, scope, visible, len(on) != 0
+    )
 
     # The ORDER BY and the LIMIT written after a set operation apply to the
     # whole of it rather than to its last arm, which is why they are put on
     # here and not inside the block.
-    if top.b != NO_NODE:
+    if top.b != NO_NODE or len(on) != 0:
         var walk = _Walk()
         # The scope is the block's when there was one block, so `ORDER BY t.b`
         # names the same table the rest of the query named. A set operation
         # leaves it empty, because the tables were inside the arms and an ORDER
         # BY written after one sorts what the whole of it produced.
-        at = _modifiers(ast, top.b, plan, walk, scope, at)
+        at = _modifiers(ast, top.b, plan, walk, scope, at, on^)
     return at
 
 
@@ -3303,6 +3312,7 @@ def _combine(
     mut sources: List[Schema],
     mut scope: _Scope,
     ctes: _Bindings,
+    defer: Bool,
 ) raises -> Int:
     """Lowers one query body: a block, a `VALUES`, or a set operation over two.
 
@@ -3321,6 +3331,10 @@ def _combine(
             empty for a set operation and for a VALUES, since neither of those
             leaves a table in reach of an ORDER BY written after it.
         ctes: The CTE names in reach.
+        defer: Whether a `DISTINCT ON` written on a single block is left for the
+            caller to apply, which it is when an ORDER BY outside the block has
+            to run underneath it. An arm of a set operation is never deferred,
+            since nothing can be written between the arm and the operation.
 
     Returns:
         The node the body produces.
@@ -3336,9 +3350,13 @@ def _combine(
         # Each arm brings its own scope and neither survives the set operation,
         # so the arms get one apiece and the caller's stays empty.
         var arm = _Scope()
-        var left = _combine(ast, node.a, catalog, plan, sources, arm, ctes)
+        var left = _combine(
+            ast, node.a, catalog, plan, sources, arm, ctes, False
+        )
         arm = _Scope()
-        var right = _combine(ast, node.b, catalog, plan, sources, arm, ctes)
+        var right = _combine(
+            ast, node.b, catalog, plan, sources, arm, ctes, False
+        )
         if read[2]:
             var lined = _by_name(plan, left, right, sources)
             left = lined[0]
@@ -3346,7 +3364,7 @@ def _combine(
         return plan.setop([left, right], read[0], read[1])
     if node.kind == STMT_VALUES:
         return _values(ast, body, plan)
-    return _block(ast, body, catalog, plan, sources, scope, ctes)
+    return _block(ast, body, catalog, plan, sources, scope, ctes, defer)
 
 
 def _by_name(
@@ -4985,6 +5003,7 @@ def _block(
     mut sources: List[Schema],
     mut scope: _Scope,
     ctes: _Bindings,
+    defer: Bool,
 ) raises -> Int:
     """Lowers one `SELECT ... FROM ... WHERE ...` block.
 
@@ -5002,6 +5021,9 @@ def _block(
             ORDER BY written outside the block can qualify a name the same way
             the block's own clauses can.
         ctes: The CTE names in reach.
+        defer: Whether a `DISTINCT ON` here is left for the caller to apply,
+            which it is when an ORDER BY written outside the block has to run
+            underneath it.
 
     Returns:
         The node the block produces.
@@ -5015,12 +5037,6 @@ def _block(
             "firepanda lowers a SELECT block, a VALUES and a set operation over"
             " two so far, and a TABLE is a different node"
         )
-    if ast.length(query.b) != 0:
-        raise Error(
-            "firepanda does not lower DISTINCT ON yet, which is a distinct on a"
-            " key list under an order"
-        )
-
     var clauses = query.children
     if ast.length(ast.slot(clauses, CLAUSE_WINDOW)) != 0:
         raise Error(
@@ -5329,7 +5345,13 @@ def _block(
 
     at = plan.project(at, outputs^, names^)
 
-    if (query.a & SELECT_DISTINCT) != 0:
+    var picked = ast.items(query.b)
+    if len(picked) != 0:
+        # A DISTINCT ON sets the same flag a plain DISTINCT does, and it is the
+        # key list rather than the flag that says which of the two was written.
+        if not defer:
+            at = _modifiers(ast, NO_NODE, plan, walk, scope, at, picked^)
+    elif (query.a & SELECT_DISTINCT) != 0:
         at = plan.distinct(at, List[Int]())
 
     return at
@@ -5713,16 +5735,26 @@ def _modifiers(
     mut walk: _Walk,
     scope: _Scope,
     input: Int,
+    var on: List[UInt32],
 ) raises -> Int:
-    """Puts the `ORDER BY`, `LIMIT` and `OFFSET` on top of a plan.
+    """Puts the `DISTINCT ON`, `ORDER BY`, `LIMIT` and `OFFSET` on a plan.
+
+    The four stack in that order read from the bottom up: the sort runs first,
+    the distinct keeps the first row of each group the sort left it with, and
+    the limit counts what came out. That is the order DuckDB gives them, and it
+    is why a `DISTINCT ON` is put on here with the modifiers rather than inside
+    the block with the projection it was written next to. An ORDER BY chooses
+    which row of each group survives as well as ordering the answer.
 
     Args:
         ast: The arenas.
-        at: The `STMT_MODIFIERS`.
+        at: The `STMT_MODIFIERS`, or `NO_NODE` when there is only a distinct.
         plan: Where the lowered expressions go.
         walk: The aggregates found so far.
         scope: What the FROM put in reach, for a qualified name.
         input: What they apply to.
+        on: The `DISTINCT ON` expressions, and empty when none was written.
+            Consumed.
 
     Returns:
         The topmost node built.
@@ -5730,14 +5762,16 @@ def _modifiers(
     Raises:
         If a modifier is a shape this does not lower yet.
     """
-    var node = ast.stmts[Int(at)]
     var out = input
 
-    var orders = ast.items(node.children)
+    var orders = List[UInt32]()
+    if at != NO_NODE:
+        orders = ast.items(ast.stmts[Int(at)].children)
+
+    var keys = List[Int]()
+    var descending = List[Bool]()
+    var nulls_last = List[Bool]()
     if len(orders) != 0:
-        var keys = List[Int]()
-        var descending = List[Bool]()
-        var nulls_last = List[Bool]()
         for i in range(len(orders)):
             var entry = ast.stmts[Int(orders[i])]
             var down = entry.b == SORT_DESCENDING
@@ -5765,19 +5799,35 @@ def _modifiers(
             keys.append(_lower_expr(ast, entry.a, plan, walk, scope, False))
             descending.append(down)
             nulls_last.append(last)
-        var kept = List[String]()
-        _widen(plan, out, keys, kept)
+
+    var chosen = List[Int](capacity=len(on))
+    for i in range(len(on)):
+        chosen.append(_lower_expr(ast, on[i], plan, walk, scope, False))
+
+    var kept = List[String]()
+    if len(keys) != 0 or len(chosen) != 0:
+        var wanted = keys.copy()
+        for i in range(len(chosen)):
+            wanted.append(chosen[i])
+        _widen(plan, out, wanted, kept)
+    if len(keys) != 0:
         out = plan.sort(out, keys^, descending^, nulls_last^)
-        if len(kept) != 0:
-            # The sort read a column the query does not return, so the widened
-            # projection under it is narrowed back here and the extra column
-            # never leaves. Above a sort a projection cannot change the order,
-            # since it is one expression per row and the rows are already where
-            # they are going.
-            var outputs = List[Int](capacity=len(kept))
-            for i in range(len(kept)):
-                outputs.append(plan.exprs.column(String(kept[i])))
-            out = plan.project(out, outputs^, kept^)
+    if len(chosen) != 0:
+        out = plan.distinct(out, chosen^)
+    if len(kept) != 0:
+        # The sort or the distinct read a column the query does not return, so
+        # the widened projection under them is narrowed back here and the extra
+        # column never leaves. Above either of them a projection cannot change
+        # the order, since it is one expression per row and the rows are already
+        # where they are going.
+        var outputs = List[Int](capacity=len(kept))
+        for i in range(len(kept)):
+            outputs.append(plan.exprs.column(String(kept[i])))
+        out = plan.project(out, outputs^, kept^)
+
+    if at == NO_NODE:
+        return out
+    var node = ast.stmts[Int(at)]
 
     if (node.payload & LIMIT_PERCENT) != 0:
         raise Error(

@@ -1925,7 +1925,52 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
             If a name is missing or repeated, or if a dtype involved has no
             physical layout.
         """
-        var at = self._dedup_at(subset, "drop_duplicates")
+        return self.drop_duplicates_at(
+            self._dedup_at(subset, "drop_duplicates")
+        )
+
+    def drop_duplicates_at(self, at: List[Int]) raises -> Self:
+        """The same as `drop_duplicates` with the columns given by position.
+
+        The overload above turns names into positions and calls this. It is
+        separate because a caller that already has positions has nothing to look
+        up, and because a name is not always enough to say which column is
+        meant: a frame that came out of a join can hold two columns called
+        `qty`, and the engine's distinct operator numbers its keys rather than
+        naming them for exactly that reason.
+
+        Args:
+            at: The positions of the columns that decide whether two rows are
+                the same. At least one, no repeats.
+
+        Returns:
+            A frame holding the first appearance of each distinct row.
+
+        Raises:
+            Error: If a position is out of range or repeated, if none were
+                given, or if a dtype involved has no physical layout.
+        """
+        if len(at) == 0:
+            raise Error(
+                "drop_duplicates: at least one column is required, and a frame"
+                " with no columns has no rows to tell apart"
+            )
+        for i in range(len(at)):
+            if at[i] < 0 or at[i] >= len(self.schema.fields):
+                raise Error(
+                    "drop_duplicates: column "
+                    + String(at[i])
+                    + " is outside a frame of "
+                    + String(len(self.schema.fields))
+                    + " columns"
+                )
+            for j in range(i):
+                if at[j] == at[i]:
+                    raise Error(
+                        "drop_duplicates: column "
+                        + String(at[i])
+                        + " was given twice"
+                    )
         var grouping = self._grouping(at)
 
         var ascending = True

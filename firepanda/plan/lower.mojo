@@ -221,16 +221,17 @@ in, so `SELECT DISTINCT` is the group by with every position as a key and no
 folds at all, and there is no operator to write. It streams for the same reason
 the group by does, holding one row per distinct row rather than the input.
 
-Part of the row is `DISTINCT ON` and is refused. It keeps whole rows chosen by
-some of their columns, so the rest would come back through a first over each,
-and a group by carries its keys in front of what it reduced, which moves the
-columns the plan's schema numbered.
+Part of the row is `DISTINCT ON` and goes to `Unique` instead. It keeps whole
+rows chosen by some of their columns, so the rest have to come back untouched
+and in place, and a group by cannot do that: it carries its keys in front of
+what it reduced, which moves the columns the plan's schema numbered, and its
+first skips nulls. `Unique` holds its input rather than one row per group, so
+the streaming route is worth keeping for the case that can use it.
 
 ### What it refuses, and why refusing is the design
 
-A distinct on part of the row is not lowered here, and neither is a difference or
-an intersection written `ALL`, a unary expression, an ordered window, or a cast
-over an input column.
+A unary expression is not lowered here, and neither is an ordered window or a
+cast over an input column.
 Every one of those raises an error that names what it was. It does not fall
 back to `Materialize`, and the reason is that `Materialize` holds a function
 pointer that captures nothing, so there is no way to hand it the expression
@@ -268,6 +269,7 @@ from firepanda.exec.node import (
     Project,
     Reduce,
     Sort,
+    Unique,
     Window,
 )
 from firepanda.exec.pipeline import Pipeline
@@ -1131,7 +1133,7 @@ def _decide(plan: Plan, at: Int, mut pipe: Pipeline) raises:
 
 
 def _lower_distinct(plan: Plan, at: Int, mut pipe: Pipeline) raises:
-    """Lowers a distinct over the whole row into a group by with no folds.
+    """Lowers a distinct into a group by, or into `Unique` when it has keys.
 
     A group by holds one row per group, and which row that is does not matter
     when the key is every column, because every row of a group is the same row.
@@ -1140,10 +1142,14 @@ def _lower_distinct(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     the first of each was seen, which is what DuckDB gives back for a distinct
     with no ordering asked for.
 
-    A key list shorter than the row is `DISTINCT ON`, and it is refused. It
-    keeps whole rows chosen by part of them, so the columns that are not keys
-    would have to come back through a first over each, and a group by puts its
-    keys in front, which moves the columns the plan's schema numbered.
+    A key list shorter than the row, or one in another order, is `DISTINCT ON`,
+    and that goes to `Unique`. It keeps whole rows chosen by part of them, so
+    the columns that are not keys have to come back untouched and in place, and
+    a group by cannot do that: it carries its keys in front, which moves the
+    columns the plan's schema numbered, and its first skips nulls. Both
+    distincts are breakers, but the group by holds one row per group and
+    `Unique` holds every row, so the cheaper one is worth keeping for the case
+    that can use it.
 
     Args:
         plan: The plan.
@@ -1151,7 +1157,7 @@ def _lower_distinct(plan: Plan, at: Int, mut pipe: Pipeline) raises:
         pipe: The pipeline, added to.
 
     Raises:
-        Error: If the distinct has a key list that is not the whole row.
+        Error: If a key is a computed expression rather than a column.
     """
     var held = plan.nodes[at].exprs.copy()
     var width = len(pipe.schema)
@@ -1160,47 +1166,32 @@ def _lower_distinct(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     if len(held) == 0:
         for i in range(width):
             keys.append(i)
-    else:
-        for i in range(len(held)):
-            if plan.exprs.nodes[held[i]].kind != ExprKind.COLUMN:
-                raise Error(
-                    String(
-                        "lower: this distinct decides on a ",
-                        plan.exprs.nodes[held[i]].kind,
-                        (
-                            " expression, and a computed key is a column the"
-                            " row does not have, so the rows kept would not be"
-                            " the rows the plan said"
-                        ),
-                    )
-                )
-            keys.append(_lower_expr(plan.exprs, held[i], pipe, width, "", memo))
-        if len(keys) != width:
+        pipe.add(Node(Group(keys^, List[GroupAgg]())))
+        return
+    for i in range(len(held)):
+        if plan.exprs.nodes[held[i]].kind != ExprKind.COLUMN:
             raise Error(
                 String(
-                    "lower: this distinct decides on ",
-                    len(keys),
-                    " of the row's ",
-                    width,
+                    "lower: this distinct decides on a ",
+                    plan.exprs.nodes[held[i]].kind,
                     (
-                        " columns, and keeping a whole row chosen by part of it"
-                        " means a first over every other column, which a group"
-                        " by puts behind its keys rather than where the plan"
-                        " numbered them"
+                        " expression, and a computed key is a column the row"
+                        " does not have, so the rows kept would not be the rows"
+                        " the plan said"
                     ),
                 )
             )
+        keys.append(_lower_expr(plan.exprs, held[i], pipe, width, "", memo))
+    var whole = len(keys) == width
+    if whole:
         for i in range(width):
             if keys[i] != i:
-                raise Error(
-                    String(
-                        "lower: this distinct decides on the row's columns in"
-                        " another order, and a group by carries its keys in the"
-                        " order it was given them, so the answer would not be"
-                        " the columns the plan numbered"
-                    )
-                )
-    pipe.add(Node(Group(keys^, List[GroupAgg]())))
+                whole = False
+                break
+    if whole:
+        pipe.add(Node(Group(keys^, List[GroupAgg]())))
+        return
+    pipe.add(Node(Unique(keys^)))
 
 
 def _lower_sort(plan: Plan, at: Int, mut pipe: Pipeline) raises:
