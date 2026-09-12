@@ -77,4 +77,4 @@ from .scalar import (
     factorize_strings_linear,
 )
 from .sorted import sorted_ordinals
-from .table import HashTable
+from .table import HashTable, ProbeLengths

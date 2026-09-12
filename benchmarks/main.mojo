@@ -184,6 +184,7 @@ from firepanda.kernel.compare import CMP_EQ, CMP_LT
 from firepanda.kernel.binary import BinaryOp, binary_value_any
 from firepanda.sql import Ast, Grammar, Transform, parse, tokenize
 from firepanda.testing.rng import Rng
+from firepanda.testing.skew import skewed_int64
 from firepanda.kernel.scalar import (
     add_scalar,
     filter_scalar,
@@ -2037,6 +2038,15 @@ def bench_hash(mut harness: Harness) raises:
     not hash at all, and it is here to show what the branch in `factorize` is
     buying on the shape of column that a real group by usually gets.
 
+    `factorize_skewed` and `factorize_skewed_tail` are the only rows here whose
+    keys are not uniform. They are addresses, from `firepanda/testing/skew.mojo`,
+    which means the high bits of every key are drawn from a set of eight and the
+    frequencies have a head. That is what ClickBench q31 groups a hundred million
+    rows by and it is a shape nothing else in this file produces. The
+    distribution measurement is in `benchmarks/probe_lengths.mojo` and says the
+    probe lengths are the same as on a uniform key, so what these two rows are
+    watching for is a change to that answer rather than a gap that is there now.
+
     Args:
         harness: The harness.
 
@@ -2108,6 +2118,33 @@ def bench_hash(mut harness: Harness) raises:
         keep(out.codes)
 
     harness.record("hash/factorize_all_distinct", "rows", rows, factorize_high)
+
+    # The four rows above are uniform, which is what every generator here
+    # produces and is not what a group by key looks like. These two are
+    # addresses: drawn from a handful of networks, so the top of every key comes
+    # from a set of eight, and drawn with a head, so a thousand of them take half
+    # the rows and the rest are seen once. Read them against `factorize_10k` and
+    # `factorize_all_distinct`, which have the same group counts and none of the
+    # structure, and the difference is what the shape of the keys costs rather
+    # than how many of them there are.
+    var addresses = skewed_int64(rows)
+    var addresses_tail = skewed_int64(rows, 0, 0.0)
+
+    def factorize_skewed() raises {imm addresses}:
+        keep(addresses)
+        var out = factorize(addresses)
+        keep(out.codes)
+
+    harness.record("hash/factorize_skewed", "rows", rows, factorize_skewed)
+
+    def factorize_skewed_tail() raises {imm addresses_tail}:
+        keep(addresses_tail)
+        var out = factorize(addresses_tail)
+        keep(out.codes)
+
+    harness.record(
+        "hash/factorize_skewed_tail", "rows", rows, factorize_skewed_tail
+    )
 
     def dict_low() raises {imm low}:
         keep(low)
@@ -3715,6 +3752,13 @@ def bench_group(mut harness: Harness) raises:
     costs shows up here and not on the narrow row, where a hundred groups sit in
     L1 whatever the probe does.
 
+    `group/frame_nearly_unique_key` is the shape ClickBench q31 has and nothing
+    else here does, a key whose group count is most of its row count, so the
+    answer is nearly as large as the input. Read it against
+    `group/frame_one_key`: same rows, same reduction, a thousand groups instead
+    of nearly a million. The split in `benchmarks/probe_lengths.mojo` says where
+    the difference goes, and it is not the hashing and not the probe.
+
     `group/frame_correlation` is the last shape of the three. A pair reduction
     reads two columns rather than one and reads them twice rather than once,
     because the deviations it sums are taken around means it does not have until
@@ -4353,6 +4397,31 @@ def bench_group(mut harness: Harness) raises:
         keep(out.rows)
 
     harness.record("group/frame_one_key", "rows", rows, frame_one)
+
+    # ClickBench q31's shape, which nothing else in this file has: a key whose
+    # group count is most of its row count, so the answer is nearly as large as
+    # the input. Against `group/frame_one_key`, which is the same rows and the
+    # same reduction over a key with a thousand values, it says what a group by
+    # costs when building the answer stops being an afterthought.
+    # `benchmarks/probe_lengths.mojo` splits that further and finds the answer is
+    # most of the query at this shape and a third of it at the other.
+    var address_key = skewed_int64(rows, 0, 0.0)
+    var address_value = Array[DType.int64](rows)
+    for i in range(rows):
+        address_value[i] = Int64(i & 0xFF)
+    var address_series = List[Series]()
+    address_series.append(Series("key", address_key^))
+    address_series.append(Series("value", address_value^))
+    var address_df = DataFrame.from_series(address_series^)
+
+    def frame_nearly_unique() raises {imm address_df}:
+        keep(address_df.rows)
+        var out = address_df.group_by(["key"], [AggSpec("value", AggKind.SUM)])
+        keep(out.rows)
+
+    harness.record(
+        "group/frame_nearly_unique_key", "rows", rows, frame_nearly_unique
+    )
 
     def frame_two() raises {imm df}:
         keep(df.rows)
