@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: IS NULL, and the other three tests spelled with words
+
+`SELECT count(*) FROM orders WHERE o_comment IS NOT NULL` was refused with "firepanda has no kernel for the operator IS yet", which meant the most ordinary predicate in SQL did not run. The kernels behind it have been in `firepanda/kernel/nulls.mojo` since the array layer was written, and what was missing was the operator between them and a query.
+
+There is one now, and it answers both directions, the two kernels differing by a flipped byte. It is not a comparison and cannot be one: `x = NULL` is null for every row and keeps nothing, which is the reason SQL has the words at all. The answer is a yes or a no for every row whatever the column under it holds, so the column it appends is marked as holding no nulls, which is a thing no other node that appends a column can say about its own answer. Any type is readable, since a null is a null whether the column holds numbers or text or dates. `ISNULL` and `NOTNULL` are the same two tests written as one word and build the same plan.
+
+`IS TRUE`, `IS FALSE`, `IS NOT TRUE` and `IS NOT FALSE` run too, and they are written out of pieces that already existed rather than given operators of their own. What `x IS TRUE` says is that `x` is there and holds true, and an and over Kleene's three valued logic says exactly that, a null on one side of a false being a false rather than a null. So the four become `is_not_null(x) and x`, `is_not_null(x) and not x`, `is_null(x) or not x` and `is_null(x) or x`, and each of them answers a yes or a no on a column that has nulls in it. `IS UNKNOWN` is still refused, for the reason it always was: the value it compares against has no literal kind and inventing one is a typing decision the parser does not get to make.
+
+### Fixed: a boolean literal written in a query was read as false
+
+`WHERE true` kept no rows and `SELECT false` and `SELECT true` gave the same answer. The parser writes the word out in capitals whatever the query spelled it with, and the plan compared it against lower case, so every boolean literal in every query was a no. Nothing in the suite wrote one, which is how it lasted. It is compared against what the parser actually writes now.
+
 ## [0.7.0] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).

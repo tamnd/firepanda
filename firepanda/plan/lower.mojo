@@ -268,6 +268,7 @@ from firepanda.exec.node import (
     Limit,
     Match,
     Node,
+    Presence,
     Project,
     Reduce,
     Sort,
@@ -539,6 +540,12 @@ def _lower_expr(
     if kind == ExprKind.CALL and exprs.nodes[root].name == "like":
         return _lower_like(exprs, root, pipe, base, name, memo)
 
+    if kind == ExprKind.CALL and (
+        exprs.nodes[root].name == "is_null"
+        or exprs.nodes[root].name == "is_not_null"
+    ):
+        return _lower_presence(exprs, root, pipe, base, name, memo)
+
     if kind == ExprKind.CONDITIONAL:
         return _lower_conditional(exprs, root, pipe, base, name, memo)
 
@@ -766,6 +773,52 @@ def _lower_like(
     else:
         pipe.add(Node(Match(at, pattern, name)))
 
+    memo.remember(root, len(pipe.schema) - 1)
+    return len(pipe.schema) - 1
+
+
+def _lower_presence(
+    exprs: Expressions,
+    root: Int,
+    mut pipe: Pipeline,
+    base: Int,
+    name: String,
+    mut memo: Memo,
+) raises -> Int:
+    """Appends whatever answers an `IS NULL` or an `IS NOT NULL`.
+
+    One line either way. The operand is lowered wherever it lands and a
+    `Presence` reads the column it landed in, and which of the two tests it is
+    is a flag on the node rather than two nodes, because the two kernels behind
+    it differ by a flipped byte.
+
+    Args:
+        exprs: The arena.
+        root: The call, already bound.
+        pipe: The pipeline, added to.
+        base: The width of the chunk before this node started lowering.
+        name: What to call the column the answer lands in.
+        memo: What this node has already computed and where it put it.
+
+    Returns:
+        The position of the column holding the answer.
+
+    Raises:
+        Error: If the call has the wrong number of arguments.
+    """
+    var args = exprs.nodes[root].children.copy()
+    if len(args) != 1:
+        raise Error(
+            String(
+                "lower: ",
+                exprs.nodes[root].name,
+                " reads one argument and was given ",
+                len(args),
+            )
+        )
+
+    var at = _lower_expr(exprs, args[0], pipe, base, name, memo, reuse=True)
+    pipe.add(Node(Presence(at, exprs.nodes[root].name == "is_null", name)))
     memo.remember(root, len(pipe.schema) - 1)
     return len(pipe.schema) - 1
 
