@@ -241,7 +241,7 @@ def register(mut module: PythonModuleBuilder) raises:
         "length", docstring="The number of rows."
     )
     _ = series.def_method[PySeries.label](
-        "label", docstring="The name of the column."
+        "label", docstring="The name of the column, or None."
     )
     _ = series.def_method[PySeries.relabel](
         "relabel", docstring="A copy of the column under a different name."

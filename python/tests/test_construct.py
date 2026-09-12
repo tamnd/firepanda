@@ -119,7 +119,8 @@ def test_a_series_is_built_from_a_sequence(firepanda: ModuleType) -> None:
     assert series.name == "qty"
     assert series.tolist() == [1, 2, 3]
     assert series.dtype == "int64"
-    assert firepanda.Series(["a", "b"]).name == ""
+    assert firepanda.Series(["a", "b"]).name is None
+    assert firepanda.Series(["a", "b"], name="").name == ""
 
 
 def test_a_series_built_from_a_series_is_copied_rather_than_iterated(

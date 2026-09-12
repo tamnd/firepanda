@@ -2531,7 +2531,7 @@ SERIES = Exposed(
     module="firepanda.py.series",
     mixin="SeriesMixin",
     constructed=True,
-    init_params=(("data", "object"), ("name", "str")),
+    init_params=(("data", "object"), ("name", "str | None")),
     bindings=(
         Binding(
             mojo="PySeries.length",
@@ -2542,14 +2542,14 @@ SERIES = Exposed(
         Binding(
             mojo="PySeries.label",
             name="label",
-            doc="The name of the column.",
-            returns="str",
+            doc="The name of the column, or None.",
+            returns="str | None",
         ),
         Binding(
             mojo="PySeries.relabel",
             name="relabel",
             doc="A copy of the column under a different name.",
-            params=(("name", "str"),),
+            params=(("name", "str | None"),),
             returns="Series",
         ),
         Binding(
@@ -2925,8 +2925,8 @@ SERIES = Exposed(
             name="name",
             kind="property",
             body="self._inner.label()",
-            doc="The name of the series.",
-            returns="str",
+            doc="The name of the series, and None when it has none.",
+            returns="str | None",
         ),
         Member(
             name="dtype",

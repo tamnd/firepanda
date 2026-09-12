@@ -36,7 +36,13 @@ firepanda does not need.
 """
 
 from std.collections import Optional
-from std.testing import TestSuite, assert_equal, assert_raises, assert_true
+from std.testing import (
+    TestSuite,
+    assert_equal,
+    assert_false,
+    assert_raises,
+    assert_true,
+)
 
 from firepanda.array.any import AnyArray
 from firepanda.array.array import Array, from_list
@@ -184,10 +190,31 @@ def test_the_result_keeps_a_name_both_operands_agree_on() raises:
 
 def test_the_result_drops_a_name_the_operands_disagree_on() raises:
     """The name goes away, on pandas' reasoning that a column called price plus
-    a column called tax is neither of those things."""
+    a column called tax is neither of those things. It goes away entirely rather
+    than becoming the empty string, which is a name a column is allowed to
+    have."""
     var a = series("price", [1], [1])
     var b = series("tax", [2], [1])
-    assert_equal((a + b).name, "", "no name")
+    assert_false(Bool((a + b).name), "no name at all")
+
+
+def test_two_operands_with_no_name_agree_on_having_none() raises:
+    """Two absences are the same absence, so the answer has no name either,
+    which is also what pandas answers."""
+    var a = series("v", [1], [1])
+    var b = series("v", [2], [1])
+    a.name = Optional[String]()
+    b.name = Optional[String]()
+    assert_false(Bool((a + b).name), "still no name")
+
+
+def test_a_column_called_nothing_is_not_a_column_with_no_name() raises:
+    """`""` is a name and pandas lets a column have it, so it agrees with itself
+    and survives the operation rather than being read as an absence."""
+    var a = series("", [1], [1])
+    var b = series("", [2], [1])
+    assert_true(Bool((a + b).name), "the empty name is a name")
+    assert_equal((a + b).name.value(), "", "and it is the empty one")
 
 
 def test_the_reflected_forms_turn_the_operands_round() raises:

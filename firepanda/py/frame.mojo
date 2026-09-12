@@ -1134,7 +1134,7 @@ struct PyDataFrame(Movable, Writable):
             AnyArray(strings_from_list(names)), Optional[String](None)
         )
         if len(parts) == 0:
-            var out = Series(String(""), empty_column(0))
+            var out = Series(Optional[String](), empty_column(0))
             out.index = labels^
             return PythonObject(alloc=PySeries(ArcPointer(out^)))
 
@@ -1151,7 +1151,9 @@ struct PyDataFrame(Movable, Writable):
                 parts[i] = parts[i].cast(DType.float64)
 
         var out = concat_series(parts)
-        out.name = String("")
+        # The answer is one value per column and is therefore about none of
+        # them, so it has no name, which is what pandas hands back too.
+        out.name = Optional[String]()
         out.index = labels^
         return PythonObject(alloc=PySeries(ArcPointer(out^)))
 
@@ -2223,8 +2225,8 @@ def index_to_series(
         index: The index to read.
         labels: The labels the answer carries, as another index, or `None` for
             the ones it was read from.
-        name: The column name, or `None` for the index's own name, which is the
-            empty string when the index has none.
+        name: The column name, or `None` for the index's own name, which is an
+            absence too when the index has none.
 
     Returns:
         A new series over a copy of the labels.
@@ -2234,12 +2236,12 @@ def index_to_series(
             they are put against.
     """
     var held = Pointer(to=PyIndex._held(index)[].index[])
-    var title = String("")
+    var title = Optional[String]()
     if name is not Python.none():
-        title = words(name, "name")
-    elif held[].name:
-        title = held[].name.value()
-    var out = Series(title, held[].materialize())
+        title = Optional[String](words(name, "name"))
+    else:
+        title = held[].name.copy()
+    var out = Series(title^, held[].materialize())
     if labels is Python.none():
         out.index = Index(copy=held[])
     else:

@@ -78,12 +78,17 @@ def test_a_name_in_the_call_wins_over_the_one_the_data_had(firepanda: ModuleType
     assert pd.Index(pd.Series([1, 2], name="a"), name="z").name == "z"
 
 
-def test_a_series_named_with_the_empty_string_names_nothing(firepanda: ModuleType) -> None:
-    # A series is named by a string and the empty string is what unnamed looks
-    # like on one, so it is read back as no name rather than as a level called
-    # nothing. Both spellings of unnamed arrive here and both mean the same.
+def test_a_series_with_no_name_and_one_called_nothing_are_two_things(
+    firepanda: ModuleType,
+) -> None:
+    # A column with no name gives an index with no level name, and a column
+    # called `""` gives a level called `""`. They used to land on the same
+    # answer here, because a series name was a `String` and the empty one was
+    # how it spelled an absence, and pandas has told them apart all along.
     assert firepanda.Index(firepanda.Series([1, 2])).name is None
-    assert firepanda.Index(firepanda.Series([1, 2], name="")).name is None
+    assert pd.Index(pd.Series([1, 2])).name is None
+    assert firepanda.Index(firepanda.Series([1, 2], name="")).name == ""
+    assert pd.Index(pd.Series([1, 2], name="")).name == ""
 
 
 def test_the_labels_of_an_unnamed_list_still_have_no_name(firepanda: ModuleType) -> None:

@@ -34,14 +34,15 @@ def test_to_series_takes_the_name_off_the_index(firepanda):
     assert whole(firepanda).to_series().name == whole(pd).to_series().name == "k"
 
 
-def test_an_unnamed_index_gives_a_column_named_with_the_empty_string(firepanda):
-    # pandas leaves the series unnamed and a series here is named by a string,
-    # so the name that means unnamed over there is the empty string over here.
-    # Document 21 has the divergence, and the values are the same either way.
+def test_an_unnamed_index_gives_a_column_with_no_name_either(firepanda):
+    # The absence goes across rather than being flattened onto the empty string,
+    # which it was until a series name became an `Optional[String]`. An index
+    # whose level is called `""` still gives a column called `""`, because that
+    # is a name and not the lack of one.
     got = firepanda.Index([1, 2]).to_series()
-    assert got.name == ""
-    assert pd.Index([1, 2]).to_series().name is None
+    assert got.name is pd.Index([1, 2]).to_series().name is None
     assert got.tolist() == pd.Index([1, 2]).to_series().tolist() == [1, 2]
+    assert firepanda.Index([1, 2], name="").to_series().name == ""
 
 
 def test_a_name_in_the_call_wins_over_the_index_name(firepanda):

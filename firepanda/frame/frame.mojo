@@ -226,16 +226,18 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                     " has "
                     + String(rows)
                     + " and column '"
-                    + series[i].name
+                    + series[i].column_name()
                     + "' has "
                     + String(len(series[i]))
                 )
             for j in range(i):
                 if series[j].name == series[i].name:
                     raise Error(
-                        "duplicate column name '" + series[i].name + "'"
+                        "duplicate column name '"
+                        + series[i].column_name()
+                        + "'"
                     )
-            fields.append(Field(series[i].name, series[i].logical()))
+            fields.append(Field(series[i].column_name(), series[i].logical()))
 
         # Popping from the back and then reversing, rather than iterating, so
         # that each column's buffers move rather than being copied. A loop over
@@ -660,7 +662,7 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
         if len(self.columns) > 0 and len(column) != self.rows:
             raise Error(
                 "cannot add column '"
-                + column.name
+                + column.column_name()
                 + "' with "
                 + String(len(column))
                 + " rows to a frame of "
@@ -668,9 +670,10 @@ struct DataFrame(Copyable, Movable, Sized, Writable):
                 + " rows"
             )
 
-        var field = Field(column.name, column.logical())
-        var replacing = self.schema.has(column.name)
-        var at = self.schema.index_of(column.name) if replacing else 0
+        var title = column.column_name()
+        var field = Field(title, column.logical())
+        var replacing = self.schema.has(title)
+        var at = self.schema.index_of(title) if replacing else 0
         if replacing:
             self.schema.fields[at] = field^
             self.columns[at] = ChunkedArray(column^.into_values())
