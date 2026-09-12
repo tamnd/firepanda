@@ -5169,6 +5169,68 @@ def _expand(
             raise Error(not_in_from("REPLACE", replaced[entry].target))
 
 
+def _widen(
+    mut plan: Plan, mut input: Int, keys: List[Int], mut kept: List[String]
+) raises:
+    """Adds the columns an `ORDER BY` reads and the query does not return.
+
+    `SELECT name FROM t ORDER BY score` sorts on a column the answer does not
+    hold, and so does `SELECT a AS z FROM t ORDER BY a`, where the name the sort
+    wrote is the one the projection renamed away. SQL allows both, and what they
+    need is the column present while the sort runs and gone afterwards. So the
+    projection under the sort is rebuilt one column wider and a second
+    projection above the sort takes the query's own columns back.
+
+    Only a column the projection's own input has can be added, which is the
+    same rule SQL states the other way around: an `ORDER BY` over a `SELECT
+    DISTINCT` or over a set operation may only name what the query returns,
+    because there is no row underneath to go and read it off. Those are left
+    alone here and refused by binding, which is where a name that resolves
+    against nothing is refused anyway.
+
+    Args:
+        plan: The nodes, added to.
+        input: What the sort will read, replaced by the wider projection.
+        keys: The lowered sort keys.
+        kept: Filled in with the query's own column names when a column was
+            added, and left empty when nothing was.
+
+    Raises:
+        If a key is not in the arena.
+    """
+    if plan.nodes[input].kind != NodeKind.PROJECT:
+        return
+
+    var names = plan.nodes[input].names.copy()
+    var missing = List[String]()
+    for i in range(len(keys)):
+        var reads = plan.exprs.names(keys[i])
+        for j in range(len(reads)):
+            var wanted = fold(reads[j])
+            var seen = False
+            for k in range(len(names)):
+                if fold(names[k]) == wanted:
+                    seen = True
+                    break
+            for k in range(len(missing)):
+                if fold(missing[k]) == wanted:
+                    seen = True
+                    break
+            if not seen:
+                missing.append(String(reads[j]))
+    if len(missing) == 0:
+        return
+
+    var outputs = plan.nodes[input].exprs.copy()
+    var wider = names.copy()
+    for i in range(len(missing)):
+        outputs.append(plan.exprs.column(String(missing[i])))
+        wider.append(String(missing[i]))
+    var below = plan.nodes[input].inputs[0]
+    input = plan.project(below, outputs^, wider^)
+    kept = names^
+
+
 def _modifiers(
     ast: Ast,
     at: UInt32,
@@ -5228,7 +5290,19 @@ def _modifiers(
             keys.append(_lower_expr(ast, entry.a, plan, walk, scope, False))
             descending.append(down)
             nulls_last.append(last)
+        var kept = List[String]()
+        _widen(plan, out, keys, kept)
         out = plan.sort(out, keys^, descending^, nulls_last^)
+        if len(kept) != 0:
+            # The sort read a column the query does not return, so the widened
+            # projection under it is narrowed back here and the extra column
+            # never leaves. Above a sort a projection cannot change the order,
+            # since it is one expression per row and the rows are already where
+            # they are going.
+            var outputs = List[Int](capacity=len(kept))
+            for i in range(len(kept)):
+                outputs.append(plan.exprs.column(String(kept[i])))
+            out = plan.project(out, outputs^, kept^)
 
     if (node.payload & LIMIT_PERCENT) != 0:
         raise Error(
