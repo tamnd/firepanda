@@ -1435,6 +1435,69 @@ def test_a_yes_written_out_keeps_every_row_and_a_no_keeps_none() raises:
     )
 
 
+def cuts(sql: StringSlice) raises -> List[String]:
+    """Runs a query that answers one text column called `piece` and reads it."""
+    var col = run(sql, session()).column("piece").as_strings()
+    var out = List[String](capacity=len(col))
+    for i in range(len(col)):
+        out.append("null" if not col.is_valid(i) else String(col[i]))
+    return out^
+
+
+def test_a_substring_takes_the_characters_the_query_named() raises:
+    # `words` is apple, apricot, banana, grape, the empty string, a null and
+    # pineapple, so three from the front keeps a different set of letters for
+    # each of them and leaves the last two alone.
+    var got = cuts("SELECT substring(word, 1, 3) AS piece FROM words")
+    assert_equal(len(got), 7, "one answer per row")
+    assert_equal(got[0], "app", "the first")
+    assert_equal(got[2], "ban", "and one from the middle")
+    assert_equal(got[4], "", "the empty string has nothing to take")
+    assert_equal(got[5], "null", "and a null stays a null")
+
+
+def test_a_substring_with_no_length_runs_to_the_end() raises:
+    var got = cuts("SELECT substring(word, 4) AS piece FROM words")
+    assert_equal(got[0], "le", "what was left of a five letter word")
+    assert_equal(got[6], "eapple", "and of a nine letter one")
+
+
+def test_a_substr_is_the_same_function_under_duckdbs_other_name() raises:
+    var got = cuts("SELECT substr(word, 2, 2) AS piece FROM words")
+    assert_equal(got[0], "pp", "the first")
+    assert_equal(got[6], "in", "and the last")
+
+
+def test_the_keyword_spelling_reads_the_same_two_numbers() raises:
+    var got = cuts("SELECT SUBSTRING(word FROM 2 FOR 2) AS piece FROM words")
+    assert_equal(got[0], "pp", "the first")
+    assert_equal(got[6], "in", "and the last")
+
+
+def test_the_keyword_spelling_without_a_from_starts_at_the_first_letter() raises:
+    var got = cuts("SELECT SUBSTRING(word FOR 3) AS piece FROM words")
+    assert_equal(got[0], "app", "the first")
+    assert_equal(got[6], "pin", "and the last")
+
+
+def test_a_substring_in_a_where_reads_the_cut_column() raises:
+    same(
+        answer("SELECT n FROM words WHERE substring(word, 1, 2) = 'ap'", "n"),
+        [1, 2],
+        "n",
+    )
+
+
+def test_a_substring_whose_start_is_a_column_is_refused() raises:
+    with assert_raises(contains="have to be written out"):
+        _ = run("SELECT substring(word, n, 2) FROM words", session())
+
+
+def test_a_substring_of_a_number_is_refused() raises:
+    with assert_raises(contains="'substring' reads text"):
+        _ = run("SELECT substring(n, 1, 2) FROM words", session())
+
+
 def test_a_coalesce_fills_the_gaps_from_the_second_argument() raises:
     same(
         read_back(

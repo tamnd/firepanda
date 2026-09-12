@@ -291,12 +291,14 @@ def _bool(t: LogicalType) -> Bool:
 
 
 def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
-    """Returns what a named function answers, for the seven that exist.
+    """Returns what a named function answers, for the eight that exist.
 
     There is no function registry yet, and the plan needs the connectives now
     because `a AND b` is a call rather than a binary operation, so this is a
-    table of seven entries instead. When the registry arrives this function
-    becomes a lookup in it and the table goes away.
+    table of eight entries instead. When the registry arrives this function
+    becomes a lookup in it and the table goes away. Eight is about as far as a
+    chain of comparisons should be asked to go, so the registry is the next
+    thing to build here rather than the ninth entry.
 
     `like` is here with them because a pattern match is not a binary operation
     either. Its right side is a pattern rather than an operand, and the node
@@ -312,6 +314,10 @@ def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
     is worked out here rather than in lowering, because lowering has to cast
     each argument to it and needs to be told what it is.
 
+    `substring` answers text and is the one that takes numbers. Only the column
+    it reads is typed here. Whether the two numbers are constants is lowering's
+    rule rather than a typing one, the same way the pattern of a `like` is.
+
     Args:
         name: The function name.
         args: What each argument binds to.
@@ -320,8 +326,37 @@ def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
         The type the call answers.
 
     Raises:
-        If the name is not one of the seven, or an argument has the wrong type.
+        If the name is not one of the eight, or an argument has the wrong type.
     """
+    if name == "substring":
+        if len(args) != 2 and len(args) != 3:
+            raise Error(
+                String(
+                    (
+                        "'substring' takes a column and one or two numbers, so"
+                        " 2 or 3 arguments, and was given "
+                    ),
+                    len(args),
+                )
+            )
+        if args[0] != LogicalType.STRING and args[0] != LogicalType.NULL:
+            raise Error(
+                String("'substring' reads text and argument 0 is ", args[0])
+            )
+        for i in range(1, len(args)):
+            if not args[i].is_integer() and args[i] != LogicalType.NULL:
+                raise Error(
+                    String(
+                        (
+                            "'substring' counts characters, so its positions"
+                            " are whole numbers, and argument "
+                        ),
+                        i,
+                        " is ",
+                        args[i],
+                    )
+                )
+        return LogicalType.STRING
     if name == "coalesce":
         if len(args) == 0:
             raise Error(

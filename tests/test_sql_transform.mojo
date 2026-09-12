@@ -231,6 +231,35 @@ def test_nullif_becomes_an_ordinary_call() raises:
     assert_equal(_printed("NULLIF(a, b)", g, rules), "nullif(a, b)")
 
 
+def test_the_three_spellings_of_a_substring_print_as_the_one_call() raises:
+    # The keyword form is not a call in the grammar, it is a rule with a `FROM`
+    # and a `FOR` under it, and the comma form goes through the same rule. Both
+    # come out the other side as the call the rest of the code knows.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("SUBSTRING(a, 2, 3)", g, rules), "substring(a, 2, 3)")
+    assert_equal(
+        _printed("SUBSTRING(a FROM 2 FOR 3)", g, rules), "substring(a, 2, 3)"
+    )
+    assert_equal(_printed("substr(a, 2, 3)", g, rules), "substr(a, 2, 3)")
+
+
+def test_a_substring_written_with_only_a_for_gets_a_start_of_one() raises:
+    # The standard lets the `FROM` go, and a window that does not say where it
+    # begins begins at the first character. The one is written in rather than
+    # left out because everything downstream counts arguments.
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("SUBSTRING(a FOR 3)", g, rules), "substring(a, 1, 3)")
+
+
+def test_a_substring_with_no_length_keeps_the_one_number() raises:
+    var g = Grammar()
+    var rules = Transform(g)
+    assert_equal(_printed("SUBSTRING(a FROM 2)", g, rules), "substring(a, 2)")
+    assert_equal(_printed("SUBSTRING(a, 2)", g, rules), "substring(a, 2)")
+
+
 def test_both_cast_spellings_print_as_the_same_one() raises:
     var g = Grammar()
     var rules = Transform(g)

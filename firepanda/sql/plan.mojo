@@ -1737,6 +1737,12 @@ def _lower_expr(
             return plan.exprs.call("coalesce", lowered^, True)
         if name == "nullif":
             return _lower_nullif(plan, lowered)
+        if name == "substr":
+            # DuckDB's other name for `SUBSTRING`, and the same function. The
+            # keyword spelling has already become a call by the time it gets
+            # here, so this is the last of the three ways of writing it turning
+            # into the one the plan holds.
+            return plan.exprs.call("substring", lowered^, True)
         return plan.exprs.call(name, lowered^, True)
 
     if node.kind == EXPR_BETWEEN:

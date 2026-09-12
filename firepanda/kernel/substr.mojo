@@ -1,13 +1,14 @@
 """The byte range of an element of a text column, cut out of it or measured.
 
-This is SQL's `substring` and it is what TPC-H q22 takes the first two characters
-of a phone number with. It cuts by bytes and not by code points, which is the
-same thing the rest of the column does: `StringView.__len__` is a byte length,
-`byte_length` is a byte length, and the reader that filled the column never
-promised the bytes were UTF-8 in the first place. That is a real difference from
-pandas, where `.str[:2]` slices code points, and it is worth knowing about before
-this is pointed at text that is not ASCII. A code point variant is a different
-kernel and it should be written when something asks for one rather than now.
+This is the cut TPC-H q22 takes the first two characters of a phone number with.
+It cuts by bytes and not by code points, which is the same thing the rest of the
+column does: `StringView.__len__` is a byte length, `byte_length` is a byte
+length, and the reader that filled the column never promised the bytes were UTF-8
+in the first place. That is a real difference from pandas, where `.str[:2]`
+slices code points, and from SQL, where `SUBSTRING` is defined on characters, so
+it is worth knowing about before this is pointed at text that is not ASCII. The
+code point variant is `text_character_substring` in `chars.mojo` and that is what
+a query reaches.
 
 Building a text column in parallel is the interesting part, and this is the first
 kernel in the library that does it. `StringArray.filter` and `StringArray.take`

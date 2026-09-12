@@ -260,6 +260,7 @@ from firepanda.exec.node import (
     Compute,
     Connective,
     Constant,
+    Cut,
     Expand,
     Fill,
     Filter,
@@ -541,6 +542,9 @@ def _lower_expr(
     if kind == ExprKind.CALL and exprs.nodes[root].name == "like":
         return _lower_like(exprs, root, pipe, base, name, memo)
 
+    if kind == ExprKind.CALL and exprs.nodes[root].name == "substring":
+        return _lower_cut(exprs, root, pipe, base, name, memo)
+
     if kind == ExprKind.CALL and (
         exprs.nodes[root].name == "is_null"
         or exprs.nodes[root].name == "is_not_null"
@@ -777,6 +781,88 @@ def _lower_like(
     else:
         pipe.add(Node(Match(at, pattern, name)))
 
+    memo.remember(root, len(pipe.schema) - 1)
+    return len(pipe.schema) - 1
+
+
+def _lower_cut(
+    exprs: Expressions,
+    root: Int,
+    mut pipe: Pipeline,
+    base: Int,
+    name: String,
+    mut memo: Memo,
+) raises -> Int:
+    """Appends whatever answers a `SUBSTRING`.
+
+    The two positions are read here rather than per row, for the reason the
+    pattern of a `LIKE` is: they do not change from row to row, and resolving
+    them once means the node carries two numbers instead of two expressions.
+    That is also the limit of what this covers. A substring whose start is
+    itself a column is a different kernel, one that works out a new window for
+    every row, and it is refused here rather than lowered into something that
+    would answer the first row's window for all of them.
+
+    A null position is refused for the same reason a null pattern is. The answer
+    would be a column of nulls and there is no operator that makes one of those
+    out of nothing yet.
+
+    Args:
+        exprs: The arena.
+        root: The call, already bound.
+        pipe: The pipeline, added to.
+        base: The width of the chunk before this node started lowering.
+        name: What to call the column the answer lands in.
+        memo: What this node has already computed and where it put it.
+
+    Returns:
+        The position of the column holding the answer.
+
+    Raises:
+        Error: If the call has the wrong number of arguments, or a position is
+            not a number written in the query.
+    """
+    var args = exprs.nodes[root].children.copy()
+    if len(args) != 2 and len(args) != 3:
+        raise Error(
+            String(
+                (
+                    "lower: substring reads a column and one or two positions,"
+                    " so two or three arguments, and was given "
+                ),
+                len(args),
+            )
+        )
+
+    var numbers = List[Int]()
+    for i in range(1, len(args)):
+        if exprs.nodes[args[i]].kind != ExprKind.LITERAL:
+            raise Error(
+                String(
+                    (
+                        "lower: the positions of a SUBSTRING have to be written"
+                        " out, and argument "
+                    ),
+                    i,
+                    (
+                        " is an expression, which would mean a new window for"
+                        " every row and there is no kernel that does that"
+                    ),
+                )
+            )
+        if exprs.nodes[args[i]].value.is_null():
+            raise Error(
+                "lower: a SUBSTRING with a null position is null for every row,"
+                " and there is no operator that answers a column of nulls yet"
+            )
+        numbers.append(Int(exprs.nodes[args[i]].value.as_scalar[DType.int64]()))
+
+    var length = Optional[Int]()
+    if len(numbers) == 2:
+        length = numbers[1]
+
+    var at = _lower_expr(exprs, args[0], pipe, base, name, memo, reuse=True)
+    pipe.add(Node(Cut(at, numbers[0], length, name)))
     memo.remember(root, len(pipe.schema) - 1)
     return len(pipe.schema) - 1
 

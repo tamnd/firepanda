@@ -912,10 +912,11 @@ struct Series(Copyable, Movable, Sized, Writable):
     def str_slice(self, offset: Int, length: Int = TO_END) raises -> Self:
         """Returns a byte range cut out of every row.
 
-        This is SQL's `substring`. It cuts by bytes rather than by code points,
-        which is what the rest of the column measures itself in, and both ends
-        are clamped, so a range that runs off a short row is the empty string
-        rather than an error.
+        It cuts by bytes rather than by code points, which is what the rest of
+        the column measures itself in, and both ends are clamped, so a range that
+        runs off a short row is the empty string rather than an error. SQL's
+        `substring` counts characters and is a different kernel, which a query
+        reaches and this does not.
 
         Args:
             offset: Where each substring starts, in bytes. Negative counts back

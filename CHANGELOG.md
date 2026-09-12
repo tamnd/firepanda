@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: SUBSTRING, in all three of the ways it is written
+
+`SELECT substring(c_phone, 1, 2) FROM customer` is the cut TPC-H q22 takes a country code with, and it was refused. So was `SUBSTRING(a FROM 1 FOR 2)`, and so was `substr`. The grammar routes even the comma spelling through the rule that exists for the keyword spelling, so one refusal covered all three, and the transform had to learn the rule before any of them could run.
+
+It reads the two numbers as characters and not as bytes. That is what the standard says and it is what DuckDB computes, and it is worth calling out because three docstrings in this repo said the opposite and have been corrected. `substr.mojo` counts bytes and is the faster kernel and is still what `Series.str_slice` reaches, since the `str` accessor follows pandas and pandas slices bytes. A query reaches a new kernel in `chars.mojo` that walks the code points. The difference is invisible until a row holds anything outside ASCII, and then it is the difference between a letter and half of one.
+
+The clipping rule is DuckDB's and it falls out rather than being arranged. The window is a range with both ends counted from one and both ends clipped into the string, so a start of zero spends its first position outside the string and comes back one character short, a negative start counts back from the end, and a negative length runs the window backwards from the start instead of being an error. `substring('hello', 0, 2)` is `h` and `substring('hello', 2, -1)` is `h` for the same reason, which is that the clipping happens to the ends and not to the answer.
+
+The positions have to be written out. A column in either of them would mean a different window for every row, and the kernel takes one window for the whole column, so a query that asks for that is refused at the point the plan is built with a message saying that is what it asked for. `substr` is renamed to `substring` while the query is lowered, the same way `ifnull` is, since nothing after that point could tell the two apart.
+
 ### Added: COALESCE, IFNULL and NULLIF
 
 `SELECT coalesce(o_comment, 'none') FROM orders` was refused with "there is no function named coalesce", which is a gap worth naming because filling a gap is most of what anybody does with a nullable column. The kernel behind it has been in `firepanda/kernel/nulls.mojo` since the array layer was written, and again what was missing was the plumbing between it and a query.

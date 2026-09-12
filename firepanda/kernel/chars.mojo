@@ -2,18 +2,25 @@
 
 Every kernel already in the library that looks inside a string looks at bytes.
 `text_substring` cuts a byte range, `find_bytes` returns a byte offset, and the
-comparison kernels order by byte. That is right for all of them, because the
-question each one is asked is about bytes: a `LIKE` pattern is a run of bytes, a
-sort order over UTF-8 bytes is code point order, and SQL's `substring` is defined
-on bytes. The docstring on `substr.mojo` says so and adds that a code point
-variant is a different kernel that should be written when something asks for one.
+comparison kernels order by byte. That is right for most of them, because the
+question each one is asked is about bytes: a `LIKE` pattern is a run of bytes and
+a sort order over UTF-8 bytes is code point order. The docstring on `substr.mojo`
+adds that a code point variant is a different kernel that should be written when
+something asks for one.
 
-The `str` accessor is what asks. `s.str.len()` on a column holding an accented
-letter is 1 in pandas and 2 in bytes, `s.str[:2]` takes two characters and can
-take three or four or six bytes doing it, and `s.str.find("a")` answers a
-position a caller can hand straight back to `s.str.slice`. So every position in
-this file is a character, and the two words are not interchangeable anywhere in
-it.
+Two things ask. The `str` accessor is the first. `s.str.len()` on a column
+holding an accented letter is 1 in pandas and 2 in bytes, `s.str[:2]` takes two
+characters and can take three or four or six bytes doing it, and `s.str.find("a")`
+answers a position a caller can hand straight back to `s.str.slice`. So every
+position in this file is a character, and the two words are not interchangeable
+anywhere in it.
+
+SQL is the second, which was a surprise and is worth writing down. The standard
+defines `SUBSTRING` on characters and DuckDB computes it on characters, so
+`substring('héllo', 1, 2)` is `hé` there and would be `h` and half a letter if it
+were cut by byte. `text_character_substring` below is what a query reaches, and
+`text_substring` in `substr.mojo` is the byte cut the frame API's `str_slice`
+reaches and is a good deal quicker.
 
 ### A character here is a code point
 
@@ -338,6 +345,78 @@ def text_character_slice(
         scratch.clear()
         _gather(bytes, bounds, scratch)
         built.append(Span(scratch))
+    return built^.finish()
+
+
+def text_character_substring(
+    a: StringArray, start: Int, length: Optional[Int]
+) raises -> StringArray:
+    """Cuts the range of characters SQL's `substring` names out of every element.
+
+    A kernel of its own rather than a call into `text_character_slice`, because
+    these are not Python's rules and the difference is not cosmetic. SQL counts
+    from one, and a position off either end clips the window rather than moving
+    it: `substring('hello', 0, 3)` is `he` and not `hel`, since the window covers
+    positions 0, 1 and 2 and no string has a position 0. A start far enough back
+    that the whole window lands before the string gives the empty string for the
+    same reason, where Python would clamp the start to the front and hand back
+    the first characters.
+
+    A negative length is legal and runs the window backwards from the start, so
+    `substring('hello', 2, -1)` is `h`. That is DuckDB's answer and it falls out
+    of treating the two numbers as the ends of a range rather than as an offset
+    and a count.
+
+    Characters and not bytes. That is what the SQL standard says and what DuckDB
+    computes, and it is the one place the library counts characters for a reason
+    other than pandas. `text_substring` in `substr.mojo` cuts the same shape in
+    bytes and is a good deal quicker at it, so a column known to hold nothing but
+    ASCII could be sent there instead, and that is worth measuring before it is
+    worth writing.
+
+    Args:
+        a: The column.
+        start: The first character, counting from one. Negative counts back from
+            the end, so -3 starts at the third character from the end.
+        length: How many characters to take, or nothing for everything to the
+            end of the element. Negative runs backwards from the start.
+
+    Returns:
+        A text column of the same height, null wherever the input is null.
+
+    Raises:
+        Error: Only what the builder raises.
+    """
+    var n = len(a)
+    var built = StringBuilder(capacity=n)
+    for i in range(n):
+        if not a.is_valid(i):
+            built.append_null()
+            continue
+        var bytes = a.unsafe_bytes(i)
+        var count = character_count(bytes)
+
+        # Where the window starts and stops, both counting from one, before
+        # anything is clipped. A zero start stays a zero, which is the whole of
+        # what makes the clipping visible.
+        var first = start
+        if start < 0:
+            first = count + start + 1
+        var last = count + 1
+        if length:
+            last = first + length.value()
+            if last < first:
+                var back = first
+                first = last
+                last = back
+
+        var from_ = min(max(first - 1, 0), count)
+        var until = min(max(last - 1, 0), count)
+        if until < from_:
+            until = from_
+        built.append(
+            bytes[character_at(bytes, from_) : character_at(bytes, until)]
+        )
     return built^.finish()
 
 
