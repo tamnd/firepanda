@@ -1888,6 +1888,13 @@ FRAME = Exposed(
             returns="DataFrame",
         ),
         Binding(
+            mojo="PyDataFrame.drop",
+            name="drop",
+            doc="The frame without the named columns.",
+            params=(("names", "list[str]"),),
+            returns="DataFrame",
+        ),
+        Binding(
             mojo="PyDataFrame.renamed_columns",
             name="renamed_columns",
             doc="The same data under a different schema.",
