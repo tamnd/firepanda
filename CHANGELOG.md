@@ -8,6 +8,12 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Fixed: a query that kept no rows answered a frame nothing could read
+
+`run("SELECT qty FROM sales WHERE qty = 999", catalog)` came back with a frame of no rows, which is right, and then `out[0]` raised `column has 0 chunks, not one; call combine() first`. The sink builds the empty answer from the schema, and a column built that way held no chunks at all, while `DataFrame.__getitem__` is `ChunkedArray.only`, which wants exactly one. So the frame was one nothing could read a column out of, and a predicate that happened to match nothing was a raise rather than an empty answer.
+
+The columns of that frame each hold one chunk of no rows now. It is built from the chunk rather than appended to, because `append` drops a chunk of no rows on purpose, to stop two chunks from starting at the same row and a row position from naming either, and here there is no second chunk and no row to name one with.
+
 ## [0.6.83] - 2026-09-12
 
 Built against Mojo 1.0.0 (ed45d567).

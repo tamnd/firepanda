@@ -2778,5 +2778,20 @@ def test_a_name_nothing_has_still_says_so() raises:
         _ = run("SELECT advengineidx FROM hits", session())
 
 
+def test_an_answer_of_no_rows_can_still_be_read() raises:
+    var out = run("SELECT qty, price FROM sales WHERE qty = 999", session())
+    assert_equal(len(out), 0, "no rows")
+    assert_equal(out.width(), 2, "and both columns")
+    assert_equal(len(out[0]), 0, "the first reads as empty")
+    assert_equal(len(out[1]), 0, "and so does the second")
+    same(read_back(out, "qty"), List[Int64](), "nothing under the name either")
+
+
+def test_an_answer_of_no_text_rows_can_still_be_read() raises:
+    var out = run("SELECT 'sold' AS tag FROM sales WHERE qty = 999", session())
+    assert_equal(len(out), 0, "no rows")
+    assert_true(out[0].is_string(), "and the column is still a text one")
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
