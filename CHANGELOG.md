@@ -8,6 +8,20 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: an uncorrelated EXISTS, wherever it is written
+
+`EXISTS` lowered to a semi join when it was correlated and written in the `AND` of a `WHERE`, and was refused everywhere else. Now the rest of it runs. `SELECT a, EXISTS (SELECT k FROM u) AS any_u FROM t` answers a boolean on every row, and so does an `EXISTS` under an `OR`, in a `CASE`, or beside a condition with nothing in it to pair on.
+
+An uncorrelated `EXISTS` is the same answer for every outer row, because whether the subquery has a row in it does not depend on which row is asking. So it takes the shape a subquery answering one value already had: the subquery is lowered into a plan of its own, one row is worked out from it, and that row is cross joined on above the `FROM`. The row is `count(*) > 0`, which is a fold with no `GROUP BY` and so is one row whatever the subquery read, including nothing. That fold is the entry above and is why this works at all. The comparison sits under the cross join rather than over it, so it is done once rather than once per outer row.
+
+There is no mark join in this and no null either, which is the difference between `EXISTS` and `IN`. An `IN` compares values and a null compares to nothing, so it has to be three valued. `EXISTS` counts rows without looking in them, so it is true or false and a `NOT EXISTS` is the plain opposite of it. The `NOT` stays where it was written and reads the column, the way a `NOT IN` reads the mark join's column.
+
+Which of the two forms an `EXISTS` takes has to be settled before the `FROM` under it is lowered, so it is settled off what is written. A subquery with no equality at the top level of its `WHERE` has no key pair to give the semi join whatever its names turn out to mean, so it is a value. The same goes for the shapes the semi join refused by name, an aggregate, a `LIMIT`, a `WITH`, a set operation and a `VALUES`, each of which the value form lowers correctly: `WHERE EXISTS (SELECT max(band) FROM tiers WHERE band > 1000)` is true, because the fold hands out one row and the row being null is not the question.
+
+A correlated one written where the semi join cannot take it is still refused, and the message now names the dependent join rather than reporting a missing table. A quantified comparison is still refused: `ANY` and `ALL` answer the same boolean per row, but each carries a comparison that neither the mark join nor this counting is given.
+
+Part of #309.
+
 ### Added: a grouped reduction whose state is the values holds the column too
 
 The other half of what 0.6.74 did without a key. `SELECT shop, count(DISTINCT qty) FROM sales GROUP BY shop` and `SELECT shop, median(qty) FROM sales GROUP BY shop` answered "nunique cannot be computed a chunk at a time" and now answer per group.
@@ -65,20 +79,6 @@ Every kind has an answer here and none of them is an error. An inner join over a
 The join settles its build side once in `bind`, one array per right column, lending the chunk when there is one and making an empty array of the column's type when there is not. `empty_any` is that array, and `ChunkedArray.combine` now goes through it as well, which fixes the same shape for a text column: an empty text column built the plain way says it is not text, because that question reads whether the string half is there rather than what the logical type says.
 
 The multi chunk end of the same accessor is #583 and is still open. This was #611.
-
-### Added: an uncorrelated EXISTS, wherever it is written
-
-`EXISTS` lowered to a semi join when it was correlated and written in the `AND` of a `WHERE`, and was refused everywhere else. Now the rest of it runs. `SELECT a, EXISTS (SELECT k FROM u) AS any_u FROM t` answers a boolean on every row, and so does an `EXISTS` under an `OR`, in a `CASE`, or beside a condition with nothing in it to pair on.
-
-An uncorrelated `EXISTS` is the same answer for every outer row, because whether the subquery has a row in it does not depend on which row is asking. So it takes the shape a subquery answering one value already had: the subquery is lowered into a plan of its own, one row is worked out from it, and that row is cross joined on above the `FROM`. The row is `count(*) > 0`, which is a fold with no `GROUP BY` and so is one row whatever the subquery read, including nothing. That fold is the entry above and is why this works at all. The comparison sits under the cross join rather than over it, so it is done once rather than once per outer row.
-
-There is no mark join in this and no null either, which is the difference between `EXISTS` and `IN`. An `IN` compares values and a null compares to nothing, so it has to be three valued. `EXISTS` counts rows without looking in them, so it is true or false and a `NOT EXISTS` is the plain opposite of it. The `NOT` stays where it was written and reads the column, the way a `NOT IN` reads the mark join's column.
-
-Which of the two forms an `EXISTS` takes has to be settled before the `FROM` under it is lowered, so it is settled off what is written. A subquery with no equality at the top level of its `WHERE` has no key pair to give the semi join whatever its names turn out to mean, so it is a value. The same goes for the shapes the semi join refused by name, an aggregate, a `LIMIT`, a `WITH`, a set operation and a `VALUES`, each of which the value form lowers correctly: `WHERE EXISTS (SELECT max(band) FROM tiers WHERE band > 1000)` is true, because the fold hands out one row and the row being null is not the question.
-
-A correlated one written where the semi join cannot take it is still refused, and the message now names the dependent join rather than reporting a missing table. A quantified comparison is still refused: `ANY` and `ALL` answer the same boolean per row, but each carries a comparison that neither the mark join nor this counting is given.
-
-Part of #309.
 
 ### Fixed: a fold with no GROUP BY over no rows hands out one row
 
