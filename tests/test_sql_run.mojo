@@ -516,6 +516,73 @@ def test_an_order_by_with_a_limit_is_the_top_of_the_table() raises:
     )
 
 
+def test_an_order_by_sorts_on_a_fold_the_query_returns() raises:
+    # The shop totals are 37, 40 and 7, so the biggest first is shop 2, shop 1
+    # and shop 3. DuckDB answers the same three rows in the same order.
+    var out = run(
+        (
+            "SELECT shop, sum(qty) AS total FROM stock GROUP BY shop"
+            " ORDER BY sum(qty) DESC"
+        ),
+        session(),
+    )
+    same(read_back(out, "shop"), [2, 1, 3], "shop")
+    same(read_back(out, "total"), [40, 37, 7], "total")
+
+
+def test_an_order_by_sorts_on_a_fold_the_query_does_not_return() raises:
+    # One column out and the sum nowhere in it. The aggregate computes it all
+    # the same, because the ORDER BY is read before that node is built.
+    var out = run(
+        "SELECT shop FROM stock GROUP BY shop ORDER BY sum(qty) DESC",
+        session(),
+    )
+    assert_equal(out.width(), 1)
+    same(read_back(out, "shop"), [2, 1, 3], "shop")
+
+
+def test_an_order_by_sorts_on_the_name_a_fold_was_given() raises:
+    var out = run(
+        (
+            "SELECT shop, sum(qty) AS total FROM stock GROUP BY shop"
+            " ORDER BY total"
+        ),
+        session(),
+    )
+    same(read_back(out, "shop"), [3, 1, 2], "shop")
+    same(read_back(out, "total"), [7, 37, 40], "total")
+
+
+def test_an_order_by_sorts_on_an_expression_over_two_folds() raises:
+    # Four rows for shop 1 and one each for the others, so the counts decide it
+    # and the sums only break a tie there is not one of.
+    same(
+        answer(
+            (
+                "SELECT shop FROM stock GROUP BY shop"
+                " ORDER BY count(*) * 100 + sum(qty) DESC"
+            ),
+            "shop",
+        ),
+        [1, 2, 3],
+        "shop",
+    )
+
+
+def test_a_limit_over_a_fold_in_the_order_by_is_the_biggest_group() raises:
+    same(
+        answer(
+            (
+                "SELECT shop FROM stock GROUP BY shop ORDER BY sum(qty) DESC"
+                " LIMIT 1"
+            ),
+            "shop",
+        ),
+        [2],
+        "shop",
+    )
+
+
 def test_a_join_pairs_the_rows_that_match() raises:
     var out = run(
         (
