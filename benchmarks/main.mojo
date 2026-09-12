@@ -4987,8 +4987,8 @@ def _connect_chain(var frame: DataFrame, count: Int) raises -> DataFrame:
     whole boolean column for the next one to read straight back.
 
     Args:
-        frame: A frame of `count` boolean columns. Consumed.
-        count: How many of them to join.
+        frame: A frame of boolean columns, at least `count` of them. Consumed.
+        count: How many of them to join, taken from the front.
 
     Returns:
         One column, the conjunction.
@@ -4996,11 +4996,12 @@ def _connect_chain(var frame: DataFrame, count: Int) raises -> DataFrame:
     Raises:
         If the pipeline raises.
     """
+    var wide = len(frame.schema)
     var pipeline = Pipeline(frame^)
     var at = 0
     for k in range(1, count):
         pipeline.add(Node(Connective(at, k, LogicOp.AND, String("t", k))))
-        at = count + k - 1
+        at = wide + k - 1
     pipeline.add(Node(Project([at])))
     return pipeline^.run()
 
@@ -5009,8 +5010,8 @@ def _connect_once(var frame: DataFrame, count: Int) raises -> DataFrame:
     """The same conjunction as one operator reading every operand.
 
     Args:
-        frame: A frame of `count` boolean columns. Consumed.
-        count: How many of them to join.
+        frame: A frame of boolean columns, at least `count` of them. Consumed.
+        count: How many of them to join, taken from the front.
 
     Returns:
         One column, the conjunction.
@@ -5021,9 +5022,10 @@ def _connect_once(var frame: DataFrame, count: Int) raises -> DataFrame:
     var at = List[Int](capacity=count)
     for k in range(count):
         at.append(k)
+    var wide = len(frame.schema)
     var pipeline = Pipeline(frame^)
     pipeline.add(Node(Connective(at^, LogicOp.AND, "all")))
-    pipeline.add(Node(Project([count])))
+    pipeline.add(Node(Project([wide])))
     return pipeline^.run()
 
 
@@ -5065,12 +5067,11 @@ def bench_pipeline(mut harness: Harness) raises:
     against `join_frame` is what the chunking costs when nothing is fused away,
     which is what the fusing has to pay for out of what it saves.
 
-    The `connective` rows are one question asked three times: a conjunction of
-    several predicates written as one operator, against the chain of two column
-    operators the lowering used to fold it into. Three operands, twelve
-    operands, and twelve operands over columns carrying nulls. They come in
-    pairs and each pair also has a copy row, because a pipeline consumes its
-    input and the copy of twelve boolean columns is not small next to the work.
+    The `connective` rows are one question asked at four widths: a conjunction
+    of several predicates written as one operator, against the chain of two
+    column operators the lowering used to fold it into. Three, four, six and
+    twelve operands, plus twelve over columns carrying nulls. They come in pairs
+    and share a copy row, because a pipeline consumes its input.
 
     Args:
         harness: The harness.
@@ -5423,24 +5424,19 @@ def bench_pipeline(mut harness: Harness) raises:
     # operators the lowering used to fold it into. Same predicates, same rows,
     # same driver, and the only thing that differs is the shape, so the pair is
     # the plan level number for making the lowering keep the flat shape the
-    # simplify pass produces. Three operands is the small end, twelve is about
-    # what a TPC-H filter carries.
+    # simplify pass produces.
+    #
+    # Three, four, six and twelve operands, because the ends of that range
+    # disagree about which shape is faster and where they cross over is a thing
+    # to know rather than a thing to interpolate. Every count reads the front of
+    # the same twelve column frame rather than a frame of its own width, so the
+    # four rows differ in operand count and in nothing else.
     #
     # A pipeline consumes the frame it is given, so every row below copies one
-    # first, and twelve chunked boolean columns of a million rows is twelve
-    # megabytes of memcpy. That is the same order as the work being measured,
-    # which is why the two copy rows are here: they are the copy and nothing
-    # else, and the gap between a chain row and a flat row is only worth
-    # reading with the matching copy row taken off both.
-    var masks_three = _mask_frame(rows, 3, MORSEL_ROWS, False)
+    # first. The copy rows are that copy and nothing else, which is what says
+    # whether it is worth subtracting.
     var masks_twelve = _mask_frame(rows, 12, MORSEL_ROWS, False)
     var masks_null = _mask_frame(rows, 12, MORSEL_ROWS, True)
-
-    def copy_three() raises {imm masks_three}:
-        var one = DataFrame(copy=masks_three)
-        keep(one.rows)
-
-    harness.record("exec/connective_copy_3", "rows", rows, copy_three)
 
     def copy_twelve() raises {imm masks_twelve}:
         var one = DataFrame(copy=masks_twelve)
@@ -5448,19 +5444,47 @@ def bench_pipeline(mut harness: Harness) raises:
 
     harness.record("exec/connective_copy_12", "rows", rows, copy_twelve)
 
-    def chain_three() raises {imm masks_three}:
-        keep(masks_three.rows)
-        var out = _connect_chain(DataFrame(copy=masks_three), 3)
+    def chain_three() raises {imm masks_twelve}:
+        keep(masks_twelve.rows)
+        var out = _connect_chain(DataFrame(copy=masks_twelve), 3)
         keep(out.rows)
 
     harness.record("exec/connective_chain_3", "rows", rows, chain_three)
 
-    def once_three() raises {imm masks_three}:
-        keep(masks_three.rows)
-        var out = _connect_once(DataFrame(copy=masks_three), 3)
+    def once_three() raises {imm masks_twelve}:
+        keep(masks_twelve.rows)
+        var out = _connect_once(DataFrame(copy=masks_twelve), 3)
         keep(out.rows)
 
     harness.record("exec/connective_once_3", "rows", rows, once_three)
+
+    def chain_four() raises {imm masks_twelve}:
+        keep(masks_twelve.rows)
+        var out = _connect_chain(DataFrame(copy=masks_twelve), 4)
+        keep(out.rows)
+
+    harness.record("exec/connective_chain_4", "rows", rows, chain_four)
+
+    def once_four() raises {imm masks_twelve}:
+        keep(masks_twelve.rows)
+        var out = _connect_once(DataFrame(copy=masks_twelve), 4)
+        keep(out.rows)
+
+    harness.record("exec/connective_once_4", "rows", rows, once_four)
+
+    def chain_six() raises {imm masks_twelve}:
+        keep(masks_twelve.rows)
+        var out = _connect_chain(DataFrame(copy=masks_twelve), 6)
+        keep(out.rows)
+
+    harness.record("exec/connective_chain_6", "rows", rows, chain_six)
+
+    def once_six() raises {imm masks_twelve}:
+        keep(masks_twelve.rows)
+        var out = _connect_once(DataFrame(copy=masks_twelve), 6)
+        keep(out.rows)
+
+    harness.record("exec/connective_once_6", "rows", rows, once_six)
 
     def chain_twelve() raises {imm masks_twelve}:
         keep(masks_twelve.rows)
