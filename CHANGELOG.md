@@ -16,6 +16,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 The ORDER BY runs underneath the distinct rather than over it. That is what DuckDB does and it is the only reading that makes the query useful: `ORDER BY qty DESC` with a `DISTINCT ON (shop)` means the largest order of each shop, so the sort chooses which row of each group survives as well as ordering the answer. A `DISTINCT ON` written inside one arm of a set operation stays inside that arm, since nothing can be written between an arm and the operation over it. The key may be a column the query does not return, which gets the same widening an `ORDER BY` on a column the query does not return already gets. A computed key is still refused by name.
 
+### Added: clip
+
+`DataFrame.clip` and `Series.clip` hold every value between two bounds, with the pandas 3.0 signature and numpy's `out` accepted empty and refused full. Each bound is a value, a run of values, a mapping, a column lined up by label, or on a frame a whole frame lined up on both axes, and on a frame a run of values is a value per column until `axis=0` says it is a value per row. `inplace` is refused, as it is everywhere.
+
+There is no new kernel. This is the pick document 48 added, run twice against two comparisons, which is also where its rules come from. A value that is missing is neither above nor below anything, so it is left alone, and that falls out of a comparison answering nothing rather than out of a rule anybody wrote. A bound that is a NaN is no bound, and so is a row of a bound that holds nothing, per row. A column no bound reaches is handed back untouched and the bound is never asked whether that column could hold it, so a fraction against a column of whole numbers is only refused when a row actually takes it.
+
+Two pandas answers nobody would guess are reproduced. Two bounds that are both values and are the wrong way round are put in order, and two that carry rows are not, so `[1, 5, 10]` clipped by `[8, 8, 8]` and `[2, 2, 2]` answers `[8, 2, 2]`, because both comparisons are made against the column as it arrived rather than against what the other bound made of it. And a label a bound does not carry loses its value while a row the bound carries nothing in keeps it, which is an ordering artefact of pandas filling the bound's gaps before lining it up. Document 49 is the long version of both.
+
+The one divergence is the one `where` and `fillna` already have. pandas widens a column when a bound of another type lands in it and this refuses instead, for the reason pandas' own nullable types refuse it.
+
 ### Added: where and mask
 
 `DataFrame.where`, `DataFrame.mask`, `Series.where` and `Series.mask` are here, with the pandas 3.0 signature and every shape of condition and other side pandas takes. A condition lines up by label and a label it does not carry is a false, a condition with no labels is read by position, a frame lines up on both axes, and a callable is handed the thing it is judging. The other side is a value, a column, a run of values, a frame, or nothing at all.
