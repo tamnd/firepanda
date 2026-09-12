@@ -8,18 +8,23 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.6.75] - 2026-09-12
+
+Built against Mojo 1.0.0 (ed45d567).
+
+Subqueries that do not read the row asking about them. An uncorrelated `EXISTS` runs wherever it is written rather than only in the `AND` of a `WHERE`, and so does every quantified comparison, the six shapes of `ANY` and `ALL` that were refused by the planner. Two of those are exactly an `IN` and go to the joins one already used; the other four fold the subquery down to its smallest and largest row. What is left of subqueries is correlation, which is the dependent join. Alongside them, a grouped reduction whose state is the values now holds its key columns too, which finishes the operator half of the reductions 0.6.74 started.
+
 ### Added: an uncorrelated EXISTS, wherever it is written
 
 `EXISTS` lowered to a semi join when it was correlated and written in the `AND` of a `WHERE`, and was refused everywhere else. Now the rest of it runs. `SELECT a, EXISTS (SELECT k FROM u) AS any_u FROM t` answers a boolean on every row, and so does an `EXISTS` under an `OR`, in a `CASE`, or beside a condition with nothing in it to pair on.
 
-An uncorrelated `EXISTS` is the same answer for every outer row, because whether the subquery has a row in it does not depend on which row is asking. So it takes the shape a subquery answering one value already had: the subquery is lowered into a plan of its own, one row is worked out from it, and that row is cross joined on above the `FROM`. The row is `count(*) > 0`, which is a fold with no `GROUP BY` and so is one row whatever the subquery read, including nothing. That fold is the entry above and is why this works at all. The comparison sits under the cross join rather than over it, so it is done once rather than once per outer row.
 An uncorrelated `EXISTS` is the same answer for every outer row, because whether the subquery has a row in it does not depend on which row is asking. So it takes the shape a subquery answering one value already had: the subquery is lowered into a plan of its own, one row is worked out from it, and that row is cross joined on above the `FROM`. The row is `count(*) > 0`, which is a fold with no `GROUP BY` and so is one row whatever the subquery read, including nothing. That fold shipped in 0.6.74 and is why this works at all. The comparison sits under the cross join rather than over it, so it is done once rather than once per outer row.
 
 There is no mark join in this and no null either, which is the difference between `EXISTS` and `IN`. An `IN` compares values and a null compares to nothing, so it has to be three valued. `EXISTS` counts rows without looking in them, so it is true or false and a `NOT EXISTS` is the plain opposite of it. The `NOT` stays where it was written and reads the column, the way a `NOT IN` reads the mark join's column.
 
 Which of the two forms an `EXISTS` takes has to be settled before the `FROM` under it is lowered, so it is settled off what is written. A subquery with no equality at the top level of its `WHERE` has no key pair to give the semi join whatever its names turn out to mean, so it is a value. The same goes for the shapes the semi join refused by name, an aggregate, a `LIMIT`, a `WITH`, a set operation and a `VALUES`, each of which the value form lowers correctly: `WHERE EXISTS (SELECT max(band) FROM tiers WHERE band > 1000)` is true, because the fold hands out one row and the row being null is not the question.
 
-A correlated one written where the semi join cannot take it is still refused, and the message now names the dependent join rather than reporting a missing table. A quantified comparison is still refused: `ANY` and `ALL` answer the same boolean per row, but each carries a comparison that neither the mark join nor this counting is given.
+A correlated one written where the semi join cannot take it is still refused, and the message now names the dependent join rather than reporting a missing table. A quantified comparison answers the same boolean per row but carries a comparison that neither the mark join nor this counting is given, and the two entries below are what it got instead.
 
 Part of #309.
 
@@ -6062,7 +6067,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.74...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.75...HEAD
+[0.6.75]: https://github.com/tamnd/firepanda/releases/tag/v0.6.75
 [0.6.74]: https://github.com/tamnd/firepanda/releases/tag/v0.6.74
 [0.6.73]: https://github.com/tamnd/firepanda/releases/tag/v0.6.73
 [0.6.72]: https://github.com/tamnd/firepanda/releases/tag/v0.6.72
