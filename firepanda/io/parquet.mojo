@@ -7,14 +7,24 @@ well is a performance project, and document 08 puts that at M8. What this
 milestone wants is the capability, now, so that a TPC-H file loads and everything
 after this can be measured against something real.
 
-So the file is handed to DuckDB, which decodes it into its own vectors, and
-`duckvector.mojo` reads those vectors as Arrow arrays without asking DuckDB to
-convert them, because for most types they already are. The copy into a firepanda
-frame is the same `assemble` the IPC reader uses, so a Parquet file of a hundred
-row groups costs what its bytes cost, the same as an IPC file of a hundred record
-batches. A result holding a type `duckvector` does not read yet goes through
-`duckdb_data_chunk_to_arrow` instead, which is the path this file shipped with
-and still the correct one.
+So the file is handed to DuckDB, which decodes it into its own vectors and hands
+them over as Arrow through `duckdb_data_chunk_to_arrow`. The copy into a
+firepanda frame is the same `assemble` the IPC reader uses, so a Parquet file of
+a hundred row groups costs what its bytes cost, the same as an IPC file of a
+hundred record batches.
+
+There used to be a second route beside that one. `duckvector.mojo` described
+DuckDB's vectors as Arrow arrays directly, without asking DuckDB to convert them,
+on the grounds that for most types they already are and the conversion was most
+of what a read cost. That was true when it was written and is not true now.
+Measured on DuckDB 1.5.5 against sf1 lineitem, six million rows and sixteen
+columns, the direct route peaked at 4639 MB and took 1200 ms where the conversion
+peaked at 3611 MB and took 1010 ms, and it lost on a projection of eleven numeric
+and date columns with no strings in it at all, which is the case it should have
+won most easily. Across TPC-H the relationship was monotonic: the more of the
+suite that took the direct route the worse both numbers got. So the route is
+gone, and the reason it is written down here is that the idea is a good one and
+somebody will have it again.
 
 The reason it is a SQL string rather than a reader object is that everything else
 this milestone needs is already a SQL string. A Hive partitioned directory is a
@@ -30,7 +40,6 @@ injection, so the path is quoted the way SQL quotes a string and the caller neve
 writes SQL unless it wants to.
 """
 
-from firepanda.exec import parallel_for
 from firepanda.frame.frame import DataFrame
 
 from .arrow_c import (
@@ -53,7 +62,6 @@ from .duckdb import (
     terminated,
     text_of,
 )
-from .duckvector import Scratch, duck_array, duck_format
 
 comptime DATABASE = 0
 """Which of a session's cells holds the database."""
@@ -336,11 +344,6 @@ struct Session(Movable):
             Error: If a conversion fails or a type cannot be read.
         """
         var width = Int(self.lib.column_count(slot))
-        var kinds = self._kinds(slot, width)
-        var direct = self._direct_layout(slot, width, kinds)
-        if len(direct) == width and width != 0:
-            return self._collect_direct(slot, width, kinds, direct, morsel_rows)
-
         var options = self.lib.arrow_options(slot)
         if not options:
             raise Error("duckdb: the result carries no arrow options")
@@ -389,147 +392,6 @@ struct Session(Movable):
         self._drop(arrays^)
         self._drop_options(settings)
         return frame^
-
-    def _kinds(self, slot: ResultPtr, width: Int) raises -> List[Int32]:
-        """Reads every column's DuckDB type id.
-
-        The logical type is a handle that has to be destroyed, and the type id
-        is a small integer, so this takes the integers once and lets the handles
-        go rather than carrying them around a read.
-
-        Args:
-            slot: The result.
-            width: How many columns it has.
-
-        Returns:
-            One `duckdb_type` per column.
-
-        Raises:
-            Error: If a column has no type, which would be a DuckDB bug.
-        """
-        var out = List[Int32](capacity=width)
-        for i in range(width):
-            var type = self.lib.column_type(slot, UInt64(i))
-            if not type:
-                raise Error(String("duckdb: column ", i, " has no type"))
-            out.append(self.lib.type_id(type.value()))
-            var held = Cells(1)
-            held.put(0, type.value())
-            self.lib.destroy_type(held.at(0))
-            _ = held^
-        return out^
-
-    def _direct_layout(
-        self, slot: ResultPtr, width: Int, kinds: List[Int32]
-    ) raises -> ArrowLayout:
-        """Builds the layout for reading the vectors directly, if we can.
-
-        Returns a layout of fewer columns than the result has when any one of
-        them is a type `duckvector` does not read, which is the caller's signal
-        to go through `duckdb_data_chunk_to_arrow` instead. It is all or nothing
-        because the assembler takes one layout, and a result read half by one
-        route and half by another is two ways to be wrong instead of one.
-
-        Args:
-            slot: The result.
-            width: How many columns it has.
-            kinds: The type ids from `_kinds`.
-
-        Returns:
-            The layout, or a short one meaning no.
-
-        Raises:
-            Error: If a column has no name.
-        """
-        var out = ArrowLayout()
-        for i in range(width):
-            var format = duck_format(kinds[i])
-            if format == "":
-                return out^
-            var name = self.lib.column_name(slot, UInt64(i))
-            if not name:
-                raise Error(String("duckdb: column ", i, " has no name"))
-            out.names.append(String(text_of(name.value())))
-            out.formats.append(format^)
-            # Parquet says whether a column is nullable and DuckDB does not pass
-            # that through a result, so this claims every column may hold a
-            # null. Claiming more than is true costs a validity bitmap on a
-            # column that has no nulls; claiming less would lose one.
-            out.nullable.append(True)
-        return out^
-
-    def _collect_direct(
-        self,
-        slot: ResultPtr,
-        width: Int,
-        kinds: List[Int32],
-        layout: ArrowLayout,
-        morsel_rows: Int = 0,
-    ) raises -> DataFrame:
-        """Drains a result by describing DuckDB's own vectors as Arrow arrays.
-
-        Every chunk is pulled before any of it is read, because the assembler
-        wants to know the finished row count before it allocates, and because a
-        chunk of a materialized result is a handle rather than a copy so holding
-        all of them costs what the result already cost.
-
-        Args:
-            slot: The result, which the caller destroys either way.
-            width: How many columns it has.
-            kinds: The type ids from `_kinds`.
-            layout: The layout from `_direct_layout`.
-            morsel_rows: The chunk height, passed through to the assembler.
-
-        Returns:
-            The frame.
-
-        Raises:
-            Error: If DuckDB will not hand over a vector, or the assembly fails.
-        """
-        var chunks = List[Handle]()
-        while True:
-            var chunk = self.lib.fetch_chunk(slot[])
-            if not chunk:
-                break
-            chunks.append(chunk.value())
-        var count = len(chunks)
-
-        var scratch = Scratch(width * count)
-        var batches = List[List[ArrowArray]](capacity=count)
-        for _ in range(count):
-            batches.append(List[ArrowArray](length=width, fill=ArrowArray()))
-
-        def describe(task: Int) raises {mut scratch, mut batches, imm}:
-            var c = task // count
-            var b = task % count
-            batches[b][c] = duck_array(
-                self.lib, chunks[b], c, kinds[c], scratch, task
-            )
-
-        var frame: DataFrame
-        try:
-            if count != 0:
-                parallel_for(describe, width * count)
-            frame = assemble(layout, batches, morsel_rows=morsel_rows)
-        except error:
-            _ = scratch^
-            self._drop_chunks(chunks)
-            raise error
-        _ = scratch^
-        self._drop_chunks(chunks)
-        return frame^
-
-    def _drop_chunks(self, chunks: List[Handle]):
-        """Destroys every data chunk a direct read pulled.
-
-        Args:
-            chunks: The chunks.
-        """
-        for i in range(len(chunks)):
-            var held = Cells(1)
-            held.put(0, chunks[i])
-            self.lib.destroy_chunk(held.at(0))
-            _ = held^
 
     def _layout(
         self, slot: ResultPtr, settings: Handle, width: Int

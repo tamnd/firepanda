@@ -40,7 +40,8 @@ from std.testing import (
 )
 
 from firepanda.dtype.logical import LogicalType
-from firepanda.io.parquet import ParquetOptions, quote, read_parquet
+from firepanda.dtype.temporal import TimeUnit
+from firepanda.io.parquet import ParquetOptions, Session, quote, read_parquet
 
 comptime SINGLE = "/tmp/firepanda_parquet_one.parquet"
 """Where the fixture is written for the tests that read one file."""
@@ -310,6 +311,67 @@ def test_a_path_with_an_apostrophe_is_a_path_and_not_syntax() raises:
     # is checked directly rather than only through a read.
     assert_equal(quote("plain.parquet"), "'plain.parquet'")
     assert_equal(quote("it's.parquet"), "'it''s.parquet'")
+
+
+def test_a_date_column_reads_as_days_from_the_epoch() raises:
+    """DuckDB's date vector is Arrow's date32 already, so this reads it as one.
+
+    Both count days from 1970-01-01 in an int32, so the test is really asking
+    whether the two agree about the epoch and the sign. A date before it is the
+    half that a reader which assumed unsigned would get wrong.
+    """
+    var session = Session()
+    var frame = session.run(
+        "SELECT * FROM (VALUES (DATE '1970-01-01'), (DATE '2020-02-29'),"
+        " (NULL), (DATE '1969-12-31')) AS t(d)"
+    )
+    assert_equal(frame[0].type, LogicalType.DATE32)
+    var days = frame[0].as_typed[DType.int32]()
+    assert_equal(days[0], 0)
+    assert_equal(days[1], 18321)
+    assert_false(frame[0].is_valid(2))
+    assert_equal(days[3], -1)
+    assert_equal(frame[0].null_count(), 1)
+
+
+def test_a_timestamp_column_reads_as_microseconds_from_the_epoch() raises:
+    """The same question for a timestamp, where the unit is the thing to get
+    wrong.
+
+    DuckDB's plain TIMESTAMP is microseconds, and the sub-second digits are in
+    the fixture so that a read at the wrong unit cannot agree by accident.
+    """
+    var session = Session()
+    var frame = session.run(
+        "SELECT * FROM (VALUES (TIMESTAMP '1970-01-01 00:00:00'),"
+        " (TIMESTAMP '2020-02-29 12:34:56.789012'), (NULL)) AS t(ts)"
+    )
+    assert_equal(frame[0].type, LogicalType.timestamp(TimeUnit.MICRO))
+    var micros = frame[0].as_typed[DType.int64]()
+    assert_equal(micros[0], 0)
+    assert_equal(micros[1], 1582979696789012)
+    assert_false(frame[0].is_valid(2))
+
+
+def test_a_date_beside_a_string_and_a_number_reads_as_all_three() raises:
+    """A mixed result, which is every result a real file produces.
+
+    The three types are converted by different code inside DuckDB and land in
+    one Arrow struct, and the long string is long on purpose, because a string
+    that does not fit inline is the one that carries a payload buffer beside the
+    views.
+    """
+    var session = Session()
+    var frame = session.run(
+        "SELECT * FROM (VALUES (DATE '2020-02-29', 'a', 1),"
+        " (DATE '1999-12-31', 'a much longer string than fits inline', 2))"
+        " AS t(d, s, n)"
+    )
+    assert_equal(frame.width(), 3)
+    assert_equal(frame[0].type, LogicalType.DATE32)
+    assert_equal(frame[0].as_typed[DType.int32]()[0], 18321)
+    assert_equal(frame[1].strings()[1], "a much longer string than fits inline")
+    assert_equal(frame[2].as_typed[DType.int32]()[1], 2)
 
 
 comptime _FIXTURE = String(

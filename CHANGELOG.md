@@ -8,6 +8,16 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Removed: the Parquet reader's direct vector route, which had become the slow one
+
+A Parquet read had two routes out of DuckDB. One asked DuckDB to convert a data chunk to Arrow. The other, in `duckvector.mojo`, described DuckDB's own vectors as Arrow arrays without converting them, on the grounds that for most types they already are one and the conversion was most of what a read cost. That was measured and true when it was written. It is not true against DuckDB 1.5.5, and the second route is now the expensive one.
+
+Reading sf1 lineitem, six million rows and sixteen columns, on a thirty two thread desktop: the direct route peaked at 4639 MB of resident set and took 1200 milliseconds, the conversion peaked at 3611 MB and took 1010. Narrowing the read to eleven numeric and date columns with no strings in it, which is the case the direct route should win most easily because it is then pure pointer arithmetic against a real copy, it still lost, 1773 MB and 377 milliseconds against 1688 MB and 314. Across TPC-H the relationship was monotonic. The suite was measured three ways, with the direct route serving the six tables that have no date column, which is what shipped, then extended to cover dates as well so it served everything, then removed. Peak resident set on q9 went 4.51 GB, 4.97 GB, 4.24 GB, and on q20 4.22 GB, 4.75 GB, 3.98 GB. More traffic on the direct route was worse every time.
+
+So the route is gone, and with it 376 lines of pointer arithmetic that had to be right about DuckDB's vector layout, its string representation and its validity bit order. Against the same suite on the same machine, peak resident set falls on eighteen of the twenty two queries, is unchanged on three and moves within noise on one. The string heavy queries over the smaller tables gain the most, because those are the ones the direct route was serving: q16 goes from 0.83 GB to 0.67, q2 from 0.80 to 0.66, q11 from 0.71 to 0.58. Wall clock is unchanged within the interquartile range on every query.
+
+The reader's answers are unchanged, and reading a date or a timestamp is now covered by tests that were not there before, which is how the two routes were confirmed to agree before one of them was taken out.
+
 ### Added: SUBSTRING, in all three of the ways it is written
 
 `SELECT substring(c_phone, 1, 2) FROM customer` is the cut TPC-H q22 takes a country code with, and it was refused. So was `SUBSTRING(a FROM 1 FOR 2)`, and so was `substr`. The grammar routes even the comma spelling through the rule that exists for the keyword spelling, so one refusal covered all three, and the transform had to learn the rule before any of them could run.
