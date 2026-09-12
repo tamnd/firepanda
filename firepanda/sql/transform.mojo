@@ -231,6 +231,9 @@ comptime _EXTRACT: UInt8 = 76
 comptime _TRIM: UInt8 = 77
 """`TrimExpression`, which is three calls with two ways of spelling each."""
 
+comptime _POSITION: UInt8 = 78
+"""`PositionExpression`, which is `instr` with its arguments the other way."""
+
 comptime _STRING: UInt8 = 19
 comptime _NUMBER: UInt8 = 20
 comptime _NULL: UInt8 = 21
@@ -685,6 +688,7 @@ struct Transform(Movable):
         self._set(names, "SubstringExpression", _SUBSTRING)
         self._set(names, "ExtractExpression", _EXTRACT)
         self._set(names, "TrimExpression", _TRIM)
+        self._set(names, "PositionExpression", _POSITION)
         self._set(names, "StringLiteral", _STRING)
         self._set(names, "NumberLiteral", _NUMBER)
         self._set(names, "NullLiteral", _NULL)
@@ -849,7 +853,6 @@ struct Transform(Movable):
         # The functions SQL spells with keywords inside the parentheses. The
         # message fills in whichever one it was, so they share an entry.
         var special: List[StaticString] = [
-            "PositionExpression",
             "OverlayExpression",
             "TryExpression",
             "UnpackExpression",
@@ -1676,6 +1679,14 @@ struct Transform(Movable):
 
         if action == _TRIM:
             return self._trim(tree, sql, node, ast, work, at)
+
+        if action == _POSITION:
+            # `POSITION Parens(PositionArguments)`, and the arguments rule holds
+            # the needle and the haystack in that order, which is the order the
+            # keyword reads in and the opposite of the one the call takes.
+            var pair = tree.children(self._only(tree, self._only(tree, node)))
+            var swapped: List[UInt32] = [pair[1], pair[0]]
+            return self._named_call(ast, work, swapped, "instr", at)
 
         if action == _NULLIF:
             # `NULLIF Parens(NullIfArguments)`, and the arguments rule holds

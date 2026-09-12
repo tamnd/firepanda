@@ -1718,6 +1718,76 @@ def test_a_trim_whose_set_is_a_column_is_refused_while_it_lowers() raises:
         _ = run("SELECT trim(word, word) AS piece FROM padded", session())
 
 
+def test_a_search_counts_from_one_and_says_zero_for_a_miss() raises:
+    # `words` is apple, apricot, banana, grape, the empty string, a null and
+    # pineapple, and the null is left out because a missing answer is the next
+    # test rather than this one.
+    var got = answer(
+        "SELECT strpos(word, 'an') AS c FROM words WHERE n <> 6", "c"
+    )
+    same(got, [0, 0, 2, 0, 0, 0], "c")
+
+
+def test_a_search_that_hits_twice_answers_the_first_one() raises:
+    var got = answer(
+        "SELECT strpos(word, 'na') AS c FROM words WHERE n = 3", "c"
+    )
+    same(got, [3], "c")
+
+
+def test_a_search_of_a_row_with_nothing_in_it_has_no_answer() raises:
+    # DuckDB answers null rather than zero, and the two are different things to
+    # anything that folds the column afterwards.
+    var out = run(
+        "SELECT strpos(word, 'a') AS c FROM words WHERE n = 6", session()
+    )
+    var col = out.column("c").as_typed[DType.int64]()
+    assert_equal(len(col), 1, "one row")
+    assert_true(not col.is_valid(0), "and nothing in it")
+
+
+def test_a_search_counts_characters_and_not_bytes() raises:
+    # `glyphs` row three is five characters and fifteen bytes, so a search that
+    # counted bytes would answer seven here.
+    var got = answer(
+        "SELECT strpos(word, '語') AS c FROM glyphs WHERE n = 3", "c"
+    )
+    same(got, [3], "c")
+
+
+def test_a_search_for_nothing_answers_the_first_character() raises:
+    var got = answer("SELECT strpos(word, '') AS c FROM words WHERE n = 1", "c")
+    same(got, [1], "c")
+
+
+def test_the_keyword_spelling_of_a_search_answers_the_same() raises:
+    var written = answer(
+        "SELECT POSITION('an' IN word) AS c FROM words WHERE n = 3", "c"
+    )
+    var called = answer(
+        "SELECT strpos(word, 'an') AS c FROM words WHERE n = 3", "c"
+    )
+    same(written, [2], "the keyword spelling ran")
+    same(called, [2], "and the call spelling agrees")
+
+
+def test_a_search_for_a_column_is_refused_while_it_lowers() raises:
+    # There is no kernel that reads a new needle for every row, so this is
+    # refused rather than answered with the first row's needle for all of them.
+    with assert_raises(contains="have to be written out"):
+        _ = run("SELECT strpos(word, word) AS c FROM words", session())
+
+
+def test_a_search_folds_the_way_clickbench_folds_one() raises:
+    # The shape ClickBench uses it in: a search worked out per row and read
+    # back as a test rather than as a number. Four of the words have the run
+    # in them somewhere, and only two of those start with it.
+    var got = answer(
+        "SELECT count(*) AS c FROM words WHERE strpos(word, 'ap') > 0", "c"
+    )
+    same(got, [4], "c")
+
+
 def test_a_trim_folds_the_way_a_character_count_folds() raises:
     # The shape that matters: a trim worked out per row and read back by the
     # length of what came off it.

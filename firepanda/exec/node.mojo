@@ -124,6 +124,7 @@ from firepanda.kernel.cast import cast_any
 from firepanda.kernel.chars import (
     text_character_length,
     text_character_substring,
+    text_find,
 )
 from firepanda.kernel.concat import concat_two_any
 from firepanda.kernel.edges import text_trim
@@ -2102,6 +2103,123 @@ struct Trim(Movable):
         var rows = len(chunk)
         var columns = chunk^.into_columns()
         columns.append(AnyArray(made^))
+        return Chunk(columns^, rows)
+
+
+struct Locate(Movable):
+    """Appends a column saying where a run of characters sits in each element.
+
+    This is SQL's `POSITION`, and `STRPOS` and `INSTR`, which are DuckDB's other
+    two names for it. Characters and not bytes, so `strpos('日本語です', '語')`
+    is three rather than seven, which is what DuckDB answers and what `Cut` and
+    `Length` already count.
+
+    It counts from one and answers zero for an element the run is not in. That
+    is SQL's numbering and it is not the kernel's: `text_find` answers from zero
+    and says minus one for a miss, because that is what `str.find` does and the
+    pandas accessor calls it directly. The one that separates them is added
+    here, which is the only reason this node holds any arithmetic at all.
+
+    The run is a constant and there is no column form, for the reason `Match`
+    has none. A run read once at plan time is a run of bytes handed to the
+    searcher, and `strpos(a, b)` over two columns is a different kernel that
+    resolves a new needle for every row. Lowering refuses that rather than
+    pretending this node can do it.
+
+    A null element gives a null answer, which the kernel already does, so
+    nothing here repairs anything.
+    """
+
+    var at: Int
+    """The position of the column being searched."""
+
+    var needle: String
+    """The run of characters to look for."""
+
+    var name: String
+    """The name the appended column gets in the output schema."""
+
+    def __init__(out self, at: Int, needle: String, name: String):
+        """Constructs a search over a column.
+
+        Args:
+            at: The position of the column being searched.
+            needle: The run of characters to look for.
+            name: The name of the appended column.
+        """
+        self.at = at
+        self.needle = needle
+        self.name = name
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Reports the input schema with a whole number column appended.
+
+        Args:
+            input: The schema of the chunks that will arrive. Consumed.
+
+        Returns:
+            The input schema with one int64 field on the end.
+
+        Raises:
+            If the position is outside the schema, or names a column that does
+            not hold text.
+        """
+        var out = input^
+        if self.at < 0 or self.at >= len(out):
+            raise Error(
+                "locate: column "
+                + String(self.at)
+                + " is outside a schema of "
+                + String(len(out))
+                + " columns"
+            )
+        if out[self.at].dtype != LogicalType.STRING:
+            raise Error(
+                "locate: a search reads text and column "
+                + String(self.at)
+                + " holds "
+                + String(out[self.at].dtype)
+            )
+        out.append(Field(self.name, LogicalType.INT64, out[self.at].nullable))
+        return out^
+
+    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Runs the search and puts the answer on the end of the chunk.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            The chunk with one more column and the same number of rows.
+
+        Raises:
+            If the position is outside the chunk, or the column is not text.
+        """
+        var width = chunk.width()
+        if self.at < 0 or self.at >= width:
+            raise Error(
+                "locate: column "
+                + String(self.at)
+                + " is outside a chunk of "
+                + String(width)
+                + " columns"
+            )
+        var found = text_find(
+            chunk.columns[self.at].strings(),
+            self.needle.as_bytes(),
+            None,
+            None,
+            False,
+        )
+        # From the kernel's numbering to SQL's. A miss is minus one and becomes
+        # zero, a hit is counted from zero and becomes counted from one, and the
+        # one addition covers both because they are the same numbering shifted.
+        var made = binary_value_any(
+            AnyArray(found^), Value(1), BinaryOp.ADD, False
+        )
+        var rows = len(chunk)
+        var columns = chunk^.into_columns()
+        columns.append(made^)
         return Chunk(columns^, rows)
 
 
@@ -5383,6 +5501,7 @@ comptime Node = Variant[
     Cut,
     Length,
     Trim,
+    Locate,
     Part,
     Truncate,
     Presence,
@@ -5444,6 +5563,8 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
         return node[Length].bind(input^)
     if node.isa[Trim]():
         return node[Trim].bind(input^)
+    if node.isa[Locate]():
+        return node[Locate].bind(input^)
     if node.isa[Part]():
         return node[Part].bind(input^)
     if node.isa[Truncate]():
@@ -5585,7 +5706,8 @@ def node_is_row_local(node: Node) -> Bool:
 
     Returns:
         True for `Filter`, `Expand`, `Project`, `Compute`, `Connective`,
-        `Apply`, `Match`, `Cut`, `Length`, `Trim`, `Part`, `Truncate`,
+        `Apply`, `Match`, `Cut`, `Length`, `Trim`, `Locate`, `Part`,
+        `Truncate`,
         `Presence`,
         `Fill`,
         `Choose`, `Constant`, `Cast` and `Join`.
@@ -5601,6 +5723,7 @@ def node_is_row_local(node: Node) -> Bool:
         or node.isa[Cut]()
         or node.isa[Length]()
         or node.isa[Trim]()
+        or node.isa[Locate]()
         or node.isa[Part]()
         or node.isa[Truncate]()
         or node.isa[Presence]()
@@ -5660,6 +5783,10 @@ def node_computes_per_row(node: Node) -> Bool:
     add per byte of payload, so it is memory bound rather than waiting on
     arithmetic, and its kernel already spreads itself over the cores, so handing
     the chunks out as well would be paying for two sets of tasks to do one pass.
+
+    `Locate` says no for `Length`'s reason. Searching is a pass over the payload
+    and its kernel spreads itself over the cores already, so a second set of
+    tasks on top of that would be paying twice to do one pass.
 
     `Part` and `Truncate` say yes. Turning a day number into a year, or a year
     back into a day number, is a run of multiplies and shifts per row and not a
@@ -5764,6 +5891,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Length].process(chunk^)
     if node.isa[Trim]():
         return node[Trim].process(chunk^)
+    if node.isa[Locate]():
+        return node[Locate].process(chunk^)
     if node.isa[Part]():
         return node[Part].process(chunk^)
     if node.isa[Truncate]():
@@ -5839,6 +5968,8 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Length].process(chunk^)
     if node.isa[Trim]():
         return node[Trim].process(chunk^)
+    if node.isa[Locate]():
+        return node[Locate].process(chunk^)
     if node.isa[Part]():
         return node[Part].process(chunk^)
     if node.isa[Truncate]():
