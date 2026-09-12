@@ -480,7 +480,9 @@ from .ast import (
     STMT_SET_OPERATION,
     STMT_VALUES,
 )
-from .catalog import Catalog, KIND_FRAME, fold
+from .catalog import NOT_FOUND, Catalog, KIND_FRAME, fold
+from .generated.functions import KIND_AGGREGATE
+from .registry import Registry
 from .cte import NOT_A_CTE, aliased, read_ctes
 from .star import (
     NOT_REPLACED,
@@ -954,6 +956,121 @@ def _is_aggregate(name: String) -> Bool:
         return True
     except:
         return False
+
+
+def _lowers(name: String) -> Bool:
+    """Whether the lowering below turns a call of this name into something.
+
+    Every name that reaches `plan.exprs.call` and is understood on the other
+    side, plus the ones rewritten on the way down. The connectives are in it
+    because the simplify pass writes `and` and `or` as calls and a plan that
+    has been through a pass binds again, so a name that never appears in SQL
+    still has to be a name this says yes to.
+
+    Args:
+        name: The function name, already folded to lower case.
+
+    Returns:
+        Whether a call of it gets anywhere.
+    """
+    if _is_aggregate(name):
+        return True
+    if name == "coalesce" or name == "ifnull" or name == "nullif":
+        return True
+    if name == "substring" or name == "substr":
+        return True
+    if name == "date_part" or name == "datepart":
+        return True
+    if name == "date_trunc" or name == "datetrunc":
+        return True
+    if name == "strlen" or name == "length" or name == "len":
+        return True
+    if name == "is_null" or name == "is_not_null" or name == "like":
+        return True
+    return name == "and" or name == "or" or name == "not"
+
+
+def _function_name(ast: Ast, run: UInt32) -> String:
+    """The one part of a call's name, or nothing when it is not one part.
+
+    A qualified name is a real thing to write and the lowering refuses it with
+    a message about its parts, so the catalog check steps over one rather than
+    reading the last part and answering the wrong question about it. Empty
+    stands for that, since a call with no name at all is refused there too.
+
+    Args:
+        ast: The arenas.
+        run: The run of interned parts.
+
+    Returns:
+        The name folded to lower case, or the empty string.
+    """
+    try:
+        return fold(_one_name(ast, run, "a function"))
+    except:
+        return String()
+
+
+def _check_functions(ast: Ast) raises:
+    """Reads every function name in a statement against the catalog.
+
+    A pass of its own, run before anything is lowered, rather than a check at
+    the point a call is lowered. Threading the registry down to that point
+    means threading it through `_lower_expr` and its forty six call sites, and
+    what the check needs is the name and nothing else, so it reads the
+    expression arena straight through instead. Every node of it belongs to this
+    statement, so walking the arena and walking the tree see the same calls.
+
+    What this buys is which of three sentences a name that goes nowhere gets.
+    Before it, `upper`, `mean` and `lenght` all came back as `there is no
+    function named 'x' yet`, which is right for one of the three. `upper` is a
+    kernel firepanda has not written. `mean` is a name the tier 1 catalog does
+    not carry, and DuckDB runs it. `lenght` is a typo for `length`, and saying
+    so is the whole of what the suggestion is for.
+
+    A name the catalog does not know is not said to be missing, because tier 1
+    is a subset of DuckDB's catalog rather than the whole of it. `mean` and
+    `levenshtein` are both real and neither is in the table, so the sentence
+    says what firepanda has and leaves DuckDB out of it.
+
+    Args:
+        ast: The arenas the statement lives in.
+
+    Raises:
+        If a call names a function that gets nowhere.
+    """
+    var registry = Registry()
+    for at in range(len(ast.exprs)):
+        if ast.exprs[at].kind != EXPR_FUNCTION:
+            continue
+
+        # A call with an `OVER` on it is left alone. `_lower_over` refuses one
+        # by name already and says the more useful thing while it does it,
+        # since `row_number` is not a kernel anybody is waiting on. It is a
+        # window function, and the catalog calls it an aggregate.
+        if ast.exprs[at].b != NO_NODE:
+            continue
+
+        var name = _function_name(ast, ast.exprs[at].payload)
+        if name.byte_length() == 0 or _lowers(name):
+            continue
+
+        var found = registry.find(name)
+        if found == NOT_FOUND:
+            var message = String("there is no function named ", name, " here")
+            var near = registry.nearest(name)
+            if near != NOT_FOUND:
+                message += String(
+                    '\nDid you mean "', registry.names[near], '"?'
+                )
+            raise Error(message)
+        if registry.kind_of(found) == KIND_AGGREGATE:
+            raise Error(
+                String("firepanda has no fold for the aggregate ", name, " yet")
+            )
+        raise Error(
+            String("firepanda has no kernel for the function ", name, " yet")
+        )
 
 
 struct _Bindings(Copyable, Movable):
@@ -3518,8 +3635,10 @@ def lower(ast: Ast, statement: UInt32, catalog: Catalog) raises -> Lowered:
         The plan, its root and the schemas the scans read.
 
     Raises:
-        If the statement is a shape this does not lower yet.
+        If the statement names a function that gets nowhere, or is a shape this
+        does not lower yet.
     """
+    _check_functions(ast)
     var plan = Plan()
     var sources = List[Schema]()
     var scope = _Scope()

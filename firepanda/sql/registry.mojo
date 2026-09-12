@@ -500,8 +500,7 @@ struct Registry(Movable, Sized):
 
         A different sentence from the one a function gets, with the candidates
         under a heading that carries no leading tab and with no trailing blank
-        line. Three tier 1 names are macros: `date_add`, `nullif` and
-        `split_part`.
+        line. Two tier 1 names are macros: `date_add` and `split_part`.
 
         Args:
             name: The name the query wrote.
