@@ -236,6 +236,112 @@ def _one_name(value: Any) -> str | None:
     return None if names[0] is None else str(names[0])
 
 
+def _dropping(labels: Any, axis: Any, index: Any, columns: Any, owner: str) -> tuple[Any, Any]:
+    """Works out which axis a drop was aimed at, the way pandas works it out.
+
+    Document 46 is the long version and this is the order of the checks, which is
+    pandas' order and gives pandas' three messages. A positional `labels` with
+    either keyword beside it is the first error, a keyword with `axis=1` beside it
+    is the second, and none of the three is the third. `axis=0` next to a keyword
+    is not an error, because zero is the default and there is no way to tell a
+    caller who wrote it from one who did not.
+
+    Args:
+        labels: The positional argument, whose axis `axis` decides.
+        axis: Which axis `labels` is for.
+        index: Row labels to drop.
+        columns: Column names to drop.
+        owner: The class name, for the axis message.
+
+    Returns:
+        The row labels to drop and the column names to drop, either of which is
+        `None` for an axis that was not named.
+
+    Raises:
+        InvalidArgumentError: For all three of pandas' complaints, and for an
+            axis this class does not have.
+    """
+    if labels is not None:
+        if index is not None or columns is not None:
+            raise InvalidArgumentError("Cannot specify both 'labels' and 'index'/'columns'")
+        allowed = (0, 1) if owner == "DataFrame" else (0,)
+        if _axis_number(axis, owner, 0, allowed) == 1:
+            return None, labels
+        return labels, None
+    if index is not None or columns is not None:
+        if axis == 1:
+            raise InvalidArgumentError("Cannot specify both 'axis' and 'index'/'columns'")
+        return index, columns
+    raise InvalidArgumentError("Need to specify at least one of 'labels', 'index' or 'columns'")
+
+
+def _ignore_or_raise(errors: Any) -> None:
+    """Checks the word that says what to do about something that is not there.
+
+    pandas reads anything that is not `"ignore"` as `"raise"`, so a misspelling
+    silently picks the strict behaviour. Document 23 argues that a misspelled
+    option is a typo worth catching rather than a value to guess at, which is the
+    answer `rename` already gives, and this is the same answer for `drop`.
+
+    Args:
+        errors: What was passed.
+
+    Raises:
+        InvalidArgumentError: If it is neither word.
+    """
+    if errors not in ("ignore", "raise"):
+        raise InvalidArgumentError(f"expected 'ignore' or 'raise', got {errors!r} for errors")
+
+
+def _dropped(wanted: Any, held: Any, errors: str) -> list[str]:
+    """The column names to hand the core, with the missing ones dealt with first.
+
+    The core resolves names against the schema and stops at the first one it
+    cannot find, which is a message about one name when the caller may have
+    mistyped three, and it has no word for skipping a name that is not there. So
+    both halves of `errors` are settled here and the core is only ever handed
+    names the frame has.
+
+    Args:
+        wanted: One name or a sequence of them.
+        held: The column names the frame has.
+        errors: `"ignore"` to skip a name that is not a column, `"raise"` to
+            collect every one of them and complain.
+
+    Returns:
+        The names to drop, in the order they were written, each of them a column
+        the frame has.
+
+    Raises:
+        KeyError: If `errors` is `"raise"` and a name is not a column.
+    """
+    names = [str(one) for one in _sequence(wanted)]
+    there = set(held)
+    missing = [name for name in names if name not in there]
+    if missing and errors == "raise":
+        raise KeyError(f"{missing} not found in axis")
+    return [name for name in names if name in there]
+
+
+def _sequence(value: Any) -> list[Any]:
+    """One label or a sequence of them, as a list either way.
+
+    A string is a sequence in Python and a label in pandas, so telling the two
+    apart is a Python question and it is answered here rather than in Mojo. A
+    tuple is read as a sequence, where pandas reads it as a single multi level
+    label, which document 46 records as one more thing waiting on the MultiIndex.
+
+    Args:
+        value: A label, or something to iterate for labels.
+
+    Returns:
+        The labels, as a list.
+    """
+    if isinstance(value, (str, bytes, bytearray)) or not hasattr(value, "__iter__"):
+        return [value]
+    return list(value)
+
+
 def _reindex_filling(kind: str, method: Any, limit: Any, tolerance: Any) -> None:
     """Refuses the three parameters of reindex that are about filling.
 
@@ -1851,6 +1957,71 @@ class DataFrameMixin:
         """
         return self.copy()
 
+    def drop(
+        self,
+        labels: Any = None,
+        *,
+        axis: Any = 0,
+        index: Any = None,
+        columns: Any = None,
+        level: Any = None,
+        inplace: bool = False,
+        errors: str = "raise",
+    ) -> DataFrame:
+        """The frame without some of its columns, or some of its rows, or both.
+
+        Document 46 is the long version. Both halves are here, unlike `rename`,
+        and they are still two different operations sharing a word. Dropping a
+        column takes a pointer out of a schema and reads nothing. Dropping a row
+        label finds the positions those labels are at and builds every column in
+        the frame again without them.
+
+        The row half is `self.index.drop` followed by `reindex`, which is two
+        calls that already existed and no new code at all. It costs one hashing
+        pass over the index more than a purpose built version would, and it
+        inherits `reindex`'s refusal of a repeated row label, so a frame whose
+        index holds the same label twice raises here where pandas drops both
+        rows. Both of those are the price of composing rather than writing a
+        kernel, and document 46 says what the kernel would look like.
+
+        `index=` and `columns=` together in one call is allowed and does both,
+        which is the one place this is more generous than `rename`. There the
+        pair is refused because one half of it refuses on its own. Here neither
+        does, so it is two independent steps with nothing to decide between.
+
+        `errors` defaults to `"raise"`, which is pandas' default here and the
+        opposite of pandas' default for `rename`. The `KeyError` lists everything
+        that was not found rather than stopping at the first.
+        """
+        from ._frame import DataFrame
+
+        _held_at("inplace", inplace, False, _NO_INPLACE)
+        _no_level(level)
+        _ignore_or_raise(errors)
+        rows, names = _dropping(labels, axis, index, columns, "DataFrame")
+        if rows is None:
+            answer = self.copy()
+        else:
+            answer = self._reindex(
+                labels=None,
+                index=self.index.drop(_sequence(rows), errors),
+                columns=None,
+                axis=None,
+                method=None,
+                copy=NO_DEFAULT,
+                level=None,
+                fill_value=None,
+                limit=None,
+                tolerance=None,
+            )
+        if names is None:
+            return answer
+        going = _dropped(names, list(answer.columns), errors)
+        try:
+            return DataFrame._wrap(answer._inner.drop(going))
+        except Exception as error:
+            raise translate(error) from None
+
     def rename(
         self,
         mapper: Any = None,
@@ -2994,6 +3165,17 @@ class SeriesMixin:
 
     _inner: _firepanda.Series
 
+    if TYPE_CHECKING:
+
+        @property
+        def index(self) -> Index:
+            """The row labels, declared here and defined by the generated class.
+
+            The frame declares the same property for the same reason, which is
+            that the table is where a one call member belongs and the type
+            checker still has to be told it will be there.
+            """
+
     def __init__(
         self,
         data: Any = None,
@@ -3291,6 +3473,49 @@ class SeriesMixin:
     def __deepcopy__(self, memo: Any = None) -> Series:
         """`copy.deepcopy(s)`, the same answer and `memo` unused."""
         return self.copy()
+
+    def drop(
+        self,
+        labels: Any = None,
+        *,
+        axis: Any = 0,
+        index: Any = None,
+        columns: Any = None,
+        level: Any = None,
+        inplace: bool = False,
+        errors: str = "raise",
+    ) -> Series:
+        """The column without the rows carrying some of its labels.
+
+        The row half of the frame's method with one column under it, and there
+        is no column half to go with it, so this is the shorter of the two even
+        though the signature is the same length. It is `self.index.drop` and then
+        `reindex`, and document 46 has what that composition costs and the one
+        thing it refuses that pandas does not.
+
+        `columns=` is accepted here and does nothing, which is measured against a
+        running pandas rather than chosen. pandas takes the keyword, finds that a
+        series has no column axis to apply it to, and answers the series
+        unchanged without a word about it. A layer that is stricter than the
+        thing it copies is still incompatible with it, so this does the same.
+        `axis=1` is a different matter and raises, with pandas' own sentence.
+        """
+        _held_at("inplace", inplace, False, _NO_INPLACE.replace("frame", "column"))
+        _no_level(level)
+        _ignore_or_raise(errors)
+        rows, _ = _dropping(labels, axis, index, columns, "Series")
+        if rows is None:
+            return self.copy()
+        return self._reindex(
+            index=self.index.drop(_sequence(rows), errors),
+            axis=None,
+            method=None,
+            copy=NO_DEFAULT,
+            level=None,
+            fill_value=None,
+            limit=None,
+            tolerance=None,
+        )
 
     def rename(
         self,

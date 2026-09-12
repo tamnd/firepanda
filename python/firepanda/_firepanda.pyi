@@ -63,6 +63,9 @@ class DataFrame:
     def select(self, names: list[str]) -> DataFrame:
         """Several columns, as a frame."""
         ...
+    def drop(self, names: list[str]) -> DataFrame:
+        """The frame without the named columns."""
+        ...
     def renamed_columns(self, olds: list[str], news: list[str]) -> DataFrame:
         """The same data under a different schema."""
         ...

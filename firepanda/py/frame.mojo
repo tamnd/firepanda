@@ -687,6 +687,37 @@ struct PyDataFrame(Movable, Writable):
         )
 
     @staticmethod
+    def drop(py_self: PythonObject, names: PythonObject) raises -> PythonObject:
+        """Takes several columns out of the frame and keeps the rest.
+
+        This is the column half of what pandas spells `drop`. The row half is
+        a different operation on a different axis and it is not here, so the
+        two are told apart one layer up rather than in the core.
+
+        Args:
+            py_self: The frame.
+            names: The columns to remove. Each has to be there, because the
+                caller has already dealt with `errors="ignore"` by the time it
+                gets here, and a name that is still in the list at this point
+                is one that was asked for and meant.
+
+        Returns:
+            A new frame holding the columns that were not named, in the order
+            they were already in.
+        """
+        var going = List[String](capacity=Int(len(names)))
+        for name in names:
+            going.append(String(name))
+        try:
+            return PythonObject(
+                alloc=Self(
+                    ArcPointer(Self._frame(py_self)[].frame[].drop(going))
+                )
+            )
+        except cause:
+            raise retagged(COLUMN, cause)
+
+    @staticmethod
     def select(
         py_self: PythonObject, names: PythonObject
     ) raises -> PythonObject:

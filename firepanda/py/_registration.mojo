@@ -122,6 +122,9 @@ def register(mut module: PythonModuleBuilder) raises:
     _ = dataframe.def_method[PyDataFrame.select](
         "select", docstring="Several columns, as a frame."
     )
+    _ = dataframe.def_method[PyDataFrame.drop](
+        "drop", docstring="The frame without the named columns."
+    )
     _ = dataframe.def_method[PyDataFrame.renamed_columns](
         "renamed_columns", docstring="The same data under a different schema."
     )
