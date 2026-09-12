@@ -258,6 +258,7 @@ from firepanda.exec.node import (
     Compute,
     Connective,
     Constant,
+    Expand,
     Filter,
     Group,
     GroupAgg,
@@ -1051,10 +1052,20 @@ def _decide(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     every row with a null in it and does it silently. A group by puts the nulls
     of a column in one group, which is the rule SQL asked for.
 
-    `ALL` is refused. `EXCEPT ALL` subtracts one copy of a row per copy on the
-    right and `INTERSECT ALL` keeps as many copies as the thinner arm has, so
-    both need a group to come back out as some number of rows rather than as
-    one, and nothing here repeats a row.
+    `ALL` is the same group by counting instead of comparing. `EXCEPT ALL`
+    subtracts one copy of a row per copy on the right and `INTERSECT ALL` keeps
+    as many copies as the thinner arm has, so both want the number of copies
+    each arm put in the group rather than which arms were in it. Adding the tag
+    up is the right arm's count, since the tag is one there and zero on the
+    left, and counting the rows is both arms together, so the left's count is
+    the one subtracted from the other. A difference then asks for the left's
+    count less the right's, an intersection asks for the smaller of the two, and
+    `Expand` turns whichever number that is into that many rows.
+
+    A difference of counts goes negative whenever the right arm has more copies,
+    and that is left alone rather than clamped here, because `Expand` writes
+    nothing for a count of zero or less. It is the one place in this file where
+    an operator's rule about its own edge saves a node.
 
     Args:
         plan: The plan, bound.
@@ -1062,23 +1073,9 @@ def _decide(plan: Plan, at: Int, mut pipe: Pipeline) raises:
         pipe: The pipeline over the tagged stack, added to.
 
     Raises:
-        Error: If `ALL` was asked for.
+        Error: If the node is not a difference or an intersection.
     """
     var op = plan.nodes[at].op
-    if plan.nodes[at].flags[0]:
-        var word = "EXCEPT ALL" if op == SET_EXCEPT else "INTERSECT ALL"
-        raise Error(
-            String(
-                "lower: ",
-                word,
-                (
-                    " counts the copies of a row on each side and emits as"
-                    " many rows as those two counts say, and the group by this"
-                    " is built on answers one row per group rather than a"
-                    " number of them"
-                ),
-            )
-        )
 
     # One short of the width, because the last column is the tag `_stacked` put
     # there and the query's own row is everything in front of it.
@@ -1086,6 +1083,28 @@ def _decide(plan: Plan, at: Int, mut pipe: Pipeline) raises:
     var keys = List[Int](capacity=width)
     for i in range(width):
         keys.append(i)
+
+    var keep = List[Int](capacity=width)
+    for i in range(width):
+        keep.append(i)
+
+    if plan.nodes[at].flags[0]:
+        var counts = List[GroupAgg]()
+        counts.append(GroupAgg(width, AggKind.SUM, "__right"))
+        counts.append(GroupAgg(width, AggKind.COUNT, "__rows"))
+        pipe.add(Node(Group(keys^, counts^)))
+        # Both arms together less the right arm's, which is the left arm's.
+        pipe.add(Node(Compute(width + 1, width, BinaryOp.SUB, "__left_rows")))
+        var copies: Int
+        if op == SET_INTERSECT:
+            pipe.add(Node(Compute(width + 2, width, BinaryOp.LT, "__thinner")))
+            pipe.add(Node(Choose(width + 3, width + 2, width, "__copies")))
+            copies = width + 4
+        else:
+            pipe.add(Node(Compute(width + 2, width, BinaryOp.SUB, "__copies")))
+            copies = width + 3
+        pipe.add(Node(Expand(copies, keep^)))
+        return
 
     # The group by puts its keys in front and its folds after them, so the tags
     # are the positions past the query's own row.
@@ -1108,9 +1127,6 @@ def _decide(plan: Plan, at: Int, mut pipe: Pipeline) raises:
         pipe.add(Node(Compute(width, width + 1, BinaryOp.EQ, "__only")))
         mask = width + 2
 
-    var keep = List[Int](capacity=width)
-    for i in range(width):
-        keep.append(i)
     pipe.add(Node(Filter(mask, keep^)))
 
 
@@ -1759,6 +1775,10 @@ def _stacked(
     tag is appended here and read there. `_SIDE` is what it is called, and the
     name is one no column of a query has, since a query cannot write it.
 
+    The tag is a byte for the distinct answer, which only ever asks whether a
+    side was in a group, and a whole number of sixty four bits for `ALL`, which
+    adds the tag up to count how many rows a side put in one.
+
     Args:
         plan: The plan, bound.
         at: The union node.
@@ -1774,13 +1794,25 @@ def _stacked(
             column's type, or if an input is a line this file cannot lower.
     """
     var tagged = plan.nodes[at].op != SET_UNION
+    var counted = tagged and plan.nodes[at].flags[0]
     var inputs = plan.nodes[at].inputs.copy()
     var fields = List[Field]()
     var columns = List[ChunkedArray]()
     for i in range(len(inputs)):
         var side = _lower_from(plan, inputs[i], frames, taken)
         if tagged:
-            side.add(Node(Constant(Value(Int8(i)), LogicalType.INT8, _SIDE)))
+            if counted:
+                # A whole number wide enough to be added up, because `ALL` sums
+                # the tag to count the rows one side put in a group and a sum of
+                # a byte would run out on a group of more than a hundred and
+                # twenty seven rows.
+                side.add(
+                    Node(Constant(Value(Int64(i)), LogicalType.INT64, _SIDE))
+                )
+            else:
+                side.add(
+                    Node(Constant(Value(Int8(i)), LogicalType.INT8, _SIDE))
+                )
         var out = side^.run()
         if i == 0:
             for c in range(len(out.schema)):
