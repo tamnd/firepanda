@@ -259,6 +259,27 @@ larger of the two, and on a column whose keys are nearly all distinct they are
 most of the run.
 """
 
+comptime COUNT_BLOCK_ROWS = 1 << 17
+"""Rows a partitioned distinct count hashes and scatters before it builds.
+
+The partitioned route exists so that a count can use every core without holding
+a copy of the key set per core, and the thing that would undo that is the
+scatter buffer it hashes into. Doing the whole column at once is sixteen bytes a
+row of staging, which on a long column is more than the tables it is protecting.
+A block at a time is two megabytes whatever the column's height is, and the
+tables carry over from one block to the next because a partition owns the same
+hash range throughout.
+
+Two megabytes is a hash written where it was taken and read back where it
+belongs, so the block wants to be small enough that the second read is still in
+cache and large enough that the three handouts it costs are paid for by the work
+inside it. Measured on the reference machine at ten million rows with a key
+every six, this is 29.6 ms, a block of a million rows is 29.0 ms for fifteen
+megabytes more, and a block of sixty five thousand is 31.6 ms and climbing
+because the handouts start to show. The flat top of that curve is wide and this
+sits at the cheap end of it.
+"""
+
 comptime CROWDED_SHARE = 2
 """Fraction of the cores taken when the tables cannot all fit in cache.
 
@@ -3266,14 +3287,18 @@ def _count_workers(groups: Int, n: Int) -> Int:
     where a medium cardinality column has room for a dozen tables and the cache
     rule alone would have given it one.
 
-    Past both, the answer is one worker, one table, and a footprint of the
-    distinct values and nothing else, which is the smallest the question has.
+    Past both, the answer is one worker and one table, which is not the same
+    thing as one core any more. `distinct_hashed` reads a refusal here as the
+    signal to take `_distinct_hashed_partitioned` instead, which splits by hash
+    range rather than by row and so holds one copy of the key set between all its
+    tables however many it has. The budget this function is spending only exists
+    because a slice route duplicates the key set, so it has nothing to say about
+    a route that does not, and the long high cardinality column this used to
+    hand to one core now uses every one of them.
 
-    What that gives up is the long high cardinality column, where a factorize
-    would have gone partitioned and run on every core and this runs on one. The
-    route that would fix it is a count that partitions by hash as it goes, so the
-    tables stay disjoint and the footprint stays at one copy of the keys while
-    the work is still spread. That is filed rather than written.
+    What is left for this function to decide is which of the two parallel routes
+    to take, and the answer is the slice route while the duplication is free,
+    because it hashes the column once and scatters nothing.
 
     Args:
         groups: The estimated distinct key count of the whole column.
@@ -3368,6 +3393,13 @@ def distinct_hashed[
             var workers = _count_workers(groups, n)
             if workers > 1:
                 return _distinct_hashed_parallel[dt](col, seed, workers, groups)
+            # The slice route was refused because a table per worker would cost
+            # more than this route is allowed to spend. The partitioned route is
+            # not refused for that, because its tables hold one copy of the key
+            # set between them however many workers there are.
+            var most = min(worker_count(), n // PARALLEL_MIN_SLICE)
+            if most >= 2 and groups >= 1:
+                return _distinct_hashed_partitioned[dt](col, seed, most, groups)
     return _distinct_hashed_serial[dt](col, seed, groups)
 
 
@@ -3519,6 +3551,161 @@ def _distinct_hashed_parallel[
     var union = 0
     for b in range(buckets):
         union += counts[b]
+    return union
+
+
+def _distinct_hashed_partitioned[
+    dt: DType
+](col: Array[dt], seed: UInt64, workers: Int, groups: Int = 0) raises -> Int:
+    """Counts a column's distinct values with one table per hash range.
+
+    The route for the column `_count_workers` refuses to split. That rule gives
+    the whole column to one core once a table per worker would cost more than
+    the ordinals the count exists to not write, which on a long column with a
+    key every few rows is every column it sees, so a count that should have been
+    the cheapest thing in the file runs slower than the factorize it replaced.
+    Measured on ten million int64 rows with a key every six: 74.3 milliseconds
+    on one core against the factorize's 53.3 on all of them.
+
+    The rule is not wrong, the shape is. A worker owning a range of rows sees
+    nearly every key the column has, so its table grows to hold nearly all of
+    them and the split costs a copy of the key set per worker. A worker owning a
+    range of the hash space sees only the keys that hash into it, no two of them
+    can hold the same key, and the tables together hold one copy of the key set
+    however many there are. So the footprint stops growing with the split and
+    the cap stops being needed. Nothing has to be folded at the end either,
+    because nothing was duplicated: the answer is the sizes added up.
+
+    What it costs is moving the rows, which is what the partitioned factorize
+    pays too, minus the half of it a count does not need. `place` writes the
+    hash and not the row, because a count never asks which row a key came from,
+    so the staging is eight bytes a row against that route's twelve and nothing
+    indexed by row outlives the block it was written in.
+
+    A block at a time for exactly that reason. Scattering the whole column at
+    once would put sixteen bytes a row on the heap, which on the column this
+    route is for is more than the tables, and the tables are the thing the route
+    is protecting. `COUNT_BLOCK_ROWS` rows at a time is a fixed two megabytes of
+    staging whatever the column's height is, and the tables carry over between
+    blocks because a partition owns the same hash range from the first block to
+    the last. On the column above that is 161.0 megabytes of peak resident set
+    against the one core route's 158.8, which is the two megabytes and the
+    rounding, for a run that takes 29.6 milliseconds against 49.7.
+
+    Partitions come from the top bits of the hash and a table's buckets from the
+    bottom ones, which have to be different bits or every key in a partition
+    would probe the same region of that partition's table.
+
+    Args:
+        col: The column.
+        seed: The per-query hash seed.
+        workers: How many slices to hash and scatter a block in parallel.
+        groups: An estimate of the column's key count, or zero if nobody took
+            one. Divided by the partition count before it is used, because a
+            partition holds its own share of the keys rather than all of them,
+            which is the opposite of what the slice route sizes against.
+
+    Parameters:
+        dt: The column's dtype.
+
+    Returns:
+        How many distinct non-null values it holds.
+
+    Raises:
+        If one of the workers cannot be run.
+    """
+    var n = len(col)
+    var has_null = col.null_count() > 0
+
+    var bits = _merge_bits(workers)
+    var parts = 1 << bits
+    var shift = UInt64(64 - bits)
+
+    var share = (groups + parts - 1) // parts if groups > 0 else 0
+    var room = _count_capacity(share, n, parts)
+    var tables = List[HashTable](capacity=parts)
+    for _ in range(parts):
+        tables.append(HashTable(room, seed))
+
+    # Sized for the longest block and reused by every one of them, so a column
+    # of any height allocates this once. The last block is short and writes into
+    # the front of the same buffers.
+    var slice_rows = (COUNT_BLOCK_ROWS + workers - 1) // workers
+    var hashes = List[Buffer](capacity=workers)
+    for _ in range(workers):
+        hashes.append(Buffer(overwritten=slice_rows * 8))
+    var keys = Buffer(overwritten=COUNT_BLOCK_ROWS * 8)
+    var counts = List[Int](length=workers * parts, fill=0)
+    var bounds = List[Int](length=workers + 1, fill=0)
+
+    var block = 0
+    while block < n:
+        var rows = min(COUNT_BLOCK_ROWS, n - block)
+
+        # Slices land on chunk boundaries so that the hashing is the same shape
+        # as everywhere else, with a short chunk only at the end of a block.
+        var chunks = (rows + CHUNK_ROWS - 1) // CHUNK_ROWS
+        for w in range(workers):
+            bounds[w] = block + chunks * w // workers * CHUNK_ROWS
+        bounds[workers] = block + rows
+        for i in range(len(counts)):
+            counts[i] = 0
+
+        def scan(w: Int) raises {mut hashes, mut counts, imm}:
+            var start = bounds[w]
+            var stop = bounds[w + 1]
+            hash_chunk(col, start, stop - start, seed, hashes[w])
+            var hash = hashes[w].bitcast[DType.uint64]()
+            var at = w * parts
+            for k in range(stop - start):
+                if has_null and not col.is_valid(start + k):
+                    continue
+                counts[
+                    at + Int(hash.unsafe_offset(k).unsafe_load() >> shift)
+                ] += 1
+
+        parallel_for(scan, workers)
+
+        # Partition major and worker minor, the same prefix sum the partitioned
+        # factorize takes, rewritten in place into one write cursor per worker
+        # per partition with the boundaries copied out first.
+        var offsets = List[Int](capacity=parts + 1)
+        var running = 0
+        for p in range(parts):
+            offsets.append(running)
+            for w in range(workers):
+                var seen = counts[w * parts + p]
+                counts[w * parts + p] = running
+                running += seen
+        offsets.append(running)
+
+        def place(w: Int) raises {mut keys, imm}:
+            var start = bounds[w]
+            var stop = bounds[w + 1]
+            var hash = hashes[w].bitcast[DType.uint64]()
+            var key = keys.mut_bitcast[DType.uint64]()
+            var at = List[Int](capacity=parts)
+            for p in range(parts):
+                at.append(counts[w * parts + p])
+            for k in range(stop - start):
+                if has_null and not col.is_valid(start + k):
+                    continue
+                var found = hash.unsafe_offset(k).unsafe_load()
+                var p = Int(found >> shift)
+                key.unsafe_offset(at[p]).unsafe_write(found)
+                at[p] += 1
+
+        parallel_for(place, workers)
+
+        def build(p: Int) raises {mut tables, imm}:
+            tables[p].tally_run(keys, offsets[p], offsets[p + 1] - offsets[p])
+
+        parallel_for(build, parts)
+        block += rows
+
+    var union = 0
+    for p in range(parts):
+        union += len(tables[p])
     return union
 
 
