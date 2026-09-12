@@ -181,6 +181,15 @@ def read_back(df: DataFrame, name: String) raises -> List[Int64]:
     return out^
 
 
+def decimals(df: DataFrame, name: String) raises -> List[Float64]:
+    """Reads a float64 column out as a plain list."""
+    var col = df.column(name).as_typed[DType.float64]()
+    var out = List[Float64](capacity=len(col))
+    for i in range(len(col)):
+        out.append(col[i])
+    return out^
+
+
 def same(got: List[Int64], want: List[Int64], what: String) raises:
     """Checks a column read back against the numbers it should hold."""
     assert_equal(len(got), len(want), what + ": how many rows")
@@ -2506,6 +2515,154 @@ def test_an_ordered_window_is_refused_by_name() raises:
 
     with assert_raises(contains="is ordered, and an ordered window"):
         _ = lower(plan, root, shift_frame())
+
+
+def test_a_conditional_picks_between_two_columns() raises:
+    # The plain shape. A condition over one column, a column on each side, and
+    # the answer is one column with rows from both.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var price = plan.exprs.column("price")
+    var ten = plan.exprs.literal(Value(Int64(10)))
+    var over = plan.exprs.binary(BinaryOp.GT, qty, ten)
+    var picked = plan.exprs.conditional(over, qty, price)
+    var root = plan.project(scan, [picked], ["taken"])
+    var out = run(plan, root)
+
+    assert_equal(len(out.schema), 1, "the projection keeps the one column")
+    same(
+        read_back(out, "taken"),
+        [10, 20, 7, 40, 12, 9, 25, 100, 30, 15],
+        "the quantity over ten and the price otherwise",
+    )
+
+
+def test_a_null_condition_takes_the_else_side() raises:
+    # The rule worth pinning. A row the question could not be asked about is a
+    # row the question did not hold for, which is what SQL says and is not what
+    # an operation would say, since every one of those answers a null instead.
+    var plan = Plan()
+    var scan = plan.scan("gauges", List[String](), 0)
+    var a = plan.exprs.column("a")
+    var b = plan.exprs.column("b")
+    var pair = plan.exprs.binary(BinaryOp.EQ, a, b)
+    var seven = plan.exprs.literal(Value(Int64(7)))
+    var nine = plan.exprs.literal(Value(Int64(9)))
+    var picked = plan.exprs.conditional(pair, seven, nine)
+    var root = plan.project(scan, [picked], ["taken"])
+    _ = bind(plan, root, gauge_schemas())
+    var pipe = lower(plan, root, gauge_frame())
+    var out = pipe^.run()
+
+    # Four of the five pairs have a null on one side or the other, so only the
+    # last row asks a question that has an answer.
+    same(
+        read_back(out, "taken"),
+        [9, 9, 9, 9, 7],
+        "the else side wherever the condition was null",
+    )
+
+
+def test_a_chain_of_whens_is_a_chain_of_nodes() raises:
+    # A conditional's else side is another conditional, which is how the parser
+    # already builds a chain, so nothing here counts branches.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var high = plan.exprs.binary(
+        BinaryOp.GT, qty, plan.exprs.literal(Value(Int64(20)))
+    )
+    var some = plan.exprs.binary(
+        BinaryOp.GT, qty, plan.exprs.literal(Value(Int64(5)))
+    )
+    var inner = plan.exprs.conditional(
+        some,
+        plan.exprs.literal(Value(Int64(2))),
+        plan.exprs.literal(Value(Int64(1))),
+    )
+    var outer = plan.exprs.conditional(
+        high, plan.exprs.literal(Value(Int64(3))), inner
+    )
+    var root = plan.project(scan, [outer], ["band"])
+    var out = run(plan, root)
+
+    same(
+        read_back(out, "band"),
+        [1, 2, 1, 3, 2, 2, 3, 1, 3, 2],
+        "three bands over the quantity",
+    )
+
+
+def test_a_conditional_over_two_types_casts_the_side_that_moves() raises:
+    # Binding promotes the two sides and the node needs them to agree, so the
+    # integer column is converted into a column of its own. In its own column
+    # rather than where it lies, because the scan's column is still the scan's.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var ten = plan.exprs.literal(Value(Int64(10)))
+    var over = plan.exprs.binary(BinaryOp.GT, qty, ten)
+    var half = plan.exprs.literal(Value(Float64(0.5)))
+    var picked = plan.exprs.conditional(over, qty, half)
+    var root = plan.project(scan, [picked], ["taken"])
+    var out = run(plan, root)
+
+    assert_equal(
+        out.schema[0].dtype,
+        LogicalType.FLOAT64,
+        "the two sides promote to the wider one",
+    )
+    var got = decimals(out, "taken")
+    var want = [0.5, 20.0, 0.5, 40.0, 12.0, 0.5, 25.0, 0.5, 30.0, 15.0]
+    assert_equal(len(got), len(want), "how many rows")
+    for i in range(len(want)):
+        assert_equal(got[i], want[i], "taken at " + String(i))
+
+
+def test_a_conditional_may_be_a_predicate() raises:
+    # The answer is a boolean column like any other, so a filter can read it.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var price = plan.exprs.column("price")
+    var over = plan.exprs.binary(
+        BinaryOp.GT, qty, plan.exprs.literal(Value(Int64(10)))
+    )
+    var dear = plan.exprs.binary(
+        BinaryOp.GT, price, plan.exprs.literal(Value(Int64(5)))
+    )
+    var asked = plan.exprs.conditional(
+        over, dear, plan.exprs.literal(Value(False))
+    )
+    var root = plan.filter(scan, asked)
+    var out = run(plan, root)
+
+    # Six rows are over ten and one of those six costs more than five.
+    same(read_back(out, "qty"), [15], "the one row both halves kept")
+
+
+def test_each_side_of_a_conditional_may_be_an_expression() raises:
+    # Both sides lower the way anything else does, so an expression on each is
+    # two lines of appends and then the choice between the two columns.
+    var plan = Plan()
+    var scan = plan.scan("sales", List[String](), 0)
+    var qty = plan.exprs.column("qty")
+    var price = plan.exprs.column("price")
+    var over = plan.exprs.binary(
+        BinaryOp.GT, qty, plan.exprs.literal(Value(Int64(10)))
+    )
+    var less = plan.exprs.binary(BinaryOp.SUB, qty, price)
+    var more = plan.exprs.binary(BinaryOp.ADD, qty, price)
+    var picked = plan.exprs.conditional(over, less, more)
+    var root = plan.project(scan, [picked], ["net"])
+    var out = run(plan, root)
+
+    same(
+        read_back(out, "net"),
+        [15, 18, 10, 39, 7, 17, 22, 101, 26, 9],
+        "the difference over ten and the sum otherwise",
+    )
 
 
 def main() raises:

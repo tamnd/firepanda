@@ -118,6 +118,7 @@ from firepanda.kernel.cast import cast_any
 from firepanda.kernel.concat import concat_two_any
 from firepanda.kernel.group import AggKind, agg_type, aggregate_group_any
 from firepanda.kernel.logic import LogicOp, logic_any, logic_type
+from firepanda.kernel.pick import pick_any
 from firepanda.kernel.reduce import reduce_any
 from firepanda.kernel.running import (
     accumulate_any,
@@ -1379,6 +1380,135 @@ struct Connective(Movable):
             )
         else:
             made = logic_any(chunk.columns[self.left], self.op)
+        var rows = len(chunk)
+        var columns = chunk^.into_columns()
+        columns.append(made^)
+        return Chunk(columns^, rows)
+
+
+struct Choose(Movable):
+    """Appends a column taking each row from one of two columns, on a condition.
+
+    This is SQL's `CASE WHEN c THEN a ELSE b END` and the frame API's `where`.
+    The shape is `Compute`'s with one more position, and it is a node of its own
+    for the reason `Connective` is: the rule for a null is not the one an
+    operation follows. A null condition is not a null answer here, it takes the
+    else side, because a row the question could not be asked about is a row the
+    question did not hold for. That is what the SQL standard says and it is what
+    `pick` already does, so nothing in the kernel changes.
+
+    A chain of `WHEN`s is a chain of these, each one's else side being the next,
+    which is how the parser already builds it and why there is no list here. An
+    expression with four branches is three nodes and two intermediates, and the
+    intermediates are dropped by the projection at the end the way every other
+    expression's are.
+
+    Both sides have to be the same type, because choosing between an int and a
+    string is not a column. Lowering casts them to the type binding worked out
+    before it builds this, so a mismatch here is a plan that was not bound.
+    """
+
+    var on: Int
+    """The position of the condition, which must be boolean."""
+
+    var left: Int
+    """The position of the column the rows where the condition holds come from.
+    """
+
+    var right: Int
+    """The position of the column the other rows come from."""
+
+    var name: String
+    """The name the appended column gets in the output schema."""
+
+    def __init__(out self, on: Int, left: Int, right: Int, name: String):
+        """Constructs a choice between two columns.
+
+        Args:
+            on: The position of the condition.
+            left: The position of the true side.
+            right: The position of the false side.
+            name: The name of the appended column.
+        """
+        self.on = on
+        self.left = left
+        self.right = right
+        self.name = name
+
+    def _check(self, width: Int) raises:
+        """Raises if any of the three positions is outside a chunk that wide.
+
+        Args:
+            width: How many columns there are.
+
+        Raises:
+            Error: If a position is outside the range.
+        """
+        var each = [self.on, self.left, self.right]
+        for i in range(len(each)):
+            if each[i] < 0 or each[i] >= width:
+                raise Error(
+                    "choose: column "
+                    + String(each[i])
+                    + " is outside a schema of "
+                    + String(width)
+                    + " columns"
+                )
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Reports the input schema with the chosen column appended.
+
+        Args:
+            input: The schema of the chunks that will arrive. Consumed.
+
+        Returns:
+            The input schema with one field on the end.
+
+        Raises:
+            Error: If a position is outside the schema, the condition is not
+                boolean, or the two sides are different types.
+        """
+        var out = input^
+        self._check(len(out))
+        if out[self.on].dtype.kind != TypeKind.BOOL:
+            raise Error(
+                "choose: the condition is "
+                + String(out[self.on].dtype)
+                + " and a condition is a yes or no question"
+            )
+        # One interior reference at a time, as `Compute.bind` does, since two
+        # into the same list cannot both be alive.
+        var made = out[self.left].dtype
+        var other = out[self.right].dtype
+        if made != other:
+            raise Error(
+                "choose: cannot choose between "
+                + String(made)
+                + " and "
+                + String(other)
+                + ", so the plan was not bound before it was lowered"
+            )
+        out.append(Field(self.name, made))
+        return out^
+
+    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Applies the choice and puts the column on the end of the chunk.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            The chunk with one more column and the same number of rows.
+
+        Raises:
+            Error: If a position is outside the chunk, the condition is not
+                boolean, or the two sides are different types.
+        """
+        self._check(chunk.width())
+        ref cond = chunk.columns[self.on].as_typed_view[DType.bool]()
+        var made = pick_any(
+            cond, chunk.columns[self.left], chunk.columns[self.right]
+        )
         var rows = len(chunk)
         var columns = chunk^.into_columns()
         columns.append(made^)
@@ -3674,6 +3804,7 @@ comptime Node = Variant[
     Project,
     Compute,
     Connective,
+    Choose,
     Constant,
     Cast,
     Join,
@@ -3719,6 +3850,8 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
         return node[Compute].bind(input^)
     if node.isa[Connective]():
         return node[Connective].bind(input^)
+    if node.isa[Choose]():
+        return node[Choose].bind(input^)
     if node.isa[Constant]():
         return node[Constant].bind(input^)
     if node.isa[Cast]():
@@ -3841,14 +3974,15 @@ def node_is_row_local(node: Node) -> Bool:
         node: The node.
 
     Returns:
-        True for `Filter`, `Project`, `Compute`, `Connective`, `Constant`,
-        `Cast` and `Join`.
+        True for `Filter`, `Project`, `Compute`, `Connective`, `Choose`,
+        `Constant`, `Cast` and `Join`.
     """
     return (
         node.isa[Filter]()
         or node.isa[Project]()
         or node.isa[Compute]()
         or node.isa[Connective]()
+        or node.isa[Choose]()
         or node.isa[Constant]()
         or node.isa[Cast]()
         or node.isa[Join]()
@@ -3894,12 +4028,13 @@ def node_computes_per_row(node: Node) -> Bool:
         node: The node.
 
     Returns:
-        True for `Filter`, `Compute`, `Connective` and `Join`.
+        True for `Filter`, `Compute`, `Connective`, `Choose` and `Join`.
     """
     return (
         node.isa[Filter]()
         or node.isa[Compute]()
         or node.isa[Connective]()
+        or node.isa[Choose]()
         or node.isa[Join]()
     )
 
@@ -3969,6 +4104,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Compute].process(chunk^)
     if node.isa[Connective]():
         return node[Connective].process(chunk^)
+    if node.isa[Choose]():
+        return node[Choose].process(chunk^)
     if node.isa[Constant]():
         return node[Constant].process(chunk^)
     if node.isa[Cast]():
@@ -4019,6 +4156,8 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Compute].process(chunk^)
     if node.isa[Connective]():
         return node[Connective].process(chunk^)
+    if node.isa[Choose]():
+        return node[Choose].process(chunk^)
     if node.isa[Constant]():
         return node[Constant].process(chunk^)
     if node.isa[Cast]():

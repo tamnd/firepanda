@@ -64,6 +64,22 @@ call with a child list, the simplify pass already flattened the nested ones, so
 the conjuncts are just the children, and a predicate that is not a conjunction
 is the one conjunct case of the same loop.
 
+### A conditional is three columns and one node
+
+`CASE WHEN c THEN a ELSE b END` lowers the way everything else does, three
+appends and then a `Choose` that reads the three positions. A chain of `WHEN`s
+arrives already nested, each one's else side being the next, so nothing here
+counts branches and a four branch expression is three nodes.
+
+Two things about it are not the general pattern. The first is the null: a null
+condition takes the else side rather than making the answer null, which is what
+the standard says and what separates this from an operation, where a null
+operand is a null answer. The second is the types. Binding promoted the two
+sides and the node needs them to agree, so a side that is not already the
+promoted type gets a cast into a column of its own. Into its own column and not
+in place, because the side may be an input column that something else still
+reads at its own type, which is the rule this whole file is built on.
+
 ### A join stays on the line, because one of its sides is a table
 
 A pipeline is a line and a join has two inputs, which sounds like the end of the
@@ -200,7 +216,7 @@ columns the plan's schema numbered.
 ### What it refuses, and why refusing is the design
 
 A distinct on part of the row is not lowered here, and neither is a difference,
-an intersection, a unary expression, a conditional, an ordered window, or a cast
+an intersection, a unary expression, an ordered window, or a cast
 over an input column.
 Every one of those raises an error that names what it was. It does not fall
 back to `Materialize`, and the reason is that `Materialize` holds a function
@@ -225,6 +241,7 @@ from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
 from firepanda.exec.node import (
     Cast,
+    Choose,
     Compute,
     Connective,
     Constant,
@@ -487,6 +504,9 @@ def _lower_expr(
     if kind == ExprKind.CALL and is_logic_name(exprs.nodes[root].name):
         return _lower_connective(exprs, root, pipe, base, name, memo)
 
+    if kind == ExprKind.CONDITIONAL:
+        return _lower_conditional(exprs, root, pipe, base, name, memo)
+
     if kind != ExprKind.BINARY:
         raise Error(
             String(
@@ -614,6 +634,109 @@ def _lower_connective(
         at = len(pipe.schema) - 1
     memo.remember(root, at)
     return at
+
+
+def _lower_conditional(
+    exprs: Expressions,
+    root: Int,
+    mut pipe: Pipeline,
+    base: Int,
+    name: String,
+    mut memo: Memo,
+) raises -> Int:
+    """Appends whatever computes a `CASE WHEN c THEN a ELSE b END`.
+
+    The three children are lowered into columns and one `Choose` reads them.
+    A chain of `WHEN`s arrives here already nested, each one's else side being
+    the next, so a four branch expression is three of these and the recursion
+    does the nesting without anything here counting branches.
+
+    The two sides are made to agree on a type before the node is built. Binding
+    worked out what the whole expression produces, by promoting the two, and a
+    side that is not already that type gets a cast of its own rather than being
+    converted where it lies, because it may be an input column that something
+    else still reads at its own type. `CASE WHEN a > 0 THEN a ELSE 0.5 END` over
+    an integer column is the ordinary case of this, and the integer side is the
+    one that moves.
+
+    Args:
+        exprs: The arena.
+        root: The conditional, already bound.
+        pipe: The pipeline, added to.
+        base: The width of the chunk before this node started lowering.
+        name: What to call the column the whole expression lands in.
+        memo: What this node has already computed and where it put it.
+
+    Returns:
+        The position of the column holding the answer.
+
+    Raises:
+        Error: If the conditional does not have three children, or one of them
+            has a kind no operator computes.
+    """
+    var kids = exprs.nodes[root].children.copy()
+    if len(kids) != 3:
+        raise Error(
+            String(
+                (
+                    "lower: a conditional reads a condition and two sides and"
+                    " was given "
+                ),
+                len(kids),
+                " children",
+            )
+        )
+
+    var want = exprs.nodes[root].type
+    var on = _lower_expr(exprs, kids[0], pipe, base, name, memo, reuse=True)
+    var left = _lower_side(exprs, kids[1], pipe, base, name, memo, want)
+    var right = _lower_side(exprs, kids[2], pipe, base, name, memo, want)
+    pipe.add(Node(Choose(on, left, right, name)))
+    memo.remember(root, len(pipe.schema) - 1)
+    return len(pipe.schema) - 1
+
+
+def _lower_side(
+    exprs: Expressions,
+    root: Int,
+    mut pipe: Pipeline,
+    base: Int,
+    name: String,
+    mut memo: Memo,
+    want: LogicalType,
+) raises -> Int:
+    """Lowers one side of a conditional and converts it if it is not the type.
+
+    Args:
+        exprs: The arena.
+        root: The side, already bound.
+        pipe: The pipeline, added to.
+        base: The width of the chunk before this node started lowering.
+        name: What to call any column this appends.
+        memo: What this node has already computed and where it put it.
+        want: The type both sides have to agree on.
+
+    Returns:
+        The position of the column holding the side at that type.
+
+    Raises:
+        Error: If the side has a kind no operator computes.
+    """
+    if (
+        exprs.nodes[root].kind == ExprKind.LITERAL
+        and exprs.nodes[root].value.is_null()
+    ):
+        # A null literal has no type of its own, so it is written down at the
+        # type the other side decided rather than being built as a column of
+        # nulls and then converted into one. `CASE WHEN c THEN x END` is where
+        # this comes from, since a CASE with no ELSE has a null there.
+        pipe.add(Node(Constant(Value(null=want), want, name)))
+        return len(pipe.schema) - 1
+    var at = _lower_expr(exprs, root, pipe, base, name, memo, reuse=True)
+    if pipe.schema[at].dtype == want:
+        return at
+    pipe.add(Node(Cast(at, want, name)))
+    return len(pipe.schema) - 1
 
 
 def _trim(mut pipe: Pipeline, base: Int) raises:
