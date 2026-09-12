@@ -483,9 +483,9 @@ def _prod_range[
             var i = base
             var lanes = SIMD[acc, width](1)
             while i + width <= last:
-                var chunk = ptr.unsafe_offset(i).unsafe_load[
-                    width=width
-                ]().cast[acc]()
+                var chunk = (
+                    ptr.unsafe_offset(i).unsafe_load[width=width]().cast[acc]()
+                )
                 comptime if dt.is_floating_point():
                     # A NaN becomes the identity, which changes no product it is
                     # in. There is nothing to remember on the side the way the
@@ -796,9 +796,7 @@ def _truthy[dt: DType](value: Scalar[dt]) -> Bool:
 
 def truth_over[
     dt: DType, //, origin: ImmOrigin, want_all: Bool
-](
-    source: Pointer[Scalar[dt], origin], validity: Bitmap, n: Int
-) raises -> Bool:
+](source: Pointer[Scalar[dt], origin], validity: Bitmap, n: Int) raises -> Bool:
     """Reports whether any or every present value of `n` is true.
 
     `any` and `all` differ by which way the fold goes and by which answer ends
@@ -844,9 +842,9 @@ def truth_over[
         var found = _truth_range[want_all=want_all](
             source, validity, start, stop
         )
-        flags.unsafe_mut_ptr().unsafe_offset(
-            start // MORSEL_ROWS
-        ).unsafe_write(UInt8(1) if found else UInt8(0))
+        flags.unsafe_mut_ptr().unsafe_offset(start // MORSEL_ROWS).unsafe_write(
+            UInt8(1) if found else UInt8(0)
+        )
 
     parallel_morsels(reduce_one, n)
 

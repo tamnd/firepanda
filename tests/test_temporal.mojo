@@ -44,14 +44,31 @@ from firepanda.kernel.temporal import (
     FIELD_CODES,
     FIELD_IS_LEAP_YEAR,
     FIELD_ISO_YEAR,
+    TRUNC_CENTURY,
+    TRUNC_DAY,
+    TRUNC_DECADE,
+    TRUNC_HOUR,
+    TRUNC_MICROSECOND,
+    TRUNC_MILLENNIUM,
+    TRUNC_MILLISECOND,
+    TRUNC_MINUTE,
+    TRUNC_MONTH,
+    TRUNC_QUARTER,
+    TRUNC_SECOND,
+    TRUNC_WEEK,
+    TRUNC_YEAR,
     TemporalField,
     civil_from_days,
+    days_from_civil,
     extract_field,
     field_dtype,
     sql_field_named,
+    temporal_as_timestamp,
     temporal_date,
     temporal_field,
     temporal_normalize,
+    temporal_truncate,
+    trunc_unit_named,
 )
 
 comptime NULL_ROW = Int64.MIN
@@ -666,6 +683,207 @@ def test_a_field_neither_system_has_is_refused() raises:
         _ = sql_field_named("epoch")
     with assert_raises(contains="no field SQL calls nosuch"):
         _ = sql_field_named("nosuch")
+
+
+def truncs(values: List[Int64], unit: Int) raises -> List[Int64]:
+    """Truncates a microsecond column and reads the answer back.
+
+    Args:
+        values: The instants, in microseconds since the epoch, with `NULL_ROW`
+            meaning a null.
+        unit: One of the `TRUNC_` codes.
+
+    Returns:
+        One integer per row, with a null row reading as zero.
+    """
+    var answer = temporal_truncate(stamps(values, TimeUnit.MICRO), unit)
+    ref view = answer.as_typed_view[DType.int64]()
+    var out = List[Int64](capacity=len(view))
+    for i in range(len(view)):
+        out.append(view[i])
+    return out^
+
+
+def test_a_day_number_survives_the_round_trip_through_the_calendar() raises:
+    # Four hundred years of days taken apart and put back together. That is a
+    # whole Gregorian cycle, so every leap rule and every month length is in
+    # here, and it runs either side of the epoch because the two lines that
+    # divide a negative number are the ones most likely to be wrong.
+    for day in range(-73049, 73049, 7):
+        var one = SIMD[DType.int64, 1](day)
+        var civil = civil_from_days[1](one)
+        assert_equal(
+            Int(days_from_civil[1](civil.year, civil.month, civil.day)[0]),
+            day,
+            String("day ", day),
+        )
+
+
+def test_the_first_day_of_a_month_is_what_truncating_to_one_gives() raises:
+    # The reference numbers are DuckDB's, read as microseconds since the epoch,
+    # off 2013-07-15 13:45:12.345678.
+    var when = List[Int64](capacity=1)
+    when.append(1373895912345678)
+    assert_equal(truncs(when, TRUNC_YEAR)[0], 1356998400000000, "year")
+    assert_equal(truncs(when, TRUNC_QUARTER)[0], 1372636800000000, "quarter")
+    assert_equal(truncs(when, TRUNC_MONTH)[0], 1372636800000000, "month")
+    assert_equal(truncs(when, TRUNC_WEEK)[0], 1373846400000000, "week")
+    assert_equal(truncs(when, TRUNC_DAY)[0], 1373846400000000, "day")
+
+
+def test_the_clock_units_are_the_column_divided_and_nothing_else() raises:
+    var when = List[Int64](capacity=1)
+    when.append(1373895912345678)
+    assert_equal(truncs(when, TRUNC_HOUR)[0], 1373893200000000, "hour")
+    assert_equal(truncs(when, TRUNC_MINUTE)[0], 1373895900000000, "minute")
+    assert_equal(truncs(when, TRUNC_SECOND)[0], 1373895912000000, "second")
+    assert_equal(
+        truncs(when, TRUNC_MILLISECOND)[0], 1373895912345000, "millisecond"
+    )
+    assert_equal(
+        truncs(when, TRUNC_MICROSECOND)[0], 1373895912345678, "microsecond"
+    )
+
+
+def test_the_three_long_units_all_end_on_a_year_of_zeros() raises:
+    var when = List[Int64](capacity=1)
+    when.append(1373895912345678)
+    assert_equal(truncs(when, TRUNC_DECADE)[0], 1262304000000000, "decade")
+    assert_equal(truncs(when, TRUNC_CENTURY)[0], 946684800000000, "century")
+    assert_equal(
+        truncs(when, TRUNC_MILLENNIUM)[0], 946684800000000, "millennium"
+    )
+
+
+def test_truncating_before_the_epoch_goes_back_and_never_forward() raises:
+    # The last second of 1969, which is the row the whole file is built around.
+    # Every one of these has to land before it and not on the epoch.
+    var when = List[Int64](capacity=1)
+    when.append(-1000000)
+    assert_equal(truncs(when, TRUNC_YEAR)[0], -31536000000000, "year")
+    assert_equal(truncs(when, TRUNC_MONTH)[0], -2678400000000, "month")
+    assert_equal(truncs(when, TRUNC_WEEK)[0], -259200000000, "week")
+    assert_equal(truncs(when, TRUNC_DAY)[0], -86400000000, "day")
+
+    # 1965-02-28, whose decade starts in 1960 and whose century starts in 1900.
+    var older = List[Int64](capacity=1)
+    older.append(-152755200000000)
+    assert_equal(truncs(older, TRUNC_DECADE)[0], -315619200000000, "decade")
+    assert_equal(truncs(older, TRUNC_CENTURY)[0], -2208988800000000, "century")
+    assert_equal(truncs(older, TRUNC_QUARTER)[0], -157766400000000, "quarter")
+
+
+def test_a_week_runs_monday_to_sunday_wherever_it_lands() raises:
+    # The 15th of July 2013 was a Monday and truncates to itself, the 14th was
+    # the Sunday before it and goes back six days to the 8th.
+    var week = List[Int64](capacity=2)
+    week.append(1373846400000000)
+    week.append(1373760000000000)
+    var got = truncs(week, TRUNC_WEEK)
+    assert_equal(got[0], 1373846400000000, "a Monday truncates to itself")
+    assert_equal(got[1], 1373241600000000, "a Sunday goes back six days")
+
+
+def test_a_leap_day_truncates_to_a_month_and_a_week_like_any_other() raises:
+    # The 29th of February 2016, which is a Monday, so the week is itself.
+    var leap = List[Int64](capacity=1)
+    leap.append(1456747200000000)
+    assert_equal(truncs(leap, TRUNC_MONTH)[0], 1454284800000000, "month")
+    assert_equal(truncs(leap, TRUNC_WEEK)[0], 1456704000000000, "week")
+
+
+def test_a_null_row_truncates_to_nothing() raises:
+    var when = List[Int64](capacity=2)
+    when.append(NULL_ROW)
+    when.append(1373895912345678)
+    var answer = temporal_truncate(stamps(when, TimeUnit.MICRO), TRUNC_MONTH)
+    ref view = answer.as_typed_view[DType.int64]()
+    assert_true(not view.is_valid(0), "the null row stays null")
+    assert_true(view.is_valid(1), "and the one beside it does not")
+
+
+def test_a_unit_finer_than_the_column_leaves_it_alone() raises:
+    var when = List[Int64](capacity=1)
+    when.append(1373895912345)
+    var answer = temporal_truncate(
+        stamps(when, TimeUnit.MILLI), TRUNC_MICROSECOND
+    )
+    ref view = answer.as_typed_view[DType.int64]()
+    assert_equal(view[0], 1373895912345, "milliseconds are already whole")
+    assert_true(
+        answer.type == LogicalType.timestamp(TimeUnit.MILLI),
+        "and the type is untouched",
+    )
+
+
+def test_truncating_keeps_the_resolution_it_was_given() raises:
+    var when = List[Int64](capacity=1)
+    when.append(1373895912)
+    var answer = temporal_truncate(stamps(when, TimeUnit.SECOND), TRUNC_HOUR)
+    ref view = answer.as_typed_view[DType.int64]()
+    assert_equal(view[0], 1373893200, "seconds that are a whole hour")
+    assert_true(
+        answer.type == LogicalType.timestamp(TimeUnit.SECOND),
+        "still seconds",
+    )
+
+
+def test_the_sql_unit_names_reach_the_units_they_name() raises:
+    assert_equal(trunc_unit_named("year"), TRUNC_YEAR, "year")
+    assert_equal(trunc_unit_named("years"), TRUNC_YEAR, "years")
+    assert_equal(trunc_unit_named("y"), TRUNC_YEAR, "y")
+    assert_equal(trunc_unit_named("mon"), TRUNC_MONTH, "mon")
+    assert_equal(trunc_unit_named("quarters"), TRUNC_QUARTER, "quarters")
+    assert_equal(trunc_unit_named("w"), TRUNC_WEEK, "w")
+    assert_equal(trunc_unit_named("min"), TRUNC_MINUTE, "min")
+    assert_equal(trunc_unit_named("us"), TRUNC_MICROSECOND, "us")
+    assert_equal(trunc_unit_named("millennia"), TRUNC_MILLENNIUM, "millennia")
+
+
+def test_a_field_name_is_not_a_unit_even_where_duckdb_takes_one() raises:
+    # DuckDB folds these onto the unit the field lives in, so `dayofweek`
+    # truncates to the day and `epoch` to the second. Reading them that way is
+    # a guess about what somebody meant, so they are refused instead.
+    with assert_raises(contains="nothing to truncate to called dayofweek"):
+        _ = trunc_unit_named("dayofweek")
+    with assert_raises(contains="nothing to truncate to called epoch"):
+        _ = trunc_unit_named("epoch")
+    with assert_raises(contains="nothing to truncate to called fortnight"):
+        _ = trunc_unit_named("fortnight")
+
+
+def test_a_date_becomes_midnight_on_the_day_it_named() raises:
+    var when = List[Int64](capacity=3)
+    when.append(1373895912345678)
+    when.append(NULL_ROW)
+    when.append(-1000000)
+    var days = temporal_date(stamps(when, TimeUnit.MICRO))
+    var back = temporal_as_timestamp(days, TimeUnit.MICRO)
+    assert_true(
+        back.type == LogicalType.timestamp(TimeUnit.MICRO),
+        "a naive microsecond timestamp",
+    )
+    ref view = back.as_typed_view[DType.int64]()
+    assert_equal(view[0], 1373846400000000, "the 15th of July at midnight")
+    assert_true(not view.is_valid(1), "a missing day is still missing")
+    assert_equal(view[2], -86400000000, "and the day before the epoch")
+
+
+def test_a_timestamp_handed_to_the_same_call_is_just_restated() raises:
+    var when = List[Int64](capacity=1)
+    when.append(1373895912)
+    var back = temporal_as_timestamp(
+        stamps(when, TimeUnit.SECOND), TimeUnit.MICRO
+    )
+    ref view = back.as_typed_view[DType.int64]()
+    assert_equal(view[0], 1373895912000000, "seconds multiplied up")
+
+
+def test_a_date_column_is_sent_away_to_be_cast_first() raises:
+    with assert_raises(contains="has to be cast to one first"):
+        _ = temporal_truncate(
+            temporal_date(stamps(List[Int64](), TimeUnit.MICRO)), TRUNC_YEAR
+        )
 
 
 def main() raises:

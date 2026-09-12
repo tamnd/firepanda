@@ -24,6 +24,7 @@ from firepanda.array.strings import strings_from_list
 from firepanda.array.value import Value
 from firepanda.dtype.logical import LogicalType
 from firepanda.dtype.schema import Field, Schema
+from firepanda.dtype.temporal import TimeUnit
 from firepanda.exec import (
     Apply,
     Cast,
@@ -50,6 +51,7 @@ from firepanda.exec import (
     Reduce,
     Scan,
     Sort,
+    Truncate,
     Unique,
     Window,
     node_apply,
@@ -64,7 +66,13 @@ from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp
 from firepanda.kernel.group import AggKind
 from firepanda.kernel.pattern import MatchKind, Pattern
-from firepanda.kernel.temporal import TemporalField
+from firepanda.kernel.temporal import (
+    TRUNC_DAY,
+    TRUNC_MONTH,
+    TRUNC_WEEK,
+    TRUNC_YEAR,
+    TemporalField,
+)
 from firepanda.kernel.unary import UnaryOp
 
 
@@ -988,6 +996,68 @@ def test_a_part_asked_for_a_yes_or_no_field_is_refused() raises:
     var pipeline = Pipeline(dated_frame())
     with assert_raises(contains="answers yes or no rather than a number"):
         pipeline.add(Node(Part(0, TemporalField.IS_LEAP_YEAR, "nope")))
+
+
+def test_a_truncate_appends_the_period_start_of_every_row() raises:
+    var pipeline = Pipeline(dated_frame())
+    pipeline.add(Node(Truncate(0, TRUNC_MONTH, "m")))
+    var out = pipeline^.run()
+    assert_equal(out.width(), 3, "the answer was appended")
+    var got = read_back(out, "m")
+    assert_equal(len(got), 4, "one answer per row")
+    assert_equal(got[0], 1370044800000000, "the 30th of June is the 1st")
+    assert_equal(got[1], 1372636800000000, "the 1st of July is itself")
+    assert_equal(got[3], 1375315200000000, "and so is the 1st of August")
+
+
+def test_a_truncate_answers_a_timestamp_even_off_a_date() raises:
+    # DuckDB's rule, and the one thing about `DATE_TRUNC` that surprises
+    # people: truncating a date to the year gives a timestamp at midnight.
+    var pipeline = Pipeline(dated_frame())
+    pipeline.add(Node(Truncate(0, TRUNC_YEAR, "y")))
+    var out = pipeline^.run()
+    assert_true(
+        out.schema[2].dtype == LogicalType.timestamp(TimeUnit.MICRO),
+        "microseconds and not days",
+    )
+    assert_equal(read_back(out, "y")[0], 1356998400000000, "the 1st of 2013")
+
+
+def test_a_truncate_of_a_missing_day_is_missing() raises:
+    var pipeline = Pipeline(dated_frame())
+    pipeline.add(Node(Truncate(0, TRUNC_WEEK, "w")))
+    var out = pipeline^.run()
+    var there = present(out, "w")
+    assert_true(there[0], "a day that is there")
+    assert_true(not there[2], "and one that is not")
+
+
+def test_a_truncate_keeps_the_column_it_read_where_it_was() raises:
+    var pipeline = Pipeline(dated_frame())
+    pipeline.add(Node(Truncate(0, TRUNC_DAY, "start")))
+    var out = pipeline^.run()
+    assert_true(out.schema[0].dtype == LogicalType.DATE32, "the days are days")
+    assert_equal(
+        read_back(out, "start")[0], 1372550400000000, "and the answer is new"
+    )
+
+
+def test_a_truncate_over_a_missing_column_is_caught_at_plan_time() raises:
+    var pipeline = Pipeline(dated_frame())
+    with assert_raises(contains="is outside a schema of 2 columns"):
+        pipeline.add(Node(Truncate(9, TRUNC_YEAR, "nope")))
+
+
+def test_a_truncate_over_a_column_that_is_not_temporal_is_caught() raises:
+    var pipeline = Pipeline(dated_frame())
+    with assert_raises(contains="a date or a timestamp is what there is"):
+        pipeline.add(Node(Truncate(1, TRUNC_YEAR, "nope")))
+
+
+def test_a_truncate_to_a_period_that_is_not_a_unit_is_refused() raises:
+    var pipeline = Pipeline(dated_frame())
+    with assert_raises(contains="is not one of the periods"):
+        pipeline.add(Node(Truncate(0, 99, "nope")))
 
 
 def test_a_null_test_appends_a_column_of_yes_and_no() raises:

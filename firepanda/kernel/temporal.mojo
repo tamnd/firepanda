@@ -188,6 +188,74 @@ comptime FIELD_CODES = [
 ]
 """Every field code, in order, for the dispatch to walk at compile time."""
 
+comptime TRUNC_MICROSECOND = 0
+"""Truncation unit for the microsecond, which is the finest one SQL names."""
+
+comptime TRUNC_MILLISECOND = 1
+"""Truncation unit for the millisecond."""
+
+comptime TRUNC_SECOND = 2
+"""Truncation unit for the second."""
+
+comptime TRUNC_MINUTE = 3
+"""Truncation unit for the minute."""
+
+comptime TRUNC_HOUR = 4
+"""Truncation unit for the hour, and the last one that is a fixed length."""
+
+comptime TRUNC_DAY = 5
+"""Truncation unit for the day. A day is a fixed length here because a naive
+column has no clock change in it, and the epoch is a midnight, so flooring to a
+multiple of a day lands on one."""
+
+comptime TRUNC_WEEK = 6
+"""Truncation unit for the week, which runs Monday to Sunday. It is a fixed
+length as well but it is not anchored on the epoch, which was a Thursday, so it
+is computed from the day number rather than divided out of it."""
+
+comptime TRUNC_MONTH = 7
+"""Truncation unit for the month, and the first one that has to go through the
+calendar because its length depends on where it lands."""
+
+comptime TRUNC_QUARTER = 8
+"""Truncation unit for the quarter, which starts in January, April, July or
+October."""
+
+comptime TRUNC_YEAR = 9
+"""Truncation unit for the year."""
+
+comptime TRUNC_DECADE = 10
+"""Truncation unit for the decade, which is the year with its last digit
+removed and so starts in a year ending in zero."""
+
+comptime TRUNC_CENTURY = 11
+"""Truncation unit for the century, which starts in a year ending in two zeros.
+That is a hundred years out of step with `EXTRACT(CENTURY FROM ...)`, which
+counts 2013 as the twenty first century. The two disagree in DuckDB and they
+disagree here for the same reason, which is that they are two different
+questions that happen to share a word."""
+
+comptime TRUNC_MILLENNIUM = 12
+"""Truncation unit for the millennium, which starts in a year ending in three
+zeros, and is out of step with the field for the same reason the century is."""
+
+comptime TRUNC_CODES = [
+    TRUNC_MICROSECOND,
+    TRUNC_MILLISECOND,
+    TRUNC_SECOND,
+    TRUNC_MINUTE,
+    TRUNC_HOUR,
+    TRUNC_DAY,
+    TRUNC_WEEK,
+    TRUNC_MONTH,
+    TRUNC_QUARTER,
+    TRUNC_YEAR,
+    TRUNC_DECADE,
+    TRUNC_CENTURY,
+    TRUNC_MILLENNIUM,
+]
+"""Every truncation unit, in order, for the dispatch to walk at compile time."""
+
 
 def field_dtype(field: Int) -> DType:
     """Returns the dtype a field answers with.
@@ -472,6 +540,56 @@ def civil_from_days[w: Int](z: SIMD[DType.int64, w]) -> Civil[w]:
         days_in_month=days_in_month,
         is_leap=is_leap,
     )
+
+
+def days_from_civil[
+    w: Int
+](
+    year: SIMD[DType.int64, w],
+    month: SIMD[DType.int64, w],
+    day: SIMD[DType.int64, w],
+) -> SIMD[DType.int64, w]:
+    """Turns a civil date back into days since 1970-01-01.
+
+    Hinnant's algorithm run the other way, and it is the same algorithm: the
+    year is moved to March so that the leap day falls at the end of it, and the
+    four hundred year cycle is divided out first so that nothing below that
+    line divides a negative number.
+
+    The one division that does see a negative number is `year // 400`, and it
+    has to round down for a date before the year 0 to come back as the day it
+    went in as. That is the same dependence `civil_from_days` has and the same
+    reason, written here so the two are not read as different code.
+
+    Args:
+        year: The calendar year, so 1969 and not the March year it belongs to.
+        month: The month from 1 to 12.
+        day: The day of the month from 1.
+
+    Parameters:
+        w: How many lanes.
+
+    Returns:
+        Days since the epoch, negative before it.
+    """
+    # January and February belong to the March year before them, which is the
+    # one shift the whole thing rests on.
+    var early = month.le(2)
+    var march_year = year - early.cast[DType.int64]()
+    var era = march_year // 400
+    var year_of_era = march_year - era * 400
+
+    # The month lengths from March, recovered by the same division
+    # `civil_from_days` uses to go the other way.
+    var march_month = early.select(month + 9, month - 3)
+    var day_of_march_year = (153 * march_month + 2) // 5 + day - 1
+    var day_of_era = (
+        year_of_era * 365
+        + year_of_era // 4
+        - year_of_era // 100
+        + day_of_march_year
+    )
+    return era * DAYS_PER_ERA + day_of_era - DAYS_TO_MARCH
 
 
 def extract_field[
@@ -1730,6 +1848,238 @@ def temporal_round(
     raise Error("temporal: " + String(mode) + " is not a rounding mode")
 
 
+def trunc_unit_named(name: StringSlice) raises -> Int:
+    """Looks a truncation unit up by the name SQL gives it.
+
+    The names are DuckDB's, in lower case, with the plural and the short
+    spelling of each one beside it. DuckDB also accepts a handful of field
+    names here and folds each one onto the unit that field lives in, so
+    `date_trunc('dayofweek', ...)` truncates to the day. Those are not accepted
+    here. They read as a truncation to something that is not a length and the
+    answer is not what the word says, and a query that writes one is far more
+    likely to have meant a field than to have meant this.
+
+    Args:
+        name: The unit, already in lower case.
+
+    Returns:
+        One of the `TRUNC_` codes.
+
+    Raises:
+        Error: If the name is not one of the thirteen.
+    """
+    if name == "microsecond" or name == "microseconds" or name == "us":
+        return TRUNC_MICROSECOND
+    if name == "millisecond" or name == "milliseconds" or name == "ms":
+        return TRUNC_MILLISECOND
+    if name == "second" or name == "seconds" or name == "s":
+        return TRUNC_SECOND
+    if name == "minute" or name == "minutes" or name == "min":
+        return TRUNC_MINUTE
+    if name == "hour" or name == "hours" or name == "h":
+        return TRUNC_HOUR
+    if name == "day" or name == "days" or name == "d":
+        return TRUNC_DAY
+    if name == "week" or name == "weeks" or name == "w":
+        return TRUNC_WEEK
+    if name == "month" or name == "months" or name == "mon":
+        return TRUNC_MONTH
+    if name == "quarter" or name == "quarters":
+        return TRUNC_QUARTER
+    if name == "year" or name == "years" or name == "y":
+        return TRUNC_YEAR
+    if name == "decade" or name == "decades":
+        return TRUNC_DECADE
+    if name == "century" or name == "centuries":
+        return TRUNC_CENTURY
+    if name == "millennium" or name == "millennia":
+        return TRUNC_MILLENNIUM
+    raise Error(
+        "temporal: there is nothing to truncate to called "
+        + String(name)
+        + ". The units are microsecond, millisecond, second, minute, hour, day,"
+        " week, month, quarter, year, decade, century and millennium, each with"
+        " its plural and its short spelling"
+    )
+
+
+def truncate_days[
+    unit: Int, w: Int
+](days: SIMD[DType.int64, w]) -> SIMD[DType.int64, w]:
+    """Moves a day number back to the start of the period it is in.
+
+    Only the units at or above a week reach this. Everything below a week is a
+    fixed number of the column's own integers and is divided out without the
+    calendar being touched at all.
+
+    Args:
+        days: Days since the epoch, negative before it.
+
+    Parameters:
+        unit: One of the `TRUNC_` codes at or above `TRUNC_WEEK`.
+        w: How many lanes.
+
+    Returns:
+        The first day of the period, which is at or before the day given.
+    """
+    comptime if unit == TRUNC_WEEK:
+        # The epoch was a Thursday, so a Monday is three days ahead of a
+        # multiple of seven. `//` rounds down, which is what makes the
+        # remainder non negative before the epoch as well as after it.
+        var shifted = days + 3
+        return days - (shifted - (shifted // 7) * 7)
+
+    var civil = civil_from_days(days)
+    comptime if unit == TRUNC_MONTH:
+        return days_from_civil(civil.year, civil.month, SIMD[DType.int64, w](1))
+    elif unit == TRUNC_QUARTER:
+        var first = ((civil.month - 1) // 3) * 3 + 1
+        return days_from_civil(civil.year, first, SIMD[DType.int64, w](1))
+
+    var year = civil.year
+    comptime if unit == TRUNC_DECADE:
+        year = (year // 10) * 10
+    elif unit == TRUNC_CENTURY:
+        year = (year // 100) * 100
+    elif unit == TRUNC_MILLENNIUM:
+        year = (year // 1000) * 1000
+    return days_from_civil(
+        year, SIMD[DType.int64, w](1), SIMD[DType.int64, w](1)
+    )
+
+
+def truncate_to_unit[
+    unit: Int
+](a: Array[DType.int64], per_day: Int64, period: Int64) raises -> Array[
+    DType.int64
+]:
+    """Moves every instant in a column back to the start of its period.
+
+    Args:
+        a: The column, holding whole units since the epoch.
+        per_day: How many of that unit make a day.
+        period: The length of one period in those same units, for a unit below
+            a week, and ignored above one. It is zero when the period is finer
+            than the column's own resolution, and the column is then already
+            on a multiple of it.
+
+    Parameters:
+        unit: One of the `TRUNC_` codes.
+
+    Returns:
+        The same unit, null wherever the input is null.
+
+    Raises:
+        Error: Only what the morsel runtime raises.
+    """
+    comptime width = simd_width_of[DType.int64]()
+
+    var n = len(a)
+    var out = Array[DType.int64](overwritten=n)
+    var validity = Bitmap(copy=a.data.validity)
+    var span = SIMD[DType.int64, width](period)
+    var scale = SIMD[DType.int64, width](per_day)
+
+    def compute(start: Int, stop: Int) raises {mut out, imm}:
+        var source = a.unsafe_ptr()
+        var target = out.unsafe_mut_ptr()
+        var i = start
+        while i < stop:
+            var value = source.unsafe_offset(i).unsafe_load[width=width]()
+            comptime if unit < TRUNC_WEEK:
+                target.unsafe_offset(i).unsafe_store((value // span) * span)
+            else:
+                var days = value // scale
+                target.unsafe_offset(i).unsafe_store(
+                    truncate_days[unit](days) * scale
+                )
+            i += width
+        repair_range(out, validity, start, stop)
+
+    parallel_morsels(compute, n)
+    out.data.validity = validity^
+    return out^
+
+
+def temporal_truncate(a: AnyArray, unit: Int) raises -> AnyArray:
+    """Moves every instant in a timestamp column back to the start of a period.
+
+    This is SQL's `DATE_TRUNC`. It always floors, including below the epoch, so
+    the last second of 1969 truncates back into 1969 rather than forward onto
+    the epoch, and the decade of the year 5 BC is the decade that starts in 10
+    BC rather than the one that starts in the year 0.
+
+    The type does not change, including the resolution, so truncating a
+    millisecond column to the hour answers milliseconds that happen to be whole
+    hours. A caller that wants DuckDB's rule, which is that the answer is a
+    microsecond timestamp whatever went in, casts before it calls this.
+
+    The units below a week are a fixed number of the column's own integers and
+    are divided out. A week is a fixed length as well but the epoch was a
+    Thursday, so it is computed from the day number instead. A month and
+    everything above it goes through the calendar and back, because its length
+    depends on where it lands.
+
+    Args:
+        a: A naive timestamp column.
+        unit: One of the `TRUNC_` codes.
+
+    Returns:
+        A column of the same type, null wherever the input is null.
+
+    Raises:
+        Error: If the column is not a timestamp, if it is on a clock whose
+            offset is a rule, or if the unit is not one of the thirteen.
+    """
+    if not a.type.zone.is_naive():
+        # The same reason rounding does it: pandas and SQL both truncate the
+        # reading on the local clock, and the stored integers are UTC.
+        return _back_on_the_clock(
+            temporal_truncate(local_readings(a), unit), a.type
+        )
+
+    if a.type.kind == TypeKind.DATE:
+        # A date column has no clock in it and its integers are days, so half
+        # the units here would be a no operation and the other half would have
+        # to be written a second time against a narrower column. Casting it to
+        # a timestamp first is one pass and is what SQL does anyway, since
+        # `DATE_TRUNC` answers a timestamp whatever it was given.
+        raise Error(
+            "temporal: truncating is defined on a timestamp column, and a date"
+            " column has to be cast to one first"
+        )
+
+    var per_day = _units_per_day(a.type)
+    var period = Int64(0)
+    if unit == TRUNC_MICROSECOND:
+        period = per_day // (Int64(SECONDS_PER_DAY) * 1_000_000)
+    elif unit == TRUNC_MILLISECOND:
+        period = per_day // (Int64(SECONDS_PER_DAY) * 1_000)
+    elif unit == TRUNC_SECOND:
+        period = per_day // Int64(SECONDS_PER_DAY)
+    elif unit == TRUNC_MINUTE:
+        period = per_day // Int64(1_440)
+    elif unit == TRUNC_HOUR:
+        period = per_day // Int64(24)
+    elif unit == TRUNC_DAY:
+        period = per_day
+    if unit < TRUNC_WEEK and period <= 1:
+        # A period finer than the column's own resolution, which is a
+        # microsecond asked of a millisecond column. Every value is already on
+        # a multiple of it.
+        return AnyArray(copy=a)
+
+    ref stamps = a.as_typed_view[DType.int64]()
+
+    comptime for code in TRUNC_CODES:
+        if unit == code:
+            return AnyArray(
+                truncate_to_unit[code](stamps, per_day, period).into_data(),
+                a.type,
+            )
+    raise Error("temporal: " + String(unit) + " is not a truncation unit")
+
+
 def unit_named(name: StringSlice) raises -> TimeUnit:
     """Looks a resolution up by the name pandas gives it.
 
@@ -1922,6 +2272,64 @@ def temporal_as_unit(a: AnyArray, unit: TimeUnit) raises -> AnyArray:
             " which is the range pandas calls out of bounds"
         )
     return AnyArray(_rescale[True](stamps, ratio).into_data(), result)
+
+
+def temporal_as_timestamp(a: AnyArray, unit: TimeUnit) raises -> AnyArray:
+    """Restates a date or a timestamp column as a timestamp at a resolution.
+
+    A date column is a count of days and a timestamp column is a count of
+    something finer, so the two are the same arithmetic once the day is treated
+    as the date column's unit. This is here because SQL keeps asking for it: a
+    `DATE_TRUNC` answers a timestamp whatever it was given, and so does adding
+    an interval to a date, and the date has to become one first.
+
+    A date has no clock and so no zone, and the timestamp it becomes is naive,
+    which is midnight on the day it named.
+
+    Args:
+        a: A date or a timestamp column.
+        unit: The resolution to answer at.
+
+    Returns:
+        A timestamp column at that resolution, null wherever the input is null.
+
+    Raises:
+        Error: If the column is neither a date nor a timestamp, or if the
+            multiply would put a value outside the range of an int64.
+    """
+    if a.type.kind == TypeKind.TIMESTAMP:
+        return temporal_as_unit(a, unit)
+    if a.type.kind != TypeKind.DATE:
+        raise Error(
+            "temporal: a date or a timestamp is what becomes a timestamp, and"
+            " this one is "
+            + String(a.type)
+        )
+
+    comptime width = simd_width_of[DType.int64]()
+    var per_day = unit.per_second() * SECONDS_PER_DAY
+    ref days = a.as_typed_view[DType.int32]()
+
+    var n = len(days)
+    var out = Array[DType.int64](overwritten=n)
+    var validity = Bitmap(copy=days.data.validity)
+    var scale = SIMD[DType.int64, width](per_day)
+
+    def compute(start: Int, stop: Int) raises {mut out, imm}:
+        var source = days.unsafe_ptr()
+        var target = out.unsafe_mut_ptr()
+        var i = start
+        while i < stop:
+            var value = source.unsafe_offset(i).unsafe_load[width=width]()
+            target.unsafe_offset(i).unsafe_store(
+                value.cast[DType.int64]() * scale
+            )
+            i += width
+        repair_range(out, validity, start, stop)
+
+    parallel_morsels(compute, n)
+    out.data.validity = validity^
+    return AnyArray(out^.into_data(), LogicalType.timestamp(unit))
 
 
 comptime DAY_NAMES = StaticString(

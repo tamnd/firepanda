@@ -8,6 +8,18 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+### Added: DATE_TRUNC
+
+`SELECT date_trunc('month', o_orderdate), sum(o_totalprice) FROM orders GROUP BY 1` is the shape of nearly every report anybody writes, and it was refused. `datetrunc` was too. This is the third of the three function gaps that sat on top of kernels that already existed, except that this one turned out to need a kernel after all.
+
+The units below a week were already there. `dt.floor` is the same operation and it divides the column by a fixed number of its own integers, which covers the day, the hour, the minute, the second, the millisecond and the microsecond. The units above that are not fixed lengths. A month is 28, 29, 30 or 31 days depending on where it lands, so pandas refuses to floor to one and there was nothing here that did it. There is now: Hinnant's day to date conversion run backwards, so a month, a quarter, a year, a decade, a century and a millennium are one trip through the calendar and back with no table and no loop. The week is a fixed length but it is not anchored on the epoch, which was a Thursday, so it is computed off the day number rather than divided out of it, and it runs Monday to Sunday the way DuckDB's does.
+
+The answer is a microsecond timestamp whatever went in, which is DuckDB's rule and is the one thing about `DATE_TRUNC` that surprises people: truncating a date to the year gives back a timestamp at midnight and not a date. A date column is turned into one on the way in, which is a multiply per row and is needed anyway, since the units below a day mean nothing to a column of day numbers. That turn is now a kernel of its own rather than something the operator does inline, because adding an interval to a date wants the same thing.
+
+DuckDB also accepts a handful of field names here and folds each one onto the unit that field lives in, so `date_trunc('dayofweek', ...)` truncates to the day and `date_trunc('epoch', ...)` to the second. Those are refused rather than answered. They read as a truncation to something that is not a length, and a query that writes one is far more likely to have meant a field than to have meant this. Everything else is refused by name with the thirteen units listed back.
+
+One thing fixed on the way. `date_part('YEAR', d)` was accepted while the plan was built and then failed in the engine, because the field name was only folded to lower case on the path the keyword spelling takes and the operator looks it up in a table that holds it in lower case only. Both spellings fold now, and so does the unit of a `DATE_TRUNC`.
+
 ### Added: EXTRACT, date_part and datepart
 
 `SELECT EXTRACT(YEAR FROM o_orderdate) FROM orders` was refused, and so were the two function spellings of it. Reading a field off a date is how nearly every report groups, so this is a gap that shows up early. The kernels have been in `firepanda/kernel/temporal.mojo` since the temporal layer was written, and as with the last two entries what was missing was the plumbing from a query down to them.

@@ -56,6 +56,7 @@ rather than accumulates.
 
 from firepanda.dtype.logical import LogicalType, TypeKind, promote
 from firepanda.dtype.schema import Field, Schema
+from firepanda.dtype.temporal import TimeUnit
 from firepanda.join.pairs import JoinKind
 from firepanda.kernel.binary import BinaryOp, binary_type, resolve_constant
 from firepanda.kernel.group import AggKind, agg_type
@@ -291,14 +292,14 @@ def _bool(t: LogicalType) -> Bool:
 
 
 def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
-    """Returns what a named function answers, for the nine that exist.
+    """Returns what a named function answers, for the ten that exist.
 
     There is no function registry yet, and the plan needs the connectives now
     because `a AND b` is a call rather than a binary operation, so this is a
-    table of nine entries instead. When the registry arrives this function
-    becomes a lookup in it and the table goes away. Nine is past where a chain
-    of comparisons should have stopped, and the registry is now the thing to
-    build here rather than the tenth entry.
+    table of ten entries instead. When the registry arrives this function
+    becomes a lookup in it and the table goes away. Ten is well past where a
+    chain of comparisons should have stopped, and the registry is the thing to
+    build here rather than the eleventh entry.
 
     `like` is here with them because a pattern match is not a binary operation
     either. Its right side is a pattern rather than an operand, and the node
@@ -323,6 +324,11 @@ def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
     specifier is not read here. Which fields exist is lowering's rule, again for
     the same reason.
 
+    `date_trunc` answers a microsecond timestamp whatever went in, which is
+    also what DuckDB answers and is worth saying out loud: truncating a date
+    gives back a timestamp at midnight and not a date. Its unit is read the way
+    `date_part` reads its field, which is to say not here.
+
     Args:
         name: The function name.
         args: What each argument binds to.
@@ -331,8 +337,44 @@ def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
         The type the call answers.
 
     Raises:
-        If the name is not one of the nine, or an argument has the wrong type.
+        If the name is not one of the ten, or an argument has the wrong type.
     """
+    if name == "date_trunc":
+        if len(args) != 2:
+            raise Error(
+                String(
+                    "'date_trunc' takes 2 arguments and was given ", len(args)
+                )
+            )
+        if args[0] != LogicalType.STRING and args[0] != LogicalType.NULL:
+            raise Error(
+                String(
+                    (
+                        "'date_trunc' is told which period by name and argument"
+                        " 0 is "
+                    ),
+                    args[0],
+                )
+            )
+        if (
+            args[1].kind != TypeKind.DATE
+            and args[1].kind != TypeKind.TIMESTAMP
+            and args[1] != LogicalType.NULL
+        ):
+            raise Error(
+                String(
+                    (
+                        "'date_trunc' truncates a date or a timestamp and"
+                        " argument 1 is "
+                    ),
+                    args[1],
+                )
+            )
+        # A date has no clock and so no zone, and the timestamp it becomes is
+        # naive. A timestamp keeps whatever clock it was being read against.
+        if args[1].kind == TypeKind.TIMESTAMP:
+            return LogicalType.timestamp(TimeUnit.MICRO, args[1].zone)
+        return LogicalType.timestamp(TimeUnit.MICRO)
     if name == "date_part":
         if len(args) != 2:
             raise Error(
