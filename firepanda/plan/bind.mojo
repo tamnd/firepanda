@@ -289,11 +289,11 @@ def _bool(t: LogicalType) -> Bool:
 
 
 def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
-    """Returns what a named function answers, for the six that exist.
+    """Returns what a named function answers, for the seven that exist.
 
     There is no function registry yet, and the plan needs the connectives now
     because `a AND b` is a call rather than a binary operation, so this is a
-    table of six entries instead. When the registry arrives this function
+    table of seven entries instead. When the registry arrives this function
     becomes a lookup in it and the table goes away.
 
     `like` is here with them because a pattern match is not a binary operation
@@ -305,6 +305,11 @@ def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
     equality it looks like, and holding it as a call is what keeps the two
     apart all the way down to the operator.
 
+    `coalesce` is the one whose answer is not a boolean. It reads any number of
+    arguments and answers whichever type they all promote to, and the promotion
+    is worked out here rather than in lowering, because lowering has to cast
+    each argument to it and needs to be told what it is.
+
     Args:
         name: The function name.
         args: What each argument binds to.
@@ -313,8 +318,35 @@ def _call_type(name: String, args: List[LogicalType]) raises -> LogicalType:
         The type the call answers.
 
     Raises:
-        If the name is not one of the six, or an argument has the wrong type.
+        If the name is not one of the seven, or an argument has the wrong type.
     """
+    if name == "coalesce":
+        if len(args) == 0:
+            raise Error(
+                "'coalesce' answers the first of its arguments that is not"
+                " null, and was given none to choose from"
+            )
+        var want = args[0]
+        for i in range(1, len(args)):
+            try:
+                want = promote(want, args[i])
+            except e:
+                raise Error(
+                    String(
+                        (
+                            "'coalesce' answers one column, so its arguments"
+                            " have to agree on a type, and argument "
+                        ),
+                        i,
+                        " is a ",
+                        args[i],
+                        " among ",
+                        want,
+                        ": ",
+                        e,
+                    )
+                )
+        return want
     if name == "is_null" or name == "is_not_null":
         # No check on the type. Every column can hold a null, and a column that
         # cannot is still a fair thing to ask about: the answer is then the same

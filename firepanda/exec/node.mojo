@@ -123,7 +123,7 @@ from firepanda.kernel.cast import cast_any
 from firepanda.kernel.concat import concat_two_any
 from firepanda.kernel.group import AggKind, agg_type, aggregate_group_any
 from firepanda.kernel.logic import LogicOp, logic_any, logic_type
-from firepanda.kernel.nulls import is_not_null_any, is_null_any
+from firepanda.kernel.nulls import coalesce_any, is_not_null_any, is_null_any
 from firepanda.kernel.pattern import (
     MatchKind,
     Pattern,
@@ -1841,6 +1841,128 @@ struct Presence(Movable):
         var rows = len(chunk)
         var columns = chunk^.into_columns()
         columns.append(AnyArray(made^))
+        return Chunk(columns^, rows)
+
+
+struct Fill(Movable):
+    """Appends a column taking each row from one column, or from another where
+    the first is missing.
+
+    This is SQL's `COALESCE` and the frame API's `fillna` with a column on the
+    right. It looks like a `Choose` whose condition is `IS NULL` over its own
+    left side, and it is a node of its own rather than that pair because the
+    kernel is one pass that reads a validity bit instead of three passes that
+    build a mask, read it and throw it away.
+
+    `COALESCE` over more than two arguments is a line of these, each one reading
+    what the one before it wrote, and the intermediates are dropped by the
+    projection at the end the way every other expression's are. That is the
+    right shape and not a compromise: the second argument only has to be
+    evaluated where the first is null, and a node that took a list would still
+    evaluate all of them.
+
+    Both columns have to be the same type, because filling an integer from a
+    string is not a column. Lowering casts them to the type binding worked out
+    before it builds this, so a mismatch here is a plan that was not bound.
+    """
+
+    var at: Int
+    """The position of the column whose values are preferred."""
+
+    var fallback: Int
+    """The position of the column the missing rows are taken from."""
+
+    var name: String
+    """The name the appended column gets in the output schema."""
+
+    def __init__(out self, at: Int, fallback: Int, name: String):
+        """Constructs a fill of one column from another.
+
+        Args:
+            at: The position of the preferred column.
+            fallback: The position of the column to fill from.
+            name: The name of the appended column.
+        """
+        self.at = at
+        self.fallback = fallback
+        self.name = name
+
+    def bind(mut self, var input: Schema) raises -> Schema:
+        """Reports the input schema with the filled column appended.
+
+        Args:
+            input: The schema of the chunks that will arrive. Consumed.
+
+        Returns:
+            The input schema with one more field on the end.
+
+        Raises:
+            If either position is outside the schema, or the two columns do not
+            hold the same type.
+        """
+        var out = input^
+        for at in [self.at, self.fallback]:
+            if at < 0 or at >= len(out):
+                raise Error(
+                    "fill: column "
+                    + String(at)
+                    + " is outside a schema of "
+                    + String(len(out))
+                    + " columns"
+                )
+        # Read the two fields out one at a time. Two subscripts of the same
+        # schema in one expression is a borrow of it while a borrow of it is
+        # still live, which the compiler refuses.
+        var mine = out[self.at].copy()
+        var theirs = out[self.fallback].copy()
+        if mine.dtype != theirs.dtype:
+            raise Error(
+                "fill: a column is filled from one of its own type, and column "
+                + String(self.at)
+                + " holds "
+                + String(mine.dtype)
+                + " while column "
+                + String(self.fallback)
+                + " holds "
+                + String(theirs.dtype)
+            )
+        # Null only where both inputs were, so a fallback with nothing missing
+        # in it makes the answer a column that cannot be null whatever the
+        # preferred side holds, which is the ordinary `COALESCE(x, 0)`.
+        out.append(
+            Field(self.name, mine.dtype, mine.nullable and theirs.nullable)
+        )
+        return out^
+
+    def process(self, var chunk: Chunk) raises -> Optional[Chunk]:
+        """Runs the fill and puts the answer on the end of the chunk.
+
+        Args:
+            chunk: The chunk. Consumed.
+
+        Returns:
+            The chunk with one more column and the same number of rows.
+
+        Raises:
+            If either position is outside the chunk, or the kernel refuses the
+            pair.
+        """
+        var width = chunk.width()
+        for at in [self.at, self.fallback]:
+            if at < 0 or at >= width:
+                raise Error(
+                    "fill: column "
+                    + String(at)
+                    + " is outside a chunk of "
+                    + String(width)
+                    + " columns"
+                )
+        var made = coalesce_any(
+            chunk.columns[self.at], chunk.columns[self.fallback]
+        )
+        var rows = len(chunk)
+        var columns = chunk^.into_columns()
+        columns.append(made^)
         return Chunk(columns^, rows)
 
 
@@ -4655,6 +4777,7 @@ comptime Node = Variant[
     Apply,
     Match,
     Presence,
+    Fill,
     Choose,
     Constant,
     Cast,
@@ -4708,6 +4831,8 @@ def node_bind(mut node: Node, var input: Schema) raises -> Schema:
         return node[Match].bind(input^)
     if node.isa[Presence]():
         return node[Presence].bind(input^)
+    if node.isa[Fill]():
+        return node[Fill].bind(input^)
     if node.isa[Choose]():
         return node[Choose].bind(input^)
     if node.isa[Constant]():
@@ -4840,7 +4965,8 @@ def node_is_row_local(node: Node) -> Bool:
 
     Returns:
         True for `Filter`, `Expand`, `Project`, `Compute`, `Connective`,
-        `Apply`, `Match`, `Presence`, `Choose`, `Constant`, `Cast` and `Join`.
+        `Apply`, `Match`, `Presence`, `Fill`, `Choose`, `Constant`, `Cast`
+        and `Join`.
     """
     return (
         node.isa[Filter]()
@@ -4851,6 +4977,7 @@ def node_is_row_local(node: Node) -> Bool:
         or node.isa[Apply]()
         or node.isa[Match]()
         or node.isa[Presence]()
+        or node.isa[Fill]()
         or node.isa[Choose]()
         or node.isa[Constant]()
         or node.isa[Cast]()
@@ -4893,9 +5020,9 @@ def node_computes_per_row(node: Node) -> Bool:
     spread over the cores, while a project on its own ran no faster at all and
     paid for the tasks on top.
 
-    `Presence` is on the memory bound side with those three. It reads a bit per
-    row and writes a byte per row and does no arithmetic in between, so there is
-    nothing for a second core to speed up.
+    `Presence` and `Fill` are on the memory bound side with those three. Each
+    reads a validity bit per row and moves a value, and neither does any
+    arithmetic in between, so there is nothing for a second core to speed up.
 
     Args:
         node: The node.
@@ -4989,6 +5116,8 @@ def node_process(mut node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Match].process(chunk^)
     if node.isa[Presence]():
         return node[Presence].process(chunk^)
+    if node.isa[Fill]():
+        return node[Fill].process(chunk^)
     if node.isa[Choose]():
         return node[Choose].process(chunk^)
     if node.isa[Constant]():
@@ -5051,6 +5180,8 @@ def node_apply(node: Node, var chunk: Chunk) raises -> Optional[Chunk]:
         return node[Match].process(chunk^)
     if node.isa[Presence]():
         return node[Presence].process(chunk^)
+    if node.isa[Fill]():
+        return node[Fill].process(chunk^)
     if node.isa[Choose]():
         return node[Choose].process(chunk^)
     if node.isa[Constant]():

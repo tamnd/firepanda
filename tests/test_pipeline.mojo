@@ -32,6 +32,7 @@ from firepanda.exec import (
     Compute,
     Constant,
     Expand,
+    Fill,
     Filter,
     Group,
     GroupAgg,
@@ -898,6 +899,62 @@ def test_a_null_test_over_a_missing_column_is_caught_at_plan_time() raises:
     var pipeline = Pipeline(cut_frame())
     with assert_raises(contains="is outside a schema of 2 columns"):
         pipeline.add(Node(Presence(4, True, "nope")))
+
+
+def test_a_fill_takes_the_gaps_from_the_other_column() raises:
+    # `gappy_frame` is 4, null, 1, 6, 2, null, and the constant beside it is a
+    # column of nines, so the answer is the two nulls turned into nines and
+    # nothing else moved.
+    var pipeline = Pipeline(gappy_frame())
+    pipeline.add(Node(Constant(Value(Int64(9)), LogicalType.INT64, "nine")))
+    pipeline.add(Node(Fill(0, 1, "filled")))
+    var out = pipeline^.run()
+    assert_equal(out.width(), 3, "the answer was appended")
+    var got = read_back(out, "filled")
+    var want = [Int64(4), 9, 1, 6, 2, 9]
+    assert_equal(len(got), 6, "one answer per row")
+    for i in range(6):
+        assert_equal(got[i], want[i], "filled at " + String(i))
+    assert_true(
+        not out.schema[2].nullable,
+        "a fallback with nothing missing leaves nothing missing",
+    )
+
+
+def test_a_fill_leaves_the_column_it_read_where_it_was() raises:
+    var pipeline = Pipeline(gappy_frame())
+    pipeline.add(Node(Constant(Value(Int64(9)), LogicalType.INT64, "nine")))
+    pipeline.add(Node(Fill(0, 1, "filled")))
+    var out = pipeline^.run()
+    var there = present(out, "n")
+    assert_false(there[1], "the column it read still has its first gap")
+    assert_false(there[5], "and its second")
+
+
+def test_a_fill_from_a_column_that_has_gaps_of_its_own_keeps_them() raises:
+    # Both sides are missing the same two rows, so there is nothing to fill
+    # from and the answer is as gappy as what went in, which is the case a node
+    # that assumed the fallback was whole would get wrong.
+    var pipeline = Pipeline(gappy_frame())
+    pipeline.add(Node(Fill(0, 0, "filled")))
+    var out = pipeline^.run()
+    var there = present(out, "filled")
+    assert_false(there[1], "the first gap is still a gap")
+    assert_false(there[5], "and so is the second")
+    assert_true(there[0], "and the rows that had values still do")
+    assert_true(out.schema[1].nullable, "the schema says so too")
+
+
+def test_a_fill_over_a_missing_column_is_caught_at_plan_time() raises:
+    var pipeline = Pipeline(gappy_frame())
+    with assert_raises(contains="is outside a schema of 1 columns"):
+        pipeline.add(Node(Fill(0, 3, "nope")))
+
+
+def test_a_fill_between_two_types_is_caught_at_plan_time() raises:
+    var pipeline = Pipeline(cut_frame())
+    with assert_raises(contains="filled from one of its own type"):
+        pipeline.add(Node(Fill(0, 1, "nope")))
 
 
 def test_a_computed_column_keeps_the_chunk_boundaries() raises:

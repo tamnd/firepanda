@@ -1418,6 +1418,97 @@ def test_a_yes_written_out_keeps_every_row_and_a_no_keeps_none() raises:
     )
 
 
+def test_a_coalesce_fills_the_gaps_from_the_second_argument() raises:
+    same(
+        read_back(
+            run("SELECT coalesce(mark, 99) AS m FROM gappy", session()), "m"
+        ),
+        [4, 4, 99, 9, 99, 1],
+        "m",
+    )
+
+
+def test_a_coalesce_reads_its_arguments_in_the_order_written() raises:
+    # The middle one is a null and fills nothing, so the third is what the gaps
+    # come from, and a version that stopped at the first fallback would answer
+    # a column that still had two gaps in it.
+    same(
+        read_back(
+            run("SELECT coalesce(mark, NULL, 7) AS m FROM gappy", session()),
+            "m",
+        ),
+        [4, 4, 7, 9, 7, 1],
+        "m",
+    )
+
+
+def test_a_coalesce_of_one_argument_is_that_argument() raises:
+    same(
+        gapped(run("SELECT coalesce(mark) AS m FROM gappy", session()), "m"),
+        [4, 4, -1, 9, -1, 1],
+        "m",
+    )
+
+
+def test_an_ifnull_is_a_coalesce_of_two() raises:
+    same(
+        read_back(
+            run("SELECT ifnull(mark, 0) AS m FROM gappy", session()), "m"
+        ),
+        [4, 4, 0, 9, 0, 1],
+        "m",
+    )
+
+
+def test_a_nullif_takes_the_value_out_where_the_two_agree() raises:
+    # The two nulls stay nulls. `mark = 4` is null on those rows rather than
+    # false, the conditional takes its else side, and the else side is `mark`.
+    same(
+        gapped(run("SELECT nullif(mark, 4) AS m FROM gappy", session()), "m"),
+        [-1, -1, -1, 9, -1, 1],
+        "m",
+    )
+
+
+def test_a_coalesce_in_a_where_reads_the_filled_column() raises:
+    same(
+        answer("SELECT mark FROM gappy WHERE coalesce(mark, 0) > 3", "mark"),
+        [4, 4, 9],
+        "mark",
+    )
+
+
+def test_a_coalesce_moves_both_sides_to_the_type_they_agree_on() raises:
+    # The column holds whole numbers and the fallback does not, so the answer is
+    # the wider of the two and the column is what moves. The fallback is cast
+    # rather than written as a fraction because the decimal literal is still
+    # refused, which is a gap of its own and not this one.
+    var out = run(
+        "SELECT coalesce(mark, CAST(0 AS DOUBLE)) AS m FROM gappy", session()
+    )
+
+    assert_true(
+        out.schema[0].dtype == LogicalType.FLOAT64, "the wider of the two"
+    )
+    var col = out.column("m").as_typed[DType.float64]()
+    assert_equal(len(col), 6, "one answer per row")
+    assert_equal(col[0], 4.0, "the value that was already there")
+    assert_equal(col[2], 0.0, "and the gap taken from the fallback")
+
+
+def test_a_coalesce_fills_a_column_of_text() raises:
+    same(
+        answer("SELECT n FROM words WHERE coalesce(word, 'zz') = 'zz'", "n"),
+        [6],
+        "n",
+    )
+
+
+def test_a_coalesce_whose_arguments_do_not_agree_is_refused() raises:
+    with assert_raises(contains="have to agree on a type"):
+        _ = run("SELECT coalesce(mark, 'a') FROM gappy", session())
+
+
 def test_a_chain_of_ors_folds_left_to_right_and_keeps_every_arm() raises:
     same(
         answer(
