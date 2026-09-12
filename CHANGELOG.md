@@ -8,6 +8,14 @@ The Mojo toolchain version is part of a release's identity and is recorded with 
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-12
+
+Built against Mojo 1.0.0 (ed45d567).
+
+ClickBench readiness. M6b closes its library work here. Through the SQL front end the 43 published statements went from 1 running to 33, the hand written driver in firepanda-bench runs 42 of them, and what a planner costs on a suite with no joins in it is measured rather than argued about: 326.4 ms hand written against 543.9 ms planned over the 33, where TPC-H measured the same pair at 4.8.
+
+The minor bump is for two new names on the frame, five new names below it, and one answer that changed. `DataFrame.replace` and `Series.replace` are new. `firepanda.kernel` exports `Pattern`, `MatchKind` and `read_pattern`, and `firepanda.exec` exports `Match` and `Apply`. The changed answer is an average taken through a plan over a column of wide integers, which used to be divided out of a total that had wrapped, so `SELECT AVG(UserID) FROM hits` answered a negative number over a column with no negative value in it. Nothing that existed changed shape.
+
 ### Added: a minus sign in front of a column
 
 `SELECT -qty FROM sales` was refused with "there is no operator that computes a unary expression yet", which was true and easy to miss, since a minus sign in front of a number folded away before lowering ever saw it and so `WHERE b > -5` always worked. What did not work was the sign in front of anything that varies per row, which is the ordinary case.
@@ -6454,7 +6462,8 @@ Install it and you get a library with no public API to speak of. The point of th
 - `factorize` loses to a `Dict` based implementation by about 1.3x on columns with a hundred or ten thousand groups, and beats it by 2.6x when every row is distinct and by 3.6x when the integer range is small enough to skip hashing. The tracking issue for M1 has the numbers and the reasoning.
 - The string layout exists but no string kernels do, so a hash table keyed on strings is not possible yet.
 
-[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.6.83...HEAD
+[Unreleased]: https://github.com/tamnd/firepanda/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/tamnd/firepanda/releases/tag/v0.7.0
 [0.6.83]: https://github.com/tamnd/firepanda/releases/tag/v0.6.83
 [0.6.82]: https://github.com/tamnd/firepanda/releases/tag/v0.6.82
 [0.6.81]: https://github.com/tamnd/firepanda/releases/tag/v0.6.81
